@@ -209,3 +209,19 @@ public struct StreamDoctorReport: Sendable {
         self.missingWindows = missingWindows
     }
 }
+
+public struct TerminalStatus: Sendable, Equatable {
+    public let name: String
+    public let isActive: Bool
+    public let state: String?
+    public let updatedAt: String?
+    public let lastOutput: String?
+
+    public init(name: String, isActive: Bool, state: String?, updatedAt: String?, lastOutput: String?) {
+        self.name = name
+        self.isActive = isActive
+        self.state = state
+        self.updatedAt = updatedAt
+        self.lastOutput = lastOutput
+    }
+}

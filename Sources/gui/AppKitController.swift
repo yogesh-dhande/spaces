@@ -24,6 +24,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSTableVie
 
     private var projects: [Project] = []
     private var streams: [StreamSummary] = []
+    private var terminalStatusesByStream: [String: [TerminalStatus]] = [:]
+    private var statusPollTimer: Timer?
 
     private var selectedProjectName: String?
     private var selectedStreamName: String?
@@ -33,7 +35,13 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSTableVie
         setupMenu()
         setupWindow()
         reloadProjects()
+        startStatusPolling()
         NSApp.activate(ignoringOtherApps: true)
+    }
+
+    public func applicationWillTerminate(_ notification: Notification) {
+        statusPollTimer?.invalidate()
+        statusPollTimer = nil
     }
 
     public func numberOfRows(in tableView: NSTableView) -> Int {
@@ -49,7 +57,19 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSTableVie
         } else {
             let stream = streams[row]
             let marker = stream.isActive ? "●" : "○"
-            text = "\(marker) \(stream.name)  (\(stream.worktreePath))"
+            let statuses = terminalStatusesByStream[stream.name] ?? []
+            let activeStatuses = statuses.filter { $0.isActive }
+            let statusText: String
+            if activeStatuses.isEmpty {
+                statusText = "terminals: none"
+            } else {
+                let parts = activeStatuses.map { status in
+                    let state = status.state ?? "unknown"
+                    return "\(status.name)=\(state)"
+                }
+                statusText = "terminals: " + parts.joined(separator: ", ")
+            }
+            text = "\(marker) \(stream.name)  (\(stream.worktreePath))  |  \(statusText)"
         }
 
         let id = NSUserInterfaceItemIdentifier("Cell")
@@ -669,6 +689,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSTableVie
     private func reloadStreams(selectStream: String? = nil) {
         guard let selectedProjectName else {
             streams = []
+            terminalStatusesByStream = [:]
             selectedStreamName = nil
             streamTable.reloadData()
             return
@@ -677,6 +698,12 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSTableVie
         do {
             let list = try orchestrator().list(projectName: selectedProjectName)
             streams = list
+            terminalStatusesByStream = [:]
+            for stream in list {
+                if let statuses = try? orchestrator().terminalStatuses(projectName: selectedProjectName, streamName: stream.name) {
+                    terminalStatusesByStream[stream.name] = statuses
+                }
+            }
             streamTable.reloadData()
 
             if let selectStream, let idx = list.firstIndex(where: { $0.name == selectStream }) {
@@ -691,6 +718,34 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSTableVie
             }
         } catch {
             setStatus("Error loading streams: \(error.localizedDescription)")
+        }
+    }
+
+    private func startStatusPolling() {
+        statusPollTimer?.invalidate()
+        statusPollTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
+            guard let self else { return }
+            Task { @MainActor in
+                self.refreshTerminalStatusesOnly()
+            }
+        }
+        RunLoop.main.add(statusPollTimer!, forMode: .common)
+    }
+
+    private func refreshTerminalStatusesOnly() {
+        guard let selectedProjectName else { return }
+        guard !streams.isEmpty else { return }
+
+        var nextStatuses: [String: [TerminalStatus]] = [:]
+        for stream in streams {
+            if let statuses = try? orchestrator().terminalStatuses(projectName: selectedProjectName, streamName: stream.name) {
+                nextStatuses[stream.name] = statuses
+            }
+        }
+
+        if nextStatuses != terminalStatusesByStream {
+            terminalStatusesByStream = nextStatuses
+            streamTable.reloadData()
         }
     }
 

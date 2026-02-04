@@ -365,17 +365,18 @@ public final class StreamOrchestrator {
 
                 for spec in project.windows {
                     let known = identity?.windows.first(where: { $0.name == spec.name })
-                    let titleFallback: String?
+                    let exists: Bool
                     if spec.kind == .terminal {
-                        titleFallback = known?.windowTitle ?? "\(terminalPrefix):\(spec.name)"
+                        let titlePrefix = known?.windowTitle ?? "\(terminalPrefix):\(spec.name)"
+                        exists = ((try? terminalAdapter.countWindows(prefix: titlePrefix)) ?? 0) > 0
                     } else {
-                        titleFallback = known?.windowTitle ?? spec.matchTitle
+                        let titleFallback = known?.windowTitle ?? spec.matchTitle
+                        exists = customAppAdapter.windowExists(
+                            bundleID: spec.bundleID,
+                            windowID: known?.windowID,
+                            titleFallback: titleFallback
+                        )
                     }
-                    let exists = customAppAdapter.windowExists(
-                        bundleID: spec.bundleID,
-                        windowID: known?.windowID,
-                        titleFallback: titleFallback
-                    )
                     if exists {
                         foundWindowCount += 1
                     } else {
@@ -405,10 +406,36 @@ public final class StreamOrchestrator {
         }
     }
 
+    public func terminalStatuses(projectName: String, streamName: String) throws -> [TerminalStatus] {
+        let (project, stream) = try resolve(projectName: projectName, streamName: streamName)
+        let identity = try store.windowIdentity(streamID: stream.id)
+        let terminalWindows = project.windows.filter { $0.kind == .terminal }
+        let prefix = terminalTitlePrefix(project: project, stream: stream)
+
+        return terminalWindows.map { spec in
+            let known = identity?.windows.first(where: { $0.name == spec.name })
+            let fallbackTitle = known?.windowTitle ?? "\(prefix):\(spec.name)"
+            let isActive = ((try? terminalAdapter.countWindows(prefix: fallbackTitle)) ?? 0) > 0
+            let statusFile = terminalStatusFilePath(stream: stream, terminalName: spec.name)
+            let payload = readTerminalStatusFile(statusFile)
+
+            return TerminalStatus(
+                name: spec.name,
+                isActive: isActive,
+                state: payload?["state"] as? String,
+                updatedAt: payload?["timestamp"] as? String,
+                lastOutput: payload?["last_output"] as? String
+            )
+        }
+    }
+
     private func showGenericWindows(project: Project, stream: Stream, identity: StreamWindowIdentity?) throws {
         let found = project.windows.contains { spec in
             let known = identity?.windows.first(where: { $0.name == spec.name })
             let titleFallback = resolvedTitleFallback(project: project, spec: spec, known: known, stream: stream)
+            if spec.kind == .terminal {
+                return ((try? terminalAdapter.countWindows(prefix: titleFallback ?? "")) ?? 0) > 0
+            }
             return customAppAdapter.windowExists(bundleID: spec.bundleID, windowID: known?.windowID, titleFallback: titleFallback)
         }
         if found {
@@ -472,7 +499,12 @@ public final class StreamOrchestrator {
                     upsertIdentity(&identities, WindowIdentity(name: spec.name, bundleID: spec.bundleID, windowID: nil, windowTitle: spec.matchTitle, anchorURL: anchor))
                 case .terminal:
                     let title = "\(terminalPrefix):\(spec.name)"
-                    try terminalAdapter.openWindow(worktreePath: stream.worktreePath, command: spec.command, title: title)
+                    let wrappedCommand = try wrappedTerminalCommand(
+                        stream: stream,
+                        terminalName: spec.name,
+                        command: spec.command
+                    )
+                    try terminalAdapter.openWindow(worktreePath: stream.worktreePath, command: wrappedCommand, title: title)
                     _ = try windowController.moveWindow(
                         target: WindowTarget(bundleID: spec.bundleID, matchTitle: title, preferFocusedWindow: false),
                         layout: spec.layout
@@ -605,6 +637,138 @@ public final class StreamOrchestrator {
 
     private func nowISO8601() -> String {
         ISO8601DateFormatter().string(from: Date())
+    }
+
+    private func wrappedTerminalCommand(stream: Stream, terminalName: String, command: String?) throws -> String? {
+        guard let command, !command.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            try writeTerminalStatusFile(stream: stream, terminalName: terminalName, state: "idle")
+            return nil
+        }
+
+        let statusFile = terminalStatusFilePath(stream: stream, terminalName: terminalName)
+        let wrapper = try ensureAgentwrapScript()
+        let escapedWrapper = shellSingleQuoted(wrapper)
+        let escapedStatusFile = shellSingleQuoted(statusFile)
+        let escapedCommand = shellSingleQuoted(command)
+        return "AGENTMUX_STATUS_FILE='\(escapedStatusFile)' '\(escapedWrapper)' /bin/bash -lc '\(escapedCommand)'"
+    }
+
+    private func terminalStatusFilePath(stream: Stream, terminalName: String) -> String {
+        let statusDir = URL(fileURLWithPath: stream.worktreePath, isDirectory: true)
+            .appendingPathComponent(".agentmux", isDirectory: true)
+            .appendingPathComponent("terminal-status", isDirectory: true)
+        let safeName = terminalName.replacingOccurrences(of: "/", with: "_")
+        return statusDir.appendingPathComponent("\(safeName).json").path
+    }
+
+    private func writeTerminalStatusFile(stream: Stream, terminalName: String, state: String) throws {
+        let filePath = terminalStatusFilePath(stream: stream, terminalName: terminalName)
+        let dir = URL(fileURLWithPath: filePath).deletingLastPathComponent()
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let payload: [String: Any] = [
+            "state": state,
+            "timestamp": nowISO8601()
+        ]
+        let data = try JSONSerialization.data(withJSONObject: payload, options: [.prettyPrinted, .sortedKeys])
+        try data.write(to: URL(fileURLWithPath: filePath), options: .atomic)
+    }
+
+    private func readTerminalStatusFile(_ filePath: String) -> [String: Any]? {
+        guard let data = try? Data(contentsOf: URL(fileURLWithPath: filePath)) else {
+            return nil
+        }
+        return (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+    }
+
+    private func ensureAgentwrapScript() throws -> String {
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        let dir = home.appendingPathComponent(".agentmux/bin", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let scriptPath = dir.appendingPathComponent("agentwrap.sh").path
+        // Keep wrapper behavior consistent by updating managed script on each use.
+        try agentwrapScriptTemplate().write(toFile: scriptPath, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: scriptPath)
+        return scriptPath
+    }
+
+    private func shellSingleQuoted(_ value: String) -> String {
+        value.replacingOccurrences(of: "'", with: "'\"'\"'")
+    }
+
+    private func agentwrapScriptTemplate() -> String {
+        """
+        #!/usr/bin/env bash
+        set -euo pipefail
+
+        STATUS_FILE="${AGENTMUX_STATUS_FILE:-./status.json}"
+        INACTIVITY_THRESHOLD="${INACTIVITY_THRESHOLD:-2}"
+        POLL_INTERVAL="${POLL_INTERVAL:-0.25}"
+
+        now_iso() { date +"%Y-%m-%dT%H:%M:%S%z"; }
+
+        write_status() {
+          local state="$1"
+          mkdir -p "$(dirname "$STATUS_FILE")"
+          cat > "${STATUS_FILE}.tmp" <<EOF
+        {
+          "state": "$state",
+          "timestamp": "$(now_iso)"
+        }
+        EOF
+          mv "${STATUS_FILE}.tmp" "${STATUS_FILE}"
+        }
+
+        if [[ $# -lt 1 ]]; then
+          echo "Usage: $0 <command> [args...]" >&2
+          exit 1
+        fi
+
+        CMD=( "$@" )
+        TMPDIR="$(mktemp -d)"
+        LOGFILE="$TMPDIR/typescript.log"
+        cleanup() { rm -rf "$TMPDIR" >/dev/null 2>&1 || true; }
+        trap cleanup EXIT
+
+        write_status "starting"
+
+        (
+          while [[ ! -f "$LOGFILE" ]]; do sleep 0.05; done
+          local_last_change="$(date +%s)"
+          local_last_size=0
+          last_line=""
+          while :; do
+            size="$(stat -f%z "$LOGFILE" 2>/dev/null || echo 0)"
+            now="$(date +%s)"
+            if [[ "$size" -gt "$local_last_size" ]]; then
+              local_last_change="$now"
+              local_last_size="$size"
+              last_line="$(tail -n 1 "$LOGFILE" 2>/dev/null || true)"
+              write_status "working"
+            else
+              if (( now - local_last_change >= INACTIVITY_THRESHOLD )); then
+                last_line="$(tail -n 1 "$LOGFILE" 2>/dev/null || true)"
+                write_status "waiting_for_input"
+              fi
+            fi
+            sleep "$POLL_INTERVAL"
+          done
+        ) &
+        MON_PID=$!
+
+        set +e
+        script -q "$LOGFILE" "${CMD[@]}"
+        EXIT_CODE=$?
+        set -e
+
+        kill "$MON_PID" >/dev/null 2>&1 || true
+
+        if [[ $EXIT_CODE -eq 0 ]]; then
+          write_status "done"
+        else
+          write_status "error"
+        fi
+        exit "$EXIT_CODE"
+        """
     }
 
     private func runGit(_ arguments: [String]) throws {
