@@ -10,6 +10,10 @@ Main modules:
 - `agentmux`: CLI entrypoint.
 - `agentmux-gui`: AppKit desktop app using `streamctl` directly.
 
+Window model is unified:
+- `Project.windows[]` with `kind` in `editor|browser|terminal|custom`
+- no legacy fixed terminal/custom per-project sections
+
 ## Lifecycle Semantics
 - `create`: create git worktree + persist stream.
 - `show`: surface existing stream windows; fallback to launch path when missing.
@@ -34,6 +38,17 @@ Stored per stream:
 Behavior:
 - `show/hide/focus/destroy` prefer persisted identity first.
 - If unavailable, fallback heuristics are used.
+
+## Terminal Status Pipeline
+- Terminal window specs with `command` are launched through a managed wrapper:
+  - `~/.agentmux/bin/agentwrap.sh`
+- The wrapper writes status file updates to:
+  - `<stream worktree>/.agentmux/terminal-status/<terminal-name>.json`
+- Status payload:
+  - `state`
+  - `timestamp`
+- `streamctl.terminalStatuses(projectName:streamName:)` reads these files and combines them with terminal window presence checks.
+- AppKit streams list polls and refreshes terminal statuses periodically.
 
 ## Window Targeting Rules
 - Use bundle IDs, not app names.

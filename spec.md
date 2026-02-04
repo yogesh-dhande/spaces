@@ -1,364 +1,195 @@
-# Agentmux - Work stream orchestrator for vibecoding
+# agentmux Product Spec (Current)
 
 ## 0. Summary
 
-Build a macOS-native app that lets users define **Projects** and launch multiple **Streams** per project.
-Each stream reliably launches, attaches to, and tiles a fixed set of windows:
+`agentmux` is a macOS-native stream orchestrator for coding workflows.
 
-* **Editor**: one per stream (Windsurf, VS Code, Cursor)
-* **Terminal**: N windows per stream (Terminal.app first)
-* **Browser**: one Chrome window per stream with predefined tabs
+It manages:
+- **Projects** (repo roots + window configuration)
+- **Streams** (git worktrees per project)
+- **Window lifecycle** (`show`, `hide`, `focus`, `destroy`) with deterministic positioning
 
-The app must:
+Window model is **unified**: each project stores a list of window specs with a `kind`:
+- `editor`
+- `browser`
+- `terminal`
+- `custom`
 
-* launch apps if needed, attach to existing windows if possible
-* **exit fullscreen before moving windows** (hard requirement)
-* unminimize windows if needed
-* tile windows on specific displays (half / quarter layouts)
-* open and close streams deterministically
-
-**MVP UI**: minimal GUI + hotkeys
-
-GUI must allow:
-
-* create/delete projects
-* configure editor / terminal / browser windows and layouts
-* create/delete streams (each stream = git worktree)
-* list active streams
-* switch streams via hotkeys or click
+No fixed editor/browser/terminal sections are required in project config.
 
 ---
 
-## 1. User & Workflow
-
-### Target user
-
-Agent power users running multiple AI coding agents across repos.
-
-### Workflow
-
-User defines configuration (YAML + local DB):
-
-* **Project**
-
-  * repo root
-  * default editor / terminal / browser
-  * window layout (display + tile per window)
-* **Streams**
-
-  * belong to a project
-  * each stream has its own git worktree
-  * opening a stream:
-
-    * checks out worktree
-    * opens editor, terminals, browser
-    * applies layout
-
----
-
-## 2. Scope
+## 1. Scope
 
 ### MUST (MVP)
+1. Project + Stream model in local SQLite
+2. Stream create/destroy with git worktrees
+3. Per-stream window launch/attach/reposition
+4. Multi-monitor placement via half/quarter tiles
+5. Deterministic targeting by bundle ID + persisted stream identity
+6. Stream diagnostics (`doctor`)
+7. Terminal activity status tracking for command-backed terminal windows
+8. AppKit GUI for project/stream/window operations
 
-1. Project + Stream model
-2. Launch / attach / reposition windows
-3. Multi-monitor support with half/quarter tiling
-4. One Chrome window per stream with configured tabs
-5. Editor opens repo root + recent files
-6. Terminal windows per stream (N)
-
-   * track coding-agent activity per terminal
-   * surface status in GUI
-   * see `prototypes/agentwrap.sh` for reference
-7. Robustness:
-
-   * retries + backoff for app/window discovery
-   * **exit fullscreen before moving**
-   * clear errors for missing permissions
-
-### SHOULD (if easy)
-
-* Unminimize windows before positioning
-* Deterministic “bring to front” ordering after launch
+### SHOULD
+- Better validation and guided inputs in GUI
+- Better remediation text in diagnostics
 
 ### NOT IN MVP
-
-* Spaces management
-* Exact session restore
+- Spaces management
+- Full session restore
+- Cloud sync/state
 
 ---
 
-## 3. Core Concepts
+## 2. Core Concepts
 
 ### Project
-
-* `id`, `name`
-* `repo_root` (absolute path)
-* `default_editor`: windsurf | vscode | cursor
-* `default_browser`: chrome
-* `default_terminal`: Terminal
-* `windows`:
-
-  * editor (1)
-  * terminal[] (N)
-  * browser (1)
-* `layout` per window:
-
-  * `display_index` (0..N-1)
-  * `tile`: leftHalf | rightHalf | topLeft | topRight | bottomLeft | bottomRight
+- `id`, `name`, `repoRoot`
+- defaults (`defaultEditor`, `defaultBrowser`, `defaultTerminal`) kept for compatibility in orchestration defaults
+- `windows[]` where each entry includes:
+  - `name`
+  - `kind` (`editor|browser|terminal|custom`)
+  - `bundleID`
+  - `layout` (`displayIndex`, `tile`)
+  - optional fields by kind:
+    - editor: `editorKind`, `matchTitle`
+    - browser: `urls` (GUI currently uses one URL per browser window)
+    - terminal: `command`
+    - custom: `launchCommand`, `matchTitle`
 
 ### Stream
+- `id`, `projectID`, `name`, `worktreePath`
+- Worktree branch defaults to stream name on create.
 
-* belongs to a project
-* `name` (unique within project, git worktree name)
-* `worktree_path` (absolute)
-
-### Window Targeting (critical)
-
-All window targeting **must use bundle identifiers**, not names.
-
-Examples:
-
-* Windsurf: `com.exafunction.windsurf`
-* Chrome: `com.google.Chrome`
-* Terminal: `com.apple.Terminal`
-* iTerm2: `com.googlecode.iterm2`
-* VS Code: `com.microsoft.VSCode`
-* Cursor: `com.todesktop.230313mzl4w4u92`
+### Stream Window Identity
+Persisted per stream:
+- `windows[]` identities (`name`, `bundleID`, optional `windowID`, optional `windowTitle`, optional `anchorURL`)
+- `updatedAt`
 
 ---
 
-## 4. Technical Approach
+## 3. Window Targeting Rules
 
-### 4.1 Window Control (AX API)
-
-Implement a low-level module that:
-
-* finds apps by bundle id
-* selects focused window first, fallback to window list
-* supports:
-
-  * `AXFullScreen = false`
-  * `AXMinimized = false` (if supported)
-  * `AXPosition`, `AXSize`
-
-**Hard rule**
-Always:
-
-1. exit fullscreen
-2. wait briefly
-3. re-fetch focused window
-   (fullscreen transitions often change the window reference)
+Hard requirements:
+1. Target apps by **bundle ID**
+2. Before setting frame:
+   - exit fullscreen
+   - refetch window
+   - unminimize if needed
+   - apply position + size
+3. Continue best-effort for non-critical windows; avoid global failure from single-window drift
 
 ---
 
-### 4.2 Display Geometry
+## 4. Stream Lifecycle Semantics
 
-* Use `NSScreen.screens[index].visibleFrame`
-* Compute tile rects from visibleFrame
+### `stream create`
+- Validate project exists
+- Create git worktree
+- Persist stream + seed empty window identity
 
----
+### `show`
+- If stream windows are found: focus/unminimize/reapply layout
+- Else: run `up` behavior (launch/create as needed)
+- Mark stream active
 
-### 4.3 Stream Orchestration
+### `hide`
+- Minimize known stream windows
+- Mark stream inactive
 
-When launching a stream:
+### `focus`
+- Bring/focus windows and reapply layout
+- Refresh identity opportunistically
+- Mark stream active
 
-1. Load project + stream config
-2. Ensure apps are running (launch if needed)
-3. Ensure required windows exist
-4. Normalize windows:
-
-   * exit fullscreen
-   * unminimize (best effort)
-5. Apply layout
-6. Chrome: ensure tabs exist
-7. Editor: open repo + dynamic files
-8. Terminals: open windows, run optional commands
-
-Retries required for:
-
-* app launch
-* window discovery
-* fullscreen transitions
+### `destroy`
+- Hide windows
+- Close browser window when anchor is available
+- Remove git worktree (and branch optionally)
+- Delete stream runtime/identity records
 
 ---
 
-## 5. Repo Structure
+## 5. Terminal Status Tracking
 
-Swift Package with modules:
+For terminal windows with configured `command`:
+- Launch command through managed wrapper:
+  - `~/.agentmux/bin/agentwrap.sh`
+- Wrapper writes status to:
+  - `<worktree>/.agentmux/terminal-status/<terminal-name>.json`
+- Status JSON is intentionally minimal:
+  - `state`
+  - `timestamp`
 
-* **winmove**
+Expected states:
+- `starting`
+- `working`
+- `waiting_for_input`
+- `done`
+- `error`
+- `idle` (used when terminal has no configured command)
 
-  * window discovery + positioning (AX)
-* **appctl**
-
-  * app-specific logic (editor, chrome, terminal)
-* **streamctl**
-
-  * orchestration layer
-* **gui**
-
-  * stream/project UI
+GUI streams table surfaces active terminal statuses and refreshes periodically.
 
 ---
 
 ## 6. Storage
 
-* Local SQLite (state)
+SQLite at:
+- default: `~/.agentmux/agentmux.db`
+- optional override: `--db <path>`
+
+Tables:
+- `projects`
+- `streams`
+- `stream_runtime`
+- `stream_window_identity`
 
 ---
 
-## 7. Editor Behavior (Dynamic Files)
+## 7. UX Requirements (Current)
 
-### Requirements
+### GUI
+- Projects pane:
+  - add/edit/delete/refresh
+- Project edit modal:
+  - manage windows inline (add via dropdown menu, edit selected, remove selected)
+- Streams pane:
+  - add/destroy/refresh
+  - show/hide/focus/doctor
+  - display terminal status summaries
 
-* Open repo root
-* Optionally open up to **3 relevant files**
-
-### Exact MVP heuristic
-
-On stream launch:
-
-1. Git root = `project.repo_root`
-2. Collect candidates:
-
-   * `git diff --name-only`
-   * `git diff --name-only --cached`
-3. If non-empty:
-
-   * open up to 3 existing files
-4. Else:
-
-   * `git ls-files`
-   * stat mtime
-   * open 3 most recently modified tracked files
-   * exclude binary/large extensions (`.png`, `.jpg`, `.zip`, etc.)
-
-### Editor commands
-
-* Windsurf: `surf .`
-* VS Code: `code -r .`
-* Cursor: `cursor -r .`
-
-Open files:
-
-* Windsurf: `surf <file>` (best effort)
-* VS Code / Cursor: `<editor> -r <file>` or `--goto`
+### CLI
+- project CRUD
+- project window CRUD
+- stream create/list/destroy
+- show/hide/focus
+- list-active
+- doctor
 
 ---
 
-## 8. Chrome Behavior
+## 8. Diagnostics
 
-### Requirements
+`doctor` reports per stream:
+- found windows count
+- expected windows count
+- list of missing window names
 
-* Exactly **one Chrome window per stream**
-* Ensure configured URLs exist as tabs
-
-### Stream identification (MVP)
-
-* First URL = **anchor URL**
-* A Chrome window belongs to the stream if any tab matches anchor URL
-
-Algorithm:
-
-1. Enumerate Chrome windows/tabs via AppleScript
-2. If window with anchor exists:
-
-   * reuse it
-   * add missing tabs
-3. Else:
-
-   * create new window with all URLs
+Further improvement area:
+- richer remediation details for missing permissions/app launch issues
 
 ---
 
-## 9. Terminal Behavior
+## 9. Testing
 
-### Requirements
+Current persistent coverage:
+- `Tests/smoke_cli.sh`
+  - project/window CRUD
+  - stream create/destroy
+  - show/hide active-state checks
+  - doctor output shape check
 
-For each terminal config entry:
-
-* open a new Terminal window
-* `cd` to worktree
-* run optional command
-
-### MVP Implementation
-
-* Use AppleScript
-* After opening:
-
-  * bring Terminal frontmost
-  * immediately move focused window via `winmove`
-* Accept some brittleness; use retries + sleeps
-
----
-
-## 10. Window Positioning Rules (Hard)
-
-For **every** window before setting frame:
-
-1. `AXFullScreen = false`
-2. wait `postFullscreenDelayMs` (250–600ms)
-3. re-fetch focused window
-4. `AXMinimized = false` (if supported)
-5. set `AXPosition`
-6. set `AXSize`
-
-Failure handling:
-
-* log warning
-* continue other windows
-* abort only if editor window cannot be created
-
----
-
-## 11. Errors & Diagnostics
-
-### User-facing errors (required)
-
-* Missing Accessibility permission
-
-  * exact steps + binaries listed
-* Invalid display index
-
-  * show detected screen count
-* App launch failure
-
-  * bundle id + launch command
-* Window not found after retries
-
-  * suggest `winmove --list --bundle <id>`
-
-### Logging
-
-* Console logs only
-* Prefix with stream name
-
----
-
-## 12. Test Plan
-
-### Window Control
-
-* Move Windsurf window (normal + fullscreen)
-* Move Chrome window
-* Move Terminal window
-* Multi-monitor placement via display index
-
-### Integration
-
-Create streams `a`, `b`, `c` with localhost tabs.
-
-`streamctl up project:a` must:
-
-* tile editor, chrome, terminal correctly
-* not duplicate Chrome windows on re-run
-* allow independent recall per stream
-
----
-
-## 13. Constraints
-
-* Local-only
-* No cloud services
-
+Future:
+- deeper module-level automated tests once toolchain constraints permit stable test target execution.

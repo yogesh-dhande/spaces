@@ -4,6 +4,7 @@
 - Core backend is implemented and shared across CLI + GUI modules.
 - GUI is AppKit-based and functional for core project/stream operations.
 - Window management is unified across window kinds (`editor`, `browser`, `terminal`, `custom`).
+- Terminal status tracking is implemented and surfaced in streams view.
 
 ## Accomplished
 - Implemented shared Swift modules: `winmove`, `appctl`, `streamctl`.
@@ -25,17 +26,23 @@
   - stream list/add/destroy
   - stream actions: `show`, `hide`, `focus`, `doctor`
   - status line feedback
+  - live terminal status summaries in streams table
+- Implemented terminal command wrapper flow:
+  - managed wrapper script at `~/.agentmux/bin/agentwrap.sh`
+  - per-terminal status files in stream worktrees
+- Added stronger smoke coverage:
+  - stream active/inactive transitions via `show/hide`
+  - doctor output shape checks
 
 ## Remaining
-- Sync docs fully with current state:
-  - `AGENTS.md`
-  - `README.md`
 - GUI polish:
-  - better validation messages
-  - keyboard shortcuts
+  - better validation messages and inline guidance
+  - richer stream row details and sorting/filtering
+- Hotkeys/shortcuts for quick stream switching (still open from spec intent)
 - Additional hardening:
-  - expand automated tests beyond smoke script
-  - improve `doctor` fix guidance for permission/app issues
+  - deeper automated tests (module-level tests beyond smoke shell script)
+  - stronger `doctor` remediation guidance (permissions/app availability)
+  - broader handling for non-Terminal terminal apps
 
 ## Next Task (start here)
-- Add richer validation and guided inputs in the AppKit window dialogs (kind-specific hints and required fields).
+- Implement keyboard shortcuts / hotkeys for stream focus and show/hide.
