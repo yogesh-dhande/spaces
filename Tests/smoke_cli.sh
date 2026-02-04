@@ -51,6 +51,23 @@ mkdir -p "$TEST_REPO"
 "$BIN" stream create --db "$TMP_DB" --project smoke --stream s1 >/dev/null
 STREAM_LIST="$($BIN stream list --db "$TMP_DB" --project smoke)"
 echo "$STREAM_LIST" | grep -q $'\ts1\t'
+
+# Active-state lifecycle checks (no configured windows required)
+ACTIVE0="$($BIN list-active --db "$TMP_DB" || true)"
+[[ -z "$ACTIVE0" ]]
+
+"$BIN" show --db "$TMP_DB" --project smoke --stream s1 >/dev/null
+ACTIVE1="$($BIN list-active --db "$TMP_DB")"
+echo "$ACTIVE1" | grep -q $'smoke\ts1\t'
+
+"$BIN" hide --db "$TMP_DB" --project smoke --stream s1 >/dev/null
+ACTIVE2="$($BIN list-active --db "$TMP_DB" || true)"
+[[ -z "$ACTIVE2" ]]
+
+# Doctor output shape should include stream row
+DOCTOR="$($BIN doctor --db "$TMP_DB" --project smoke --stream s1)"
+echo "$DOCTOR" | grep -q $'smoke\ts1\twindows:'
+
 "$BIN" stream destroy --db "$TMP_DB" --project smoke --stream s1 >/dev/null
 
 "$BIN" project delete --db "$TMP_DB" --name smoke >/dev/null
