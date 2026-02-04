@@ -18,6 +18,10 @@
   - `stream_runtime`
   - `stream_window_identity`
 - Implemented `doctor` diagnostics with window found/expected counts and missing window names.
+- Improved user-facing diagnostics:
+  - explicit Accessibility permission steps
+  - exact binary guidance (`Terminal.app`, running `agentmux` binary, `agentmux-gui`)
+  - actionable next-step hints in `doctor` output
 - Added repeatable smoke script: `tests/smoke_cli.sh`.
 - Migrated GUI from SwiftUI attempt to AppKit.
 - Implemented AppKit GUI MVP:

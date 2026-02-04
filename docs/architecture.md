@@ -72,3 +72,7 @@ Behavior:
 ## Current Constraints
 - macOS only.
 - Local-only state and control plane.
+
+## Diagnostics Notes
+- CLI error messages include concrete Accessibility remediation steps and exact binaries to enable.
+- `doctor` prints actionable follow-up commands when windows are missing.

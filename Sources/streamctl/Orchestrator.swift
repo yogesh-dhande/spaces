@@ -344,6 +344,7 @@ public final class StreamOrchestrator {
     }
 
     public func doctor(projectName: String? = nil, streamName: String? = nil) throws -> [StreamDoctorReport] {
+        let hasAXPermission = windowController.hasAccessibilityPermission()
         let projects: [Project]
         if let projectName {
             guard let project = try store.project(named: projectName) else {
@@ -392,7 +393,8 @@ public final class StreamOrchestrator {
                         identityUpdatedAt: identity?.updatedAt,
                         foundWindowCount: foundWindowCount,
                         expectedWindowCount: project.windows.count,
-                        missingWindows: missingWindows
+                        missingWindows: missingWindows,
+                        accessibilityPermissionGranted: hasAXPermission
                     )
                 )
             }

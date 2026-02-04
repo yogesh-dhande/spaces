@@ -55,10 +55,20 @@ struct CLI {
             if reports.isEmpty {
                 print("No streams found.")
             }
+            var printedAXGuidance = false
             for report in reports {
                 print("\(report.projectName)\t\(report.streamName)\twindows:\(report.foundWindowCount)/\(report.expectedWindowCount)")
                 let missing = report.missingWindows.isEmpty ? "-" : report.missingWindows.joined(separator: ",")
                 print("  missing=\(missing) updated=\(report.identityUpdatedAt ?? "-")")
+                if !report.accessibilityPermissionGranted && !printedAXGuidance {
+                    print("  diagnostic: Accessibility permission missing; window diagnostics may be inaccurate.")
+                    printAccessibilityGuidance()
+                    printedAXGuidance = true
+                }
+                if !report.missingWindows.isEmpty {
+                    print("  next: verify window config with `agentmux project window list --project \(report.projectName)`")
+                    print("  next: re-run `agentmux show --project \(report.projectName) --stream \(report.streamName)` and then `agentmux doctor --project \(report.projectName) --stream \(report.streamName)`")
+                }
             }
 
         default:
@@ -300,11 +310,26 @@ struct CLI {
           --db <path> overrides default database path (~/.agentmux/agentmux.db)
         """)
     }
+
+    private func printAccessibilityGuidance() {
+        let binary = CommandLine.arguments.first ?? "agentmux"
+        print("  fix steps:")
+        print("    1) Open System Settings > Privacy & Security > Accessibility")
+        print("    2) Enable /Applications/Terminal.app (if launching from terminal)")
+        print("    3) Enable \(binary)")
+        print("    4) Enable agentmux-gui (if using GUI)")
+        print("    5) Quit and relaunch app/command")
+        print("  quick open: open \"x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility\"")
+    }
 }
 
 do {
     try CLI(args: CommandLine.arguments).run()
 } catch {
     fputs("Error: \(error.localizedDescription)\n", stderr)
+    if error.localizedDescription.localizedCaseInsensitiveContains("Accessibility permission is missing") {
+        fputs("Fix: open System Settings > Privacy & Security > Accessibility and enable Terminal + agentmux/agentmux-gui.\n", stderr)
+        fputs("Quick open: open \"x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility\"\n", stderr)
+    }
     exit(1)
 }

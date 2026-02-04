@@ -190,6 +190,7 @@ public struct StreamDoctorReport: Sendable {
     public let foundWindowCount: Int
     public let expectedWindowCount: Int
     public let missingWindows: [String]
+    public let accessibilityPermissionGranted: Bool
 
     public init(
         projectName: String,
@@ -198,7 +199,8 @@ public struct StreamDoctorReport: Sendable {
         identityUpdatedAt: String?,
         foundWindowCount: Int,
         expectedWindowCount: Int,
-        missingWindows: [String]
+        missingWindows: [String],
+        accessibilityPermissionGranted: Bool
     ) {
         self.projectName = projectName
         self.streamName = streamName
@@ -207,6 +209,7 @@ public struct StreamDoctorReport: Sendable {
         self.foundWindowCount = foundWindowCount
         self.expectedWindowCount = expectedWindowCount
         self.missingWindows = missingWindows
+        self.accessibilityPermissionGranted = accessibilityPermissionGranted
     }
 }
 

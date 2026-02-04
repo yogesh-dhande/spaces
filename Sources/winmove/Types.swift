@@ -87,15 +87,27 @@ public enum WinmoveError: LocalizedError, Sendable {
     public var errorDescription: String? {
         switch self {
         case .accessibilityPermissionMissing:
-            return "Accessibility permission is missing. Enable Terminal and agentmux in System Settings > Privacy & Security > Accessibility."
+            let binary = ProcessInfo.processInfo.arguments.first ?? "agentmux"
+            return """
+            Accessibility permission is missing.
+            Steps:
+            1) Open System Settings > Privacy & Security > Accessibility
+            2) Enable:
+               - /Applications/Terminal.app (if launching from terminal)
+               - \(binary)
+               - agentmux-gui (if using the GUI app)
+            3) Quit and relaunch the app/command
+            Tip: run `open "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"`
+            """
         case let .appNotRunning(bundleID):
-            return "App not running for bundle id: \(bundleID)"
+            return "App not running for bundle id: \(bundleID). Confirm the bundle id is correct and the app is installed."
         case let .invalidDisplayIndex(index, screenCount):
-            return "Invalid display index \(index). Detected screens: \(screenCount)"
+            let maxIndex = max(0, screenCount - 1)
+            return "Invalid display index \(index). Detected screens: \(screenCount) (valid index range: 0...\(maxIndex))."
         case let .windowNotFound(bundleID):
-            return "Window not found after retries for bundle id: \(bundleID)"
+            return "Window not found after retries for bundle id: \(bundleID). Ensure the app window is open and title matching is correct."
         case let .moveFailed(bundleID):
-            return "Failed to move window after retries for bundle id: \(bundleID)"
+            return "Failed to move window after retries for bundle id: \(bundleID). This is usually an Accessibility permission or window-state issue."
         }
     }
 }
