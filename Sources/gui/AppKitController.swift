@@ -4,6 +4,18 @@ import streamctl
 
 @MainActor
 public final class AppKitController: NSObject, NSApplicationDelegate, NSTableViewDataSource, NSTableViewDelegate {
+    private final class ProjectEditorContext {
+        let projectName: String
+        let windowPicker: NSPopUpButton
+        let addWindowButton: NSButton
+
+        init(projectName: String, windowPicker: NSPopUpButton, addWindowButton: NSButton) {
+            self.projectName = projectName
+            self.windowPicker = windowPicker
+            self.addWindowButton = addWindowButton
+        }
+    }
+
     private var window: NSWindow!
 
     private let projectTable = NSTableView()
@@ -15,6 +27,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSTableVie
 
     private var selectedProjectName: String?
     private var selectedStreamName: String?
+    private var projectEditorContext: ProjectEditorContext?
 
     public func applicationDidFinishLaunching(_ notification: Notification) {
         setupMenu()
@@ -249,24 +262,12 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSTableVie
     @objc private func addProjectClicked() {
         let name = NSTextField(string: "")
         let repo = NSTextField(string: FileManager.default.currentDirectoryPath)
-        let editor = NSTextField(string: "windsurf")
-        let eDisplay = NSTextField(string: "0")
-        let eTile = NSTextField(string: "leftHalf")
-        let bDisplay = NSTextField(string: "0")
-        let bTile = NSTextField(string: "rightHalf")
-        let tabs = NSTextField(string: "")
         guard runModalForm(
             title: "Add Project",
             message: "Create a new project",
             fields: [
                 ("Name", name),
-                ("Repo Root", repo),
-                ("Editor", editor),
-                ("Editor Display", eDisplay),
-                ("Editor Tile", eTile),
-                ("Browser Display", bDisplay),
-                ("Browser Tile", bTile),
-                ("Browser Tabs CSV", tabs)
+                ("Repo Root", repo)
             ]
         ) else {
             return
@@ -276,14 +277,14 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSTableVie
             _ = try orchestrator().createProject(
                 name: name.stringValue.trimmingCharacters(in: .whitespacesAndNewlines),
                 repoRoot: repo.stringValue.trimmingCharacters(in: .whitespacesAndNewlines),
-                editor: editor.stringValue.trimmingCharacters(in: .whitespacesAndNewlines),
-                browser: "chrome",
-                terminal: "terminal",
-                editorDisplay: Int(eDisplay.stringValue),
-                editorTile: eTile.stringValue.trimmingCharacters(in: .whitespacesAndNewlines),
-                browserDisplay: Int(bDisplay.stringValue),
-                browserTile: bTile.stringValue.trimmingCharacters(in: .whitespacesAndNewlines),
-                browserTabs: tabs.stringValue.split(separator: ",").map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
+                editor: nil,
+                browser: nil,
+                terminal: nil,
+                editorDisplay: nil,
+                editorTile: nil,
+                browserDisplay: nil,
+                browserTile: nil,
+                browserTabs: []
             )
             reloadProjects(selectProject: name.stringValue)
             setStatus("Created project '\(name.stringValue)'.")
@@ -299,41 +300,70 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSTableVie
         }
 
         let repo = NSTextField(string: project.repoRoot)
-        let editor = NSTextField(string: project.defaultEditor.rawValue)
-        let eDisplay = NSTextField(string: String(project.editorLayout.displayIndex))
-        let eTile = NSTextField(string: project.editorLayout.tile.rawValue)
-        let bDisplay = NSTextField(string: String(project.browserLayout.displayIndex))
-        let bTile = NSTextField(string: project.browserLayout.tile.rawValue)
-        let tabs = NSTextField(string: project.browserTabs.joined(separator: ","))
+        let picker = NSPopUpButton(frame: NSRect(x: 0, y: 0, width: 360, height: 26), pullsDown: false)
+        picker.autoenablesItems = false
+        populateWindowPicker(picker, projectName: project.name)
 
-        guard runModalForm(
-            title: "Edit Project",
-            message: "Update selected project settings",
-            fields: [
-                ("Repo Root", repo),
-                ("Editor", editor),
-                ("Editor Display", eDisplay),
-                ("Editor Tile", eTile),
-                ("Browser Display", bDisplay),
-                ("Browser Tile", bTile),
-                ("Browser Tabs CSV", tabs)
-            ]
-        ) else {
-            return
-        }
+        let addWindowButton = NSButton(title: "Add Window…", target: self, action: #selector(projectEditorAddWindowClicked))
+        let editWindowButton = NSButton(title: "Edit Selected…", target: self, action: #selector(projectEditorEditWindowClicked))
+        let removeWindowButton = NSButton(title: "Remove Selected…", target: self, action: #selector(projectEditorRemoveWindowClicked))
+        addWindowButton.bezelStyle = .rounded
+        editWindowButton.bezelStyle = .rounded
+        removeWindowButton.bezelStyle = .rounded
+
+        let buttonRow = NSStackView(views: [addWindowButton, editWindowButton, removeWindowButton])
+        buttonRow.orientation = .horizontal
+        buttonRow.spacing = 8
+
+        let rows: [[NSView]] = [
+            [NSTextField(labelWithString: "Repo Root"), repo],
+            [NSTextField(labelWithString: "Windows"), picker],
+            [NSTextField(labelWithString: ""), buttonRow]
+        ]
+
+        let grid = NSGridView(views: rows)
+        grid.translatesAutoresizingMaskIntoConstraints = false
+        grid.rowSpacing = 8
+        grid.columnSpacing = 10
+        grid.column(at: 0).xPlacement = .trailing
+        grid.column(at: 0).width = 150
+        grid.column(at: 1).xPlacement = .fill
+        grid.column(at: 1).width = 380
+
+        let container = NSView(frame: NSRect(x: 0, y: 0, width: 560, height: 140))
+        container.addSubview(grid)
+        NSLayoutConstraint.activate([
+            grid.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 8),
+            grid.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -8),
+            grid.topAnchor.constraint(equalTo: container.topAnchor, constant: 6),
+            grid.bottomAnchor.constraint(lessThanOrEqualTo: container.bottomAnchor, constant: -6)
+        ])
+
+        let alert = NSAlert()
+        alert.messageText = "Edit Project"
+        alert.informativeText = "Update selected project settings"
+        alert.alertStyle = .informational
+        alert.addButton(withTitle: "Save")
+        alert.addButton(withTitle: "Cancel")
+        alert.accessoryView = container
+
+        projectEditorContext = ProjectEditorContext(projectName: project.name, windowPicker: picker, addWindowButton: addWindowButton)
+        defer { projectEditorContext = nil }
+
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
 
         do {
             _ = try orchestrator().updateProject(
                 name: project.name,
                 repoRoot: repo.stringValue,
-                editor: editor.stringValue,
-                browser: "chrome",
-                terminal: "terminal",
-                editorDisplay: Int(eDisplay.stringValue),
-                editorTile: eTile.stringValue,
-                browserDisplay: Int(bDisplay.stringValue),
-                browserTile: bTile.stringValue,
-                browserTabs: tabs.stringValue.split(separator: ",").map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
+                editor: nil,
+                browser: nil,
+                terminal: nil,
+                editorDisplay: nil,
+                editorTile: nil,
+                browserDisplay: nil,
+                browserTile: nil,
+                browserTabs: nil
             )
             reloadProjects(selectProject: project.name)
             setStatus("Saved project '\(project.name)'.")
@@ -355,6 +385,192 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSTableVie
             setStatus("Deleted project '\(project)'.")
         } catch {
             setStatus("Delete project failed: \(error.localizedDescription)")
+        }
+    }
+
+    @objc private func addEditorWindowClicked() {
+        guard let projectName = selectedProjectName else { return }
+        let name = NSTextField(string: "")
+        let bundleID = NSTextField(string: "com.exafunction.windsurf")
+        let display = NSTextField(string: "0")
+        let tile = NSTextField(string: "leftHalf")
+        let editorKind = NSTextField(string: "windsurf")
+        let matchTitle = NSTextField(string: "")
+        guard runModalForm(
+            title: "Add Editor Window",
+            message: "Add editor window spec to '\(projectName)'",
+            fields: [
+                ("Name", name),
+                ("Bundle ID", bundleID),
+                ("Display", display),
+                ("Tile", tile),
+                ("Editor Kind (windsurf|vscode|cursor)", editorKind),
+                ("Match Title (optional)", matchTitle)
+            ]
+        ) else { return }
+
+        do {
+            let updated = try orchestrator().addProjectWindow(
+                projectName: projectName,
+                name: name.stringValue,
+                kind: "editor",
+                bundleID: bundleID.stringValue,
+                displayIndex: Int(display.stringValue) ?? 0,
+                tile: tile.stringValue,
+                launchCommand: nil,
+                command: nil,
+                urls: [],
+                matchTitle: blankToNil(matchTitle.stringValue),
+                editorKind: blankToNil(editorKind.stringValue)
+            )
+            setStatus("Added editor window. total windows=\(updated.windows.count)")
+        } catch {
+            setStatus("Add editor window failed: \(error.localizedDescription)")
+        }
+    }
+
+    @objc private func addBrowserWindowClicked() {
+        guard let projectName = selectedProjectName else { return }
+        let name = NSTextField(string: "")
+        let bundleID = NSTextField(string: "com.google.Chrome")
+        let display = NSTextField(string: "0")
+        let tile = NSTextField(string: "rightHalf")
+        let url = NSTextField(string: "http://localhost:3000")
+        let matchTitle = NSTextField(string: "")
+        guard runModalForm(
+            title: "Add Browser Window",
+            message: "Add browser window spec to '\(projectName)'",
+            fields: [
+                ("Name", name),
+                ("Bundle ID", bundleID),
+                ("Display", display),
+                ("Tile", tile),
+                ("URL", url),
+                ("Match Title (optional)", matchTitle)
+            ]
+        ) else { return }
+
+        do {
+            let updated = try orchestrator().addProjectWindow(
+                projectName: projectName,
+                name: name.stringValue,
+                kind: "browser",
+                bundleID: bundleID.stringValue,
+                displayIndex: Int(display.stringValue) ?? 0,
+                tile: tile.stringValue,
+                launchCommand: nil,
+                command: nil,
+                urls: [url.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)].filter { !$0.isEmpty },
+                matchTitle: blankToNil(matchTitle.stringValue),
+                editorKind: nil
+            )
+            setStatus("Added browser window. total windows=\(updated.windows.count)")
+        } catch {
+            setStatus("Add browser window failed: \(error.localizedDescription)")
+        }
+    }
+
+    @objc private func addTerminalWindowClicked() {
+        guard let projectName = selectedProjectName else { return }
+        let name = NSTextField(string: "")
+        let bundleID = NSTextField(string: "com.apple.Terminal")
+        let display = NSTextField(string: "0")
+        let tile = NSTextField(string: "bottomLeft")
+        let command = NSTextField(string: "")
+        let matchTitle = NSTextField(string: "")
+        guard runModalForm(
+            title: "Add Terminal Window",
+            message: "Add terminal window spec to '\(projectName)'",
+            fields: [
+                ("Name", name),
+                ("Bundle ID", bundleID),
+                ("Display", display),
+                ("Tile", tile),
+                ("Shell Command (optional)", command),
+                ("Match Title (optional)", matchTitle)
+            ]
+        ) else { return }
+
+        do {
+            let updated = try orchestrator().addProjectWindow(
+                projectName: projectName,
+                name: name.stringValue,
+                kind: "terminal",
+                bundleID: bundleID.stringValue,
+                displayIndex: Int(display.stringValue) ?? 0,
+                tile: tile.stringValue,
+                launchCommand: nil,
+                command: blankToNil(command.stringValue),
+                urls: [],
+                matchTitle: blankToNil(matchTitle.stringValue),
+                editorKind: nil
+            )
+            setStatus("Added terminal window. total windows=\(updated.windows.count)")
+        } catch {
+            setStatus("Add terminal window failed: \(error.localizedDescription)")
+        }
+    }
+
+    @objc private func addCustomWindowClicked() {
+        guard let projectName = selectedProjectName else { return }
+        let name = NSTextField(string: "")
+        let bundleID = NSTextField(string: "")
+        let display = NSTextField(string: "0")
+        let tile = NSTextField(string: "bottomRight")
+        let launchCommand = NSTextField(string: "")
+        let matchTitle = NSTextField(string: "")
+        guard runModalForm(
+            title: "Add Custom Window",
+            message: "Add custom window spec to '\(projectName)'",
+            fields: [
+                ("Name", name),
+                ("Bundle ID", bundleID),
+                ("Display", display),
+                ("Tile", tile),
+                ("Launch Command", launchCommand),
+                ("Match Title (optional)", matchTitle)
+            ]
+        ) else { return }
+
+        do {
+            let updated = try orchestrator().addProjectWindow(
+                projectName: projectName,
+                name: name.stringValue,
+                kind: "custom",
+                bundleID: bundleID.stringValue,
+                displayIndex: Int(display.stringValue) ?? 0,
+                tile: tile.stringValue,
+                launchCommand: blankToNil(launchCommand.stringValue),
+                command: nil,
+                urls: [],
+                matchTitle: blankToNil(matchTitle.stringValue),
+                editorKind: nil
+            )
+            setStatus("Added custom window. total windows=\(updated.windows.count)")
+        } catch {
+            setStatus("Add custom window failed: \(error.localizedDescription)")
+        }
+    }
+
+    @objc private func editWindowClicked() {
+        guard let projectName = selectedProjectName else { return }
+        do {
+            let windows = try orchestrator().listProjectWindows(projectName: projectName)
+            guard let idx = chooseWindowIndex(projectName: projectName, windows: windows, title: "Edit Window", message: "Choose a window in '\(projectName)'") else { return }
+            try editWindow(projectName: projectName, index: idx)
+        } catch {
+            setStatus("Edit window failed: \(error.localizedDescription)")
+        }
+    }
+
+    @objc private func removeWindowClicked() {
+        guard let projectName = selectedProjectName else { return }
+        do {
+            let windows = try orchestrator().listProjectWindows(projectName: projectName)
+            guard let idx = chooseWindowIndex(projectName: projectName, windows: windows, title: "Remove Window", message: "Choose a window to remove in '\(projectName)'") else { return }
+            try removeWindow(projectName: projectName, index: idx)
+        } catch {
+            setStatus("Remove window failed: \(error.localizedDescription)")
         }
     }
 
@@ -406,9 +622,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSTableVie
                 setStatus("No doctor report for \(project)/\(stream).")
                 return
             }
-            let editor = report.editorWindowFound ? "ok" : "missing"
-            let chrome = report.chromeWindowFound ? "ok" : "missing"
-            setStatus("doctor \(project)/\(stream): editor=\(editor), chrome=\(chrome), terminal=\(report.terminalWindowCount)/\(report.expectedTerminalWindowCount)")
+            let missing = report.missingWindows.isEmpty ? "-" : report.missingWindows.joined(separator: ",")
+            setStatus("doctor \(project)/\(stream): windows=\(report.foundWindowCount)/\(report.expectedWindowCount), missing=\(missing)")
         } catch {
             setStatus("Doctor failed: \(error.localizedDescription)")
         }
@@ -565,5 +780,219 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSTableVie
 
     private func setStatus(_ text: String) {
         statusLabel.stringValue = text
+    }
+
+    private func blankToNil(_ value: String) -> String? {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
+    private func parseOptionalInt(_ value: String) -> Int? {
+        guard let text = blankToNil(value) else { return nil }
+        return Int(text)
+    }
+
+    @objc private func projectEditorAddWindowClicked() {
+        guard let ctx = projectEditorContext else { return }
+        let menu = NSMenu()
+        menu.autoenablesItems = false
+        menu.addItem(withTitle: "Add Browser Window", action: #selector(projectEditorAddBrowserWindowClicked(_:)), keyEquivalent: "")
+        menu.addItem(withTitle: "Add Terminal Window", action: #selector(projectEditorAddTerminalWindowClicked(_:)), keyEquivalent: "")
+        menu.addItem(withTitle: "Add Editor Window", action: #selector(projectEditorAddEditorWindowClicked(_:)), keyEquivalent: "")
+        menu.addItem(withTitle: "Add Custom Window", action: #selector(projectEditorAddCustomWindowClicked(_:)), keyEquivalent: "")
+        for item in menu.items {
+            item.target = self
+            item.isEnabled = true
+        }
+        let event = NSApp.currentEvent ?? NSEvent.mouseEvent(
+            with: .leftMouseDown,
+            location: NSPoint(
+                x: ctx.addWindowButton.window?.frame.midX ?? window.frame.midX,
+                y: ctx.addWindowButton.window?.frame.midY ?? window.frame.midY
+            ),
+            modifierFlags: [],
+            timestamp: ProcessInfo.processInfo.systemUptime,
+            windowNumber: ctx.addWindowButton.window?.windowNumber ?? window.windowNumber,
+            context: nil,
+            eventNumber: 0,
+            clickCount: 1,
+            pressure: 1
+        )
+        guard let event else { return }
+        NSMenu.popUpContextMenu(menu, with: event, for: ctx.addWindowButton)
+    }
+
+    @objc private func projectEditorEditWindowClicked() {
+        guard let ctx = projectEditorContext else { return }
+        let previous = selectedProjectName
+        selectedProjectName = ctx.projectName
+        defer { selectedProjectName = previous }
+        let idx = ctx.windowPicker.indexOfSelectedItem
+        guard idx >= 0 else {
+            setStatus("No window selected.")
+            return
+        }
+        do {
+            try editWindow(projectName: ctx.projectName, index: idx)
+        } catch {
+            setStatus("Edit window failed: \(error.localizedDescription)")
+        }
+        populateWindowPicker(ctx.windowPicker, projectName: ctx.projectName)
+    }
+
+    @objc private func projectEditorRemoveWindowClicked() {
+        guard let ctx = projectEditorContext else { return }
+        let previous = selectedProjectName
+        selectedProjectName = ctx.projectName
+        defer { selectedProjectName = previous }
+        let idx = ctx.windowPicker.indexOfSelectedItem
+        guard idx >= 0 else {
+            setStatus("No window selected.")
+            return
+        }
+        do {
+            try removeWindow(projectName: ctx.projectName, index: idx)
+        } catch {
+            setStatus("Remove window failed: \(error.localizedDescription)")
+        }
+        populateWindowPicker(ctx.windowPicker, projectName: ctx.projectName)
+    }
+
+    @objc private func projectEditorAddBrowserWindowClicked(_ sender: Any?) {
+        runProjectEditorAddAction { addBrowserWindowClicked() }
+    }
+
+    @objc private func projectEditorAddTerminalWindowClicked(_ sender: Any?) {
+        runProjectEditorAddAction { addTerminalWindowClicked() }
+    }
+
+    @objc private func projectEditorAddEditorWindowClicked(_ sender: Any?) {
+        runProjectEditorAddAction { addEditorWindowClicked() }
+    }
+
+    @objc private func projectEditorAddCustomWindowClicked(_ sender: Any?) {
+        runProjectEditorAddAction { addCustomWindowClicked() }
+    }
+
+    private func runProjectEditorAddAction(_ action: () -> Void) {
+        guard let ctx = projectEditorContext else { return }
+        let previous = selectedProjectName
+        selectedProjectName = ctx.projectName
+        action()
+        selectedProjectName = previous
+        populateWindowPicker(ctx.windowPicker, projectName: ctx.projectName)
+    }
+
+    private func populateWindowPicker(_ picker: NSPopUpButton, projectName: String) {
+        picker.removeAllItems()
+        let windows = (try? orchestrator().listProjectWindows(projectName: projectName)) ?? []
+        for (index, spec) in windows.enumerated() {
+            picker.addItem(withTitle: "\(index): \(spec.name) [\(spec.kind.rawValue)]")
+        }
+        if windows.isEmpty {
+            picker.addItem(withTitle: "(no windows)")
+            picker.selectItem(at: 0)
+            picker.isEnabled = false
+        } else {
+            picker.isEnabled = true
+            picker.selectItem(at: 0)
+        }
+    }
+
+    private func chooseWindowIndex(projectName: String, windows: [ProjectWindowSpec], title: String, message: String) -> Int? {
+        guard !windows.isEmpty else {
+            setStatus("No windows configured for '\(projectName)'.")
+            return nil
+        }
+        let picker = NSPopUpButton(frame: NSRect(x: 0, y: 0, width: 420, height: 26), pullsDown: false)
+        for (index, spec) in windows.enumerated() {
+            picker.addItem(withTitle: "\(index): \(spec.name) [\(spec.kind.rawValue)]")
+        }
+
+        let alert = NSAlert()
+        alert.messageText = title
+        alert.informativeText = message
+        alert.alertStyle = .informational
+        alert.addButton(withTitle: "OK")
+        alert.addButton(withTitle: "Cancel")
+        alert.accessoryView = picker
+        guard alert.runModal() == .alertFirstButtonReturn else { return nil }
+        let idx = picker.indexOfSelectedItem
+        return (idx >= 0 && idx < windows.count) ? idx : nil
+    }
+
+    private func editWindow(projectName: String, index idx: Int) throws {
+        let windows = try orchestrator().listProjectWindows(projectName: projectName)
+        guard idx >= 0, idx < windows.count else {
+            setStatus("Invalid window index.")
+            return
+        }
+
+        let existing = windows[idx]
+        let name = NSTextField(string: existing.name)
+        let bundleID = NSTextField(string: existing.bundleID)
+        let display = NSTextField(string: String(existing.layout.displayIndex))
+        let tile = NSTextField(string: existing.layout.tile.rawValue)
+        let matchTitle = NSTextField(string: existing.matchTitle ?? "")
+
+        var fields: [(String, NSTextField)] = [
+            ("Name", name),
+            ("Bundle ID", bundleID),
+            ("Display", display),
+            ("Tile", tile),
+            ("Match Title (optional)", matchTitle)
+        ]
+
+        let editorKind = NSTextField(string: existing.editorKind ?? "")
+        let url = NSTextField(string: existing.urls.first ?? "")
+        let command = NSTextField(string: existing.command ?? "")
+        let launchCommand = NSTextField(string: existing.launchCommand ?? "")
+
+        switch existing.kind {
+        case .editor:
+            fields.append(("Editor Kind (windsurf|vscode|cursor)", editorKind))
+        case .browser:
+            fields.append(("URL", url))
+        case .terminal:
+            fields.append(("Shell Command (optional)", command))
+        case .custom:
+            fields.append(("Launch Command", launchCommand))
+        }
+
+        guard runModalForm(
+            title: "Edit \(existing.kind.rawValue.capitalized) Window",
+            message: "Update window at index \(idx) in '\(projectName)'",
+            fields: fields
+        ) else { return }
+
+        let updated = try orchestrator().updateProjectWindow(
+            projectName: projectName,
+            index: idx,
+            name: name.stringValue,
+            kind: existing.kind.rawValue,
+            bundleID: bundleID.stringValue,
+            displayIndex: Int(display.stringValue),
+            tile: tile.stringValue,
+            launchCommand: existing.kind == .custom ? blankToNil(launchCommand.stringValue) : nil,
+            command: existing.kind == .terminal ? blankToNil(command.stringValue) : nil,
+            urls: existing.kind == .browser
+                ? [url.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)].filter { !$0.isEmpty }
+                : [],
+            matchTitle: blankToNil(matchTitle.stringValue),
+            editorKind: existing.kind == .editor ? blankToNil(editorKind.stringValue) : nil
+        )
+        setStatus("Updated \(existing.kind.rawValue) window at index \(idx). total windows=\(updated.windows.count)")
+    }
+
+    private func removeWindow(projectName: String, index idx: Int) throws {
+        let windows = try orchestrator().listProjectWindows(projectName: projectName)
+        guard idx >= 0, idx < windows.count else {
+            setStatus("Invalid window index.")
+            return
+        }
+        let spec = windows[idx]
+        guard confirm(title: "Remove Window", message: "Remove '\(spec.name)' (\(spec.kind.rawValue))?") else { return }
+        let updated = try orchestrator().removeProjectWindow(projectName: projectName, index: idx)
+        setStatus("Removed window at index \(idx). total windows=\(updated.windows.count)")
     }
 }

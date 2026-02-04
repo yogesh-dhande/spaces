@@ -56,11 +56,9 @@ struct CLI {
                 print("No streams found.")
             }
             for report in reports {
-                let editor = report.editorWindowFound ? "ok" : "missing"
-                let chrome = report.chromeWindowFound ? "ok" : "missing"
-                let terminal = "\(report.terminalWindowCount)/\(report.expectedTerminalWindowCount)"
-                print("\(report.projectName)\t\(report.streamName)\teditor:\(editor)\tchrome:\(chrome)\tterminal:\(terminal)")
-                print("  identity editor=\(report.editorMatchTitle ?? "-") chrome=\(report.chromeAnchorURL ?? "-") terminal=\(report.terminalTitlePrefix ?? "-") updated=\(report.identityUpdatedAt ?? "-")")
+                print("\(report.projectName)\t\(report.streamName)\twindows:\(report.foundWindowCount)/\(report.expectedWindowCount)")
+                let missing = report.missingWindows.isEmpty ? "-" : report.missingWindows.joined(separator: ",")
+                print("  missing=\(missing) updated=\(report.identityUpdatedAt ?? "-")")
             }
 
         default:
@@ -70,14 +68,14 @@ struct CLI {
 
     private func runProjectSubcommand(orchestrator: StreamOrchestrator) throws {
         guard args.count >= 3 else {
-            throw NSError(domain: "agentmux.cli", code: 2, userInfo: [NSLocalizedDescriptionKey: "Missing project action. Use: project create|update|delete|list|terminal"])
+            throw NSError(domain: "agentmux.cli", code: 2, userInfo: [NSLocalizedDescriptionKey: "Missing project action. Use: project create|update|delete|list|window"])
         }
 
         switch args[2] {
         case "list":
             let projects = try orchestrator.listProjects()
             for project in projects {
-                print("\(project.name)\t\(project.repoRoot)\teditor=\(project.defaultEditor.rawValue)\tbrowser=\(project.defaultBrowser.rawValue)\tterminal=\(project.defaultTerminal.rawValue)")
+                print("\(project.name)\t\(project.repoRoot)\twindows=\(project.windows.count)\teditor=\(project.defaultEditor.rawValue)\tbrowser=\(project.defaultBrowser.rawValue)\tterminal=\(project.defaultTerminal.rawValue)")
             }
 
         case "create":
@@ -120,63 +118,73 @@ struct CLI {
             try orchestrator.deleteProject(name: name)
             print("Deleted project \(name)")
 
-        case "terminal":
-            try runProjectTerminalSubcommand(orchestrator: orchestrator)
+        case "window":
+            try runProjectWindowSubcommand(orchestrator: orchestrator)
 
         default:
             throw NSError(domain: "agentmux.cli", code: 2, userInfo: [NSLocalizedDescriptionKey: "Unknown project action: \(args[2])"])
         }
     }
 
-    private func runProjectTerminalSubcommand(orchestrator: StreamOrchestrator) throws {
+    private func runProjectWindowSubcommand(orchestrator: StreamOrchestrator) throws {
         guard args.count >= 4 else {
-            throw NSError(domain: "agentmux.cli", code: 2, userInfo: [NSLocalizedDescriptionKey: "Missing project terminal action. Use: project terminal list|add|update|remove"])
+            throw NSError(domain: "agentmux.cli", code: 2, userInfo: [NSLocalizedDescriptionKey: "Missing project window action. Use: project window list|add|update|remove"])
         }
-
         switch args[3] {
         case "list":
             let project = try value(for: "--project")
-            let terminals = try orchestrator.listProjectTerminals(projectName: project)
-            for (index, terminal) in terminals.enumerated() {
-                print("\(index)\tdisplay=\(terminal.layout.displayIndex)\ttile=\(terminal.layout.tile.rawValue)\tcommand=\(terminal.command ?? "")")
+            let windows = try orchestrator.listProjectWindows(projectName: project)
+            for (index, spec) in windows.enumerated() {
+                let urls = spec.urls.joined(separator: ",")
+                print("\(index)\tname=\(spec.name)\tkind=\(spec.kind.rawValue)\tbundle=\(spec.bundleID)\tdisplay=\(spec.layout.displayIndex)\ttile=\(spec.layout.tile.rawValue)\tmatch=\(spec.matchTitle ?? "")\teditor=\(spec.editorKind ?? "")\tcmd=\(spec.command ?? spec.launchCommand ?? "")\turls=\(urls)")
             }
-
         case "add":
             let project = try value(for: "--project")
+            let name = try value(for: "--name")
+            let kind = try value(for: "--kind")
+            let bundleID = try value(for: "--bundle-id")
             let display = try requiredIntValue(for: "--display")
             let tile = try value(for: "--tile")
-            let command = optionalValue(for: "--command")
-            let updated = try orchestrator.addProjectTerminal(
+            let updated = try orchestrator.addProjectWindow(
                 projectName: project,
+                name: name,
+                kind: kind,
+                bundleID: bundleID,
                 displayIndex: display,
                 tile: tile,
-                command: command
+                launchCommand: optionalValue(for: "--launch-command"),
+                command: optionalValue(for: "--command"),
+                urls: csvList(for: "--urls"),
+                matchTitle: optionalValue(for: "--match-title"),
+                editorKind: optionalValue(for: "--editor-kind")
             )
-            print("Added terminal spec. count=\(updated.terminals.count)")
-
+            print("Added window spec. count=\(updated.windows.count)")
         case "update":
             let project = try value(for: "--project")
             let index = try requiredIntValue(for: "--index")
-            let display = intValue(for: "--display")
-            let tile = optionalValue(for: "--tile")
-            let command = optionalValue(for: "--command")
-            let updated = try orchestrator.updateProjectTerminal(
+            let urls = args.contains("--urls") ? csvList(for: "--urls") : nil
+            let updated = try orchestrator.updateProjectWindow(
                 projectName: project,
                 index: index,
-                displayIndex: display,
-                tile: tile,
-                command: command
+                name: optionalValue(for: "--name"),
+                kind: optionalValue(for: "--kind"),
+                bundleID: optionalValue(for: "--bundle-id"),
+                displayIndex: intValue(for: "--display"),
+                tile: optionalValue(for: "--tile"),
+                launchCommand: optionalValue(for: "--launch-command"),
+                command: optionalValue(for: "--command"),
+                urls: urls,
+                matchTitle: optionalValue(for: "--match-title"),
+                editorKind: optionalValue(for: "--editor-kind")
             )
-            print("Updated terminal spec at index \(index). count=\(updated.terminals.count)")
-
+            print("Updated window spec at index \(index). count=\(updated.windows.count)")
         case "remove":
             let project = try value(for: "--project")
             let index = try requiredIntValue(for: "--index")
-            let updated = try orchestrator.removeProjectTerminal(projectName: project, index: index)
-            print("Removed terminal spec at index \(index). count=\(updated.terminals.count)")
-
+            let updated = try orchestrator.removeProjectWindow(projectName: project, index: index)
+            print("Removed window spec at index \(index). count=\(updated.windows.count)")
         default:
-            throw NSError(domain: "agentmux.cli", code: 2, userInfo: [NSLocalizedDescriptionKey: "Unknown project terminal action: \(args[3])"])
+            throw NSError(domain: "agentmux.cli", code: 2, userInfo: [NSLocalizedDescriptionKey: "Unknown project window action: \(args[3])"])
         }
     }
 
@@ -273,10 +281,10 @@ struct CLI {
           agentmux project create --name <name> --repo-root <path> [--editor windsurf|vscode|cursor] [--browser chrome] [--terminal terminal] [--editor-display <n>] [--editor-tile <tile>] [--browser-display <n>] [--browser-tile <tile>] [--browser-tabs <u1,u2,...>]
           agentmux project update --name <name> [--repo-root <path>] [--editor windsurf|vscode|cursor] [--browser chrome] [--terminal terminal] [--editor-display <n>] [--editor-tile <tile>] [--browser-display <n>] [--browser-tile <tile>] [--browser-tabs <u1,u2,...>]
           agentmux project delete --name <name>
-          agentmux project terminal list --project <name>
-          agentmux project terminal add --project <name> --display <n> --tile <tile> [--command <shell>]
-          agentmux project terminal update --project <name> --index <n> [--display <n>] [--tile <tile>] [--command <shell>]
-          agentmux project terminal remove --project <name> --index <n>
+          agentmux project window list --project <name>
+          agentmux project window add --project <name> --name <name> --kind <editor|browser|terminal|custom> --bundle-id <id> --display <n> --tile <tile> [--editor-kind <windsurf|vscode|cursor>] [--urls <u1,u2,...>] [--command <shell>] [--launch-command <shell>] [--match-title <title>]
+          agentmux project window update --project <name> --index <n> [--name <name>] [--kind <...>] [--bundle-id <id>] [--display <n>] [--tile <tile>] [--editor-kind <...>] [--urls <u1,u2,...>] [--command <shell>] [--launch-command <shell>] [--match-title <title>]
+          agentmux project window remove --project <name> --index <n>
 
           agentmux stream list --project <name>
           agentmux stream create --project <name> --stream <name> [--worktree <path>]

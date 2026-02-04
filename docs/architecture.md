@@ -1,7 +1,7 @@
 # Architecture
 
 ## Overview
-`agentmux` orchestrates coding streams (git worktrees) on macOS and manages stream-scoped editor/browser/terminal windows.
+`agentmux` orchestrates coding streams (git worktrees) on macOS and manages stream-scoped windows.
 
 Main modules:
 - `winmove`: Accessibility (AX) window discovery/control and tiling.
@@ -28,9 +28,7 @@ Tables:
 
 ## Stream Window Identity
 Stored per stream:
-- `editorMatchTitle`
-- `chromeAnchorURL`
-- `terminalTitlePrefix`
+- `windows[]` (`name`, `bundleID`, optional `windowID`, optional `windowTitle`, optional `anchorURL`)
 - `updatedAt`
 
 Behavior:
@@ -48,7 +46,7 @@ Behavior:
 
 ## Canonical CLI
 - `agentmux project list|create|update|delete ...`
-- `agentmux project terminal list|add|update|remove ...`
+- `agentmux project window list|add|update|remove ...`
 - `agentmux stream list|create|destroy ...`
 - `agentmux show --project <name> --stream <name>`
 - `agentmux hide --project <name> --stream <name>`
@@ -59,5 +57,3 @@ Behavior:
 ## Current Constraints
 - macOS only.
 - Local-only state and control plane.
-- Chrome stream identity is tab-anchor based.
-- Terminal stream identity uses custom tab-title prefix.

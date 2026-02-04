@@ -20,18 +20,19 @@ LIST_OUT="$($BIN project list --db "$TMP_DB")"
 echo "$LIST_OUT" | grep -q "smoke"
 echo "$LIST_OUT" | grep -q "editor=cursor"
 
-# Terminal config CRUD
-"$BIN" project terminal add --db "$TMP_DB" --project smoke --display 1 --tile bottomRight --command 'echo hi' >/dev/null
-TERM_LIST="$($BIN project terminal list --db "$TMP_DB" --project smoke)"
-echo "$TERM_LIST" | grep -q "tile=bottomRight"
+# Project window CRUD
+"$BIN" project window add --db "$TMP_DB" --project smoke --name t1 --kind terminal --bundle-id com.apple.Terminal --display 1 --tile bottomRight --command 'echo hi' >/dev/null
+WIN_LIST="$($BIN project window list --db "$TMP_DB" --project smoke)"
+echo "$WIN_LIST" | grep -q "name=t1"
+echo "$WIN_LIST" | grep -q "tile=bottomRight"
 
-"$BIN" project terminal update --db "$TMP_DB" --project smoke --index 0 --tile topLeft >/dev/null
-TERM_LIST2="$($BIN project terminal list --db "$TMP_DB" --project smoke)"
-echo "$TERM_LIST2" | grep -q "tile=topLeft"
+"$BIN" project window update --db "$TMP_DB" --project smoke --index 0 --tile topLeft >/dev/null
+WIN_LIST2="$($BIN project window list --db "$TMP_DB" --project smoke)"
+echo "$WIN_LIST2" | grep -q "tile=topLeft"
 
-"$BIN" project terminal remove --db "$TMP_DB" --project smoke --index 0 >/dev/null
-TERM_LIST3="$($BIN project terminal list --db "$TMP_DB" --project smoke || true)"
-[[ -z "$TERM_LIST3" ]]
+"$BIN" project window remove --db "$TMP_DB" --project smoke --index 0 >/dev/null
+WIN_LIST3="$($BIN project window list --db "$TMP_DB" --project smoke || true)"
+[[ -z "$WIN_LIST3" ]]
 
 # Stream CRUD (without show/hide to avoid GUI dependencies)
 TEST_REPO="/tmp/agentmux-smoke-repo"
