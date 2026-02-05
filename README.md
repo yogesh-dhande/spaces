@@ -35,8 +35,6 @@ agentmux stream capture --project <name> --stream <stream>
 agentmux stream destroy --project <name> --stream <stream>
 
 agentmux show --project <name> --stream <stream>
-agentmux hide --project <name> --stream <stream>
-agentmux focus --project <name> --stream <stream>
 agentmux doctor [--project <name>] [--stream <name>]
 ```
 

@@ -32,16 +32,6 @@ struct CLI {
             let stream = try value(for: "--stream")
             try orchestrator.show(projectName: project, streamName: stream)
 
-        case "hide":
-            let project = try value(for: "--project")
-            let stream = try value(for: "--stream")
-            try orchestrator.hide(projectName: project, streamName: stream)
-
-        case "focus":
-            let project = try value(for: "--project")
-            let stream = try value(for: "--stream")
-            try orchestrator.focus(projectName: project, streamName: stream)
-
         case "list-active":
             let active = try orchestrator.listActive()
             for stream in active {
@@ -217,8 +207,7 @@ struct CLI {
           agentmux stream destroy --project <name> --stream <name> [--remove-branch]
 
           agentmux show --project <name> --stream <name>
-          agentmux hide --project <name> --stream <name>
-          agentmux focus --project <name> --stream <name>
+          agentmux show --project <name> --stream <name>
           agentmux list-active
           agentmux doctor [--project <name>] [--stream <name>]
 

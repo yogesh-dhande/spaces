@@ -21,7 +21,6 @@ Window management is done via yabai window IDs captured from a given space.
 3. Window capture per stream (yabai window IDs)
 4. Stream actions:
    - `show`: focus captured windows
-   - `hide`: minimize captured windows
    - `destroy`: close captured windows
 5. Stream diagnostics (`doctor`) for captured/missing windows
 6. AppKit GUI for project/stream operations
@@ -69,10 +68,6 @@ Persisted per stream:
 - Mark stream active
 - If no window can be focused, warn and recommend closing/reopening the target app windows, then re-capture
 
-### `hide`
-- Minimize each captured window
-- Mark stream inactive
-
 ### `destroy`
 - Close each captured window
 - Remove git worktree (and branch optionally)
@@ -110,14 +105,14 @@ Tables:
   - add/edit/delete/refresh
 - Streams pane:
   - add/edit/destroy/refresh
-  - capture/show/hide/focus/doctor
+  - capture/show/doctor
   - display + space shown per stream
 
 ### CLI
 - project CRUD
 - stream create/update/list/destroy
 - stream capture
-- show/hide/focus
+- show
 - list-active
 - doctor
 

@@ -7,7 +7,7 @@
 
 ## Accomplished
 - Implemented shared Swift modules: `appctl`, `streamctl`.
-- Implemented stream lifecycle backend: `create`, `capture`, `show`, `hide`, `destroy`, `focus`.
+- Implemented stream lifecycle backend: `create`, `capture`, `show`, `destroy`.
 - Implemented CLI project/stream CRUD:
   - `project list/create/update/delete`
   - `stream list/create/update/capture/destroy`
@@ -15,7 +15,7 @@
 - Implemented AppKit GUI MVP:
   - project list/add/edit/delete
   - stream list/add/edit/destroy
-  - stream actions: `capture`, `show`, `hide`, `focus`, `doctor`
+  - stream actions: `capture`, `show`, `doctor`
   - status line feedback
 - Added warning on `show` when no captured windows can be focused (suggests closing/reopening windows).
 - Added repeatable smoke script: `Tests/smoke_cli.sh`.

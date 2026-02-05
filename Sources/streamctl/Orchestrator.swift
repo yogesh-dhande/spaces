@@ -109,22 +109,6 @@ public final class StreamOrchestrator {
         try store.markActive(stream: stream)
     }
 
-    public func hide(projectName: String, streamName: String) throws {
-        let (_, stream) = try resolve(projectName: projectName, streamName: streamName)
-        if let identity = try store.windowIdentity(streamID: stream.id) {
-            print("[stream:\(stream.name)] hide windows=\(identity.windows.count)")
-            for win in identity.windows {
-                print("[stream:\(stream.name)] hide minimize id=\(win.id) app=\(win.app) space=\(win.space) display=\(win.display)")
-                _ = try? yabai.minimizeWindow(id: win.id)
-            }
-        }
-        try store.markInactive(stream: stream)
-    }
-
-    public func focus(projectName: String, streamName: String) throws {
-        try show(projectName: projectName, streamName: streamName)
-    }
-
     public func capture(projectName: String, streamName: String) throws {
         let (_, stream) = try resolve(projectName: projectName, streamName: streamName)
         let windows = try yabai.listWindows(spaceIndex: stream.spaceIndex)

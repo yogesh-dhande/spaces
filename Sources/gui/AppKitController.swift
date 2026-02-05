@@ -268,8 +268,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSTableVie
 
         let row2 = NSStackView(views: [
             makeButton(title: "Show", action: #selector(showStreamClicked)),
-            makeButton(title: "Hide", action: #selector(hideStreamClicked)),
-            makeButton(title: "Focus", action: #selector(focusStreamClicked)),
             makeButton(title: "Doctor", action: #selector(doctorStreamClicked))
         ])
         row2.orientation = .horizontal
@@ -486,8 +484,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSTableVie
     }
 
     @objc private func showStreamClicked() { runStreamAction("show") { try $0.show(projectName: $1, streamName: $2) } }
-    @objc private func hideStreamClicked() { runStreamAction("hide") { try $0.hide(projectName: $1, streamName: $2) } }
-    @objc private func focusStreamClicked() { runStreamAction("focus") { try $0.focus(projectName: $1, streamName: $2) } }
 
     @objc private func doctorStreamClicked() {
         guard let project = selectedProjectName, let stream = selectedStreamName else {

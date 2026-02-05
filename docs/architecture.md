@@ -13,9 +13,7 @@ Main modules:
 - `create`: create git worktree + persist stream.
 - `capture`: query yabai windows for the stream's space + persist identity.
 - `show`: focus captured windows + mark active; warn when none are focusable.
-- `hide`: minimize captured windows + mark inactive.
 - `destroy`: close captured windows + remove worktree + remove records.
-- `focus`: same as `show`.
 
 ## Persistence
 SQLite default path: `~/.agentmux/agentmux.db`.
@@ -31,15 +29,12 @@ Tables:
   - `yabai -m query --windows --space <space>`
 - Window actions:
   - `yabai -m window --focus <id>`
-  - `yabai -m window --minimize <id>`
   - `yabai -m window --close <id>`
 
 ## Canonical CLI
 - `agentmux project list|create|update|delete ...`
 - `agentmux stream list|create|update|capture|destroy ...`
 - `agentmux show --project <name> --stream <name>`
-- `agentmux hide --project <name> --stream <name>`
-- `agentmux focus --project <name> --stream <name>`
 - `agentmux list-active`
 - `agentmux doctor [--project <name>] [--stream <name>]`
 
