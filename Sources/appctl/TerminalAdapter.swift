@@ -3,7 +3,8 @@ import Foundation
 public final class TerminalAdapter {
     public init() {}
 
-    public func openWindow(worktreePath: String, command: String?, title: String) throws {
+    @discardableResult
+    public func openWindow(worktreePath: String, command: String?, title: String) throws -> Int? {
         let escapedWorktree = shellEscaped(worktreePath)
         let line: String
         if let command, !command.isEmpty {
@@ -20,13 +21,19 @@ public final class TerminalAdapter {
           activate
           do script "\(escapedLine)"
           delay 0.1
+          set targetWindow to front window
           try
-            set custom title of selected tab of front window to "\(escapedTitle)"
+            set custom title of selected tab of targetWindow to "\(escapedTitle)"
           end try
+          try
+            return (id of targetWindow as string)
+          end try
+          return ""
         end tell
         """
 
-        _ = try Shell.runAndCapture(["osascript", "-e", script])
+        let output = try Shell.runAndCapture(["osascript", "-e", script]).trimmingCharacters(in: .whitespacesAndNewlines)
+        return Int(output)
     }
 
     @discardableResult
@@ -133,6 +140,77 @@ public final class TerminalAdapter {
         """
         let output = try Shell.runAndCapture(["osascript", "-e", script]).trimmingCharacters(in: .whitespacesAndNewlines)
         return Int(output) ?? 0
+    }
+
+    @discardableResult
+    public func focusWindow(id: Int) throws -> Bool {
+        let script = """
+        set targetID to \(id)
+        tell application "Terminal"
+          activate
+          try
+            set targetWindow to (first window whose id is targetID)
+            set index of targetWindow to 1
+            return "1"
+          on error
+            return "0"
+          end try
+        end tell
+        """
+        let output = try Shell.runAndCapture(["osascript", "-e", script]).trimmingCharacters(in: .whitespacesAndNewlines)
+        return output == "1"
+    }
+
+    @discardableResult
+    public func hideWindow(id: Int) throws -> Bool {
+        let script = """
+        set targetID to \(id)
+        tell application "Terminal"
+          try
+            set targetWindow to (first window whose id is targetID)
+            set miniaturized of targetWindow to true
+            return "1"
+          on error
+            return "0"
+          end try
+        end tell
+        """
+        let output = try Shell.runAndCapture(["osascript", "-e", script]).trimmingCharacters(in: .whitespacesAndNewlines)
+        return output == "1"
+    }
+
+    @discardableResult
+    public func closeWindow(id: Int) throws -> Bool {
+        let script = """
+        set targetID to \(id)
+        tell application "Terminal"
+          try
+            close (first window whose id is targetID)
+            return "1"
+          on error
+            return "0"
+          end try
+        end tell
+        """
+        let output = try Shell.runAndCapture(["osascript", "-e", script]).trimmingCharacters(in: .whitespacesAndNewlines)
+        return output == "1"
+    }
+
+    @discardableResult
+    public func hasWindow(id: Int) throws -> Bool {
+        let script = """
+        set targetID to \(id)
+        tell application "Terminal"
+          try
+            set _ to (first window whose id is targetID)
+            return "1"
+          on error
+            return "0"
+          end try
+        end tell
+        """
+        let output = try Shell.runAndCapture(["osascript", "-e", script]).trimmingCharacters(in: .whitespacesAndNewlines)
+        return output == "1"
     }
 
     private func shellEscaped(_ value: String) -> String {

@@ -21,11 +21,13 @@ public struct WindowLayout: Codable, Sendable {
 
 public struct WindowTarget: Sendable {
     public let bundleID: String
+    public let windowNumber: Int?
     public let matchTitle: String?
     public let preferFocusedWindow: Bool
 
-    public init(bundleID: String, matchTitle: String? = nil, preferFocusedWindow: Bool = true) {
+    public init(bundleID: String, windowNumber: Int? = nil, matchTitle: String? = nil, preferFocusedWindow: Bool = true) {
         self.bundleID = bundleID
+        self.windowNumber = windowNumber
         self.matchTitle = matchTitle
         self.preferFocusedWindow = preferFocusedWindow
     }
@@ -56,10 +58,12 @@ public struct MoveOptions: Sendable {
 public struct WindowInfo: Sendable {
     public let title: String
     public let isFullscreen: Bool
+    public let windowNumber: Int?
 
-    public init(title: String, isFullscreen: Bool) {
+    public init(title: String, isFullscreen: Bool, windowNumber: Int?) {
         self.title = title
         self.isFullscreen = isFullscreen
+        self.windowNumber = windowNumber
     }
 }
 

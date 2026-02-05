@@ -3,9 +3,10 @@ import Foundation
 public final class ChromeAdapter {
     public init() {}
 
-    public func ensureTabs(urls: [String]) throws {
+    @discardableResult
+    public func ensureTabs(urls: [String]) throws -> Int? {
         guard !urls.isEmpty else {
-            return
+            return nil
         }
 
         let quoted = urls.map { "\"\($0.replacingOccurrences(of: "\\\"", with: "\\\\\""))\"" }.joined(separator: ",")
@@ -29,9 +30,13 @@ public final class ChromeAdapter {
 
           if targetWindow is missing value then
             set targetWindow to make new window
-            repeat with u in requestedUrls
-              tell targetWindow to make new tab at end of tabs with properties {URL:u}
-            end repeat
+            set URL of active tab of targetWindow to anchorUrl
+            if (count of requestedUrls) > 1 then
+              repeat with i from 2 to (count of requestedUrls)
+                set u to item i of requestedUrls
+                tell targetWindow to make new tab at end of tabs with properties {URL:u}
+              end repeat
+            end if
           else
             set existingUrls to {}
             repeat with t in tabs of targetWindow
@@ -43,11 +48,12 @@ public final class ChromeAdapter {
               end if
             end repeat
           end if
+          return (id of targetWindow as string)
         end tell
         """
 
-        _ = try Shell.runAndCapture(["osascript", "-e", script])
-        return
+        let output = try Shell.runAndCapture(["osascript", "-e", script]).trimmingCharacters(in: .whitespacesAndNewlines)
+        return Int(output)
     }
 
     @discardableResult
@@ -152,6 +158,81 @@ public final class ChromeAdapter {
             end repeat
           end repeat
           return "0"
+        end tell
+        """
+        let output = try Shell.runAndCapture(["osascript", "-e", script]).trimmingCharacters(in: .whitespacesAndNewlines)
+        return output == "1"
+    }
+
+    @discardableResult
+    public func focusWindow(windowID: Int) throws -> Bool {
+        let script = """
+        set targetID to \(windowID)
+        tell application "Google Chrome"
+          activate
+          try
+            set targetWindow to (first window whose id is targetID)
+            set index of targetWindow to 1
+            return "1"
+          on error
+            return "0"
+          end try
+        end tell
+        """
+        let output = try Shell.runAndCapture(["osascript", "-e", script]).trimmingCharacters(in: .whitespacesAndNewlines)
+        return output == "1"
+    }
+
+    @discardableResult
+    public func hideWindow(windowID: Int) throws -> Bool {
+        let script = """
+        set targetID to \(windowID)
+        tell application "Google Chrome"
+          try
+            set targetWindow to (first window whose id is targetID)
+            try
+              set minimized of targetWindow to true
+            on error
+              set miniaturized of targetWindow to true
+            end try
+            return "1"
+          on error
+            return "0"
+          end try
+        end tell
+        """
+        let output = try Shell.runAndCapture(["osascript", "-e", script]).trimmingCharacters(in: .whitespacesAndNewlines)
+        return output == "1"
+    }
+
+    @discardableResult
+    public func closeWindow(windowID: Int) throws -> Bool {
+        let script = """
+        set targetID to \(windowID)
+        tell application "Google Chrome"
+          try
+            close (first window whose id is targetID)
+            return "1"
+          on error
+            return "0"
+          end try
+        end tell
+        """
+        let output = try Shell.runAndCapture(["osascript", "-e", script]).trimmingCharacters(in: .whitespacesAndNewlines)
+        return output == "1"
+    }
+
+    @discardableResult
+    public func hasWindow(windowID: Int) throws -> Bool {
+        let script = """
+        set targetID to \(windowID)
+        tell application "Google Chrome"
+          try
+            set _ to (first window whose id is targetID)
+            return "1"
+          on error
+            return "0"
+          end try
         end tell
         """
         let output = try Shell.runAndCapture(["osascript", "-e", script]).trimmingCharacters(in: .whitespacesAndNewlines)

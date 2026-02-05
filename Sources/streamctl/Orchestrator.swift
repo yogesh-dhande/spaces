@@ -67,7 +67,20 @@ public final class StreamOrchestrator {
         let identity = try store.windowIdentity(streamID: stream.id)
         try destroyGenericWindows(project: project, stream: stream, identity: identity)
 
-        try runGit(["-C", project.repoRoot, "worktree", "remove", "--force", stream.worktreePath])
+        do {
+            try runGit(["-C", project.repoRoot, "worktree", "remove", "--force", stream.worktreePath])
+        } catch let StreamctlError.gitCommandFailed(message) {
+            // Treat already-gone worktrees as non-fatal so destroy still clears DB records.
+            let lower = message.lowercased()
+            let ignorable =
+                lower.contains("does not exist") ||
+                lower.contains("is not a working tree") ||
+                lower.contains("not a worktree") ||
+                lower.contains("not found")
+            if !ignorable {
+                throw StreamctlError.gitCommandFailed(message: message)
+            }
+        }
 
         if removeBranch {
             _ = try? runGit(["-C", project.repoRoot, "branch", "-D", stream.name])
@@ -222,6 +235,11 @@ public final class StreamOrchestrator {
         guard let parsedKind = ProjectWindowKind(rawValue: kind.lowercased()) else {
             throw StreamctlError.invalidArgument(message: "kind must be one of: editor,browser,terminal,custom")
         }
+        if parsedKind == .browser {
+            if urls.count != 1 || urls[0].trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                throw StreamctlError.invalidArgument(message: "browser windows require exactly one non-empty URL")
+            }
+        }
         if current.windows.contains(where: { $0.name == name }) {
             throw StreamctlError.invalidArgument(message: "window name already exists")
         }
@@ -297,6 +315,12 @@ public final class StreamOrchestrator {
             matchTitle: matchTitle ?? existing.matchTitle,
             editorKind: editorKind ?? existing.editorKind
         )
+        let validated = windows[index]
+        if validated.kind == .browser {
+            if validated.urls.count != 1 || validated.urls[0].trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                throw StreamctlError.invalidArgument(message: "browser windows require exactly one non-empty URL")
+            }
+        }
 
         let updated = Project(
             id: current.id,
@@ -362,20 +386,18 @@ public final class StreamOrchestrator {
                 let identity = try store.windowIdentity(streamID: stream.id)
                 var foundWindowCount = 0
                 var missingWindows: [String] = []
-                let terminalPrefix = terminalTitlePrefix(project: project, stream: stream)
-
                 for spec in project.windows {
                     let known = identity?.windows.first(where: { $0.name == spec.name })
                     let exists: Bool
-                    if spec.kind == .terminal {
-                        let titlePrefix = known?.windowTitle ?? "\(terminalPrefix):\(spec.name)"
-                        exists = ((try? terminalAdapter.countWindows(prefix: titlePrefix)) ?? 0) > 0
+                    if spec.kind == .terminal, let id = known?.windowID {
+                        exists = ((try? terminalAdapter.hasWindow(id: id)) ?? false)
+                    } else if spec.kind == .browser, let id = known?.windowID {
+                        exists = ((try? chromeAdapter.hasWindow(windowID: id)) ?? false)
                     } else {
-                        let titleFallback = known?.windowTitle ?? spec.matchTitle
                         exists = customAppAdapter.windowExists(
                             bundleID: spec.bundleID,
                             windowID: known?.windowID,
-                            titleFallback: titleFallback
+                            titleFallback: nil
                         )
                     }
                     if exists {
@@ -412,12 +434,11 @@ public final class StreamOrchestrator {
         let (project, stream) = try resolve(projectName: projectName, streamName: streamName)
         let identity = try store.windowIdentity(streamID: stream.id)
         let terminalWindows = project.windows.filter { $0.kind == .terminal }
-        let prefix = terminalTitlePrefix(project: project, stream: stream)
-
         return terminalWindows.map { spec in
             let known = identity?.windows.first(where: { $0.name == spec.name })
-            let fallbackTitle = known?.windowTitle ?? "\(prefix):\(spec.name)"
-            let isActive = ((try? terminalAdapter.countWindows(prefix: fallbackTitle)) ?? 0) > 0
+            let isActive = known?.windowID.flatMap { id in
+                (try? terminalAdapter.hasWindow(id: id))
+            } ?? false
             let statusFile = terminalStatusFilePath(stream: stream, terminalName: spec.name)
             let payload = readTerminalStatusFile(statusFile)
 
@@ -432,13 +453,9 @@ public final class StreamOrchestrator {
     }
 
     private func showGenericWindows(project: Project, stream: Stream, identity: StreamWindowIdentity?) throws {
-        let found = project.windows.contains { spec in
+        let found = project.windows.allSatisfy { spec in
             let known = identity?.windows.first(where: { $0.name == spec.name })
-            let titleFallback = resolvedTitleFallback(project: project, spec: spec, known: known, stream: stream)
-            if spec.kind == .terminal {
-                return ((try? terminalAdapter.countWindows(prefix: titleFallback ?? "")) ?? 0) > 0
-            }
-            return customAppAdapter.windowExists(bundleID: spec.bundleID, windowID: known?.windowID, titleFallback: titleFallback)
+            return isWindowAlive(project: project, stream: stream, spec: spec, known: known)
         }
         if found {
             try focusGenericWindows(project: project, stream: stream, identity: identity)
@@ -451,24 +468,60 @@ public final class StreamOrchestrator {
         let logger = StreamLogger(stream: stream.name)
         for spec in project.windows {
             let known = identity?.windows.first(where: { $0.name == spec.name })
-            let match = resolvedTitleFallback(project: project, spec: spec, known: known, stream: stream)
-            _ = try? windowController.setMinimized(
-                target: WindowTarget(bundleID: spec.bundleID, matchTitle: match, preferFocusedWindow: match == nil),
-                minimized: true
-            )
+            switch spec.kind {
+            case .browser:
+                if let windowID = known?.windowID {
+                    _ = try? chromeAdapter.hideWindow(windowID: windowID)
+                } else {
+                    logger.warn("skip hide for browser '\(spec.name)': missing deterministic window id")
+                }
+            default:
+                if spec.kind == .terminal, let windowID = known?.windowID {
+                    _ = try? terminalAdapter.hideWindow(id: windowID)
+                } else if let windowID = known?.windowID {
+                    _ = try? windowController.setMinimized(
+                        target: WindowTarget(bundleID: spec.bundleID, windowNumber: windowID, preferFocusedWindow: false),
+                        minimized: true
+                    )
+                } else if let title = known?.windowTitle {
+                    _ = try? windowController.setMinimized(
+                        target: WindowTarget(bundleID: spec.bundleID, matchTitle: title, preferFocusedWindow: false),
+                        minimized: true
+                    )
+                } else if spec.kind != .terminal {
+                    logger.warn("skip hide for window '\(spec.name)': missing deterministic window id")
+                }
+            }
         }
         try store.markInactive(stream: stream)
         logger.info("stream hidden")
     }
 
     private func destroyGenericWindows(project: Project, stream: Stream, identity: StreamWindowIdentity?) throws {
-        try hideGenericWindows(project: project, stream: stream, identity: identity)
-        for spec in project.windows where spec.kind == .browser {
+        let logger = StreamLogger(stream: stream.name)
+
+        for spec in project.windows {
             let known = identity?.windows.first(where: { $0.name == spec.name })
-            if let anchor = known?.anchorURL ?? spec.urls.first {
-                _ = try? chromeAdapter.closeWindow(anchorURL: anchor)
+
+            switch spec.kind {
+            case .terminal:
+                if let windowID = known?.windowID {
+                    _ = try? terminalAdapter.closeWindow(id: windowID)
+                }
+            case .browser:
+                if let windowID = known?.windowID {
+                    _ = try? chromeAdapter.closeWindow(windowID: windowID)
+                }
+            default:
+                if let windowID = known?.windowID {
+                    _ = try? windowController.closeWindow(
+                        target: WindowTarget(bundleID: spec.bundleID, windowNumber: windowID, preferFocusedWindow: false)
+                    )
+                }
             }
         }
+        try store.markInactive(stream: stream)
+        logger.info("stream windows closed")
     }
 
     private func upGenericWindows(project: Project, stream: Stream, existingIdentity: StreamWindowIdentity?) throws {
@@ -476,10 +529,15 @@ public final class StreamOrchestrator {
         logger.info("launching stream")
         var identities: [WindowIdentity] = existingIdentity?.windows ?? []
         let terminalPrefix = terminalTitlePrefix(project: project, stream: stream)
-
-        for spec in project.windows {
+                for spec in project.windows {
             do {
                 try appLauncher.ensureRunning(bundleID: spec.bundleID)
+                let known = identities.first(where: { $0.name == spec.name })
+                if isWindowAlive(project: project, stream: stream, spec: spec, known: known) {
+                    // Deterministic existing window: focus/reposition without recreating.
+                    _ = try focusOneWindow(project: project, stream: stream, spec: spec, known: known)
+                    continue
+                }
                 switch spec.kind {
                 case .editor:
                     let kind = try parseEditor(spec.editorKind, fallback: .windsurf)
@@ -489,16 +547,18 @@ public final class StreamOrchestrator {
                         target: WindowTarget(bundleID: spec.bundleID, matchTitle: spec.matchTitle ?? fallback, preferFocusedWindow: true),
                         layout: spec.layout
                     )
-                    upsertIdentity(&identities, WindowIdentity(name: spec.name, bundleID: spec.bundleID, windowID: nil, windowTitle: moved.title, anchorURL: nil))
+                    let resolvedWindowID = moved.windowNumber ?? (try? windowController.findWindowNumber(bundleID: spec.bundleID, matchTitle: moved.title))
+                    upsertIdentity(&identities, WindowIdentity(name: spec.name, bundleID: spec.bundleID, windowID: resolvedWindowID, windowTitle: moved.title, anchorURL: nil))
                 case .browser:
-                    try chromeAdapter.ensureTabs(urls: spec.urls)
-                    let anchor = spec.urls.first
-                    if let anchor { _ = try? chromeAdapter.focusWindow(anchorURL: anchor) }
+                    let windowID = try chromeAdapter.ensureTabs(urls: spec.urls)
+                    if let windowID {
+                        _ = try? chromeAdapter.focusWindow(windowID: windowID)
+                    }
                     _ = try windowController.moveWindow(
-                        target: WindowTarget(bundleID: spec.bundleID, matchTitle: spec.matchTitle, preferFocusedWindow: true),
+                        target: WindowTarget(bundleID: spec.bundleID, matchTitle: nil, preferFocusedWindow: true),
                         layout: spec.layout
                     )
-                    upsertIdentity(&identities, WindowIdentity(name: spec.name, bundleID: spec.bundleID, windowID: nil, windowTitle: spec.matchTitle, anchorURL: anchor))
+                    upsertIdentity(&identities, WindowIdentity(name: spec.name, bundleID: spec.bundleID, windowID: windowID, windowTitle: nil, anchorURL: spec.urls.first))
                 case .terminal:
                     let title = "\(terminalPrefix):\(spec.name)"
                     let wrappedCommand = try wrappedTerminalCommand(
@@ -506,21 +566,23 @@ public final class StreamOrchestrator {
                         terminalName: spec.name,
                         command: spec.command
                     )
-                    try terminalAdapter.openWindow(worktreePath: stream.worktreePath, command: wrappedCommand, title: title)
+                    let windowID = try terminalAdapter.openWindow(worktreePath: stream.worktreePath, command: wrappedCommand, title: title)
                     _ = try windowController.moveWindow(
-                        target: WindowTarget(bundleID: spec.bundleID, matchTitle: title, preferFocusedWindow: false),
+                        target: WindowTarget(bundleID: spec.bundleID, matchTitle: nil, preferFocusedWindow: true),
                         layout: spec.layout
                     )
-                    upsertIdentity(&identities, WindowIdentity(name: spec.name, bundleID: spec.bundleID, windowID: nil, windowTitle: title, anchorURL: nil))
+                    upsertIdentity(&identities, WindowIdentity(name: spec.name, bundleID: spec.bundleID, windowID: windowID, windowTitle: title, anchorURL: nil))
                 case .custom:
                     if let command = spec.launchCommand,
                        let detected = customAppAdapter.launchAndDetectWindow(bundleID: spec.bundleID, command: command, matchTitle: spec.matchTitle) {
                         let title = detected.title ?? spec.matchTitle
-                        _ = try? windowController.moveWindow(
+                        let moved = try? windowController.moveWindow(
                             target: WindowTarget(bundleID: spec.bundleID, matchTitle: title, preferFocusedWindow: false),
                             layout: spec.layout
                         )
-                        upsertIdentity(&identities, WindowIdentity(name: spec.name, bundleID: spec.bundleID, windowID: detected.windowID, windowTitle: title, anchorURL: nil))
+                        let resolvedWindowID = moved?.windowNumber
+                            ?? (try? windowController.findWindowNumber(bundleID: spec.bundleID, matchTitle: title))
+                        upsertIdentity(&identities, WindowIdentity(name: spec.name, bundleID: spec.bundleID, windowID: resolvedWindowID ?? detected.windowID, windowTitle: title, anchorURL: nil))
                     } else {
                         logger.warn("custom window launch not detected: \(spec.name)")
                     }
@@ -529,6 +591,8 @@ public final class StreamOrchestrator {
                 logger.warn("window setup failed (\(spec.name)): \(error.localizedDescription)")
             }
         }
+
+        try raiseStreamWindowsToFront(project: project, stream: stream, identities: identities)
 
         let identity = StreamWindowIdentity(
             streamID: stream.id,
@@ -542,38 +606,26 @@ public final class StreamOrchestrator {
 
     private func focusGenericWindows(project: Project, stream: Stream, identity: StreamWindowIdentity?) throws {
         let logger = StreamLogger(stream: stream.name)
-        var identities: [WindowIdentity] = identity?.windows ?? []
+        let identities: [WindowIdentity] = identity?.windows ?? []
 
         for spec in project.windows {
             do {
                 try appLauncher.ensureRunning(bundleID: spec.bundleID)
                 let known = identities.first(where: { $0.name == spec.name })
-                let title = resolvedTitleFallback(project: project, spec: spec, known: known, stream: stream)
-
-                switch spec.kind {
-                case .browser:
-                    let anchor = known?.anchorURL ?? spec.urls.first
-                    if let anchor { _ = try? chromeAdapter.focusWindow(anchorURL: anchor) }
-                default:
-                    _ = try? appLauncher.activate(bundleID: spec.bundleID)
+                if isWindowAlive(project: project, stream: stream, spec: spec, known: known) {
+                    _ = try focusOneWindow(project: project, stream: stream, spec: spec, known: known)
+                } else {
+                    // Deterministic id not found for this window: recreate on show/focus.
+                    try upGenericWindows(project: project, stream: stream, existingIdentity: StreamWindowIdentity(streamID: stream.id, windows: identities, updatedAt: nowISO8601()))
+                    return
                 }
 
-                _ = try? windowController.setMinimized(
-                    target: WindowTarget(bundleID: spec.bundleID, matchTitle: title, preferFocusedWindow: title == nil),
-                    minimized: false
-                )
-                _ = try? windowController.moveWindow(
-                    target: WindowTarget(bundleID: spec.bundleID, matchTitle: title, preferFocusedWindow: title == nil),
-                    layout: spec.layout
-                )
-
-                if known == nil, let detected = customAppAdapter.detectWindow(bundleID: spec.bundleID, matchTitle: title) {
-                    upsertIdentity(&identities, WindowIdentity(name: spec.name, bundleID: spec.bundleID, windowID: detected.windowID, windowTitle: detected.title ?? title, anchorURL: spec.urls.first))
-                }
             } catch {
                 logger.warn("window focus failed (\(spec.name)): \(error.localizedDescription)")
             }
         }
+
+        try raiseStreamWindowsToFront(project: project, stream: stream, identities: identities)
 
         let refreshed = StreamWindowIdentity(
             streamID: stream.id,
@@ -588,6 +640,77 @@ public final class StreamOrchestrator {
     private func upsertIdentity(_ identities: inout [WindowIdentity], _ entry: WindowIdentity) {
         identities.removeAll { $0.name == entry.name }
         identities.append(entry)
+    }
+
+    private func isWindowAlive(project: Project, stream: Stream, spec: ProjectWindowSpec, known: WindowIdentity?) -> Bool {
+        guard let known else { return false }
+        switch spec.kind {
+        case .browser:
+            guard let id = known.windowID else { return false }
+            return ((try? chromeAdapter.hasWindow(windowID: id)) ?? false)
+        case .terminal:
+            guard let id = known.windowID else { return false }
+            return ((try? terminalAdapter.hasWindow(id: id)) ?? false)
+        case .custom:
+            guard let id = known.windowID else { return false }
+            return customAppAdapter.windowExists(bundleID: spec.bundleID, windowID: id, titleFallback: nil)
+        case .editor:
+            guard let id = known.windowID else { return false }
+            return customAppAdapter.windowExists(bundleID: spec.bundleID, windowID: id, titleFallback: nil)
+        }
+    }
+
+    @discardableResult
+    private func focusOneWindow(project: Project, stream: Stream, spec: ProjectWindowSpec, known: WindowIdentity?) throws -> Bool {
+        switch spec.kind {
+        case .browser:
+            guard let id = known?.windowID else { return false }
+            guard (try chromeAdapter.focusWindow(windowID: id)) else { return false }
+            _ = try? windowController.moveWindow(
+                target: WindowTarget(bundleID: spec.bundleID, matchTitle: nil, preferFocusedWindow: true),
+                layout: spec.layout
+            )
+            return true
+        case .terminal:
+            guard let id = known?.windowID else { return false }
+            guard (try terminalAdapter.focusWindow(id: id)) else { return false }
+            _ = try? windowController.moveWindow(
+                target: WindowTarget(bundleID: spec.bundleID, matchTitle: nil, preferFocusedWindow: true),
+                layout: spec.layout
+            )
+            return true
+        case .custom, .editor:
+            guard let windowID = known?.windowID else { return false }
+            _ = try? appLauncher.activate(bundleID: spec.bundleID)
+            _ = try? windowController.setMinimized(
+                target: WindowTarget(bundleID: spec.bundleID, windowNumber: windowID, preferFocusedWindow: false),
+                minimized: false
+            )
+            _ = try? windowController.moveWindow(
+                target: WindowTarget(bundleID: spec.bundleID, windowNumber: windowID, preferFocusedWindow: false),
+                layout: spec.layout
+            )
+            return true
+        }
+    }
+
+    private func raiseStreamWindowsToFront(project: Project, stream: Stream, identities: [WindowIdentity]) throws {
+        // Bring stream-specific browser windows to front first.
+        for spec in project.windows where spec.kind == .browser {
+            let known = identities.first(where: { $0.name == spec.name })
+            if let id = known?.windowID {
+                _ = try? chromeAdapter.focusWindow(windowID: id)
+            }
+        }
+
+        // Then bring stream-specific terminal windows to front so unrelated
+        // browser windows cannot visually overlap stream terminals.
+        for spec in project.windows where spec.kind == .terminal {
+            let known = identities.first(where: { $0.name == spec.name })
+            if let id = known?.windowID {
+                _ = try? terminalAdapter.focusWindow(id: id)
+            }
+        }
     }
 
     private func resolve(projectName: String, streamName: String) throws -> (Project, Stream) {

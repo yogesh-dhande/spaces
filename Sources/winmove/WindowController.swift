@@ -99,11 +99,63 @@ public final class WindowController {
         return windowInfo(foundWindow)
     }
 
+    public func findWindowNumber(bundleID: String, matchTitle: String?) throws -> Int? {
+        try ensureAccessibilityPermission()
+        guard let app = runningApp(bundleID: bundleID) else {
+            throw WinmoveError.appNotRunning(bundleID: bundleID)
+        }
+        guard let foundWindow = chooseWindow(
+            app: app,
+            target: WindowTarget(bundleID: bundleID, matchTitle: matchTitle, preferFocusedWindow: false)
+        ) else {
+            return nil
+        }
+        return windowNumber(foundWindow)
+    }
+
+    @discardableResult
+    public func closeWindow(
+        target: WindowTarget,
+        options: MoveOptions = .init()
+    ) throws -> WindowInfo {
+        try ensureAccessibilityPermission()
+
+        guard let app = withRetry(retries: options.retries, delayMs: options.delayMs, {
+            self.runningApp(bundleID: target.bundleID)
+        }) else {
+            throw WinmoveError.appNotRunning(bundleID: target.bundleID)
+        }
+
+        guard let foundWindow = withRetry(retries: options.retries, delayMs: options.delayMs, {
+            self.chooseWindow(app: app, target: target)
+        }) else {
+            throw WinmoveError.windowNotFound(bundleID: target.bundleID)
+        }
+
+        var closeButton: AnyObject?
+        let buttonError = AXUIElementCopyAttributeValue(foundWindow, kAXCloseButtonAttribute as CFString, &closeButton)
+        guard buttonError == .success, let button = closeButton else {
+            throw WinmoveError.moveFailed(bundleID: target.bundleID)
+        }
+
+        let pressError = AXUIElementPerformAction((button as! AXUIElement), kAXPressAction as CFString)
+        guard pressError == .success else {
+            throw WinmoveError.moveFailed(bundleID: target.bundleID)
+        }
+        return windowInfo(foundWindow)
+    }
+
     private func runningApp(bundleID: String) -> NSRunningApplication? {
         NSWorkspace.shared.runningApplications.first { $0.bundleIdentifier == bundleID }
     }
 
     private func chooseWindow(app: NSRunningApplication, target: WindowTarget) -> AXUIElement? {
+        let windows = getWindows(for: app)
+
+        if let targetNumber = target.windowNumber {
+            return windows.first { self.windowNumber($0) == targetNumber }
+        }
+
         if target.preferFocusedWindow, let focused = focusedWindow(for: app) {
             if let match = target.matchTitle?.lowercased(), !windowTitle(focused).lowercased().contains(match) {
                 // Continue to fallback window list.
@@ -111,17 +163,29 @@ public final class WindowController {
                 return focused
             }
         }
-
-        let windows = getWindows(for: app)
         if windows.isEmpty {
             return nil
         }
 
         if let match = target.matchTitle?.lowercased() {
-            return windows.first { windowTitle($0).lowercased().contains(match) } ?? windows.first
+            // When a title matcher is provided, do not fall back to an arbitrary
+            // window; returning nil prevents mutating the wrong stream window.
+            return windows.first { windowTitle($0).lowercased().contains(match) }
         }
 
         return windows.first
+    }
+
+    private func windowNumber(_ window: AXUIElement) -> Int? {
+        var value: AnyObject?
+        let error = AXUIElementCopyAttributeValue(window, "AXWindowNumber" as CFString, &value)
+        guard error == .success else {
+            return nil
+        }
+        if let number = value as? NSNumber {
+            return number.intValue
+        }
+        return nil
     }
 
     private func displayFrame(index: Int) throws -> CGRect {
@@ -144,18 +208,18 @@ public final class WindowController {
         case .rightHalf:
             return CGRect(x: x + w / 2, y: y, width: w / 2, height: h)
         case .topLeft:
-            return CGRect(x: x, y: y + h / 2, width: w / 2, height: h / 2)
-        case .topRight:
-            return CGRect(x: x + w / 2, y: y + h / 2, width: w / 2, height: h / 2)
-        case .bottomLeft:
             return CGRect(x: x, y: y, width: w / 2, height: h / 2)
-        case .bottomRight:
+        case .topRight:
             return CGRect(x: x + w / 2, y: y, width: w / 2, height: h / 2)
+        case .bottomLeft:
+            return CGRect(x: x, y: y + h / 2, width: w / 2, height: h / 2)
+        case .bottomRight:
+            return CGRect(x: x + w / 2, y: y + h / 2, width: w / 2, height: h / 2)
         }
     }
 
     private func windowInfo(_ window: AXUIElement) -> WindowInfo {
-        WindowInfo(title: windowTitle(window), isFullscreen: isFullscreen(window))
+        WindowInfo(title: windowTitle(window), isFullscreen: isFullscreen(window), windowNumber: windowNumber(window))
     }
 
     private func normalizeWindow(app: NSRunningApplication, window: AXUIElement, options: MoveOptions) -> AXUIElement {

@@ -42,6 +42,7 @@
 - GUI polish:
   - better validation messages and inline guidance
   - richer stream row details and sorting/filtering
+  - show selectors where appropriate instead of free string input (e.g. window location "leftHalf", "rightHalf", "bottomHalf", "fullScreen")
 - Hotkeys/shortcuts for quick stream switching (still open from spec intent)
 - Additional hardening:
   - deeper automated tests (module-level tests beyond smoke shell script)
