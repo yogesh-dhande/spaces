@@ -11,7 +11,7 @@
 - Do not add backward compatibility layers unless explicitly requested.
 
 ## Data & Paths
-- Default DB path: `~/.agentmux/agentmux.db` (`--db` override allowed).
+- DB path: `~/.agentmux/agentmux.db` (managed automatically).
 - Schema and architecture details live in `docs/architecture.md`.
 
 ## Working Rules

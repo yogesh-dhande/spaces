@@ -179,6 +179,7 @@ struct CLI {
 
     private func databasePath() throws -> String {
         if let override = optionalValue(for: "--db"), !override.isEmpty {
+            fputs("Warning: --db is for internal/testing use. The database location is managed automatically.\n", stderr)
             return override
         }
 
@@ -213,9 +214,7 @@ struct CLI {
 
         Notes:
           - `show` focuses captured windows; if none can be focused, close/reopen the target app windows and re-run `stream capture`.
-
-        Optional:
-          --db <path> overrides default database path (~/.agentmux/agentmux.db)
+          - Database state is stored at ~/.agentmux/agentmux.db and is managed automatically.
         """)
     }
 }

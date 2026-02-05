@@ -87,8 +87,7 @@ Persisted per stream:
 ## 5. Storage
 
 SQLite at:
-- default: `~/.agentmux/agentmux.db`
-- optional override: `--db <path>`
+- path: `~/.agentmux/agentmux.db` (managed automatically)
 
 Tables:
 - `projects`

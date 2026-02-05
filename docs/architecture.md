@@ -16,7 +16,7 @@ Main modules:
 - `destroy`: close captured windows + remove worktree + remove records.
 
 ## Persistence
-SQLite default path: `~/.agentmux/agentmux.db`.
+SQLite path: `~/.agentmux/agentmux.db` (managed automatically).
 
 Tables:
 - `projects`: serialized `Project` payload by `name`.

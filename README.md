@@ -39,6 +39,7 @@ agentmux doctor [--project <name>] [--stream <name>]
 ```
 
 Note: If `show` reports that no compatible windows could be focused, close and reopen the target app windows, then re-run `stream capture`.
+Note: Database state is stored at `~/.agentmux/agentmux.db` and is managed automatically.
 
 ## Build
 ```bash

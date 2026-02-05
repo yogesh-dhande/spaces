@@ -4,6 +4,7 @@
 - Core backend is implemented and shared across CLI + GUI modules.
 - GUI is AppKit-based and functional for project/stream operations.
 - Stream window control uses **yabai** window IDs captured per stream.
+- Database state lives at `~/.agentmux/agentmux.db` and is managed automatically.
 
 ## Accomplished
 - Implemented shared Swift modules: `appctl`, `streamctl`.
