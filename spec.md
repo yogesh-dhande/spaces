@@ -2,20 +2,14 @@
 
 ## 0. Summary
 
-`agentmux` is a macOS-native stream orchestrator for coding workflows.
+`agentmux` is a macOS stream orchestrator that uses **yabai** for window‑level control.
 
 It manages:
-- **Projects** (repo roots + window configuration)
+- **Projects** (repo roots)
 - **Streams** (git worktrees per project)
-- **Window lifecycle** (`show`, `hide`, `focus`, `destroy`) with deterministic positioning
+- **Captured window sets** per stream
 
-Window model is **unified**: each project stores a list of window specs with a `kind`:
-- `editor`
-- `browser`
-- `terminal`
-- `custom`
-
-No fixed editor/browser/terminal sections are required in project config.
+Window management is done via yabai window IDs captured from a given space.
 
 ---
 
@@ -24,19 +18,20 @@ No fixed editor/browser/terminal sections are required in project config.
 ### MUST (MVP)
 1. Project + Stream model in local SQLite
 2. Stream create/destroy with git worktrees
-3. Per-stream window launch/attach/reposition
-4. Multi-monitor placement via half/quarter tiles
-5. Deterministic targeting by bundle ID + persisted stream identity
-6. Stream diagnostics (`doctor`)
-7. Terminal activity status tracking for command-backed terminal windows
-8. AppKit GUI for project/stream/window operations
+3. Window capture per stream (yabai window IDs)
+4. Stream actions:
+   - `show`: focus captured windows
+   - `hide`: minimize captured windows
+   - `destroy`: close captured windows
+5. Stream diagnostics (`doctor`) for captured/missing windows
+6. AppKit GUI for project/stream operations
 
 ### SHOULD
 - Better validation and guided inputs in GUI
 - Better remediation text in diagnostics
 
 ### NOT IN MVP
-- Spaces management
+- Automatic window discovery without capture
 - Full session restore
 - Cloud sync/state
 
@@ -46,95 +41,55 @@ No fixed editor/browser/terminal sections are required in project config.
 
 ### Project
 - `id`, `name`, `repoRoot`
-- defaults (`defaultEditor`, `defaultBrowser`, `defaultTerminal`) kept for compatibility in orchestration defaults
-- `windows[]` where each entry includes:
-  - `name`
-  - `kind` (`editor|browser|terminal|custom`)
-  - `bundleID`
-  - `layout` (`displayIndex`, `tile`)
-  - optional fields by kind:
-    - editor: `editorKind`, `matchTitle`
-    - browser: `urls` (GUI currently uses one URL per browser window)
-    - terminal: `command`
-    - custom: `launchCommand`, `matchTitle`
 
 ### Stream
 - `id`, `projectID`, `name`, `worktreePath`
-- Worktree branch defaults to stream name on create.
+- `displayIndex`, `spaceIndex` (used for capture target)
 
 ### Stream Window Identity
 Persisted per stream:
-- `windows[]` identities (`name`, `bundleID`, optional `windowID`, optional `windowTitle`, optional `anchorURL`)
+- `windows[]` (`id`, `app`, `title`, `space`, `display`)
 - `updatedAt`
 
 ---
 
-## 3. Window Targeting Rules
-
-Hard requirements:
-1. Target apps by **bundle ID**
-2. Before setting frame:
-   - exit fullscreen
-   - refetch window
-   - unminimize if needed
-   - apply position + size
-3. Continue best-effort for non-critical windows; avoid global failure from single-window drift
-
----
-
-## 4. Stream Lifecycle Semantics
+## 3. Stream Lifecycle Semantics
 
 ### `stream create`
 - Validate project exists
 - Create git worktree
-- Persist stream + seed empty window identity
+- Persist stream with display + space
+
+### `stream capture`
+- Query yabai windows for the stream's space
+- Persist the captured window set
 
 ### `show`
-- If stream windows are found: focus/unminimize/reapply layout
-- Else: run `up` behavior (launch/create as needed)
+- Focus each captured window
 - Mark stream active
+- If no window can be focused, warn and recommend closing/reopening the target app windows, then re-capture
 
 ### `hide`
-- Minimize known stream windows
+- Minimize each captured window
 - Mark stream inactive
 
-### `focus`
-- Bring/focus windows and reapply layout
-- Refresh identity opportunistically
-- Mark stream active
-
 ### `destroy`
-- Hide windows
-- Close browser window when anchor is available
+- Close each captured window
 - Remove git worktree (and branch optionally)
 - Delete stream runtime/identity records
 
 ---
 
-## 5. Terminal Status Tracking
+## 4. Diagnostics
 
-For terminal windows with configured `command`:
-- Launch command through managed wrapper:
-  - `~/.agentmux/bin/agentwrap.sh`
-- Wrapper writes status to:
-  - `<worktree>/.agentmux/terminal-status/<terminal-name>.json`
-- Status JSON is intentionally minimal:
-  - `state`
-  - `timestamp`
-
-Expected states:
-- `starting`
-- `working`
-- `waiting_for_input`
-- `done`
-- `error`
-- `idle` (used when terminal has no configured command)
-
-GUI streams table surfaces active terminal statuses and refreshes periodically.
+`doctor` reports per stream:
+- captured window count
+- missing window ids
+- yabai availability
 
 ---
 
-## 6. Storage
+## 5. Storage
 
 SQLite at:
 - default: `~/.agentmux/agentmux.db`
@@ -148,48 +103,29 @@ Tables:
 
 ---
 
-## 7. UX Requirements (Current)
+## 6. UX Requirements (Current)
 
 ### GUI
 - Projects pane:
   - add/edit/delete/refresh
-- Project edit modal:
-  - manage windows inline (add via dropdown menu, edit selected, remove selected)
 - Streams pane:
-  - add/destroy/refresh
-  - show/hide/focus/doctor
-  - display terminal status summaries
+  - add/edit/destroy/refresh
+  - capture/show/hide/focus/doctor
+  - display + space shown per stream
 
 ### CLI
 - project CRUD
-- project window CRUD
-- stream create/list/destroy
+- stream create/update/list/destroy
+- stream capture
 - show/hide/focus
 - list-active
 - doctor
 
 ---
 
-## 8. Diagnostics
-
-`doctor` reports per stream:
-- found windows count
-- expected windows count
-- list of missing window names
-
-Further improvement area:
-- richer remediation details for missing permissions/app launch issues
-
----
-
-## 9. Testing
+## 7. Testing
 
 Current persistent coverage:
 - `Tests/smoke_cli.sh`
-  - project/window CRUD
+  - project CRUD
   - stream create/destroy
-  - show/hide active-state checks
-  - doctor output shape check
-
-Future:
-- deeper module-level automated tests once toolchain constraints permit stable test target execution.

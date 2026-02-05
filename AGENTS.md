@@ -2,23 +2,17 @@
 
 ## Purpose
 - `agentmux` is a macOS Swift app for stream-based workspace orchestration.
-- Projects use a unified window model (`editor|browser|terminal|custom`) configured per window entry.
+- Streams map to **captured window sets** managed via yabai.
 
 ## Contributor Contract
-- Preserve deterministic window targeting and layout behavior.
-- Target apps by bundle ID only (not display names).
-- Keep editor launch/position failures blocking; browser/terminal failures best-effort.
-- Prefer persisted stream identity over fuzzy matching.
-- Avoid backward compatibility aliases unless explicitly requested.
-- Keep terminal status flow intact:
-  - terminal commands should run through the managed wrapper
-  - status files stay minimal (`state`, `timestamp`)
+- Use yabai as the single source of truth for window IDs.
+- Stream capture is required before show/hide/focus.
+- Avoid window-level automation outside yabai.
+- Do not add backward compatibility layers unless explicitly requested.
 
 ## Data & Paths
 - Default DB path: `~/.agentmux/agentmux.db` (`--db` override allowed).
 - Schema and architecture details live in `docs/architecture.md`.
-- Managed terminal wrapper: `~/.agentmux/bin/agentwrap.sh`
-- Per-stream terminal statuses: `<worktree>/.agentmux/terminal-status/*.json`
 
 ## Working Rules
 - Build with `swift build` before finishing changes.

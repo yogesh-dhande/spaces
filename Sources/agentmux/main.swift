@@ -45,7 +45,7 @@ struct CLI {
         case "list-active":
             let active = try orchestrator.listActive()
             for stream in active {
-                print("\(stream.projectName)\t\(stream.streamName)\t\(stream.activatedAt)\t\(stream.worktreePath)")
+                print("\(stream.projectName)\t\(stream.streamName)\t\(stream.activatedAt)\t\(stream.worktreePath)\tdisplay=\(stream.displayIndex)\tspace=\(stream.spaceIndex)")
             }
 
         case "doctor":
@@ -55,19 +55,14 @@ struct CLI {
             if reports.isEmpty {
                 print("No streams found.")
             }
-            var printedAXGuidance = false
             for report in reports {
-                print("\(report.projectName)\t\(report.streamName)\twindows:\(report.foundWindowCount)/\(report.expectedWindowCount)")
-                let missing = report.missingWindows.isEmpty ? "-" : report.missingWindows.joined(separator: ",")
-                print("  missing=\(missing) updated=\(report.identityUpdatedAt ?? "-")")
-                if !report.accessibilityPermissionGranted && !printedAXGuidance {
-                    print("  diagnostic: Accessibility permission missing; window diagnostics may be inaccurate.")
-                    printAccessibilityGuidance()
-                    printedAXGuidance = true
+                print("\(report.projectName)\t\(report.streamName)\twindows=\(report.windowsFound)/\(report.windowsExpected)\tspace=\(report.spaceIndex)\tdisplay=\(report.displayIndex)")
+                if !report.yabaiAvailable {
+                    print("  diagnostic: yabai not available. Install and start yabai, then retry.")
                 }
-                if !report.missingWindows.isEmpty {
-                    print("  next: verify window config with `agentmux project window list --project \(report.projectName)`")
-                    print("  next: re-run `agentmux show --project \(report.projectName) --stream \(report.streamName)` and then `agentmux doctor --project \(report.projectName) --stream \(report.streamName)`")
+                if !report.missingWindowIDs.isEmpty {
+                    let list = report.missingWindowIDs.map(String.init).joined(separator: ",")
+                    print("  missing_window_ids=\(list)")
                 }
             }
 
@@ -78,48 +73,27 @@ struct CLI {
 
     private func runProjectSubcommand(orchestrator: StreamOrchestrator) throws {
         guard args.count >= 3 else {
-            throw NSError(domain: "agentmux.cli", code: 2, userInfo: [NSLocalizedDescriptionKey: "Missing project action. Use: project create|update|delete|list|window"])
+            throw NSError(domain: "agentmux.cli", code: 2, userInfo: [NSLocalizedDescriptionKey: "Missing project action. Use: project create|update|delete|list"])
         }
 
         switch args[2] {
         case "list":
             let projects = try orchestrator.listProjects()
             for project in projects {
-                print("\(project.name)\t\(project.repoRoot)\twindows=\(project.windows.count)\teditor=\(project.defaultEditor.rawValue)\tbrowser=\(project.defaultBrowser.rawValue)\tterminal=\(project.defaultTerminal.rawValue)")
+                print("\(project.name)\t\(project.repoRoot)")
             }
 
         case "create":
             let name = try value(for: "--name")
             let repoRoot = try value(for: "--repo-root")
-            let browserTabs = csvList(for: "--browser-tabs")
-            let created = try orchestrator.createProject(
-                name: name,
-                repoRoot: repoRoot,
-                editor: optionalValue(for: "--editor"),
-                browser: optionalValue(for: "--browser"),
-                terminal: optionalValue(for: "--terminal"),
-                editorDisplay: intValue(for: "--editor-display"),
-                editorTile: optionalValue(for: "--editor-tile"),
-                browserDisplay: intValue(for: "--browser-display"),
-                browserTile: optionalValue(for: "--browser-tile"),
-                browserTabs: browserTabs
-            )
+            let created = try orchestrator.createProject(name: name, repoRoot: repoRoot)
             print("Created project \(created.name)\t\(created.repoRoot)")
 
         case "update":
             let name = try value(for: "--name")
-            let tabsFlagPresent = args.contains("--browser-tabs")
             let updated = try orchestrator.updateProject(
                 name: name,
-                repoRoot: optionalValue(for: "--repo-root"),
-                editor: optionalValue(for: "--editor"),
-                browser: optionalValue(for: "--browser"),
-                terminal: optionalValue(for: "--terminal"),
-                editorDisplay: intValue(for: "--editor-display"),
-                editorTile: optionalValue(for: "--editor-tile"),
-                browserDisplay: intValue(for: "--browser-display"),
-                browserTile: optionalValue(for: "--browser-tile"),
-                browserTabs: tabsFlagPresent ? csvList(for: "--browser-tabs") : nil
+                repoRoot: optionalValue(for: "--repo-root")
             )
             print("Updated project \(updated.name)")
 
@@ -128,79 +102,14 @@ struct CLI {
             try orchestrator.deleteProject(name: name)
             print("Deleted project \(name)")
 
-        case "window":
-            try runProjectWindowSubcommand(orchestrator: orchestrator)
-
         default:
             throw NSError(domain: "agentmux.cli", code: 2, userInfo: [NSLocalizedDescriptionKey: "Unknown project action: \(args[2])"])
         }
     }
 
-    private func runProjectWindowSubcommand(orchestrator: StreamOrchestrator) throws {
-        guard args.count >= 4 else {
-            throw NSError(domain: "agentmux.cli", code: 2, userInfo: [NSLocalizedDescriptionKey: "Missing project window action. Use: project window list|add|update|remove"])
-        }
-        switch args[3] {
-        case "list":
-            let project = try value(for: "--project")
-            let windows = try orchestrator.listProjectWindows(projectName: project)
-            for (index, spec) in windows.enumerated() {
-                let urls = spec.urls.joined(separator: ",")
-                print("\(index)\tname=\(spec.name)\tkind=\(spec.kind.rawValue)\tbundle=\(spec.bundleID)\tdisplay=\(spec.layout.displayIndex)\ttile=\(spec.layout.tile.rawValue)\tmatch=\(spec.matchTitle ?? "")\teditor=\(spec.editorKind ?? "")\tcmd=\(spec.command ?? spec.launchCommand ?? "")\turls=\(urls)")
-            }
-        case "add":
-            let project = try value(for: "--project")
-            let name = try value(for: "--name")
-            let kind = try value(for: "--kind")
-            let bundleID = try value(for: "--bundle-id")
-            let display = try requiredIntValue(for: "--display")
-            let tile = try value(for: "--tile")
-            let updated = try orchestrator.addProjectWindow(
-                projectName: project,
-                name: name,
-                kind: kind,
-                bundleID: bundleID,
-                displayIndex: display,
-                tile: tile,
-                launchCommand: optionalValue(for: "--launch-command"),
-                command: optionalValue(for: "--command"),
-                urls: csvList(for: "--urls"),
-                matchTitle: optionalValue(for: "--match-title"),
-                editorKind: optionalValue(for: "--editor-kind")
-            )
-            print("Added window spec. count=\(updated.windows.count)")
-        case "update":
-            let project = try value(for: "--project")
-            let index = try requiredIntValue(for: "--index")
-            let urls = args.contains("--urls") ? csvList(for: "--urls") : nil
-            let updated = try orchestrator.updateProjectWindow(
-                projectName: project,
-                index: index,
-                name: optionalValue(for: "--name"),
-                kind: optionalValue(for: "--kind"),
-                bundleID: optionalValue(for: "--bundle-id"),
-                displayIndex: intValue(for: "--display"),
-                tile: optionalValue(for: "--tile"),
-                launchCommand: optionalValue(for: "--launch-command"),
-                command: optionalValue(for: "--command"),
-                urls: urls,
-                matchTitle: optionalValue(for: "--match-title"),
-                editorKind: optionalValue(for: "--editor-kind")
-            )
-            print("Updated window spec at index \(index). count=\(updated.windows.count)")
-        case "remove":
-            let project = try value(for: "--project")
-            let index = try requiredIntValue(for: "--index")
-            let updated = try orchestrator.removeProjectWindow(projectName: project, index: index)
-            print("Removed window spec at index \(index). count=\(updated.windows.count)")
-        default:
-            throw NSError(domain: "agentmux.cli", code: 2, userInfo: [NSLocalizedDescriptionKey: "Unknown project window action: \(args[3])"])
-        }
-    }
-
     private func runStreamSubcommand(orchestrator: StreamOrchestrator) throws {
         guard args.count >= 3 else {
-            throw NSError(domain: "agentmux.cli", code: 2, userInfo: [NSLocalizedDescriptionKey: "Missing stream action. Use: stream create|destroy|list"])
+            throw NSError(domain: "agentmux.cli", code: 2, userInfo: [NSLocalizedDescriptionKey: "Missing stream action. Use: stream create|update|destroy|list|capture"])
         }
 
         switch args[2] {
@@ -208,8 +117,27 @@ struct CLI {
             let project = try value(for: "--project")
             let stream = try value(for: "--stream")
             let worktreePath = optionalValue(for: "--worktree")
-            let created = try orchestrator.create(projectName: project, streamName: stream, worktreePath: worktreePath)
-            print("Created stream \(created.name)\t\(created.worktreePath)")
+            let display = try requiredIntValue(for: "--display")
+            let space = try requiredIntValue(for: "--space")
+            let created = try orchestrator.create(projectName: project, streamName: stream, worktreePath: worktreePath, displayIndex: display, spaceIndex: space)
+            print("Created stream \(created.name)\t\(created.worktreePath)\tdisplay=\(created.displayIndex)\tspace=\(created.spaceIndex)")
+
+        case "update":
+            let project = try value(for: "--project")
+            let stream = try value(for: "--stream")
+            let updated = try orchestrator.updateStream(
+                projectName: project,
+                streamName: stream,
+                displayIndex: intValue(for: "--display"),
+                spaceIndex: intValue(for: "--space")
+            )
+            print("Updated stream \(updated.name)\tdisplay=\(updated.displayIndex)\tspace=\(updated.spaceIndex)")
+
+        case "capture":
+            let project = try value(for: "--project")
+            let stream = try value(for: "--stream")
+            try orchestrator.capture(projectName: project, streamName: stream)
+            print("Captured windows for \(project)/\(stream)")
 
         case "destroy":
             let project = try value(for: "--project")
@@ -223,7 +151,7 @@ struct CLI {
             let streams = try orchestrator.list(projectName: project)
             for stream in streams {
                 let marker = stream.isActive ? "*" : " "
-                print("\(marker)\t\(stream.name)\t\(stream.worktreePath)")
+                print("\(marker)\t\(stream.name)\t\(stream.worktreePath)\tdisplay=\(stream.displayIndex)\tspace=\(stream.spaceIndex)")
             }
 
         default:
@@ -259,16 +187,6 @@ struct CLI {
         return value
     }
 
-    private func csvList(for flag: String) -> [String] {
-        guard let raw = optionalValue(for: flag) else {
-            return []
-        }
-        return raw
-            .split(separator: ",")
-            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-            .filter { !$0.isEmpty }
-    }
-
     private func databasePath() throws -> String {
         if let override = optionalValue(for: "--db"), !override.isEmpty {
             return override
@@ -288,16 +206,14 @@ struct CLI {
           agentmux seed-json --file <seed.json>
 
           agentmux project list
-          agentmux project create --name <name> --repo-root <path> [--editor windsurf|vscode|cursor] [--browser chrome] [--terminal terminal] [--editor-display <n>] [--editor-tile <tile>] [--browser-display <n>] [--browser-tile <tile>] [--browser-tabs <u1,u2,...>]
-          agentmux project update --name <name> [--repo-root <path>] [--editor windsurf|vscode|cursor] [--browser chrome] [--terminal terminal] [--editor-display <n>] [--editor-tile <tile>] [--browser-display <n>] [--browser-tile <tile>] [--browser-tabs <u1,u2,...>]
+          agentmux project create --name <name> --repo-root <path>
+          agentmux project update --name <name> [--repo-root <path>]
           agentmux project delete --name <name>
-          agentmux project window list --project <name>
-          agentmux project window add --project <name> --name <name> --kind <editor|browser|terminal|custom> --bundle-id <id> --display <n> --tile <tile> [--editor-kind <windsurf|vscode|cursor>] [--urls <u1,u2,...>] [--command <shell>] [--launch-command <shell>] [--match-title <title>]
-          agentmux project window update --project <name> --index <n> [--name <name>] [--kind <...>] [--bundle-id <id>] [--display <n>] [--tile <tile>] [--editor-kind <...>] [--urls <u1,u2,...>] [--command <shell>] [--launch-command <shell>] [--match-title <title>]
-          agentmux project window remove --project <name> --index <n>
 
           agentmux stream list --project <name>
-          agentmux stream create --project <name> --stream <name> [--worktree <path>]
+          agentmux stream create --project <name> --stream <name> --display <n> --space <n> [--worktree <path>]
+          agentmux stream update --project <name> --stream <name> [--display <n>] [--space <n>]
+          agentmux stream capture --project <name> --stream <name>
           agentmux stream destroy --project <name> --stream <name> [--remove-branch]
 
           agentmux show --project <name> --stream <name>
@@ -306,20 +222,12 @@ struct CLI {
           agentmux list-active
           agentmux doctor [--project <name>] [--stream <name>]
 
+        Notes:
+          - `show` focuses captured windows; if none can be focused, close/reopen the target app windows and re-run `stream capture`.
+
         Optional:
           --db <path> overrides default database path (~/.agentmux/agentmux.db)
         """)
-    }
-
-    private func printAccessibilityGuidance() {
-        let binary = CommandLine.arguments.first ?? "agentmux"
-        print("  fix steps:")
-        print("    1) Open System Settings > Privacy & Security > Accessibility")
-        print("    2) Enable /Applications/Terminal.app (if launching from terminal)")
-        print("    3) Enable \(binary)")
-        print("    4) Enable agentmux-gui (if using GUI)")
-        print("    5) Quit and relaunch app/command")
-        print("  quick open: open \"x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility\"")
     }
 }
 
@@ -327,9 +235,5 @@ do {
     try CLI(args: CommandLine.arguments).run()
 } catch {
     fputs("Error: \(error.localizedDescription)\n", stderr)
-    if error.localizedDescription.localizedCaseInsensitiveContains("Accessibility permission is missing") {
-        fputs("Fix: open System Settings > Privacy & Security > Accessibility and enable Terminal + agentmux/agentmux-gui.\n", stderr)
-        fputs("Quick open: open \"x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility\"\n", stderr)
-    }
     exit(1)
 }
