@@ -7,7 +7,6 @@ let package = Package(
         .macOS(.v14)
     ],
     products: [
-        .library(name: "winmove", targets: ["winmove"]),
         .library(name: "appctl", targets: ["appctl"]),
         .library(name: "streamctl", targets: ["streamctl"]),
         .library(name: "gui", targets: ["gui"]),
@@ -15,7 +14,6 @@ let package = Package(
         .executable(name: "agentmux-gui", targets: ["agentmux-gui"])
     ],
     targets: [
-        .target(name: "winmove"),
         .target(name: "appctl"),
         .target(
             name: "streamctl",
