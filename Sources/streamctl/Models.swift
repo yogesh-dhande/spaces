@@ -1,101 +1,14 @@
 import Foundation
-import appctl
-import winmove
 
 public struct Project: Codable, Sendable {
     public let id: UUID
     public let name: String
     public let repoRoot: String
-    public let defaultEditor: EditorKind
-    public let defaultBrowser: BrowserKind
-    public let defaultTerminal: TerminalKind
-    public let editorLayout: WindowLayout
-    public let browserLayout: WindowLayout
-    public let windows: [ProjectWindowSpec]
-    public let browserTabs: [String]
 
-    public init(
-        id: UUID,
-        name: String,
-        repoRoot: String,
-        defaultEditor: EditorKind,
-        defaultBrowser: BrowserKind,
-        defaultTerminal: TerminalKind,
-        editorLayout: WindowLayout,
-        browserLayout: WindowLayout,
-        windows: [ProjectWindowSpec],
-        browserTabs: [String]
-    ) {
+    public init(id: UUID, name: String, repoRoot: String) {
         self.id = id
         self.name = name
         self.repoRoot = repoRoot
-        self.defaultEditor = defaultEditor
-        self.defaultBrowser = defaultBrowser
-        self.defaultTerminal = defaultTerminal
-        self.editorLayout = editorLayout
-        self.browserLayout = browserLayout
-        self.windows = windows
-        self.browserTabs = browserTabs
-    }
-
-    private enum CodingKeys: String, CodingKey {
-        case id, name, repoRoot, defaultEditor, defaultBrowser, defaultTerminal
-        case editorLayout, browserLayout, windows, browserTabs
-    }
-
-    public init(from decoder: Decoder) throws {
-        let c = try decoder.container(keyedBy: CodingKeys.self)
-        id = try c.decode(UUID.self, forKey: .id)
-        name = try c.decode(String.self, forKey: .name)
-        repoRoot = try c.decode(String.self, forKey: .repoRoot)
-        defaultEditor = try c.decode(EditorKind.self, forKey: .defaultEditor)
-        defaultBrowser = try c.decode(BrowserKind.self, forKey: .defaultBrowser)
-        defaultTerminal = try c.decode(TerminalKind.self, forKey: .defaultTerminal)
-        editorLayout = try c.decode(WindowLayout.self, forKey: .editorLayout)
-        browserLayout = try c.decode(WindowLayout.self, forKey: .browserLayout)
-        windows = try c.decodeIfPresent([ProjectWindowSpec].self, forKey: .windows) ?? []
-        browserTabs = try c.decodeIfPresent([String].self, forKey: .browserTabs) ?? []
-    }
-}
-
-public enum ProjectWindowKind: String, Codable, Sendable {
-    case editor
-    case browser
-    case terminal
-    case custom
-}
-
-public struct ProjectWindowSpec: Codable, Sendable {
-    public let name: String
-    public let kind: ProjectWindowKind
-    public let bundleID: String
-    public let layout: WindowLayout
-    public let launchCommand: String?
-    public let command: String?
-    public let urls: [String]
-    public let matchTitle: String?
-    public let editorKind: String?
-
-    public init(
-        name: String,
-        kind: ProjectWindowKind,
-        bundleID: String,
-        layout: WindowLayout,
-        launchCommand: String?,
-        command: String?,
-        urls: [String],
-        matchTitle: String?,
-        editorKind: String?
-    ) {
-        self.name = name
-        self.kind = kind
-        self.bundleID = bundleID
-        self.layout = layout
-        self.launchCommand = launchCommand
-        self.command = command
-        self.urls = urls
-        self.matchTitle = matchTitle
-        self.editorKind = editorKind
     }
 }
 
@@ -104,12 +17,16 @@ public struct Stream: Codable, Sendable {
     public let projectID: UUID
     public let name: String
     public let worktreePath: String
+    public let displayIndex: Int
+    public let spaceIndex: Int
 
-    public init(id: UUID, projectID: UUID, name: String, worktreePath: String) {
+    public init(id: UUID, projectID: UUID, name: String, worktreePath: String, displayIndex: Int, spaceIndex: Int) {
         self.id = id
         self.projectID = projectID
         self.name = name
         self.worktreePath = worktreePath
+        self.displayIndex = displayIndex
+        self.spaceIndex = spaceIndex
     }
 }
 
@@ -117,11 +34,15 @@ public struct StreamSummary: Sendable {
     public let name: String
     public let worktreePath: String
     public let isActive: Bool
+    public let displayIndex: Int
+    public let spaceIndex: Int
 
-    public init(name: String, worktreePath: String, isActive: Bool) {
+    public init(name: String, worktreePath: String, isActive: Bool, displayIndex: Int, spaceIndex: Int) {
         self.name = name
         self.worktreePath = worktreePath
         self.isActive = isActive
+        self.displayIndex = displayIndex
+        self.spaceIndex = spaceIndex
     }
 }
 
@@ -130,12 +51,16 @@ public struct ActiveStreamSummary: Sendable {
     public let streamName: String
     public let worktreePath: String
     public let activatedAt: String
+    public let displayIndex: Int
+    public let spaceIndex: Int
 
-    public init(projectName: String, streamName: String, worktreePath: String, activatedAt: String) {
+    public init(projectName: String, streamName: String, worktreePath: String, activatedAt: String, displayIndex: Int, spaceIndex: Int) {
         self.projectName = projectName
         self.streamName = streamName
         self.worktreePath = worktreePath
         self.activatedAt = activatedAt
+        self.displayIndex = displayIndex
+        self.spaceIndex = spaceIndex
     }
 }
 
@@ -144,11 +69,7 @@ public struct StreamWindowIdentity: Codable, Sendable {
     public let windows: [WindowIdentity]
     public let updatedAt: String
 
-    public init(
-        streamID: UUID,
-        windows: [WindowIdentity],
-        updatedAt: String
-    ) {
+    public init(streamID: UUID, windows: [WindowIdentity], updatedAt: String) {
         self.streamID = streamID
         self.windows = windows
         self.updatedAt = updatedAt
@@ -167,18 +88,18 @@ public struct StreamWindowIdentity: Codable, Sendable {
 }
 
 public struct WindowIdentity: Codable, Sendable {
-    public let name: String
-    public let bundleID: String
-    public let windowID: Int?
-    public let windowTitle: String?
-    public let anchorURL: String?
+    public let id: Int
+    public let app: String
+    public let title: String?
+    public let space: Int
+    public let display: Int
 
-    public init(name: String, bundleID: String, windowID: Int?, windowTitle: String?, anchorURL: String?) {
-        self.name = name
-        self.bundleID = bundleID
-        self.windowID = windowID
-        self.windowTitle = windowTitle
-        self.anchorURL = anchorURL
+    public init(id: Int, app: String, title: String?, space: Int, display: Int) {
+        self.id = id
+        self.app = app
+        self.title = title
+        self.space = space
+        self.display = display
     }
 }
 
@@ -186,45 +107,42 @@ public struct StreamDoctorReport: Sendable {
     public let projectName: String
     public let streamName: String
     public let worktreePath: String
-    public let identityUpdatedAt: String?
-    public let foundWindowCount: Int
-    public let expectedWindowCount: Int
-    public let missingWindows: [String]
-    public let accessibilityPermissionGranted: Bool
+    public let displayIndex: Int
+    public let spaceIndex: Int
+    public let yabaiAvailable: Bool
+    public let windowsFound: Int
+    public let windowsExpected: Int
+    public let missingWindowIDs: [Int]
 
     public init(
         projectName: String,
         streamName: String,
         worktreePath: String,
-        identityUpdatedAt: String?,
-        foundWindowCount: Int,
-        expectedWindowCount: Int,
-        missingWindows: [String],
-        accessibilityPermissionGranted: Bool
+        displayIndex: Int,
+        spaceIndex: Int,
+        yabaiAvailable: Bool,
+        windowsFound: Int,
+        windowsExpected: Int,
+        missingWindowIDs: [Int]
     ) {
         self.projectName = projectName
         self.streamName = streamName
         self.worktreePath = worktreePath
-        self.identityUpdatedAt = identityUpdatedAt
-        self.foundWindowCount = foundWindowCount
-        self.expectedWindowCount = expectedWindowCount
-        self.missingWindows = missingWindows
-        self.accessibilityPermissionGranted = accessibilityPermissionGranted
+        self.displayIndex = displayIndex
+        self.spaceIndex = spaceIndex
+        self.yabaiAvailable = yabaiAvailable
+        self.windowsFound = windowsFound
+        self.windowsExpected = windowsExpected
+        self.missingWindowIDs = missingWindowIDs
     }
 }
 
-public struct TerminalStatus: Sendable, Equatable {
-    public let name: String
-    public let isActive: Bool
-    public let state: String?
-    public let updatedAt: String?
-    public let lastOutput: String?
+public struct SpaceOption: Sendable {
+    public let displayIndex: Int
+    public let spaceIndex: Int
 
-    public init(name: String, isActive: Bool, state: String?, updatedAt: String?, lastOutput: String?) {
-        self.name = name
-        self.isActive = isActive
-        self.state = state
-        self.updatedAt = updatedAt
-        self.lastOutput = lastOutput
+    public init(displayIndex: Int, spaceIndex: Int) {
+        self.displayIndex = displayIndex
+        self.spaceIndex = spaceIndex
     }
 }

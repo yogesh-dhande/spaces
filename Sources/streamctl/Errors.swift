@@ -8,6 +8,7 @@ public enum StreamctlError: LocalizedError {
     case invalidWorktree(path: String)
     case gitCommandFailed(message: String)
     case invalidArgument(message: String)
+    case yabaiUnavailable(message: String)
 
     public var errorDescription: String? {
         switch self {
@@ -25,6 +26,8 @@ public enum StreamctlError: LocalizedError {
             return "Git command failed: \(message)"
         case let .invalidArgument(message):
             return "Invalid argument: \(message)"
+        case let .yabaiUnavailable(message):
+            return "yabai not available: \(message)"
         }
     }
 }

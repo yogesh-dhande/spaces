@@ -61,6 +61,16 @@ public final class SQLiteStore {
         return try decoder.decode(Stream.self, from: data)
     }
 
+    public func stream(id: UUID) throws -> Stream? {
+        guard let data = try queryOneBlob(
+            sql: "SELECT payload FROM streams WHERE id = ?",
+            bindings: [id.uuidString]
+        ) else {
+            return nil
+        }
+        return try decoder.decode(Stream.self, from: data)
+    }
+
     public func projects() throws -> [Project] {
         let blobs = try queryBlobColumn(sql: "SELECT payload FROM projects ORDER BY name")
         return try blobs.map { try decoder.decode(Project.self, from: $0) }
@@ -125,19 +135,20 @@ public final class SQLiteStore {
     }
 
     public func streams(projectID: UUID) throws -> [StreamSummary] {
-        let rows = try queryRows(
-            sql: """
-            SELECT s.name, s.worktree_path, COALESCE(r.is_active, 0)
-            FROM streams s
-            LEFT JOIN stream_runtime r ON r.stream_id = s.id
-            WHERE s.project_id = ?
-            ORDER BY s.name
-            """,
+        let blobs = try queryBlobColumn(
+            sql: "SELECT payload FROM streams WHERE project_id = ? ORDER BY name",
             bindings: [projectID.uuidString]
         )
-
-        return rows.map {
-            StreamSummary(name: $0[0], worktreePath: $0[1], isActive: ($0[2] == "1"))
+        return try blobs.compactMap { data in
+            let stream = try decoder.decode(Stream.self, from: data)
+            let active = (try? isStreamActive(streamID: stream.id)) ?? false
+            return StreamSummary(
+                name: stream.name,
+                worktreePath: stream.worktreePath,
+                isActive: active,
+                displayIndex: stream.displayIndex,
+                spaceIndex: stream.spaceIndex
+            )
         }
     }
 
@@ -168,10 +179,21 @@ public final class SQLiteStore {
         )
     }
 
+    private func isStreamActive(streamID: UUID) throws -> Bool {
+        let rows = try queryRows(
+            sql: "SELECT COALESCE(is_active, 0) FROM stream_runtime WHERE stream_id = ?",
+            bindings: [streamID.uuidString]
+        )
+        guard let first = rows.first, let raw = first.first else {
+            return false
+        }
+        return raw == "1"
+    }
+
     public func activeStreams() throws -> [ActiveStreamSummary] {
         let rows = try queryRows(
             sql: """
-            SELECT p.name, s.name, s.worktree_path, COALESCE(r.activated_at, '')
+            SELECT r.stream_id, COALESCE(r.activated_at, ''), p.name
             FROM stream_runtime r
             JOIN streams s ON s.id = r.stream_id
             JOIN projects p ON p.id = s.project_id
@@ -180,8 +202,19 @@ public final class SQLiteStore {
             """
         )
 
-        return rows.map {
-            ActiveStreamSummary(projectName: $0[0], streamName: $0[1], worktreePath: $0[2], activatedAt: $0[3])
+        return try rows.compactMap { row in
+            guard row.count >= 3, let streamID = UUID(uuidString: row[0]) else {
+                return nil
+            }
+            guard let stream = try stream(id: streamID) else { return nil }
+            return ActiveStreamSummary(
+                projectName: row[2],
+                streamName: stream.name,
+                worktreePath: stream.worktreePath,
+                activatedAt: row[1],
+                displayIndex: stream.displayIndex,
+                spaceIndex: stream.spaceIndex
+            )
         }
     }
 
@@ -214,6 +247,7 @@ public final class SQLiteStore {
           stream_id TEXT PRIMARY KEY,
           payload BLOB NOT NULL
         );
+
         """
         try executeBatch(sql: sql)
     }

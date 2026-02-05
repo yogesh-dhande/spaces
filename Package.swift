@@ -16,10 +16,10 @@ let package = Package(
     ],
     targets: [
         .target(name: "winmove"),
-        .target(name: "appctl", dependencies: ["winmove"]),
+        .target(name: "appctl"),
         .target(
             name: "streamctl",
-            dependencies: ["winmove", "appctl"],
+            dependencies: ["appctl"],
             linkerSettings: [.linkedLibrary("sqlite3")]
         ),
         .target(name: "gui", dependencies: ["streamctl"]),
