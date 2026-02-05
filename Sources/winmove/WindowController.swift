@@ -113,6 +113,17 @@ public final class WindowController {
         return windowNumber(foundWindow)
     }
 
+    public func hasWindow(bundleID: String, windowNumber: Int) throws -> Bool {
+        try ensureAccessibilityPermission()
+        guard let app = runningApp(bundleID: bundleID) else {
+            return false
+        }
+        return chooseWindow(
+            app: app,
+            target: WindowTarget(bundleID: bundleID, windowNumber: windowNumber, preferFocusedWindow: false)
+        ) != nil
+    }
+
     @discardableResult
     public func closeWindow(
         target: WindowTarget,
@@ -141,6 +152,37 @@ public final class WindowController {
         let pressError = AXUIElementPerformAction((button as! AXUIElement), kAXPressAction as CFString)
         guard pressError == .success else {
             throw WinmoveError.moveFailed(bundleID: target.bundleID)
+        }
+        return windowInfo(foundWindow)
+    }
+
+    @discardableResult
+    public func raiseWindow(
+        target: WindowTarget,
+        options: MoveOptions = .init()
+    ) throws -> WindowInfo {
+        try ensureAccessibilityPermission()
+
+        guard let app = withRetry(retries: options.retries, delayMs: options.delayMs, {
+            self.runningApp(bundleID: target.bundleID)
+        }) else {
+            throw WinmoveError.appNotRunning(bundleID: target.bundleID)
+        }
+
+        guard let foundWindow = withRetry(retries: options.retries, delayMs: options.delayMs, {
+            self.chooseWindow(app: app, target: target)
+        }) else {
+            throw WinmoveError.windowNotFound(bundleID: target.bundleID)
+        }
+
+        let raiseError = AXUIElementPerformAction(foundWindow, kAXRaiseAction as CFString)
+        if raiseError != .success {
+            // Some apps don't support AXRaise consistently; explicitly mark/focus window.
+            let mainOK = setBoolAttribute(foundWindow, attribute: kAXMainAttribute as CFString, enabled: true)
+            let focusedOK = setBoolAttribute(foundWindow, attribute: kAXFocusedAttribute as CFString, enabled: true)
+            guard mainOK || focusedOK else {
+                throw WinmoveError.moveFailed(bundleID: target.bundleID)
+            }
         }
         return windowInfo(foundWindow)
     }
@@ -296,6 +338,11 @@ public final class WindowController {
     private func setMinimized(_ window: AXUIElement, _ minimized: Bool) -> AXError {
         let value: CFBoolean = minimized ? kCFBooleanTrue : kCFBooleanFalse
         return AXUIElementSetAttributeValue(window, kAXMinimizedAttribute as CFString, value)
+    }
+
+    private func setBoolAttribute(_ window: AXUIElement, attribute: CFString, enabled: Bool) -> Bool {
+        let value: CFBoolean = enabled ? kCFBooleanTrue : kCFBooleanFalse
+        return AXUIElementSetAttributeValue(window, attribute, value) == .success
     }
 
     private func setWindowFrame(_ window: AXUIElement, rect: CGRect) -> Bool {
