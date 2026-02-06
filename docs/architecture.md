@@ -23,6 +23,7 @@ Tables:
 - `streams`: serialized `Stream` payload by `(project_id, name)`.
 - `stream_runtime`: active/inactive state and timestamps.
 - `stream_window_identity`: captured window sets per stream.
+- `settings`: key/value settings (e.g., GUI hotkey).
 
 Local status files:
 - Terminal status files written by `agentmux wrap` once the focused window is captured.
@@ -42,6 +43,7 @@ Local status files:
 - `agentmux show --project <name> --stream <name>`
 - `agentmux list-active`
 - `agentmux doctor [--project <name>] [--stream <name>]`
+- `agentmux settings get|set|reset --gui-hotkey ...`
 - `agentmux wrap [--project <name> --stream <name>] -- <command> [args...]`
 - `agentmux wrap [--project <name> --stream <name>] <command> [args...]`
 

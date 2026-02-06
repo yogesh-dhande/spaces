@@ -22,6 +22,9 @@ struct CLI {
             try SeedLoader.importJSON(filePath: file, store: store)
             print("Imported seed data into \(db)")
 
+        case "settings":
+            try runSettingsSubcommand(orchestrator: orchestrator)
+
         case "project":
             try runProjectSubcommand(orchestrator: orchestrator)
 
@@ -99,6 +102,42 @@ struct CLI {
 
         default:
             throw NSError(domain: "agentmux.cli", code: 2, userInfo: [NSLocalizedDescriptionKey: "Unknown project action: \(args[2])"])
+        }
+    }
+
+    private func runSettingsSubcommand(orchestrator: StreamOrchestrator) throws {
+        guard args.count >= 3 else {
+            throw NSError(domain: "agentmux.cli", code: 2, userInfo: [NSLocalizedDescriptionKey: "Missing settings action. Use: settings get|set|reset"])
+        }
+
+        switch args[2] {
+        case "get":
+            if args.contains("--gui-hotkey") {
+                let current = try orchestrator.guiHotkey()
+                print("gui-hotkey\t\(current)")
+            } else {
+                throw NSError(domain: "agentmux.cli", code: 2, userInfo: [NSLocalizedDescriptionKey: "Missing setting flag. Use: settings get --gui-hotkey"])
+            }
+
+        case "set":
+            if let raw = optionalValue(for: "--gui-hotkey") {
+                let spec = try HotkeySpec.parse(raw)
+                try orchestrator.setGUIHotkey(spec.normalized)
+                print("Updated gui-hotkey\t\(spec.normalized)")
+            } else {
+                throw NSError(domain: "agentmux.cli", code: 2, userInfo: [NSLocalizedDescriptionKey: "Missing --gui-hotkey value. Use: settings set --gui-hotkey \"cmd+shift+space\""])
+            }
+
+        case "reset":
+            if args.contains("--gui-hotkey") {
+                try orchestrator.setGUIHotkey(nil)
+                print("Reset gui-hotkey\t\(SettingsKey.defaultGUIHotkey)")
+            } else {
+                throw NSError(domain: "agentmux.cli", code: 2, userInfo: [NSLocalizedDescriptionKey: "Missing setting flag. Use: settings reset --gui-hotkey"])
+            }
+
+        default:
+            throw NSError(domain: "agentmux.cli", code: 2, userInfo: [NSLocalizedDescriptionKey: "Unknown settings action: \(args[2])"])
         }
     }
 
@@ -273,10 +312,7 @@ struct CLI {
             return override
         }
 
-        let home = FileManager.default.homeDirectoryForCurrentUser
-        let dir = home.appendingPathComponent(".agentmux", isDirectory: true)
-        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        return dir.appendingPathComponent("agentmux.db").path
+        return try DatabaseLocator.defaultPath()
     }
 
     private func printHelp() {
@@ -285,6 +321,10 @@ struct CLI {
 
         Usage:
           agentmux seed-json --file <seed.json>
+
+          agentmux settings get --gui-hotkey
+          agentmux settings set --gui-hotkey <spec>
+          agentmux settings reset --gui-hotkey
 
           agentmux project list
           agentmux project create --name <name> --repo-root <path>

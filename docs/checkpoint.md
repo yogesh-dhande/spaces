@@ -23,6 +23,9 @@
 - GUI stream list shows a card per stream with per-window status and auto-refresh.
 - Added warning on `show` when no captured windows can be focused (suggests closing/reopening windows).
 - Added repeatable smoke script: `Tests/smoke_cli.sh`.
+- Added configurable global hotkey to toggle the GUI on the active space/display.
+- GUI auto-reloads the hotkey when settings change.
+- Hotkey moves the GUI to the active space when invoked from another space/display.
 
 ## Remaining
 - GUI polish:

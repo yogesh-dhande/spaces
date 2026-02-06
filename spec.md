@@ -104,6 +104,7 @@ Tables:
 - `streams`
 - `stream_runtime`
 - `stream_window_identity`
+- `settings` (key/value settings)
 
 ---
 
@@ -117,6 +118,8 @@ Tables:
   - capture/show/doctor
   - display + space shown per stream
   - captured windows listed per stream as rows in a card, with status when available and auto-refresh
+- Global hotkey toggle for show/hide (user-configurable; default `cmd+shift+space`)
+- If visible on another space/display, the hotkey moves the GUI to the active space instead of hiding it
 
 ### CLI
 - project CRUD

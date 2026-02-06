@@ -1,4 +1,5 @@
 import AppKit
+import Carbon
 import Foundation
 import streamctl
 
@@ -15,6 +16,20 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSTableVie
     private var streamStatuses: [String: [WindowStatus]] = [:]
     private var streamWindows: [String: [CapturedWindow]] = [:]
     private var statusRefreshTimer: Timer?
+    private var hotkeyRefreshTimer: Timer?
+
+    private var hotkeyRef: EventHotKeyRef?
+    private var hotkeyHandler: EventHandlerRef?
+    private var registeredHotkey: HotkeySpec?
+    private var lastHotkeyRaw: String?
+    private lazy var hotkeyHandlerProc: EventHandlerUPP = { _, _, userData in
+        guard let userData else { return noErr }
+        let controller = Unmanaged<AppKitController>.fromOpaque(userData).takeUnretainedValue()
+        DispatchQueue.main.async {
+            controller.toggleWindowFromHotkey()
+        }
+        return noErr
+    }
 
     private var selectedProjectName: String?
     private var selectedStreamName: String?
@@ -95,6 +110,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSTableVie
     public func applicationDidFinishLaunching(_ notification: Notification) {
         setupMenu()
         setupWindow()
+        setupHotkey()
+        startHotkeyRefresh()
         reloadProjects()
         startStatusRefresh()
         NSApp.activate(ignoringOtherApps: true)
@@ -156,6 +173,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSTableVie
             defer: false
         )
         window.title = "agentmux"
+        window.collectionBehavior.insert(.moveToActiveSpace)
 
         let split = NSSplitView()
         split.translatesAutoresizingMaskIntoConstraints = false
@@ -744,10 +762,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSTableVie
     }
 
     private func databasePath() throws -> String {
-        let home = FileManager.default.homeDirectoryForCurrentUser
-        let dir = home.appendingPathComponent(".agentmux", isDirectory: true)
-        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        return dir.appendingPathComponent("agentmux.db").path
+        try DatabaseLocator.defaultPath()
     }
 
     private func runModalForm(title: String, message: String, fields: [(String, NSTextField)]) -> Bool {
@@ -874,6 +889,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSTableVie
 
         let appItem = NSMenuItem()
         let appMenu = NSMenu()
+        appMenu.addItem(withTitle: "Set Hotkey...", action: #selector(setHotkeyClicked), keyEquivalent: "")
+        appMenu.addItem(withTitle: "Reset Hotkey", action: #selector(resetHotkeyClicked), keyEquivalent: "")
+        appMenu.addItem(NSMenuItem.separator())
         appMenu.addItem(withTitle: "Quit agentmux", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         appItem.submenu = appMenu
         mainMenu.addItem(appItem)
@@ -883,6 +901,270 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSTableVie
 
     private func setStatus(_ text: String) {
         statusLabel.stringValue = text
+    }
+
+    @objc private func setHotkeyClicked() {
+        let field = NSTextField(string: registeredHotkey?.normalized ?? SettingsKey.defaultGUIHotkey)
+        if runModalForm(title: "Set GUI Hotkey", message: "Enter a hotkey like cmd+shift+space or ctrl+alt+f1.", fields: [("Hotkey", field)]) {
+            let raw = field.stringValue
+            do {
+                let spec = try HotkeySpec.parse(raw)
+                try orchestrator().setGUIHotkey(spec.normalized)
+                registerHotkey(spec)
+                lastHotkeyRaw = spec.normalized
+                setStatus("Hotkey set to \(spec.normalized)")
+            } catch {
+                showErrorAlert(title: "Invalid hotkey", message: error.localizedDescription)
+            }
+        }
+    }
+
+    @objc private func resetHotkeyClicked() {
+        do {
+            try orchestrator().setGUIHotkey(nil)
+            let spec = try HotkeySpec.parse(SettingsKey.defaultGUIHotkey)
+            registerHotkey(spec)
+            lastHotkeyRaw = spec.normalized
+            setStatus("Hotkey reset to \(spec.normalized)")
+        } catch {
+            showErrorAlert(title: "Failed to reset hotkey", message: error.localizedDescription)
+        }
+    }
+
+    private func setupHotkey() {
+        do {
+            let raw = try orchestrator().guiHotkey()
+            let spec = try HotkeySpec.parse(raw)
+            registerHotkey(spec)
+            lastHotkeyRaw = raw
+        } catch {
+            setStatus("Hotkey error: \(error.localizedDescription)")
+        }
+    }
+
+    private func registerHotkey(_ spec: HotkeySpec) {
+        unregisterHotkey()
+        guard let keyCode = keyCode(for: spec.key) else {
+            setStatus("Unsupported hotkey key: \(spec.key)")
+            return
+        }
+
+        let modifiers = carbonModifiers(from: spec.modifiers)
+        let hotkeyID = EventHotKeyID(signature: fourCharCode("AMUX"), id: 1)
+        let status = RegisterEventHotKey(keyCode, modifiers, hotkeyID, GetEventDispatcherTarget(), 0, &hotkeyRef)
+        if status != noErr {
+            setStatus("Failed to register hotkey (\(status))")
+            return
+        }
+
+        var eventSpec = EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyPressed))
+        InstallEventHandler(
+            GetEventDispatcherTarget(),
+            hotkeyHandlerProc,
+            1,
+            &eventSpec,
+            UnsafeMutableRawPointer(Unmanaged.passUnretained(self).toOpaque()),
+            &hotkeyHandler
+        )
+        registeredHotkey = spec
+    }
+
+    private func unregisterHotkey() {
+        if let hotkeyRef {
+            UnregisterEventHotKey(hotkeyRef)
+            self.hotkeyRef = nil
+        }
+        if let hotkeyHandler {
+            RemoveEventHandler(hotkeyHandler)
+            self.hotkeyHandler = nil
+        }
+        registeredHotkey = nil
+    }
+
+    fileprivate func toggleWindowFromHotkey() {
+        if window.isVisible {
+            if shouldMoveToActiveSpace() {
+                showWindowOnActiveSpace()
+            } else {
+                window.orderOut(nil)
+            }
+        } else {
+            showWindowOnActiveSpace()
+        }
+    }
+
+    private func shouldMoveToActiveSpace() -> Bool {
+        if let targetScreen = screenForActiveDisplay(), window.screen != targetScreen {
+            return true
+        }
+        if !window.isOnActiveSpace {
+            return true
+        }
+        return false
+    }
+
+    private func showWindowOnActiveSpace() {
+        if let screen = screenForActiveDisplay() {
+            centerWindow(on: screen)
+        }
+        window.collectionBehavior.insert(.moveToActiveSpace)
+        if window.isMiniaturized {
+            window.deminiaturize(nil)
+        }
+        window.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
+    private func screenForActiveDisplay() -> NSScreen? {
+        let mouse = NSEvent.mouseLocation
+        return NSScreen.screens.first { $0.frame.contains(mouse) }
+    }
+
+    private func centerWindow(on screen: NSScreen) {
+        let frame = window.frame
+        let visible = screen.visibleFrame
+        let origin = NSPoint(
+            x: visible.origin.x + (visible.size.width - frame.size.width) / 2,
+            y: visible.origin.y + (visible.size.height - frame.size.height) / 2
+        )
+        window.setFrameOrigin(origin)
+    }
+
+    private func keyCode(for key: String) -> UInt32? {
+        let lower = key.lowercased()
+        if lower.count == 1, let scalar = lower.unicodeScalars.first {
+            if CharacterSet.letters.contains(scalar) {
+                switch lower {
+                case "a": return UInt32(kVK_ANSI_A)
+                case "b": return UInt32(kVK_ANSI_B)
+                case "c": return UInt32(kVK_ANSI_C)
+                case "d": return UInt32(kVK_ANSI_D)
+                case "e": return UInt32(kVK_ANSI_E)
+                case "f": return UInt32(kVK_ANSI_F)
+                case "g": return UInt32(kVK_ANSI_G)
+                case "h": return UInt32(kVK_ANSI_H)
+                case "i": return UInt32(kVK_ANSI_I)
+                case "j": return UInt32(kVK_ANSI_J)
+                case "k": return UInt32(kVK_ANSI_K)
+                case "l": return UInt32(kVK_ANSI_L)
+                case "m": return UInt32(kVK_ANSI_M)
+                case "n": return UInt32(kVK_ANSI_N)
+                case "o": return UInt32(kVK_ANSI_O)
+                case "p": return UInt32(kVK_ANSI_P)
+                case "q": return UInt32(kVK_ANSI_Q)
+                case "r": return UInt32(kVK_ANSI_R)
+                case "s": return UInt32(kVK_ANSI_S)
+                case "t": return UInt32(kVK_ANSI_T)
+                case "u": return UInt32(kVK_ANSI_U)
+                case "v": return UInt32(kVK_ANSI_V)
+                case "w": return UInt32(kVK_ANSI_W)
+                case "x": return UInt32(kVK_ANSI_X)
+                case "y": return UInt32(kVK_ANSI_Y)
+                case "z": return UInt32(kVK_ANSI_Z)
+                default: break
+                }
+            }
+            if CharacterSet.decimalDigits.contains(scalar) {
+                switch lower {
+                case "0": return UInt32(kVK_ANSI_0)
+                case "1": return UInt32(kVK_ANSI_1)
+                case "2": return UInt32(kVK_ANSI_2)
+                case "3": return UInt32(kVK_ANSI_3)
+                case "4": return UInt32(kVK_ANSI_4)
+                case "5": return UInt32(kVK_ANSI_5)
+                case "6": return UInt32(kVK_ANSI_6)
+                case "7": return UInt32(kVK_ANSI_7)
+                case "8": return UInt32(kVK_ANSI_8)
+                case "9": return UInt32(kVK_ANSI_9)
+                default: break
+                }
+            }
+        }
+
+        switch lower {
+        case "space": return UInt32(kVK_Space)
+        case "tab": return UInt32(kVK_Tab)
+        case "return": return UInt32(kVK_Return)
+        case "enter": return UInt32(kVK_Return)
+        case "escape": return UInt32(kVK_Escape)
+        case "delete", "backspace": return UInt32(kVK_Delete)
+        case "forwarddelete": return UInt32(kVK_ForwardDelete)
+        case "left": return UInt32(kVK_LeftArrow)
+        case "right": return UInt32(kVK_RightArrow)
+        case "up": return UInt32(kVK_UpArrow)
+        case "down": return UInt32(kVK_DownArrow)
+        default: break
+        }
+
+        if lower.hasPrefix("f"), let value = Int(lower.dropFirst()) {
+            switch value {
+            case 1: return UInt32(kVK_F1)
+            case 2: return UInt32(kVK_F2)
+            case 3: return UInt32(kVK_F3)
+            case 4: return UInt32(kVK_F4)
+            case 5: return UInt32(kVK_F5)
+            case 6: return UInt32(kVK_F6)
+            case 7: return UInt32(kVK_F7)
+            case 8: return UInt32(kVK_F8)
+            case 9: return UInt32(kVK_F9)
+            case 10: return UInt32(kVK_F10)
+            case 11: return UInt32(kVK_F11)
+            case 12: return UInt32(kVK_F12)
+            case 13: return UInt32(kVK_F13)
+            case 14: return UInt32(kVK_F14)
+            case 15: return UInt32(kVK_F15)
+            case 16: return UInt32(kVK_F16)
+            case 17: return UInt32(kVK_F17)
+            case 18: return UInt32(kVK_F18)
+            case 19: return UInt32(kVK_F19)
+            case 20: return UInt32(kVK_F20)
+            default: break
+            }
+        }
+
+        return nil
+    }
+
+    private func carbonModifiers(from modifiers: Set<HotkeyModifier>) -> UInt32 {
+        var flags: UInt32 = 0
+        if modifiers.contains(.cmd) { flags |= UInt32(cmdKey) }
+        if modifiers.contains(.shift) { flags |= UInt32(shiftKey) }
+        if modifiers.contains(.alt) { flags |= UInt32(optionKey) }
+        if modifiers.contains(.ctrl) { flags |= UInt32(controlKey) }
+        return flags
+    }
+
+    private func showErrorAlert(title: String, message: String) {
+        let alert = NSAlert()
+        alert.messageText = title
+        alert.informativeText = message
+        alert.alertStyle = .critical
+        alert.addButton(withTitle: "OK")
+        alert.runModal()
+    }
+
+    private func startHotkeyRefresh() {
+        hotkeyRefreshTimer?.invalidate()
+        hotkeyRefreshTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
+            guard let self else { return }
+            DispatchQueue.main.async {
+                self.refreshHotkeyIfNeeded()
+            }
+        }
+        RunLoop.main.add(hotkeyRefreshTimer!, forMode: .common)
+    }
+
+    private func refreshHotkeyIfNeeded() {
+        do {
+            let raw = try orchestrator().guiHotkey()
+            guard raw != lastHotkeyRaw else { return }
+            let spec = try HotkeySpec.parse(raw)
+            registerHotkey(spec)
+            lastHotkeyRaw = raw
+            setStatus("Hotkey updated to \(spec.normalized)")
+        } catch {
+            setStatus("Hotkey reload failed: \(error.localizedDescription)")
+        }
     }
 
     private func startStatusRefresh() {
@@ -896,6 +1178,14 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSTableVie
         }
         RunLoop.main.add(statusRefreshTimer!, forMode: .common)
     }
+}
+
+private func fourCharCode(_ string: String) -> OSType {
+    var result: OSType = 0
+    for scalar in string.utf8.prefix(4) {
+        result = (result << 8) + OSType(scalar)
+    }
+    return result
 }
 
 private struct TerminalStatus: Decodable {

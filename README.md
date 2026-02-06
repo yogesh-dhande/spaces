@@ -14,14 +14,15 @@ A local macOS control plane for AI coding streams.
 
 ## Getting Started (GUI)
 1. Launch the `agentmux` app.
-2. Add a project:
+2. Toggle the GUI with the global hotkey (default: `cmd+shift+space`).
+3. Add a project:
    - Name: a short identifier (e.g. `agentmux`).
    - Repo Root: the absolute path to the git repository.
-3. Create a stream:
+4. Create a stream:
    - Stream Name: a branch/worktree name (e.g. `feature-x`).
    - Display/Space: the target macOS display/space indices.
-4. Open your editor/terminal in the stream worktree.
-5. Use `show` to capture and recall the windows later (capture is automatic).
+5. Open your editor/terminal in the stream worktree.
+6. Use `show` to capture and recall the windows later (capture is automatic).
 
 ## Common Issues
 - `yabai` missing or not running:
@@ -60,3 +61,11 @@ The GUI stream list shows a card per stream with one row per captured window (ap
 ```bash
 swift build
 ```
+
+## GUI Hotkey
+- Default hotkey: `cmd+shift+space`
+- Set via GUI: App menu -> Set Hotkey...
+- Set via CLI: `agentmux settings set --gui-hotkey "cmd+shift+space"`
+- Reset via CLI: `agentmux settings reset --gui-hotkey`
+- The GUI polls for changes and reloads the hotkey automatically.
+- If the GUI is visible on a different space/display, invoking the hotkey moves it to the active space instead of hiding it.

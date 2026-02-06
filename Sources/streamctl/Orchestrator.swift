@@ -137,6 +137,14 @@ public final class StreamOrchestrator {
         try store.projects()
     }
 
+    public func guiHotkey() throws -> String {
+        try store.setting(key: SettingsKey.guiHotkey) ?? SettingsKey.defaultGUIHotkey
+    }
+
+    public func setGUIHotkey(_ raw: String?) throws {
+        try store.setSetting(key: SettingsKey.guiHotkey, value: raw)
+    }
+
     public func createProject(name: String, repoRoot: String) throws -> Project {
         if try store.project(named: name) != nil {
             throw StreamctlError.projectAlreadyExists(name: name)

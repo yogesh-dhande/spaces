@@ -106,6 +106,23 @@ public final class SQLiteStore {
         )
     }
 
+    public func setting(key: String) throws -> String? {
+        let rows = try queryRows(sql: "SELECT value FROM settings WHERE key = ?", bindings: [key])
+        guard let value = rows.first?.first else { return nil }
+        return value
+    }
+
+    public func setSetting(key: String, value: String?) throws {
+        if let value {
+            try execute(
+                sql: "INSERT INTO settings(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                bindings: [key, value]
+            )
+        } else {
+            try execute(sql: "DELETE FROM settings WHERE key = ?", bindings: [key])
+        }
+    }
+
     public func deleteStream(id: UUID) throws {
         try execute(sql: "DELETE FROM stream_window_identity WHERE stream_id = ?", bindings: [id.uuidString])
         try execute(sql: "DELETE FROM stream_runtime WHERE stream_id = ?", bindings: [id.uuidString])
@@ -246,6 +263,11 @@ public final class SQLiteStore {
         CREATE TABLE IF NOT EXISTS stream_window_identity (
           stream_id TEXT PRIMARY KEY,
           payload BLOB NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS settings (
+          key TEXT PRIMARY KEY,
+          value TEXT NOT NULL
         );
 
         """
