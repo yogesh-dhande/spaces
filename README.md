@@ -69,3 +69,7 @@ swift build
 - Reset via CLI: `agentmux settings reset --gui-hotkey`
 - The GUI polls for changes and reloads the hotkey automatically.
 - If the GUI is visible on a different space/display, invoking the hotkey moves it to the active space instead of hiding it.
+- Stream shortcuts (GUI app active):
+  - Next stream: `cmd+]`
+  - Previous stream: `cmd+[`
+  - Show selected stream: `cmd+return`

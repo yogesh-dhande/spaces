@@ -9,6 +9,10 @@ Main modules:
 - `agentmux`: CLI entrypoint.
 - `agentmux-gui`: AppKit desktop app using `streamctl` directly.
 
+GUI shortcuts:
+- Global hotkey toggles the GUI (user-configurable).
+- When the GUI is active: `cmd+]` next stream, `cmd+[` previous stream, `cmd+return` show selected stream.
+
 ## Lifecycle Semantics
 - `create`: create git worktree + persist stream.
 - `capture`: query yabai windows for the stream's space + persist identity (optional; `show` auto-captures).

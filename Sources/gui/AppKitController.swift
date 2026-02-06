@@ -896,6 +896,27 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSTableVie
         appItem.submenu = appMenu
         mainMenu.addItem(appItem)
 
+        let streamItem = NSMenuItem()
+        let streamMenu = NSMenu(title: "Stream")
+        let nextItem = NSMenuItem(title: "Next Stream", action: #selector(selectNextStream), keyEquivalent: "]")
+        nextItem.keyEquivalentModifierMask = [.command]
+        nextItem.target = self
+        streamMenu.addItem(nextItem)
+
+        let prevItem = NSMenuItem(title: "Previous Stream", action: #selector(selectPreviousStream), keyEquivalent: "[")
+        prevItem.keyEquivalentModifierMask = [.command]
+        prevItem.target = self
+        streamMenu.addItem(prevItem)
+
+        streamMenu.addItem(NSMenuItem.separator())
+        let showItem = NSMenuItem(title: "Show Selected Stream", action: #selector(showSelectedStreamShortcut), keyEquivalent: "\r")
+        showItem.keyEquivalentModifierMask = [.command]
+        showItem.target = self
+        streamMenu.addItem(showItem)
+
+        streamItem.submenu = streamMenu
+        mainMenu.addItem(streamItem)
+
         NSApp.mainMenu = mainMenu
     }
 
@@ -1165,6 +1186,40 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSTableVie
         } catch {
             setStatus("Hotkey reload failed: \(error.localizedDescription)")
         }
+    }
+
+    @objc private func selectNextStream() {
+        selectAdjacentStream(offset: 1)
+    }
+
+    @objc private func selectPreviousStream() {
+        selectAdjacentStream(offset: -1)
+    }
+
+    private func selectAdjacentStream(offset: Int) {
+        guard !streams.isEmpty else {
+            setStatus("No streams to select.")
+            return
+        }
+
+        var current = streamTable.selectedRow
+        if current < 0 || current >= streams.count {
+            current = 0
+        } else {
+            current = (current + offset) % streams.count
+            if current < 0 {
+                current += streams.count
+            }
+        }
+
+        streamTable.selectRowIndexes(IndexSet(integer: current), byExtendingSelection: false)
+        streamTable.scrollRowToVisible(current)
+        selectedStreamName = streams[current].name
+        setStatus("Selected stream '\(streams[current].name)'.")
+    }
+
+    @objc private func showSelectedStreamShortcut() {
+        showStreamClicked()
     }
 
     private func startStatusRefresh() {
