@@ -67,12 +67,23 @@ swift build
 
 ## GUI Hotkey
 - Default hotkey: `cmd+shift+space`
-- Set via GUI: App menu -> Set Hotkey...
+- Set via GUI: App menu -> Set Hotkey... (press the desired key combination)
+- Reset via GUI: App menu -> Reset Hotkey
 - Set via CLI: `agentmux settings set --gui-hotkey "cmd+shift+space"`
 - Reset via CLI: `agentmux settings reset --gui-hotkey`
-- The GUI polls for changes and reloads the hotkey automatically.
+- The GUI polls for changes and reloads the hotkey/shortcuts automatically.
 - If the GUI is visible on a different space/display, invoking the hotkey moves it to the active space instead of hiding it.
 - Stream shortcuts (GUI app active):
   - Next stream: `cmd+]`
   - Previous stream: `cmd+[`
   - Show selected stream: `cmd+return`
+  - Set via GUI: App menu -> Set Shortcuts... (press desired key combinations)
+  - Reset via GUI: App menu -> Reset Shortcuts
+  - Set via CLI:
+    - `agentmux settings set --gui-next-shortcut "cmd+]"`
+    - `agentmux settings set --gui-prev-shortcut "cmd+["`
+    - `agentmux settings set --gui-show-shortcut "cmd+return"`
+  - Reset via CLI:
+    - `agentmux settings reset --gui-next-shortcut`
+    - `agentmux settings reset --gui-prev-shortcut`
+    - `agentmux settings reset --gui-show-shortcut`

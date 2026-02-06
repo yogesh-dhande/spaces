@@ -87,9 +87,35 @@ public struct HotkeySpec: Sendable, Equatable {
             if CharacterSet.decimalDigits.contains(char) {
                 return token
             }
+            let allowedPunctuation: Set<String> = ["[", "]", ";", "'", ",", ".", "/", "\\", "=", "`"]
+            if allowedPunctuation.contains(token) {
+                return token
+            }
         }
 
         switch token {
+        case "minus", "dash":
+            return "minus"
+        case "equals", "equal":
+            return "="
+        case "backslash":
+            return "\\"
+        case "slash":
+            return "/"
+        case "comma":
+            return ","
+        case "period", "dot":
+            return "."
+        case "quote", "apostrophe":
+            return "'"
+        case "semicolon":
+            return ";"
+        case "leftbracket", "lbracket":
+            return "["
+        case "rightbracket", "rbracket":
+            return "]"
+        case "grave", "backtick":
+            return "`"
         case "space", "spacebar":
             return "space"
         case "tab":

@@ -23,6 +23,17 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSTableVie
     private var hotkeyHandler: EventHandlerRef?
     private var registeredHotkey: HotkeySpec?
     private var lastHotkeyRaw: String?
+    private var nextShortcut: HotkeySpec?
+    private var previousShortcut: HotkeySpec?
+    private var showShortcut: HotkeySpec?
+    private var lastNextShortcutRaw: String?
+    private var lastPreviousShortcutRaw: String?
+    private var lastShowShortcutRaw: String?
+    private var shortcutMonitor: Any?
+    private var suppressShortcuts = false
+    private var nextStreamMenuItem: NSMenuItem?
+    private var previousStreamMenuItem: NSMenuItem?
+    private var showStreamMenuItem: NSMenuItem?
     private lazy var hotkeyHandlerProc: EventHandlerUPP = { _, _, userData in
         guard let userData else { return noErr }
         let controller = Unmanaged<AppKitController>.fromOpaque(userData).takeUnretainedValue()
@@ -108,10 +119,155 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSTableVie
         }
     }
 
+    private final class HotkeyCaptureField: NSControl {
+        private final class WeakBox {
+            weak var value: HotkeyCaptureField?
+            init(_ value: HotkeyCaptureField) { self.value = value }
+        }
+
+        private let valueField = NSTextField(string: "")
+        private let placeholder: String
+        private let specFromEvent: (NSEvent) -> HotkeySpec?
+        private static weak var currentFocusedField: HotkeyCaptureField?
+        private static var allFields: [WeakBox] = []
+        private var isFocused = false
+        var capturedSpec: HotkeySpec? {
+            didSet { updateDisplay() }
+        }
+
+        init(placeholder: String, initial: HotkeySpec?, specFromEvent: @escaping (NSEvent) -> HotkeySpec?) {
+            self.placeholder = placeholder
+            self.specFromEvent = specFromEvent
+            self.capturedSpec = initial
+            super.init(frame: .zero)
+            translatesAutoresizingMaskIntoConstraints = false
+            setup()
+            updateDisplay()
+            HotkeyCaptureField.allFields.append(WeakBox(self))
+        }
+
+        required init?(coder: NSCoder) { nil }
+
+        override var acceptsFirstResponder: Bool { true }
+
+        override func acceptsFirstMouse(for event: NSEvent?) -> Bool {
+            return true
+        }
+
+        override func mouseDown(with event: NSEvent) {
+            window?.makeFirstResponder(self)
+            setFocused(true)
+        }
+
+        override func becomeFirstResponder() -> Bool {
+            needsDisplay = true
+            if HotkeyCaptureField.currentFocusedField !== self {
+                HotkeyCaptureField.currentFocusedField?.setFocused(false)
+                HotkeyCaptureField.currentFocusedField = self
+            }
+            setFocused(true)
+            return true
+        }
+
+        override func resignFirstResponder() -> Bool {
+            needsDisplay = true
+            setFocused(false)
+            return true
+        }
+
+        override func keyDown(with event: NSEvent) {
+            guard let spec = specFromEvent(event) else {
+                NSSound.beep()
+                return
+            }
+            capturedSpec = spec
+        }
+
+        @objc private func handleClick(_ sender: Any?) {
+            window?.makeFirstResponder(self)
+            setFocused(true)
+        }
+
+        private func setup() {
+            wantsLayer = true
+            layer?.backgroundColor = NSColor.controlBackgroundColor.cgColor
+            layer?.cornerRadius = 7
+            layer?.borderWidth = 1
+            layer?.borderColor = NSColor.separatorColor.cgColor
+            layer?.shadowColor = NSColor.black.withAlphaComponent(0.15).cgColor
+            layer?.shadowOpacity = 0.6
+            layer?.shadowRadius = 2
+            layer?.shadowOffset = CGSize(width: 0, height: -1)
+
+            valueField.isEditable = false
+            valueField.isSelectable = false
+            valueField.refusesFirstResponder = true
+            valueField.isBordered = false
+            valueField.drawsBackground = false
+            valueField.backgroundColor = .clear
+            valueField.alignment = .center
+            valueField.font = .systemFont(ofSize: 12, weight: .medium)
+            valueField.translatesAutoresizingMaskIntoConstraints = false
+            addSubview(valueField)
+            NSLayoutConstraint.activate([
+                valueField.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 8),
+                valueField.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -8),
+                valueField.topAnchor.constraint(equalTo: topAnchor, constant: 3),
+                valueField.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -3),
+                heightAnchor.constraint(equalToConstant: 24)
+            ])
+
+            let click = NSClickGestureRecognizer(target: self, action: #selector(handleClick(_:)))
+            addGestureRecognizer(click)
+            let valueClick = NSClickGestureRecognizer(target: self, action: #selector(handleClick(_:)))
+            valueField.addGestureRecognizer(valueClick)
+        }
+
+        private func updateDisplay() {
+            if let capturedSpec {
+                valueField.stringValue = capturedSpec.normalized
+                valueField.textColor = .labelColor
+            } else {
+                valueField.stringValue = placeholder
+                valueField.textColor = .secondaryLabelColor
+            }
+        }
+
+        private func updateFocusAppearance() {
+            if isFocused {
+                layer?.borderColor = NSColor.controlAccentColor.cgColor
+            } else {
+                layer?.borderColor = NSColor.separatorColor.cgColor
+            }
+        }
+
+        private func setFocused(_ focused: Bool) {
+            if focused {
+                HotkeyCaptureField.clearAllFocus(except: self)
+                HotkeyCaptureField.currentFocusedField = self
+            } else if HotkeyCaptureField.currentFocusedField === self {
+                HotkeyCaptureField.currentFocusedField = nil
+            }
+            isFocused = focused
+            updateFocusAppearance()
+        }
+
+        private static func clearAllFocus(except field: HotkeyCaptureField?) {
+            allFields = allFields.filter { $0.value != nil }
+            for box in allFields {
+                if let target = box.value, target !== field {
+                    target.setFocused(false)
+                }
+            }
+        }
+    }
+
     public func applicationDidFinishLaunching(_ notification: Notification) {
         setupMenu()
         setupWindow()
         setupHotkey()
+        setupShortcuts()
+        setupShortcutMonitor()
         startHotkeyRefresh()
         reloadProjects()
         startStatusRefresh()
@@ -825,6 +981,76 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSTableVie
         return response == .alertFirstButtonReturn
     }
 
+    private enum KeyCaptureResult {
+        case save
+        case cancel
+        case resetDefaults
+    }
+
+    private func runHotkeyCaptureForm(title: String, message: String, fields: [(String, HotkeyCaptureField)]) -> KeyCaptureResult {
+        let alert = NSAlert()
+        alert.messageText = title
+        alert.informativeText = message
+        alert.alertStyle = .informational
+        alert.addButton(withTitle: "Save")
+        alert.addButton(withTitle: "Cancel")
+        alert.addButton(withTitle: "Reset Defaults")
+
+        let containerHeight = max(190, fields.count * 42 + 30)
+        let container = NSView(frame: NSRect(x: 0, y: 0, width: 460, height: containerHeight))
+        let rows: [[NSView]] = fields.map { label, field in
+            field.frame = NSRect(x: 0, y: 0, width: 180, height: 24)
+            let labelView = NSTextField(labelWithString: label)
+            labelView.alignment = .left
+            labelView.lineBreakMode = .byTruncatingTail
+            labelView.font = .systemFont(ofSize: 13)
+            labelView.frame = NSRect(x: 0, y: 0, width: 250, height: 22)
+            return [labelView, field]
+        }
+
+        let grid = NSGridView(views: rows)
+        grid.translatesAutoresizingMaskIntoConstraints = false
+        grid.rowSpacing = 12
+        grid.columnSpacing = 14
+        if grid.numberOfColumns >= 2 {
+            grid.column(at: 0).xPlacement = .leading
+            grid.column(at: 0).width = 250
+            grid.column(at: 1).xPlacement = .trailing
+            grid.column(at: 1).width = 180
+        }
+        container.addSubview(grid)
+        NSLayoutConstraint.activate([
+            grid.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 8),
+            grid.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -8),
+            grid.topAnchor.constraint(equalTo: container.topAnchor, constant: 6),
+            grid.bottomAnchor.constraint(lessThanOrEqualTo: container.bottomAnchor, constant: -6)
+        ])
+
+        alert.accessoryView = container
+        if let first = fields.first?.1 {
+            alert.window.initialFirstResponder = first
+        }
+        let response = alert.runModal()
+        switch response {
+        case .alertFirstButtonReturn:
+            return .save
+        case .alertThirdButtonReturn:
+            return .resetDefaults
+        default:
+            return .cancel
+        }
+    }
+
+    private func makeHotkeyCaptureField(initial: HotkeySpec) -> HotkeyCaptureField {
+        HotkeyCaptureField(
+            placeholder: "Click then press keys",
+            initial: initial,
+            specFromEvent: { [weak self] event in
+                self?.hotkeySpec(from: event)
+            }
+        )
+    }
+
     private func runStreamModal(
         title: String,
         message: String,
@@ -903,8 +1129,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSTableVie
 
         let appItem = NSMenuItem()
         let appMenu = NSMenu()
-        appMenu.addItem(withTitle: "Set Hotkey...", action: #selector(setHotkeyClicked), keyEquivalent: "")
-        appMenu.addItem(withTitle: "Reset Hotkey", action: #selector(resetHotkeyClicked), keyEquivalent: "")
+        appMenu.addItem(withTitle: "Keyboard Shortcuts...", action: #selector(editKeysClicked), keyEquivalent: "")
         appMenu.addItem(NSMenuItem.separator())
         appMenu.addItem(withTitle: "Quit agentmux", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         appItem.submenu = appMenu
@@ -912,21 +1137,21 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSTableVie
 
         let streamItem = NSMenuItem()
         let streamMenu = NSMenu(title: "Stream")
-        let nextItem = NSMenuItem(title: "Next Stream", action: #selector(selectNextStream), keyEquivalent: "]")
-        nextItem.keyEquivalentModifierMask = [.command]
+        let nextItem = NSMenuItem(title: "Next Stream", action: #selector(selectNextStream), keyEquivalent: "")
         nextItem.target = self
         streamMenu.addItem(nextItem)
+        nextStreamMenuItem = nextItem
 
-        let prevItem = NSMenuItem(title: "Previous Stream", action: #selector(selectPreviousStream), keyEquivalent: "[")
-        prevItem.keyEquivalentModifierMask = [.command]
+        let prevItem = NSMenuItem(title: "Previous Stream", action: #selector(selectPreviousStream), keyEquivalent: "")
         prevItem.target = self
         streamMenu.addItem(prevItem)
+        previousStreamMenuItem = prevItem
 
         streamMenu.addItem(NSMenuItem.separator())
-        let showItem = NSMenuItem(title: "Show Selected Stream", action: #selector(showSelectedStreamShortcut), keyEquivalent: "\r")
-        showItem.keyEquivalentModifierMask = [.command]
+        let showItem = NSMenuItem(title: "Show Selected Stream", action: #selector(showSelectedStreamShortcut), keyEquivalent: "")
         showItem.target = self
         streamMenu.addItem(showItem)
+        showStreamMenuItem = showItem
 
         streamItem.submenu = streamMenu
         mainMenu.addItem(streamItem)
@@ -938,31 +1163,92 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSTableVie
         statusLabel.stringValue = text
     }
 
-    @objc private func setHotkeyClicked() {
-        let field = NSTextField(string: registeredHotkey?.normalized ?? SettingsKey.defaultGUIHotkey)
-        if runModalForm(title: "Set GUI Hotkey", message: "Enter a hotkey like cmd+shift+space or ctrl+alt+f1.", fields: [("Hotkey", field)]) {
-            let raw = field.stringValue
-            do {
-                let spec = try HotkeySpec.parse(raw)
-                try orchestrator().setGUIHotkey(spec.normalized)
-                registerHotkey(spec)
-                lastHotkeyRaw = spec.normalized
-                setStatus("Hotkey set to \(spec.normalized)")
-            } catch {
-                showErrorAlert(title: "Invalid hotkey", message: error.localizedDescription)
-            }
-        }
-    }
-
-    @objc private func resetHotkeyClicked() {
+    @objc private func editKeysClicked() {
         do {
-            try orchestrator().setGUIHotkey(nil)
-            let spec = try HotkeySpec.parse(SettingsKey.defaultGUIHotkey)
-            registerHotkey(spec)
-            lastHotkeyRaw = spec.normalized
-            setStatus("Hotkey reset to \(spec.normalized)")
+            let currentHotkey = try HotkeySpec.parse(try orchestrator().guiHotkey())
+            let currentNext = try HotkeySpec.parse(try orchestrator().guiNextShortcut())
+            let currentPrev = try HotkeySpec.parse(try orchestrator().guiPreviousShortcut())
+            let currentShow = try HotkeySpec.parse(try orchestrator().guiShowShortcut())
+
+            let hotkeyField = makeHotkeyCaptureField(initial: currentHotkey)
+            let nextField = makeHotkeyCaptureField(initial: currentNext)
+            let prevField = makeHotkeyCaptureField(initial: currentPrev)
+            let showField = makeHotkeyCaptureField(initial: currentShow)
+
+            suppressShortcuts = true
+            unregisterHotkey()
+            let result = runHotkeyCaptureForm(
+                title: "Keyboard Shortcuts",
+                message: "Click a field and press the key combination you want.",
+                fields: [
+                    ("Toggle agentmux window", hotkeyField),
+                    ("Next stream", nextField),
+                    ("Previous stream", prevField),
+                    ("Show selected stream", showField)
+                ]
+            )
+
+            var didRegisterHotkey = false
+            switch result {
+            case .save:
+                guard
+                    let hotkeySpec = hotkeyField.capturedSpec,
+                    let nextSpec = nextField.capturedSpec,
+                    let prevSpec = prevField.capturedSpec,
+                    let showSpec = showField.capturedSpec
+                else {
+                    showErrorAlert(title: "Invalid shortcuts", message: "Missing one or more shortcuts.")
+                    return
+                }
+                try orchestrator().setGUIHotkey(hotkeySpec.normalized)
+                try orchestrator().setGUINextShortcut(nextSpec.normalized)
+                try orchestrator().setGUIPreviousShortcut(prevSpec.normalized)
+                try orchestrator().setGUIShowShortcut(showSpec.normalized)
+                registerHotkey(hotkeySpec)
+                didRegisterHotkey = true
+                lastHotkeyRaw = hotkeySpec.normalized
+                nextShortcut = nextSpec
+                previousShortcut = prevSpec
+                showShortcut = showSpec
+                lastNextShortcutRaw = nextSpec.normalized
+                lastPreviousShortcutRaw = prevSpec.normalized
+                lastShowShortcutRaw = showSpec.normalized
+                updateShortcutMenuItems()
+                updateHotkeyHint()
+                setStatus("Shortcuts updated.")
+            case .resetDefaults:
+                try orchestrator().setGUIHotkey(nil)
+                try orchestrator().setGUINextShortcut(nil)
+                try orchestrator().setGUIPreviousShortcut(nil)
+                try orchestrator().setGUIShowShortcut(nil)
+                let hotkeySpec = try HotkeySpec.parse(SettingsKey.defaultGUIHotkey)
+                let nextSpec = try HotkeySpec.parse(SettingsKey.defaultGUINextShortcut)
+                let prevSpec = try HotkeySpec.parse(SettingsKey.defaultGUIPreviousShortcut)
+                let showSpec = try HotkeySpec.parse(SettingsKey.defaultGUIShowShortcut)
+                registerHotkey(hotkeySpec)
+                didRegisterHotkey = true
+                lastHotkeyRaw = hotkeySpec.normalized
+                nextShortcut = nextSpec
+                previousShortcut = prevSpec
+                showShortcut = showSpec
+                lastNextShortcutRaw = nextSpec.normalized
+                lastPreviousShortcutRaw = prevSpec.normalized
+                lastShowShortcutRaw = showSpec.normalized
+                updateShortcutMenuItems()
+                updateHotkeyHint()
+                setStatus("Shortcuts reset.")
+            case .cancel:
+                break
+            }
+            suppressShortcuts = false
+            if !didRegisterHotkey {
+                registerHotkey(currentHotkey)
+                lastHotkeyRaw = currentHotkey.normalized
+                updateHotkeyHint()
+            }
         } catch {
-            showErrorAlert(title: "Failed to reset hotkey", message: error.localizedDescription)
+            suppressShortcuts = false
+            showErrorAlert(title: "Invalid shortcuts", message: error.localizedDescription)
         }
     }
 
@@ -977,6 +1263,64 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSTableVie
             setStatus("Hotkey error: \(error.localizedDescription)")
             updateHotkeyHint()
         }
+    }
+
+    private func setupShortcuts() {
+        do {
+            let nextRaw = try orchestrator().guiNextShortcut()
+            let prevRaw = try orchestrator().guiPreviousShortcut()
+            let showRaw = try orchestrator().guiShowShortcut()
+            let nextSpec = try HotkeySpec.parse(nextRaw)
+            let prevSpec = try HotkeySpec.parse(prevRaw)
+            let showSpec = try HotkeySpec.parse(showRaw)
+            nextShortcut = nextSpec
+            previousShortcut = prevSpec
+            showShortcut = showSpec
+            lastNextShortcutRaw = nextRaw
+            lastPreviousShortcutRaw = prevRaw
+            lastShowShortcutRaw = showRaw
+            updateShortcutMenuItems()
+            updateHotkeyHint()
+        } catch {
+            setStatus("Shortcut error: \(error.localizedDescription)")
+            updateHotkeyHint()
+        }
+    }
+
+    private func setupShortcutMonitor() {
+        shortcutMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            guard let self else { return event }
+            guard self.shouldHandleShortcuts() else { return event }
+            guard !event.isARepeat else { return event }
+            guard let spec = self.hotkeySpec(from: event) else { return event }
+
+            if spec == self.nextShortcut {
+                self.selectNextStream()
+                return nil
+            }
+            if spec == self.previousShortcut {
+                self.selectPreviousStream()
+                return nil
+            }
+            if spec == self.showShortcut {
+                self.showSelectedStreamShortcut()
+                return nil
+            }
+
+            return event
+        }
+    }
+
+    private func shouldHandleShortcuts() -> Bool {
+        if suppressShortcuts { return false }
+        guard window.isKeyWindow else { return false }
+        if let responder = window.firstResponder as? NSTextView, responder.isEditable {
+            return false
+        }
+        if let responder = window.firstResponder as? NSTextField, responder.isEditable {
+            return false
+        }
+        return true
     }
 
     private func registerHotkey(_ spec: HotkeySpec) {
@@ -1069,6 +1413,106 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSTableVie
         window.setFrameOrigin(origin)
     }
 
+    private func hotkeySpec(from event: NSEvent) -> HotkeySpec? {
+        guard let key = keyName(for: event.keyCode) else { return nil }
+        let modifiers = hotkeyModifiers(from: event.modifierFlags)
+        return HotkeySpec(key: key, modifiers: modifiers)
+    }
+
+    private func hotkeyModifiers(from flags: NSEvent.ModifierFlags) -> Set<HotkeyModifier> {
+        let masked = flags.intersection(.deviceIndependentFlagsMask)
+        var modifiers = Set<HotkeyModifier>()
+        if masked.contains(.command) { modifiers.insert(.cmd) }
+        if masked.contains(.shift) { modifiers.insert(.shift) }
+        if masked.contains(.option) { modifiers.insert(.alt) }
+        if masked.contains(.control) { modifiers.insert(.ctrl) }
+        return modifiers
+    }
+
+    private func keyName(for keyCode: UInt16) -> String? {
+        switch keyCode {
+        case UInt16(kVK_ANSI_A): return "a"
+        case UInt16(kVK_ANSI_B): return "b"
+        case UInt16(kVK_ANSI_C): return "c"
+        case UInt16(kVK_ANSI_D): return "d"
+        case UInt16(kVK_ANSI_E): return "e"
+        case UInt16(kVK_ANSI_F): return "f"
+        case UInt16(kVK_ANSI_G): return "g"
+        case UInt16(kVK_ANSI_H): return "h"
+        case UInt16(kVK_ANSI_I): return "i"
+        case UInt16(kVK_ANSI_J): return "j"
+        case UInt16(kVK_ANSI_K): return "k"
+        case UInt16(kVK_ANSI_L): return "l"
+        case UInt16(kVK_ANSI_M): return "m"
+        case UInt16(kVK_ANSI_N): return "n"
+        case UInt16(kVK_ANSI_O): return "o"
+        case UInt16(kVK_ANSI_P): return "p"
+        case UInt16(kVK_ANSI_Q): return "q"
+        case UInt16(kVK_ANSI_R): return "r"
+        case UInt16(kVK_ANSI_S): return "s"
+        case UInt16(kVK_ANSI_T): return "t"
+        case UInt16(kVK_ANSI_U): return "u"
+        case UInt16(kVK_ANSI_V): return "v"
+        case UInt16(kVK_ANSI_W): return "w"
+        case UInt16(kVK_ANSI_X): return "x"
+        case UInt16(kVK_ANSI_Y): return "y"
+        case UInt16(kVK_ANSI_Z): return "z"
+        case UInt16(kVK_ANSI_0): return "0"
+        case UInt16(kVK_ANSI_1): return "1"
+        case UInt16(kVK_ANSI_2): return "2"
+        case UInt16(kVK_ANSI_3): return "3"
+        case UInt16(kVK_ANSI_4): return "4"
+        case UInt16(kVK_ANSI_5): return "5"
+        case UInt16(kVK_ANSI_6): return "6"
+        case UInt16(kVK_ANSI_7): return "7"
+        case UInt16(kVK_ANSI_8): return "8"
+        case UInt16(kVK_ANSI_9): return "9"
+        case UInt16(kVK_ANSI_LeftBracket): return "["
+        case UInt16(kVK_ANSI_RightBracket): return "]"
+        case UInt16(kVK_ANSI_Semicolon): return ";"
+        case UInt16(kVK_ANSI_Quote): return "'"
+        case UInt16(kVK_ANSI_Comma): return ","
+        case UInt16(kVK_ANSI_Period): return "."
+        case UInt16(kVK_ANSI_Slash): return "/"
+        case UInt16(kVK_ANSI_Backslash): return "\\"
+        case UInt16(kVK_ANSI_Minus): return "minus"
+        case UInt16(kVK_ANSI_Equal): return "="
+        case UInt16(kVK_ANSI_Grave): return "`"
+        case UInt16(kVK_Space): return "space"
+        case UInt16(kVK_Tab): return "tab"
+        case UInt16(kVK_Return): return "return"
+        case UInt16(kVK_ANSI_KeypadEnter): return "enter"
+        case UInt16(kVK_Escape): return "escape"
+        case UInt16(kVK_Delete): return "delete"
+        case UInt16(kVK_ForwardDelete): return "forwarddelete"
+        case UInt16(kVK_LeftArrow): return "left"
+        case UInt16(kVK_RightArrow): return "right"
+        case UInt16(kVK_UpArrow): return "up"
+        case UInt16(kVK_DownArrow): return "down"
+        case UInt16(kVK_F1): return "f1"
+        case UInt16(kVK_F2): return "f2"
+        case UInt16(kVK_F3): return "f3"
+        case UInt16(kVK_F4): return "f4"
+        case UInt16(kVK_F5): return "f5"
+        case UInt16(kVK_F6): return "f6"
+        case UInt16(kVK_F7): return "f7"
+        case UInt16(kVK_F8): return "f8"
+        case UInt16(kVK_F9): return "f9"
+        case UInt16(kVK_F10): return "f10"
+        case UInt16(kVK_F11): return "f11"
+        case UInt16(kVK_F12): return "f12"
+        case UInt16(kVK_F13): return "f13"
+        case UInt16(kVK_F14): return "f14"
+        case UInt16(kVK_F15): return "f15"
+        case UInt16(kVK_F16): return "f16"
+        case UInt16(kVK_F17): return "f17"
+        case UInt16(kVK_F18): return "f18"
+        case UInt16(kVK_F19): return "f19"
+        case UInt16(kVK_F20): return "f20"
+        default: return nil
+        }
+    }
+
     private func keyCode(for key: String) -> UInt32? {
         let lower = key.lowercased()
         if lower.count == 1, let scalar = lower.unicodeScalars.first {
@@ -1121,6 +1565,17 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSTableVie
         }
 
         switch lower {
+        case "[": return UInt32(kVK_ANSI_LeftBracket)
+        case "]": return UInt32(kVK_ANSI_RightBracket)
+        case ";": return UInt32(kVK_ANSI_Semicolon)
+        case "'": return UInt32(kVK_ANSI_Quote)
+        case ",": return UInt32(kVK_ANSI_Comma)
+        case ".": return UInt32(kVK_ANSI_Period)
+        case "/": return UInt32(kVK_ANSI_Slash)
+        case "\\": return UInt32(kVK_ANSI_Backslash)
+        case "minus", "dash": return UInt32(kVK_ANSI_Minus)
+        case "=": return UInt32(kVK_ANSI_Equal)
+        case "`": return UInt32(kVK_ANSI_Grave)
         case "space": return UInt32(kVK_Space)
         case "tab": return UInt32(kVK_Tab)
         case "return": return UInt32(kVK_Return)
@@ -1173,6 +1628,51 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSTableVie
         return flags
     }
 
+    private func updateShortcutMenuItems() {
+        if let nextShortcut {
+            applyMenuShortcutDisplay(nextShortcut, to: nextStreamMenuItem)
+        }
+        if let previousShortcut {
+            applyMenuShortcutDisplay(previousShortcut, to: previousStreamMenuItem)
+        }
+        if let showShortcut {
+            applyMenuShortcutDisplay(showShortcut, to: showStreamMenuItem)
+        }
+    }
+
+    private func applyMenuShortcutDisplay(_ spec: HotkeySpec, to item: NSMenuItem?) {
+        guard let item else { return }
+        if let (key, mask) = menuKeyEquivalent(for: spec) {
+            item.keyEquivalent = key
+            item.keyEquivalentModifierMask = mask
+        } else {
+            item.keyEquivalent = ""
+            item.keyEquivalentModifierMask = []
+        }
+    }
+
+    private func menuKeyEquivalent(for spec: HotkeySpec) -> (String, NSEvent.ModifierFlags)? {
+        let key = spec.key.lowercased()
+        let equivalent: String
+        switch key {
+        case "space": equivalent = " "
+        case "tab": equivalent = "\t"
+        case "return", "enter": equivalent = "\r"
+        case "escape": equivalent = "\u{1b}"
+        case "minus": equivalent = "-"
+        default:
+            guard key.count == 1 else { return nil }
+            equivalent = key
+        }
+
+        var mask: NSEvent.ModifierFlags = []
+        if spec.modifiers.contains(.cmd) { mask.insert(.command) }
+        if spec.modifiers.contains(.shift) { mask.insert(.shift) }
+        if spec.modifiers.contains(.alt) { mask.insert(.option) }
+        if spec.modifiers.contains(.ctrl) { mask.insert(.control) }
+        return (equivalent, mask)
+    }
+
     private func showErrorAlert(title: String, message: String) {
         let alert = NSAlert()
         alert.messageText = title
@@ -1187,30 +1687,58 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSTableVie
         hotkeyRefreshTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
             guard let self else { return }
             DispatchQueue.main.async {
-                self.refreshHotkeyIfNeeded()
+                self.refreshBindingsIfNeeded()
             }
         }
         RunLoop.main.add(hotkeyRefreshTimer!, forMode: .common)
     }
 
-    private func refreshHotkeyIfNeeded() {
+    private func refreshBindingsIfNeeded() {
         do {
-            let raw = try orchestrator().guiHotkey()
-            guard raw != lastHotkeyRaw else { return }
-            let spec = try HotkeySpec.parse(raw)
-            registerHotkey(spec)
-            lastHotkeyRaw = raw
-            setStatus("Hotkey updated to \(spec.normalized)")
+            let hotkeyRaw = try orchestrator().guiHotkey()
+            if hotkeyRaw != lastHotkeyRaw {
+                let spec = try HotkeySpec.parse(hotkeyRaw)
+                registerHotkey(spec)
+                lastHotkeyRaw = hotkeyRaw
+                setStatus("Hotkey updated to \(spec.normalized)")
+            }
+
+            let nextRaw = try orchestrator().guiNextShortcut()
+            let prevRaw = try orchestrator().guiPreviousShortcut()
+            let showRaw = try orchestrator().guiShowShortcut()
+            var shortcutsChanged = false
+            if nextRaw != lastNextShortcutRaw {
+                nextShortcut = try HotkeySpec.parse(nextRaw)
+                lastNextShortcutRaw = nextRaw
+                shortcutsChanged = true
+            }
+            if prevRaw != lastPreviousShortcutRaw {
+                previousShortcut = try HotkeySpec.parse(prevRaw)
+                lastPreviousShortcutRaw = prevRaw
+                shortcutsChanged = true
+            }
+            if showRaw != lastShowShortcutRaw {
+                showShortcut = try HotkeySpec.parse(showRaw)
+                lastShowShortcutRaw = showRaw
+                shortcutsChanged = true
+            }
+            if shortcutsChanged {
+                updateShortcutMenuItems()
+                setStatus("Shortcuts updated.")
+            }
             updateHotkeyHint()
         } catch {
-            setStatus("Hotkey reload failed: \(error.localizedDescription)")
+            setStatus("Bindings reload failed: \(error.localizedDescription)")
             updateHotkeyHint()
         }
     }
 
     private func updateHotkeyHint() {
         let hotkey = registeredHotkey?.normalized ?? SettingsKey.defaultGUIHotkey
-        let hint = "Hotkey: \(hotkey)  |  Next: cmd+]  Prev: cmd+[  Show: cmd+return"
+        let next = nextShortcut?.normalized ?? SettingsKey.defaultGUINextShortcut
+        let prev = previousShortcut?.normalized ?? SettingsKey.defaultGUIPreviousShortcut
+        let show = showShortcut?.normalized ?? SettingsKey.defaultGUIShowShortcut
+        let hint = "Hotkey: \(hotkey)  |  Next: \(next)  Prev: \(prev)  Show: \(show)"
         hotkeyHintLabel.stringValue = hint
         hotkeyHintLabel.toolTip = hint
     }

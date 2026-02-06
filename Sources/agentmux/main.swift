@@ -115,8 +115,21 @@ struct CLI {
             if args.contains("--gui-hotkey") {
                 let current = try orchestrator.guiHotkey()
                 print("gui-hotkey\t\(current)")
+            } else if args.contains("--gui-next-shortcut") {
+                let current = try orchestrator.guiNextShortcut()
+                print("gui-next-shortcut\t\(current)")
+            } else if args.contains("--gui-prev-shortcut") {
+                let current = try orchestrator.guiPreviousShortcut()
+                print("gui-prev-shortcut\t\(current)")
+            } else if args.contains("--gui-show-shortcut") {
+                let current = try orchestrator.guiShowShortcut()
+                print("gui-show-shortcut\t\(current)")
             } else {
-                throw NSError(domain: "agentmux.cli", code: 2, userInfo: [NSLocalizedDescriptionKey: "Missing setting flag. Use: settings get --gui-hotkey"])
+                throw NSError(
+                    domain: "agentmux.cli",
+                    code: 2,
+                    userInfo: [NSLocalizedDescriptionKey: "Missing setting flag. Use: settings get --gui-hotkey|--gui-next-shortcut|--gui-prev-shortcut|--gui-show-shortcut"]
+                )
             }
 
         case "set":
@@ -124,16 +137,45 @@ struct CLI {
                 let spec = try HotkeySpec.parse(raw)
                 try orchestrator.setGUIHotkey(spec.normalized)
                 print("Updated gui-hotkey\t\(spec.normalized)")
+            } else if let raw = optionalValue(for: "--gui-next-shortcut") {
+                let spec = try HotkeySpec.parse(raw)
+                try orchestrator.setGUINextShortcut(spec.normalized)
+                print("Updated gui-next-shortcut\t\(spec.normalized)")
+            } else if let raw = optionalValue(for: "--gui-prev-shortcut") {
+                let spec = try HotkeySpec.parse(raw)
+                try orchestrator.setGUIPreviousShortcut(spec.normalized)
+                print("Updated gui-prev-shortcut\t\(spec.normalized)")
+            } else if let raw = optionalValue(for: "--gui-show-shortcut") {
+                let spec = try HotkeySpec.parse(raw)
+                try orchestrator.setGUIShowShortcut(spec.normalized)
+                print("Updated gui-show-shortcut\t\(spec.normalized)")
             } else {
-                throw NSError(domain: "agentmux.cli", code: 2, userInfo: [NSLocalizedDescriptionKey: "Missing --gui-hotkey value. Use: settings set --gui-hotkey \"cmd+shift+space\""])
+                throw NSError(
+                    domain: "agentmux.cli",
+                    code: 2,
+                    userInfo: [NSLocalizedDescriptionKey: "Missing setting flag/value. Use: settings set --gui-hotkey|--gui-next-shortcut|--gui-prev-shortcut|--gui-show-shortcut <spec>"]
+                )
             }
 
         case "reset":
             if args.contains("--gui-hotkey") {
                 try orchestrator.setGUIHotkey(nil)
                 print("Reset gui-hotkey\t\(SettingsKey.defaultGUIHotkey)")
+            } else if args.contains("--gui-next-shortcut") {
+                try orchestrator.setGUINextShortcut(nil)
+                print("Reset gui-next-shortcut\t\(SettingsKey.defaultGUINextShortcut)")
+            } else if args.contains("--gui-prev-shortcut") {
+                try orchestrator.setGUIPreviousShortcut(nil)
+                print("Reset gui-prev-shortcut\t\(SettingsKey.defaultGUIPreviousShortcut)")
+            } else if args.contains("--gui-show-shortcut") {
+                try orchestrator.setGUIShowShortcut(nil)
+                print("Reset gui-show-shortcut\t\(SettingsKey.defaultGUIShowShortcut)")
             } else {
-                throw NSError(domain: "agentmux.cli", code: 2, userInfo: [NSLocalizedDescriptionKey: "Missing setting flag. Use: settings reset --gui-hotkey"])
+                throw NSError(
+                    domain: "agentmux.cli",
+                    code: 2,
+                    userInfo: [NSLocalizedDescriptionKey: "Missing setting flag. Use: settings reset --gui-hotkey|--gui-next-shortcut|--gui-prev-shortcut|--gui-show-shortcut"]
+                )
             }
 
         default:
@@ -323,8 +365,17 @@ struct CLI {
           agentmux seed-json --file <seed.json>
 
           agentmux settings get --gui-hotkey
+          agentmux settings get --gui-next-shortcut
+          agentmux settings get --gui-prev-shortcut
+          agentmux settings get --gui-show-shortcut
           agentmux settings set --gui-hotkey <spec>
+          agentmux settings set --gui-next-shortcut <spec>
+          agentmux settings set --gui-prev-shortcut <spec>
+          agentmux settings set --gui-show-shortcut <spec>
           agentmux settings reset --gui-hotkey
+          agentmux settings reset --gui-next-shortcut
+          agentmux settings reset --gui-prev-shortcut
+          agentmux settings reset --gui-show-shortcut
 
           agentmux project list
           agentmux project create --name <name> --repo-root <path>

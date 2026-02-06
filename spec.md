@@ -121,7 +121,7 @@ Tables:
   - captured windows listed per stream as rows in a card, with status when available and auto-refresh
 - Global hotkey toggle for show/hide (user-configurable; default `cmd+shift+space`)
 - If visible on another space/display, the hotkey moves the GUI to the active space instead of hiding it
-- GUI shortcuts (when app is active): `cmd+]` next stream, `cmd+[` previous stream, `cmd+return` show selected stream
+- GUI shortcuts (when app is active) are configurable via GUI (press desired key combinations). Defaults: `cmd+]` next stream, `cmd+[` previous stream, `cmd+return` show selected stream
 
 ### CLI
 - project CRUD

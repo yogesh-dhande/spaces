@@ -10,8 +10,8 @@ Main modules:
 - `agentmux-gui`: AppKit desktop app using `streamctl` directly.
 
 GUI shortcuts:
-- Global hotkey toggles the GUI (user-configurable).
-- When the GUI is active: `cmd+]` next stream, `cmd+[` previous stream, `cmd+return` show selected stream.
+- Global hotkey toggles the GUI (user-configurable via GUI/CLI).
+- When the GUI is active: shortcuts are configurable via GUI/CLI (defaults: `cmd+]` next stream, `cmd+[` previous stream, `cmd+return` show selected stream).
 
 ## Lifecycle Semantics
 - `create`: create git worktree + persist stream.
@@ -28,7 +28,7 @@ Tables:
 - `streams`: serialized `Stream` payload by `(project_id, name)`.
 - `stream_runtime`: active/inactive state and timestamps.
 - `stream_window_identity`: captured window sets per stream.
-- `settings`: key/value settings (e.g., GUI hotkey).
+- `settings`: key/value settings (e.g., GUI hotkey + GUI shortcuts).
 
 Local status files:
 - Terminal status files written by `agentmux wrap` once the focused window is captured.
@@ -49,6 +49,9 @@ Local status files:
 - `agentmux list-active`
 - `agentmux doctor [--project <name>] [--stream <name>]`
 - `agentmux settings get|set|reset --gui-hotkey ...`
+- `agentmux settings get|set|reset --gui-next-shortcut ...`
+- `agentmux settings get|set|reset --gui-prev-shortcut ...`
+- `agentmux settings get|set|reset --gui-show-shortcut ...`
 - `agentmux wrap [--project <name> --stream <name>] -- <command> [args...]`
 - `agentmux wrap [--project <name> --stream <name>] <command> [args...]`
 

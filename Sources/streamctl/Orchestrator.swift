@@ -145,6 +145,30 @@ public final class StreamOrchestrator {
         try store.setSetting(key: SettingsKey.guiHotkey, value: raw)
     }
 
+    public func guiNextShortcut() throws -> String {
+        try store.setting(key: SettingsKey.guiNextShortcut) ?? SettingsKey.defaultGUINextShortcut
+    }
+
+    public func setGUINextShortcut(_ raw: String?) throws {
+        try store.setSetting(key: SettingsKey.guiNextShortcut, value: raw)
+    }
+
+    public func guiPreviousShortcut() throws -> String {
+        try store.setting(key: SettingsKey.guiPreviousShortcut) ?? SettingsKey.defaultGUIPreviousShortcut
+    }
+
+    public func setGUIPreviousShortcut(_ raw: String?) throws {
+        try store.setSetting(key: SettingsKey.guiPreviousShortcut, value: raw)
+    }
+
+    public func guiShowShortcut() throws -> String {
+        try store.setting(key: SettingsKey.guiShowShortcut) ?? SettingsKey.defaultGUIShowShortcut
+    }
+
+    public func setGUIShowShortcut(_ raw: String?) throws {
+        try store.setSetting(key: SettingsKey.guiShowShortcut, value: raw)
+    }
+
     public func createProject(name: String, repoRoot: String) throws -> Project {
         if try store.project(named: name) != nil {
             throw StreamctlError.projectAlreadyExists(name: name)
