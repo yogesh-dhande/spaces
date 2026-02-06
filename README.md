@@ -21,8 +21,7 @@ A local macOS control plane for AI coding streams.
    - Stream Name: a branch/worktree name (e.g. `feature-x`).
    - Display/Space: the target macOS display/space indices.
 4. Open your editor/terminal in the stream worktree.
-5. Capture windows for the stream.
-6. Use `show` to recall the captured windows later.
+5. Use `show` to capture and recall the windows later (capture is automatic).
 
 ## Common Issues
 - `yabai` missing or not running:
@@ -31,7 +30,7 @@ A local macOS control plane for AI coding streams.
 - Accessibility permissions missing:
   - Go to System Settings -> Privacy & Security -> Accessibility.
   - Enable access for `yabai` and `agentmux` (if listed).
-  - Re-run `stream capture` after granting access.
+- Re-run `show` after granting access.
 
 ## Current Model
 - Projects have:
@@ -45,7 +44,7 @@ A local macOS control plane for AI coding streams.
 - Each stream has a captured set of windows (yabai window IDs)
 - Each terminal window can emit a status file via `agentmux wrap`
 
-Note: If `show` reports that no compatible windows could be focused, close and reopen the target app windows, then re-run `stream capture`.
+Note: If `show` reports that no compatible windows could be focused, close and reopen the target app windows, then re-run `show`.
 Note: Database state is stored at `~/.agentmux/agentmux.db` and is managed automatically.
 
 ## Terminal Status Tracking
@@ -54,7 +53,7 @@ Use `agentmux wrap` to run a command under a PTY and publish status per terminal
 agentmux wrap [--project <name> --stream <name>] -- <command> [args...]
 agentmux wrap [--project <name> --stream <name>] <command> [args...]
 ```
-Status files are written to `<worktree>/.agentmux/status/window-<id>.json` once the focused window is captured.
+Status files are written to `<worktree>/.agentmux/status/window-<id>.json` once the focused window is captured by `show`.
 The GUI stream list shows a card per stream with one row per captured window (app/title) and status when available, auto-refreshing periodically.
 
 ## Build

@@ -9,15 +9,15 @@
 
 ## Accomplished
 - Implemented shared Swift modules: `appctl`, `streamctl`.
-- Implemented stream lifecycle backend: `create`, `capture`, `show`, `destroy`.
+- Implemented stream lifecycle backend: `create`, `capture` (manual), `show` (auto-captures), `destroy`.
 - Implemented CLI project/stream CRUD:
   - `project list/create/update/delete`
-  - `stream list/create/update/capture/destroy`
+  - `stream list/create/update/capture/destroy` (capture optional; `show` auto-captures)
 - Implemented `doctor` diagnostics for captured/missing windows.
 - Implemented AppKit GUI MVP:
   - project list/add/edit/delete
   - stream list/add/edit/destroy
-  - stream actions: `capture`, `show`, `doctor`
+  - stream actions: `show` (auto-captures), `doctor`
   - status line feedback
 - Added `agentmux wrap` to emit per-terminal status files for streams.
 - GUI stream list shows a card per stream with per-window status and auto-refresh.
@@ -28,8 +28,5 @@
 - GUI polish:
   - better validation messages and inline guidance
   - richer stream row details (sorting/filtering)
-- Optional: show captured windows list in GUI
+- Optional: richer filtering/sorting in GUI
 - Deeper automated tests for yabai integration (beyond smoke shell script)
-
-## Next Task (start here)
-- Add a GUI modal to display captured windows for a stream.

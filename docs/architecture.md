@@ -11,8 +11,8 @@ Main modules:
 
 ## Lifecycle Semantics
 - `create`: create git worktree + persist stream.
-- `capture`: query yabai windows for the stream's space + persist identity.
-- `show`: focus captured windows + mark active; warn when none are focusable.
+- `capture`: query yabai windows for the stream's space + persist identity (optional; `show` auto-captures).
+- `show`: capture current space windows, focus captured windows + mark active; warn when none are focusable.
 - `destroy`: close captured windows + remove worktree + remove records.
 
 ## Persistence

@@ -18,9 +18,9 @@ Window management is done via yabai window IDs captured from a given space.
 ### MUST (MVP)
 1. Project + Stream model in local SQLite
 2. Stream create/destroy with git worktrees
-3. Window capture per stream (yabai window IDs)
+3. Window capture per stream (yabai window IDs, refreshed on `show`)
 4. Stream actions:
-   - `show`: focus captured windows
+   - `show`: capture current space windows, then focus captured windows
    - `destroy`: close captured windows
 5. Stream diagnostics (`doctor`) for captured/missing windows
 6. AppKit GUI for project/stream operations
@@ -71,11 +71,12 @@ Per focused terminal window:
 ### `stream capture`
 - Query yabai windows for the stream's space
 - Persist the captured window set
+Note: optional; `show` performs capture automatically.
 
 ### `show`
-- Focus each captured window
+- Capture current space windows and focus each captured window
 - Mark stream active
-- If no window can be focused, warn and recommend closing/reopening the target app windows, then re-capture
+- If no window can be focused, warn and recommend closing/reopening the target app windows, then re-run `show`
 
 ### `destroy`
 - Close each captured window
@@ -120,7 +121,7 @@ Tables:
 ### CLI
 - project CRUD
 - stream create/update/list/destroy
-- stream capture
+- stream capture (optional)
 - show
 - list-active
 - doctor

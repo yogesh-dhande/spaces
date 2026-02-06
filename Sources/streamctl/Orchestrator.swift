@@ -89,8 +89,9 @@ public final class StreamOrchestrator {
         let (_, stream) = try resolve(projectName: projectName, streamName: streamName)
         try ensureValidWorktree(stream: stream)
 
+        try capture(projectName: projectName, streamName: streamName)
         guard let identity = try store.windowIdentity(streamID: stream.id) else {
-            throw StreamctlError.invalidArgument(message: "No captured windows for stream. Run 'stream capture' first.")
+            throw StreamctlError.invalidArgument(message: "No captured windows for stream. Run 'show' again after opening windows in the target space.")
         }
 
         print("[stream:\(stream.name)] show windows=\(identity.windows.count)")

@@ -254,7 +254,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSTableVie
         let row1 = NSStackView(views: [
             makeButton(title: "Add", action: #selector(addStreamClicked)),
             makeButton(title: "Edit", action: #selector(editStreamClicked)),
-            makeButton(title: "Capture", action: #selector(captureStreamClicked)),
             makeButton(title: "Destroy", action: #selector(destroyStreamClicked)),
             makeButton(title: "Refresh", action: #selector(refreshStreamsClicked))
         ])
@@ -450,19 +449,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSTableVie
         }
     }
 
-    @objc private func captureStreamClicked() {
-        guard let project = selectedProjectName, let stream = selectedStreamName else {
-            setStatus("Select a stream first.")
-            return
-        }
-        do {
-            try orchestrator().capture(projectName: project, streamName: stream)
-            setStatus("Captured windows for \(project)/\(stream)")
-        } catch {
-            setStatus("Capture failed: \(error.localizedDescription)")
-        }
-    }
-
     @objc private func destroyStreamClicked() {
         guard let project = selectedProjectName, let stream = selectedStreamName else {
             setStatus("Select a stream first.")
@@ -576,7 +562,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSTableVie
         var allWindowIDs: [Int] = []
         var streamFiles: [String: [URL]] = [:]
         var capturedByStream: [String: [WindowIdentity]] = [:]
-        var statusIDsByStream: [String: Set<Int>] = [:]
         for stream in streams {
             let statusDir = URL(fileURLWithPath: stream.worktreePath)
                 .appendingPathComponent(".agentmux", isDirectory: true)
@@ -589,12 +574,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSTableVie
             let jsonFiles = files.filter { $0.pathExtension.lowercased() == "json" }
             guard !jsonFiles.isEmpty else { continue }
             streamFiles[stream.name] = jsonFiles
-            for file in jsonFiles {
-                if let id = windowID(from: file) {
-                    allWindowIDs.append(id)
-                    statusIDsByStream[stream.name, default: []].insert(id)
-                }
-            }
 
             if let windows = try? orchestrator().capturedWindows(projectName: projectName, streamName: stream.name) {
                 capturedByStream[stream.name] = windows
@@ -621,25 +600,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSTableVie
         }
 
         for (streamName, windows) in capturedByStream {
-            var mappedByID: [Int: CapturedWindow] = [:]
-            for win in windows {
+            let mapped = windows.map { win in
                 let title = titleLookup[win.id] ?? win.title ?? win.app
-                mappedByID[win.id] = CapturedWindow(id: win.id, app: win.app, title: title)
-            }
-            if let statusIDs = statusIDsByStream[streamName] {
-                for id in statusIDs where mappedByID[id] == nil {
-                    let title = titleLookup[id] ?? "Unknown Window"
-                    mappedByID[id] = CapturedWindow(id: id, app: "unknown", title: title)
-                }
-            }
-            let mapped = mappedByID.values.sorted { $0.id < $1.id }
-            windowsResult[streamName] = mapped
-        }
-
-        for (streamName, statusIDs) in statusIDsByStream where windowsResult[streamName] == nil {
-            let mapped = statusIDs.map { id in
-                let title = titleLookup[id] ?? "Unknown Window"
-                return CapturedWindow(id: id, app: "unknown", title: title)
+                return CapturedWindow(id: win.id, app: win.app, title: title)
             }.sorted { $0.id < $1.id }
             windowsResult[streamName] = mapped
         }

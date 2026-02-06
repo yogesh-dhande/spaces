@@ -304,7 +304,7 @@ struct CLI {
           agentmux wrap [--project <name> --stream <name>] <command> [args...]
 
         Notes:
-          - `show` focuses captured windows; if none can be focused, close/reopen the target app windows and re-run `stream capture`.
+          - `show` captures current space windows before focusing; if none can be focused, close/reopen the target app windows and re-run `show`.
           - `wrap` runs a command under a PTY and writes status to <worktree>/.agentmux/status/window-<id>.json once the focused window is captured.
           - Database state is stored at ~/.agentmux/agentmux.db and is managed automatically.
         """)
