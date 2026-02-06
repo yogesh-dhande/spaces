@@ -346,6 +346,7 @@ struct CLI {
         Notes:
           - `show` captures current space windows before focusing; if none can be focused, close/reopen the target app windows and re-run `show`.
           - `wrap` runs a command under a PTY and writes status to <worktree>/.agentmux/status/window-<id>.json once the focused window is captured.
+          - Default stream worktrees are created at <repo>/.worktrees/<stream> when --worktree is not provided.
           - Database state is stored at ~/.agentmux/agentmux.db and is managed automatically.
         """)
     }

@@ -45,6 +45,9 @@ A local macOS control plane for AI coding streams.
 - Each stream has a captured set of windows (yabai window IDs)
 - Each terminal window can emit a status file via `agentmux wrap`
 
+## Worktrees
+- Default stream worktrees are created at `<repo>/.worktrees/<stream>` when `--worktree` is not provided.
+
 Note: If `show` reports that no compatible windows could be focused, close and reopen the target app windows, then re-run `show`.
 Note: Database state is stored at `~/.agentmux/agentmux.db` and is managed automatically.
 

@@ -293,7 +293,7 @@ public final class StreamOrchestrator {
     private func defaultWorktreePath(project: Project, streamName: String) -> String {
         let rootURL = URL(fileURLWithPath: project.repoRoot)
         return rootURL
-            .appendingPathComponent(".agentmux-worktrees", isDirectory: true)
+            .appendingPathComponent(".worktrees", isDirectory: true)
             .appendingPathComponent(streamName, isDirectory: true)
             .path
     }

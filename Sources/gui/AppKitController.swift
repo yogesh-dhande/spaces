@@ -10,6 +10,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSTableVie
     private let projectTable = NSTableView()
     private let streamTable = NSTableView()
     private let statusLabel = NSTextField(labelWithString: "")
+    private let hotkeyHintLabel = NSTextField(labelWithString: "")
 
     private var projects: [Project] = []
     private var streams: [StreamSummary] = []
@@ -189,22 +190,35 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSTableVie
         let root = NSView()
         root.translatesAutoresizingMaskIntoConstraints = false
         root.addSubview(split)
-        root.addSubview(statusLabel)
+        let footerStack = NSStackView(views: [statusLabel, hotkeyHintLabel])
+        footerStack.translatesAutoresizingMaskIntoConstraints = false
+        footerStack.orientation = .horizontal
+        footerStack.alignment = .centerY
+        footerStack.spacing = 12
+        footerStack.distribution = .fill
 
-        statusLabel.translatesAutoresizingMaskIntoConstraints = false
+        root.addSubview(footerStack)
+
         statusLabel.textColor = .secondaryLabelColor
         statusLabel.lineBreakMode = .byTruncatingTail
+        statusLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+
+        hotkeyHintLabel.textColor = .tertiaryLabelColor
+        hotkeyHintLabel.font = .systemFont(ofSize: 11)
+        hotkeyHintLabel.alignment = .right
+        hotkeyHintLabel.lineBreakMode = .byTruncatingTail
+        hotkeyHintLabel.setContentCompressionResistancePriority(.defaultHigh, for: .horizontal)
 
         NSLayoutConstraint.activate([
             split.leadingAnchor.constraint(equalTo: root.leadingAnchor),
             split.trailingAnchor.constraint(equalTo: root.trailingAnchor),
             split.topAnchor.constraint(equalTo: root.topAnchor),
-            split.bottomAnchor.constraint(equalTo: statusLabel.topAnchor, constant: -8),
+            split.bottomAnchor.constraint(equalTo: footerStack.topAnchor, constant: -8),
 
-            statusLabel.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 12),
-            statusLabel.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -12),
-            statusLabel.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -10),
-            statusLabel.heightAnchor.constraint(equalToConstant: 20)
+            footerStack.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 12),
+            footerStack.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -12),
+            footerStack.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -10),
+            footerStack.heightAnchor.constraint(equalToConstant: 20)
         ])
 
         window.contentView = root
@@ -958,8 +972,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSTableVie
             let spec = try HotkeySpec.parse(raw)
             registerHotkey(spec)
             lastHotkeyRaw = raw
+            updateHotkeyHint()
         } catch {
             setStatus("Hotkey error: \(error.localizedDescription)")
+            updateHotkeyHint()
         }
     }
 
@@ -988,6 +1004,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSTableVie
             &hotkeyHandler
         )
         registeredHotkey = spec
+        updateHotkeyHint()
     }
 
     private func unregisterHotkey() {
@@ -1000,6 +1017,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSTableVie
             self.hotkeyHandler = nil
         }
         registeredHotkey = nil
+        updateHotkeyHint()
     }
 
     fileprivate func toggleWindowFromHotkey() {
@@ -1183,9 +1201,18 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSTableVie
             registerHotkey(spec)
             lastHotkeyRaw = raw
             setStatus("Hotkey updated to \(spec.normalized)")
+            updateHotkeyHint()
         } catch {
             setStatus("Hotkey reload failed: \(error.localizedDescription)")
+            updateHotkeyHint()
         }
+    }
+
+    private func updateHotkeyHint() {
+        let hotkey = registeredHotkey?.normalized ?? SettingsKey.defaultGUIHotkey
+        let hint = "Hotkey: \(hotkey)  |  Next: cmd+]  Prev: cmd+[  Show: cmd+return"
+        hotkeyHintLabel.stringValue = hint
+        hotkeyHintLabel.toolTip = hint
     }
 
     @objc private func selectNextStream() {

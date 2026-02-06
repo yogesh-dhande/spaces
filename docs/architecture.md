@@ -18,6 +18,7 @@ GUI shortcuts:
 - `capture`: query yabai windows for the stream's space + persist identity (optional; `show` auto-captures).
 - `show`: capture current space windows, focus captured windows + mark active; warn when none are focusable.
 - `destroy`: close captured windows + remove worktree + remove records.
+  - Default worktree path (if not specified): `<repo>/.worktrees/<stream>`.
 
 ## Persistence
 SQLite path: `~/.agentmux/agentmux.db` (managed automatically).

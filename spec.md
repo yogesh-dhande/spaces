@@ -67,6 +67,7 @@ Per focused terminal window:
 - Validate project exists
 - Create git worktree
 - Persist stream with display + space
+- Default worktree path (if not specified): `<repo>/.worktrees/<stream>`
 
 ### `stream capture`
 - Query yabai windows for the stream's space

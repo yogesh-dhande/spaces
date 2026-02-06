@@ -27,6 +27,7 @@
 - GUI auto-reloads the hotkey when settings change.
 - Hotkey moves the GUI to the active space when invoked from another space/display.
 - Added GUI keyboard shortcuts to select next/previous stream and show the selected stream.
+- Default stream worktrees now live under `<repo>/.worktrees/<stream>`.
 
 ## Remaining
 - GUI polish:
