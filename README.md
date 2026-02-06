@@ -12,6 +12,27 @@ A local macOS control plane for AI coding streams.
 - `yabai` installed and running
 - Accessibility permissions granted (for yabai window actions)
 
+## Getting Started (GUI)
+1. Launch the `agentmux` app.
+2. Add a project:
+   - Name: a short identifier (e.g. `agentmux`).
+   - Repo Root: the absolute path to the git repository.
+3. Create a stream:
+   - Stream Name: a branch/worktree name (e.g. `feature-x`).
+   - Display/Space: the target macOS display/space indices.
+4. Open your editor/terminal in the stream worktree.
+5. Capture windows for the stream.
+6. Use `show` to recall the captured windows later.
+
+## Common Issues
+- `yabai` missing or not running:
+  - Install: `brew install yabai`
+  - Start: `yabai --start-service`
+- Accessibility permissions missing:
+  - Go to System Settings -> Privacy & Security -> Accessibility.
+  - Enable access for `yabai` and `agentmux` (if listed).
+  - Re-run `stream capture` after granting access.
+
 ## Current Model
 - Projects have:
   - `name`
@@ -22,21 +43,6 @@ A local macOS control plane for AI coding streams.
   - `display index`
   - `space index`
 - Each stream has a captured set of windows (yabai window IDs)
-
-## CLI (core)
-```bash
-agentmux project create --name <name> --repo-root <path>
-agentmux project update --name <name> [--repo-root <path>]
-agentmux project delete --name <name>
-
-agentmux stream create --project <name> --stream <stream> --display <n> --space <n>
-agentmux stream update --project <name> --stream <stream> [--display <n>] [--space <n>]
-agentmux stream capture --project <name> --stream <stream>
-agentmux stream destroy --project <name> --stream <stream>
-
-agentmux show --project <name> --stream <stream>
-agentmux doctor [--project <name>] [--stream <name>]
-```
 
 Note: If `show` reports that no compatible windows could be focused, close and reopen the target app windows, then re-run `stream capture`.
 Note: Database state is stored at `~/.agentmux/agentmux.db` and is managed automatically.
