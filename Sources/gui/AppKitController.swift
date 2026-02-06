@@ -12,6 +12,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSTableVie
 
     private var projects: [Project] = []
     private var streams: [StreamSummary] = []
+    private var streamStatuses: [String: [WindowStatus]] = [:]
+    private var streamWindows: [String: [CapturedWindow]] = [:]
+    private var statusRefreshTimer: Timer?
 
     private var selectedProjectName: String?
     private var selectedStreamName: String?
@@ -93,6 +96,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSTableVie
         setupMenu()
         setupWindow()
         reloadProjects()
+        startStatusRefresh()
         NSApp.activate(ignoringOtherApps: true)
     }
 
@@ -101,36 +105,28 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSTableVie
         return streams.count
     }
 
+    public func tableView(_ tableView: NSTableView, heightOfRow row: Int) -> CGFloat {
+        if tableView == streamTable, row >= 0, row < streams.count {
+            let stream = streams[row]
+            let windowCount = streamWindows[stream.name]?.count ?? 0
+            let lines = 1 + max(windowCount, 1)
+            return CGFloat(lines) * 20.0 + 8.0
+        }
+        return tableView.rowHeight
+    }
+
     public func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
-        let text: String
         if tableView == projectTable {
             let project = projects[row]
-            text = "\(project.name)  (\(project.repoRoot))"
+            let text = "\(project.name)  (\(project.repoRoot))"
+            return makeTextCell(tableView: tableView, text: text)
         } else {
             let stream = streams[row]
             let marker = stream.isActive ? "●" : "○"
-            text = "\(marker) \(stream.name)  (\(stream.worktreePath))  |  display=\(stream.displayIndex) space=\(stream.spaceIndex)"
+            let header = "\(marker) \(stream.name)  (\(stream.worktreePath))  |  display=\(stream.displayIndex) space=\(stream.spaceIndex)"
+            let lines = formatWindowLines(for: stream.name)
+            return makeStreamCell(tableView: tableView, header: header, lines: lines)
         }
-
-        let id = NSUserInterfaceItemIdentifier("Cell")
-        if let cell = tableView.makeView(withIdentifier: id, owner: nil) as? NSTableCellView {
-            cell.textField?.stringValue = text
-            return cell
-        }
-
-        let cell = NSTableCellView()
-        cell.identifier = id
-        let tf = NSTextField(labelWithString: text)
-        tf.translatesAutoresizingMaskIntoConstraints = false
-        tf.lineBreakMode = .byTruncatingTail
-        cell.addSubview(tf)
-        cell.textField = tf
-        NSLayoutConstraint.activate([
-            tf.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 6),
-            tf.trailingAnchor.constraint(equalTo: cell.trailingAnchor, constant: -6),
-            tf.centerYAnchor.constraint(equalTo: cell.centerYAnchor)
-        ])
-        return cell
     }
 
     public func tableViewSelectionDidChange(_ notification: Notification) {
@@ -543,6 +539,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSTableVie
     private func reloadStreams(selectStream: String? = nil) {
         guard let selectedProjectName else {
             streams = []
+            streamStatuses = [:]
+            streamWindows = [:]
             selectedStreamName = nil
             streamTable.reloadData()
             return
@@ -551,6 +549,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSTableVie
         do {
             let list = try orchestrator().list(projectName: selectedProjectName)
             streams = list
+            let (statuses, windows) = loadStreamStatusesAndWindows(projectName: selectedProjectName, streams: list)
+            streamStatuses = statuses
+            streamWindows = windows
             streamTable.reloadData()
 
             if let selectStream, let idx = list.firstIndex(where: { $0.name == selectStream }) {
@@ -565,6 +566,208 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSTableVie
             }
         } catch {
             setStatus("Error loading streams: \(error.localizedDescription)")
+        }
+    }
+
+    private func loadStreamStatusesAndWindows(projectName: String, streams: [StreamSummary]) -> ([String: [WindowStatus]], [String: [CapturedWindow]]) {
+        var result: [String: [WindowStatus]] = [:]
+        var windowsResult: [String: [CapturedWindow]] = [:]
+        let fm = FileManager.default
+        var allWindowIDs: [Int] = []
+        var streamFiles: [String: [URL]] = [:]
+        var capturedByStream: [String: [WindowIdentity]] = [:]
+        var statusIDsByStream: [String: Set<Int>] = [:]
+        for stream in streams {
+            let statusDir = URL(fileURLWithPath: stream.worktreePath)
+                .appendingPathComponent(".agentmux", isDirectory: true)
+                .appendingPathComponent("status", isDirectory: true)
+            guard let files = try? fm.contentsOfDirectory(at: statusDir, includingPropertiesForKeys: [.contentModificationDateKey], options: [.skipsHiddenFiles]),
+                  !files.isEmpty else {
+                continue
+            }
+
+            let jsonFiles = files.filter { $0.pathExtension.lowercased() == "json" }
+            guard !jsonFiles.isEmpty else { continue }
+            streamFiles[stream.name] = jsonFiles
+            for file in jsonFiles {
+                if let id = windowID(from: file) {
+                    allWindowIDs.append(id)
+                    statusIDsByStream[stream.name, default: []].insert(id)
+                }
+            }
+
+            if let windows = try? orchestrator().capturedWindows(projectName: projectName, streamName: stream.name) {
+                capturedByStream[stream.name] = windows
+                allWindowIDs.append(contentsOf: windows.map { $0.id })
+            }
+        }
+
+        let titleLookup = (try? orchestrator().windowTitles(ids: allWindowIDs)) ?? [:]
+        for (streamName, files) in streamFiles {
+            var statuses: [WindowStatus] = []
+            for file in files {
+                guard let id = windowID(from: file) else { continue }
+                guard let data = try? Data(contentsOf: file),
+                      let status = try? JSONDecoder().decode(TerminalStatus.self, from: data) else {
+                    continue
+                }
+                let title = titleLookup[id]
+                statuses.append(WindowStatus(id: id, title: title, status: status))
+            }
+            statuses.sort { $0.id < $1.id }
+            if !statuses.isEmpty {
+                result[streamName] = statuses
+            }
+        }
+
+        for (streamName, windows) in capturedByStream {
+            var mappedByID: [Int: CapturedWindow] = [:]
+            for win in windows {
+                let title = titleLookup[win.id] ?? win.title ?? win.app
+                mappedByID[win.id] = CapturedWindow(id: win.id, app: win.app, title: title)
+            }
+            if let statusIDs = statusIDsByStream[streamName] {
+                for id in statusIDs where mappedByID[id] == nil {
+                    let title = titleLookup[id] ?? "Unknown Window"
+                    mappedByID[id] = CapturedWindow(id: id, app: "unknown", title: title)
+                }
+            }
+            let mapped = mappedByID.values.sorted { $0.id < $1.id }
+            windowsResult[streamName] = mapped
+        }
+
+        for (streamName, statusIDs) in statusIDsByStream where windowsResult[streamName] == nil {
+            let mapped = statusIDs.map { id in
+                let title = titleLookup[id] ?? "Unknown Window"
+                return CapturedWindow(id: id, app: "unknown", title: title)
+            }.sorted { $0.id < $1.id }
+            windowsResult[streamName] = mapped
+        }
+
+        return (result, windowsResult)
+    }
+
+    private func windowID(from url: URL) -> Int? {
+        let name = url.deletingPathExtension().lastPathComponent
+        guard name.hasPrefix("window-") else { return nil }
+        let raw = String(name.dropFirst("window-".count))
+        return Int(raw)
+    }
+
+    private func formatStatusText(for streamName: String) -> String {
+        guard let windows = streamWindows[streamName], !windows.isEmpty else {
+            return ""
+        }
+        let statusLookup = Dictionary(uniqueKeysWithValues: (streamStatuses[streamName] ?? []).map { ($0.id, $0) })
+        let summary = windows.map { win in
+            var label = win.title ?? win.app
+            if label.isEmpty { label = win.app }
+            var text = label
+            if let status = statusLookup[win.id] {
+                text += " status=\(status.status.displayState)"
+                if let exitCode = status.status.exitCode, status.status.state == "done" || status.status.state == "error" {
+                    text += " exit=\(exitCode)"
+                }
+            } else {
+                text += " status=unknown"
+            }
+            return text
+        }.joined(separator: "; ")
+        return "  |  windows=\(windows.count) [\(summary)]"
+    }
+
+    private func formatWindowLines(for streamName: String) -> [String] {
+        guard let windows = streamWindows[streamName], !windows.isEmpty else {
+            return ["windows=0"]
+        }
+        let statusLookup = Dictionary(uniqueKeysWithValues: (streamStatuses[streamName] ?? []).map { ($0.id, $0) })
+        return windows.map { win in
+            var label = win.title ?? win.app
+            if label.isEmpty { label = win.app }
+            var text = "[\(win.id)] \(label)"
+            if let status = statusLookup[win.id] {
+                text += "  status=\(status.status.displayState)"
+                if let exitCode = status.status.exitCode, status.status.state == "done" || status.status.state == "error" {
+                    text += " exit=\(exitCode)"
+                }
+            } else {
+                text += "  status=missing"
+            }
+            return text
+        }
+    }
+
+    private func makeTextCell(tableView: NSTableView, text: String) -> NSView? {
+        let id = NSUserInterfaceItemIdentifier("Cell")
+        if let cell = tableView.makeView(withIdentifier: id, owner: nil) as? NSTableCellView {
+            cell.textField?.stringValue = text
+            cell.textField?.toolTip = text
+            return cell
+        }
+
+        let cell = NSTableCellView()
+        cell.identifier = id
+        let tf = NSTextField(labelWithString: text)
+        tf.translatesAutoresizingMaskIntoConstraints = false
+        tf.lineBreakMode = .byTruncatingTail
+        cell.addSubview(tf)
+        cell.textField = tf
+        cell.textField?.toolTip = text
+        NSLayoutConstraint.activate([
+            tf.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 6),
+            tf.trailingAnchor.constraint(equalTo: cell.trailingAnchor, constant: -6),
+            tf.centerYAnchor.constraint(equalTo: cell.centerYAnchor)
+        ])
+        return cell
+    }
+
+    private func makeStreamCell(tableView: NSTableView, header: String, lines: [String]) -> NSView? {
+        let id = NSUserInterfaceItemIdentifier("StreamCell")
+        if let cell = tableView.makeView(withIdentifier: id, owner: nil) as? NSTableCellView,
+           let stack = cell.subviews.first(where: { $0.identifier?.rawValue == "StreamStack" }) as? NSStackView {
+            updateStreamStack(stack, header: header, lines: lines)
+            return cell
+        }
+
+        let cell = NSTableCellView()
+        cell.identifier = id
+        let stack = NSStackView()
+        stack.identifier = NSUserInterfaceItemIdentifier("StreamStack")
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 4
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        cell.addSubview(stack)
+        NSLayoutConstraint.activate([
+            stack.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 6),
+            stack.trailingAnchor.constraint(equalTo: cell.trailingAnchor, constant: -6),
+            stack.topAnchor.constraint(equalTo: cell.topAnchor, constant: 4),
+            stack.bottomAnchor.constraint(lessThanOrEqualTo: cell.bottomAnchor, constant: -4)
+        ])
+
+        updateStreamStack(stack, header: header, lines: lines)
+        return cell
+    }
+
+    private func updateStreamStack(_ stack: NSStackView, header: String, lines: [String]) {
+        stack.arrangedSubviews.forEach { view in
+            stack.removeArrangedSubview(view)
+            view.removeFromSuperview()
+        }
+
+        let headerLabel = NSTextField(labelWithString: header)
+        headerLabel.lineBreakMode = .byTruncatingTail
+        headerLabel.font = .systemFont(ofSize: 12, weight: .semibold)
+        headerLabel.toolTip = header
+        stack.addArrangedSubview(headerLabel)
+
+        for line in lines {
+            let label = NSTextField(labelWithString: line)
+            label.lineBreakMode = .byTruncatingTail
+            label.font = .systemFont(ofSize: 11)
+            label.textColor = .secondaryLabelColor
+            label.toolTip = line
+            stack.addArrangedSubview(label)
         }
     }
 
@@ -718,4 +921,57 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSTableVie
     private func setStatus(_ text: String) {
         statusLabel.stringValue = text
     }
+
+    private func startStatusRefresh() {
+        statusRefreshTimer?.invalidate()
+        statusRefreshTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
+            guard let self else { return }
+            DispatchQueue.main.async {
+                guard self.selectedProjectName != nil else { return }
+                self.reloadStreams(selectStream: self.selectedStreamName)
+            }
+        }
+        RunLoop.main.add(statusRefreshTimer!, forMode: .common)
+    }
+}
+
+private struct TerminalStatus: Decodable {
+    let state: String
+    let timestamp: String
+    let exitCode: Int?
+
+    var displayState: String {
+        switch state {
+        case "starting":
+            return "starting"
+        case "working":
+            return "working"
+        case "waiting_for_input":
+            return "waiting"
+        case "done":
+            return "done"
+        case "error":
+            return "error"
+        default:
+            return state
+        }
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case state
+        case timestamp
+        case exitCode = "exit_code"
+    }
+}
+
+private struct WindowStatus {
+    let id: Int
+    let title: String?
+    let status: TerminalStatus
+}
+
+private struct CapturedWindow {
+    let id: Int
+    let app: String
+    let title: String?
 }

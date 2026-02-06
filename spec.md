@@ -24,6 +24,7 @@ Window management is done via yabai window IDs captured from a given space.
    - `destroy`: close captured windows
 5. Stream diagnostics (`doctor`) for captured/missing windows
 6. AppKit GUI for project/stream operations
+7. Terminal command wrapper that emits per-window status files (`wrap`)
 
 ### SHOULD
 - Better validation and guided inputs in GUI
@@ -49,6 +50,14 @@ Window management is done via yabai window IDs captured from a given space.
 Persisted per stream:
 - `windows[]` (`id`, `app`, `title`, `space`, `display`)
 - `updatedAt`
+
+### Terminal Window Status
+Per focused terminal window:
+- `state` (`starting`, `working`, `waiting_for_input`, `done`, `error`)
+- `timestamp`, `exit_code`, `last_output`
+- `project`, `stream`, `window_id`
+- Stored at `<worktree>/.agentmux/status/window-<id>.json`
+ - Emitted after the window is captured into a stream
 
 ---
 
@@ -106,6 +115,7 @@ Tables:
   - add/edit/destroy/refresh
   - capture/show/doctor
   - display + space shown per stream
+  - captured windows listed per stream as rows in a card, with status when available and auto-refresh
 
 ### CLI
 - project CRUD
@@ -114,6 +124,7 @@ Tables:
 - show
 - list-active
 - doctor
+- wrap
 
 ---
 

@@ -5,6 +5,7 @@
 - GUI is AppKit-based and functional for project/stream operations.
 - Stream window control uses **yabai** window IDs captured per stream.
 - Database state lives at `~/.agentmux/agentmux.db` and is managed automatically.
+- Terminal window status can be tracked via `agentmux wrap`.
 
 ## Accomplished
 - Implemented shared Swift modules: `appctl`, `streamctl`.
@@ -18,6 +19,8 @@
   - stream list/add/edit/destroy
   - stream actions: `capture`, `show`, `doctor`
   - status line feedback
+- Added `agentmux wrap` to emit per-terminal status files for streams.
+- GUI stream list shows a card per stream with per-window status and auto-refresh.
 - Added warning on `show` when no captured windows can be focused (suggests closing/reopening windows).
 - Added repeatable smoke script: `Tests/smoke_cli.sh`.
 

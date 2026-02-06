@@ -24,6 +24,11 @@ Tables:
 - `stream_runtime`: active/inactive state and timestamps.
 - `stream_window_identity`: captured window sets per stream.
 
+Local status files:
+- Terminal status files written by `agentmux wrap` once the focused window is captured.
+- Path: `<worktree>/.agentmux/status/window-<id>.json`.
+- GUI reads captured windows per stream and maps statuses by window ID, resolving titles via yabai.
+
 ## Yabai Integration
 - Window capture:
   - `yabai -m query --windows --space <space>`
@@ -37,6 +42,8 @@ Tables:
 - `agentmux show --project <name> --stream <name>`
 - `agentmux list-active`
 - `agentmux doctor [--project <name>] [--stream <name>]`
+- `agentmux wrap [--project <name> --stream <name>] -- <command> [args...]`
+- `agentmux wrap [--project <name> --stream <name>] <command> [args...]`
 
 ## Current Constraints
 - macOS only.

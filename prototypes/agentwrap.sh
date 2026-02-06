@@ -4,9 +4,9 @@ set -euo pipefail
 # Example usage:
 # ./agentwrap.sh codex
 
-STATUS_FILE="./status.json"
 INACTIVITY_THRESHOLD="${INACTIVITY_THRESHOLD:-2}"  # seconds without new output => waiting_for_input
 POLL_INTERVAL="${POLL_INTERVAL:-0.25}"
+DEBUG_WRAP="${AGENTMUX_WRAP_DEBUG:-0}"
 
 now_iso() {
   # macOS-compatible ISO-ish timestamp
@@ -16,19 +16,15 @@ now_iso() {
 write_status() {
   local state="$1"
   local exit_code="${2:-null}"
-  local last_output="${3:-}"
-
-  # Minimal JSON escaping for quotes/backslashes/newlines
-  last_output="${last_output//\\/\\\\}"
-  last_output="${last_output//\"/\\\"}"
-  last_output="${last_output//$'\n'/ }"
+  if [[ "$DEBUG_WRAP" == "1" ]]; then
+    echo "wrap: write_status state=$state exit=$exit_code file=$STATUS_FILE" >&2
+  fi
 
   cat > "${STATUS_FILE}.tmp" <<EOF
 {
   "state": "$state",
   "timestamp": "$(now_iso)",
-  "exit_code": $exit_code,
-  "last_output": "$last_output"
+  "exit_code": $exit_code
 }
 EOF
   mv "${STATUS_FILE}.tmp" "${STATUS_FILE}"
@@ -44,6 +40,7 @@ CMD=( "$@" )
 # Temp log file for `script` output
 TMPDIR="$(mktemp -d)"
 LOGFILE="$TMPDIR/typescript.log"
+STATUS_FILE="${STATUS_FILE:-$TMPDIR/status.json}"
 cleanup() { rm -rf "$TMPDIR" >/dev/null 2>&1 || true; }
 trap cleanup EXIT
 

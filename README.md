@@ -43,9 +43,19 @@ A local macOS control plane for AI coding streams.
   - `display index`
   - `space index`
 - Each stream has a captured set of windows (yabai window IDs)
+- Each terminal window can emit a status file via `agentmux wrap`
 
 Note: If `show` reports that no compatible windows could be focused, close and reopen the target app windows, then re-run `stream capture`.
 Note: Database state is stored at `~/.agentmux/agentmux.db` and is managed automatically.
+
+## Terminal Status Tracking
+Use `agentmux wrap` to run a command under a PTY and publish status per terminal window:
+```bash
+agentmux wrap [--project <name> --stream <name>] -- <command> [args...]
+agentmux wrap [--project <name> --stream <name>] <command> [args...]
+```
+Status files are written to `<worktree>/.agentmux/status/window-<id>.json` once the focused window is captured.
+The GUI stream list shows a card per stream with one row per captured window (app/title) and status when available, auto-refreshing periodically.
 
 ## Build
 ```bash

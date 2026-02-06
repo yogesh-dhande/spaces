@@ -21,7 +21,7 @@ let package = Package(
             linkerSettings: [.linkedLibrary("sqlite3")]
         ),
         .target(name: "gui", dependencies: ["streamctl"]),
-        .executableTarget(name: "agentmux", dependencies: ["streamctl"]),
+        .executableTarget(name: "agentmux", dependencies: ["streamctl", "appctl"]),
         .executableTarget(name: "agentmux-gui", dependencies: ["gui"])
     ]
 )

@@ -64,6 +64,15 @@ public final class YabaiAdapter {
         return try decodeList(json)
     }
 
+    public func focusedWindow() throws -> YabaiWindow? {
+        do {
+            let json = try Shell.runAndCapture(["yabai", "-m", "query", "--windows", "--window"])
+            return try decodeObject(json)
+        } catch {
+            return nil
+        }
+    }
+
     public func validate(displayIndex: Int, spaceIndex: Int) throws -> YabaiValidation {
         let displays = try listDisplays()
         let spaces = try listSpaces()
@@ -98,5 +107,10 @@ public final class YabaiAdapter {
     private func decodeList<T: Decodable>(_ json: String) throws -> [T] {
         let data = Data(json.utf8)
         return try JSONDecoder().decode([T].self, from: data)
+    }
+
+    private func decodeObject<T: Decodable>(_ json: String) throws -> T {
+        let data = Data(json.utf8)
+        return try JSONDecoder().decode(T.self, from: data)
     }
 }

@@ -1,4 +1,5 @@
 import Foundation
+import appctl
 import streamctl
 
 struct CLI {
@@ -55,6 +56,10 @@ struct CLI {
                     print("  missing_window_ids=\(list)")
                 }
             }
+
+        case "wrap":
+            let exitCode = try runWrapCommand(store: store, dbPath: db)
+            exit(exitCode)
 
         default:
             printHelp()
@@ -149,6 +154,91 @@ struct CLI {
         }
     }
 
+    private func runWrapCommand(store: SQLiteStore, dbPath: String) throws -> Int32 {
+        let projectName = optionalValue(for: "--project")
+        let streamName = optionalValue(for: "--stream")
+        if (projectName != nil) != (streamName != nil) {
+            throw NSError(domain: "agentmux.cli", code: 2, userInfo: [NSLocalizedDescriptionKey: "Both --project and --stream are required when specifying a target stream."])
+        }
+        let command = try commandAfterDoubleDash()
+        if let projectName, let streamName {
+            guard let project = try store.project(named: projectName) else {
+                throw NSError(domain: "agentmux.cli", code: 2, userInfo: [NSLocalizedDescriptionKey: "Unknown project: \(projectName)"])
+            }
+            guard let _ = try store.stream(projectID: project.id, name: streamName) else {
+                throw NSError(domain: "agentmux.cli", code: 2, userInfo: [NSLocalizedDescriptionKey: "Unknown stream: \(projectName)/\(streamName)"])
+            }
+        }
+
+        let yabai = YabaiAdapter()
+        guard let focused = try yabai.focusedWindow() else {
+            throw NSError(domain: "agentmux.cli", code: 2, userInfo: [NSLocalizedDescriptionKey: "No focused window found via yabai. Focus the target terminal window and retry."])
+        }
+
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("agentmux-wrap-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let env = ProcessInfo.processInfo.environment
+        let inactivityThreshold = Double(env["INACTIVITY_THRESHOLD"] ?? "") ?? 2.0
+        let pollInterval = Double(env["POLL_INTERVAL"] ?? "") ?? 0.25
+
+        let resolver = StreamResolver(
+            dbPath: dbPath,
+            preferredProject: projectName,
+            preferredStream: streamName
+        )
+
+        let mapping = try resolver.resolve(windowID: focused.id)
+        if let mapping {
+            let statusFile = statusFileURL(for: mapping, windowID: focused.id)
+            let statusDir = statusFile.deletingLastPathComponent()
+            try FileManager.default.createDirectory(at: statusDir, withIntermediateDirectories: true)
+
+            if ProcessInfo.processInfo.environment["AGENTMUX_WRAP_DEBUG"] == "1" {
+                fputs("wrap: mapped project=\(mapping.project.name) stream=\(mapping.stream.name) worktree=\(mapping.stream.worktreePath)\n", stderr)
+                fputs("wrap: focused_window_id \(focused.id)\n", stderr)
+            }
+
+            try writeStatusSeed(path: statusFile.path)
+
+            return try runAgentWrap(
+                command: command,
+                statusFile: statusFile,
+                inactivityThreshold: inactivityThreshold,
+                pollInterval: pollInterval,
+                debug: ProcessInfo.processInfo.environment["AGENTMUX_WRAP_DEBUG"] == "1"
+            )
+        } else {
+            fputs("wrap: no captured stream found for focused window; running without status.\n", stderr)
+            return try runDirect(command: command, debug: ProcessInfo.processInfo.environment["AGENTMUX_WRAP_DEBUG"] == "1")
+        }
+    }
+
+    private func commandAfterDoubleDash() throws -> [String] {
+        if let idx = args.firstIndex(of: "--"), idx + 1 < args.count {
+            let command = Array(args[(idx + 1)...])
+            guard !command.isEmpty else {
+                throw NSError(domain: "agentmux.cli", code: 2, userInfo: [NSLocalizedDescriptionKey: "Missing command. Use: wrap [--project <name> --stream <name>] -- <command> [args...]"])
+            }
+            return command
+        }
+
+        if args.contains("--project") || args.contains("--stream") {
+            throw NSError(domain: "agentmux.cli", code: 2, userInfo: [NSLocalizedDescriptionKey: "Missing -- delimiter. Use: wrap [--project <name> --stream <name>] -- <command> [args...]"])
+        }
+
+        guard args.count >= 3 else {
+            throw NSError(domain: "agentmux.cli", code: 2, userInfo: [NSLocalizedDescriptionKey: "Missing command. Use: wrap [--project <name> --stream <name>] <command> [args...]"])
+        }
+        let command = Array(args[2...])
+        guard !command.isEmpty else {
+            throw NSError(domain: "agentmux.cli", code: 2, userInfo: [NSLocalizedDescriptionKey: "Missing command. Use: wrap [--project <name> --stream <name>] <command> [args...]"])
+        }
+        return command
+    }
+
     private func value(for flag: String) throws -> String {
         guard let idx = args.firstIndex(of: flag), idx + 1 < args.count else {
             throw NSError(domain: "agentmux.cli", code: 2, userInfo: [NSLocalizedDescriptionKey: "Missing required flag \(flag)"])
@@ -208,15 +298,147 @@ struct CLI {
           agentmux stream destroy --project <name> --stream <name> [--remove-branch]
 
           agentmux show --project <name> --stream <name>
-          agentmux show --project <name> --stream <name>
           agentmux list-active
           agentmux doctor [--project <name>] [--stream <name>]
+          agentmux wrap [--project <name> --stream <name>] -- <command> [args...]
+          agentmux wrap [--project <name> --stream <name>] <command> [args...]
 
         Notes:
           - `show` focuses captured windows; if none can be focused, close/reopen the target app windows and re-run `stream capture`.
+          - `wrap` runs a command under a PTY and writes status to <worktree>/.agentmux/status/window-<id>.json once the focused window is captured.
           - Database state is stored at ~/.agentmux/agentmux.db and is managed automatically.
         """)
     }
+}
+
+private struct StreamMapping {
+    let project: Project
+    let stream: streamctl.Stream
+}
+
+private final class StreamResolver {
+    private let store: SQLiteStore
+    private let preferredProject: String?
+    private let preferredStream: String?
+
+    init(dbPath: String, preferredProject: String?, preferredStream: String?) {
+        self.store = (try? SQLiteStore(path: dbPath)) ?? {
+            fatalError("Failed to open SQLite store at \(dbPath)")
+        }()
+        self.preferredProject = preferredProject
+        self.preferredStream = preferredStream
+    }
+
+    func resolve(windowID: Int) throws -> StreamMapping? {
+        if let preferredProject, let preferredStream {
+            guard let project = try store.project(named: preferredProject) else {
+                throw NSError(domain: "agentmux.wrap", code: 2, userInfo: [NSLocalizedDescriptionKey: "Unknown project: \(preferredProject)"])
+            }
+            guard let stream = try store.stream(projectID: project.id, name: preferredStream) else {
+                throw NSError(domain: "agentmux.wrap", code: 2, userInfo: [NSLocalizedDescriptionKey: "Unknown stream: \(preferredProject)/\(preferredStream)"])
+            }
+            if let identity = try store.windowIdentity(streamID: stream.id),
+               identity.windows.contains(where: { $0.id == windowID }) {
+                return StreamMapping(project: project, stream: stream)
+            }
+            return nil
+        }
+
+        let projects = try store.projects()
+        var matches: [StreamMapping] = []
+        for project in projects {
+            let streams = try store.fullStreams(projectID: project.id)
+            for stream in streams {
+                guard let identity = try store.windowIdentity(streamID: stream.id) else { continue }
+                if identity.windows.contains(where: { $0.id == windowID }) {
+                    matches.append(StreamMapping(project: project, stream: stream))
+                }
+            }
+        }
+
+        if matches.count > 1 {
+            throw NSError(domain: "agentmux.wrap", code: 2, userInfo: [NSLocalizedDescriptionKey: "Focused window matches multiple streams. Use --project/--stream to disambiguate."])
+        }
+        return matches.first
+    }
+}
+
+private func statusFileURL(for mapping: StreamMapping, windowID: Int) -> URL {
+    let worktreeURL = URL(fileURLWithPath: mapping.stream.worktreePath, relativeTo: URL(fileURLWithPath: FileManager.default.currentDirectoryPath))
+        .standardizedFileURL
+    let statusDir = worktreeURL
+        .appendingPathComponent(".agentmux", isDirectory: true)
+        .appendingPathComponent("status", isDirectory: true)
+    return statusDir.appendingPathComponent("window-\(windowID).json")
+}
+
+private func runAgentWrap(
+    command: [String],
+    statusFile: URL,
+    inactivityThreshold: Double,
+    pollInterval: Double,
+    debug: Bool
+) throws -> Int32 {
+    let cwd = FileManager.default.currentDirectoryPath
+    let scriptFile = URL(fileURLWithPath: cwd).appendingPathComponent("prototypes/agentwrap.sh")
+    guard FileManager.default.fileExists(atPath: scriptFile.path) else {
+        throw NSError(domain: "agentmux.wrap", code: 2, userInfo: [NSLocalizedDescriptionKey: "Missing prototypes/agentwrap.sh."])
+    }
+
+    let absoluteStatus = URL(fileURLWithPath: statusFile.path, relativeTo: URL(fileURLWithPath: cwd)).standardizedFileURL
+    let statusDir = absoluteStatus.deletingLastPathComponent()
+    try FileManager.default.createDirectory(at: statusDir, withIntermediateDirectories: true)
+    setenv("STATUS_FILE", absoluteStatus.path, 1)
+    setenv("INACTIVITY_THRESHOLD", String(Int(inactivityThreshold)), 1)
+    let pollMicros = max(1, Int(pollInterval * 1_000_000))
+    setenv("POLL_INTERVAL", String(Double(pollMicros) / 1_000_000), 1)
+
+    if debug {
+        fputs("wrap: exec \(scriptFile.path) " + command.joined(separator: " ") + "\n", stderr)
+        fputs("wrap: status_file \(absoluteStatus.path)\n", stderr)
+    }
+    return execBash(scriptPath: scriptFile.path, command: command)
+}
+
+private func writeStatusSeed(path: String) throws {
+    let now = ISO8601DateFormatter().string(from: Date())
+    let json = """
+    {
+      "state": "starting",
+      "timestamp": "\(now)",
+      "exit_code": null,
+      "last_output": "launching"
+    }
+    """
+    try json.write(toFile: path, atomically: true, encoding: .utf8)
+}
+
+private func runDirect(command: [String], debug: Bool) throws -> Int32 {
+    let process = Process()
+    process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+    process.arguments = command
+    process.currentDirectoryURL = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+    process.standardInput = FileHandle.standardInput
+    process.standardOutput = FileHandle.standardOutput
+    process.standardError = FileHandle.standardError
+    if debug {
+        fputs("wrap: exec (direct) " + command.joined(separator: " ") + "\n", stderr)
+    }
+    try process.run()
+    process.waitUntilExit()
+    return process.terminationStatus
+}
+
+private func execBash(scriptPath: String, command: [String]) -> Int32 {
+    var argv: [UnsafeMutablePointer<CChar>?] = []
+    argv.append(strdup("/bin/bash"))
+    argv.append(strdup(scriptPath))
+    for arg in command {
+        argv.append(strdup(arg))
+    }
+    argv.append(nil)
+    execv("/bin/bash", &argv)
+    return -1
 }
 
 do {

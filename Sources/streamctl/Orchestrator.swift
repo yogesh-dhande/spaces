@@ -241,6 +241,29 @@ public final class StreamOrchestrator {
             }
     }
 
+    public func capturedWindows(projectName: String, streamName: String) throws -> [WindowIdentity] {
+        let (_, stream) = try resolve(projectName: projectName, streamName: streamName)
+        guard let identity = try store.windowIdentity(streamID: stream.id) else {
+            return []
+        }
+        return identity.windows
+    }
+
+    public func windowTitles(ids: [Int]) throws -> [Int: String] {
+        let lookup = Set(ids)
+        guard !lookup.isEmpty else { return [:] }
+        let windows = try yabai.listWindows()
+        var result: [Int: String] = [:]
+        for win in windows where lookup.contains(win.id) {
+            if let title = win.title, !title.isEmpty {
+                result[win.id] = title
+            } else {
+                result[win.id] = win.app
+            }
+        }
+        return result
+    }
+
     private func resolve(projectName: String, streamName: String) throws -> (Project, Stream) {
         guard let project = try store.project(named: projectName) else {
             throw StreamctlError.missingProject(name: projectName)
