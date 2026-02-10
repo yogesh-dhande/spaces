@@ -8,7 +8,9 @@ public final class SQLiteStore {
     public init(path: String) throws {
         var handle: OpaquePointer?
         if sqlite3_open(path, &handle) != SQLITE_OK {
-            throw NSError(domain: "agentmux.store", code: 1, userInfo: [NSLocalizedDescriptionKey: "Failed opening sqlite db at \(path)"])
+            throw NSError(
+                domain: "agentmux.store", code: 1,
+                userInfo: [NSLocalizedDescriptionKey: "Failed opening sqlite db at \(path)"])
         }
         guard let handle else {
             throw NSError(domain: "agentmux.store", code: 1, userInfo: [NSLocalizedDescriptionKey: "DB handle is nil"])
@@ -24,37 +26,41 @@ public final class SQLiteStore {
     public func upsert(project: ProjectRecord) throws {
         try execute(
             sql: """
-            INSERT INTO projects(id, name, dir, is_git, default_branch)
-            VALUES (?, ?, ?, ?, ?)
-            ON CONFLICT(id) DO UPDATE SET
-              name = excluded.name,
-              dir = excluded.dir,
-              is_git = excluded.is_git,
-              default_branch = excluded.default_branch
-            """,
+                INSERT INTO projects(id, name, dir, is_git, default_branch)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                  name = excluded.name,
+                  dir = excluded.dir,
+                  is_git = excluded.is_git,
+                  default_branch = excluded.default_branch
+                """,
             bindings: [
                 project.id,
                 project.name,
                 project.dir,
                 project.isGitRepo ? "1" : "0",
-                project.defaultBranch ?? ""
+                project.defaultBranch ?? "",
             ]
         )
     }
 
     public func project(id: String) throws -> ProjectRecord? {
-        guard let row = try queryRow(
-            sql: "SELECT id, name, dir, is_git, default_branch FROM projects WHERE id = ?",
-            bindings: [id]
-        ) else { return nil }
+        guard
+            let row = try queryRow(
+                sql: "SELECT id, name, dir, is_git, default_branch FROM projects WHERE id = ?",
+                bindings: [id]
+            )
+        else { return nil }
         return decodeProject(row: row)
     }
 
     public func project(dir: String) throws -> ProjectRecord? {
-        guard let row = try queryRow(
-            sql: "SELECT id, name, dir, is_git, default_branch FROM projects WHERE dir = ?",
-            bindings: [dir]
-        ) else { return nil }
+        guard
+            let row = try queryRow(
+                sql: "SELECT id, name, dir, is_git, default_branch FROM projects WHERE dir = ?",
+                bindings: [dir]
+            )
+        else { return nil }
         return decodeProject(row: row)
     }
 
@@ -64,10 +70,19 @@ public final class SQLiteStore {
     }
 
     public func deleteProject(id: String) throws {
-        try execute(sql: "DELETE FROM windows WHERE workspace_id IN (SELECT id FROM workspaces WHERE project_id = ?)", bindings: [id])
-        try execute(sql: "DELETE FROM status_results WHERE process_id IN (SELECT id FROM running_processes WHERE workspace_id IN (SELECT id FROM workspaces WHERE project_id = ?))", bindings: [id])
-        try execute(sql: "DELETE FROM running_processes WHERE workspace_id IN (SELECT id FROM workspaces WHERE project_id = ?)", bindings: [id])
-        try execute(sql: "DELETE FROM workspace_ports WHERE workspace_id IN (SELECT id FROM workspaces WHERE project_id = ?)", bindings: [id])
+        try execute(
+            sql: "DELETE FROM windows WHERE workspace_id IN (SELECT id FROM workspaces WHERE project_id = ?)",
+            bindings: [id])
+        try execute(
+            sql:
+                "DELETE FROM status_results WHERE process_id IN (SELECT id FROM running_processes WHERE workspace_id IN (SELECT id FROM workspaces WHERE project_id = ?))",
+            bindings: [id])
+        try execute(
+            sql: "DELETE FROM running_processes WHERE workspace_id IN (SELECT id FROM workspaces WHERE project_id = ?)",
+            bindings: [id])
+        try execute(
+            sql: "DELETE FROM workspace_ports WHERE workspace_id IN (SELECT id FROM workspaces WHERE project_id = ?)",
+            bindings: [id])
         try execute(sql: "DELETE FROM workspaces WHERE project_id = ?", bindings: [id])
         try execute(sql: "DELETE FROM projects WHERE id = ?", bindings: [id])
     }
@@ -75,18 +90,18 @@ public final class SQLiteStore {
     public func upsert(workspace: WorkspaceRecord) throws {
         try execute(
             sql: """
-            INSERT INTO workspaces(id, project_id, name, dir, dirname, branch, is_default, is_archived, is_running, last_launched_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(id) DO UPDATE SET
-              name = excluded.name,
-              dir = excluded.dir,
-              dirname = excluded.dirname,
-              branch = excluded.branch,
-              is_default = excluded.is_default,
-              is_archived = excluded.is_archived,
-              is_running = excluded.is_running,
-              last_launched_at = excluded.last_launched_at
-            """,
+                INSERT INTO workspaces(id, project_id, name, dir, dirname, branch, is_default, is_archived, is_running, last_launched_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                  name = excluded.name,
+                  dir = excluded.dir,
+                  dirname = excluded.dirname,
+                  branch = excluded.branch,
+                  is_default = excluded.is_default,
+                  is_archived = excluded.is_archived,
+                  is_running = excluded.is_running,
+                  last_launched_at = excluded.last_launched_at
+                """,
             bindings: [
                 workspace.id,
                 workspace.projectID,
@@ -97,41 +112,45 @@ public final class SQLiteStore {
                 workspace.isDefault ? "1" : "0",
                 workspace.isArchived ? "1" : "0",
                 workspace.isRunning ? "1" : "0",
-                workspace.lastLaunchedAt ?? ""
+                workspace.lastLaunchedAt ?? "",
             ]
         )
     }
 
     public func workspace(id: String) throws -> WorkspaceRecord? {
-        guard let row = try queryRow(
-            sql: """
-            SELECT id, project_id, name, dir, dirname, branch, is_default, is_archived, is_running, last_launched_at
-            FROM workspaces WHERE id = ?
-            """,
-            bindings: [id]
-        ) else { return nil }
+        guard
+            let row = try queryRow(
+                sql: """
+                    SELECT id, project_id, name, dir, dirname, branch, is_default, is_archived, is_running, last_launched_at
+                    FROM workspaces WHERE id = ?
+                    """,
+                bindings: [id]
+            )
+        else { return nil }
         return decodeWorkspace(row: row)
     }
 
     public func workspace(projectID: String, name: String) throws -> WorkspaceRecord? {
-        guard let row = try queryRow(
-            sql: """
-            SELECT id, project_id, name, dir, dirname, branch, is_default, is_archived, is_running, last_launched_at
-            FROM workspaces WHERE project_id = ? AND name = ?
-            """,
-            bindings: [projectID, name]
-        ) else { return nil }
+        guard
+            let row = try queryRow(
+                sql: """
+                    SELECT id, project_id, name, dir, dirname, branch, is_default, is_archived, is_running, last_launched_at
+                    FROM workspaces WHERE project_id = ? AND name = ?
+                    """,
+                bindings: [projectID, name]
+            )
+        else { return nil }
         return decodeWorkspace(row: row)
     }
 
     public func workspaces(projectID: String, includeArchived: Bool = false) throws -> [WorkspaceRecord] {
         let rows = try queryRows(
             sql: """
-            SELECT id, project_id, name, dir, dirname, branch, is_default, is_archived, is_running, last_launched_at
-            FROM workspaces
-            WHERE project_id = ? AND (? = 1 OR is_archived = 0)
-            ORDER BY is_default DESC, name
-            """,
+                SELECT id, project_id, name, dir, dirname, branch, is_default, is_archived, is_running, last_launched_at
+                FROM workspaces
+                WHERE project_id = ? AND (? = 1 OR is_archived = 0)
+                ORDER BY is_default DESC, name
+                """,
             bindings: [projectID, includeArchived ? "1" : "0"]
         )
         return rows.compactMap { decodeWorkspace(row: $0) }
@@ -139,7 +158,10 @@ public final class SQLiteStore {
 
     public func deleteWorkspace(id: String) throws {
         try execute(sql: "DELETE FROM windows WHERE workspace_id = ?", bindings: [id])
-        try execute(sql: "DELETE FROM status_results WHERE process_id IN (SELECT id FROM running_processes WHERE workspace_id = ?)", bindings: [id])
+        try execute(
+            sql:
+                "DELETE FROM status_results WHERE process_id IN (SELECT id FROM running_processes WHERE workspace_id = ?)",
+            bindings: [id])
         try execute(sql: "DELETE FROM running_processes WHERE workspace_id = ?", bindings: [id])
         try execute(sql: "DELETE FROM workspace_ports WHERE workspace_id = ?", bindings: [id])
         try execute(sql: "DELETE FROM workspaces WHERE id = ?", bindings: [id])
@@ -148,10 +170,10 @@ public final class SQLiteStore {
     public func updateWorkspaceRunning(id: String, isRunning: Bool, launchedAt: String?) throws {
         try execute(
             sql: """
-            UPDATE workspaces
-            SET is_running = ?, last_launched_at = ?
-            WHERE id = ?
-            """,
+                UPDATE workspaces
+                SET is_running = ?, last_launched_at = ?
+                WHERE id = ?
+                """,
             bindings: [isRunning ? "1" : "0", launchedAt ?? "", id]
         )
     }
@@ -188,20 +210,20 @@ public final class SQLiteStore {
     public func upsert(runningProcess: RunningProcessRecord) throws {
         try execute(
             sql: """
-            INSERT INTO running_processes(id, workspace_id, template_name, command, terminal_app, window_id, pid, status, log_path, last_output_at, started_at, exited_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(id) DO UPDATE SET
-              template_name = excluded.template_name,
-              command = excluded.command,
-              terminal_app = excluded.terminal_app,
-              window_id = excluded.window_id,
-              pid = excluded.pid,
-              status = excluded.status,
-              log_path = excluded.log_path,
-              last_output_at = excluded.last_output_at,
-              started_at = excluded.started_at,
-              exited_at = excluded.exited_at
-            """,
+                INSERT INTO running_processes(id, workspace_id, template_name, command, terminal_app, window_id, pid, status, log_path, last_output_at, started_at, exited_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                  template_name = excluded.template_name,
+                  command = excluded.command,
+                  terminal_app = excluded.terminal_app,
+                  window_id = excluded.window_id,
+                  pid = excluded.pid,
+                  status = excluded.status,
+                  log_path = excluded.log_path,
+                  last_output_at = excluded.last_output_at,
+                  started_at = excluded.started_at,
+                  exited_at = excluded.exited_at
+                """,
             bindings: [
                 runningProcess.id,
                 runningProcess.workspaceID,
@@ -214,7 +236,7 @@ public final class SQLiteStore {
                 runningProcess.logPath ?? "",
                 runningProcess.lastOutputAt ?? "",
                 runningProcess.startedAt ?? "",
-                runningProcess.exitedAt ?? ""
+                runningProcess.exitedAt ?? "",
             ]
         )
     }
@@ -222,10 +244,10 @@ public final class SQLiteStore {
     public func runningProcesses(workspaceID: String) throws -> [RunningProcessRecord] {
         let rows = try queryRows(
             sql: """
-            SELECT id, workspace_id, template_name, command, terminal_app, window_id, pid, status, log_path, last_output_at, started_at, exited_at
-            FROM running_processes WHERE workspace_id = ?
-            ORDER BY started_at
-            """,
+                SELECT id, workspace_id, template_name, command, terminal_app, window_id, pid, status, log_path, last_output_at, started_at, exited_at
+                FROM running_processes WHERE workspace_id = ?
+                ORDER BY started_at
+                """,
             bindings: [workspaceID]
         )
         return rows.compactMap { decodeRunningProcess(row: $0) }
@@ -238,19 +260,19 @@ public final class SQLiteStore {
     public func upsert(statusResult: StatusResult) throws {
         try execute(
             sql: """
-            INSERT INTO status_results(process_id, check_name, status, message, last_run_at)
-            VALUES (?, ?, ?, ?, ?)
-            ON CONFLICT(process_id, check_name) DO UPDATE SET
-              status = excluded.status,
-              message = excluded.message,
-              last_run_at = excluded.last_run_at
-            """,
+                INSERT INTO status_results(process_id, check_name, status, message, last_run_at)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(process_id, check_name) DO UPDATE SET
+                  status = excluded.status,
+                  message = excluded.message,
+                  last_run_at = excluded.last_run_at
+                """,
             bindings: [
                 statusResult.processID,
                 statusResult.checkName,
                 statusResult.status,
                 statusResult.message ?? "",
-                statusResult.lastRunAt ?? ""
+                statusResult.lastRunAt ?? "",
             ]
         )
     }
@@ -274,16 +296,16 @@ public final class SQLiteStore {
     public func upsert(window: WindowRecord) throws {
         try execute(
             sql: """
-            INSERT INTO windows(id, workspace_id, app, title, window_id, role, order_index, last_seen_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(id) DO UPDATE SET
-              app = excluded.app,
-              title = excluded.title,
-              window_id = excluded.window_id,
-              role = excluded.role,
-              order_index = excluded.order_index,
-              last_seen_at = excluded.last_seen_at
-            """,
+                INSERT INTO windows(id, workspace_id, app, title, window_id, role, order_index, last_seen_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                  app = excluded.app,
+                  title = excluded.title,
+                  window_id = excluded.window_id,
+                  role = excluded.role,
+                  order_index = excluded.order_index,
+                  last_seen_at = excluded.last_seen_at
+                """,
             bindings: [
                 window.id,
                 window.workspaceID,
@@ -292,7 +314,7 @@ public final class SQLiteStore {
                 window.windowID.map(String.init) ?? "",
                 window.role,
                 String(window.orderIndex),
-                window.lastSeenAt
+                window.lastSeenAt,
             ]
         )
     }
@@ -300,10 +322,10 @@ public final class SQLiteStore {
     public func windows(workspaceID: String) throws -> [WindowRecord] {
         let rows = try queryRows(
             sql: """
-            SELECT id, workspace_id, app, title, window_id, role, order_index, last_seen_at
-            FROM windows WHERE workspace_id = ?
-            ORDER BY order_index
-            """,
+                SELECT id, workspace_id, app, title, window_id, role, order_index, last_seen_at
+                FROM windows WHERE workspace_id = ?
+                ORDER BY order_index
+                """,
             bindings: [workspaceID]
         )
         return rows.compactMap { decodeWindow(row: $0) }
@@ -330,7 +352,8 @@ public final class SQLiteStore {
     public func setSetting(key: String, value: String?) throws {
         if let value {
             try execute(
-                sql: "INSERT INTO settings(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                sql:
+                    "INSERT INTO settings(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
                 bindings: [key, value]
             )
         } else {
@@ -343,16 +366,17 @@ public final class SQLiteStore {
         if currentVersion == schemaVersion {
             return
         }
-        try executeBatch(sql: """
-        DROP TABLE IF EXISTS status_results;
-        DROP TABLE IF EXISTS running_processes;
-        DROP TABLE IF EXISTS workspace_ports;
-        DROP TABLE IF EXISTS windows;
-        DROP TABLE IF EXISTS workspaces;
-        DROP TABLE IF EXISTS projects;
-        DROP TABLE IF EXISTS settings;
-        DROP TABLE IF EXISTS schema_version;
-        """)
+        try executeBatch(
+            sql: """
+                DROP TABLE IF EXISTS status_results;
+                DROP TABLE IF EXISTS running_processes;
+                DROP TABLE IF EXISTS workspace_ports;
+                DROP TABLE IF EXISTS windows;
+                DROP TABLE IF EXISTS workspaces;
+                DROP TABLE IF EXISTS projects;
+                DROP TABLE IF EXISTS settings;
+                DROP TABLE IF EXISTS schema_version;
+                """)
         try createSchema()
         try execute(sql: "INSERT INTO schema_version(version) VALUES (?)", bindings: [String(schemaVersion)])
     }
@@ -369,79 +393,79 @@ public final class SQLiteStore {
 
     private func createSchema() throws {
         let sql = """
-        CREATE TABLE IF NOT EXISTS projects (
-          id TEXT PRIMARY KEY,
-          name TEXT NOT NULL,
-          dir TEXT NOT NULL UNIQUE,
-          is_git INTEGER NOT NULL,
-          default_branch TEXT
-        );
+            CREATE TABLE IF NOT EXISTS projects (
+              id TEXT PRIMARY KEY,
+              name TEXT NOT NULL,
+              dir TEXT NOT NULL UNIQUE,
+              is_git INTEGER NOT NULL,
+              default_branch TEXT
+            );
 
-        CREATE TABLE IF NOT EXISTS workspaces (
-          id TEXT PRIMARY KEY,
-          project_id TEXT NOT NULL,
-          name TEXT NOT NULL,
-          dir TEXT NOT NULL,
-          dirname TEXT,
-          branch TEXT,
-          is_default INTEGER NOT NULL,
-          is_archived INTEGER NOT NULL,
-          is_running INTEGER NOT NULL,
-          last_launched_at TEXT,
-          UNIQUE(project_id, name)
-        );
+            CREATE TABLE IF NOT EXISTS workspaces (
+              id TEXT PRIMARY KEY,
+              project_id TEXT NOT NULL,
+              name TEXT NOT NULL,
+              dir TEXT NOT NULL,
+              dirname TEXT,
+              branch TEXT,
+              is_default INTEGER NOT NULL,
+              is_archived INTEGER NOT NULL,
+              is_running INTEGER NOT NULL,
+              last_launched_at TEXT,
+              UNIQUE(project_id, name)
+            );
 
-        CREATE TABLE IF NOT EXISTS workspace_ports (
-          workspace_id TEXT NOT NULL,
-          port_index INTEGER NOT NULL,
-          port_number INTEGER NOT NULL,
-          PRIMARY KEY (workspace_id, port_index)
-        );
+            CREATE TABLE IF NOT EXISTS workspace_ports (
+              workspace_id TEXT NOT NULL,
+              port_index INTEGER NOT NULL,
+              port_number INTEGER NOT NULL,
+              PRIMARY KEY (workspace_id, port_index)
+            );
 
-        CREATE TABLE IF NOT EXISTS running_processes (
-          id TEXT PRIMARY KEY,
-          workspace_id TEXT NOT NULL,
-          template_name TEXT NOT NULL,
-          command TEXT NOT NULL,
-          terminal_app TEXT,
-          window_id INTEGER,
-          pid INTEGER,
-          status TEXT NOT NULL,
-          log_path TEXT,
-          last_output_at TEXT,
-          started_at TEXT,
-          exited_at TEXT
-        );
+            CREATE TABLE IF NOT EXISTS running_processes (
+              id TEXT PRIMARY KEY,
+              workspace_id TEXT NOT NULL,
+              template_name TEXT NOT NULL,
+              command TEXT NOT NULL,
+              terminal_app TEXT,
+              window_id INTEGER,
+              pid INTEGER,
+              status TEXT NOT NULL,
+              log_path TEXT,
+              last_output_at TEXT,
+              started_at TEXT,
+              exited_at TEXT
+            );
 
-        CREATE TABLE IF NOT EXISTS status_results (
-          process_id TEXT NOT NULL,
-          check_name TEXT NOT NULL,
-          status TEXT NOT NULL,
-          message TEXT,
-          last_run_at TEXT,
-          PRIMARY KEY (process_id, check_name)
-        );
+            CREATE TABLE IF NOT EXISTS status_results (
+              process_id TEXT NOT NULL,
+              check_name TEXT NOT NULL,
+              status TEXT NOT NULL,
+              message TEXT,
+              last_run_at TEXT,
+              PRIMARY KEY (process_id, check_name)
+            );
 
-        CREATE TABLE IF NOT EXISTS windows (
-          id TEXT PRIMARY KEY,
-          workspace_id TEXT NOT NULL,
-          app TEXT NOT NULL,
-          title TEXT,
-          window_id INTEGER,
-          role TEXT NOT NULL,
-          order_index INTEGER,
-          last_seen_at TEXT
-        );
+            CREATE TABLE IF NOT EXISTS windows (
+              id TEXT PRIMARY KEY,
+              workspace_id TEXT NOT NULL,
+              app TEXT NOT NULL,
+              title TEXT,
+              window_id INTEGER,
+              role TEXT NOT NULL,
+              order_index INTEGER,
+              last_seen_at TEXT
+            );
 
-        CREATE TABLE IF NOT EXISTS settings (
-          key TEXT PRIMARY KEY,
-          value TEXT NOT NULL
-        );
+            CREATE TABLE IF NOT EXISTS settings (
+              key TEXT PRIMARY KEY,
+              value TEXT NOT NULL
+            );
 
-        CREATE TABLE IF NOT EXISTS schema_version (
-          version INTEGER NOT NULL
-        );
-        """
+            CREATE TABLE IF NOT EXISTS schema_version (
+              version INTEGER NOT NULL
+            );
+            """
         try executeBatch(sql: sql)
     }
 
@@ -571,12 +595,14 @@ public final class SQLiteStore {
             let slot = Int32(index + 1)
             switch value {
             case let text as String:
-                sqlite3_bind_text(statement, slot, text, -1, SQLITE_TRANSIENT)
+                sqlite3_bind_text(statement, slot, text, -1, sqliteTransient)
             default:
-                throw NSError(domain: "agentmux.store", code: 8, userInfo: [NSLocalizedDescriptionKey: "Unsupported binding type"])
+                throw NSError(
+                    domain: "agentmux.store", code: 8, userInfo: [NSLocalizedDescriptionKey: "Unsupported binding type"]
+                )
             }
         }
     }
 }
 
-private let SQLITE_TRANSIENT = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
+private let sqliteTransient = unsafeBitCast(-1, to: sqlite3_destructor_type.self)

@@ -39,7 +39,9 @@ final class ProcessEditor {
     }
 
     func setProcesses(_ processes: [ProcessTemplate]) {
-        rows.forEach { $0.remove() }
+        for row in rows {
+            row.remove()
+        }
         rows = []
         for process in processes {
             addRow(with: process)
@@ -121,7 +123,7 @@ final class ProcessEditor {
             commandField.setContentHuggingPriority(.defaultLow, for: .horizontal)
             commandField.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
 
-            [nameField, commandField].forEach { field in
+            for field in [nameField, commandField] {
                 NotificationCenter.default.addObserver(
                     forName: NSText.didChangeNotification,
                     object: field,

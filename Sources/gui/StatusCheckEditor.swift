@@ -52,7 +52,9 @@ final class StatusCheckEditor {
     }
 
     func setChecks(_ checks: [StatusCheckDefinition]) {
-        rows.forEach { $0.remove() }
+        for row in rows {
+            row.remove()
+        }
         rows = []
         for check in checks {
             addRow(with: check)
@@ -173,7 +175,7 @@ final class StatusCheckEditor {
             commandField.setContentHuggingPriority(.defaultLow, for: .horizontal)
             commandField.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
 
-            [nameField, commandField, intervalField, timeoutField].forEach { field in
+            for field in [nameField, commandField, intervalField, timeoutField] {
                 NotificationCenter.default.addObserver(
                     forName: NSText.didChangeNotification,
                     object: field,

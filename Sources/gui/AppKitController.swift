@@ -79,7 +79,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
     private func buildWindow() {
         let rect = NSRect(x: 200, y: 200, width: 1100, height: 700)
-        window = NSWindow(contentRect: rect, styleMask: [.titled, .resizable, .closable], backing: .buffered, defer: false)
+        window = NSWindow(
+            contentRect: rect, styleMask: [.titled, .resizable, .closable], backing: .buffered, defer: false)
         window.title = "agentmux"
         window.center()
 
@@ -101,7 +102,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             splitView.leadingAnchor.constraint(equalTo: content.leadingAnchor),
             splitView.trailingAnchor.constraint(equalTo: content.trailingAnchor),
             splitView.topAnchor.constraint(equalTo: content.topAnchor),
-            splitView.bottomAnchor.constraint(equalTo: content.bottomAnchor)
+            splitView.bottomAnchor.constraint(equalTo: content.bottomAnchor),
         ])
         window.contentView = content
         window.makeKeyAndOrderFront(nil)
@@ -120,7 +121,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let title = NSTextField(labelWithString: "Projects")
         title.font = .systemFont(ofSize: 14, weight: .semibold)
 
-        let addButton = actionButton(title: "Add Project", symbol: "plus", tooltip: "Add project", action: #selector(addProject), primary: false)
+        let addButton = actionButton(
+            title: "Add Project", symbol: "plus", tooltip: "Add project", action: #selector(addProject), primary: false)
 
         let reloadButton = iconButton(symbol: "arrow.clockwise", tooltip: "Reload", action: #selector(reloadTapped))
 
@@ -156,7 +158,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             scroll.leadingAnchor.constraint(equalTo: container.leadingAnchor),
             scroll.trailingAnchor.constraint(equalTo: container.trailingAnchor),
             scroll.topAnchor.constraint(equalTo: header.bottomAnchor, constant: 8),
-            scroll.bottomAnchor.constraint(equalTo: container.bottomAnchor)
+            scroll.bottomAnchor.constraint(equalTo: container.bottomAnchor),
         ])
 
         return container
@@ -171,7 +173,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         detailContainer.addSubview(placeholder)
         NSLayoutConstraint.activate([
             placeholder.centerXAnchor.constraint(equalTo: detailContainer.centerXAnchor),
-            placeholder.centerYAnchor.constraint(equalTo: detailContainer.centerYAnchor)
+            placeholder.centerYAnchor.constraint(equalTo: detailContainer.centerYAnchor),
         ])
         return detailContainer
     }
@@ -209,7 +211,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     }
 
     private func showPlaceholder() {
-        detailContainer.subviews.forEach { $0.removeFromSuperview() }
+        for view in detailContainer.subviews {
+            view.removeFromSuperview()
+        }
         let placeholder = NSTextField(labelWithString: "Select a project or workspace.")
         placeholder.font = .systemFont(ofSize: 14)
         placeholder.textColor = .secondaryLabelColor
@@ -217,12 +221,14 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         detailContainer.addSubview(placeholder)
         NSLayoutConstraint.activate([
             placeholder.centerXAnchor.constraint(equalTo: detailContainer.centerXAnchor),
-            placeholder.centerYAnchor.constraint(equalTo: detailContainer.centerYAnchor)
+            placeholder.centerYAnchor.constraint(equalTo: detailContainer.centerYAnchor),
         ])
     }
 
     private func showProjectDetail(project: ProjectSummary) {
-        detailContainer.subviews.forEach { $0.removeFromSuperview() }
+        for view in detailContainer.subviews {
+            view.removeFromSuperview()
+        }
         let stack = NSStackView()
         stack.orientation = .vertical
         stack.spacing = 12
@@ -266,7 +272,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             statusEditor.setChecks(config.statusChecks)
         }
 
-        let saveButton = actionButton(title: "Save Project", symbol: "square.and.arrow.down", tooltip: "Save project (⌘S)", action: #selector(saveProject(_:)), primary: true)
+        let saveButton = actionButton(
+            title: "Save Project", symbol: "square.and.arrow.down", tooltip: "Save project (⌘S)",
+            action: #selector(saveProject(_:)), primary: true)
         saveButton.identifier = NSUserInterfaceItemIdentifier(project.id)
         saveButton.keyEquivalent = "\r"
 
@@ -294,7 +302,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         NSLayoutConstraint.activate([
             stack.leadingAnchor.constraint(equalTo: detailContainer.leadingAnchor, constant: 20),
             stack.trailingAnchor.constraint(equalTo: detailContainer.trailingAnchor, constant: -20),
-            stack.topAnchor.constraint(equalTo: detailContainer.topAnchor, constant: 20)
+            stack.topAnchor.constraint(equalTo: detailContainer.topAnchor, constant: 20),
         ])
 
         saveButton.tag = storeProjectFields(
@@ -315,7 +323,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     }
 
     private func showAddProjectForm() {
-        detailContainer.subviews.forEach { $0.removeFromSuperview() }
+        for view in detailContainer.subviews {
+            view.removeFromSuperview()
+        }
         let stack = NSStackView()
         stack.orientation = .vertical
         stack.spacing = 12
@@ -343,7 +353,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let statusEditor = StatusCheckEditor(processNamesProvider: { processEditor.processNames() })
         statusEditor.setChecks([])
 
-        let createButton = iconButton(symbol: "checkmark.circle", tooltip: "Create project", action: #selector(createProject(_:)))
+        let createButton = iconButton(
+            symbol: "checkmark.circle", tooltip: "Create project", action: #selector(createProject(_:)))
 
         let cancelButton = iconButton(symbol: "xmark.circle", tooltip: "Cancel", action: #selector(cancelProjectForm))
 
@@ -380,7 +391,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         NSLayoutConstraint.activate([
             stack.leadingAnchor.constraint(equalTo: detailContainer.leadingAnchor, constant: 20),
             stack.trailingAnchor.constraint(equalTo: detailContainer.trailingAnchor, constant: -20),
-            stack.topAnchor.constraint(equalTo: detailContainer.topAnchor, constant: 20)
+            stack.topAnchor.constraint(equalTo: detailContainer.topAnchor, constant: 20),
         ])
 
         createButton.tag = storeAddProjectFields(
@@ -395,7 +406,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     }
 
     private func showAddWorkspaceForm(project: ProjectSummary) {
-        detailContainer.subviews.forEach { $0.removeFromSuperview() }
+        for view in detailContainer.subviews {
+            view.removeFromSuperview()
+        }
         let stack = NSStackView()
         stack.orientation = .vertical
         stack.spacing = 12
@@ -406,7 +419,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let nameField = NSTextField(string: "")
         nameField.placeholderString = "workspace name"
 
-        let createButton = iconButton(symbol: "checkmark.circle", tooltip: "Create workspace", action: #selector(createWorkspace(_:)))
+        let createButton = iconButton(
+            symbol: "checkmark.circle", tooltip: "Create workspace", action: #selector(createWorkspace(_:)))
         let cancelButton = iconButton(symbol: "xmark.circle", tooltip: "Cancel", action: #selector(cancelProjectForm))
 
         stack.addArrangedSubview(header)
@@ -425,14 +439,16 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         NSLayoutConstraint.activate([
             stack.leadingAnchor.constraint(equalTo: detailContainer.leadingAnchor, constant: 20),
             stack.trailingAnchor.constraint(equalTo: detailContainer.trailingAnchor, constant: -20),
-            stack.topAnchor.constraint(equalTo: detailContainer.topAnchor, constant: 20)
+            stack.topAnchor.constraint(equalTo: detailContainer.topAnchor, constant: 20),
         ])
 
         createButton.tag = storeAddWorkspaceFields(projectID: project.id, nameField: nameField)
     }
 
     private func showWorkspaceDetail(project: ProjectSummary, workspace: WorkspaceSummary) {
-        detailContainer.subviews.forEach { $0.removeFromSuperview() }
+        for view in detailContainer.subviews {
+            view.removeFromSuperview()
+        }
         let stack = NSStackView()
         stack.orientation = .vertical
         stack.spacing = 12
@@ -444,11 +460,17 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let dirLabel = labeledValue(title: "Directory", value: workspace.dir)
         let statusLabel = statusRow(isRunning: workspace.isRunning)
 
-        let launchButton = actionButton(title: "Launch (⌘L)", symbol: "play.circle", tooltip: "Launch", action: #selector(launchWorkspace(_:)), primary: false)
+        let launchButton = actionButton(
+            title: "Launch (⌘L)", symbol: "play.circle", tooltip: "Launch", action: #selector(launchWorkspace(_:)),
+            primary: false)
         launchButton.identifier = NSUserInterfaceItemIdentifier(workspace.id)
-        let stopButton = actionButton(title: "Stop (⌘.)", symbol: "stop.circle", tooltip: "Stop", action: #selector(stopWorkspace(_:)), primary: false)
+        let stopButton = actionButton(
+            title: "Stop (⌘.)", symbol: "stop.circle", tooltip: "Stop", action: #selector(stopWorkspace(_:)),
+            primary: false)
         stopButton.identifier = NSUserInterfaceItemIdentifier(workspace.id)
-        let archiveButton = actionButton(title: "Archive", symbol: "archivebox", tooltip: "Archive", action: #selector(archiveWorkspace(_:)), primary: false)
+        let archiveButton = actionButton(
+            title: "Archive", symbol: "archivebox", tooltip: "Archive", action: #selector(archiveWorkspace(_:)),
+            primary: false)
         archiveButton.identifier = NSUserInterfaceItemIdentifier(workspace.id)
         archiveButton.isEnabled = !workspace.isDefault
 
@@ -484,7 +506,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             stack.trailingAnchor.constraint(equalTo: detailContainer.trailingAnchor, constant: -20),
             stack.topAnchor.constraint(equalTo: detailContainer.topAnchor, constant: 20),
             tabs.heightAnchor.constraint(equalToConstant: 320),
-            tabs.widthAnchor.constraint(equalTo: stack.widthAnchor)
+            tabs.widthAnchor.constraint(equalTo: stack.widthAnchor),
         ])
         detailContainer.layoutSubtreeIfNeeded()
     }
@@ -562,7 +584,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         return label
     }
 
-
     private func labeledValue(title: String, value: String) -> NSView {
         let stack = NSStackView()
         stack.orientation = .horizontal
@@ -600,7 +621,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         return button
     }
 
-    private func actionButton(title: String, symbol: String?, tooltip: String, action: Selector, primary: Bool) -> NSButton {
+    private func actionButton(title: String, symbol: String?, tooltip: String, action: Selector, primary: Bool)
+        -> NSButton
+    {
         let button = NSButton(title: title, target: self, action: action)
         button.bezelStyle = primary ? .rounded : .texturedRounded
         if let symbol {
@@ -650,7 +673,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             content.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: inset),
             content.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -inset),
             content.topAnchor.constraint(equalTo: container.topAnchor, constant: inset),
-            content.bottomAnchor.constraint(equalTo: container.bottomAnchor, constant: -inset)
+            content.bottomAnchor.constraint(equalTo: container.bottomAnchor, constant: -inset),
         ])
         return container
     }
@@ -728,13 +751,15 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
     @objc private func addWorkspace(_ sender: NSButton) {
         guard let projectID = sender.identifier?.rawValue,
-              let project = projects.first(where: { $0.id == projectID }) else { return }
+            let project = projects.first(where: { $0.id == projectID })
+        else { return }
         showAddWorkspaceForm(project: project)
     }
 
     @objc private func addWorkspaceFromToolbar(_ sender: NSButton) {
         if let projectID = sender.identifier?.rawValue,
-           let project = projects.first(where: { $0.id == projectID }) {
+            let project = projects.first(where: { $0.id == projectID })
+        {
             showAddWorkspaceForm(project: project)
             return
         }
@@ -877,7 +902,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     private func findWorkspace(id: String) -> (ProjectSummary, WorkspaceSummary)? {
         for project in projects {
             if let workspaces = workspacesByProject[project.id],
-               let workspace = workspaces.first(where: { $0.id == id }) {
+                let workspace = workspaces.first(where: { $0.id == id })
+            {
                 return (project, workspace)
             }
         }
@@ -970,8 +996,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         shortcutMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
             guard let self else { return event }
             if event.modifierFlags.contains(.command),
-               !event.modifierFlags.contains(.shift),
-               event.charactersIgnoringModifiers?.lowercased() == "n" {
+                !event.modifierFlags.contains(.shift),
+                event.charactersIgnoringModifiers?.lowercased() == "n"
+            {
                 self.addWorkspaceFromShortcut()
                 return nil
             }
@@ -1039,7 +1066,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let running = allRunningWorkspaces()
         guard !running.isEmpty else { return }
         if let selectedWorkspaceID,
-           let idx = running.firstIndex(where: { $0.id == selectedWorkspaceID }) {
+            let idx = running.firstIndex(where: { $0.id == selectedWorkspaceID })
+        {
             let next = running[(idx + 1) % running.count]
             selectWorkspace(next)
         } else {
@@ -1051,7 +1079,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let running = allRunningWorkspaces()
         guard !running.isEmpty else { return }
         if let selectedWorkspaceID,
-           let idx = running.firstIndex(where: { $0.id == selectedWorkspaceID }) {
+            let idx = running.firstIndex(where: { $0.id == selectedWorkspaceID })
+        {
             let prev = running[(idx - 1 + running.count) % running.count]
             selectWorkspace(prev)
         } else {
@@ -1079,9 +1108,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
     private func windowShortcutIndex(for event: NSEvent) -> Int? {
         guard event.modifierFlags.contains(.command),
-              event.modifierFlags.contains(.shift),
-              !event.modifierFlags.contains(.option),
-              !event.modifierFlags.contains(.control) else {
+            event.modifierFlags.contains(.shift),
+            !event.modifierFlags.contains(.option),
+            !event.modifierFlags.contains(.control)
+        else {
             return nil
         }
         let keyMap: [UInt16: Int] = [
@@ -1093,7 +1123,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             UInt16(kVK_ANSI_6): 6,
             UInt16(kVK_ANSI_7): 7,
             UInt16(kVK_ANSI_8): 8,
-            UInt16(kVK_ANSI_9): 9
+            UInt16(kVK_ANSI_9): 9,
         ]
         return keyMap[event.keyCode]
     }
@@ -1101,7 +1131,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     private func selectWorkspace(_ workspace: WorkspaceSummary) {
         for row in 0..<outlineView.numberOfRows {
             if let item = outlineView.item(atRow: row) as? OutlineItem {
-                if case let .workspace(_, ws) = item, ws.id == workspace.id {
+                if case .workspace(_, let ws) = item, ws.id == workspace.id {
                     outlineView.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
                     break
                 }
@@ -1155,7 +1185,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         if item == nil {
             return projects.count
         }
-        if case let .project(project) = item as? OutlineItem {
+        if case .project(let project) = item as? OutlineItem {
             return workspacesByProject[project.id]?.count ?? 0
         }
         return 0
@@ -1172,8 +1202,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         if item == nil {
             return OutlineItem.project(projects[index])
         }
-        if case let .project(project) = item as? OutlineItem {
-            let workspace = workspacesByProject[project.id]?[index] ?? WorkspaceSummary(id: "", name: "", dir: "", isRunning: false, isArchived: false, isDefault: false)
+        if case .project(let project) = item as? OutlineItem {
+            let workspace =
+                workspacesByProject[project.id]?[index]
+                ?? WorkspaceSummary(id: "", name: "", dir: "", isRunning: false, isArchived: false, isDefault: false)
             return OutlineItem.workspace(project, workspace)
         }
         return OutlineItem.project(projects[0])
@@ -1194,14 +1226,15 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             icon.heightAnchor.constraint(equalToConstant: 10),
             text.leadingAnchor.constraint(equalTo: icon.trailingAnchor, constant: 6),
             text.trailingAnchor.constraint(equalTo: cell.trailingAnchor, constant: -6),
-            text.centerYAnchor.constraint(equalTo: cell.centerYAnchor)
+            text.centerYAnchor.constraint(equalTo: cell.centerYAnchor),
         ])
-        if case let .project(project) = item as? OutlineItem {
+        if case .project(let project) = item as? OutlineItem {
             icon.image = nil
             text.stringValue = project.name
             text.font = .systemFont(ofSize: 13, weight: .semibold)
-        } else if case let .workspace(_, workspace) = item as? OutlineItem {
-            icon.image = NSImage(systemSymbolName: workspace.isRunning ? "circle.fill" : "circle", accessibilityDescription: "Status")
+        } else if case .workspace(_, let workspace) = item as? OutlineItem {
+            icon.image = NSImage(
+                systemSymbolName: workspace.isRunning ? "circle.fill" : "circle", accessibilityDescription: "Status")
             icon.contentTintColor = workspace.isRunning ? .systemGreen : .tertiaryLabelColor
             text.stringValue = workspace.name
             text.font = .systemFont(ofSize: 12)
@@ -1236,11 +1269,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         }
         lastSelectedRow = row
         switch item {
-        case let .project(project):
+        case .project(let project):
             selectedProjectID = project.id
             selectedWorkspaceID = nil
             showProjectDetail(project: project)
-        case let .workspace(project, workspace):
+        case .workspace(let project, let workspace):
             selectedProjectID = project.id
             selectedWorkspaceID = workspace.id
             showWorkspaceDetail(project: project, workspace: workspace)
@@ -1255,17 +1288,20 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         statusEditor: StatusCheckEditor
     ) {
         projectHasUnsavedChanges = false
-        NotificationCenter.default.addObserver(forName: NSText.didChangeNotification, object: setupView, queue: .main) { [weak self] _ in
+        NotificationCenter.default.addObserver(forName: NSText.didChangeNotification, object: setupView, queue: .main) {
+            [weak self] _ in
             Task { @MainActor in
                 self?.projectHasUnsavedChanges = true
             }
         }
-        NotificationCenter.default.addObserver(forName: NSText.didChangeNotification, object: cleanupView, queue: .main) { [weak self] _ in
+        NotificationCenter.default.addObserver(forName: NSText.didChangeNotification, object: cleanupView, queue: .main)
+        { [weak self] _ in
             Task { @MainActor in
                 self?.projectHasUnsavedChanges = true
             }
         }
-        NotificationCenter.default.addObserver(forName: NSText.didChangeNotification, object: browserView, queue: .main) { [weak self] _ in
+        NotificationCenter.default.addObserver(forName: NSText.didChangeNotification, object: browserView, queue: .main)
+        { [weak self] _ in
             Task { @MainActor in
                 self?.projectHasUnsavedChanges = true
             }

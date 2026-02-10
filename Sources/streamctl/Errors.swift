@@ -14,25 +14,25 @@ public enum AgentmuxError: LocalizedError {
 
     public var errorDescription: String? {
         switch self {
-        case let .missingProject(dir):
+        case .missingProject(let dir):
             return "Project not found: \(dir)"
-        case let .projectAlreadyExists(dir):
+        case .projectAlreadyExists(let dir):
             return "Project already exists: \(dir)"
-        case let .missingWorkspace(project, workspace):
+        case .missingWorkspace(let project, let workspace):
             return "Workspace not found for project \(project): \(workspace)"
-        case let .workspaceAlreadyExists(project, workspace):
+        case .workspaceAlreadyExists(let project, let workspace):
             return "Workspace already exists for project \(project): \(workspace)"
-        case let .invalidWorkspace(path):
+        case .invalidWorkspace(let path):
             return "Workspace path does not exist: \(path)"
-        case let .gitCommandFailed(message):
+        case .gitCommandFailed(let message):
             return "Git command failed: \(message)"
-        case let .invalidArgument(message):
+        case .invalidArgument(let message):
             return "Invalid argument: \(message)"
-        case let .yabaiUnavailable(message):
+        case .yabaiUnavailable(let message):
             return "yabai not available: \(message)"
-        case let .dependencyMissing(message):
+        case .dependencyMissing(let message):
             return "Missing dependency: \(message)"
-        case let .configError(message):
+        case .configError(let message):
             return "Configuration error: \(message)"
         }
     }

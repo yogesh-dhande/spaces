@@ -32,7 +32,9 @@ public enum Shell {
         if process.terminationStatus != 0 {
             let errData = err.fileHandleForReading.readDataToEndOfFile()
             let text = String(data: errData, encoding: .utf8) ?? ""
-            throw NSError(domain: "agentmux.shell", code: Int(process.terminationStatus), userInfo: [NSLocalizedDescriptionKey: text])
+            throw NSError(
+                domain: "agentmux.shell", code: Int(process.terminationStatus),
+                userInfo: [NSLocalizedDescriptionKey: text])
         }
 
         return String(data: data, encoding: .utf8) ?? ""

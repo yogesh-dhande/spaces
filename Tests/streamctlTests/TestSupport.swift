@@ -18,7 +18,9 @@ func makeProjectRecord(id: String = UUID().uuidString, dir: String) -> ProjectRe
     ProjectRecord(id: id, name: "Project", dir: dir, isGitRepo: false, defaultBranch: nil)
 }
 
-func makeWorkspaceRecord(id: String = UUID().uuidString, projectID: String, name: String, dir: String) -> WorkspaceRecord {
+func makeWorkspaceRecord(id: String = UUID().uuidString, projectID: String, name: String, dir: String)
+    -> WorkspaceRecord
+{
     WorkspaceRecord(
         id: id,
         projectID: projectID,

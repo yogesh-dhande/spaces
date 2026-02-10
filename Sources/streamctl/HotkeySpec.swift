@@ -39,7 +39,8 @@ public struct HotkeySpec: Sendable, Equatable {
             throw HotkeySpecError("Hotkey cannot be empty")
         }
 
-        let normalizedRaw = trimmed
+        let normalizedRaw =
+            trimmed
             .lowercased()
             .replacingOccurrences(of: "+", with: " ")
             .replacingOccurrences(of: "-", with: " ")
@@ -217,6 +218,6 @@ public struct HotkeySpec: Sendable, Equatable {
         "left": UInt32(kVK_LeftArrow),
         "right": UInt32(kVK_RightArrow),
         "up": UInt32(kVK_UpArrow),
-        "down": UInt32(kVK_DownArrow)
+        "down": UInt32(kVK_DownArrow),
     ]
 }

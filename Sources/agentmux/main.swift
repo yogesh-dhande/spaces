@@ -35,29 +35,39 @@ struct CLI {
 
     private func runConfigSubcommand(orchestrator: AgentmuxOrchestrator, path: String) throws {
         guard args.count >= 3 else {
-            throw NSError(domain: "agentmux.cli", code: 2, userInfo: [NSLocalizedDescriptionKey: "Missing config action. Use: config path|show"])
+            throw NSError(
+                domain: "agentmux.cli", code: 2,
+                userInfo: [NSLocalizedDescriptionKey: "Missing config action. Use: config path|show"])
         }
         switch args[2] {
         case "path":
             print(path)
         case "show":
             let config = try ConfigStore(path: path).load()
-            print("editor=\(config.editor?.rawValue ?? "none") port_range=\(config.portRange.start)-\(config.portRange.end) projects=\(config.projects.count)")
+            print(
+                "editor=\(config.editor?.rawValue ?? "none") port_range=\(config.portRange.start)-\(config.portRange.end) projects=\(config.projects.count)"
+            )
         default:
-            throw NSError(domain: "agentmux.cli", code: 2, userInfo: [NSLocalizedDescriptionKey: "Unknown config action: \(args[2])"])
+            throw NSError(
+                domain: "agentmux.cli", code: 2,
+                userInfo: [NSLocalizedDescriptionKey: "Unknown config action: \(args[2])"])
         }
     }
 
     private func runProjectSubcommand(orchestrator: AgentmuxOrchestrator) throws {
         guard args.count >= 3 else {
-            throw NSError(domain: "agentmux.cli", code: 2, userInfo: [NSLocalizedDescriptionKey: "Missing project action. Use: project list|add|update|remove"])
+            throw NSError(
+                domain: "agentmux.cli", code: 2,
+                userInfo: [NSLocalizedDescriptionKey: "Missing project action. Use: project list|add|update|remove"])
         }
 
         switch args[2] {
         case "list":
             let projects = try orchestrator.listProjects()
             for project in projects {
-                print("\(project.name)\t\(project.dir)\tgit=\(project.isGitRepo ? "yes" : "no")\tdefault_branch=\(project.defaultBranch ?? "-")")
+                print(
+                    "\(project.name)\t\(project.dir)\tgit=\(project.isGitRepo ? "yes" : "no")\tdefault_branch=\(project.defaultBranch ?? "-")"
+                )
             }
         case "add":
             let dir = try value(for: "--dir")
@@ -68,7 +78,9 @@ struct CLI {
             let setupScript = optionalValue(for: "--setup-script")
             let cleanupScript = optionalValue(for: "--cleanup-script")
             guard var config = try orchestrator.projectConfig(projectID: normalizePath(dir)) else {
-                throw NSError(domain: "agentmux.cli", code: 2, userInfo: [NSLocalizedDescriptionKey: "Project not found for dir \(dir)"])
+                throw NSError(
+                    domain: "agentmux.cli", code: 2,
+                    userInfo: [NSLocalizedDescriptionKey: "Project not found for dir \(dir)"])
             }
             if let setupScript {
                 config.setupScript = setupScript
@@ -83,24 +95,32 @@ struct CLI {
             try orchestrator.removeProject(dir: dir)
             print("Removed project \(dir)")
         default:
-            throw NSError(domain: "agentmux.cli", code: 2, userInfo: [NSLocalizedDescriptionKey: "Unknown project action: \(args[2])"])
+            throw NSError(
+                domain: "agentmux.cli", code: 2,
+                userInfo: [NSLocalizedDescriptionKey: "Unknown project action: \(args[2])"])
         }
     }
 
     private func runWorkspaceSubcommand(orchestrator: AgentmuxOrchestrator) throws {
         guard args.count >= 3 else {
-            throw NSError(domain: "agentmux.cli", code: 2, userInfo: [NSLocalizedDescriptionKey: "Missing workspace action. Use: workspace list|create|launch|stop|archive|activate"])
+            throw NSError(
+                domain: "agentmux.cli", code: 2,
+                userInfo: [
+                    NSLocalizedDescriptionKey:
+                        "Missing workspace action. Use: workspace list|create|launch|stop|archive|activate"
+                ])
         }
         switch args[2] {
         case "list":
             let projectDir = try value(for: "--project-dir")
             let projectID = normalizePath(projectDir)
-            let workspaces = try orchestrator.listWorkspaces(projectID: projectID, includeArchived: args.contains("--all"))
+            let workspaces = try orchestrator.listWorkspaces(
+                projectID: projectID, includeArchived: args.contains("--all"))
             for ws in workspaces {
                 let flags = [
                     ws.isDefault ? "default" : nil,
                     ws.isRunning ? "running" : nil,
-                    ws.isArchived ? "archived" : nil
+                    ws.isArchived ? "archived" : nil,
                 ].compactMap { $0 }.joined(separator: ",")
                 print("\(ws.name)\t\(ws.dir)\t\(flags)")
             }
@@ -127,7 +147,9 @@ struct CLI {
             try orchestrator.setActiveWorkspace(id: id)
             print("Activated workspace \(id)")
         default:
-            throw NSError(domain: "agentmux.cli", code: 2, userInfo: [NSLocalizedDescriptionKey: "Unknown workspace action: \(args[2])"])
+            throw NSError(
+                domain: "agentmux.cli", code: 2,
+                userInfo: [NSLocalizedDescriptionKey: "Unknown workspace action: \(args[2])"])
         }
     }
 
@@ -135,15 +157,22 @@ struct CLI {
         let projectDir = try value(for: "--project-dir")
         let name = try value(for: "--name")
         let projectID = normalizePath(projectDir)
-        guard let workspace = try orchestrator.listWorkspaces(projectID: projectID, includeArchived: true).first(where: { $0.name == name }) else {
-            throw NSError(domain: "agentmux.cli", code: 2, userInfo: [NSLocalizedDescriptionKey: "Workspace not found: \(name)"])
+        guard
+            let workspace = try orchestrator.listWorkspaces(projectID: projectID, includeArchived: true).first(where: {
+                $0.name == name
+            })
+        else {
+            throw NSError(
+                domain: "agentmux.cli", code: 2, userInfo: [NSLocalizedDescriptionKey: "Workspace not found: \(name)"])
         }
         return workspace.id
     }
 
     private func runSettingsSubcommand(orchestrator: AgentmuxOrchestrator) throws {
         guard args.count >= 3 else {
-            throw NSError(domain: "agentmux.cli", code: 2, userInfo: [NSLocalizedDescriptionKey: "Missing settings action. Use: settings get|set|reset"])
+            throw NSError(
+                domain: "agentmux.cli", code: 2,
+                userInfo: [NSLocalizedDescriptionKey: "Missing settings action. Use: settings get|set|reset"])
         }
 
         switch args[2] {
@@ -164,7 +193,10 @@ struct CLI {
                 throw NSError(
                     domain: "agentmux.cli",
                     code: 2,
-                    userInfo: [NSLocalizedDescriptionKey: "Missing setting flag. Use: settings get --gui-hotkey|--gui-next-shortcut|--gui-prev-shortcut|--gui-show-shortcut"]
+                    userInfo: [
+                        NSLocalizedDescriptionKey:
+                            "Missing setting flag. Use: settings get --gui-hotkey|--gui-next-shortcut|--gui-prev-shortcut|--gui-show-shortcut"
+                    ]
                 )
             }
 
@@ -189,7 +221,10 @@ struct CLI {
                 throw NSError(
                     domain: "agentmux.cli",
                     code: 2,
-                    userInfo: [NSLocalizedDescriptionKey: "Missing setting flag/value. Use: settings set --gui-hotkey|--gui-next-shortcut|--gui-prev-shortcut|--gui-show-shortcut <spec>"]
+                    userInfo: [
+                        NSLocalizedDescriptionKey:
+                            "Missing setting flag/value. Use: settings set --gui-hotkey|--gui-next-shortcut|--gui-prev-shortcut|--gui-show-shortcut <spec>"
+                    ]
                 )
             }
 
@@ -210,18 +245,24 @@ struct CLI {
                 throw NSError(
                     domain: "agentmux.cli",
                     code: 2,
-                    userInfo: [NSLocalizedDescriptionKey: "Missing setting flag. Use: settings reset --gui-hotkey|--gui-next-shortcut|--gui-prev-shortcut|--gui-show-shortcut"]
+                    userInfo: [
+                        NSLocalizedDescriptionKey:
+                            "Missing setting flag. Use: settings reset --gui-hotkey|--gui-next-shortcut|--gui-prev-shortcut|--gui-show-shortcut"
+                    ]
                 )
             }
 
         default:
-            throw NSError(domain: "agentmux.cli", code: 2, userInfo: [NSLocalizedDescriptionKey: "Unknown settings action: \(args[2])"])
+            throw NSError(
+                domain: "agentmux.cli", code: 2,
+                userInfo: [NSLocalizedDescriptionKey: "Unknown settings action: \(args[2])"])
         }
     }
 
     private func value(for flag: String) throws -> String {
         guard let idx = args.firstIndex(of: flag), idx + 1 < args.count else {
-            throw NSError(domain: "agentmux.cli", code: 2, userInfo: [NSLocalizedDescriptionKey: "Missing required flag \(flag)"])
+            throw NSError(
+                domain: "agentmux.cli", code: 2, userInfo: [NSLocalizedDescriptionKey: "Missing required flag \(flag)"])
         }
         return args[idx + 1]
     }
@@ -238,45 +279,46 @@ struct CLI {
     }
 
     private func printHelp() {
-        print("""
-        agentmux command line
+        print(
+            """
+            agentmux command line
 
-        Usage:
-          agentmux config path
-          agentmux config show
+            Usage:
+              agentmux config path
+              agentmux config show
 
-          agentmux settings get --gui-hotkey
-          agentmux settings get --gui-next-shortcut
-          agentmux settings get --gui-prev-shortcut
-          agentmux settings get --gui-show-shortcut
-          agentmux settings set --gui-hotkey <spec>
-          agentmux settings set --gui-next-shortcut <spec>
-          agentmux settings set --gui-prev-shortcut <spec>
-          agentmux settings set --gui-show-shortcut <spec>
-          agentmux settings reset --gui-hotkey
-          agentmux settings reset --gui-next-shortcut
-          agentmux settings reset --gui-prev-shortcut
-          agentmux settings reset --gui-show-shortcut
+              agentmux settings get --gui-hotkey
+              agentmux settings get --gui-next-shortcut
+              agentmux settings get --gui-prev-shortcut
+              agentmux settings get --gui-show-shortcut
+              agentmux settings set --gui-hotkey <spec>
+              agentmux settings set --gui-next-shortcut <spec>
+              agentmux settings set --gui-prev-shortcut <spec>
+              agentmux settings set --gui-show-shortcut <spec>
+              agentmux settings reset --gui-hotkey
+              agentmux settings reset --gui-next-shortcut
+              agentmux settings reset --gui-prev-shortcut
+              agentmux settings reset --gui-show-shortcut
 
-          agentmux project list
-          agentmux project add --dir <path>
-          agentmux project update --dir <path> [--setup-script <script>] [--cleanup-script <script>]
-          agentmux project remove --dir <path>
+              agentmux project list
+              agentmux project add --dir <path>
+              agentmux project update --dir <path> [--setup-script <script>] [--cleanup-script <script>]
+              agentmux project remove --dir <path>
 
-          agentmux workspace list --project-dir <path> [--all]
-          agentmux workspace create --project-dir <path> --name <name>
-          agentmux workspace launch --project-dir <path> --name <name>
-          agentmux workspace stop --project-dir <path> --name <name>
-          agentmux workspace archive --project-dir <path> --name <name>
-          agentmux workspace activate --project-dir <path> --name <name>
+              agentmux workspace list --project-dir <path> [--all]
+              agentmux workspace create --project-dir <path> --name <name>
+              agentmux workspace launch --project-dir <path> --name <name>
+              agentmux workspace stop --project-dir <path> --name <name>
+              agentmux workspace archive --project-dir <path> --name <name>
+              agentmux workspace activate --project-dir <path> --name <name>
 
-        Notes:
-          - Configuration is stored in ~/.agentmux/config.yaml (YAML is source of truth).
-          - Runtime state is stored in ~/.agentmux/agentmux.db and rebuilt if schema changes.
-          - Workspaces reserve PORT0-PORT9 from the configured port range.
-          - GUI window focus shortcuts: cmd+shift+1 through cmd+shift+9 (when GUI is focused).
-          - GUI window cycle shortcuts: cmd+shift+[ and cmd+shift+] (global, when GUI is not focused).
-        """)
+            Notes:
+              - Configuration is stored in ~/.agentmux/config.yaml (YAML is source of truth).
+              - Runtime state is stored in ~/.agentmux/agentmux.db and rebuilt if schema changes.
+              - Workspaces reserve PORT0-PORT9 from the configured port range.
+              - GUI window focus shortcuts: cmd+shift+1 through cmd+shift+9 (when GUI is focused).
+              - GUI window cycle shortcuts: cmd+shift+[ and cmd+shift+] (global, when GUI is not focused).
+            """)
     }
 }
 

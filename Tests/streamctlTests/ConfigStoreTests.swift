@@ -1,4 +1,5 @@
 import XCTest
+
 @testable import streamctl
 
 final class ConfigStoreTests: XCTestCase {
@@ -24,12 +25,12 @@ final class ConfigStoreTests: XCTestCase {
         let dir = try makeTempDirectory()
         let path = dir.appendingPathComponent("config.yaml").path
         let yaml = """
-        editor: none
-        port_range:
-          start: 30000
-          end: 20000
-        projects: []
-        """
+            editor: none
+            port_range:
+              start: 30000
+              end: 20000
+            projects: []
+            """
         try yaml.write(toFile: path, atomically: true, encoding: .utf8)
         let store = ConfigStore(path: path)
 

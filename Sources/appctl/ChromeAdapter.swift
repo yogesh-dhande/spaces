@@ -10,13 +10,13 @@ public final class ChromeAdapter {
     public func openWindow(url: String) throws -> Int {
         let escaped = url.replacingOccurrences(of: "\"", with: "\\\"")
         let script = """
-        tell application "Google Chrome"
-          activate
-          set newWindow to make new window
-          set URL of active tab of newWindow to "\(escaped)"
-          return id of newWindow
-        end tell
-        """
+            tell application "Google Chrome"
+              activate
+              set newWindow to make new window
+              set URL of active tab of newWindow to "\(escaped)"
+              return id of newWindow
+            end tell
+            """
         let output = try AppleScript.run(script)
         return Int(output.trimmingCharacters(in: .whitespacesAndNewlines)) ?? -1
     }
@@ -24,23 +24,24 @@ public final class ChromeAdapter {
     public func windowMatches(forURLPrefix prefix: String) throws -> [ChromeWindowMatch] {
         let escaped = prefix.replacingOccurrences(of: "\"", with: "\\\"")
         let script = """
-        set output to ""
-        tell application "Google Chrome"
-          repeat with w in windows
-            set wid to id of w
-            set titleText to title of w
-            repeat with t in tabs of w
-              set u to URL of t
-              if u starts with "\(escaped)" then
-                set output to output & wid & "\\t" & titleText & "\\t" & u & "\\n"
-              end if
-            end repeat
-          end repeat
-        end tell
-        return output
-        """
+            set output to ""
+            tell application "Google Chrome"
+              repeat with w in windows
+                set wid to id of w
+                set titleText to title of w
+                repeat with t in tabs of w
+                  set u to URL of t
+                  if u starts with "\(escaped)" then
+                    set output to output & wid & "\\t" & titleText & "\\t" & u & "\\n"
+                  end if
+                end repeat
+              end repeat
+            end tell
+            return output
+            """
         let output = try AppleScript.run(script)
-        return output
+        return
+            output
             .split(separator: "\n")
             .compactMap { line in
                 let parts = line.split(separator: "\t", maxSplits: 2).map(String.init)

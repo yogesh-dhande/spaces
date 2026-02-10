@@ -9,7 +9,9 @@ public final class GitClient {
     }
 
     public func defaultBranch(path: String) -> String? {
-        if let output = try? Shell.runAndCapture(["git", "-C", path, "symbolic-ref", "--short", "refs/remotes/origin/HEAD"]) {
+        if let output = try? Shell.runAndCapture([
+            "git", "-C", path, "symbolic-ref", "--short", "refs/remotes/origin/HEAD",
+        ]) {
             let trimmed = output.trimmingCharacters(in: .whitespacesAndNewlines)
             if let slash = trimmed.split(separator: "/").last {
                 return String(slash)
@@ -21,12 +23,14 @@ public final class GitClient {
     }
 
     public func branchExists(path: String, branch: String) -> Bool {
-        let status = (try? Shell.run(["git", "-C", path, "show-ref", "--verify", "--quiet", "refs/heads/\(branch)"])) ?? 1
+        let status =
+            (try? Shell.run(["git", "-C", path, "show-ref", "--verify", "--quiet", "refs/heads/\(branch)"])) ?? 1
         return status == 0
     }
 
     public func remoteBranchExists(path: String, branch: String) -> Bool {
-        let status = (try? Shell.run(["git", "-C", path, "ls-remote", "--exit-code", "--heads", "origin", branch])) ?? 1
+        let status =
+            (try? Shell.run(["git", "-C", path, "ls-remote", "--exit-code", "--heads", "origin", branch])) ?? 1
         return status == 0
     }
 
@@ -65,7 +69,8 @@ public final class GitClient {
 
         if process.terminationStatus != 0 {
             let errData = err.fileHandleForReading.readDataToEndOfFile()
-            let message = String(data: errData, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "unknown"
+            let message =
+                String(data: errData, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "unknown"
             throw AgentmuxError.gitCommandFailed(message: message)
         }
     }

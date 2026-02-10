@@ -1,4 +1,5 @@
 import XCTest
+
 @testable import streamctl
 
 final class PortAllocatorTests: XCTestCase {
@@ -40,11 +41,13 @@ final class PortAllocatorTests: XCTestCase {
 
         let allocator = PortAllocator(store: store)
 
-        XCTAssertThrowsError(try allocator.allocatePorts(
-            workspaceID: workspaceB.id,
-            count: 2,
-            range: PortRange(start: 20000, end: 20002)
-        )) { error in
+        XCTAssertThrowsError(
+            try allocator.allocatePorts(
+                workspaceID: workspaceB.id,
+                count: 2,
+                range: PortRange(start: 20000, end: 20002)
+            )
+        ) { error in
             guard case AgentmuxError.invalidArgument = error else {
                 return XCTFail("Unexpected error: \(error)")
             }

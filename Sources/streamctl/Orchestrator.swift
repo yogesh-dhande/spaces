@@ -63,14 +63,17 @@ public final class AgentmuxOrchestrator {
 
     public func listProjects() throws -> [ProjectSummary] {
         return try store.projects().map {
-            ProjectSummary(id: $0.id, name: $0.name, dir: $0.dir, isGitRepo: $0.isGitRepo, defaultBranch: $0.defaultBranch)
+            ProjectSummary(
+                id: $0.id, name: $0.name, dir: $0.dir, isGitRepo: $0.isGitRepo, defaultBranch: $0.defaultBranch)
         }
     }
 
     public func listWorkspaces(projectID: String, includeArchived: Bool = false) throws -> [WorkspaceSummary] {
         let records = try store.workspaces(projectID: projectID, includeArchived: includeArchived)
         return records.map {
-            WorkspaceSummary(id: $0.id, name: $0.name, dir: $0.dir, isRunning: $0.isRunning, isArchived: $0.isArchived, isDefault: $0.isDefault)
+            WorkspaceSummary(
+                id: $0.id, name: $0.name, dir: $0.dir, isRunning: $0.isRunning, isArchived: $0.isArchived,
+                isDefault: $0.isDefault)
         }
     }
 
@@ -190,7 +193,8 @@ public final class AgentmuxOrchestrator {
         let workspaceDirname: String?
         let branch: String?
         if project.isGitRepo {
-            let dirname = try makeWorkspaceDirname(project: project, workspaceName: name, branch: name, existingDirname: nil)
+            let dirname = try makeWorkspaceDirname(
+                project: project, workspaceName: name, branch: name, existingDirname: nil)
             workspaceDirname = dirname
             let worktreeRoot = try worktreeRoot(project: project)
             try FileManager.default.createDirectory(at: worktreeRoot, withIntermediateDirectories: true)
@@ -238,25 +242,36 @@ public final class AgentmuxOrchestrator {
             _ = try PortAllocator(store: store).allocatePorts(workspaceID: workspace.id, count: 10, range: portRange)
         }
 
-        let env = buildWorkspaceEnv(project: project, workspace: workspace, ports: try store.workspacePorts(workspaceID: workspace.id))
+        let env = buildWorkspaceEnv(
+            project: project, workspace: workspace, ports: try store.workspacePorts(workspaceID: workspace.id))
 
         var newWindows: [WindowRecord] = []
         var windowSnapshot = try yabai.listWindows()
 
         if let config {
             try launchProcesses(project: project, workspace: workspace, templates: config.processes, env: env)
-            newWindows.append(contentsOf: try captureNewWindows(snapshot: windowSnapshot, role: "terminal", appName: "iTerm2", workspaceID: workspace.id, orderOffset: 200))
+            newWindows.append(
+                contentsOf: try captureNewWindows(
+                    snapshot: windowSnapshot, role: "terminal", appName: "iTerm2", workspaceID: workspace.id,
+                    orderOffset: 200))
             windowSnapshot = try yabai.listWindows()
 
-            let browserMatches = try ensureBrowserSessions(project: project, workspace: workspace, sessions: config.browserSessions, env: env)
+            let browserMatches = try ensureBrowserSessions(
+                project: project, workspace: workspace, sessions: config.browserSessions, env: env)
             newWindows.append(contentsOf: browserMatches)
-            newWindows.append(contentsOf: try captureNewWindows(snapshot: windowSnapshot, role: "browser", appName: "Google Chrome", workspaceID: workspace.id, orderOffset: 0))
+            newWindows.append(
+                contentsOf: try captureNewWindows(
+                    snapshot: windowSnapshot, role: "browser", appName: "Google Chrome", workspaceID: workspace.id,
+                    orderOffset: 0))
             windowSnapshot = try yabai.listWindows()
         }
 
         if let editor = try configStore.load().editor {
             try EditorLauncher.open(editor: editor, directory: workspace.dir)
-            newWindows.append(contentsOf: try captureNewWindows(snapshot: windowSnapshot, role: "editor", appName: editorAppName(editor), workspaceID: workspace.id, orderOffset: 100))
+            newWindows.append(
+                contentsOf: try captureNewWindows(
+                    snapshot: windowSnapshot, role: "editor", appName: editorAppName(editor), workspaceID: workspace.id,
+                    orderOffset: 100))
         }
 
         try store.deleteWindows(workspaceID: workspace.id)
@@ -339,7 +354,8 @@ public final class AgentmuxOrchestrator {
         for check in config.statusChecks {
             guard let process = processes.first(where: { $0.templateName == check.process }) else { continue }
             let resolvedCommand = applyEnvVars(check.command, env: env)
-            let outcome = try runCommandWithTimeout(command: resolvedCommand, cwd: workspace.dir, timeout: check.timeout, env: env)
+            let outcome = try runCommandWithTimeout(
+                command: resolvedCommand, cwd: workspace.dir, timeout: check.timeout, env: env)
             let status = outcome.exitCode == 0 ? "green" : "red"
             let result = StatusResult(
                 processID: process.id,
@@ -548,7 +564,8 @@ public final class AgentmuxOrchestrator {
         _ = try Shell.run(["/bin/bash", "-lc", script], cwd: cwd)
     }
 
-    private func buildWorkspaceEnv(project: ProjectRecord, workspace: WorkspaceRecord, ports: [Int]) -> [String: String] {
+    private func buildWorkspaceEnv(project: ProjectRecord, workspace: WorkspaceRecord, ports: [Int]) -> [String: String]
+    {
         var env: [String: String] = [:]
         for (idx, port) in ports.enumerated() {
             env["PORT\(idx)"] = String(port)
@@ -559,7 +576,9 @@ public final class AgentmuxOrchestrator {
         return env
     }
 
-    private func launchProcesses(project: ProjectRecord, workspace: WorkspaceRecord, templates: [ProcessTemplate], env: [String: String]) throws {
+    private func launchProcesses(
+        project: ProjectRecord, workspace: WorkspaceRecord, templates: [ProcessTemplate], env: [String: String]
+    ) throws {
         guard iterm.isAvailable() else {
             throw AgentmuxError.dependencyMissing(message: "iTerm2 is required to launch processes.")
         }
@@ -602,7 +621,9 @@ public final class AgentmuxOrchestrator {
 
     }
 
-    private func ensureBrowserSessions(project: ProjectRecord, workspace: WorkspaceRecord, sessions: [BrowserSession], env: [String: String]) throws -> [WindowRecord] {
+    private func ensureBrowserSessions(
+        project: ProjectRecord, workspace: WorkspaceRecord, sessions: [BrowserSession], env: [String: String]
+    ) throws -> [WindowRecord] {
         guard !sessions.isEmpty else { return [] }
         guard chrome.isAvailable() else {
             throw AgentmuxError.dependencyMissing(message: "Google Chrome is required for browser sessions.")
@@ -643,7 +664,9 @@ public final class AgentmuxOrchestrator {
         return attached
     }
 
-    private func captureNewWindows(snapshot: [YabaiWindow], role: String, appName: String, workspaceID: String, orderOffset: Int) throws -> [WindowRecord] {
+    private func captureNewWindows(
+        snapshot: [YabaiWindow], role: String, appName: String, workspaceID: String, orderOffset: Int
+    ) throws -> [WindowRecord] {
         let after = try yabai.listWindows()
         let snapshotIDs = Set(snapshot.map(\.id))
         let created = after.filter { !snapshotIDs.contains($0.id) && $0.app == appName }
@@ -663,12 +686,15 @@ public final class AgentmuxOrchestrator {
 
     private func runtimeDirectory() throws -> String {
         let home = FileManager.default.homeDirectoryForCurrentUser
-        let dir = home.appendingPathComponent(".agentmux", isDirectory: true).appendingPathComponent("runtime", isDirectory: true)
+        let dir = home.appendingPathComponent(".agentmux", isDirectory: true).appendingPathComponent(
+            "runtime", isDirectory: true)
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         return dir.path
     }
 
-    private func shellCommand(base: String, cwd: String, env: [String: String], logFile: String, pidFile: String) -> String {
+    private func shellCommand(base: String, cwd: String, env: [String: String], logFile: String, pidFile: String)
+        -> String
+    {
         let envExports = env.map { key, value in
             return "export \(key)=\"\(value)\""
         }.sorted().joined(separator: "; ")
@@ -679,7 +705,7 @@ public final class AgentmuxOrchestrator {
             "cd \"\(safeCwd)\"",
             envExports.isEmpty ? nil : envExports,
             "echo $$ > \"\(safePid)\"",
-            "\(base) 2>&1 | tee -a \"\(safeLog)\""
+            "\(base) 2>&1 | tee -a \"\(safeLog)\"",
         ].compactMap { $0 }
         let script = commands.joined(separator: "; ")
         let singleQuoted = script.replacing("'", with: "'\\''")
@@ -694,7 +720,9 @@ public final class AgentmuxOrchestrator {
         return output
     }
 
-    private func runCommandWithTimeout(command: String, cwd: String, timeout: Int, env: [String: String]) throws -> CommandOutcome {
+    private func runCommandWithTimeout(command: String, cwd: String, timeout: Int, env: [String: String]) throws
+        -> CommandOutcome
+    {
         let process = Process()
         let out = Pipe()
         process.executableURL = URL(fileURLWithPath: "/bin/bash")
@@ -767,26 +795,30 @@ public final class AgentmuxOrchestrator {
         "shallot", "shrimp", "soup", "sorbet", "soy", "spice", "spinach", "squash", "steak", "stew",
         "sugar", "sushi", "syrup", "taco", "tamarind", "tapioca", "tea", "toffee", "toast", "tofu",
         "tomato", "tortilla", "tuna", "turkey", "turnip", "vanilla", "vinegar", "waffle", "walnut", "watermelon",
-        "yams", "yogurt", "ziti", "zucchini"
+        "yams", "yogurt", "ziti", "zucchini",
     ]
 
     private func worktreeRoot(project: ProjectRecord) throws -> URL {
         let home = FileManager.default.homeDirectoryForCurrentUser
         let projectDirname = sanitizeDirname(project.name, fallback: "project")
-        return home
+        return
+            home
             .appending(path: "agentmux", directoryHint: .isDirectory)
             .appending(path: "workspaces", directoryHint: .isDirectory)
             .appending(path: projectDirname, directoryHint: .isDirectory)
     }
 
-    private func makeWorkspaceDirname(project: ProjectRecord, workspaceName: String, branch: String, existingDirname: String?) throws -> String {
+    private func makeWorkspaceDirname(
+        project: ProjectRecord, workspaceName: String, branch: String, existingDirname: String?
+    ) throws -> String {
         if let existingDirname, !existingDirname.isEmpty {
             return existingDirname
         }
         let used = try usedWorkspaceDirnames(project: project)
         let available = AgentmuxOrchestrator.workspaceFoodNames.filter { !used.contains($0) }
         guard !available.isEmpty else {
-            throw AgentmuxError.invalidArgument(message: "No available workspace dirnames remain for project \(project.name).")
+            throw AgentmuxError.invalidArgument(
+                message: "No available workspace dirnames remain for project \(project.name).")
         }
         let seed = UInt(bitPattern: project.dir.hashValue ^ workspaceName.hashValue ^ branch.hashValue)
         let index = Int(seed % UInt(available.count))
