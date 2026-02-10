@@ -620,6 +620,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         scroll.drawsBackground = true
         textView.drawsBackground = true
         textView.backgroundColor = .textBackgroundColor
+        textView.textColor = .textColor
         textView.textContainerInset = NSSize(width: 6, height: 6)
         textView.minSize = NSSize(width: 0, height: height)
         textView.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
