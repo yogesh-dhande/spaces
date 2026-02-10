@@ -91,6 +91,11 @@ scripts/swiftpm.sh build
 scripts/swiftpm.sh test
 ```
 
+## Lint
+```bash
+scripts/lint.sh
+```
+
 ## Coverage
 ```bash
 scripts/coverage.sh
