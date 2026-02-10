@@ -28,6 +28,7 @@ let package = Package(
         ),
         .target(name: "gui", dependencies: ["streamctl"]),
         .executableTarget(name: "agentmux", dependencies: ["streamctl", "appctl"]),
-        .executableTarget(name: "agentmux-gui", dependencies: ["gui"])
+        .executableTarget(name: "agentmux-gui", dependencies: ["gui"]),
+        .testTarget(name: "streamctlTests", dependencies: ["streamctl"])
     ]
 )

@@ -25,6 +25,7 @@
 ## Working Rules
 - Build with `swift build` before finishing changes.
 - Always run `swift build` after making changes.
+- Always run `swift test` after making changes.
 - Keep changes local-first and deterministic.
 - When adding behavior, update CLI help and architecture docs in the same change.
 - For behavior changes, also keep `README.md`, `docs/checkpoint.md`, and `spec.md` aligned.
