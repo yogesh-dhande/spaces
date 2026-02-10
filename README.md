@@ -80,3 +80,13 @@ agentmux workspace activate --project-dir /path/to/repo --name feature-x
 ```bash
 swift build
 ```
+
+## Tests
+```bash
+swift test
+```
+
+## Coverage
+```bash
+scripts/coverage.sh
+```

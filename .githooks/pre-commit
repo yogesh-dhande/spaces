@@ -1,5 +1,5 @@
 #!/bin/sh
 set -e
 
-echo "Running swift test..."
-swift test
+echo "Running coverage tests..."
+scripts/coverage.sh
