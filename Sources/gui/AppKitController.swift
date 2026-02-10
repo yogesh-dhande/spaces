@@ -486,6 +486,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             tabs.heightAnchor.constraint(equalToConstant: 320),
             tabs.widthAnchor.constraint(equalTo: stack.widthAnchor)
         ])
+        detailContainer.layoutSubtreeIfNeeded()
     }
 
     private func workspaceRunView(workspace: WorkspaceSummary) -> NSView {
@@ -546,6 +547,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let scopedKey = "agentmux_\(sanitizeEnvKey(project.name))_\(sanitizeEnvKey(workspace.name))_WORKSPACE_DIR"
         lines.append("\(scopedKey)=\(workspace.dir)")
         envView.string = lines.joined(separator: "\n")
+        if let container = envView.textContainer, let layout = envView.layoutManager {
+            layout.ensureLayout(for: container)
+        }
         let scroll = scrollableTextView(envView, height: 240)
         container.addArrangedSubview(scroll)
         return insetContainerView(container)
@@ -618,6 +622,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         scroll.autohidesScrollers = true
         scroll.borderType = .lineBorder
         scroll.drawsBackground = true
+        scroll.backgroundColor = .textBackgroundColor
+        scroll.contentView.drawsBackground = true
+        scroll.contentView.backgroundColor = .textBackgroundColor
         textView.drawsBackground = true
         textView.backgroundColor = .textBackgroundColor
         textView.textColor = .textColor
@@ -636,7 +643,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
     private func insetContainerView(_ content: NSView, inset: CGFloat = 8) -> NSView {
         let container = NSView()
-        container.translatesAutoresizingMaskIntoConstraints = false
+        container.translatesAutoresizingMaskIntoConstraints = true
+        container.autoresizingMask = [.width, .height]
         container.addSubview(content)
         NSLayoutConstraint.activate([
             content.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: inset),
