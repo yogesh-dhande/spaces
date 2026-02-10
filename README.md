@@ -77,13 +77,14 @@ agentmux workspace activate --project-dir /path/to/repo --name feature-x
 ```
 
 ## Build
+Use the SwiftPM wrapper to keep caches inside the workspace (avoids user cache warnings in sandboxed environments).
 ```bash
-swift build
+scripts/swiftpm.sh build
 ```
 
 ## Tests
 ```bash
-swift test
+scripts/swiftpm.sh test
 ```
 
 ## Coverage

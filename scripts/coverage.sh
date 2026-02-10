@@ -6,7 +6,7 @@ mkdir -p "$cache_dir"
 export CLANG_MODULE_CACHE_PATH="$cache_dir"
 
 echo "Running swift test with coverage..."
-swift test --enable-code-coverage --disable-sandbox
+"$(pwd)/scripts/swiftpm.sh" test --enable-code-coverage --disable-sandbox
 
 profdata_path=$(find .build -type f -name "*.profdata" | sort | tail -n 1)
 if [ -z "${profdata_path:-}" ]; then

@@ -23,8 +23,8 @@
 - Use labeled input fields for configuration; do not require users to enter app-specific text formats.
 
 ## Working Rules
-- Build with `swift build` before finishing changes.
-- Always run `swift build` after making changes.
+- Build with `scripts/swiftpm.sh build` before finishing changes (workspace-local SwiftPM cache).
+- Always run `scripts/swiftpm.sh build` after making changes.
 - Always run `scripts/coverage.sh` after making changes.
 - Keep changes local-first and deterministic.
 - When adding behavior, update CLI help and architecture docs in the same change.
