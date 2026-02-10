@@ -1,89 +1,80 @@
 # agentmux
 
-A local macOS control plane for AI coding streams.
-
-`agentmux` manages:
-- projects (`repo-root`)
-- streams (git worktrees)
-- window sets captured per stream via **yabai**
+`agentmux` is a local macOS control plane for workspace orchestration.
+It manages projects, workspaces, processes, and window sets so you can move between coding contexts quickly.
 
 ## Requirements
-- macOS
-- `yabai` installed and running
-- Accessibility permissions granted (for yabai window actions)
+- macOS 14+
+- `yabai` installed and running (window IDs and focus)
+- iTerm2 (terminal windows)
+- Google Chrome (browser sessions)
+- Accessibility permissions granted for window focus and control
 
-## Getting Started (GUI)
-1. Launch the `agentmux` app.
-2. Toggle the GUI with the global hotkey (default: `cmd+shift+space`).
-3. Add a project:
-   - Name: a short identifier (e.g. `agentmux`).
-   - Repo Root: the absolute path to the git repository.
-4. Create a stream:
-   - Stream Name: a branch/worktree name (e.g. `feature-x`).
-   - Display/Space: the target macOS display/space indices.
-5. Open your editor/terminal in the stream worktree.
-6. Use `show` to capture and recall the windows later (capture is automatic).
+## Configuration
+YAML is the source of truth:
+- Path: `~/.agentmux/config.yaml`
+- Runtime DB: `~/.agentmux/agentmux.db` (ephemeral)
+- Git worktrees: `/Users/<username>/agentmux/workspaces/<dirname>`
 
-## Common Issues
-- `yabai` missing or not running:
-  - Install: `brew install yabai`
-  - Start: `yabai --start-service`
-- Accessibility permissions missing:
-  - Go to System Settings -> Privacy & Security -> Accessibility.
-  - Enable access for `yabai` and `agentmux` (if listed).
-- Re-run `show` after granting access.
-
-## Current Model
-- Projects have:
-  - `name`
-  - `repo-root`
-- Streams have:
-  - `name`
-  - `worktree-path`
-  - `display index`
-  - `space index`
-- Each stream has a captured set of windows (yabai window IDs)
-- Each terminal window can emit a status file via `agentmux wrap`
-
-## Worktrees
-- Default stream worktrees are created at `<repo>/.worktrees/<stream>` when `--worktree` is not provided.
-
-Note: If `show` reports that no compatible windows could be focused, close and reopen the target app windows, then re-run `show`.
-Note: Database state is stored at `~/.agentmux/agentmux.db` and is managed automatically.
-
-## Terminal Status Tracking
-Use `agentmux wrap` to run a command under a PTY and publish status per terminal window:
-```bash
-agentmux wrap [--project <name> --stream <name>] -- <command> [args...]
-agentmux wrap [--project <name> --stream <name>] <command> [args...]
+Example config:
+```yaml
+editor: vscode
+port_range:
+  start: 20000
+  end: 30000
+projects:
+  - dir: /path/to/repo
+    setup_script: cp /shared/.env .env
+    cleanup_script: rm -f .env
+    processes:
+      - name: server
+        command: PORT=$PORT0 npm run dev
+    status_checks:
+      - name: web
+        process: server
+        command: curl -fsS http://localhost:$PORT0/health
+        interval: 10
+        timeout: 2
+        onExit: notify
+    browser_sessions:
+      - url: http://localhost:$PORT0
 ```
-Status files are written to `<worktree>/.agentmux/status/window-<id>.json` once the focused window is captured by `show`.
-The GUI stream list shows a card per stream with one row per captured window (app/title) and status when available, auto-refreshing periodically.
+
+## GUI
+- Two panes: projects/workspaces on the left, details on the right.
+- No dialogs for add/edit; all forms are in the right pane.
+- Workspace view includes:
+  - Launch/Stop/Archive buttons
+  - Processes and status
+  - Windows list with shortcut hints
+  - Env vars/ports tab
+
+Hotkeys:
+- Global toggle: `cmd+shift+=`
+- Next running workspace: `cmd+shift+]`
+- Previous running workspace: `cmd+shift+[`
+- Activate selected workspace: `cmd+shift+return`
+- New workspace (when app is focused): `cmd+n`
+
+## CLI
+```bash
+agentmux config path
+agentmux config show
+
+agentmux project list
+agentmux project add --dir /path/to/repo
+agentmux project update --dir /path/to/repo --setup-script "cp ~/.env .env"
+agentmux project remove --dir /path/to/repo
+
+agentmux workspace list --project-dir /path/to/repo --all
+agentmux workspace create --project-dir /path/to/repo --name feature-x
+agentmux workspace launch --project-dir /path/to/repo --name feature-x
+agentmux workspace stop --project-dir /path/to/repo --name feature-x
+agentmux workspace archive --project-dir /path/to/repo --name feature-x
+agentmux workspace activate --project-dir /path/to/repo --name feature-x
+```
 
 ## Build
 ```bash
 swift build
 ```
-
-## GUI Hotkey
-- Default hotkey: `cmd+shift+space`
-- Set via GUI: App menu -> Set Hotkey... (press the desired key combination)
-- Reset via GUI: App menu -> Reset Hotkey
-- Set via CLI: `agentmux settings set --gui-hotkey "cmd+shift+space"`
-- Reset via CLI: `agentmux settings reset --gui-hotkey`
-- The GUI polls for changes and reloads the hotkey/shortcuts automatically.
-- If the GUI is visible on a different space/display, invoking the hotkey moves it to the active space instead of hiding it.
-- Stream shortcuts (GUI app active):
-  - Next stream: `cmd+]`
-  - Previous stream: `cmd+[`
-  - Show selected stream: `cmd+return`
-  - Set via GUI: App menu -> Set Shortcuts... (press desired key combinations)
-  - Reset via GUI: App menu -> Reset Shortcuts
-  - Set via CLI:
-    - `agentmux settings set --gui-next-shortcut "cmd+]"`
-    - `agentmux settings set --gui-prev-shortcut "cmd+["`
-    - `agentmux settings set --gui-show-shortcut "cmd+return"`
-  - Reset via CLI:
-    - `agentmux settings reset --gui-next-shortcut`
-    - `agentmux settings reset --gui-prev-shortcut`
-    - `agentmux settings reset --gui-show-shortcut`

@@ -1,8 +1,8 @@
 import Foundation
 
-enum Shell {
+public enum Shell {
     @discardableResult
-    static func run(_ command: [String], cwd: String? = nil) throws -> Int32 {
+    public static func run(_ command: [String], cwd: String? = nil) throws -> Int32 {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
         process.arguments = command
@@ -14,7 +14,7 @@ enum Shell {
         return process.terminationStatus
     }
 
-    static func runAndCapture(_ command: [String], cwd: String? = nil) throws -> String {
+    public static func runAndCapture(_ command: [String], cwd: String? = nil) throws -> String {
         let process = Process()
         let out = Pipe()
         let err = Pipe()

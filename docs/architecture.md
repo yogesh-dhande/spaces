@@ -1,61 +1,70 @@
 # Architecture
 
 ## Overview
-`agentmux` orchestrates coding streams (git worktrees) on macOS and uses **yabai** for window‑level control.
+`agentmux` is a macOS developer tool for workspace orchestration.
+
+Key principles:
+- YAML is the **source of truth** for user configuration.
+- SQLite is **ephemeral runtime state** and may be rebuilt on startup.
+- AppleScript is preferred for app automation (Chrome, iTerm2); yabai is used for window IDs, space/display, and focus.
 
 Main modules:
-- `appctl`: external system adapters (yabai).
-- `streamctl`: orchestration, models, persistence, diagnostics.
+- `appctl`: system adapters (yabai, AppleScript, Chrome, iTerm2).
+- `streamctl`: core orchestration, models, persistence, config.
 - `agentmux`: CLI entrypoint.
-- `agentmux-gui`: AppKit desktop app using `streamctl` directly.
+- `agentmux-gui`: AppKit GUI built on `streamctl`.
 
-GUI shortcuts:
-- Global hotkey toggles the GUI (user-configurable via GUI/CLI).
-- When the GUI is active: shortcuts are configurable via GUI/CLI (defaults: `cmd+]` next stream, `cmd+[` previous stream, `cmd+return` show selected stream).
+## Data Model
+Configuration (YAML):
+- `editor` preference.
+- `port_range` base range.
+- `projects` with:
+  - `dir`, `setup_script`, `cleanup_script`
+  - `processes`
+  - `status_checks`
+  - `browser_sessions`
+
+Runtime (SQLite):
+- `projects` derived from config (normalized dir, git info).
+- `workspaces` runtime state.
+- `workspace_ports` reserved ports per workspace.
+- `running_processes`, `status_results`.
+- `windows` tracked per workspace.
+- `settings` for GUI hotkeys and active workspace.
 
 ## Lifecycle Semantics
-- `create`: create git worktree + persist stream.
-- `capture`: query yabai windows for the stream's space + persist identity (optional; `show` auto-captures).
-- `show`: capture current space windows, focus captured windows + mark active; warn when none are focusable.
-- `destroy`: close captured windows + remove worktree + remove records.
-  - Default worktree path (if not specified): `<repo>/.worktrees/<stream>`.
+- Project add/update: update YAML, re-sync runtime.
+- Workspace create:
+  - If git repo: create worktree under `/Users/<username>/agentmux/workspaces/<dirname>`.
+  - Run `setup_script` once.
+  - Reserve PORT0–PORT9 from `portRange`.
+- Workspace launch:
+  - Start processes in iTerm2 windows with env vars injected.
+  - Ensure Chrome windows/tabs exist for BrowserSessions.
+  - Open editor if configured.
+  - Track window IDs via yabai.
+- Workspace stop:
+  - Close tracked windows and terminals.
+  - Clear runtime process state.
+- Workspace archive:
+  - Stop workspace.
+  - Run `cleanup_script` once.
+  - Remove worktree (git projects).
+  - Release reserved ports.
 
-## Persistence
-SQLite path: `~/.agentmux/agentmux.db` (managed automatically).
+## Window Tracking
+- AppleScript is used to open/manage Chrome and iTerm2 windows.
+- yabai is the source of truth for window IDs and focus.
+- On launch, agentmux captures new windows and stores IDs in the runtime DB.
 
-Tables:
-- `projects`: serialized `Project` payload by `name`.
-- `streams`: serialized `Stream` payload by `(project_id, name)`.
-- `stream_runtime`: active/inactive state and timestamps.
-- `stream_window_identity`: captured window sets per stream.
-- `settings`: key/value settings (e.g., GUI hotkey + GUI shortcuts).
+## Hotkeys
+- Global hotkey toggles GUI visibility.
+- When GUI is focused: next/previous running workspace and activate selected workspace.
+- `cmd+n` creates a new workspace for the selected project.
+- Window focus uses yabai window IDs in the order: browser, editor, terminals.
 
-Local status files:
-- Terminal status files written by `agentmux wrap` once the focused window is captured.
-- Path: `<worktree>/.agentmux/status/window-<id>.json`.
-- GUI reads captured windows per stream and maps statuses by window ID, resolving titles via yabai.
-
-## Yabai Integration
-- Window capture:
-  - `yabai -m query --windows --space <space>`
-- Window actions:
-  - `yabai -m window --focus <id>`
-  - `yabai -m window --close <id>`
-
-## Canonical CLI
-- `agentmux project list|create|update|delete ...`
-- `agentmux stream list|create|update|capture|destroy ...`
-- `agentmux show --project <name> --stream <name>`
-- `agentmux list-active`
-- `agentmux doctor [--project <name>] [--stream <name>]`
-- `agentmux settings get|set|reset --gui-hotkey ...`
-- `agentmux settings get|set|reset --gui-next-shortcut ...`
-- `agentmux settings get|set|reset --gui-prev-shortcut ...`
-- `agentmux settings get|set|reset --gui-show-shortcut ...`
-- `agentmux wrap [--project <name> --stream <name>] -- <command> [args...]`
-- `agentmux wrap [--project <name> --stream <name>] <command> [args...]`
-
-## Current Constraints
-- macOS only.
-- Local-only state and control plane.
-- Requires yabai + Accessibility permissions.
+## Dependencies
+- macOS 14+
+- `yabai` (window IDs + focus)
+- iTerm2 (terminal processes)
+- Google Chrome (browser sessions)

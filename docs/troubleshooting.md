@@ -1,25 +1,20 @@
 # Troubleshooting (Dev)
 
-This document is for development-time diagnostics, especially around yabai and window capture.
+This document is for development-time diagnostics, especially around yabai and window focus.
 
 ## Yabai Basics
 
-List all displays:
+List displays:
 ```bash
 yabai -m query --displays
 ```
 
-List all spaces:
+List spaces:
 ```bash
 yabai -m query --spaces
 ```
 
-List windows in a space (by space index):
-```bash
-yabai -m query --windows --space 1
-```
-
-List all windows (all spaces):
+List all windows:
 ```bash
 yabai -m query --windows
 ```
@@ -31,34 +26,29 @@ yabai -m query --windows --window
 
 ## agentmux Diagnostics
 
-Doctor report for all streams:
+Show config path:
 ```bash
-agentmux doctor
+agentmux config path
 ```
 
-Doctor report for a project/stream:
+List projects:
 ```bash
-agentmux doctor --project <name> --stream <name>
+agentmux project list
 ```
 
-Capture + show (auto-captures on show):
+List workspaces (including archived):
 ```bash
-agentmux show --project <name> --stream <name>
+agentmux workspace list --project-dir /path/to/repo --all
 ```
 
-## Status Files
+## Runtime Logs
 
-Status files are written per terminal window:
+Process logs are stored under:
 ```
-<worktree>/.agentmux/status/window-<id>.json
+~/.agentmux/runtime/<workspace-id>/*.log
 ```
 
-List status files:
+Inspect a log:
 ```bash
-find <worktree>/.agentmux/status -name "window-*.json" -print
-```
-
-Watch status updates:
-```bash
-while true; do date; find <worktree>/.agentmux/status -name "window-*.json" -print -exec cat {} \;; sleep 1; echo "----"; done
+tail -n 200 ~/.agentmux/runtime/<workspace-id>/<process>.log
 ```

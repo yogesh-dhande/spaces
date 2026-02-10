@@ -4,36 +4,30 @@ import Foundation
 import streamctl
 
 @MainActor
-public final class AppKitController: NSObject, NSApplicationDelegate, NSTableViewDataSource, NSTableViewDelegate {
+public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineViewDataSource, NSOutlineViewDelegate {
     private var window: NSWindow!
+    private let outlineView = NSOutlineView()
+    private let detailContainer = NSView()
 
-    private let projectTable = NSTableView()
-    private let streamTable = NSTableView()
-    private let statusLabel = NSTextField(labelWithString: "")
-    private let hotkeyHintLabel = NSTextField(labelWithString: "")
+    private var orchestrator: AgentmuxOrchestrator!
+    private var projects: [ProjectSummary] = []
+    private var workspacesByProject: [String: [WorkspaceSummary]] = [:]
 
-    private var projects: [Project] = []
-    private var streams: [StreamSummary] = []
-    private var streamStatuses: [String: [WindowStatus]] = [:]
-    private var streamWindows: [String: [CapturedWindow]] = [:]
-    private var statusRefreshTimer: Timer?
-    private var hotkeyRefreshTimer: Timer?
+    private var selectedProjectID: String?
+    private var selectedWorkspaceID: String?
+    private var lastSelectedRow: Int = -1
+    private var projectHasUnsavedChanges = false
 
     private var hotkeyRef: EventHotKeyRef?
     private var hotkeyHandler: EventHandlerRef?
     private var registeredHotkey: HotkeySpec?
-    private var lastHotkeyRaw: String?
-    private var nextShortcut: HotkeySpec?
-    private var previousShortcut: HotkeySpec?
-    private var showShortcut: HotkeySpec?
-    private var lastNextShortcutRaw: String?
-    private var lastPreviousShortcutRaw: String?
-    private var lastShowShortcutRaw: String?
     private var shortcutMonitor: Any?
-    private var suppressShortcuts = false
-    private var nextStreamMenuItem: NSMenuItem?
-    private var previousStreamMenuItem: NSMenuItem?
-    private var showStreamMenuItem: NSMenuItem?
+    private var nextShortcutSpec: HotkeySpec?
+    private var previousShortcutSpec: HotkeySpec?
+    private var activateShortcutSpec: HotkeySpec?
+
+    private var configCache: AppConfig?
+
     private lazy var hotkeyHandlerProc: EventHandlerUPP = { _, _, userData in
         guard let userData else { return noErr }
         let controller = Unmanaged<AppKitController>.fromOpaque(userData).takeUnretainedValue()
@@ -43,1798 +37,1536 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSTableVie
         return noErr
     }
 
-    private var selectedProjectName: String?
-    private var selectedStreamName: String?
-
-    private final class SpacePickerView: NSView {
-        private var buttons: [NSButton] = []
-        private let optionsByDisplay: [(display: Int, spaces: [Int])]
-        private let displayField: NSTextField
-        private let spaceField: NSTextField
-
-        init(options: [SpaceOption], displayField: NSTextField, spaceField: NSTextField) {
-            let grouped = Dictionary(grouping: options, by: { $0.displayIndex })
-            self.optionsByDisplay = grouped.keys.sorted().map { key in
-                let spaces = grouped[key]?.map { $0.spaceIndex }.sorted() ?? []
-                return (display: key, spaces: spaces)
-            }
-            self.displayField = displayField
-            self.spaceField = spaceField
-            super.init(frame: .zero)
-            translatesAutoresizingMaskIntoConstraints = false
-            buildView()
-        }
-
-        required init?(coder: NSCoder) {
-            return nil
-        }
-
-        private func buildView() {
-            let stack = NSStackView()
-            stack.orientation = .vertical
-            stack.spacing = 6
-            stack.translatesAutoresizingMaskIntoConstraints = false
-
-            for entry in optionsByDisplay {
-                let row = NSStackView()
-                row.orientation = .horizontal
-                row.spacing = 6
-                row.alignment = .centerY
-
-                let label = NSTextField(labelWithString: "Display \(entry.display)")
-                label.font = .systemFont(ofSize: 12, weight: .semibold)
-                label.textColor = .secondaryLabelColor
-                row.addArrangedSubview(label)
-
-                for space in entry.spaces {
-                    let button = NSButton(title: "\(space)", target: self, action: #selector(spaceClicked(_:)))
-                    button.setButtonType(.toggle)
-                    button.bezelStyle = .texturedRounded
-                    button.tag = (entry.display * 10_000) + space
-                    buttons.append(button)
-                    row.addArrangedSubview(button)
-                }
-
-                stack.addArrangedSubview(row)
-            }
-
-            addSubview(stack)
-            NSLayoutConstraint.activate([
-                stack.leadingAnchor.constraint(equalTo: leadingAnchor),
-                stack.trailingAnchor.constraint(equalTo: trailingAnchor),
-                stack.topAnchor.constraint(equalTo: topAnchor),
-                stack.bottomAnchor.constraint(equalTo: bottomAnchor)
-            ])
-        }
-
-        @objc private func spaceClicked(_ sender: NSButton) {
-            for btn in buttons where btn != sender {
-                btn.state = .off
-            }
-            sender.state = .on
-            let display = sender.tag / 10_000
-            let space = sender.tag % 10_000
-            displayField.stringValue = String(display)
-            spaceField.stringValue = String(space)
-        }
-    }
-
-    private final class HotkeyCaptureField: NSControl {
-        private final class WeakBox {
-            weak var value: HotkeyCaptureField?
-            init(_ value: HotkeyCaptureField) { self.value = value }
-        }
-
-        private let valueField = NSTextField(string: "")
-        private let placeholder: String
-        private let specFromEvent: (NSEvent) -> HotkeySpec?
-        private static weak var currentFocusedField: HotkeyCaptureField?
-        private static var allFields: [WeakBox] = []
-        private var isFocused = false
-        var capturedSpec: HotkeySpec? {
-            didSet { updateDisplay() }
-        }
-
-        init(placeholder: String, initial: HotkeySpec?, specFromEvent: @escaping (NSEvent) -> HotkeySpec?) {
-            self.placeholder = placeholder
-            self.specFromEvent = specFromEvent
-            self.capturedSpec = initial
-            super.init(frame: .zero)
-            translatesAutoresizingMaskIntoConstraints = false
-            setup()
-            updateDisplay()
-            HotkeyCaptureField.allFields.append(WeakBox(self))
-        }
-
-        required init?(coder: NSCoder) { nil }
-
-        override var acceptsFirstResponder: Bool { true }
-
-        override func acceptsFirstMouse(for event: NSEvent?) -> Bool {
-            return true
-        }
-
-        override func mouseDown(with event: NSEvent) {
-            window?.makeFirstResponder(self)
-            setFocused(true)
-        }
-
-        override func becomeFirstResponder() -> Bool {
-            needsDisplay = true
-            if HotkeyCaptureField.currentFocusedField !== self {
-                HotkeyCaptureField.currentFocusedField?.setFocused(false)
-                HotkeyCaptureField.currentFocusedField = self
-            }
-            setFocused(true)
-            return true
-        }
-
-        override func resignFirstResponder() -> Bool {
-            needsDisplay = true
-            setFocused(false)
-            return true
-        }
-
-        override func keyDown(with event: NSEvent) {
-            guard let spec = specFromEvent(event) else {
-                NSSound.beep()
-                return
-            }
-            capturedSpec = spec
-        }
-
-        @objc private func handleClick(_ sender: Any?) {
-            window?.makeFirstResponder(self)
-            setFocused(true)
-        }
-
-        private func setup() {
-            wantsLayer = true
-            layer?.backgroundColor = NSColor.controlBackgroundColor.cgColor
-            layer?.cornerRadius = 7
-            layer?.borderWidth = 1
-            layer?.borderColor = NSColor.separatorColor.cgColor
-            layer?.shadowColor = NSColor.black.withAlphaComponent(0.15).cgColor
-            layer?.shadowOpacity = 0.6
-            layer?.shadowRadius = 2
-            layer?.shadowOffset = CGSize(width: 0, height: -1)
-
-            valueField.isEditable = false
-            valueField.isSelectable = false
-            valueField.refusesFirstResponder = true
-            valueField.isBordered = false
-            valueField.drawsBackground = false
-            valueField.backgroundColor = .clear
-            valueField.alignment = .center
-            valueField.font = .systemFont(ofSize: 12, weight: .medium)
-            valueField.translatesAutoresizingMaskIntoConstraints = false
-            addSubview(valueField)
-            NSLayoutConstraint.activate([
-                valueField.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 8),
-                valueField.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -8),
-                valueField.topAnchor.constraint(equalTo: topAnchor, constant: 3),
-                valueField.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -3),
-                heightAnchor.constraint(equalToConstant: 24)
-            ])
-
-            let click = NSClickGestureRecognizer(target: self, action: #selector(handleClick(_:)))
-            addGestureRecognizer(click)
-            let valueClick = NSClickGestureRecognizer(target: self, action: #selector(handleClick(_:)))
-            valueField.addGestureRecognizer(valueClick)
-        }
-
-        private func updateDisplay() {
-            if let capturedSpec {
-                valueField.stringValue = capturedSpec.normalized
-                valueField.textColor = .labelColor
-            } else {
-                valueField.stringValue = placeholder
-                valueField.textColor = .secondaryLabelColor
-            }
-        }
-
-        private func updateFocusAppearance() {
-            if isFocused {
-                layer?.borderColor = NSColor.controlAccentColor.cgColor
-            } else {
-                layer?.borderColor = NSColor.separatorColor.cgColor
-            }
-        }
-
-        private func setFocused(_ focused: Bool) {
-            if focused {
-                HotkeyCaptureField.clearAllFocus(except: self)
-                HotkeyCaptureField.currentFocusedField = self
-            } else if HotkeyCaptureField.currentFocusedField === self {
-                HotkeyCaptureField.currentFocusedField = nil
-            }
-            isFocused = focused
-            updateFocusAppearance()
-        }
-
-        private static func clearAllFocus(except field: HotkeyCaptureField?) {
-            allFields = allFields.filter { $0.value != nil }
-            for box in allFields {
-                if let target = box.value, target !== field {
-                    target.setFocused(false)
-                }
-            }
-        }
+    private enum OutlineItem {
+        case project(ProjectSummary)
+        case workspace(ProjectSummary, WorkspaceSummary)
     }
 
     public func applicationDidFinishLaunching(_ notification: Notification) {
-        setupMenu()
-        setupWindow()
-        setupHotkey()
-        setupShortcuts()
+        do {
+            let db = try DatabaseLocator.defaultPath()
+            let configPath = try ConfigStore.defaultPath()
+            let store = try SQLiteStore(path: db)
+            let configStore = ConfigStore(path: configPath)
+            orchestrator = AgentmuxOrchestrator(store: store, configStore: configStore)
+            configCache = try orchestrator.syncConfig()
+            loadShortcutSpecs()
+        } catch {
+            showError(error)
+            return
+        }
+
+        buildWindow()
+        reloadData()
+        setupGlobalHotkey()
         setupShortcutMonitor()
-        startHotkeyRefresh()
-        reloadProjects()
-        startStatusRefresh()
-        NSApp.activate(ignoringOtherApps: true)
     }
 
-    public func numberOfRows(in tableView: NSTableView) -> Int {
-        if tableView == projectTable { return projects.count }
-        return streams.count
-    }
-
-    public func tableView(_ tableView: NSTableView, heightOfRow row: Int) -> CGFloat {
-        if tableView == streamTable, row >= 0, row < streams.count {
-            let stream = streams[row]
-            let windowCount = streamWindows[stream.name]?.count ?? 0
-            let lines = 1 + max(windowCount, 1)
-            return CGFloat(lines) * 20.0 + 8.0
-        }
-        return tableView.rowHeight
-    }
-
-    public func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
-        if tableView == projectTable {
-            let project = projects[row]
-            let text = "\(project.name)  (\(project.repoRoot))"
-            return makeTextCell(tableView: tableView, text: text)
-        } else {
-            let stream = streams[row]
-            let marker = stream.isActive ? "●" : "○"
-            let header = "\(marker) \(stream.name)  (\(stream.worktreePath))  |  display=\(stream.displayIndex) space=\(stream.spaceIndex)"
-            let lines = formatWindowLines(for: stream.name)
-            return makeStreamCell(tableView: tableView, header: header, lines: lines)
+    public func applicationWillTerminate(_ notification: Notification) {
+        teardownGlobalHotkey()
+        if let shortcutMonitor {
+            NSEvent.removeMonitor(shortcutMonitor)
         }
     }
 
-    public func tableViewSelectionDidChange(_ notification: Notification) {
-        if notification.object as? NSTableView == projectTable {
-            let idx = projectTable.selectedRow
-            if idx >= 0 && idx < projects.count {
-                selectedProjectName = projects[idx].name
-            } else {
-                selectedProjectName = nil
-            }
-            reloadStreams()
-        } else if notification.object as? NSTableView == streamTable {
-            let idx = streamTable.selectedRow
-            if idx >= 0 && idx < streams.count {
-                selectedStreamName = streams[idx].name
-            } else {
-                selectedStreamName = nil
-            }
-        }
-    }
-
-    private func setupWindow() {
-        window = NSWindow(
-            contentRect: NSRect(x: 120, y: 120, width: 1200, height: 760),
-            styleMask: [.titled, .closable, .miniaturizable, .resizable],
-            backing: .buffered,
-            defer: false
-        )
+    private func buildWindow() {
+        let rect = NSRect(x: 200, y: 200, width: 1100, height: 700)
+        window = NSWindow(contentRect: rect, styleMask: [.titled, .resizable, .closable], backing: .buffered, defer: false)
         window.title = "agentmux"
-        window.collectionBehavior.insert(.moveToActiveSpace)
+        window.center()
 
-        let split = NSSplitView()
-        split.translatesAutoresizingMaskIntoConstraints = false
-        split.isVertical = true
-        split.dividerStyle = .thin
+        let splitView = NSSplitView()
+        splitView.dividerStyle = .thin
+        splitView.isVertical = true
+        splitView.translatesAutoresizingMaskIntoConstraints = false
 
-        let left = makeProjectsPane()
-        let right = makeStreamsPane()
-        split.addSubview(left)
-        split.addSubview(right)
-        split.setPosition(480, ofDividerAt: 0)
+        let leftPane = makeLeftPane()
+        let rightPane = makeRightPane()
 
-        let root = NSView()
-        root.translatesAutoresizingMaskIntoConstraints = false
-        root.addSubview(split)
-        let footerStack = NSStackView(views: [statusLabel, hotkeyHintLabel])
-        footerStack.translatesAutoresizingMaskIntoConstraints = false
-        footerStack.orientation = .horizontal
-        footerStack.alignment = .centerY
-        footerStack.spacing = 12
-        footerStack.distribution = .fill
+        splitView.addArrangedSubview(leftPane)
+        splitView.addArrangedSubview(rightPane)
+        splitView.setPosition(320, ofDividerAt: 0)
 
-        root.addSubview(footerStack)
-
-        statusLabel.textColor = .secondaryLabelColor
-        statusLabel.lineBreakMode = .byTruncatingTail
-        statusLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-
-        hotkeyHintLabel.textColor = .tertiaryLabelColor
-        hotkeyHintLabel.font = .systemFont(ofSize: 11)
-        hotkeyHintLabel.alignment = .right
-        hotkeyHintLabel.lineBreakMode = .byTruncatingTail
-        hotkeyHintLabel.setContentCompressionResistancePriority(.defaultHigh, for: .horizontal)
-
+        let content = NSView()
+        content.addSubview(splitView)
         NSLayoutConstraint.activate([
-            split.leadingAnchor.constraint(equalTo: root.leadingAnchor),
-            split.trailingAnchor.constraint(equalTo: root.trailingAnchor),
-            split.topAnchor.constraint(equalTo: root.topAnchor),
-            split.bottomAnchor.constraint(equalTo: footerStack.topAnchor, constant: -8),
-
-            footerStack.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 12),
-            footerStack.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -12),
-            footerStack.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -10),
-            footerStack.heightAnchor.constraint(equalToConstant: 20)
+            splitView.leadingAnchor.constraint(equalTo: content.leadingAnchor),
+            splitView.trailingAnchor.constraint(equalTo: content.trailingAnchor),
+            splitView.topAnchor.constraint(equalTo: content.topAnchor),
+            splitView.bottomAnchor.constraint(equalTo: content.bottomAnchor)
         ])
-
-        window.contentView = root
+        window.contentView = content
         window.makeKeyAndOrderFront(nil)
     }
 
-    private func makeProjectsPane() -> NSView {
+    private func makeLeftPane() -> NSView {
         let container = NSView()
         container.translatesAutoresizingMaskIntoConstraints = false
 
-        let header = NSTextField(labelWithString: "Projects")
-        header.font = .boldSystemFont(ofSize: 14)
+        let header = NSStackView()
+        header.orientation = .horizontal
+        header.alignment = .centerY
+        header.spacing = 8
         header.translatesAutoresizingMaskIntoConstraints = false
 
-        let buttons = NSStackView(views: [
-            makeButton(title: "Add", action: #selector(addProjectClicked)),
-            makeButton(title: "Edit", action: #selector(editProjectClicked)),
-            makeButton(title: "Delete", action: #selector(deleteProjectClicked)),
-            makeButton(title: "Refresh", action: #selector(refreshProjectsClicked))
-        ])
-        buttons.orientation = .horizontal
-        buttons.spacing = 8
-        buttons.translatesAutoresizingMaskIntoConstraints = false
+        let title = NSTextField(labelWithString: "Projects")
+        title.font = .systemFont(ofSize: 14, weight: .semibold)
 
-        let col = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("project-col"))
-        col.title = "Project"
-        projectTable.addTableColumn(col)
-        projectTable.headerView = nil
-        projectTable.delegate = self
-        projectTable.dataSource = self
+        let addButton = actionButton(title: "Add Project", symbol: "plus", tooltip: "Add project", action: #selector(addProject), primary: false)
+
+        let reloadButton = iconButton(symbol: "arrow.clockwise", tooltip: "Reload", action: #selector(reloadTapped))
+
+        header.addArrangedSubview(title)
+        header.addArrangedSubview(NSView())
+        header.addArrangedSubview(reloadButton)
+        header.addArrangedSubview(addButton)
 
         let scroll = NSScrollView()
         scroll.translatesAutoresizingMaskIntoConstraints = false
-        scroll.documentView = projectTable
         scroll.hasVerticalScroller = true
 
+        let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("name"))
+        column.title = "Projects"
+        outlineView.addTableColumn(column)
+        outlineView.outlineTableColumn = column
+        outlineView.headerView = nil
+        outlineView.rowSizeStyle = .default
+        outlineView.delegate = self
+        outlineView.dataSource = self
+        outlineView.selectionHighlightStyle = .regular
+
+        scroll.documentView = outlineView
+
         container.addSubview(header)
-        container.addSubview(buttons)
         container.addSubview(scroll)
 
         NSLayoutConstraint.activate([
-            header.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 10),
-            header.topAnchor.constraint(equalTo: container.topAnchor, constant: 10),
+            header.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 12),
+            header.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -12),
+            header.topAnchor.constraint(equalTo: container.topAnchor, constant: 12),
 
-            buttons.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 10),
-            buttons.topAnchor.constraint(equalTo: header.bottomAnchor, constant: 8),
-
-            scroll.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 10),
-            scroll.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -10),
-            scroll.topAnchor.constraint(equalTo: buttons.bottomAnchor, constant: 10),
-            scroll.bottomAnchor.constraint(equalTo: container.bottomAnchor, constant: -10)
+            scroll.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+            scroll.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+            scroll.topAnchor.constraint(equalTo: header.bottomAnchor, constant: 8),
+            scroll.bottomAnchor.constraint(equalTo: container.bottomAnchor)
         ])
 
         return container
     }
 
-    private func makeStreamsPane() -> NSView {
-        let container = NSView()
-        container.translatesAutoresizingMaskIntoConstraints = false
-
-        let header = NSTextField(labelWithString: "Streams")
-        header.font = .boldSystemFont(ofSize: 14)
-        header.translatesAutoresizingMaskIntoConstraints = false
-
-        let row1 = NSStackView(views: [
-            makeButton(title: "Add", action: #selector(addStreamClicked)),
-            makeButton(title: "Edit", action: #selector(editStreamClicked)),
-            makeButton(title: "Destroy", action: #selector(destroyStreamClicked)),
-            makeButton(title: "Refresh", action: #selector(refreshStreamsClicked))
-        ])
-        row1.orientation = .horizontal
-        row1.spacing = 8
-        row1.translatesAutoresizingMaskIntoConstraints = false
-
-        let row2 = NSStackView(views: [
-            makeButton(title: "Show", action: #selector(showStreamClicked)),
-            makeButton(title: "Doctor", action: #selector(doctorStreamClicked))
-        ])
-        row2.orientation = .horizontal
-        row2.spacing = 8
-        row2.translatesAutoresizingMaskIntoConstraints = false
-
-        let col = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("stream-col"))
-        col.title = "Stream"
-        streamTable.addTableColumn(col)
-        streamTable.headerView = nil
-        streamTable.delegate = self
-        streamTable.dataSource = self
-
-        let scroll = NSScrollView()
-        scroll.translatesAutoresizingMaskIntoConstraints = false
-        scroll.documentView = streamTable
-        scroll.hasVerticalScroller = true
-
-        container.addSubview(header)
-        container.addSubview(row1)
-        container.addSubview(row2)
-        container.addSubview(scroll)
-
+    private func makeRightPane() -> NSView {
+        detailContainer.translatesAutoresizingMaskIntoConstraints = false
+        let placeholder = NSTextField(labelWithString: "Select a project or workspace.")
+        placeholder.font = .systemFont(ofSize: 14)
+        placeholder.textColor = .secondaryLabelColor
+        placeholder.translatesAutoresizingMaskIntoConstraints = false
+        detailContainer.addSubview(placeholder)
         NSLayoutConstraint.activate([
-            header.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 10),
-            header.topAnchor.constraint(equalTo: container.topAnchor, constant: 10),
-
-            row1.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 10),
-            row1.topAnchor.constraint(equalTo: header.bottomAnchor, constant: 8),
-
-            row2.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 10),
-            row2.topAnchor.constraint(equalTo: row1.bottomAnchor, constant: 8),
-
-            scroll.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 10),
-            scroll.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -10),
-            scroll.topAnchor.constraint(equalTo: row2.bottomAnchor, constant: 10),
-            scroll.bottomAnchor.constraint(equalTo: container.bottomAnchor, constant: -10)
+            placeholder.centerXAnchor.constraint(equalTo: detailContainer.centerXAnchor),
+            placeholder.centerYAnchor.constraint(equalTo: detailContainer.centerYAnchor)
         ])
-
-        return container
+        return detailContainer
     }
 
-    private func makeButton(title: String, action: Selector) -> NSButton {
-        let button = NSButton(title: title, target: self, action: action)
-        button.bezelStyle = .rounded
-        return button
-    }
-
-    @objc private func refreshProjectsClicked() { reloadProjects() }
-    @objc private func refreshStreamsClicked() { reloadStreams() }
-
-    @objc private func addProjectClicked() {
-        let name = NSTextField(string: "")
-        let repo = NSTextField(string: FileManager.default.currentDirectoryPath)
-        guard runModalForm(
-            title: "Add Project",
-            message: "Create a new project",
-            fields: [
-                ("Name", name),
-                ("Repo Root", repo)
-            ]
-        ) else {
-            return
-        }
-
+    private func reloadData() {
         do {
-            _ = try orchestrator().createProject(
-                name: name.stringValue.trimmingCharacters(in: .whitespacesAndNewlines),
-                repoRoot: repo.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-            )
-            reloadProjects(selectProject: name.stringValue)
-            setStatus("Created project '\(name.stringValue)'.")
+            configCache = try orchestrator.syncConfig()
+            loadShortcutSpecs()
+            projects = try orchestrator.listProjects()
+            workspacesByProject = [:]
+            for project in projects {
+                let workspaces = try orchestrator.listWorkspaces(projectID: project.id, includeArchived: true)
+                workspacesByProject[project.id] = workspaces
+            }
+            outlineView.reloadData()
+            outlineView.expandItem(nil, expandChildren: true)
+            refreshSelection()
         } catch {
-            setStatus("Create project failed: \(error.localizedDescription)")
+            showError(error)
         }
     }
 
-    @objc private func editProjectClicked() {
-        guard let project = selectedProject() else {
-            setStatus("Select a project first.")
-            return
-        }
-
-        let repo = NSTextField(string: project.repoRoot)
-        guard runModalForm(
-            title: "Edit Project",
-            message: "Update selected project settings",
-            fields: [("Repo Root", repo)]
-        ) else {
-            return
-        }
-
-        do {
-            _ = try orchestrator().updateProject(
-                name: project.name,
-                repoRoot: repo.stringValue
-            )
-            reloadProjects(selectProject: project.name)
-            setStatus("Saved project '\(project.name)'.")
-        } catch {
-            setStatus("Save project failed: \(error.localizedDescription)")
-        }
-    }
-
-    @objc private func deleteProjectClicked() {
-        guard let project = selectedProjectName else {
-            setStatus("Select a project first.")
-            return
-        }
-        guard confirm(title: "Delete Project", message: "Delete '\(project)' and all streams?") else { return }
-
-        do {
-            try orchestrator().deleteProject(name: project)
-            reloadProjects()
-            setStatus("Deleted project '\(project)'.")
-        } catch {
-            setStatus("Delete project failed: \(error.localizedDescription)")
-        }
-    }
-
-    @objc private func addStreamClicked() {
-        guard let project = selectedProjectName else {
-            setStatus("Select a project first.")
-            return
-        }
-        let name = NSTextField(string: "")
-        let display = NSTextField(string: "1")
-        let space = NSTextField(string: "1")
-        let picker = makeSpacePicker(displayField: display, spaceField: space)
-        guard runStreamModal(
-            title: "Add Stream",
-            message: "Create new stream in '\(project)'",
-            nameField: name,
-            displayField: display,
-            spaceField: space,
-            picker: picker
-        ) else { return }
-
-        do {
-            _ = try orchestrator().create(
-                projectName: project,
-                streamName: name.stringValue,
-                worktreePath: nil,
-                displayIndex: Int(display.stringValue) ?? 1,
-                spaceIndex: Int(space.stringValue) ?? 1
-            )
-            reloadStreams(selectStream: name.stringValue)
-            setStatus("Created stream '\(name.stringValue)'.")
-        } catch {
-            setStatus("Create stream failed: \(error.localizedDescription)")
-        }
-    }
-
-    @objc private func editStreamClicked() {
-        guard let project = selectedProjectName, let stream = selectedStreamName else {
-            setStatus("Select a stream first.")
-            return
-        }
-        guard let existing = streams.first(where: { $0.name == stream }) else { return }
-
-        let display = NSTextField(string: String(existing.displayIndex))
-        let space = NSTextField(string: String(existing.spaceIndex))
-        let picker = makeSpacePicker(displayField: display, spaceField: space)
-        guard runStreamModal(
-            title: "Edit Stream",
-            message: "Update display/space for '\(stream)'",
-            nameField: nil,
-            displayField: display,
-            spaceField: space,
-            picker: picker
-        ) else { return }
-
-        do {
-            _ = try orchestrator().updateStream(
-                projectName: project,
-                streamName: stream,
-                displayIndex: Int(display.stringValue),
-                spaceIndex: Int(space.stringValue)
-            )
-            reloadStreams(selectStream: stream)
-            setStatus("Updated stream '\(stream)'.")
-        } catch {
-            setStatus("Update stream failed: \(error.localizedDescription)")
-        }
-    }
-
-    @objc private func destroyStreamClicked() {
-        guard let project = selectedProjectName, let stream = selectedStreamName else {
-            setStatus("Select a stream first.")
-            return
-        }
-        guard confirm(title: "Destroy Stream", message: "Destroy '\(stream)' from project '\(project)'?") else { return }
-
-        do {
-            try orchestrator().destroy(projectName: project, streamName: stream, removeBranch: false)
-            reloadStreams()
-            setStatus("Destroyed stream '\(stream)'.")
-        } catch {
-            setStatus("Destroy stream failed: \(error.localizedDescription)")
-        }
-    }
-
-    @objc private func showStreamClicked() { runStreamAction("show") { try $0.show(projectName: $1, streamName: $2) } }
-
-    @objc private func doctorStreamClicked() {
-        guard let project = selectedProjectName, let stream = selectedStreamName else {
-            setStatus("Select a stream first.")
-            return
-        }
-        do {
-            let reports = try orchestrator().doctor(projectName: project, streamName: stream)
-            guard let report = reports.first else {
-                setStatus("No doctor report for \(project)/\(stream).")
+    private func refreshSelection() {
+        if let selectedWorkspaceID {
+            if let (project, workspace) = findWorkspace(id: selectedWorkspaceID) {
+                showWorkspaceDetail(project: project, workspace: workspace)
                 return
             }
-            let missing = report.missingWindowIDs.isEmpty ? "-" : report.missingWindowIDs.map(String.init).joined(separator: ",")
-            setStatus("doctor \(project)/\(stream): windows=\(report.windowsFound)/\(report.windowsExpected), missing=\(missing)")
-        } catch {
-            setStatus("Doctor failed: \(error.localizedDescription)")
         }
-    }
-
-    private func runStreamAction(_ action: String, _ body: (StreamOrchestrator, String, String) throws -> Void) {
-        guard let project = selectedProjectName, let stream = selectedStreamName else {
-            setStatus("Select a stream first.")
+        if let selectedProjectID, let project = projects.first(where: { $0.id == selectedProjectID }) {
+            showProjectDetail(project: project)
             return
         }
-
-        do {
-            try body(try orchestrator(), project, stream)
-            reloadStreams(selectStream: stream)
-            setStatus("\(action) ok: \(project)/\(stream)")
-        } catch {
-            setStatus("\(action) failed: \(error.localizedDescription)")
-        }
+        showPlaceholder()
     }
 
-    private func reloadProjects(selectProject: String? = nil) {
-        do {
-            let list = try orchestrator().listProjects().sorted { $0.name < $1.name }
-            projects = list
-            projectTable.reloadData()
-
-            if let selectProject, let idx = list.firstIndex(where: { $0.name == selectProject }) {
-                projectTable.selectRowIndexes(IndexSet(integer: idx), byExtendingSelection: false)
-                selectedProjectName = list[idx].name
-            } else if !list.isEmpty {
-                let idx = min(max(projectTable.selectedRow, 0), list.count - 1)
-                projectTable.selectRowIndexes(IndexSet(integer: idx), byExtendingSelection: false)
-                selectedProjectName = list[idx].name
-            } else {
-                selectedProjectName = nil
-            }
-            reloadStreams()
-        } catch {
-            setStatus("Error loading projects: \(error.localizedDescription)")
-        }
-    }
-
-    private func reloadStreams(selectStream: String? = nil) {
-        guard let selectedProjectName else {
-            streams = []
-            streamStatuses = [:]
-            streamWindows = [:]
-            selectedStreamName = nil
-            streamTable.reloadData()
-            return
-        }
-
-        do {
-            let list = try orchestrator().list(projectName: selectedProjectName)
-            streams = list
-            let (statuses, windows) = loadStreamStatusesAndWindows(projectName: selectedProjectName, streams: list)
-            streamStatuses = statuses
-            streamWindows = windows
-            streamTable.reloadData()
-
-            if let selectStream, let idx = list.firstIndex(where: { $0.name == selectStream }) {
-                streamTable.selectRowIndexes(IndexSet(integer: idx), byExtendingSelection: false)
-                selectedStreamName = list[idx].name
-            } else if !list.isEmpty {
-                let idx = min(max(streamTable.selectedRow, 0), list.count - 1)
-                streamTable.selectRowIndexes(IndexSet(integer: idx), byExtendingSelection: false)
-                selectedStreamName = list[idx].name
-            } else {
-                selectedStreamName = nil
-            }
-        } catch {
-            setStatus("Error loading streams: \(error.localizedDescription)")
-        }
-    }
-
-    private func loadStreamStatusesAndWindows(projectName: String, streams: [StreamSummary]) -> ([String: [WindowStatus]], [String: [CapturedWindow]]) {
-        var result: [String: [WindowStatus]] = [:]
-        var windowsResult: [String: [CapturedWindow]] = [:]
-        let fm = FileManager.default
-        var allWindowIDs: [Int] = []
-        var streamFiles: [String: [URL]] = [:]
-        var capturedByStream: [String: [WindowIdentity]] = [:]
-        for stream in streams {
-            let statusDir = URL(fileURLWithPath: stream.worktreePath)
-                .appendingPathComponent(".agentmux", isDirectory: true)
-                .appendingPathComponent("status", isDirectory: true)
-            guard let files = try? fm.contentsOfDirectory(at: statusDir, includingPropertiesForKeys: [.contentModificationDateKey], options: [.skipsHiddenFiles]),
-                  !files.isEmpty else {
-                continue
-            }
-
-            let jsonFiles = files.filter { $0.pathExtension.lowercased() == "json" }
-            guard !jsonFiles.isEmpty else { continue }
-            streamFiles[stream.name] = jsonFiles
-
-            if let windows = try? orchestrator().capturedWindows(projectName: projectName, streamName: stream.name) {
-                capturedByStream[stream.name] = windows
-                allWindowIDs.append(contentsOf: windows.map { $0.id })
-            }
-        }
-
-        let titleLookup = (try? orchestrator().windowTitles(ids: allWindowIDs)) ?? [:]
-        for (streamName, files) in streamFiles {
-            var statuses: [WindowStatus] = []
-            for file in files {
-                guard let id = windowID(from: file) else { continue }
-                guard let data = try? Data(contentsOf: file),
-                      let status = try? JSONDecoder().decode(TerminalStatus.self, from: data) else {
-                    continue
-                }
-                let title = titleLookup[id]
-                statuses.append(WindowStatus(id: id, title: title, status: status))
-            }
-            statuses.sort { $0.id < $1.id }
-            if !statuses.isEmpty {
-                result[streamName] = statuses
-            }
-        }
-
-        for (streamName, windows) in capturedByStream {
-            let mapped = windows.map { win in
-                let title = titleLookup[win.id] ?? win.title ?? win.app
-                return CapturedWindow(id: win.id, app: win.app, title: title)
-            }.sorted { $0.id < $1.id }
-            windowsResult[streamName] = mapped
-        }
-
-        return (result, windowsResult)
-    }
-
-    private func windowID(from url: URL) -> Int? {
-        let name = url.deletingPathExtension().lastPathComponent
-        guard name.hasPrefix("window-") else { return nil }
-        let raw = String(name.dropFirst("window-".count))
-        return Int(raw)
-    }
-
-    private func formatStatusText(for streamName: String) -> String {
-        guard let windows = streamWindows[streamName], !windows.isEmpty else {
-            return ""
-        }
-        let statusLookup = Dictionary(uniqueKeysWithValues: (streamStatuses[streamName] ?? []).map { ($0.id, $0) })
-        let summary = windows.map { win in
-            var label = win.title ?? win.app
-            if label.isEmpty { label = win.app }
-            var text = label
-            if let status = statusLookup[win.id] {
-                text += " status=\(status.status.displayState)"
-                if let exitCode = status.status.exitCode, status.status.state == "done" || status.status.state == "error" {
-                    text += " exit=\(exitCode)"
-                }
-            } else {
-                text += " status=unknown"
-            }
-            return text
-        }.joined(separator: "; ")
-        return "  |  windows=\(windows.count) [\(summary)]"
-    }
-
-    private func formatWindowLines(for streamName: String) -> [String] {
-        guard let windows = streamWindows[streamName], !windows.isEmpty else {
-            return ["windows=0"]
-        }
-        let statusLookup = Dictionary(uniqueKeysWithValues: (streamStatuses[streamName] ?? []).map { ($0.id, $0) })
-        return windows.map { win in
-            var label = win.title ?? win.app
-            if label.isEmpty { label = win.app }
-            var text = "[\(win.id)] \(label)"
-            if let status = statusLookup[win.id] {
-                text += "  status=\(status.status.displayState)"
-                if let exitCode = status.status.exitCode, status.status.state == "done" || status.status.state == "error" {
-                    text += " exit=\(exitCode)"
-                }
-            } else {
-                text += "  status=missing"
-            }
-            return text
-        }
-    }
-
-    private func makeTextCell(tableView: NSTableView, text: String) -> NSView? {
-        let id = NSUserInterfaceItemIdentifier("Cell")
-        if let cell = tableView.makeView(withIdentifier: id, owner: nil) as? NSTableCellView {
-            cell.textField?.stringValue = text
-            cell.textField?.toolTip = text
-            return cell
-        }
-
-        let cell = NSTableCellView()
-        cell.identifier = id
-        let tf = NSTextField(labelWithString: text)
-        tf.translatesAutoresizingMaskIntoConstraints = false
-        tf.lineBreakMode = .byTruncatingTail
-        cell.addSubview(tf)
-        cell.textField = tf
-        cell.textField?.toolTip = text
+    private func showPlaceholder() {
+        detailContainer.subviews.forEach { $0.removeFromSuperview() }
+        let placeholder = NSTextField(labelWithString: "Select a project or workspace.")
+        placeholder.font = .systemFont(ofSize: 14)
+        placeholder.textColor = .secondaryLabelColor
+        placeholder.translatesAutoresizingMaskIntoConstraints = false
+        detailContainer.addSubview(placeholder)
         NSLayoutConstraint.activate([
-            tf.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 6),
-            tf.trailingAnchor.constraint(equalTo: cell.trailingAnchor, constant: -6),
-            tf.centerYAnchor.constraint(equalTo: cell.centerYAnchor)
+            placeholder.centerXAnchor.constraint(equalTo: detailContainer.centerXAnchor),
+            placeholder.centerYAnchor.constraint(equalTo: detailContainer.centerYAnchor)
         ])
-        return cell
     }
 
-    private func makeStreamCell(tableView: NSTableView, header: String, lines: [String]) -> NSView? {
-        let id = NSUserInterfaceItemIdentifier("StreamCell")
-        if let cell = tableView.makeView(withIdentifier: id, owner: nil) as? NSTableCellView,
-           let stack = cell.subviews.first(where: { $0.identifier?.rawValue == "StreamStack" }) as? NSStackView {
-            updateStreamStack(stack, header: header, lines: lines)
-            return cell
-        }
-
-        let cell = NSTableCellView()
-        cell.identifier = id
+    private func showProjectDetail(project: ProjectSummary) {
+        detailContainer.subviews.forEach { $0.removeFromSuperview() }
         let stack = NSStackView()
-        stack.identifier = NSUserInterfaceItemIdentifier("StreamStack")
         stack.orientation = .vertical
-        stack.alignment = .leading
-        stack.spacing = 4
+        stack.spacing = 12
         stack.translatesAutoresizingMaskIntoConstraints = false
-        cell.addSubview(stack)
+
+        let headerRow = NSStackView()
+        headerRow.orientation = .horizontal
+        headerRow.alignment = .centerY
+        headerRow.spacing = 8
+        let header = NSTextField(labelWithString: project.name)
+        header.font = .systemFont(ofSize: 20, weight: .semibold)
+        let addWorkspaceButton = actionButton(
+            title: "New Workspace",
+            symbol: "plus.rectangle.on.rectangle",
+            tooltip: "New workspace for \(project.name) (⌘N)",
+            action: #selector(addWorkspaceFromToolbar),
+            primary: false
+        )
+        addWorkspaceButton.identifier = NSUserInterfaceItemIdentifier(project.id)
+        headerRow.addArrangedSubview(header)
+        headerRow.addArrangedSubview(NSView())
+        headerRow.addArrangedSubview(addWorkspaceButton)
+
+        let dirLabel = labeledValue(title: "Directory", value: project.dir)
+
+        let setupView = makeEditableTextView()
+        let cleanupView = makeEditableTextView()
+
+        let processEditor = ProcessEditor()
+        let browserView = makeEditableTextView()
+        let browserScroll = scrollableTextView(browserView, height: 80)
+
+        let statusEditor = StatusCheckEditor(processNamesProvider: { processEditor.processNames() })
+        statusEditor.setChecks([])
+
+        if let config = configCache?.projects.first(where: { normalizePath($0.dir) == project.dir }) {
+            setupView.string = config.setupScript ?? ""
+            cleanupView.string = config.cleanupScript ?? ""
+            processEditor.setProcesses(config.processes)
+            browserView.string = config.browserSessions.compactMap { $0.url }.joined(separator: "\n")
+            statusEditor.setChecks(config.statusChecks)
+        }
+
+        let saveButton = actionButton(title: "Save Project", symbol: "square.and.arrow.down", tooltip: "Save project (⌘S)", action: #selector(saveProject(_:)), primary: true)
+        saveButton.identifier = NSUserInterfaceItemIdentifier(project.id)
+        saveButton.keyEquivalent = "\r"
+
+        stack.addArrangedSubview(headerRow)
+        stack.addArrangedSubview(dirLabel)
+        stack.addArrangedSubview(label(text: "Setup script"))
+        stack.addArrangedSubview(scrollableTextView(setupView, height: 90))
+        stack.addArrangedSubview(label(text: "Cleanup script"))
+        stack.addArrangedSubview(scrollableTextView(cleanupView, height: 90))
+        stack.addArrangedSubview(label(text: "Processes"))
+        stack.addArrangedSubview(processEditor.container)
+        stack.addArrangedSubview(label(text: "Browser sessions (URL per line)"))
+        stack.addArrangedSubview(browserScroll)
+        stack.addArrangedSubview(label(text: "Status checks (per process)"))
+        stack.addArrangedSubview(statusEditor.container)
+
+        let buttonRow = NSStackView()
+        buttonRow.orientation = .horizontal
+        buttonRow.spacing = 8
+        buttonRow.addArrangedSubview(NSView())
+        buttonRow.addArrangedSubview(saveButton)
+        stack.addArrangedSubview(buttonRow)
+
+        detailContainer.addSubview(stack)
         NSLayoutConstraint.activate([
-            stack.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 6),
-            stack.trailingAnchor.constraint(equalTo: cell.trailingAnchor, constant: -6),
-            stack.topAnchor.constraint(equalTo: cell.topAnchor, constant: 4),
-            stack.bottomAnchor.constraint(lessThanOrEqualTo: cell.bottomAnchor, constant: -4)
+            stack.leadingAnchor.constraint(equalTo: detailContainer.leadingAnchor, constant: 20),
+            stack.trailingAnchor.constraint(equalTo: detailContainer.trailingAnchor, constant: -20),
+            stack.topAnchor.constraint(equalTo: detailContainer.topAnchor, constant: 20)
         ])
 
-        updateStreamStack(stack, header: header, lines: lines)
-        return cell
-    }
-
-    private func updateStreamStack(_ stack: NSStackView, header: String, lines: [String]) {
-        stack.arrangedSubviews.forEach { view in
-            stack.removeArrangedSubview(view)
-            view.removeFromSuperview()
-        }
-
-        let headerLabel = NSTextField(labelWithString: header)
-        headerLabel.lineBreakMode = .byTruncatingTail
-        headerLabel.font = .systemFont(ofSize: 12, weight: .semibold)
-        headerLabel.toolTip = header
-        stack.addArrangedSubview(headerLabel)
-
-        for line in lines {
-            let label = NSTextField(labelWithString: line)
-            label.lineBreakMode = .byTruncatingTail
-            label.font = .systemFont(ofSize: 11)
-            label.textColor = .secondaryLabelColor
-            label.toolTip = line
-            stack.addArrangedSubview(label)
-        }
-    }
-
-    private func selectedProject() -> Project? {
-        guard let selectedProjectName else { return nil }
-        return projects.first(where: { $0.name == selectedProjectName })
-    }
-
-    private func orchestrator() throws -> StreamOrchestrator {
-        StreamOrchestrator(store: try SQLiteStore(path: try databasePath()))
-    }
-
-    private func databasePath() throws -> String {
-        try DatabaseLocator.defaultPath()
-    }
-
-    private func runModalForm(title: String, message: String, fields: [(String, NSTextField)]) -> Bool {
-        let alert = NSAlert()
-        alert.messageText = title
-        alert.informativeText = message
-        alert.alertStyle = .informational
-        alert.addButton(withTitle: "OK")
-        alert.addButton(withTitle: "Cancel")
-
-        let containerHeight = max(140, fields.count * 34 + 12)
-        let container = NSView(frame: NSRect(x: 0, y: 0, width: 560, height: containerHeight))
-        let rows: [[NSView]] = fields.map { label, field in
-            field.isEditable = true
-            field.isSelectable = true
-            field.isEnabled = true
-            field.controlSize = .regular
-            field.frame = NSRect(x: 0, y: 0, width: 360, height: 22)
-
-            let labelView = NSTextField(labelWithString: label)
-            labelView.alignment = .right
-            labelView.frame = NSRect(x: 0, y: 0, width: 150, height: 22)
-            return [labelView, field]
-        }
-
-        let grid = NSGridView(views: rows)
-        grid.translatesAutoresizingMaskIntoConstraints = false
-        grid.rowSpacing = 8
-        grid.columnSpacing = 10
-        if grid.numberOfColumns >= 2 {
-            grid.column(at: 0).xPlacement = .trailing
-            grid.column(at: 0).width = 150
-            grid.column(at: 1).xPlacement = .fill
-            grid.column(at: 1).width = 380
-        }
-        container.addSubview(grid)
-        NSLayoutConstraint.activate([
-            grid.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 8),
-            grid.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -8),
-            grid.topAnchor.constraint(equalTo: container.topAnchor, constant: 6),
-            grid.bottomAnchor.constraint(lessThanOrEqualTo: container.bottomAnchor, constant: -6)
-        ])
-
-        alert.accessoryView = container
-        let response = alert.runModal()
-        return response == .alertFirstButtonReturn
-    }
-
-    private enum KeyCaptureResult {
-        case save
-        case cancel
-        case resetDefaults
-    }
-
-    private func runHotkeyCaptureForm(title: String, message: String, fields: [(String, HotkeyCaptureField)]) -> KeyCaptureResult {
-        let alert = NSAlert()
-        alert.messageText = title
-        alert.informativeText = message
-        alert.alertStyle = .informational
-        alert.addButton(withTitle: "Save")
-        alert.addButton(withTitle: "Cancel")
-        alert.addButton(withTitle: "Reset Defaults")
-
-        let containerHeight = max(190, fields.count * 42 + 30)
-        let container = NSView(frame: NSRect(x: 0, y: 0, width: 460, height: containerHeight))
-        let rows: [[NSView]] = fields.map { label, field in
-            field.frame = NSRect(x: 0, y: 0, width: 180, height: 24)
-            let labelView = NSTextField(labelWithString: label)
-            labelView.alignment = .left
-            labelView.lineBreakMode = .byTruncatingTail
-            labelView.font = .systemFont(ofSize: 13)
-            labelView.frame = NSRect(x: 0, y: 0, width: 250, height: 22)
-            return [labelView, field]
-        }
-
-        let grid = NSGridView(views: rows)
-        grid.translatesAutoresizingMaskIntoConstraints = false
-        grid.rowSpacing = 12
-        grid.columnSpacing = 14
-        if grid.numberOfColumns >= 2 {
-            grid.column(at: 0).xPlacement = .leading
-            grid.column(at: 0).width = 250
-            grid.column(at: 1).xPlacement = .trailing
-            grid.column(at: 1).width = 180
-        }
-        container.addSubview(grid)
-        NSLayoutConstraint.activate([
-            grid.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 8),
-            grid.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -8),
-            grid.topAnchor.constraint(equalTo: container.topAnchor, constant: 6),
-            grid.bottomAnchor.constraint(lessThanOrEqualTo: container.bottomAnchor, constant: -6)
-        ])
-
-        alert.accessoryView = container
-        if let first = fields.first?.1 {
-            alert.window.initialFirstResponder = first
-        }
-        let response = alert.runModal()
-        switch response {
-        case .alertFirstButtonReturn:
-            return .save
-        case .alertThirdButtonReturn:
-            return .resetDefaults
-        default:
-            return .cancel
-        }
-    }
-
-    private func makeHotkeyCaptureField(initial: HotkeySpec) -> HotkeyCaptureField {
-        HotkeyCaptureField(
-            placeholder: "Click then press keys",
-            initial: initial,
-            specFromEvent: { [weak self] event in
-                self?.hotkeySpec(from: event)
-            }
+        saveButton.tag = storeProjectFields(
+            projectID: project.id,
+            setupView: setupView,
+            cleanupView: cleanupView,
+            processEditor: processEditor,
+            browserView: browserView,
+            statusEditor: statusEditor
+        )
+        registerDirtyTracking(
+            setupView: setupView,
+            cleanupView: cleanupView,
+            processEditor: processEditor,
+            browserView: browserView,
+            statusEditor: statusEditor
         )
     }
 
-    private func runStreamModal(
-        title: String,
-        message: String,
-        nameField: NSTextField?,
-        displayField: NSTextField,
-        spaceField: NSTextField,
-        picker: NSView?
-    ) -> Bool {
-        let alert = NSAlert()
-        alert.messageText = title
-        alert.informativeText = message
-        alert.alertStyle = .informational
-        alert.addButton(withTitle: "OK")
-        alert.addButton(withTitle: "Cancel")
+    private func showAddProjectForm() {
+        detailContainer.subviews.forEach { $0.removeFromSuperview() }
+        let stack = NSStackView()
+        stack.orientation = .vertical
+        stack.spacing = 12
+        stack.translatesAutoresizingMaskIntoConstraints = false
 
-        var rows: [[NSView]] = []
-        if let nameField {
-            rows.append([NSTextField(labelWithString: "Stream Name"), nameField])
-        }
-        rows.append([NSTextField(labelWithString: "Display Index"), displayField])
-        rows.append([NSTextField(labelWithString: "Space Index"), spaceField])
+        let header = NSTextField(labelWithString: "New Project")
+        header.font = .systemFont(ofSize: 20, weight: .semibold)
 
-        if let picker {
-            let label = NSTextField(labelWithString: "Spaces")
-            label.alignment = .right
-            label.textColor = .secondaryLabelColor
-            rows.append([label, picker])
-        }
+        let dirField = NSTextField(string: "")
+        dirField.isEditable = false
+        dirField.placeholderString = "Choose a project directory"
+        let browseButton = NSButton(title: "", target: self, action: #selector(browseProjectDir(_:)))
+        browseButton.bezelStyle = .texturedRounded
+        browseButton.image = NSImage(systemSymbolName: "folder", accessibilityDescription: "Choose directory")
+        browseButton.toolTip = "Choose directory"
 
-        let grid = NSGridView(views: rows)
-        grid.translatesAutoresizingMaskIntoConstraints = false
-        grid.rowSpacing = 8
-        grid.columnSpacing = 10
-        if grid.numberOfColumns >= 2 {
-            grid.column(at: 0).xPlacement = .trailing
-            grid.column(at: 0).width = 150
-            grid.column(at: 1).xPlacement = .fill
-            grid.column(at: 1).width = 380
-        }
+        let setupView = makeEditableTextView()
+        let cleanupView = makeEditableTextView()
 
-        let containerHeight = max(180, rows.count * 34 + 80)
-        let container = NSView(frame: NSRect(x: 0, y: 0, width: 560, height: containerHeight))
-        container.addSubview(grid)
+        let processEditor = ProcessEditor()
+
+        let browserView = makeEditableTextView()
+        let browserScroll = scrollableTextView(browserView, height: 80)
+
+        let statusEditor = StatusCheckEditor(processNamesProvider: { processEditor.processNames() })
+        statusEditor.setChecks([])
+
+        let createButton = iconButton(symbol: "checkmark.circle", tooltip: "Create project", action: #selector(createProject(_:)))
+
+        let cancelButton = iconButton(symbol: "xmark.circle", tooltip: "Cancel", action: #selector(cancelProjectForm))
+
+        stack.addArrangedSubview(header)
+        stack.addArrangedSubview(label(text: "Project directory"))
+        let dirRow = NSStackView()
+        dirRow.orientation = .horizontal
+        dirRow.spacing = 8
+        dirField.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        browseButton.setContentHuggingPriority(.defaultHigh, for: .horizontal)
+        dirRow.addArrangedSubview(dirField)
+        dirRow.addArrangedSubview(browseButton)
+        stack.addArrangedSubview(dirRow)
+        stack.addArrangedSubview(label(text: "Setup script"))
+        stack.addArrangedSubview(scrollableTextView(setupView, height: 90))
+        stack.addArrangedSubview(label(text: "Cleanup script"))
+        stack.addArrangedSubview(scrollableTextView(cleanupView, height: 90))
+        stack.addArrangedSubview(label(text: "Processes"))
+        stack.addArrangedSubview(processEditor.container)
+        stack.addArrangedSubview(label(text: "Browser sessions (URL per line)"))
+        stack.addArrangedSubview(browserScroll)
+        stack.addArrangedSubview(label(text: "Status checks (per process)"))
+        stack.addArrangedSubview(statusEditor.container)
+
+        let buttonRow = NSStackView()
+        buttonRow.orientation = .horizontal
+        buttonRow.spacing = 8
+        buttonRow.addArrangedSubview(cancelButton)
+        buttonRow.addArrangedSubview(NSView())
+        buttonRow.addArrangedSubview(createButton)
+        stack.addArrangedSubview(buttonRow)
+
+        detailContainer.addSubview(stack)
         NSLayoutConstraint.activate([
-            grid.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 8),
-            grid.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -8),
-            grid.topAnchor.constraint(equalTo: container.topAnchor, constant: 6),
-            grid.bottomAnchor.constraint(lessThanOrEqualTo: container.bottomAnchor, constant: -6)
+            stack.leadingAnchor.constraint(equalTo: detailContainer.leadingAnchor, constant: 20),
+            stack.trailingAnchor.constraint(equalTo: detailContainer.trailingAnchor, constant: -20),
+            stack.topAnchor.constraint(equalTo: detailContainer.topAnchor, constant: 20)
         ])
 
-        alert.accessoryView = container
-        let response = alert.runModal()
-        return response == .alertFirstButtonReturn
+        createButton.tag = storeAddProjectFields(
+            dirField: dirField,
+            setupView: setupView,
+            cleanupView: cleanupView,
+            processEditor: processEditor,
+            browserView: browserView,
+            statusEditor: statusEditor,
+            browseButton: browseButton
+        )
     }
 
-    private func makeSpacePicker(displayField: NSTextField, spaceField: NSTextField) -> NSView? {
-        guard let options = try? orchestrator().listSpaceOptions(), !options.isEmpty else {
-            return nil
+    private func showAddWorkspaceForm(project: ProjectSummary) {
+        detailContainer.subviews.forEach { $0.removeFromSuperview() }
+        let stack = NSStackView()
+        stack.orientation = .vertical
+        stack.spacing = 12
+        stack.translatesAutoresizingMaskIntoConstraints = false
+
+        let header = NSTextField(labelWithString: "New Workspace for \(project.name)")
+        header.font = .systemFont(ofSize: 20, weight: .semibold)
+        let nameField = NSTextField(string: "")
+        nameField.placeholderString = "workspace name"
+
+        let createButton = iconButton(symbol: "checkmark.circle", tooltip: "Create workspace", action: #selector(createWorkspace(_:)))
+        let cancelButton = iconButton(symbol: "xmark.circle", tooltip: "Cancel", action: #selector(cancelProjectForm))
+
+        stack.addArrangedSubview(header)
+        stack.addArrangedSubview(label(text: "Workspace name (branch name for git)"))
+        stack.addArrangedSubview(nameField)
+
+        let buttonRow = NSStackView()
+        buttonRow.orientation = .horizontal
+        buttonRow.spacing = 8
+        buttonRow.addArrangedSubview(cancelButton)
+        buttonRow.addArrangedSubview(NSView())
+        buttonRow.addArrangedSubview(createButton)
+        stack.addArrangedSubview(buttonRow)
+
+        detailContainer.addSubview(stack)
+        NSLayoutConstraint.activate([
+            stack.leadingAnchor.constraint(equalTo: detailContainer.leadingAnchor, constant: 20),
+            stack.trailingAnchor.constraint(equalTo: detailContainer.trailingAnchor, constant: -20),
+            stack.topAnchor.constraint(equalTo: detailContainer.topAnchor, constant: 20)
+        ])
+
+        createButton.tag = storeAddWorkspaceFields(projectID: project.id, nameField: nameField)
+    }
+
+    private func showWorkspaceDetail(project: ProjectSummary, workspace: WorkspaceSummary) {
+        detailContainer.subviews.forEach { $0.removeFromSuperview() }
+        let stack = NSStackView()
+        stack.orientation = .vertical
+        stack.spacing = 12
+        stack.translatesAutoresizingMaskIntoConstraints = false
+
+        let header = NSTextField(labelWithString: "\(project.name) / \(workspace.name)")
+        header.font = .systemFont(ofSize: 20, weight: .semibold)
+
+        let dirLabel = labeledValue(title: "Directory", value: workspace.dir)
+        let statusLabel = labeledValue(title: "Status", value: workspace.isRunning ? "Running" : "Stopped")
+
+        let launchButton = actionButton(title: "Launch", symbol: "play.circle", tooltip: "Launch (⌘L)", action: #selector(launchWorkspace(_:)), primary: false)
+        launchButton.identifier = NSUserInterfaceItemIdentifier(workspace.id)
+        let stopButton = actionButton(title: "Stop", symbol: "stop.circle", tooltip: "Stop (⌘.)", action: #selector(stopWorkspace(_:)), primary: false)
+        stopButton.identifier = NSUserInterfaceItemIdentifier(workspace.id)
+        let archiveButton = actionButton(title: "Archive", symbol: "archivebox", tooltip: "Archive", action: #selector(archiveWorkspace(_:)), primary: false)
+        archiveButton.identifier = NSUserInterfaceItemIdentifier(workspace.id)
+        archiveButton.isEnabled = !workspace.isDefault
+
+        let buttonRow = NSStackView()
+        buttonRow.orientation = .horizontal
+        buttonRow.spacing = 8
+        buttonRow.addArrangedSubview(launchButton)
+        buttonRow.addArrangedSubview(stopButton)
+        buttonRow.addArrangedSubview(archiveButton)
+        buttonRow.addArrangedSubview(NSView())
+
+        let tabs = NSTabView()
+        tabs.translatesAutoresizingMaskIntoConstraints = false
+        let runTab = NSTabViewItem(identifier: "run")
+        runTab.label = "Run"
+        runTab.view = workspaceRunView(workspace: workspace)
+        let envTab = NSTabViewItem(identifier: "env")
+        envTab.label = "Env"
+        envTab.view = workspaceEnvView(project: project, workspace: workspace)
+        tabs.addTabViewItem(runTab)
+        tabs.addTabViewItem(envTab)
+
+        stack.addArrangedSubview(header)
+        stack.addArrangedSubview(dirLabel)
+        stack.addArrangedSubview(statusLabel)
+        stack.addArrangedSubview(buttonRow)
+        stack.addArrangedSubview(tabs)
+
+        detailContainer.addSubview(stack)
+        NSLayoutConstraint.activate([
+            stack.leadingAnchor.constraint(equalTo: detailContainer.leadingAnchor, constant: 20),
+            stack.trailingAnchor.constraint(equalTo: detailContainer.trailingAnchor, constant: -20),
+            stack.topAnchor.constraint(equalTo: detailContainer.topAnchor, constant: 20),
+            tabs.heightAnchor.constraint(equalToConstant: 320)
+        ])
+    }
+
+    private func workspaceRunView(workspace: WorkspaceSummary) -> NSView {
+        let container = NSStackView()
+        container.orientation = .vertical
+        container.spacing = 10
+
+        let processesLabel = label(text: "Running processes")
+        let windowsLabel = label(text: "Windows (cmd+shift+<n>)")
+
+        let processList = NSTextView()
+        processList.isEditable = false
+        processList.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
+        let processes = (try? orchestrator.runningProcesses(workspaceID: workspace.id)) ?? []
+        let results = (try? orchestrator.runStatusChecks(workspaceID: workspace.id)) ?? []
+        processList.string = processes.map { process in
+            let checks = results.filter { $0.processID == process.id }
+            if checks.isEmpty {
+                return "\(process.templateName) [\(process.status.rawValue)]"
+            }
+            let checkInfo = checks.map { "\($0.checkName)=\($0.status)" }.joined(separator: ", ")
+            return "\(process.templateName) [\(process.status.rawValue)] { \(checkInfo) }"
+        }.joined(separator: "\n")
+        let processScroll = scrollableTextView(processList, height: 120)
+
+        let windowsList = NSTextView()
+        windowsList.isEditable = false
+        windowsList.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
+        let windows = (try? orchestrator.windows(workspaceID: workspace.id)) ?? []
+        windowsList.string = windows.enumerated().map { idx, win in
+            let title = win.title ?? win.app
+            return "cmd+shift+\(idx + 1)  \(win.app) — \(title)"
+        }.joined(separator: "\n")
+        let windowsScroll = scrollableTextView(windowsList, height: 120)
+
+        container.addArrangedSubview(processesLabel)
+        container.addArrangedSubview(processScroll)
+        container.addArrangedSubview(windowsLabel)
+        container.addArrangedSubview(windowsScroll)
+        return container
+    }
+
+    private func workspaceEnvView(project: ProjectSummary, workspace: WorkspaceSummary) -> NSView {
+        let container = NSStackView()
+        container.orientation = .vertical
+        container.spacing = 10
+        let envView = NSTextView()
+        envView.isEditable = false
+        envView.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
+        let reservedPorts = (try? orchestrator.workspacePorts(workspaceID: workspace.id)) ?? []
+        var lines: [String] = []
+        for (idx, port) in reservedPorts.enumerated() {
+            lines.append("PORT\(idx)=\(port)")
         }
-        let picker = SpacePickerView(options: options, displayField: displayField, spaceField: spaceField)
-        return picker
+        lines.append("agentmux_WORKSPACE_DIR=\(workspace.dir)")
+        let scopedKey = "agentmux_\(sanitizeEnvKey(project.name))_\(sanitizeEnvKey(workspace.name))_WORKSPACE_DIR"
+        lines.append("\(scopedKey)=\(workspace.dir)")
+        envView.string = lines.joined(separator: "\n")
+        let scroll = scrollableTextView(envView, height: 240)
+        container.addArrangedSubview(scroll)
+        return container
     }
 
-    private func confirm(title: String, message: String) -> Bool {
-        let alert = NSAlert()
-        alert.messageText = title
-        alert.informativeText = message
-        alert.alertStyle = .warning
-        alert.addButton(withTitle: "Confirm")
-        alert.addButton(withTitle: "Cancel")
-        return alert.runModal() == .alertFirstButtonReturn
+    private func label(text: String) -> NSTextField {
+        let label = NSTextField(labelWithString: text)
+        label.font = .systemFont(ofSize: 12, weight: .semibold)
+        label.textColor = .secondaryLabelColor
+        return label
     }
 
-    private func setupMenu() {
-        let mainMenu = NSMenu(title: "MainMenu")
 
-        let appItem = NSMenuItem()
-        let appMenu = NSMenu()
-        appMenu.addItem(withTitle: "Keyboard Shortcuts...", action: #selector(editKeysClicked), keyEquivalent: "")
-        appMenu.addItem(NSMenuItem.separator())
-        appMenu.addItem(withTitle: "Quit agentmux", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
-        appItem.submenu = appMenu
-        mainMenu.addItem(appItem)
-
-        let streamItem = NSMenuItem()
-        let streamMenu = NSMenu(title: "Stream")
-        let nextItem = NSMenuItem(title: "Next Stream", action: #selector(selectNextStream), keyEquivalent: "")
-        nextItem.target = self
-        streamMenu.addItem(nextItem)
-        nextStreamMenuItem = nextItem
-
-        let prevItem = NSMenuItem(title: "Previous Stream", action: #selector(selectPreviousStream), keyEquivalent: "")
-        prevItem.target = self
-        streamMenu.addItem(prevItem)
-        previousStreamMenuItem = prevItem
-
-        streamMenu.addItem(NSMenuItem.separator())
-        let showItem = NSMenuItem(title: "Show Selected Stream", action: #selector(showSelectedStreamShortcut), keyEquivalent: "")
-        showItem.target = self
-        streamMenu.addItem(showItem)
-        showStreamMenuItem = showItem
-
-        streamItem.submenu = streamMenu
-        mainMenu.addItem(streamItem)
-
-        NSApp.mainMenu = mainMenu
+    private func labeledValue(title: String, value: String) -> NSView {
+        let stack = NSStackView()
+        stack.orientation = .horizontal
+        stack.spacing = 8
+        let label = NSTextField(labelWithString: "\(title):")
+        label.font = .systemFont(ofSize: 12, weight: .semibold)
+        let valueField = NSTextField(labelWithString: value)
+        valueField.font = .systemFont(ofSize: 12)
+        valueField.lineBreakMode = .byTruncatingMiddle
+        stack.addArrangedSubview(label)
+        stack.addArrangedSubview(valueField)
+        return stack
     }
 
-    private func setStatus(_ text: String) {
-        statusLabel.stringValue = text
+    private func iconButton(symbol: String, tooltip: String, action: Selector) -> NSButton {
+        let button = NSButton(title: "", target: self, action: action)
+        button.bezelStyle = .texturedRounded
+        button.image = NSImage(systemSymbolName: symbol, accessibilityDescription: tooltip)
+        button.toolTip = tooltip
+        return button
     }
 
-    @objc private func editKeysClicked() {
+    private func actionButton(title: String, symbol: String?, tooltip: String, action: Selector, primary: Bool) -> NSButton {
+        let button = NSButton(title: title, target: self, action: action)
+        button.bezelStyle = primary ? .rounded : .texturedRounded
+        if let symbol {
+            button.image = NSImage(systemSymbolName: symbol, accessibilityDescription: tooltip)
+            button.imagePosition = .imageLeading
+        }
+        button.toolTip = tooltip
+        if primary {
+            button.controlSize = .large
+            button.font = .systemFont(ofSize: 13, weight: .semibold)
+        }
+        return button
+    }
+
+    private func scrollableTextView(_ textView: NSTextView, height: CGFloat) -> NSScrollView {
+        let scroll = NSScrollView()
+        scroll.hasVerticalScroller = true
+        scroll.hasHorizontalScroller = false
+        scroll.autohidesScrollers = true
+        scroll.borderType = .bezelBorder
+        scroll.drawsBackground = true
+        textView.minSize = NSSize(width: 0, height: height)
+        textView.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
+        textView.isVerticallyResizable = true
+        textView.isHorizontallyResizable = false
+        textView.autoresizingMask = [.width]
+        textView.textContainer?.widthTracksTextView = true
+        scroll.documentView = textView
+        scroll.translatesAutoresizingMaskIntoConstraints = false
+        scroll.heightAnchor.constraint(equalToConstant: height).isActive = true
+        return scroll
+    }
+
+    private func makeEditableTextView() -> NSTextView {
+        let textView = NSTextView()
+        textView.isEditable = true
+        textView.isSelectable = true
+        textView.isRichText = false
+        textView.allowsUndo = true
+        textView.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
+        textView.textContainerInset = NSSize(width: 6, height: 6)
+        textView.isVerticallyResizable = true
+        textView.isHorizontallyResizable = false
+        textView.textContainer?.widthTracksTextView = true
+        textView.textContainer?.containerSize = NSSize(width: 0, height: CGFloat.greatestFiniteMagnitude)
+        return textView
+    }
+
+    private func storeProjectFields(
+        projectID: String,
+        setupView: NSTextView,
+        cleanupView: NSTextView,
+        processEditor: ProcessEditor,
+        browserView: NSTextView,
+        statusEditor: StatusCheckEditor
+    ) -> Int {
+        let id = projectID.hashValue
+        ProjectFieldCache.shared.cache[id] = ProjectFieldRefs(
+            projectID: projectID,
+            setupView: setupView,
+            cleanupView: cleanupView,
+            processEditor: processEditor,
+            browserView: browserView,
+            statusEditor: statusEditor
+        )
+        return id
+    }
+
+    private func storeAddProjectFields(
+        dirField: NSTextField,
+        setupView: NSTextView,
+        cleanupView: NSTextView,
+        processEditor: ProcessEditor,
+        browserView: NSTextView,
+        statusEditor: StatusCheckEditor,
+        browseButton: NSButton
+    ) -> Int {
+        let id = UUID().uuidString.hashValue
+        AddProjectFieldCache.shared.cache[id] = AddProjectFieldRefs(
+            dirField: dirField,
+            setupView: setupView,
+            cleanupView: cleanupView,
+            processEditor: processEditor,
+            browserView: browserView,
+            statusEditor: statusEditor
+        )
+        browseButton.tag = id
+        return id
+    }
+
+    private func storeAddWorkspaceFields(projectID: String, nameField: NSTextField) -> Int {
+        let id = UUID().uuidString.hashValue
+        AddWorkspaceFieldCache.shared.cache[id] = AddWorkspaceFieldRefs(projectID: projectID, nameField: nameField)
+        return id
+    }
+
+    @objc private func reloadTapped() {
+        reloadData()
+    }
+
+    @objc private func addProject() {
+        showAddProjectForm()
+    }
+
+    @objc private func addWorkspace(_ sender: NSButton) {
+        guard let projectID = sender.identifier?.rawValue,
+              let project = projects.first(where: { $0.id == projectID }) else { return }
+        showAddWorkspaceForm(project: project)
+    }
+
+    @objc private func addWorkspaceFromToolbar(_ sender: NSButton) {
+        if let projectID = sender.identifier?.rawValue,
+           let project = projects.first(where: { $0.id == projectID }) {
+            showAddWorkspaceForm(project: project)
+            return
+        }
+        guard let project = currentProjectForNewWorkspace() else { return }
+        showAddWorkspaceForm(project: project)
+    }
+
+    private func addWorkspaceFromShortcut() {
+        guard let project = currentProjectForNewWorkspace() else { return }
+        showAddWorkspaceForm(project: project)
+    }
+
+    private func currentProjectForNewWorkspace() -> ProjectSummary? {
+        if let selectedProjectID, let project = projects.first(where: { $0.id == selectedProjectID }) {
+            return project
+        }
+        if let selectedWorkspaceID, let (project, _) = findWorkspace(id: selectedWorkspaceID) {
+            return project
+        }
+        return nil
+    }
+
+    @objc private func saveProject(_ sender: NSButton) {
+        guard let refs = ProjectFieldCache.shared.cache[sender.tag] else { return }
         do {
-            let currentHotkey = try HotkeySpec.parse(try orchestrator().guiHotkey())
-            let currentNext = try HotkeySpec.parse(try orchestrator().guiNextShortcut())
-            let currentPrev = try HotkeySpec.parse(try orchestrator().guiPreviousShortcut())
-            let currentShow = try HotkeySpec.parse(try orchestrator().guiShowShortcut())
-
-            let hotkeyField = makeHotkeyCaptureField(initial: currentHotkey)
-            let nextField = makeHotkeyCaptureField(initial: currentNext)
-            let prevField = makeHotkeyCaptureField(initial: currentPrev)
-            let showField = makeHotkeyCaptureField(initial: currentShow)
-
-            suppressShortcuts = true
-            unregisterHotkey()
-            let result = runHotkeyCaptureForm(
-                title: "Keyboard Shortcuts",
-                message: "Click a field and press the key combination you want.",
-                fields: [
-                    ("Toggle agentmux window", hotkeyField),
-                    ("Next stream", nextField),
-                    ("Previous stream", prevField),
-                    ("Show selected stream", showField)
-                ]
-            )
-
-            var didRegisterHotkey = false
-            switch result {
-            case .save:
-                guard
-                    let hotkeySpec = hotkeyField.capturedSpec,
-                    let nextSpec = nextField.capturedSpec,
-                    let prevSpec = prevField.capturedSpec,
-                    let showSpec = showField.capturedSpec
-                else {
-                    showErrorAlert(title: "Invalid shortcuts", message: "Missing one or more shortcuts.")
-                    return
-                }
-                try orchestrator().setGUIHotkey(hotkeySpec.normalized)
-                try orchestrator().setGUINextShortcut(nextSpec.normalized)
-                try orchestrator().setGUIPreviousShortcut(prevSpec.normalized)
-                try orchestrator().setGUIShowShortcut(showSpec.normalized)
-                registerHotkey(hotkeySpec)
-                didRegisterHotkey = true
-                lastHotkeyRaw = hotkeySpec.normalized
-                nextShortcut = nextSpec
-                previousShortcut = prevSpec
-                showShortcut = showSpec
-                lastNextShortcutRaw = nextSpec.normalized
-                lastPreviousShortcutRaw = prevSpec.normalized
-                lastShowShortcutRaw = showSpec.normalized
-                updateShortcutMenuItems()
-                updateHotkeyHint()
-                setStatus("Shortcuts updated.")
-            case .resetDefaults:
-                try orchestrator().setGUIHotkey(nil)
-                try orchestrator().setGUINextShortcut(nil)
-                try orchestrator().setGUIPreviousShortcut(nil)
-                try orchestrator().setGUIShowShortcut(nil)
-                let hotkeySpec = try HotkeySpec.parse(SettingsKey.defaultGUIHotkey)
-                let nextSpec = try HotkeySpec.parse(SettingsKey.defaultGUINextShortcut)
-                let prevSpec = try HotkeySpec.parse(SettingsKey.defaultGUIPreviousShortcut)
-                let showSpec = try HotkeySpec.parse(SettingsKey.defaultGUIShowShortcut)
-                registerHotkey(hotkeySpec)
-                didRegisterHotkey = true
-                lastHotkeyRaw = hotkeySpec.normalized
-                nextShortcut = nextSpec
-                previousShortcut = prevSpec
-                showShortcut = showSpec
-                lastNextShortcutRaw = nextSpec.normalized
-                lastPreviousShortcutRaw = prevSpec.normalized
-                lastShowShortcutRaw = showSpec.normalized
-                updateShortcutMenuItems()
-                updateHotkeyHint()
-                setStatus("Shortcuts reset.")
-            case .cancel:
-                break
+            try orchestrator.updateProjectConfig(projectID: refs.projectID) { config in
+                config.setupScript = refs.setupView.string.isEmpty ? nil : refs.setupView.string
+                config.cleanupScript = refs.cleanupView.string.isEmpty ? nil : refs.cleanupView.string
+                config.processes = refs.processEditor.currentProcesses()
+                config.browserSessions = parseBrowserSessions(refs.browserView.string)
+                config.statusChecks = refs.statusEditor.currentChecks()
             }
-            suppressShortcuts = false
-            if !didRegisterHotkey {
-                registerHotkey(currentHotkey)
-                lastHotkeyRaw = currentHotkey.normalized
-                updateHotkeyHint()
-            }
+            projectHasUnsavedChanges = false
+            reloadData()
         } catch {
-            suppressShortcuts = false
-            showErrorAlert(title: "Invalid shortcuts", message: error.localizedDescription)
+            showError(error)
         }
     }
 
-    private func setupHotkey() {
+    @objc private func createProject(_ sender: NSButton) {
+        guard let refs = AddProjectFieldCache.shared.cache[sender.tag] else { return }
         do {
-            let raw = try orchestrator().guiHotkey()
+            let dir = refs.dirField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !dir.isEmpty else { return }
+            let record = try orchestrator.addProject(dir: dir)
+            var config = ProjectConfig(dir: record.dir)
+            config.setupScript = refs.setupView.string.isEmpty ? nil : refs.setupView.string
+            config.cleanupScript = refs.cleanupView.string.isEmpty ? nil : refs.cleanupView.string
+            config.processes = refs.processEditor.currentProcesses()
+            config.browserSessions = parseBrowserSessions(refs.browserView.string)
+            config.statusChecks = refs.statusEditor.currentChecks()
+            try orchestrator.updateProjectConfig(config)
+            reloadData()
+        } catch {
+            showError(error)
+        }
+    }
+
+    @objc private func browseProjectDir(_ sender: NSButton) {
+        guard let refs = AddProjectFieldCache.shared.cache[sender.tag] else { return }
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.allowsMultipleSelection = false
+        panel.begin { result in
+            if result == .OK, let url = panel.url {
+                refs.dirField.stringValue = url.path
+            }
+        }
+    }
+
+    @objc private func createWorkspace(_ sender: NSButton) {
+        guard let refs = AddWorkspaceFieldCache.shared.cache[sender.tag] else { return }
+        do {
+            let name = refs.nameField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !name.isEmpty else { return }
+            _ = try orchestrator.createWorkspace(projectID: refs.projectID, name: name)
+            reloadData()
+        } catch {
+            showError(error)
+        }
+    }
+
+    @objc private func cancelProjectForm() {
+        refreshSelection()
+    }
+
+    @objc private func launchWorkspace(_ sender: NSButton) {
+        guard let id = sender.identifier?.rawValue else { return }
+        do {
+            try orchestrator.launchWorkspace(workspaceID: id)
+            reloadData()
+        } catch {
+            showError(error)
+        }
+    }
+
+    @objc private func stopWorkspace(_ sender: NSButton) {
+        guard let id = sender.identifier?.rawValue else { return }
+        do {
+            try orchestrator.stopWorkspace(workspaceID: id)
+            reloadData()
+        } catch {
+            showError(error)
+        }
+    }
+
+    @objc private func archiveWorkspace(_ sender: NSButton) {
+        guard let id = sender.identifier?.rawValue else { return }
+        do {
+            try orchestrator.archiveWorkspace(workspaceID: id)
+            reloadData()
+        } catch {
+            showError(error)
+        }
+    }
+
+    private func parseProcesses(_ raw: String) -> [ProcessTemplate] {
+        _ = raw
+        return []
+    }
+
+    private func parseBrowserSessions(_ raw: String) -> [BrowserSession] {
+        raw.split(separator: "\n").compactMap { line in
+            let url = line.trimmingCharacters(in: .whitespacesAndNewlines)
+            return url.isEmpty ? nil : BrowserSession(url: url)
+        }
+    }
+
+    private func parseStatusChecks(_ raw: String) -> [StatusCheckDefinition] {
+        _ = raw
+        return []
+    }
+
+    private func showError(_ error: Error) {
+        let alert = NSAlert(error: error)
+        alert.runModal()
+    }
+
+    private func findWorkspace(id: String) -> (ProjectSummary, WorkspaceSummary)? {
+        for project in projects {
+            if let workspaces = workspacesByProject[project.id],
+               let workspace = workspaces.first(where: { $0.id == id }) {
+                return (project, workspace)
+            }
+        }
+        return nil
+    }
+
+    private func normalizePath(_ path: String) -> String {
+        URL(fileURLWithPath: path).resolvingSymlinksInPath().standardizedFileURL.path
+    }
+
+    private func sanitizeEnvKey(_ raw: String) -> String {
+        raw.uppercased().map { char in
+            if char.isLetter || char.isNumber { return char }
+            return "_"
+        }.reduce("") { $0 + String($1) }
+    }
+
+    private func setupGlobalHotkey() {
+        do {
+            let raw = try orchestrator.guiHotkey()
             let spec = try HotkeySpec.parse(raw)
             registerHotkey(spec)
-            lastHotkeyRaw = raw
-            updateHotkeyHint()
         } catch {
-            setStatus("Hotkey error: \(error.localizedDescription)")
-            updateHotkeyHint()
+            showError(error)
         }
     }
 
-    private func setupShortcuts() {
-        do {
-            let nextRaw = try orchestrator().guiNextShortcut()
-            let prevRaw = try orchestrator().guiPreviousShortcut()
-            let showRaw = try orchestrator().guiShowShortcut()
-            let nextSpec = try HotkeySpec.parse(nextRaw)
-            let prevSpec = try HotkeySpec.parse(prevRaw)
-            let showSpec = try HotkeySpec.parse(showRaw)
-            nextShortcut = nextSpec
-            previousShortcut = prevSpec
-            showShortcut = showSpec
-            lastNextShortcutRaw = nextRaw
-            lastPreviousShortcutRaw = prevRaw
-            lastShowShortcutRaw = showRaw
-            updateShortcutMenuItems()
-            updateHotkeyHint()
-        } catch {
-            setStatus("Shortcut error: \(error.localizedDescription)")
-            updateHotkeyHint()
+    private func teardownGlobalHotkey() {
+        if let hotkeyRef {
+            UnregisterEventHotKey(hotkeyRef)
         }
-    }
-
-    private func setupShortcutMonitor() {
-        shortcutMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
-            guard let self else { return event }
-            guard self.shouldHandleShortcuts() else { return event }
-            guard !event.isARepeat else { return event }
-            guard let spec = self.hotkeySpec(from: event) else { return event }
-
-            if spec == self.nextShortcut {
-                self.selectNextStream()
-                return nil
-            }
-            if spec == self.previousShortcut {
-                self.selectPreviousStream()
-                return nil
-            }
-            if spec == self.showShortcut {
-                self.showSelectedStreamShortcut()
-                return nil
-            }
-
-            return event
+        if let hotkeyHandler {
+            RemoveEventHandler(hotkeyHandler)
         }
-    }
-
-    private func shouldHandleShortcuts() -> Bool {
-        if suppressShortcuts { return false }
-        guard window.isKeyWindow else { return false }
-        if let responder = window.firstResponder as? NSTextView, responder.isEditable {
-            return false
-        }
-        if let responder = window.firstResponder as? NSTextField, responder.isEditable {
-            return false
-        }
-        return true
+        hotkeyRef = nil
+        hotkeyHandler = nil
     }
 
     private func registerHotkey(_ spec: HotkeySpec) {
-        unregisterHotkey()
-        guard let keyCode = keyCode(for: spec.key) else {
-            setStatus("Unsupported hotkey key: \(spec.key)")
-            return
-        }
-
-        let modifiers = carbonModifiers(from: spec.modifiers)
-        let hotkeyID = EventHotKeyID(signature: fourCharCode("AMUX"), id: 1)
-        let status = RegisterEventHotKey(keyCode, modifiers, hotkeyID, GetEventDispatcherTarget(), 0, &hotkeyRef)
+        teardownGlobalHotkey()
+        let hotKeyID = EventHotKeyID(signature: OSType(UInt32(truncatingIfNeeded: "AMUX".utf8.reduce(0) { ($0 << 8) + UInt32($1) })), id: 1)
+        let target = GetEventDispatcherTarget()
+        let status = RegisterEventHotKey(UInt32(spec.keyCode), spec.modifiersCarbon, hotKeyID, target, 0, &hotkeyRef)
         if status != noErr {
-            setStatus("Failed to register hotkey (\(status))")
             return
         }
 
         var eventSpec = EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyPressed))
-        InstallEventHandler(
-            GetEventDispatcherTarget(),
+        let handlerStatus = InstallEventHandler(
+            target,
             hotkeyHandlerProc,
             1,
             &eventSpec,
             UnsafeMutableRawPointer(Unmanaged.passUnretained(self).toOpaque()),
             &hotkeyHandler
         )
-        registeredHotkey = spec
-        updateHotkeyHint()
+        if handlerStatus == noErr {
+            registeredHotkey = spec
+        }
     }
 
-    private func unregisterHotkey() {
-        if let hotkeyRef {
-            UnregisterEventHotKey(hotkeyRef)
-            self.hotkeyRef = nil
-        }
-        if let hotkeyHandler {
-            RemoveEventHandler(hotkeyHandler)
-            self.hotkeyHandler = nil
-        }
-        registeredHotkey = nil
-        updateHotkeyHint()
-    }
-
-    fileprivate func toggleWindowFromHotkey() {
-        if window.isVisible {
-            if shouldMoveToActiveSpace() {
-                showWindowOnActiveSpace()
-            } else {
-                window.orderOut(nil)
+    private func setupShortcutMonitor() {
+        shortcutMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            guard let self else { return event }
+            if event.modifierFlags.contains(.command),
+               !event.modifierFlags.contains(.shift),
+               event.charactersIgnoringModifiers?.lowercased() == "n" {
+                self.addWorkspaceFromShortcut()
+                return nil
             }
-        } else {
-            showWindowOnActiveSpace()
+            if let nextShortcutSpec, matches(event: event, spec: nextShortcutSpec) {
+                self.selectNextRunningWorkspace()
+                return nil
+            }
+            if let previousShortcutSpec, matches(event: event, spec: previousShortcutSpec) {
+                self.selectPreviousRunningWorkspace()
+                return nil
+            }
+            if let activateShortcutSpec, matches(event: event, spec: activateShortcutSpec) {
+                self.activateSelectedWorkspace()
+                return nil
+            }
+            return event
         }
     }
 
-    private func shouldMoveToActiveSpace() -> Bool {
-        if let targetScreen = screenForActiveDisplay(), window.screen != targetScreen {
-            return true
+    private func loadShortcutSpecs() {
+        do {
+            nextShortcutSpec = try HotkeySpec.parse(orchestrator.guiNextShortcut())
+            previousShortcutSpec = try HotkeySpec.parse(orchestrator.guiPreviousShortcut())
+            activateShortcutSpec = try HotkeySpec.parse(orchestrator.guiShowShortcut())
+        } catch {
+            nextShortcutSpec = nil
+            previousShortcutSpec = nil
+            activateShortcutSpec = nil
         }
-        if !window.isOnActiveSpace {
+    }
+
+    private func matches(event: NSEvent, spec: HotkeySpec) -> Bool {
+        guard UInt32(event.keyCode) == spec.keyCode else { return false }
+        let flags = eventModifierCarbonFlags(event)
+        return flags == spec.modifiersCarbon
+    }
+
+    private func eventModifierCarbonFlags(_ event: NSEvent) -> UInt32 {
+        var result: UInt32 = 0
+        let flags = event.modifierFlags
+        if flags.contains(.command) { result |= UInt32(cmdKey) }
+        if flags.contains(.shift) { result |= UInt32(shiftKey) }
+        if flags.contains(.option) { result |= UInt32(optionKey) }
+        if flags.contains(.control) { result |= UInt32(controlKey) }
+        return result
+    }
+
+    private func selectNextRunningWorkspace() {
+        let running = allRunningWorkspaces()
+        guard !running.isEmpty else { return }
+        if let selectedWorkspaceID,
+           let idx = running.firstIndex(where: { $0.id == selectedWorkspaceID }) {
+            let next = running[(idx + 1) % running.count]
+            selectWorkspace(next)
+        } else {
+            selectWorkspace(running[0])
+        }
+    }
+
+    private func selectPreviousRunningWorkspace() {
+        let running = allRunningWorkspaces()
+        guard !running.isEmpty else { return }
+        if let selectedWorkspaceID,
+           let idx = running.firstIndex(where: { $0.id == selectedWorkspaceID }) {
+            let prev = running[(idx - 1 + running.count) % running.count]
+            selectWorkspace(prev)
+        } else {
+            selectWorkspace(running[0])
+        }
+    }
+
+    private func activateSelectedWorkspace() {
+        guard let selectedWorkspaceID else { return }
+        do {
+            try orchestrator.focusWorkspace(workspaceID: selectedWorkspaceID)
+        } catch {
+            showError(error)
+        }
+    }
+
+    private func selectWorkspace(_ workspace: WorkspaceSummary) {
+        for row in 0..<outlineView.numberOfRows {
+            if let item = outlineView.item(atRow: row) as? OutlineItem {
+                if case let .workspace(_, ws) = item, ws.id == workspace.id {
+                    outlineView.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
+                    break
+                }
+            }
+        }
+    }
+
+    private func allRunningWorkspaces() -> [WorkspaceSummary] {
+        var list: [WorkspaceSummary] = []
+        for project in projects {
+            let workspaces = workspacesByProject[project.id] ?? []
+            list.append(contentsOf: workspaces.filter { $0.isRunning && !$0.isArchived })
+        }
+        return list
+    }
+
+    private func toggleWindowFromHotkey() {
+        guard let window else { return }
+        if window.isVisible {
+            window.orderOut(nil)
+        } else {
+            window.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+        }
+    }
+
+    public func outlineView(_ outlineView: NSOutlineView, numberOfChildrenOfItem item: Any?) -> Int {
+        if item == nil {
+            return projects.count
+        }
+        if case let .project(project) = item as? OutlineItem {
+            return workspacesByProject[project.id]?.count ?? 0
+        }
+        return 0
+    }
+
+    public func outlineView(_ outlineView: NSOutlineView, isItemExpandable item: Any) -> Bool {
+        if case .project = item as? OutlineItem {
             return true
         }
         return false
     }
 
-    private func showWindowOnActiveSpace() {
-        if let screen = screenForActiveDisplay() {
-            centerWindow(on: screen)
+    public func outlineView(_ outlineView: NSOutlineView, child index: Int, ofItem item: Any?) -> Any {
+        if item == nil {
+            return OutlineItem.project(projects[index])
         }
-        window.collectionBehavior.insert(.moveToActiveSpace)
-        if window.isMiniaturized {
-            window.deminiaturize(nil)
+        if case let .project(project) = item as? OutlineItem {
+            let workspace = workspacesByProject[project.id]?[index] ?? WorkspaceSummary(id: "", name: "", dir: "", isRunning: false, isArchived: false, isDefault: false)
+            return OutlineItem.workspace(project, workspace)
         }
-        window.makeKeyAndOrderFront(nil)
-        NSApp.activate(ignoringOtherApps: true)
+        return OutlineItem.project(projects[0])
     }
 
-    private func screenForActiveDisplay() -> NSScreen? {
-        let mouse = NSEvent.mouseLocation
-        return NSScreen.screens.first { $0.frame.contains(mouse) }
-    }
-
-    private func centerWindow(on screen: NSScreen) {
-        let frame = window.frame
-        let visible = screen.visibleFrame
-        let origin = NSPoint(
-            x: visible.origin.x + (visible.size.width - frame.size.width) / 2,
-            y: visible.origin.y + (visible.size.height - frame.size.height) / 2
-        )
-        window.setFrameOrigin(origin)
-    }
-
-    private func hotkeySpec(from event: NSEvent) -> HotkeySpec? {
-        guard let key = keyName(for: event.keyCode) else { return nil }
-        let modifiers = hotkeyModifiers(from: event.modifierFlags)
-        return HotkeySpec(key: key, modifiers: modifiers)
-    }
-
-    private func hotkeyModifiers(from flags: NSEvent.ModifierFlags) -> Set<HotkeyModifier> {
-        let masked = flags.intersection(.deviceIndependentFlagsMask)
-        var modifiers = Set<HotkeyModifier>()
-        if masked.contains(.command) { modifiers.insert(.cmd) }
-        if masked.contains(.shift) { modifiers.insert(.shift) }
-        if masked.contains(.option) { modifiers.insert(.alt) }
-        if masked.contains(.control) { modifiers.insert(.ctrl) }
-        return modifiers
-    }
-
-    private func keyName(for keyCode: UInt16) -> String? {
-        switch keyCode {
-        case UInt16(kVK_ANSI_A): return "a"
-        case UInt16(kVK_ANSI_B): return "b"
-        case UInt16(kVK_ANSI_C): return "c"
-        case UInt16(kVK_ANSI_D): return "d"
-        case UInt16(kVK_ANSI_E): return "e"
-        case UInt16(kVK_ANSI_F): return "f"
-        case UInt16(kVK_ANSI_G): return "g"
-        case UInt16(kVK_ANSI_H): return "h"
-        case UInt16(kVK_ANSI_I): return "i"
-        case UInt16(kVK_ANSI_J): return "j"
-        case UInt16(kVK_ANSI_K): return "k"
-        case UInt16(kVK_ANSI_L): return "l"
-        case UInt16(kVK_ANSI_M): return "m"
-        case UInt16(kVK_ANSI_N): return "n"
-        case UInt16(kVK_ANSI_O): return "o"
-        case UInt16(kVK_ANSI_P): return "p"
-        case UInt16(kVK_ANSI_Q): return "q"
-        case UInt16(kVK_ANSI_R): return "r"
-        case UInt16(kVK_ANSI_S): return "s"
-        case UInt16(kVK_ANSI_T): return "t"
-        case UInt16(kVK_ANSI_U): return "u"
-        case UInt16(kVK_ANSI_V): return "v"
-        case UInt16(kVK_ANSI_W): return "w"
-        case UInt16(kVK_ANSI_X): return "x"
-        case UInt16(kVK_ANSI_Y): return "y"
-        case UInt16(kVK_ANSI_Z): return "z"
-        case UInt16(kVK_ANSI_0): return "0"
-        case UInt16(kVK_ANSI_1): return "1"
-        case UInt16(kVK_ANSI_2): return "2"
-        case UInt16(kVK_ANSI_3): return "3"
-        case UInt16(kVK_ANSI_4): return "4"
-        case UInt16(kVK_ANSI_5): return "5"
-        case UInt16(kVK_ANSI_6): return "6"
-        case UInt16(kVK_ANSI_7): return "7"
-        case UInt16(kVK_ANSI_8): return "8"
-        case UInt16(kVK_ANSI_9): return "9"
-        case UInt16(kVK_ANSI_LeftBracket): return "["
-        case UInt16(kVK_ANSI_RightBracket): return "]"
-        case UInt16(kVK_ANSI_Semicolon): return ";"
-        case UInt16(kVK_ANSI_Quote): return "'"
-        case UInt16(kVK_ANSI_Comma): return ","
-        case UInt16(kVK_ANSI_Period): return "."
-        case UInt16(kVK_ANSI_Slash): return "/"
-        case UInt16(kVK_ANSI_Backslash): return "\\"
-        case UInt16(kVK_ANSI_Minus): return "minus"
-        case UInt16(kVK_ANSI_Equal): return "="
-        case UInt16(kVK_ANSI_Grave): return "`"
-        case UInt16(kVK_Space): return "space"
-        case UInt16(kVK_Tab): return "tab"
-        case UInt16(kVK_Return): return "return"
-        case UInt16(kVK_ANSI_KeypadEnter): return "enter"
-        case UInt16(kVK_Escape): return "escape"
-        case UInt16(kVK_Delete): return "delete"
-        case UInt16(kVK_ForwardDelete): return "forwarddelete"
-        case UInt16(kVK_LeftArrow): return "left"
-        case UInt16(kVK_RightArrow): return "right"
-        case UInt16(kVK_UpArrow): return "up"
-        case UInt16(kVK_DownArrow): return "down"
-        case UInt16(kVK_F1): return "f1"
-        case UInt16(kVK_F2): return "f2"
-        case UInt16(kVK_F3): return "f3"
-        case UInt16(kVK_F4): return "f4"
-        case UInt16(kVK_F5): return "f5"
-        case UInt16(kVK_F6): return "f6"
-        case UInt16(kVK_F7): return "f7"
-        case UInt16(kVK_F8): return "f8"
-        case UInt16(kVK_F9): return "f9"
-        case UInt16(kVK_F10): return "f10"
-        case UInt16(kVK_F11): return "f11"
-        case UInt16(kVK_F12): return "f12"
-        case UInt16(kVK_F13): return "f13"
-        case UInt16(kVK_F14): return "f14"
-        case UInt16(kVK_F15): return "f15"
-        case UInt16(kVK_F16): return "f16"
-        case UInt16(kVK_F17): return "f17"
-        case UInt16(kVK_F18): return "f18"
-        case UInt16(kVK_F19): return "f19"
-        case UInt16(kVK_F20): return "f20"
-        default: return nil
+    public func outlineView(_ outlineView: NSOutlineView, viewFor tableColumn: NSTableColumn?, item: Any) -> NSView? {
+        let cell = NSTableCellView()
+        let icon = NSImageView()
+        icon.translatesAutoresizingMaskIntoConstraints = false
+        let text = NSTextField(labelWithString: "")
+        text.translatesAutoresizingMaskIntoConstraints = false
+        cell.addSubview(text)
+        cell.addSubview(icon)
+        NSLayoutConstraint.activate([
+            icon.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 6),
+            icon.centerYAnchor.constraint(equalTo: cell.centerYAnchor),
+            icon.widthAnchor.constraint(equalToConstant: 10),
+            icon.heightAnchor.constraint(equalToConstant: 10),
+            text.leadingAnchor.constraint(equalTo: icon.trailingAnchor, constant: 6),
+            text.trailingAnchor.constraint(equalTo: cell.trailingAnchor, constant: -6),
+            text.centerYAnchor.constraint(equalTo: cell.centerYAnchor)
+        ])
+        if case let .project(project) = item as? OutlineItem {
+            icon.image = nil
+            text.stringValue = project.name
+            text.font = .systemFont(ofSize: 13, weight: .semibold)
+        } else if case let .workspace(_, workspace) = item as? OutlineItem {
+            icon.image = NSImage(systemSymbolName: workspace.isRunning ? "circle.fill" : "circle", accessibilityDescription: "Status")
+            icon.contentTintColor = workspace.isRunning ? .systemGreen : .tertiaryLabelColor
+            text.stringValue = workspace.name
+            text.font = .systemFont(ofSize: 12)
+            if workspace.isArchived {
+                text.textColor = .secondaryLabelColor
+            }
         }
+        return cell
     }
 
-    private func keyCode(for key: String) -> UInt32? {
-        let lower = key.lowercased()
-        if lower.count == 1, let scalar = lower.unicodeScalars.first {
-            if CharacterSet.letters.contains(scalar) {
-                switch lower {
-                case "a": return UInt32(kVK_ANSI_A)
-                case "b": return UInt32(kVK_ANSI_B)
-                case "c": return UInt32(kVK_ANSI_C)
-                case "d": return UInt32(kVK_ANSI_D)
-                case "e": return UInt32(kVK_ANSI_E)
-                case "f": return UInt32(kVK_ANSI_F)
-                case "g": return UInt32(kVK_ANSI_G)
-                case "h": return UInt32(kVK_ANSI_H)
-                case "i": return UInt32(kVK_ANSI_I)
-                case "j": return UInt32(kVK_ANSI_J)
-                case "k": return UInt32(kVK_ANSI_K)
-                case "l": return UInt32(kVK_ANSI_L)
-                case "m": return UInt32(kVK_ANSI_M)
-                case "n": return UInt32(kVK_ANSI_N)
-                case "o": return UInt32(kVK_ANSI_O)
-                case "p": return UInt32(kVK_ANSI_P)
-                case "q": return UInt32(kVK_ANSI_Q)
-                case "r": return UInt32(kVK_ANSI_R)
-                case "s": return UInt32(kVK_ANSI_S)
-                case "t": return UInt32(kVK_ANSI_T)
-                case "u": return UInt32(kVK_ANSI_U)
-                case "v": return UInt32(kVK_ANSI_V)
-                case "w": return UInt32(kVK_ANSI_W)
-                case "x": return UInt32(kVK_ANSI_X)
-                case "y": return UInt32(kVK_ANSI_Y)
-                case "z": return UInt32(kVK_ANSI_Z)
-                default: break
+    public func outlineViewSelectionDidChange(_ notification: Notification) {
+        let row = outlineView.selectedRow
+        if projectHasUnsavedChanges {
+            let response = unsavedChangesPrompt()
+            if response == .alertFirstButtonReturn {
+                if !saveCurrentProject() {
+                    outlineView.selectRowIndexes(IndexSet(integer: lastSelectedRow), byExtendingSelection: false)
+                    return
                 }
-            }
-            if CharacterSet.decimalDigits.contains(scalar) {
-                switch lower {
-                case "0": return UInt32(kVK_ANSI_0)
-                case "1": return UInt32(kVK_ANSI_1)
-                case "2": return UInt32(kVK_ANSI_2)
-                case "3": return UInt32(kVK_ANSI_3)
-                case "4": return UInt32(kVK_ANSI_4)
-                case "5": return UInt32(kVK_ANSI_5)
-                case "6": return UInt32(kVK_ANSI_6)
-                case "7": return UInt32(kVK_ANSI_7)
-                case "8": return UInt32(kVK_ANSI_8)
-                case "9": return UInt32(kVK_ANSI_9)
-                default: break
-                }
+            } else if response == .alertThirdButtonReturn {
+                outlineView.selectRowIndexes(IndexSet(integer: lastSelectedRow), byExtendingSelection: false)
+                return
+            } else {
+                projectHasUnsavedChanges = false
             }
         }
-
-        switch lower {
-        case "[": return UInt32(kVK_ANSI_LeftBracket)
-        case "]": return UInt32(kVK_ANSI_RightBracket)
-        case ";": return UInt32(kVK_ANSI_Semicolon)
-        case "'": return UInt32(kVK_ANSI_Quote)
-        case ",": return UInt32(kVK_ANSI_Comma)
-        case ".": return UInt32(kVK_ANSI_Period)
-        case "/": return UInt32(kVK_ANSI_Slash)
-        case "\\": return UInt32(kVK_ANSI_Backslash)
-        case "minus", "dash": return UInt32(kVK_ANSI_Minus)
-        case "=": return UInt32(kVK_ANSI_Equal)
-        case "`": return UInt32(kVK_ANSI_Grave)
-        case "space": return UInt32(kVK_Space)
-        case "tab": return UInt32(kVK_Tab)
-        case "return": return UInt32(kVK_Return)
-        case "enter": return UInt32(kVK_Return)
-        case "escape": return UInt32(kVK_Escape)
-        case "delete", "backspace": return UInt32(kVK_Delete)
-        case "forwarddelete": return UInt32(kVK_ForwardDelete)
-        case "left": return UInt32(kVK_LeftArrow)
-        case "right": return UInt32(kVK_RightArrow)
-        case "up": return UInt32(kVK_UpArrow)
-        case "down": return UInt32(kVK_DownArrow)
-        default: break
-        }
-
-        if lower.hasPrefix("f"), let value = Int(lower.dropFirst()) {
-            switch value {
-            case 1: return UInt32(kVK_F1)
-            case 2: return UInt32(kVK_F2)
-            case 3: return UInt32(kVK_F3)
-            case 4: return UInt32(kVK_F4)
-            case 5: return UInt32(kVK_F5)
-            case 6: return UInt32(kVK_F6)
-            case 7: return UInt32(kVK_F7)
-            case 8: return UInt32(kVK_F8)
-            case 9: return UInt32(kVK_F9)
-            case 10: return UInt32(kVK_F10)
-            case 11: return UInt32(kVK_F11)
-            case 12: return UInt32(kVK_F12)
-            case 13: return UInt32(kVK_F13)
-            case 14: return UInt32(kVK_F14)
-            case 15: return UInt32(kVK_F15)
-            case 16: return UInt32(kVK_F16)
-            case 17: return UInt32(kVK_F17)
-            case 18: return UInt32(kVK_F18)
-            case 19: return UInt32(kVK_F19)
-            case 20: return UInt32(kVK_F20)
-            default: break
-            }
-        }
-
-        return nil
-    }
-
-    private func carbonModifiers(from modifiers: Set<HotkeyModifier>) -> UInt32 {
-        var flags: UInt32 = 0
-        if modifiers.contains(.cmd) { flags |= UInt32(cmdKey) }
-        if modifiers.contains(.shift) { flags |= UInt32(shiftKey) }
-        if modifiers.contains(.alt) { flags |= UInt32(optionKey) }
-        if modifiers.contains(.ctrl) { flags |= UInt32(controlKey) }
-        return flags
-    }
-
-    private func updateShortcutMenuItems() {
-        if let nextShortcut {
-            applyMenuShortcutDisplay(nextShortcut, to: nextStreamMenuItem)
-        }
-        if let previousShortcut {
-            applyMenuShortcutDisplay(previousShortcut, to: previousStreamMenuItem)
-        }
-        if let showShortcut {
-            applyMenuShortcutDisplay(showShortcut, to: showStreamMenuItem)
-        }
-    }
-
-    private func applyMenuShortcutDisplay(_ spec: HotkeySpec, to item: NSMenuItem?) {
-        guard let item else { return }
-        if let (key, mask) = menuKeyEquivalent(for: spec) {
-            item.keyEquivalent = key
-            item.keyEquivalentModifierMask = mask
-        } else {
-            item.keyEquivalent = ""
-            item.keyEquivalentModifierMask = []
-        }
-    }
-
-    private func menuKeyEquivalent(for spec: HotkeySpec) -> (String, NSEvent.ModifierFlags)? {
-        let key = spec.key.lowercased()
-        let equivalent: String
-        switch key {
-        case "space": equivalent = " "
-        case "tab": equivalent = "\t"
-        case "return", "enter": equivalent = "\r"
-        case "escape": equivalent = "\u{1b}"
-        case "minus": equivalent = "-"
-        default:
-            guard key.count == 1 else { return nil }
-            equivalent = key
-        }
-
-        var mask: NSEvent.ModifierFlags = []
-        if spec.modifiers.contains(.cmd) { mask.insert(.command) }
-        if spec.modifiers.contains(.shift) { mask.insert(.shift) }
-        if spec.modifiers.contains(.alt) { mask.insert(.option) }
-        if spec.modifiers.contains(.ctrl) { mask.insert(.control) }
-        return (equivalent, mask)
-    }
-
-    private func showErrorAlert(title: String, message: String) {
-        let alert = NSAlert()
-        alert.messageText = title
-        alert.informativeText = message
-        alert.alertStyle = .critical
-        alert.addButton(withTitle: "OK")
-        alert.runModal()
-    }
-
-    private func startHotkeyRefresh() {
-        hotkeyRefreshTimer?.invalidate()
-        hotkeyRefreshTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
-            guard let self else { return }
-            DispatchQueue.main.async {
-                self.refreshBindingsIfNeeded()
-            }
-        }
-        RunLoop.main.add(hotkeyRefreshTimer!, forMode: .common)
-    }
-
-    private func refreshBindingsIfNeeded() {
-        do {
-            let hotkeyRaw = try orchestrator().guiHotkey()
-            if hotkeyRaw != lastHotkeyRaw {
-                let spec = try HotkeySpec.parse(hotkeyRaw)
-                registerHotkey(spec)
-                lastHotkeyRaw = hotkeyRaw
-                setStatus("Hotkey updated to \(spec.normalized)")
-            }
-
-            let nextRaw = try orchestrator().guiNextShortcut()
-            let prevRaw = try orchestrator().guiPreviousShortcut()
-            let showRaw = try orchestrator().guiShowShortcut()
-            var shortcutsChanged = false
-            if nextRaw != lastNextShortcutRaw {
-                nextShortcut = try HotkeySpec.parse(nextRaw)
-                lastNextShortcutRaw = nextRaw
-                shortcutsChanged = true
-            }
-            if prevRaw != lastPreviousShortcutRaw {
-                previousShortcut = try HotkeySpec.parse(prevRaw)
-                lastPreviousShortcutRaw = prevRaw
-                shortcutsChanged = true
-            }
-            if showRaw != lastShowShortcutRaw {
-                showShortcut = try HotkeySpec.parse(showRaw)
-                lastShowShortcutRaw = showRaw
-                shortcutsChanged = true
-            }
-            if shortcutsChanged {
-                updateShortcutMenuItems()
-                setStatus("Shortcuts updated.")
-            }
-            updateHotkeyHint()
-        } catch {
-            setStatus("Bindings reload failed: \(error.localizedDescription)")
-            updateHotkeyHint()
-        }
-    }
-
-    private func updateHotkeyHint() {
-        let hotkey = registeredHotkey?.normalized ?? SettingsKey.defaultGUIHotkey
-        let next = nextShortcut?.normalized ?? SettingsKey.defaultGUINextShortcut
-        let prev = previousShortcut?.normalized ?? SettingsKey.defaultGUIPreviousShortcut
-        let show = showShortcut?.normalized ?? SettingsKey.defaultGUIShowShortcut
-        let hint = "Hotkey: \(hotkey)  |  Next: \(next)  Prev: \(prev)  Show: \(show)"
-        hotkeyHintLabel.stringValue = hint
-        hotkeyHintLabel.toolTip = hint
-    }
-
-    @objc private func selectNextStream() {
-        selectAdjacentStream(offset: 1)
-    }
-
-    @objc private func selectPreviousStream() {
-        selectAdjacentStream(offset: -1)
-    }
-
-    private func selectAdjacentStream(offset: Int) {
-        guard !streams.isEmpty else {
-            setStatus("No streams to select.")
+        guard row >= 0, let item = outlineView.item(atRow: row) as? OutlineItem else {
+            selectedProjectID = nil
+            selectedWorkspaceID = nil
+            showPlaceholder()
             return
         }
+        lastSelectedRow = row
+        switch item {
+        case let .project(project):
+            selectedProjectID = project.id
+            selectedWorkspaceID = nil
+            showProjectDetail(project: project)
+        case let .workspace(project, workspace):
+            selectedProjectID = project.id
+            selectedWorkspaceID = workspace.id
+            showWorkspaceDetail(project: project, workspace: workspace)
+        }
+    }
 
-        var current = streamTable.selectedRow
-        if current < 0 || current >= streams.count {
-            current = 0
-        } else {
-            current = (current + offset) % streams.count
-            if current < 0 {
-                current += streams.count
+    private func registerDirtyTracking(
+        setupView: NSTextView,
+        cleanupView: NSTextView,
+        processEditor: ProcessEditor,
+        browserView: NSTextView,
+        statusEditor: StatusCheckEditor
+    ) {
+        projectHasUnsavedChanges = false
+        NotificationCenter.default.addObserver(forName: NSText.didChangeNotification, object: setupView, queue: .main) { [weak self] _ in
+            Task { @MainActor in
+                self?.projectHasUnsavedChanges = true
+            }
+        }
+        NotificationCenter.default.addObserver(forName: NSText.didChangeNotification, object: cleanupView, queue: .main) { [weak self] _ in
+            Task { @MainActor in
+                self?.projectHasUnsavedChanges = true
+            }
+        }
+        NotificationCenter.default.addObserver(forName: NSText.didChangeNotification, object: browserView, queue: .main) { [weak self] _ in
+            Task { @MainActor in
+                self?.projectHasUnsavedChanges = true
+            }
+        }
+        processEditor.onDirty = { [weak self] in
+            Task { @MainActor in
+                self?.projectHasUnsavedChanges = true
+                statusEditor.refreshProcessOptions()
+            }
+        }
+        statusEditor.onDirty = { [weak self] in
+            Task { @MainActor in
+                self?.projectHasUnsavedChanges = true
+            }
+        }
+    }
+
+    private func saveCurrentProject() -> Bool {
+        guard let selectedProjectID else { return true }
+        let tag = selectedProjectID.hashValue
+        guard let refs = ProjectFieldCache.shared.cache[tag] else { return true }
+        do {
+            try orchestrator.updateProjectConfig(projectID: refs.projectID) { config in
+                config.setupScript = refs.setupView.string.isEmpty ? nil : refs.setupView.string
+                config.cleanupScript = refs.cleanupView.string.isEmpty ? nil : refs.cleanupView.string
+                config.processes = refs.processEditor.currentProcesses()
+                config.browserSessions = parseBrowserSessions(refs.browserView.string)
+                config.statusChecks = refs.statusEditor.currentChecks()
+            }
+            projectHasUnsavedChanges = false
+            reloadData()
+            return true
+        } catch {
+            showError(error)
+            return false
+        }
+    }
+
+    private func unsavedChangesPrompt() -> NSApplication.ModalResponse {
+        let alert = NSAlert()
+        alert.messageText = "Unsaved Changes"
+        alert.informativeText = "You have unsaved changes. Save before leaving?"
+        alert.addButton(withTitle: "Save")
+        alert.addButton(withTitle: "Discard")
+        alert.addButton(withTitle: "Cancel")
+        return alert.runModal()
+    }
+}
+
+@MainActor
+private final class ProjectFieldCache {
+    static let shared = ProjectFieldCache()
+    var cache: [Int: ProjectFieldRefs] = [:]
+}
+
+private struct ProjectFieldRefs {
+    let projectID: String
+    let setupView: NSTextView
+    let cleanupView: NSTextView
+    let processEditor: ProcessEditor
+    let browserView: NSTextView
+    let statusEditor: StatusCheckEditor
+}
+
+@MainActor
+private final class AddProjectFieldCache {
+    static let shared = AddProjectFieldCache()
+    var cache: [Int: AddProjectFieldRefs] = [:]
+}
+
+private struct AddProjectFieldRefs {
+    let dirField: NSTextField
+    let setupView: NSTextView
+    let cleanupView: NSTextView
+    let processEditor: ProcessEditor
+    let browserView: NSTextView
+    let statusEditor: StatusCheckEditor
+}
+
+@MainActor
+private final class AddWorkspaceFieldCache {
+    static let shared = AddWorkspaceFieldCache()
+    var cache: [Int: AddWorkspaceFieldRefs] = [:]
+}
+
+private struct AddWorkspaceFieldRefs {
+    let projectID: String
+    let nameField: NSTextField
+}
+
+@MainActor
+private func makeFieldHeader(_ text: String) -> NSTextField {
+    let label = NSTextField(labelWithString: text)
+    label.font = .systemFont(ofSize: 11, weight: .semibold)
+    label.textColor = .secondaryLabelColor
+    return label
+}
+
+@MainActor
+private final class ProcessEditor {
+    let container = NSStackView()
+    private let rowsStack = NSStackView()
+    private let addButton: NSButton
+    private var rows: [ProcessRowRefs] = []
+    var onDirty: (() -> Void)?
+
+    init() {
+        container.orientation = .vertical
+        container.spacing = 8
+        rowsStack.orientation = .vertical
+        rowsStack.spacing = 6
+        addButton = NSButton(title: "", target: nil, action: nil)
+        addButton.bezelStyle = .texturedRounded
+        addButton.image = NSImage(systemSymbolName: "plus", accessibilityDescription: "Add Process")
+        addButton.toolTip = "Add process"
+        addButton.target = self
+        addButton.action = #selector(addRowFromButton)
+        let header = NSStackView()
+        header.orientation = .horizontal
+        header.spacing = 6
+        header.alignment = .centerY
+        let nameHeader = makeFieldHeader("Name")
+        let commandHeader = makeFieldHeader("Command")
+        header.addArrangedSubview(nameHeader)
+        header.addArrangedSubview(commandHeader)
+        header.addArrangedSubview(NSView())
+        header.addArrangedSubview(addButton)
+        nameHeader.widthAnchor.constraint(equalToConstant: 160).isActive = true
+        commandHeader.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        commandHeader.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        container.addArrangedSubview(header)
+        container.addArrangedSubview(rowsStack)
+        addRow(with: nil)
+    }
+
+    func setProcesses(_ processes: [ProcessTemplate]) {
+        rows.forEach { $0.remove() }
+        rows = []
+        for process in processes {
+            addRow(with: process)
+        }
+        if processes.isEmpty {
+            addRow(with: nil)
+        }
+    }
+
+    func currentProcesses() -> [ProcessTemplate] {
+        rows.compactMap { row in
+            let name = row.nameField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            let command = row.commandField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !command.isEmpty else { return nil }
+            return ProcessTemplate(name: name.isEmpty ? nil : name, command: command)
+        }
+    }
+
+    func processNames() -> [String] {
+        let names = rows.compactMap { row -> String? in
+            let name = row.nameField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            return name.isEmpty ? nil : name
+        }
+        return Array(Set(names)).sorted()
+    }
+
+    private func addRow(with process: ProcessTemplate?) {
+        let row = ProcessRowRefs()
+        rows.append(row)
+        rowsStack.addArrangedSubview(row.container)
+        if let process {
+            row.nameField.stringValue = process.name ?? ""
+            row.commandField.stringValue = process.command
+        }
+        row.onChange = { [weak self] in
+            self?.onDirty?()
+        }
+        row.onRemove = { [weak self, weak row] in
+            guard let self, let row else { return }
+            if let idx = self.rows.firstIndex(where: { $0 === row }) {
+                self.rows.remove(at: idx)
+            }
+            row.remove()
+            self.onDirty?()
+        }
+        onDirty?()
+    }
+
+    @objc private func addRowFromButton() {
+        addRow(with: nil)
+    }
+
+    @MainActor
+    private final class ProcessRowRefs {
+        let container = NSStackView()
+        let nameField = NSTextField(string: "")
+        let commandField = NSTextField(string: "")
+        var onRemove: (() -> Void)?
+        var onChange: (() -> Void)?
+
+        init() {
+            container.orientation = .horizontal
+            container.spacing = 6
+            container.alignment = .centerY
+
+            nameField.placeholderString = "name"
+            commandField.placeholderString = "command"
+
+            let removeButton = NSButton(title: "", target: self, action: #selector(removeRow))
+            removeButton.bezelStyle = .texturedRounded
+            removeButton.image = NSImage(systemSymbolName: "minus", accessibilityDescription: "Remove Process")
+            removeButton.toolTip = "Remove process"
+
+            container.addArrangedSubview(nameField)
+            container.addArrangedSubview(commandField)
+            container.addArrangedSubview(removeButton)
+
+            nameField.widthAnchor.constraint(equalToConstant: 160).isActive = true
+            commandField.setContentHuggingPriority(.defaultLow, for: .horizontal)
+            commandField.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+
+            [nameField, commandField].forEach { field in
+                NotificationCenter.default.addObserver(
+                    forName: NSText.didChangeNotification,
+                    object: field,
+                    queue: .main
+                ) { [weak self] _ in
+                    Task { @MainActor in
+                        self?.onChange?()
+                    }
+                }
             }
         }
 
-        streamTable.selectRowIndexes(IndexSet(integer: current), byExtendingSelection: false)
-        streamTable.scrollRowToVisible(current)
-        selectedStreamName = streams[current].name
-        setStatus("Selected stream '\(streams[current].name)'.")
+        func remove() {
+            container.removeFromSuperview()
+        }
+
+        @objc private func removeRow() {
+            onRemove?()
+        }
+    }
+}
+
+@MainActor
+private final class StatusCheckEditor {
+    let container = NSStackView()
+    private let rowsStack = NSStackView()
+    private let addButton: NSButton
+    private var rows: [StatusCheckRowRefs] = []
+    var onDirty: (() -> Void)?
+    private let processNamesProvider: () -> [String]
+
+    init(processNamesProvider: @escaping () -> [String]) {
+        self.processNamesProvider = processNamesProvider
+        container.orientation = .vertical
+        container.spacing = 8
+        rowsStack.orientation = .vertical
+        rowsStack.spacing = 6
+        addButton = NSButton(title: "", target: nil, action: nil)
+        addButton.bezelStyle = .texturedRounded
+        addButton.image = NSImage(systemSymbolName: "plus", accessibilityDescription: "Add Status Check")
+        addButton.toolTip = "Add status check"
+        addButton.target = self
+        addButton.action = #selector(addRowFromButton)
+        let header = NSStackView()
+        header.orientation = .horizontal
+        header.spacing = 6
+        header.alignment = .centerY
+        let nameHeader = makeFieldHeader("Name")
+        let processHeader = makeFieldHeader("Process")
+        let commandHeader = makeFieldHeader("Command")
+        let intervalHeader = makeFieldHeader("Interval")
+        let timeoutHeader = makeFieldHeader("Timeout")
+        let onExitHeader = makeFieldHeader("On Exit")
+        header.addArrangedSubview(nameHeader)
+        header.addArrangedSubview(processHeader)
+        header.addArrangedSubview(commandHeader)
+        header.addArrangedSubview(intervalHeader)
+        header.addArrangedSubview(timeoutHeader)
+        header.addArrangedSubview(onExitHeader)
+        header.addArrangedSubview(NSView())
+        header.addArrangedSubview(addButton)
+        nameHeader.widthAnchor.constraint(equalToConstant: 120).isActive = true
+        processHeader.widthAnchor.constraint(equalToConstant: 140).isActive = true
+        intervalHeader.widthAnchor.constraint(equalToConstant: 70).isActive = true
+        timeoutHeader.widthAnchor.constraint(equalToConstant: 70).isActive = true
+        onExitHeader.widthAnchor.constraint(equalToConstant: 90).isActive = true
+        commandHeader.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        commandHeader.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        container.addArrangedSubview(header)
+        container.addArrangedSubview(rowsStack)
     }
 
-    @objc private func showSelectedStreamShortcut() {
-        showStreamClicked()
+    func setChecks(_ checks: [StatusCheckDefinition]) {
+        rows.forEach { $0.remove() }
+        rows = []
+        for check in checks {
+            addRow(with: check)
+        }
+        if checks.isEmpty {
+            addRow(with: nil)
+        }
     }
 
-    private func startStatusRefresh() {
-        statusRefreshTimer?.invalidate()
-        statusRefreshTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
-            guard let self else { return }
-            DispatchQueue.main.async {
-                guard self.selectedProjectName != nil else { return }
-                self.reloadStreams(selectStream: self.selectedStreamName)
+    func refreshProcessOptions() {
+        let names = processNamesProvider()
+        for row in rows {
+            row.refreshProcessOptions(names: names)
+        }
+    }
+
+    func currentChecks() -> [StatusCheckDefinition] {
+        rows.compactMap { row in
+            let name = row.nameField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            let process = row.processPopup.titleOfSelectedItem?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            let command = row.commandField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            let interval = Int(row.intervalField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)) ?? 60
+            let timeout = Int(row.timeoutField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)) ?? 5
+            let onExit = StatusCheckOnExit(rawValue: row.onExitPopup.titleOfSelectedItem ?? "") ?? .none
+            guard !process.isEmpty, !command.isEmpty else { return nil }
+            return StatusCheckDefinition(
+                name: name.isEmpty ? nil : name,
+                process: process,
+                command: command,
+                interval: interval,
+                timeout: timeout,
+                onExit: onExit
+            )
+        }
+    }
+
+    private func addRow(with check: StatusCheckDefinition?) {
+        let row = StatusCheckRowRefs(processNames: processNamesProvider())
+        rows.append(row)
+        rowsStack.addArrangedSubview(row.container)
+        if let check {
+            row.nameField.stringValue = check.name ?? ""
+            row.commandField.stringValue = check.command
+            row.intervalField.stringValue = String(check.interval)
+            row.timeoutField.stringValue = String(check.timeout)
+            row.onExitPopup.selectItem(withTitle: check.onExit.rawValue)
+            if row.processPopup.item(withTitle: check.process) == nil {
+                row.processPopup.addItem(withTitle: check.process)
+            }
+            row.processPopup.selectItem(withTitle: check.process)
+        }
+        row.onChange = { [weak self] in
+            self?.onDirty?()
+        }
+        row.onRemove = { [weak self, weak row] in
+            guard let self, let row else { return }
+            if let idx = self.rows.firstIndex(where: { $0 === row }) {
+                self.rows.remove(at: idx)
+            }
+            row.remove()
+            self.onDirty?()
+        }
+        onDirty?()
+    }
+
+    @objc private func addRowFromButton() {
+        addRow(with: nil)
+    }
+
+    private func processNames() -> [String] {
+        let names = processNamesProvider()
+        return names.isEmpty ? ["process"] : names
+    }
+
+    @MainActor
+    private final class StatusCheckRowRefs {
+        let container = NSStackView()
+        let nameField = NSTextField(string: "")
+        let processPopup = NSPopUpButton()
+        let commandField = NSTextField(string: "")
+        let intervalField = NSTextField(string: "60")
+        let timeoutField = NSTextField(string: "5")
+        let onExitPopup = NSPopUpButton()
+        var onRemove: (() -> Void)?
+        var onChange: (() -> Void)?
+
+        init(processNames: [String]) {
+            container.orientation = .horizontal
+            container.spacing = 6
+            container.alignment = .centerY
+
+            nameField.placeholderString = "name"
+            commandField.placeholderString = "command"
+            intervalField.placeholderString = "interval"
+            timeoutField.placeholderString = "timeout"
+
+            processPopup.addItems(withTitles: processNames)
+            onExitPopup.addItems(withTitles: StatusCheckOnExit.allCases.map { $0.rawValue })
+
+            let removeButton = NSButton(title: "", target: self, action: #selector(removeRow))
+            removeButton.bezelStyle = .texturedRounded
+            removeButton.image = NSImage(systemSymbolName: "minus", accessibilityDescription: "Remove Status Check")
+            removeButton.toolTip = "Remove status check"
+
+            container.addArrangedSubview(nameField)
+            container.addArrangedSubview(processPopup)
+            container.addArrangedSubview(commandField)
+            container.addArrangedSubview(intervalField)
+            container.addArrangedSubview(timeoutField)
+            container.addArrangedSubview(onExitPopup)
+            container.addArrangedSubview(removeButton)
+
+            nameField.widthAnchor.constraint(equalToConstant: 120).isActive = true
+            processPopup.widthAnchor.constraint(equalToConstant: 140).isActive = true
+            intervalField.widthAnchor.constraint(equalToConstant: 70).isActive = true
+            timeoutField.widthAnchor.constraint(equalToConstant: 70).isActive = true
+            onExitPopup.widthAnchor.constraint(equalToConstant: 90).isActive = true
+            commandField.setContentHuggingPriority(.defaultLow, for: .horizontal)
+            commandField.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+
+            [nameField, commandField, intervalField, timeoutField].forEach { field in
+                NotificationCenter.default.addObserver(
+                    forName: NSText.didChangeNotification,
+                    object: field,
+                    queue: .main
+                ) { [weak self] _ in
+                    Task { @MainActor in
+                        self?.onChange?()
+                    }
+                }
+            }
+            processPopup.target = self
+            processPopup.action = #selector(changedPopup)
+            onExitPopup.target = self
+            onExitPopup.action = #selector(changedPopup)
+        }
+
+        func refreshProcessOptions(names: [String]) {
+            let current = processPopup.titleOfSelectedItem
+            processPopup.removeAllItems()
+            processPopup.addItems(withTitles: names.isEmpty ? ["process"] : names)
+            if let current, processPopup.item(withTitle: current) != nil {
+                processPopup.selectItem(withTitle: current)
             }
         }
-        RunLoop.main.add(statusRefreshTimer!, forMode: .common)
-    }
-}
 
-private func fourCharCode(_ string: String) -> OSType {
-    var result: OSType = 0
-    for scalar in string.utf8.prefix(4) {
-        result = (result << 8) + OSType(scalar)
-    }
-    return result
-}
+        func remove() {
+            container.removeFromSuperview()
+        }
 
-private struct TerminalStatus: Decodable {
-    let state: String
-    let timestamp: String
-    let exitCode: Int?
+        @objc private func removeRow() {
+            onRemove?()
+        }
 
-    var displayState: String {
-        switch state {
-        case "starting":
-            return "starting"
-        case "working":
-            return "working"
-        case "waiting_for_input":
-            return "waiting"
-        case "done":
-            return "done"
-        case "error":
-            return "error"
-        default:
-            return state
+        @objc private func changedPopup() {
+            onChange?()
         }
     }
-
-    private enum CodingKeys: String, CodingKey {
-        case state
-        case timestamp
-        case exitCode = "exit_code"
-    }
-}
-
-private struct WindowStatus {
-    let id: Int
-    let title: String?
-    let status: TerminalStatus
-}
-
-private struct CapturedWindow {
-    let id: Int
-    let app: String
-    let title: String?
 }

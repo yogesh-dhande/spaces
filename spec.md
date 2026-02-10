@@ -1,142 +1,201 @@
-# agentmux Product Spec (Current)
-
-## 0. Summary
-
-`agentmux` is a macOS stream orchestrator that uses **yabai** for window‑level control.
-
-It manages:
-- **Projects** (repo roots)
-- **Streams** (git worktrees per project)
-- **Captured window sets** per stream
-
-Window management is done via yabai window IDs captured from a given space.
-
----
-
-## 1. Scope
-
-### MUST (MVP)
-1. Project + Stream model in local SQLite
-2. Stream create/destroy with git worktrees
-3. Window capture per stream (yabai window IDs, refreshed on `show`)
-4. Stream actions:
-   - `show`: capture current space windows, then focus captured windows
-   - `destroy`: close captured windows
-5. Stream diagnostics (`doctor`) for captured/missing windows
-6. AppKit GUI for project/stream operations
-7. Terminal command wrapper that emits per-window status files (`wrap`)
-
-### SHOULD
-- Better validation and guided inputs in GUI
-- Better remediation text in diagnostics
-
-### NOT IN MVP
-- Automatic window discovery without capture
-- Full session restore
-- Cloud sync/state
-
----
-
-## 2. Core Concepts
-
-### Project
-- `id`, `name`, `repoRoot`
-
-### Stream
-- `id`, `projectID`, `name`, `worktreePath`
-- `displayIndex`, `spaceIndex` (used for capture target)
-
-### Stream Window Identity
-Persisted per stream:
-- `windows[]` (`id`, `app`, `title`, `space`, `display`)
-- `updatedAt`
-
-### Terminal Window Status
-Per focused terminal window:
-- `state` (`starting`, `working`, `waiting_for_input`, `done`, `error`)
-- `timestamp`, `exit_code`, `last_output`
-- `project`, `stream`, `window_id`
-- Stored at `<worktree>/.agentmux/status/window-<id>.json`
- - Emitted after the window is captured into a stream
-
----
-
-## 3. Stream Lifecycle Semantics
-
-### `stream create`
-- Validate project exists
-- Create git worktree
-- Persist stream with display + space
-- Default worktree path (if not specified): `<repo>/.worktrees/<stream>`
-
-### `stream capture`
-- Query yabai windows for the stream's space
-- Persist the captured window set
-Note: optional; `show` performs capture automatically.
-
-### `show`
-- Capture current space windows and focus each captured window
-- Mark stream active
-- If no window can be focused, warn and recommend closing/reopening the target app windows, then re-run `show`
-
-### `destroy`
-- Close each captured window
-- Remove git worktree (and branch optionally)
-- Delete stream runtime/identity records
-
----
-
-## 4. Diagnostics
-
-`doctor` reports per stream:
-- captured window count
-- missing window ids
-- yabai availability
-
----
-
-## 5. Storage
-
-SQLite at:
-- path: `~/.agentmux/agentmux.db` (managed automatically)
-
-Tables:
-- `projects`
-- `streams`
-- `stream_runtime`
-- `stream_window_identity`
-- `settings` (key/value settings)
-
----
-
-## 6. UX Requirements (Current)
-
-### GUI
-- Projects pane:
-  - add/edit/delete/refresh
-- Streams pane:
-  - add/edit/destroy/refresh
-  - capture/show/doctor
-  - display + space shown per stream
-  - captured windows listed per stream as rows in a card, with status when available and auto-refresh
-- Global hotkey toggle for show/hide (user-configurable; default `cmd+shift+space`)
-- If visible on another space/display, the hotkey moves the GUI to the active space instead of hiding it
-- GUI shortcuts (when app is active) are configurable via GUI (press desired key combinations). Defaults: `cmd+]` next stream, `cmd+[` previous stream, `cmd+return` show selected stream
-
-### CLI
-- project CRUD
-- stream create/update/list/destroy
-- stream capture (optional)
-- show
-- list-active
-- doctor
-- wrap
-
----
-
-## 7. Testing
-
-Current persistent coverage:
-- `Tests/smoke_cli.sh`
-  - project CRUD
-  - stream create/destroy
+- Application name: agentmux
+- Goals
+    - Build a developer tool to maximize productivity in coding with the help of coding agents
+    - solve for following painpoints
+        - workspace/worktree management for working on multiple features in parallel
+            - creation, deletion etc
+            - supply same .env per worktree
+            - auto manage port conflicts
+        - windows management for workspace - quickly switch to the correct set of windows for feature in mind
+        - reduce overhead of context switching
+        - notifications for when things are ready for human eyes (e.g. coding agent is idle or server process has exited) so time is not wasted
+- Non-goals
+    - agentmux does **not** manage window geometry or tiling (delegated to user/yabai)
+    - agentmux does **not** attempt to restore exact tab ordering inside browsers
+    - agentmux does **not** introspect editor internals (no VS Code extensions required)
+    - agentmux does **not** manage secrets beyond env vars
+- Implementation preferences
+    - GUI should be a thin wrapper written in AppKit that calls code written in swift in a separate module. This is critical to make it easy to port the GUI to a different tech stack later (e.g. tauri)
+    - Prefer automation using applescript, followed by shell commands whenever possible
+    - Prefer AppleScript if the app exposes a stable scripting dictionary (Chrome, iTerm2)
+    - Use yabai only for window IDs, space/display resolution, or when AppleScript fails
+    - Ok to have yabai will be a required dependency
+    - Avoid yabai SIP
+    - Show useful messages and hints to the user for a smooth UX
+    - In all failure cases, agentmux should surface a clear, actionable error message in the GUI.
+    - supported browsers: chrome
+    - supported terminals: iTerm2
+- Models and data
+    - YAML is the source of truth for configuration.
+        - User specified data is stored in a YAML config file so it can be easily shared
+    - SQLite is ephemeral runtime state and may be rebuilt on startup.
+        - Internal app data (running processes, window identifiers,  is stored in a local sqlite3 db
+    - User preferences
+        - editor: enum - None, VS Code, Cursor, Windsurf, Vim - if specified, used to open an editor at workspace launch
+    - Project
+        - fields
+            - dir: str, path of the project folder, name can be inferred from it for display in the UI
+            - setup_script: str, shell script to run once when a new workspace is created for a project
+                - use cases: copy .env file from a shared location to the desired path in the git worktree folder
+            - cleanup_script: str, shell script to run once when a workspace is archived
+        - behavior
+            - stored in yaml config
+            - Project ID is derived from the absolute path (normalized, realpath). Renaming the folder creates a new project unless explicitly migrated.
+            - if the project is a git repo, a default workspace corresponding to the main/master branch is created. this workspace cannot be archived
+            - if the project is not a git repo, a default workspace corresponding to the project folder is created. this workspace cannot be archived
+            - Whether the project is a git repo should be checked at application startup to catch cases when a git repo is added at a later stage
+                - also checked **on project add**
+                - and optionally **on workspace creation**
+    - Process
+        - fields
+            - project: Project
+            - command: terminal command to run. can use service port identifiers to set port env vars
+        - behavior
+            - stored in yaml config
+            - types or use cases
+                - web server
+                - task queue
+                - tests or linting (watch and run)
+                - coding agent
+                - editor (e.g. vim)
+            - Used for processes that should be always running e.g. a server. If a process needs to run once and exit (e.g. db migrations) it should be defined as part of a server’s startup script
+            - automatically identify if running a coding agent by inspecting the command (e.g. `codex` , `claude` )
+                - if coding agent, report idle/busy status by checking periodically
+                - Idle is defined as no stdout or stderr output for N seconds **while the process is still running**
+                - do not write status to a json file, store if db if needed
+    - StatusCheck
+        - fields
+            - process: Process for which this check is being run
+            - command: str, shell command to run to check status (e.g. curl)
+            - interval: int, seconds in between status checks
+            - timeout: int, seconds after which check command is marked as failed
+            - on exit: enum, do nothing | restart process | notify
+        - behavior
+            - stored in yaml config
+            - these checks run at specified intervals and update the status indicator (green, red) in the GUI
+            - each running process can have multiple status indicators e.g. when the command starts several docker services and the status check is run for multiple services defined in the docker compose file
+    - Status
+        - fields
+            - def: StatusCheck
+            - value: running | exited | idle (if Process type is agent)
+    - BrowserSession
+        - fields
+            - project: Project
+            - url: optional[str], if specified, used to open a browser at workspace launch
+        - behavior
+            - stored in yaml config
+            - the url should be specified using port vars made available to the workspace e.g. $PORT0 through $PORT10. at runtime, it is decoded based on the actual values of these variables
+            - user can add multiple browser sessions to each project, each will be opened a new window when the workspace is launched e.g. localhost:3000, localhost:3000/blog
+    - Workspace
+        - fields
+            - project: Project
+            - name: str, default to branch name but user can edit during creation or later
+                - for default workspaces (that are created without being initiated by the user), use “default” as the name
+                - for other workspaces, use this as the name of the branch to check out
+            - dirname: str, autogenerated name for the dir in which the git worktree is created. this is needed because branch names may contain invalid characters for a directory name (e.g. /)
+        - behavior
+            - A workspace may be backed by a git worktree, but workspace is a higher-level agentmux concept
+            - stored in db
+            - a workspace can be created, launched, closed, deleted
+            - when created
+                - create a git worktree and use its path as workspace directory. all commands will be run from this path
+                - worktrees should be stored in /users/<username>/agentmux/workspaces/<projectname>/<dirname>
+                - run the setup script defined by the project once
+                - each workspace gets 10 open ports reserved so any processes run as part of the workspace can use them
+                    - Ports remain reserved for a workspace until it is stopped.
+                    - Ports are allocated from a configurable base range (e.g. 20000–30000), tracked in db
+                    - Ports remain reserved for a workspace until it is archived
+            - when launched
+                - start processes defined by the project in their own terminal windows. keep track of these windows so they can be focused later when lopping this this workspace’s windows
+                - ensure that browser tabs for the browser sessions defined for the project are open, and if not, open them. keep track of them so they can be focused later when lopping this this workspace’s windows
+                - open the workspace dir in user’s preferred editor
+            - when stopped
+                - stop any processes running in this workspace
+                - close any windows or tabs open for this workspace (terminals, browsers, editor)
+            - when archived
+                - run the cleanup script defined by the project once
+                - keep git branches but remove worktree and workspace dir
+                - release reserved ports
+    - RunningProcess
+        - fields
+            - template: Process
+            - workspace: Workspace
+            - statuses: list of Status objects
+        - behavior:
+            - stored in db
+            - when started, each process receives the following env vars
+                - PORT0-PORT9, the 10 ports reserved for the workspace so they can used when starting a sever e.g. `PORT=$PORT0 npm run dev`
+            - can be restarted from agentmux GUI (e.g. if .env files are changed). restarts in the existing terminal window
+    - Window
+        - fields
+            - workspace: Workspace
+            - any other attributes need to uniquely identify a mac window via applescript or yabai
+        - behavior
+            - not specified by the user
+            - application manages these
+            - stored in db so that application restart does not lose pointer to existing windows open on mac; if identifying windows on the fly is robust and fast, then these may be stored in memory instead
+            - Automatically identify any chrome windows that have matching BrowserSessions open (browser url starts with BrowserSession.url) and attach those to the related workspace. User may open additional tabs or windows. all of them should be automatically identified and tracked
+            - when looping through windows, the order should be browser window, editor window, and then terminal windows in the order in which processes are defined
+            - Window records may become stale across app restarts; agentmux must re-discover windows on launch and reconcile with stored state
+- User flow
+    - User installs the app
+    - Check for required dependencies e.g. yabai. If missing, ask user to install and provide instructions or links to instructions
+    - Check for required permissions e.g. accessibility. If missing, ask user to provide using deep links to settings whenever possible. Provide instructions.
+    - Once the app is configured appropriately, prompt the user to create their first project
+    - User creates a project by pointing to a dir
+        - We automatically identify if the dir is a git repo. This will inform how we should handle creation of workspaces for that project
+            - if not a git repo, create a default workspace corresponding to the project dir
+            - if a git repo, create a default workspace corresponding to the main/master branch
+        - User optionally sets up processes
+            - These are used as templates start processes that are monitored by agentmux when the workspace is launched. Examples include starting a server, task queue, coding agent
+        - User optionally sets up status checks for processes
+        - User optionally sets up browser sessions
+            - These are used to open/track browser window tabs pointing to the specified url (start of url must match what is specified by the user)
+    - When creating a non-default workspace
+        - agentmux creates a git worktree. agentmux first checks if the specified branch exists locally or remote. If neither, creates a new branch with that name.
+    - When launching a workspace
+        - identify and reserve 10 open ports for the workspace. pass those as env variables to each process that is started
+        - each process also receives the following env vars
+            - $PORT0  through $PORT9
+            - $agentmux_PROJECT_DIR
+            - $agentmux_WORKSPACE_DIR
+            - $agentmux_<PROJECT_NAME>_<WORKSPACE_NAME>_WORKSPACE_DIR - these can be used to start and run related services that may be defined in other projects e.g. if backend and frontend are  in a separate repos
+        - run processes in terminal windows based on process templates defined in the project
+        - open browser window/tabs for browser sessions
+        - agentmux keeps track of all windows belonging to each workspace so users can easily loop through them (focus them one by one by using keyboard shortcuts)
+- GUI
+    - Layout
+        - Two panes
+            - left pane for list of projects, with nested list of workspaces under each project
+            - for each workspace in the list, show an indicator for whether the workspace is running (processes running, windows open)
+            - right pane for details about selected item
+                - when project is selected - show details about the project, allow editing details, deleting etc
+                - when a workspace is selected - show details about the workspace, allow editing, deleting etc
+                    - 2 tabs
+                        - first (default visible) tab for running details
+                            - buttons to launch, stop, archive
+                            - Show running processes and status (based on status checks)
+                            - Show list of windows associated with the workspace
+                                - show keyboard shortcut hints for each so user can quickly focus a window if desired. generate these shortcut hits dynamically (e.g. cmd+shift+1)
+                                - show titles and application name
+                        - second
+                            - Show values of env vars related to ports, workspace set for processes (in a separate tab to avoid clutter in main tab)
+    - Do not open dialogs when showing forms (e.g. adding a project or worktree, or updating keybindings). Prefer to show them in the existing window (right pane) by replacing content of the main pane like in a web app. This is done for UX since it is easy to lose track of open dialogs.
+    - Keyboard shortcuts
+        - User can override default keybindings
+        - Global hotkey (default: cmd+shift+=) to toggle visibility of the app
+            - If not visible in the currently focused display and space, make it visible in that display and space (that could mean unhiding it, or simply moving it from another display and space)
+            - if visible, hide it
+        - When agentmux in open and in focus
+            - Loop through running workspaces (skips any workspaces that are not launched yet)
+                - forward: `cmd+shift+]`
+                - backward: `cmd+shift+[`
+                - When a workspace is selected
+                    - `cmd+n` creates a new workspace in the same project
+                    - list of windows in the right pane belonging to the workspace get dynamically assigned keyboard shortcuts of the form  `cmd+shift+<number>` and shown as hints next to the title so the user can quickly switch to that window by hitting the appropriate keys e.g. `cmd+shift+2`
+                        - since these are autogenerated, they can not be set to custom keys by the user
+                    - `cmd+shift+return` marks the workspace as active
+                        - brings the first window in list of windows belonging to the workspace in focus (by moving to the display and space that window is in)
+                        - subsequent forward: `cmd+shift+]` or backward: `cmd+shift+[` keystrokes (when agentmux is not in focus) loop through windows for the active workspace
+                            - Note that agentmux does not move windows. User choses when and where to move windows. agentmux simply moves focus to the window wherever it is on display/space
+        - If the most recently focused window belongs to a agentmux workspace, forward: `cmd+shift+]` or backward: `cmd+shift+[`  keyboard shortcuts loop through windows belonging to that workspace
