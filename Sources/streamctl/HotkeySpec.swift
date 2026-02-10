@@ -1,13 +1,6 @@
 import Carbon
 import Foundation
 
-public enum HotkeyModifier: String, CaseIterable, Sendable {
-    case cmd
-    case shift
-    case alt
-    case ctrl
-}
-
 public struct HotkeySpec: Sendable, Equatable {
     public let key: String
     public let modifiers: Set<HotkeyModifier>
@@ -226,14 +219,4 @@ public struct HotkeySpec: Sendable, Equatable {
         "up": UInt32(kVK_UpArrow),
         "down": UInt32(kVK_DownArrow)
     ]
-}
-
-public struct HotkeySpecError: LocalizedError {
-    private let message: String
-
-    public init(_ message: String) {
-        self.message = message
-    }
-
-    public var errorDescription: String? { message }
 }

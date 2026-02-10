@@ -1,45 +1,5 @@
 import Foundation
 
-public struct YabaiDisplay: Decodable, Sendable {
-    public let index: Int
-}
-
-public struct YabaiSpace: Decodable, Sendable {
-    public let index: Int
-    public let display: Int
-}
-
-public struct YabaiWindow: Decodable, Sendable {
-    public let id: Int
-    public let pid: Int?
-    public let app: String
-    public let title: String?
-    public let space: Int
-    public let display: Int
-    public let isSticky: Bool
-    public let isHidden: Bool
-    public let isVisible: Bool
-    public let isNativeFullscreen: Bool
-
-    private enum CodingKeys: String, CodingKey {
-        case id
-        case pid
-        case app
-        case title
-        case space
-        case display
-        case isSticky = "is-sticky"
-        case isHidden = "is-hidden"
-        case isVisible = "is-visible"
-        case isNativeFullscreen = "is-native-fullscreen"
-    }
-}
-
-public struct YabaiValidation: Sendable {
-    public let displayExists: Bool
-    public let spaceExists: Bool
-}
-
 public final class YabaiAdapter {
     public init() {}
 

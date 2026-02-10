@@ -479,12 +479,6 @@ public final class AgentmuxOrchestrator {
         try store.setSetting(key: "active_workspace_id", value: id)
     }
 
-    private struct NormalizedProject {
-        let id: String
-        let record: ProjectRecord
-        let config: ProjectConfig
-    }
-
     private func normalize(project: ProjectConfig) throws -> NormalizedProject {
         let dir = normalizePath(project.dir)
         var isDir: ObjCBool = false
@@ -698,11 +692,6 @@ public final class AgentmuxOrchestrator {
             output = output.replacingOccurrences(of: "$\(key)", with: value)
         }
         return output
-    }
-
-    private struct CommandOutcome {
-        let exitCode: Int32
-        let output: String
     }
 
     private func runCommandWithTimeout(command: String, cwd: String, timeout: Int, env: [String: String]) throws -> CommandOutcome {

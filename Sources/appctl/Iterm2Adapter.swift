@@ -1,9 +1,5 @@
 import Foundation
 
-public struct ItermWindowInfo: Sendable {
-    public let id: Int
-}
-
 public final class Iterm2Adapter {
     public init() {}
 
