@@ -147,9 +147,14 @@ public final class AgentmuxOrchestrator {
             let revivedDirname: String?
             let revivedBranch: String?
             if project.isGitRepo {
-                let dirname = makeWorkspaceDirname(project: project, workspaceName: name, branch: name)
+                let dirname = try makeWorkspaceDirname(
+                    project: project,
+                    workspaceName: name,
+                    branch: name,
+                    existingDirname: existing.dirname
+                )
                 revivedDirname = dirname
-                let worktreeRoot = try worktreeRoot()
+                let worktreeRoot = try worktreeRoot(project: project)
                 try FileManager.default.createDirectory(at: worktreeRoot, withIntermediateDirectories: true)
                 revivedDir = worktreeRoot.appendingPathComponent(dirname, isDirectory: true).path
                 if !FileManager.default.fileExists(atPath: revivedDir) {
@@ -185,9 +190,9 @@ public final class AgentmuxOrchestrator {
         let workspaceDirname: String?
         let branch: String?
         if project.isGitRepo {
-            let dirname = makeWorkspaceDirname(project: project, workspaceName: name, branch: name)
+            let dirname = try makeWorkspaceDirname(project: project, workspaceName: name, branch: name, existingDirname: nil)
             workspaceDirname = dirname
-            let worktreeRoot = try worktreeRoot()
+            let worktreeRoot = try worktreeRoot(project: project)
             try FileManager.default.createDirectory(at: worktreeRoot, withIntermediateDirectories: true)
             workspaceDir = worktreeRoot.appendingPathComponent(dirname, isDirectory: true).path
             try git.createWorktree(path: project.dir, worktreePath: workspaceDir, branch: name)
@@ -706,22 +711,76 @@ public final class AgentmuxOrchestrator {
         return path
     }
 
-    private func worktreeRoot() throws -> URL {
+    private static let workspaceFoodNames: [String] = [
+        "almond", "anchovy", "apple", "apricot", "avocado", "bagel", "bacon", "banana", "basil", "bean",
+        "beef", "beet", "berry", "biscuit", "bread", "broccoli", "brownie", "burger", "burrito", "butter",
+        "cabbage", "cacao", "candy", "cantaloupe", "caramel", "carrot", "cashew", "celery", "cereal", "cherry",
+        "cheddar", "cheesecake", "chili", "chips", "chive", "chocolate", "chutney", "cider", "cinnamon", "clove",
+        "cocoa", "coconut", "coffee", "coleslaw", "cookie", "corn", "couscous", "cracker", "cream", "crouton",
+        "cucumber", "cupcake", "curry", "custard", "danish", "dill", "donut", "dumpling", "eclair", "edamame",
+        "egg", "empanada", "endive", "fajita", "falafel", "fig", "flan", "fries", "garlic", "ginger",
+        "gnocchi", "granola", "grape", "gravy", "grits", "guava", "ham", "hazelnut", "honey", "hummus",
+        "icecream", "jam", "jalapeno", "jelly", "kale", "kebab", "ketchup", "kiwi", "kohlrabi", "lasagna",
+        "leek", "lemon", "lentil", "lettuce", "lime", "lobster", "lychee", "macaroni", "macaron", "mango",
+        "maple", "marshmallow", "mascarpone", "mayo", "meatball", "melon", "mint", "mocha", "molasses", "muffin",
+        "mushroom", "mustard", "nacho", "noodle", "nutmeg", "oat", "omelet", "olive", "onion", "orange",
+        "oreo", "pancake", "papaya", "paprika", "parsnip", "pastry", "peach", "peanut", "pear", "peas",
+        "pecan", "pepper", "pesto", "pho", "pickle", "pie", "pineapple", "pita", "pizza", "plum",
+        "poppy", "popcorn", "pork", "potato", "poutine", "pretzel", "prune", "pudding", "pumpkin", "quiche",
+        "quinoa", "radish", "raisin", "ramen", "relish", "rice", "risotto", "roast", "roll", "saffron",
+        "sage", "salad", "salami", "salsa", "salt", "sardine", "sausage", "scone", "seaweed", "sesame",
+        "shallot", "shrimp", "soup", "sorbet", "soy", "spice", "spinach", "squash", "steak", "stew",
+        "sugar", "sushi", "syrup", "taco", "tamarind", "tapioca", "tea", "toffee", "toast", "tofu",
+        "tomato", "tortilla", "tuna", "turkey", "turnip", "vanilla", "vinegar", "waffle", "walnut", "watermelon",
+        "yams", "yogurt", "ziti", "zucchini"
+    ]
+
+    private func worktreeRoot(project: ProjectRecord) throws -> URL {
         let home = FileManager.default.homeDirectoryForCurrentUser
-        return home.appendingPathComponent("agentmux", isDirectory: true).appendingPathComponent("workspaces", isDirectory: true)
+        let projectDirname = sanitizeDirname(project.name, fallback: "project")
+        return home
+            .appending(path: "agentmux", directoryHint: .isDirectory)
+            .appending(path: "workspaces", directoryHint: .isDirectory)
+            .appending(path: projectDirname, directoryHint: .isDirectory)
     }
 
-    private func makeWorkspaceDirname(project: ProjectRecord, workspaceName: String, branch: String) -> String {
-        let base = "\(project.name)-\(workspaceName)-\(branch)"
-        let cleaned = base.map { char -> String in
+    private func makeWorkspaceDirname(project: ProjectRecord, workspaceName: String, branch: String, existingDirname: String?) throws -> String {
+        if let existingDirname, !existingDirname.isEmpty {
+            return existingDirname
+        }
+        let used = try usedWorkspaceDirnames(project: project)
+        let available = AgentmuxOrchestrator.workspaceFoodNames.filter { !used.contains($0) }
+        guard !available.isEmpty else {
+            throw AgentmuxError.invalidArgument(message: "No available workspace dirnames remain for project \(project.name).")
+        }
+        let seed = UInt(bitPattern: project.dir.hashValue ^ workspaceName.hashValue ^ branch.hashValue)
+        let index = Int(seed % UInt(available.count))
+        return available[index]
+    }
+
+    private func usedWorkspaceDirnames(project: ProjectRecord) throws -> Set<String> {
+        let records = try store.workspaces(projectID: project.id, includeArchived: true)
+        var used = Set<String>()
+        for record in records {
+            if let dirname = record.dirname, !dirname.isEmpty {
+                used.insert(dirname)
+            }
+        }
+        let root = try worktreeRoot(project: project)
+        if let entries = try? FileManager.default.contentsOfDirectory(atPath: root.path) {
+            used.formUnion(entries)
+        }
+        return used
+    }
+
+    private func sanitizeDirname(_ raw: String, fallback: String) -> String {
+        let cleaned = raw.map { char -> String in
             if char.isLetter || char.isNumber { return String(char) }
             if char == "-" || char == "_" { return String(char) }
             return "-"
         }.joined()
-        let trimmed = cleaned.trimmingCharacters(in: CharacterSet(charactersIn: "-"))
-        let suffix = String(abs(project.dir.hashValue ^ workspaceName.hashValue ^ branch.hashValue), radix: 16)
-        let finalBase = trimmed.isEmpty ? "workspace" : trimmed
-        return "\(finalBase)-\(suffix.prefix(6))"
+        let trimmed = cleaned.trimmingCharacters(in: CharacterSet(charactersIn: "-_"))
+        return trimmed.isEmpty ? fallback : trimmed
     }
 
     private func sanitizeEnvKey(_ raw: String) -> String {

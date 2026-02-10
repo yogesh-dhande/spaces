@@ -35,7 +35,7 @@ Runtime (SQLite):
 ## Lifecycle Semantics
 - Project add/update: update YAML, re-sync runtime.
 - Workspace create:
-  - If git repo: create worktree under `/Users/<username>/agentmux/workspaces/<dirname>`.
+  - If git repo: create worktree under `/Users/<username>/agentmux/workspaces/<projectname>/<dirname>` (dirname is a unique food name).
   - Run `setup_script` once.
   - Reserve PORT0–PORT9 from `portRange`.
 - Workspace launch:

@@ -14,7 +14,7 @@ It manages projects, workspaces, processes, and window sets so you can move betw
 YAML is the source of truth:
 - Path: `~/.agentmux/config.yaml`
 - Runtime DB: `~/.agentmux/agentmux.db` (ephemeral)
-- Git worktrees: `/Users/<username>/agentmux/workspaces/<dirname>`
+- Git worktrees: `/Users/<username>/agentmux/workspaces/<projectname>/<dirname>` (dirname is a unique food name)
 
 Example config:
 ```yaml

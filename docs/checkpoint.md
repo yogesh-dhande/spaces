@@ -15,7 +15,7 @@
 - Chrome browser sessions opened via AppleScript.
 - Workspace launch/stop/archive and port allocation.
 - Updated hotkey defaults to spec (`cmd+shift+=`, `cmd+shift+]`, `cmd+shift+[`, `cmd+shift+return`).
-- Worktrees stored under `/Users/<username>/agentmux/workspaces/<dirname>`.
+- Worktrees stored under `/Users/<username>/agentmux/workspaces/<projectname>/<dirname>` (dirname is a unique food name).
 - Added `cmd+n` shortcut and toolbar button to create a new workspace for the selected project.
 
 ## Remaining
