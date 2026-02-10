@@ -2,7 +2,7 @@ import AppKit
 import gui
 
 @main
-struct AgentmuxGUIApp {
+struct AgentmuxApp {
     static func main() {
         let app = NSApplication.shared
         let delegate = AppKitController()

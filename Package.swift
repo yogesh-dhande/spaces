@@ -11,7 +11,7 @@ let package = Package(
         .library(name: "streamctl", targets: ["streamctl"]),
         .library(name: "gui", targets: ["gui"]),
         .executable(name: "agentmux", targets: ["agentmux"]),
-        .executable(name: "agentmux-gui", targets: ["agentmux-gui"])
+        .executable(name: "agentmux-app", targets: ["agentmux-app"])
     ],
     dependencies: [
         .package(url: "https://github.com/jpsim/Yams.git", from: "5.1.3")
@@ -28,7 +28,7 @@ let package = Package(
         ),
         .target(name: "gui", dependencies: ["streamctl"]),
         .executableTarget(name: "agentmux", dependencies: ["streamctl", "appctl"]),
-        .executableTarget(name: "agentmux-gui", dependencies: ["gui"]),
+        .executableTarget(name: "agentmux-app", dependencies: ["gui"]),
         .testTarget(name: "streamctlTests", dependencies: ["streamctl"])
     ]
 )

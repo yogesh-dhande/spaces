@@ -3,6 +3,10 @@
 `agentmux` is a local macOS control plane for workspace orchestration.
 It manages projects, workspaces, processes, and window sets so you can move between coding contexts quickly.
 
+## Docs
+- Architecture: `docs/architecture.md`
+- Specification: `spec.md`
+
 ## Requirements
 - macOS 14+
 - `yabai` installed and running (window IDs and focus)
