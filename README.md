@@ -52,7 +52,7 @@ projects:
   - Env vars/ports tab
 
 Hotkeys:
-- Global toggle: `cmd+shift+=`
+- Global focus: `cmd+shift+=`
 - Next running workspace: `cmd+shift+]`
 - Previous running workspace: `cmd+shift+[`
 - Activate selected workspace: `cmd+shift+return`

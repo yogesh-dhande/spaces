@@ -184,9 +184,8 @@
     - Do not open dialogs when showing forms (e.g. adding a project or worktree, or updating keybindings). Prefer to show them in the existing window (right pane) by replacing content of the main pane like in a web app. This is done for UX since it is easy to lose track of open dialogs.
     - Keyboard shortcuts
         - User can override default keybindings
-        - Global hotkey (default: cmd+shift+=) to toggle visibility of the app
+        - Global hotkey (default: cmd+shift+=) focuses the app
             - If not visible in the currently focused display and space, make it visible in that display and space (that could mean unhiding it, or simply moving it from another display and space)
-            - if visible, hide it
         - When agentmux in open and in focus
             - Loop through running workspaces (skips any workspaces that are not launched yet)
                 - forward: `cmd+shift+]`

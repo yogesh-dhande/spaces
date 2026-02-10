@@ -8,6 +8,7 @@
 - CLI updated to project/workspace management and config discovery.
 - GUI supports cmd+shift+1 through cmd+shift+9 to focus workspace windows.
 - Global cmd+shift+[ and cmd+shift+] cycle workspace windows when the GUI is not focused.
+- Global cmd+shift+= focuses the app instead of toggling visibility.
 
 ## Accomplished
 - Replaced stream-based model with project/workspace/process design.

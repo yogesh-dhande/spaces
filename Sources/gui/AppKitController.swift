@@ -1146,12 +1146,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
     private func toggleWindowFromHotkey() {
         guard let window else { return }
-        if window.isVisible {
-            window.orderOut(nil)
-        } else {
-            window.makeKeyAndOrderFront(nil)
-            NSApp.activate(ignoringOtherApps: true)
+        if window.isMiniaturized {
+            window.deminiaturize(nil)
         }
+        window.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
     }
 
     public func outlineView(_ outlineView: NSOutlineView, numberOfChildrenOfItem item: Any?) -> Int {
