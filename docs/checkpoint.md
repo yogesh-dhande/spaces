@@ -1,28 +1,26 @@
 # Checkpoint
 
 ## Current Status
-- YAML config is the source of truth for projects, processes, browser sessions, and status checks.
-- Runtime state lives in `~/.agentmux/agentmux.db` and is rebuilt when schema changes.
-- Workspaces manage git worktrees, ports, and runtime process/window state.
-- AppKit GUI uses a two-pane layout with in-place forms (no dialogs for add/edit).
-- CLI updated to project/workspace management and config discovery.
-- GUI supports cmd+shift+1 through cmd+shift+9 to focus workspace windows.
-- Global cmd+shift+[ and cmd+shift+] cycle workspace windows when the GUI is not focused.
-- Global cmd+shift+= focuses the app instead of toggling visibility.
+- YAML config at `~/.agentmux/config.yaml` is the source of truth for editor preference, port range, projects, processes, browser sessions, and status checks.
+- Runtime state lives in `~/.agentmux/agentmux.db` (projects, workspaces, ports, running processes, status results, windows, settings) and is rebuilt when the schema version changes.
+- Projects are normalized by real path; a default workspace is ensured per project with reserved ports.
+- Workspaces create git worktrees for git projects, run setup/cleanup scripts, and reserve 10 ports per workspace.
+- Workspace launch starts processes in iTerm2 with env vars and logs under `~/.agentmux/runtime/<workspace-id>`, opens Chrome browser sessions, optionally opens the editor, and captures window IDs via yabai in browser/editor/terminal order.
+- AppKit GUI is two-pane with in-place forms and editors for processes, browser sessions, and status checks; workspace detail includes run/stop/archive, windows list with shortcut hints, and an env/ports tab.
+- Hotkeys are configurable (settings stored in the runtime DB): global toggle `cmd+shift+=`, global window navigation `cmd+shift+]` and `cmd+shift+[`, activate selected workspace `cmd+shift+return`, new workspace `cmd+n`, window focus `cmd+shift+1` through `cmd+shift+9`.
+- CLI supports config path/show, project list/add/update/remove, workspace list/create/launch/stop/archive/activate, and settings get/set/reset for GUI shortcuts.
 
 ## Accomplished
 - Replaced stream-based model with project/workspace/process design.
-- Added YAML config loader/saver and default config generation.
-- New runtime schema: workspaces, ports, processes, windows, and status results.
-- Basic process launch in iTerm2 with env vars injected.
-- Chrome browser sessions opened via AppleScript.
-- Workspace launch/stop/archive and port allocation.
-- Updated hotkey defaults to spec (`cmd+shift+=`, `cmd+shift+]`, `cmd+shift+[`, `cmd+shift+return`).
-- Worktrees stored under `/Users/<username>/agentmux/workspaces/<projectname>/<dirname>` (dirname is a unique food name).
-- Added `cmd+n` shortcut and toolbar button to create a new workspace for the selected project.
+- Added YAML config loader/saver with default config generation and port-range validation.
+- New runtime schema for projects, workspaces, ports, processes, windows, status results, and settings.
+- Implemented git worktree create/remove, port allocation, and setup/cleanup scripts.
+- Added iTerm2 process launch with env injection, PID/log capture, and runtime tracking.
+- Implemented Chrome browser session opening and yabai-based window capture.
+- Built the AppKit GUI with two-pane layout, project/workspace editing, and window shortcut hints.
+- Added CLI subcommands for projects/workspaces plus settings for hotkey customization.
 
 ## Remaining
-- Richer status check scheduling (periodic background runner).
-- More robust window reconciliation on app restart.
-- Enhanced GUI editing for process templates and status checks.
-- Global window loop shortcuts when agentmux is not focused.
+- Periodic status check runner (honor interval/timeout) plus on-exit actions.
+- Coding agent detection with idle/busy state tracking.
+- Window reconciliation on app restart (re-scan existing windows and map to workspaces).
