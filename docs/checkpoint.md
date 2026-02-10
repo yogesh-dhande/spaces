@@ -6,6 +6,8 @@
 - Workspaces manage git worktrees, ports, and runtime process/window state.
 - AppKit GUI uses a two-pane layout with in-place forms (no dialogs for add/edit).
 - CLI updated to project/workspace management and config discovery.
+- GUI supports cmd+shift+1 through cmd+shift+9 to focus workspace windows.
+- Global cmd+shift+[ and cmd+shift+] cycle workspace windows when the GUI is not focused.
 
 ## Accomplished
 - Replaced stream-based model with project/workspace/process design.

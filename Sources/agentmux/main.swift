@@ -274,6 +274,8 @@ struct CLI {
           - Configuration is stored in ~/.agentmux/config.yaml (YAML is source of truth).
           - Runtime state is stored in ~/.agentmux/agentmux.db and rebuilt if schema changes.
           - Workspaces reserve PORT0-PORT9 from the configured port range.
+          - GUI window focus shortcuts: cmd+shift+1 through cmd+shift+9 (when GUI is focused).
+          - GUI window cycle shortcuts: cmd+shift+[ and cmd+shift+] (global, when GUI is not focused).
         """)
     }
 }

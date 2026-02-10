@@ -382,6 +382,52 @@ public final class AgentmuxOrchestrator {
         }
     }
 
+    public func focusWorkspaceWindow(workspaceID: String, index: Int) throws {
+        guard index > 0 else { return }
+        let windows = try store.windows(workspaceID: workspaceID).sorted { $0.orderIndex < $1.orderIndex }
+        guard index <= windows.count else { return }
+        guard let id = windows[index - 1].windowID else { return }
+        let ok = (try? yabai.focusWindow(id: id)) ?? false
+        if ok {
+            try setActiveWorkspace(id: workspaceID)
+        }
+    }
+
+    public func focusNextWindow(workspaceID: String) throws {
+        try focusWindowRelative(workspaceID: workspaceID, delta: 1)
+    }
+
+    public func focusPreviousWindow(workspaceID: String) throws {
+        try focusWindowRelative(workspaceID: workspaceID, delta: -1)
+    }
+
+    public func workspaceIDForFocusedWindow() throws -> String? {
+        guard let focused = try yabai.focusedWindow() else { return nil }
+        return try store.workspaceID(windowID: focused.id)
+    }
+
+    private func focusWindowRelative(workspaceID: String, delta: Int) throws {
+        let windows = try store.windows(workspaceID: workspaceID).sorted { $0.orderIndex < $1.orderIndex }
+        guard !windows.isEmpty else { return }
+        let focusedID = try yabai.focusedWindow()?.id
+        let currentIndex = focusedID.flatMap { id in
+            windows.firstIndex(where: { $0.windowID == id })
+        }
+        let targetIndex: Int
+        if let currentIndex {
+            targetIndex = (currentIndex + delta + windows.count) % windows.count
+        } else if delta > 0 {
+            targetIndex = 0
+        } else {
+            targetIndex = windows.count - 1
+        }
+        guard let targetID = windows[targetIndex].windowID else { return }
+        let ok = (try? yabai.focusWindow(id: targetID)) ?? false
+        if ok {
+            try setActiveWorkspace(id: workspaceID)
+        }
+    }
+
     public func listSpaceOptions() throws -> [SpaceOption] {
         let spaces = try yabai.listSpaces()
         return spaces.map { SpaceOption(displayIndex: $0.display, spaceIndex: $0.index) }

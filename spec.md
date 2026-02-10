@@ -136,6 +136,7 @@
             - stored in db so that application restart does not lose pointer to existing windows open on mac; if identifying windows on the fly is robust and fast, then these may be stored in memory instead
             - Automatically identify any chrome windows that have matching BrowserSessions open (browser url starts with BrowserSession.url) and attach those to the related workspace. User may open additional tabs or windows. all of them should be automatically identified and tracked
             - when looping through windows, the order should be browser window, editor window, and then terminal windows in the order in which processes are defined
+            - when GUI is focused, cmd+shift+1 through cmd+shift+9 focus the corresponding workspace window
             - Window records may become stale across app restarts; agentmux must re-discover windows on launch and reconcile with stored state
 - User flow
     - User installs the app

@@ -309,6 +309,14 @@ public final class SQLiteStore {
         return rows.compactMap { decodeWindow(row: $0) }
     }
 
+    public func workspaceID(windowID: Int) throws -> String? {
+        let row = try queryRow(
+            sql: "SELECT workspace_id FROM windows WHERE window_id = ? LIMIT 1",
+            bindings: [String(windowID)]
+        )
+        return row?.first
+    }
+
     public func deleteWindows(workspaceID: String) throws {
         try execute(sql: "DELETE FROM windows WHERE workspace_id = ?", bindings: [workspaceID])
     }

@@ -60,6 +60,8 @@ Runtime (SQLite):
 ## Hotkeys
 - Global hotkey toggles GUI visibility.
 - When GUI is focused: next/previous running workspace and activate selected workspace.
+- When GUI is focused: `cmd+shift+1` through `cmd+shift+9` focus the corresponding workspace window.
+- When GUI is not focused: `cmd+shift+]` or `cmd+shift+[` cycle windows for the active or currently focused workspace.
 - `cmd+n` creates a new workspace for the selected project.
 - Window focus uses yabai window IDs in the order: browser, editor, terminals.
 

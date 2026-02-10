@@ -15,6 +15,8 @@ YAML is the source of truth:
 - Path: `~/.agentmux/config.yaml`
 - Runtime DB: `~/.agentmux/agentmux.db` (ephemeral)
 - Git worktrees: `/Users/<username>/agentmux/workspaces/<projectname>/<dirname>` (dirname is a unique food name)
+- GUI shortcuts (when focused): `cmd+shift+1` through `cmd+shift+9` focus workspace windows
+- Global window navigation (when GUI not focused): `cmd+shift+]` and `cmd+shift+[`
 
 Example config:
 ```yaml

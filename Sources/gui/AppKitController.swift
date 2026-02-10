@@ -18,8 +18,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     private var lastSelectedRow: Int = -1
     private var projectHasUnsavedChanges = false
 
-    private var hotkeyRef: EventHotKeyRef?
     private var hotkeyHandler: EventHandlerRef?
+    private var hotkeyRefs: [UInt32: EventHotKeyRef] = [:]
     private var registeredHotkey: HotkeySpec?
     private var shortcutMonitor: Any?
     private var nextShortcutSpec: HotkeySpec?
@@ -28,13 +28,32 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
     private var configCache: AppConfig?
 
-    private lazy var hotkeyHandlerProc: EventHandlerUPP = { _, _, userData in
+    private lazy var hotkeyHandlerProc: EventHandlerUPP = { _, event, userData in
         guard let userData else { return noErr }
         let controller = Unmanaged<AppKitController>.fromOpaque(userData).takeUnretainedValue()
-        DispatchQueue.main.async {
-            controller.toggleWindowFromHotkey()
+        var hotKeyID = EventHotKeyID()
+        let status = GetEventParameter(
+            event,
+            EventParamName(kEventParamDirectObject),
+            EventParamType(typeEventHotKeyID),
+            nil,
+            MemoryLayout<EventHotKeyID>.size,
+            nil,
+            &hotKeyID
+        )
+        if status != noErr {
+            return status
+        }
+        Task { @MainActor in
+            controller.handleGlobalHotkey(id: hotKeyID.id)
         }
         return noErr
+    }
+
+    private enum GlobalHotkey: UInt32 {
+        case toggle = 1
+        case next = 2
+        case previous = 3
     }
 
     private enum OutlineItem {
@@ -434,11 +453,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         header.font = .systemFont(ofSize: 20, weight: .semibold)
 
         let dirLabel = labeledValue(title: "Directory", value: workspace.dir)
-        let statusLabel = labeledValue(title: "Status", value: workspace.isRunning ? "Running" : "Stopped")
+        let statusLabel = statusRow(isRunning: workspace.isRunning)
 
-        let launchButton = actionButton(title: "Launch", symbol: "play.circle", tooltip: "Launch (⌘L)", action: #selector(launchWorkspace(_:)), primary: false)
+        let launchButton = actionButton(title: "Launch (⌘L)", symbol: "play.circle", tooltip: "Launch", action: #selector(launchWorkspace(_:)), primary: false)
         launchButton.identifier = NSUserInterfaceItemIdentifier(workspace.id)
-        let stopButton = actionButton(title: "Stop", symbol: "stop.circle", tooltip: "Stop (⌘.)", action: #selector(stopWorkspace(_:)), primary: false)
+        let stopButton = actionButton(title: "Stop (⌘.)", symbol: "stop.circle", tooltip: "Stop", action: #selector(stopWorkspace(_:)), primary: false)
         stopButton.identifier = NSUserInterfaceItemIdentifier(workspace.id)
         let archiveButton = actionButton(title: "Archive", symbol: "archivebox", tooltip: "Archive", action: #selector(archiveWorkspace(_:)), primary: false)
         archiveButton.identifier = NSUserInterfaceItemIdentifier(workspace.id)
@@ -454,6 +473,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
         let tabs = NSTabView()
         tabs.translatesAutoresizingMaskIntoConstraints = false
+        tabs.tabViewType = .topTabsBezelBorder
         let runTab = NSTabViewItem(identifier: "run")
         runTab.label = "Run"
         runTab.view = workspaceRunView(workspace: workspace)
@@ -474,7 +494,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             stack.leadingAnchor.constraint(equalTo: detailContainer.leadingAnchor, constant: 20),
             stack.trailingAnchor.constraint(equalTo: detailContainer.trailingAnchor, constant: -20),
             stack.topAnchor.constraint(equalTo: detailContainer.topAnchor, constant: 20),
-            tabs.heightAnchor.constraint(equalToConstant: 320)
+            tabs.heightAnchor.constraint(equalToConstant: 320),
+            tabs.widthAnchor.constraint(equalTo: stack.widthAnchor)
         ])
     }
 
@@ -482,6 +503,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let container = NSStackView()
         container.orientation = .vertical
         container.spacing = 10
+        container.translatesAutoresizingMaskIntoConstraints = false
 
         let processesLabel = label(text: "Running processes")
         let windowsLabel = label(text: "Windows (cmd+shift+<n>)")
@@ -515,13 +537,14 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         container.addArrangedSubview(processScroll)
         container.addArrangedSubview(windowsLabel)
         container.addArrangedSubview(windowsScroll)
-        return container
+        return insetContainerView(container)
     }
 
     private func workspaceEnvView(project: ProjectSummary, workspace: WorkspaceSummary) -> NSView {
         let container = NSStackView()
         container.orientation = .vertical
         container.spacing = 10
+        container.translatesAutoresizingMaskIntoConstraints = false
         let envView = NSTextView()
         envView.isEditable = false
         envView.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
@@ -536,7 +559,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         envView.string = lines.joined(separator: "\n")
         let scroll = scrollableTextView(envView, height: 240)
         container.addArrangedSubview(scroll)
-        return container
+        return insetContainerView(container)
     }
 
     private func label(text: String) -> NSTextField {
@@ -558,6 +581,21 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         valueField.lineBreakMode = .byTruncatingMiddle
         stack.addArrangedSubview(label)
         stack.addArrangedSubview(valueField)
+        return stack
+    }
+
+    private func statusRow(isRunning: Bool) -> NSView {
+        let stack = NSStackView()
+        stack.orientation = .horizontal
+        stack.spacing = 8
+        let label = NSTextField(labelWithString: "Status:")
+        label.font = .systemFont(ofSize: 12, weight: .semibold)
+        let icon = NSImageView()
+        icon.image = NSImage(systemSymbolName: isRunning ? "circle.fill" : "circle", accessibilityDescription: "Status")
+        icon.contentTintColor = isRunning ? .systemGreen : .tertiaryLabelColor
+        icon.toolTip = isRunning ? "Running" : "Stopped"
+        stack.addArrangedSubview(label)
+        stack.addArrangedSubview(icon)
         return stack
     }
 
@@ -589,8 +627,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         scroll.hasVerticalScroller = true
         scroll.hasHorizontalScroller = false
         scroll.autohidesScrollers = true
-        scroll.borderType = .bezelBorder
+        scroll.borderType = .lineBorder
         scroll.drawsBackground = true
+        textView.drawsBackground = true
+        textView.backgroundColor = .textBackgroundColor
+        textView.textContainerInset = NSSize(width: 6, height: 6)
         textView.minSize = NSSize(width: 0, height: height)
         textView.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
         textView.isVerticallyResizable = true
@@ -601,6 +642,19 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         scroll.translatesAutoresizingMaskIntoConstraints = false
         scroll.heightAnchor.constraint(equalToConstant: height).isActive = true
         return scroll
+    }
+
+    private func insetContainerView(_ content: NSView, inset: CGFloat = 8) -> NSView {
+        let container = NSView()
+        container.translatesAutoresizingMaskIntoConstraints = false
+        container.addSubview(content)
+        NSLayoutConstraint.activate([
+            content.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: inset),
+            content.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -inset),
+            content.topAnchor.constraint(equalTo: container.topAnchor, constant: inset),
+            content.bottomAnchor.constraint(equalTo: container.bottomAnchor, constant: -inset)
+        ])
+        return container
     }
 
     private func makeEditableTextView() -> NSTextView {
@@ -847,30 +901,48 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         do {
             let raw = try orchestrator.guiHotkey()
             let spec = try HotkeySpec.parse(raw)
-            registerHotkey(spec)
+            registerHotkeys(toggle: spec, next: nextShortcutSpec, previous: previousShortcutSpec)
         } catch {
             showError(error)
         }
     }
 
     private func teardownGlobalHotkey() {
-        if let hotkeyRef {
-            UnregisterEventHotKey(hotkeyRef)
+        for ref in hotkeyRefs.values {
+            UnregisterEventHotKey(ref)
         }
+        hotkeyRefs.removeAll()
         if let hotkeyHandler {
             RemoveEventHandler(hotkeyHandler)
         }
-        hotkeyRef = nil
         hotkeyHandler = nil
     }
 
-    private func registerHotkey(_ spec: HotkeySpec) {
+    private func registerHotkeys(toggle: HotkeySpec, next: HotkeySpec?, previous: HotkeySpec?) {
         teardownGlobalHotkey()
-        let hotKeyID = EventHotKeyID(signature: OSType(UInt32(truncatingIfNeeded: "AMUX".utf8.reduce(0) { ($0 << 8) + UInt32($1) })), id: 1)
+        let signature = OSType(UInt32(truncatingIfNeeded: "AMUX".utf8.reduce(0) { ($0 << 8) + UInt32($1) }))
         let target = GetEventDispatcherTarget()
-        let status = RegisterEventHotKey(UInt32(spec.keyCode), spec.modifiersCarbon, hotKeyID, target, 0, &hotkeyRef)
-        if status != noErr {
-            return
+        registerHotkey(
+            spec: toggle,
+            id: GlobalHotkey.toggle.rawValue,
+            signature: signature,
+            target: target
+        )
+        if let next {
+            registerHotkey(
+                spec: next,
+                id: GlobalHotkey.next.rawValue,
+                signature: signature,
+                target: target
+            )
+        }
+        if let previous {
+            registerHotkey(
+                spec: previous,
+                id: GlobalHotkey.previous.rawValue,
+                signature: signature,
+                target: target
+            )
         }
 
         var eventSpec = EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyPressed))
@@ -883,7 +955,16 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             &hotkeyHandler
         )
         if handlerStatus == noErr {
-            registeredHotkey = spec
+            registeredHotkey = toggle
+        }
+    }
+
+    private func registerHotkey(spec: HotkeySpec, id: UInt32, signature: OSType, target: EventTargetRef?) {
+        var ref: EventHotKeyRef?
+        let hotKeyID = EventHotKeyID(signature: signature, id: id)
+        let status = RegisterEventHotKey(UInt32(spec.keyCode), spec.modifiersCarbon, hotKeyID, target, 0, &ref)
+        if status == noErr, let ref {
+            hotkeyRefs[id] = ref
         }
     }
 
@@ -894,6 +975,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                !event.modifierFlags.contains(.shift),
                event.charactersIgnoringModifiers?.lowercased() == "n" {
                 self.addWorkspaceFromShortcut()
+                return nil
+            }
+            if let windowIndex = windowShortcutIndex(for: event) {
+                self.focusWindowShortcut(index: windowIndex)
                 return nil
             }
             if let nextShortcutSpec, matches(event: event, spec: nextShortcutSpec) {
@@ -909,6 +994,18 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 return nil
             }
             return event
+        }
+    }
+
+    private func handleGlobalHotkey(id: UInt32) {
+        guard let hotkey = GlobalHotkey(rawValue: id) else { return }
+        switch hotkey {
+        case .toggle:
+            toggleWindowFromHotkey()
+        case .next:
+            focusGlobalWindowNavigation(direction: 1)
+        case .previous:
+            focusGlobalWindowNavigation(direction: -1)
         }
     }
 
@@ -973,6 +1070,36 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         }
     }
 
+    private func focusWindowShortcut(index: Int) {
+        guard let selectedWorkspaceID else { return }
+        do {
+            try orchestrator.focusWorkspaceWindow(workspaceID: selectedWorkspaceID, index: index)
+        } catch {
+            showError(error)
+        }
+    }
+
+    private func windowShortcutIndex(for event: NSEvent) -> Int? {
+        guard event.modifierFlags.contains(.command),
+              event.modifierFlags.contains(.shift),
+              !event.modifierFlags.contains(.option),
+              !event.modifierFlags.contains(.control) else {
+            return nil
+        }
+        let keyMap: [UInt16: Int] = [
+            UInt16(kVK_ANSI_1): 1,
+            UInt16(kVK_ANSI_2): 2,
+            UInt16(kVK_ANSI_3): 3,
+            UInt16(kVK_ANSI_4): 4,
+            UInt16(kVK_ANSI_5): 5,
+            UInt16(kVK_ANSI_6): 6,
+            UInt16(kVK_ANSI_7): 7,
+            UInt16(kVK_ANSI_8): 8,
+            UInt16(kVK_ANSI_9): 9
+        ]
+        return keyMap[event.keyCode]
+    }
+
     private func selectWorkspace(_ workspace: WorkspaceSummary) {
         for row in 0..<outlineView.numberOfRows {
             if let item = outlineView.item(atRow: row) as? OutlineItem {
@@ -982,6 +1109,30 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 }
             }
         }
+    }
+
+    private func focusGlobalWindowNavigation(direction: Int) {
+        guard !NSApp.isActive else { return }
+        guard let workspaceID = globalWindowNavigationWorkspaceID() else { return }
+        do {
+            if direction > 0 {
+                try orchestrator.focusNextWindow(workspaceID: workspaceID)
+            } else {
+                try orchestrator.focusPreviousWindow(workspaceID: workspaceID)
+            }
+        } catch {
+            showError(error)
+        }
+    }
+
+    private func globalWindowNavigationWorkspaceID() -> String? {
+        if let workspaceID = try? orchestrator.workspaceIDForFocusedWindow() {
+            return workspaceID
+        }
+        if let workspaceID = try? orchestrator.activeWorkspaceID() {
+            return workspaceID
+        }
+        return nil
     }
 
     private func allRunningWorkspaces() -> [WorkspaceSummary] {
