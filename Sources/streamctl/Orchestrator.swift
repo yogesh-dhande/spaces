@@ -45,10 +45,7 @@ public final class AgentmuxOrchestrator {
                 removedInvalid = true
             }
         }
-        if removedInvalid || updatedPaths {
-            config.projects = normalizedConfigs
-            try configStore.save(config)
-        }
+        config.projects = normalizedConfigs
         let keepIDs = Set(normalizedProjects.map(\.id))
         let existing = try store.projects()
         for project in existing where !keepIDs.contains(project.id) {
@@ -57,6 +54,10 @@ public final class AgentmuxOrchestrator {
         for project in normalizedProjects {
             try store.upsert(project: project.record)
             try ensureDefaultWorkspace(for: project.record)
+            try ensureWorkspaceSettings(for: project.record, config: project.config)
+        }
+        if removedInvalid || updatedPaths {
+            try configStore.save(config)
         }
         return config
     }
@@ -81,6 +82,37 @@ public final class AgentmuxOrchestrator {
         let config = try configStore.load()
         guard let project = try store.project(id: projectID) else { return nil }
         return config.projects.first { normalizePath($0.dir) == project.dir }
+    }
+
+    public func workspaceSettings(workspaceID: String) throws -> WorkspaceSettings? {
+        let (project, workspace) = try resolveWorkspace(id: workspaceID)
+        let config = try projectConfig(projectID: project.id)
+        return try loadWorkspaceSettings(project: project, workspace: workspace, config: config)
+    }
+
+    public func updateWorkspaceSettings(workspaceID: String, update: (inout WorkspaceSettings) -> Void) throws {
+        let (project, workspace) = try resolveWorkspace(id: workspaceID)
+        let config = try projectConfig(projectID: project.id)
+        guard var existing = try loadWorkspaceSettings(project: project, workspace: workspace, config: config) else {
+            throw AgentmuxError.missingProject(dir: project.dir)
+        }
+        let previous = existing
+        update(&existing)
+        try store.setWorkspaceProcesses(workspaceID: workspace.id, processes: existing.processes)
+        try store.setWorkspaceStatusChecks(workspaceID: workspace.id, checks: existing.statusChecks)
+        try store.setWorkspaceBrowserSessions(workspaceID: workspace.id, sessions: existing.browserSessions)
+        try store.touchWorkspaceSettings(workspaceID: workspace.id, updatedAt: nowISO8601())
+        let trackedProcesses = try store.runningProcesses(workspaceID: workspace.id)
+        let trackedWindows = try store.windows(workspaceID: workspace.id)
+        let hasRuntimeIndicators = !trackedProcesses.isEmpty || !trackedWindows.isEmpty
+        if !workspace.isRunning && hasRuntimeIndicators {
+            let launchedAt = workspace.lastLaunchedAt ?? nowISO8601()
+            try store.updateWorkspaceRunning(id: workspace.id, isRunning: true, launchedAt: launchedAt)
+        }
+        if workspace.isRunning || hasRuntimeIndicators {
+            try applyWorkspaceSettingsUpdate(
+                project: project, workspace: workspace, previous: previous, updated: existing)
+        }
     }
 
     public func addProject(dir: String) throws -> ProjectRecord {
@@ -182,6 +214,7 @@ public final class AgentmuxOrchestrator {
                 lastLaunchedAt: nil
             )
             try store.upsert(workspace: revived)
+            try seedWorkspaceSettings(project: project, workspace: revived)
             if let config = try projectConfig(projectID: projectID), let script = config.setupScript, !script.isEmpty {
                 try runScript(script, cwd: revived.dir)
             }
@@ -219,6 +252,7 @@ public final class AgentmuxOrchestrator {
             lastLaunchedAt: nil
         )
         try store.upsert(workspace: workspace)
+        try seedWorkspaceSettings(project: project, workspace: workspace)
 
         if let config = try projectConfig(projectID: projectID), let script = config.setupScript, !script.isEmpty {
             try runScript(script, cwd: workspaceDir)
@@ -235,7 +269,7 @@ public final class AgentmuxOrchestrator {
         guard !workspace.isArchived else {
             throw AgentmuxError.invalidArgument(message: "Workspace is archived.")
         }
-        let config = try projectConfig(projectID: project.id)
+        let config = try loadWorkspaceSettings(project: project, workspace: workspace, config: try projectConfig(projectID: project.id))
         let ports = try store.workspacePorts(workspaceID: workspace.id)
         if ports.count != 10 {
             let portRange = try configStore.load().portRange
@@ -346,7 +380,7 @@ public final class AgentmuxOrchestrator {
 
     public func runStatusChecks(workspaceID: String) throws -> [StatusResult] {
         let (project, workspace) = try resolveWorkspace(id: workspaceID)
-        guard let config = try projectConfig(projectID: project.id) else { return [] }
+        guard let config = try loadWorkspaceSettings(project: project, workspace: workspace, config: try projectConfig(projectID: project.id)) else { return [] }
         let processes = try store.runningProcesses(workspaceID: workspaceID)
         let ports = try store.workspacePorts(workspaceID: workspaceID)
         let env = buildWorkspaceEnv(project: project, workspace: workspace, ports: ports)
@@ -546,6 +580,7 @@ public final class AgentmuxOrchestrator {
             lastLaunchedAt: nil
         )
         try store.upsert(workspace: workspace)
+        try seedWorkspaceSettings(project: project, workspace: workspace)
         let portRange = try configStore.load().portRange
         _ = try PortAllocator(store: store).allocatePorts(workspaceID: workspace.id, count: 10, range: portRange)
     }
@@ -558,6 +593,48 @@ public final class AgentmuxOrchestrator {
             throw AgentmuxError.missingProject(dir: workspace.projectID)
         }
         return (project, workspace)
+    }
+
+    private func ensureWorkspaceSettings(for project: ProjectRecord, config: ProjectConfig) throws {
+        let workspaces = try store.workspaces(projectID: project.id, includeArchived: true)
+        for workspace in workspaces {
+            let hasSettings = try store.workspaceSettingsExists(workspaceID: workspace.id)
+            if !hasSettings {
+                try seedWorkspaceSettings(project: project, workspace: workspace, config: config)
+            }
+        }
+    }
+
+    private func seedWorkspaceSettings(project: ProjectRecord, workspace: WorkspaceRecord) throws {
+        let config = try projectConfig(projectID: project.id)
+        try seedWorkspaceSettings(project: project, workspace: workspace, config: config)
+    }
+
+    private func seedWorkspaceSettings(project _: ProjectRecord, workspace: WorkspaceRecord, config: ProjectConfig?) throws {
+        let snapshot = WorkspaceSettings(
+            processes: config?.processes ?? [],
+            statusChecks: config?.statusChecks ?? [],
+            browserSessions: config?.browserSessions ?? []
+        )
+        try store.setWorkspaceProcesses(workspaceID: workspace.id, processes: snapshot.processes)
+        try store.setWorkspaceStatusChecks(workspaceID: workspace.id, checks: snapshot.statusChecks)
+        try store.setWorkspaceBrowserSessions(workspaceID: workspace.id, sessions: snapshot.browserSessions)
+        try store.touchWorkspaceSettings(workspaceID: workspace.id, updatedAt: nowISO8601())
+    }
+
+    private func loadWorkspaceSettings(
+        project: ProjectRecord,
+        workspace: WorkspaceRecord,
+        config: ProjectConfig?
+    ) throws -> WorkspaceSettings? {
+        let hasSettings = try store.workspaceSettingsExists(workspaceID: workspace.id)
+        if !hasSettings {
+            try seedWorkspaceSettings(project: project, workspace: workspace, config: config)
+        }
+        let processes = try store.workspaceProcesses(workspaceID: workspace.id)
+        let statusChecks = try store.workspaceStatusChecks(workspaceID: workspace.id)
+        let browserSessions = try store.workspaceBrowserSessions(workspaceID: workspace.id)
+        return WorkspaceSettings(processes: processes, statusChecks: statusChecks, browserSessions: browserSessions)
     }
 
     private func runScript(_ script: String, cwd: String) throws {
@@ -574,6 +651,297 @@ public final class AgentmuxOrchestrator {
         let scopedKey = "agentmux_\(sanitizeEnvKey(project.name))_\(sanitizeEnvKey(workspace.name))_WORKSPACE_DIR"
         env[scopedKey] = workspace.dir
         return env
+    }
+
+    private func applyWorkspaceSettingsUpdate(
+        project: ProjectRecord,
+        workspace: WorkspaceRecord,
+        previous: WorkspaceSettings,
+        updated: WorkspaceSettings
+    ) throws {
+        let ports = try store.workspacePorts(workspaceID: workspace.id)
+        let env = buildWorkspaceEnv(project: project, workspace: workspace, ports: ports)
+        try reconcileProcesses(
+            workspace: workspace,
+            previous: previous.processes,
+            updated: updated.processes,
+            env: env
+        )
+        try reconcileBrowserSessions(project: project, workspace: workspace, sessions: updated.browserSessions, env: env)
+        try pruneMissingWindows(workspaceID: workspace.id)
+    }
+
+    private func processKey(for template: ProcessTemplate) -> String {
+        let name = template.name?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let command = template.command.trimmingCharacters(in: .whitespacesAndNewlines)
+        return name.isEmpty ? command : name
+    }
+
+    private func processRuntimePaths(workspaceID: String, name: String) throws -> (logFile: String, pidFile: String) {
+        let runtimeRoot = try runtimeDirectory()
+        let workspaceRuntime = URL(fileURLWithPath: runtimeRoot).appendingPathComponent(workspaceID, isDirectory: true)
+        try FileManager.default.createDirectory(at: workspaceRuntime, withIntermediateDirectories: true)
+        let safe = safeFilename(name)
+        let logFile = workspaceRuntime.appendingPathComponent("\(safe).log").path
+        let pidFile = workspaceRuntime.appendingPathComponent("\(safe).pid").path
+        return (logFile, pidFile)
+    }
+
+    private func reconcileProcesses(
+        workspace: WorkspaceRecord,
+        previous: [ProcessTemplate],
+        updated: [ProcessTemplate],
+        env: [String: String]
+    ) throws {
+        struct DesiredProcess {
+            let matchKey: String
+            let desiredKey: String
+            let template: ProcessTemplate
+        }
+
+        let running = try store.runningProcesses(workspaceID: workspace.id)
+        let runningByKey = Dictionary(uniqueKeysWithValues: running.map { ($0.templateName, $0) })
+
+        var desiredByMatch: [String: DesiredProcess] = [:]
+        for (idx, template) in updated.enumerated() {
+            let desiredKey = processKey(for: template)
+            let hasName = !(template.name?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "").isEmpty
+            var matchKey = desiredKey
+            if !hasName, idx < previous.count {
+                let previousKey = processKey(for: previous[idx])
+                if desiredKey == template.command && !previousKey.isEmpty {
+                    matchKey = previousKey
+                }
+            }
+            if desiredByMatch[matchKey] == nil {
+                desiredByMatch[matchKey] = DesiredProcess(
+                    matchKey: matchKey,
+                    desiredKey: desiredKey,
+                    template: template
+                )
+            }
+        }
+
+        let toStop = running.filter { desiredByMatch[$0.templateName] == nil }
+        let toStart = desiredByMatch.filter { runningByKey[$0.key] == nil }
+        var toRestart: [(DesiredProcess, RunningProcessRecord)] = []
+        var toRelabel: [(DesiredProcess, RunningProcessRecord)] = []
+        for desired in desiredByMatch.values {
+            if let running = runningByKey[desired.matchKey] {
+                if running.command != desired.template.command {
+                    toRestart.append((desired, running))
+                } else if running.templateName != desired.desiredKey {
+                    toRelabel.append((desired, running))
+                }
+            }
+        }
+
+        if (!toStart.isEmpty || !toRestart.isEmpty), !iterm.isAvailable() {
+            throw AgentmuxError.dependencyMissing(message: "iTerm2 is required to launch processes.")
+        }
+
+        for process in toStop {
+            if let windowID = process.windowID, process.terminalApp == "iTerm2" {
+                _ = try? iterm.closeWindow(id: windowID)
+            }
+            if let pid = process.pid {
+                _ = try? Shell.run(["kill", "-TERM", "\(pid)"])
+            }
+            try store.deleteRunningProcess(id: process.id)
+        }
+
+        for (desired, process) in toRelabel {
+            let updated = RunningProcessRecord(
+                id: process.id,
+                workspaceID: workspace.id,
+                templateName: desired.desiredKey,
+                command: process.command,
+                terminalApp: process.terminalApp,
+                windowID: process.windowID,
+                pid: process.pid,
+                status: process.status,
+                logPath: process.logPath,
+                lastOutputAt: process.lastOutputAt,
+                startedAt: process.startedAt,
+                exitedAt: process.exitedAt
+            )
+            try store.upsert(runningProcess: updated)
+        }
+
+        var existingWindowIDs = Set<Int>(
+            (try store.windows(workspaceID: workspace.id)).compactMap { $0.windowID }
+        )
+        var terminalCount = (try? store.windows(workspaceID: workspace.id).filter { $0.role == "terminal" }.count) ?? 0
+
+        for (desired, process) in toRestart {
+            let name = desired.desiredKey
+            let (logFile, pidFile) = try processRuntimePaths(workspaceID: workspace.id, name: name)
+            let command = shellCommand(
+                base: desired.template.command,
+                cwd: workspace.dir,
+                env: env,
+                logFile: logFile,
+                pidFile: pidFile
+            )
+            if let windowID = process.windowID {
+                if let pid = process.pid {
+                    _ = try? Shell.run(["kill", "-TERM", "\(pid)"])
+                }
+                try iterm.runInWindow(id: windowID, command: command)
+                let pid = try? Int(String(contentsOfFile: pidFile).trimmingCharacters(in: .whitespacesAndNewlines))
+                let updated = RunningProcessRecord(
+                    id: process.id,
+                    workspaceID: workspace.id,
+                    templateName: desired.desiredKey,
+                    command: desired.template.command,
+                    terminalApp: "iTerm2",
+                    windowID: windowID,
+                    pid: pid,
+                    status: .running,
+                    logPath: logFile,
+                    lastOutputAt: nil,
+                    startedAt: nowISO8601(),
+                    exitedAt: nil
+                )
+                try store.upsert(runningProcess: updated)
+            } else {
+                let snapshot = try yabai.listWindows()
+                let window = try iterm.openWindowAndRun(command: command)
+                let pid = try? Int(String(contentsOfFile: pidFile).trimmingCharacters(in: .whitespacesAndNewlines))
+                let updated = RunningProcessRecord(
+                    id: process.id,
+                    workspaceID: workspace.id,
+                    templateName: desired.desiredKey,
+                    command: desired.template.command,
+                    terminalApp: "iTerm2",
+                    windowID: window.id >= 0 ? window.id : nil,
+                    pid: pid,
+                    status: .running,
+                    logPath: logFile,
+                    lastOutputAt: nil,
+                    startedAt: nowISO8601(),
+                    exitedAt: nil
+                )
+                try store.upsert(runningProcess: updated)
+                let captured = try captureNewWindows(
+                    snapshot: snapshot,
+                    role: "terminal",
+                    appName: "iTerm2",
+                    workspaceID: workspace.id,
+                    orderOffset: 200 + terminalCount
+                )
+                if let windowRecord = captured.first, let id = windowRecord.windowID, !existingWindowIDs.contains(id) {
+                    existingWindowIDs.insert(id)
+                    terminalCount += 1
+                    try store.upsert(window: windowRecord)
+                }
+            }
+        }
+
+        for (_, desired) in toStart {
+            let name = desired.desiredKey
+            let (logFile, pidFile) = try processRuntimePaths(workspaceID: workspace.id, name: name)
+            let command = shellCommand(
+                base: desired.template.command,
+                cwd: workspace.dir,
+                env: env,
+                logFile: logFile,
+                pidFile: pidFile
+            )
+            let snapshot = try yabai.listWindows()
+            let window = try iterm.openWindowAndRun(command: command)
+            let pid = try? Int(String(contentsOfFile: pidFile).trimmingCharacters(in: .whitespacesAndNewlines))
+            let record = RunningProcessRecord(
+                id: UUID().uuidString,
+                workspaceID: workspace.id,
+                templateName: desired.desiredKey,
+                command: desired.template.command,
+                terminalApp: "iTerm2",
+                windowID: window.id >= 0 ? window.id : nil,
+                pid: pid,
+                status: .running,
+                logPath: logFile,
+                lastOutputAt: nil,
+                startedAt: nowISO8601(),
+                exitedAt: nil
+            )
+            try store.upsert(runningProcess: record)
+            let captured = try captureNewWindows(
+                snapshot: snapshot,
+                role: "terminal",
+                appName: "iTerm2",
+                workspaceID: workspace.id,
+                orderOffset: 200 + terminalCount
+            )
+            if let windowRecord = captured.first, let id = windowRecord.windowID, !existingWindowIDs.contains(id) {
+                existingWindowIDs.insert(id)
+                terminalCount += 1
+                try store.upsert(window: windowRecord)
+            }
+        }
+    }
+
+    private func reconcileBrowserSessions(
+        project: ProjectRecord,
+        workspace: WorkspaceRecord,
+        sessions: [BrowserSession],
+        env: [String: String]
+    ) throws {
+        let tracked = try store.windows(workspaceID: workspace.id).filter { $0.role == "browser" }
+        if sessions.isEmpty {
+            for window in tracked {
+                if let id = window.windowID {
+                    _ = try? yabai.closeWindow(id: id)
+                }
+                try store.deleteWindow(id: window.id)
+            }
+            return
+        }
+        guard chrome.isAvailable() else {
+            throw AgentmuxError.dependencyMissing(message: "Google Chrome is required for browser sessions.")
+        }
+        let snapshot = try yabai.listWindows()
+        let attached = try ensureBrowserSessions(project: project, workspace: workspace, sessions: sessions, env: env)
+        let attachedIDs = Set(attached.compactMap { $0.windowID })
+        let captured = try captureNewWindows(
+            snapshot: snapshot,
+            role: "browser",
+            appName: "Google Chrome",
+            workspaceID: workspace.id,
+            orderOffset: 0
+        )
+        let desiredIDs = attachedIDs.union(captured.compactMap { $0.windowID })
+        for window in tracked {
+            guard let id = window.windowID else {
+                try store.deleteWindow(id: window.id)
+                continue
+            }
+            if !desiredIDs.contains(id) {
+                _ = try? yabai.closeWindow(id: id)
+                try store.deleteWindow(id: window.id)
+            }
+        }
+        var existingIDs = Set(tracked.compactMap { $0.windowID })
+        for window in attached + captured {
+            guard let id = window.windowID else { continue }
+            if existingIDs.contains(id) { continue }
+            existingIDs.insert(id)
+            try store.upsert(window: window)
+        }
+    }
+
+    private func pruneMissingWindows(workspaceID: String) throws {
+        let existingIDs = Set(try yabai.listWindows().map(\.id))
+        let windows = try store.windows(workspaceID: workspaceID)
+        for window in windows {
+            guard let id = window.windowID else {
+                try store.deleteWindow(id: window.id)
+                continue
+            }
+            if !existingIDs.contains(id) {
+                try store.deleteWindow(id: window.id)
+            }
+        }
     }
 
     private func launchProcesses(

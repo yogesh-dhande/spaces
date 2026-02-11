@@ -17,6 +17,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     private var selectedWorkspaceID: String?
     private var lastSelectedRow: Int = -1
     private var projectHasUnsavedChanges = false
+    private var workspaceHasUnsavedChanges = false
 
     private var hotkeyHandler: EventHandlerRef?
     private var hotkeyRefs: [UInt32: EventHotKeyRef] = [:]
@@ -491,8 +492,12 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let envTab = NSTabViewItem(identifier: "env")
         envTab.label = "Env"
         envTab.view = workspaceEnvView(project: project, workspace: workspace)
+        let settingsTab = NSTabViewItem(identifier: "settings")
+        settingsTab.label = "Settings"
+        settingsTab.view = workspaceSettingsView(project: project, workspace: workspace)
         tabs.addTabViewItem(runTab)
         tabs.addTabViewItem(envTab)
+        tabs.addTabViewItem(settingsTab)
 
         stack.addArrangedSubview(header)
         stack.addArrangedSubview(dirLabel)
@@ -574,6 +579,90 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         }
         let scroll = scrollableTextView(envView, height: 240)
         container.addArrangedSubview(scroll)
+        return insetContainerView(container)
+    }
+
+    private func workspaceSettingsView(project: ProjectSummary, workspace: WorkspaceSummary) -> NSView {
+        let container = NSStackView()
+        container.orientation = .vertical
+        container.spacing = 10
+        container.translatesAutoresizingMaskIntoConstraints = false
+
+        let contentStack = NSStackView()
+        contentStack.orientation = .vertical
+        contentStack.spacing = 10
+        contentStack.translatesAutoresizingMaskIntoConstraints = false
+
+        let processEditor = ProcessEditor()
+        let browserView = makeEditableTextView()
+        let browserScroll = scrollableTextView(browserView, height: 80)
+
+        let statusEditor = StatusCheckEditor(processNamesProvider: { processEditor.processNames() })
+        statusEditor.setChecks([])
+
+        if let config = try? orchestrator.workspaceSettings(workspaceID: workspace.id) {
+            processEditor.setProcesses(config.processes)
+            browserView.string = config.browserSessions.compactMap { $0.url }.joined(separator: "\n")
+            statusEditor.setChecks(config.statusChecks)
+        } else if let config = configCache?.projects.first(where: { normalizePath($0.dir) == project.dir }) {
+            processEditor.setProcesses(config.processes)
+            browserView.string = config.browserSessions.compactMap { $0.url }.joined(separator: "\n")
+            statusEditor.setChecks(config.statusChecks)
+        }
+
+        let saveButton = actionButton(
+            title: "Save Workspace",
+            symbol: "square.and.arrow.down",
+            tooltip: "Save workspace settings",
+            action: #selector(saveWorkspace(_:)),
+            primary: true
+        )
+
+        contentStack.addArrangedSubview(label(text: "Processes"))
+        contentStack.addArrangedSubview(processEditor.container)
+        contentStack.addArrangedSubview(label(text: "Browser sessions (URL per line)"))
+        contentStack.addArrangedSubview(browserScroll)
+        contentStack.addArrangedSubview(label(text: "Status checks (per process)"))
+        contentStack.addArrangedSubview(statusEditor.container)
+
+        let scroll = NSScrollView()
+        scroll.hasVerticalScroller = true
+        scroll.hasHorizontalScroller = false
+        scroll.autohidesScrollers = true
+        scroll.borderType = .noBorder
+        scroll.drawsBackground = false
+        scroll.documentView = contentStack
+        scroll.translatesAutoresizingMaskIntoConstraints = false
+        scroll.heightAnchor.constraint(equalToConstant: 230).isActive = true
+        scroll.contentView.drawsBackground = false
+        NSLayoutConstraint.activate([
+            contentStack.leadingAnchor.constraint(equalTo: scroll.contentView.leadingAnchor),
+            contentStack.trailingAnchor.constraint(equalTo: scroll.contentView.trailingAnchor),
+            contentStack.topAnchor.constraint(equalTo: scroll.contentView.topAnchor),
+            contentStack.widthAnchor.constraint(equalTo: scroll.contentView.widthAnchor),
+            contentStack.bottomAnchor.constraint(equalTo: scroll.contentView.bottomAnchor),
+        ])
+
+        let buttonRow = NSStackView()
+        buttonRow.orientation = .horizontal
+        buttonRow.spacing = 8
+        buttonRow.addArrangedSubview(NSView())
+        buttonRow.addArrangedSubview(saveButton)
+        container.addArrangedSubview(scroll)
+        container.addArrangedSubview(buttonRow)
+
+        saveButton.tag = storeWorkspaceFields(
+            workspaceID: workspace.id,
+            processEditor: processEditor,
+            browserView: browserView,
+            statusEditor: statusEditor
+        )
+        registerWorkspaceDirtyTracking(
+            processEditor: processEditor,
+            browserView: browserView,
+            statusEditor: statusEditor
+        )
+
         return insetContainerView(container)
     }
 
@@ -713,6 +802,22 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         return id
     }
 
+    private func storeWorkspaceFields(
+        workspaceID: String,
+        processEditor: ProcessEditor,
+        browserView: NSTextView,
+        statusEditor: StatusCheckEditor
+    ) -> Int {
+        let id = workspaceID.hashValue
+        WorkspaceFieldCache.shared.cache[id] = WorkspaceFieldRefs(
+            workspaceID: workspaceID,
+            processEditor: processEditor,
+            browserView: browserView,
+            statusEditor: statusEditor
+        )
+        return id
+    }
+
     private func storeAddProjectFields(
         dirField: NSTextField,
         setupView: NSTextView,
@@ -783,6 +888,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     }
 
     @objc private func saveProject(_ sender: NSButton) {
+        commitEditing()
         guard let refs = ProjectFieldCache.shared.cache[sender.tag] else { return }
         do {
             try orchestrator.updateProjectConfig(projectID: refs.projectID) { config in
@@ -793,6 +899,22 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 config.statusChecks = refs.statusEditor.currentChecks()
             }
             projectHasUnsavedChanges = false
+            reloadData()
+        } catch {
+            showError(error)
+        }
+    }
+
+    @objc private func saveWorkspace(_ sender: NSButton) {
+        commitEditing()
+        guard let refs = WorkspaceFieldCache.shared.cache[sender.tag] else { return }
+        do {
+            try orchestrator.updateWorkspaceSettings(workspaceID: refs.workspaceID) { config in
+                config.processes = refs.processEditor.currentProcesses()
+                config.browserSessions = parseBrowserSessions(refs.browserView.string)
+                config.statusChecks = refs.statusEditor.currentChecks()
+            }
+            workspaceHasUnsavedChanges = false
             reloadData()
         } catch {
             showError(error)
@@ -1247,10 +1369,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
     public func outlineViewSelectionDidChange(_ notification: Notification) {
         let row = outlineView.selectedRow
-        if projectHasUnsavedChanges {
+        if projectHasUnsavedChanges || workspaceHasUnsavedChanges {
             let response = unsavedChangesPrompt()
             if response == .alertFirstButtonReturn {
-                if !saveCurrentProject() {
+                if !saveCurrentDetail() {
                     outlineView.selectRowIndexes(IndexSet(integer: lastSelectedRow), byExtendingSelection: false)
                     return
                 }
@@ -1259,6 +1381,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 return
             } else {
                 projectHasUnsavedChanges = false
+                workspaceHasUnsavedChanges = false
             }
         }
         guard row >= 0, let item = outlineView.item(atRow: row) as? OutlineItem else {
@@ -1319,7 +1442,60 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         }
     }
 
+    private func registerWorkspaceDirtyTracking(
+        processEditor: ProcessEditor,
+        browserView: NSTextView,
+        statusEditor: StatusCheckEditor
+    ) {
+        workspaceHasUnsavedChanges = false
+        NotificationCenter.default.addObserver(forName: NSText.didChangeNotification, object: browserView, queue: .main)
+        { [weak self] _ in
+            Task { @MainActor in
+                self?.workspaceHasUnsavedChanges = true
+            }
+        }
+        processEditor.onDirty = { [weak self] in
+            Task { @MainActor in
+                self?.workspaceHasUnsavedChanges = true
+                statusEditor.refreshProcessOptions()
+            }
+        }
+        statusEditor.onDirty = { [weak self] in
+            Task { @MainActor in
+                self?.workspaceHasUnsavedChanges = true
+            }
+        }
+    }
+
+    private func saveCurrentDetail() -> Bool {
+        if selectedWorkspaceID != nil {
+            return saveCurrentWorkspace()
+        }
+        return saveCurrentProject()
+    }
+
+    private func saveCurrentWorkspace() -> Bool {
+        commitEditing()
+        guard let selectedWorkspaceID else { return true }
+        let tag = selectedWorkspaceID.hashValue
+        guard let refs = WorkspaceFieldCache.shared.cache[tag] else { return true }
+        do {
+            try orchestrator.updateWorkspaceSettings(workspaceID: refs.workspaceID) { config in
+                config.processes = refs.processEditor.currentProcesses()
+                config.browserSessions = parseBrowserSessions(refs.browserView.string)
+                config.statusChecks = refs.statusEditor.currentChecks()
+            }
+            workspaceHasUnsavedChanges = false
+            reloadData()
+            return true
+        } catch {
+            showError(error)
+            return false
+        }
+    }
+
     private func saveCurrentProject() -> Bool {
+        commitEditing()
         guard let selectedProjectID else { return true }
         let tag = selectedProjectID.hashValue
         guard let refs = ProjectFieldCache.shared.cache[tag] else { return true }
@@ -1348,5 +1524,13 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         alert.addButton(withTitle: "Discard")
         alert.addButton(withTitle: "Cancel")
         return alert.runModal()
+    }
+
+    private func commitEditing() {
+        let windows = [window, NSApp.keyWindow, NSApp.mainWindow].compactMap { $0 }
+        for window in windows {
+            window.endEditing(for: nil)
+            _ = window.makeFirstResponder(nil)
+        }
     }
 }

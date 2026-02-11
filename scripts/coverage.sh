@@ -2,8 +2,11 @@
 set -eu
 
 cache_dir="$(pwd)/.build/clang-module-cache"
+coverage_dir="$(pwd)/.build/coverage"
 mkdir -p "$cache_dir"
+mkdir -p "$coverage_dir"
 export CLANG_MODULE_CACHE_PATH="$cache_dir"
+export LLVM_PROFILE_FILE="$coverage_dir/%m.profraw"
 
 echo "Running swift test with coverage..."
 "$(pwd)/scripts/swiftpm.sh" test --enable-code-coverage --disable-sandbox

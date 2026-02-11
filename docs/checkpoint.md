@@ -1,12 +1,13 @@
 # Checkpoint
 
 ## Current Status
-- YAML config at `~/.agentmux/config.yaml` is the source of truth for editor preference, port range, projects, processes, browser sessions, and status checks.
-- Runtime state lives in `~/.agentmux/agentmux.db` (projects, workspaces, ports, running processes, status results, windows, settings) and is rebuilt when the schema version changes.
+- YAML config at `~/.agentmux/config.yaml` is the source of truth for editor preference, port range, projects, and project templates (processes, browser sessions, status checks).
+- Runtime state and workspace settings live in `~/.agentmux/agentmux.db` (projects, workspaces, ports, running processes, status results, windows, settings, workspace settings) and are rebuilt when the schema version changes; workspace settings are re-seeded from project templates when missing.
 - Projects are normalized by real path; a default workspace is ensured per project with reserved ports.
 - Workspaces create git worktrees for git projects, run setup/cleanup scripts, and reserve 10 ports per workspace.
 - Workspace launch starts processes in iTerm2 with env vars and logs under `~/.agentmux/runtime/<workspace-id>`, opens Chrome browser sessions, optionally opens the editor, and captures window IDs via yabai in browser/editor/terminal order.
-- AppKit GUI is two-pane with in-place forms and editors for processes, browser sessions, and status checks; workspace detail includes run/stop/archive, windows list with shortcut hints, and an env/ports tab.
+- Workspace settings snapshot project templates on creation into the runtime DB and are editable per workspace; updates to running workspaces reconcile processes and browser sessions immediately.
+- AppKit GUI is two-pane with in-place forms and editors for processes, browser sessions, and status checks; workspace detail includes run/stop/archive, windows list with shortcut hints, an env/ports tab, and workspace settings.
 - Hotkeys are configurable (settings stored in the runtime DB): global toggle `cmd+shift+=`, global window navigation `cmd+shift+]` and `cmd+shift+[`, activate selected workspace `cmd+shift+return`, new workspace `cmd+n`, window focus `cmd+shift+1` through `cmd+shift+9`.
 - CLI supports config path/show, project list/add/update/remove, workspace list/create/launch/stop/archive/activate, and settings get/set/reset for GUI shortcuts.
 
@@ -21,6 +22,21 @@
 - Added CLI subcommands for projects/workspaces plus settings for hotkey customization.
 
 ## Remaining
-- Periodic status check runner (honor interval/timeout) plus on-exit actions.
-- Coding agent detection with idle/busy state tracking.
-- Window reconciliation on app restart (re-scan existing windows and map to workspaces).
+- Dependency/permission onboarding (detect missing `yabai` or macOS accessibility permissions and guide the user).
+- Periodic status check runner (honor interval/timeout) plus on-exit actions, with GUI status updates.
+- Coding agent detection with idle/busy state tracking and notifications for idle/exited events.
+- Window reconciliation on app restart and possibly also when starting to loop through windows of a workspace (re-scan existing windows, match browser sessions, and map them to workspaces).
+
+## Polish
+- Auto-update system (Sparkle) with signed releases and staged rollouts.
+- Crash reporting + opt-in analytics, plus a diagnostics export (logs, db schema version, config summary).
+- Structured logging with log levels and rotating files.
+- Accessibility pass (VoiceOver, keyboard navigation, focus order, contrast checks).
+- Localization scaffolding (even if only en-US ships initially).
+- Preferences UI for editor selection, port range, hotkeys, and default behaviors.
+- Data migration strategy for DB schema changes (beyond rebuild if/when persistence matters).
+- Backup/restore for config + workspace settings.
+- Code signing, notarization, and hardened runtime checks in CI.
+- Performance/energy budget for background polling (status checks, agent idle detection).
+- Security review for shell command execution and AppleScript boundaries.
+- App health view (dependency status, permissions, last run errors).

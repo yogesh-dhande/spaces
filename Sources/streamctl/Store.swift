@@ -3,7 +3,7 @@ import SQLite3
 
 public final class SQLiteStore {
     private let db: OpaquePointer
-    private let schemaVersion = 3
+    private let schemaVersion = 4
 
     public init(path: String) throws {
         var handle: OpaquePointer?
@@ -72,6 +72,20 @@ public final class SQLiteStore {
     public func deleteProject(id: String) throws {
         try execute(
             sql: "DELETE FROM windows WHERE workspace_id IN (SELECT id FROM workspaces WHERE project_id = ?)",
+            bindings: [id])
+        try execute(
+            sql: "DELETE FROM workspace_settings WHERE workspace_id IN (SELECT id FROM workspaces WHERE project_id = ?)",
+            bindings: [id])
+        try execute(
+            sql: "DELETE FROM workspace_processes WHERE workspace_id IN (SELECT id FROM workspaces WHERE project_id = ?)",
+            bindings: [id])
+        try execute(
+            sql:
+                "DELETE FROM workspace_status_checks WHERE workspace_id IN (SELECT id FROM workspaces WHERE project_id = ?)",
+            bindings: [id])
+        try execute(
+            sql:
+                "DELETE FROM workspace_browser_sessions WHERE workspace_id IN (SELECT id FROM workspaces WHERE project_id = ?)",
             bindings: [id])
         try execute(
             sql:
@@ -158,6 +172,10 @@ public final class SQLiteStore {
 
     public func deleteWorkspace(id: String) throws {
         try execute(sql: "DELETE FROM windows WHERE workspace_id = ?", bindings: [id])
+        try execute(sql: "DELETE FROM workspace_settings WHERE workspace_id = ?", bindings: [id])
+        try execute(sql: "DELETE FROM workspace_processes WHERE workspace_id = ?", bindings: [id])
+        try execute(sql: "DELETE FROM workspace_status_checks WHERE workspace_id = ?", bindings: [id])
+        try execute(sql: "DELETE FROM workspace_browser_sessions WHERE workspace_id = ?", bindings: [id])
         try execute(
             sql:
                 "DELETE FROM status_results WHERE process_id IN (SELECT id FROM running_processes WHERE workspace_id = ?)",
@@ -201,6 +219,138 @@ public final class SQLiteStore {
             bindings: [workspaceID]
         )
         return rows.compactMap { Int($0.first ?? "") }
+    }
+
+    public func setWorkspaceProcesses(workspaceID: String, processes: [ProcessTemplate]) throws {
+        try execute(sql: "DELETE FROM workspace_processes WHERE workspace_id = ?", bindings: [workspaceID])
+        for (index, process) in processes.enumerated() {
+            try execute(
+                sql: """
+                    INSERT INTO workspace_processes(id, workspace_id, name, command, order_index)
+                    VALUES (?, ?, ?, ?, ?)
+                    """,
+                bindings: [
+                    UUID().uuidString,
+                    workspaceID,
+                    process.name ?? "",
+                    process.command,
+                    String(index),
+                ]
+            )
+        }
+    }
+
+    public func workspaceProcesses(workspaceID: String) throws -> [ProcessTemplate] {
+        let rows = try queryRows(
+            sql: """
+                SELECT name, command
+                FROM workspace_processes
+                WHERE workspace_id = ?
+                ORDER BY order_index
+                """,
+            bindings: [workspaceID]
+        )
+        return rows.map { row in
+            let name = row[0].isEmpty ? nil : row[0]
+            return ProcessTemplate(name: name, command: row[1])
+        }
+    }
+
+    public func setWorkspaceStatusChecks(workspaceID: String, checks: [StatusCheckDefinition]) throws {
+        try execute(sql: "DELETE FROM workspace_status_checks WHERE workspace_id = ?", bindings: [workspaceID])
+        for (index, check) in checks.enumerated() {
+            try execute(
+                sql: """
+                    INSERT INTO workspace_status_checks(id, workspace_id, name, process, command, interval, timeout, on_exit, order_index)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                bindings: [
+                    UUID().uuidString,
+                    workspaceID,
+                    check.name ?? "",
+                    check.process,
+                    check.command,
+                    String(check.interval),
+                    String(check.timeout),
+                    check.onExit.rawValue,
+                    String(index),
+                ]
+            )
+        }
+    }
+
+    public func workspaceStatusChecks(workspaceID: String) throws -> [StatusCheckDefinition] {
+        let rows = try queryRows(
+            sql: """
+                SELECT name, process, command, interval, timeout, on_exit
+                FROM workspace_status_checks
+                WHERE workspace_id = ?
+                ORDER BY order_index
+                """,
+            bindings: [workspaceID]
+        )
+        return rows.map { row in
+            StatusCheckDefinition(
+                name: row[0].isEmpty ? nil : row[0],
+                process: row[1],
+                command: row[2],
+                interval: Int(row[3]) ?? 60,
+                timeout: Int(row[4]) ?? 5,
+                onExit: StatusCheckOnExit(rawValue: row[5]) ?? .none
+            )
+        }
+    }
+
+    public func setWorkspaceBrowserSessions(workspaceID: String, sessions: [BrowserSession]) throws {
+        try execute(sql: "DELETE FROM workspace_browser_sessions WHERE workspace_id = ?", bindings: [workspaceID])
+        for (index, session) in sessions.enumerated() {
+            try execute(
+                sql: """
+                    INSERT INTO workspace_browser_sessions(id, workspace_id, url, order_index)
+                    VALUES (?, ?, ?, ?)
+                    """,
+                bindings: [
+                    UUID().uuidString,
+                    workspaceID,
+                    session.url ?? "",
+                    String(index),
+                ]
+            )
+        }
+    }
+
+    public func workspaceSettingsExists(workspaceID: String) throws -> Bool {
+        let rows = try queryRows(
+            sql: "SELECT workspace_id FROM workspace_settings WHERE workspace_id = ?",
+            bindings: [workspaceID]
+        )
+        return !rows.isEmpty
+    }
+
+    public func touchWorkspaceSettings(workspaceID: String, updatedAt: String) throws {
+        try execute(
+            sql: """
+                INSERT INTO workspace_settings(workspace_id, updated_at)
+                VALUES (?, ?)
+                ON CONFLICT(workspace_id) DO UPDATE SET updated_at = excluded.updated_at
+                """,
+            bindings: [workspaceID, updatedAt]
+        )
+    }
+
+    public func workspaceBrowserSessions(workspaceID: String) throws -> [BrowserSession] {
+        let rows = try queryRows(
+            sql: """
+                SELECT url
+                FROM workspace_browser_sessions
+                WHERE workspace_id = ?
+                ORDER BY order_index
+                """,
+            bindings: [workspaceID]
+        )
+        return rows.map { row in
+            BrowserSession(url: row[0].isEmpty ? nil : row[0])
+        }
     }
 
     public func releaseWorkspacePorts(workspaceID: String) throws {
@@ -251,6 +401,11 @@ public final class SQLiteStore {
             bindings: [workspaceID]
         )
         return rows.compactMap { decodeRunningProcess(row: $0) }
+    }
+
+    public func deleteRunningProcess(id: String) throws {
+        try execute(sql: "DELETE FROM status_results WHERE process_id = ?", bindings: [id])
+        try execute(sql: "DELETE FROM running_processes WHERE id = ?", bindings: [id])
     }
 
     public func deleteRunningProcesses(workspaceID: String) throws {
@@ -343,6 +498,10 @@ public final class SQLiteStore {
         try execute(sql: "DELETE FROM windows WHERE workspace_id = ?", bindings: [workspaceID])
     }
 
+    public func deleteWindow(id: String) throws {
+        try execute(sql: "DELETE FROM windows WHERE id = ?", bindings: [id])
+    }
+
     public func setting(key: String) throws -> String? {
         let rows = try queryRows(sql: "SELECT value FROM settings WHERE key = ?", bindings: [key])
         guard let value = rows.first?.first else { return nil }
@@ -370,6 +529,10 @@ public final class SQLiteStore {
             sql: """
                 DROP TABLE IF EXISTS status_results;
                 DROP TABLE IF EXISTS running_processes;
+                DROP TABLE IF EXISTS workspace_browser_sessions;
+                DROP TABLE IF EXISTS workspace_status_checks;
+                DROP TABLE IF EXISTS workspace_processes;
+                DROP TABLE IF EXISTS workspace_settings;
                 DROP TABLE IF EXISTS workspace_ports;
                 DROP TABLE IF EXISTS windows;
                 DROP TABLE IF EXISTS workspaces;
@@ -420,6 +583,38 @@ public final class SQLiteStore {
               port_index INTEGER NOT NULL,
               port_number INTEGER NOT NULL,
               PRIMARY KEY (workspace_id, port_index)
+            );
+
+            CREATE TABLE IF NOT EXISTS workspace_settings (
+              workspace_id TEXT PRIMARY KEY,
+              updated_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS workspace_processes (
+              id TEXT PRIMARY KEY,
+              workspace_id TEXT NOT NULL,
+              name TEXT,
+              command TEXT NOT NULL,
+              order_index INTEGER NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS workspace_status_checks (
+              id TEXT PRIMARY KEY,
+              workspace_id TEXT NOT NULL,
+              name TEXT,
+              process TEXT NOT NULL,
+              command TEXT NOT NULL,
+              interval INTEGER NOT NULL,
+              timeout INTEGER NOT NULL,
+              on_exit TEXT NOT NULL,
+              order_index INTEGER NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS workspace_browser_sessions (
+              id TEXT PRIMARY KEY,
+              workspace_id TEXT NOT NULL,
+              url TEXT,
+              order_index INTEGER NOT NULL
             );
 
             CREATE TABLE IF NOT EXISTS running_processes (

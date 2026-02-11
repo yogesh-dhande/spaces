@@ -1,11 +1,12 @@
 # Architecture
 
 ## Overview
-`agentmux` is a macOS Swift app for stream-based workspace orchestration. A stream is a captured set of windows tied to a workspace. YAML is the source of truth for configuration, while SQLite is an ephemeral runtime cache that can be rebuilt when the schema changes.
+`agentmux` is a macOS Swift app for stream-based workspace orchestration. A stream is a captured set of windows tied to a workspace. YAML is the source of truth for global settings and project templates, while SQLite stores runtime state plus per-workspace settings that are not written back to YAML.
 
 Key invariants:
-- YAML config is the source of truth and is normalized on load.
-- SQLite stores runtime state and can be recreated when the schema version changes.
+- YAML config is the source of truth for global settings and project templates and is normalized on load.
+- Workspace settings are stored in SQLite and seeded from project templates; no YAML workspace overrides exist.
+- SQLite stores runtime state and can be recreated when the schema version changes (workspace settings are re-seeded from templates).
 - yabai is the source of truth for window IDs and focus.
 - Stream capture must happen before a stream is shown or focused.
 - Avoid window-level automation outside yabai.
@@ -43,14 +44,24 @@ Config file:
 - Top-level fields: `editor`, `port_range`, `projects`.
 - Project fields: `dir`, `setup_script`, `cleanup_script`, `processes`, `status_checks`, `browser_sessions`.
 
+Workspace settings:
+- Each workspace snapshots project `processes`, `status_checks`, and `browser_sessions` at creation.
+- Snapshots are stored in the runtime DB alongside other workspace data.
+- Edits are stored in SQLite only; YAML remains unchanged.
+- Edits to a running workspace reconcile processes and browser sessions immediately.
+
 Runtime database:
 - Path: `~/.agentmux/agentmux.db`.
-- Schema is recreated when `schema_version` changes.
+- Schema is recreated when `schema_version` changes; workspace settings are re-seeded from project templates as needed.
 
 ```mermaid
 erDiagram
   projects ||--o{ workspaces : has
   workspaces ||--o{ workspace_ports : allocates
+  workspaces ||--o{ workspace_settings : config
+  workspaces ||--o{ workspace_processes : overrides
+  workspaces ||--o{ workspace_status_checks : overrides
+  workspaces ||--o{ workspace_browser_sessions : overrides
   workspaces ||--o{ running_processes : runs
   running_processes ||--o{ status_results : checks
   workspaces ||--o{ windows : captures
@@ -80,6 +91,38 @@ erDiagram
     TEXT workspace_id PK
     INTEGER port_index PK
     INTEGER port_number
+  }
+
+  workspace_settings {
+    TEXT workspace_id PK
+    TEXT updated_at
+  }
+
+  workspace_processes {
+    TEXT id PK
+    TEXT workspace_id
+    TEXT name
+    TEXT command
+    INTEGER order_index
+  }
+
+  workspace_status_checks {
+    TEXT id PK
+    TEXT workspace_id
+    TEXT name
+    TEXT process
+    TEXT command
+    INTEGER interval
+    INTEGER timeout
+    TEXT on_exit
+    INTEGER order_index
+  }
+
+  workspace_browser_sessions {
+    TEXT id PK
+    TEXT workspace_id
+    TEXT url
+    INTEGER order_index
   }
 
   running_processes {

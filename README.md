@@ -46,6 +46,9 @@ projects:
       - url: http://localhost:$PORT0
 ```
 
+Workspaces snapshot project processes, status checks, and browser sessions at creation time into the runtime DB.
+Updates to workspace settings apply immediately when the workspace is running (new processes start, changed commands restart, and new browser sessions open).
+
 ## GUI
 - Two panes: projects/workspaces on the left, details on the right.
 - No dialogs for add/edit; all forms are in the right pane.
@@ -54,6 +57,7 @@ projects:
   - Processes and status
   - Windows list with shortcut hints
   - Env vars/ports tab
+  - Workspace settings tab
 
 Hotkeys:
 - Global focus: `cmd+shift+=`

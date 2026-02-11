@@ -26,10 +26,14 @@
     - supported browsers: chrome
     - supported terminals: iTerm2
 - Models and data
-    - YAML is the source of truth for configuration.
-        - User specified data is stored in a YAML config file so it can be easily shared
-    - SQLite is ephemeral runtime state and may be rebuilt on startup.
-        - Internal app data (running processes, window identifiers,  is stored in a local sqlite3 db
+    - Configuration sources
+        - YAML is the source of truth for global preferences and project templates.
+            - User specified project data is stored in a YAML config file so it can be easily shared
+            - Project templates include processes, status checks, and browser sessions
+        - SQLite stores workspace state and per-workspace settings overrides.
+            - Workspace settings are seeded from project templates on creation or when missing
+            - Workspace edits are not written back to YAML
+            - Schema changes rebuild the DB; missing workspace settings are re-seeded from project templates
     - User preferences
         - editor: enum - None, VS Code, Cursor, Windsurf, Vim - if specified, used to open an editor at workspace launch
     - Project
@@ -51,7 +55,8 @@
             - project: Project
             - command: terminal command to run. can use service port identifiers to set port env vars
         - behavior
-            - stored in yaml config
+            - Project templates stored in yaml config
+            - Workspace copies stored in db and editable per workspace
             - types or use cases
                 - web server
                 - task queue
@@ -71,7 +76,8 @@
             - timeout: int, seconds after which check command is marked as failed
             - on exit: enum, do nothing | restart process | notify
         - behavior
-            - stored in yaml config
+            - Project templates stored in yaml config
+            - Workspace copies stored in db and editable per workspace
             - these checks run at specified intervals and update the status indicator (green, red) in the GUI
             - each running process can have multiple status indicators e.g. when the command starts several docker services and the status check is run for multiple services defined in the docker compose file
     - Status
@@ -83,7 +89,8 @@
             - project: Project
             - url: optional[str], if specified, used to open a browser at workspace launch
         - behavior
-            - stored in yaml config
+            - Project templates stored in yaml config
+            - Workspace copies stored in db and editable per workspace
             - the url should be specified using port vars made available to the workspace e.g. $PORT0 through $PORT10. at runtime, it is decoded based on the actual values of these variables
             - user can add multiple browser sessions to each project, each will be opened a new window when the workspace is launched e.g. localhost:3000, localhost:3000/blog
     - Workspace
@@ -101,14 +108,19 @@
                 - create a git worktree and use its path as workspace directory. all commands will be run from this path
                 - worktrees should be stored in /users/<username>/agentmux/workspaces/<projectname>/<dirname>
                 - run the setup script defined by the project once
+                - snapshot project processes, status checks, and browser sessions into workspace settings in the db
                 - each workspace gets 10 open ports reserved so any processes run as part of the workspace can use them
                     - Ports remain reserved for a workspace until it is stopped.
                     - Ports are allocated from a configurable base range (e.g. 20000–30000), tracked in db
                     - Ports remain reserved for a workspace until it is archived
             - when launched
-                - start processes defined by the project in their own terminal windows. keep track of these windows so they can be focused later when lopping this this workspace’s windows
-                - ensure that browser tabs for the browser sessions defined for the project are open, and if not, open them. keep track of them so they can be focused later when lopping this this workspace’s windows
+                - start processes defined by the workspace in their own terminal windows. keep track of these windows so they can be focused later when lopping this this workspace’s windows
+                - ensure that browser tabs for the browser sessions defined for the workspace are open, and if not, open them. keep track of them so they can be focused later when lopping this this workspace’s windows
                 - open the workspace dir in user’s preferred editor
+            - when updated while running
+                - start newly added processes in new terminals
+                - restart processes whose commands change in the same terminal window
+                - open newly added browser sessions immediately
             - when stopped
                 - stop any processes running in this workspace
                 - close any windows or tabs open for this workspace (terminals, browsers, editor)
@@ -152,6 +164,7 @@
         - User optionally sets up status checks for processes
         - User optionally sets up browser sessions
             - These are used to open/track browser window tabs pointing to the specified url (start of url must match what is specified by the user)
+        - User can edit workspace settings later; changes are stored in the db and applied immediately if the workspace is running
     - When creating a non-default workspace
         - agentmux creates a git worktree. agentmux first checks if the specified branch exists locally or remote. If neither, creates a new branch with that name.
     - When launching a workspace
@@ -161,8 +174,8 @@
             - $agentmux_PROJECT_DIR
             - $agentmux_WORKSPACE_DIR
             - $agentmux_<PROJECT_NAME>_<WORKSPACE_NAME>_WORKSPACE_DIR - these can be used to start and run related services that may be defined in other projects e.g. if backend and frontend are  in a separate repos
-        - run processes in terminal windows based on process templates defined in the project
-        - open browser window/tabs for browser sessions
+        - run processes in terminal windows based on process templates defined in the workspace
+        - open browser window/tabs for browser sessions defined in the workspace
         - agentmux keeps track of all windows belonging to each workspace so users can easily loop through them (focus them one by one by using keyboard shortcuts)
 - GUI
     - Layout
@@ -172,7 +185,7 @@
             - right pane for details about selected item
                 - when project is selected - show details about the project, allow editing details, deleting etc
                 - when a workspace is selected - show details about the workspace, allow editing, deleting etc
-                    - 2 tabs
+                    - 3 tabs
                         - first (default visible) tab for running details
                             - buttons to launch, stop, archive
                             - Show running processes and status (based on status checks)
@@ -181,6 +194,8 @@
                                 - show titles and application name
                         - second
                             - Show values of env vars related to ports, workspace set for processes (in a separate tab to avoid clutter in main tab)
+                        - third
+                            - Workspace settings for processes, status checks, and browser sessions
     - Do not open dialogs when showing forms (e.g. adding a project or worktree, or updating keybindings). Prefer to show them in the existing window (right pane) by replacing content of the main pane like in a web app. This is done for UX since it is easy to lose track of open dialogs.
     - Keyboard shortcuts
         - User can override default keybindings
