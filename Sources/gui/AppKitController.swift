@@ -4,8 +4,11 @@ import Foundation
 import streamctl
 
 @MainActor
-public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineViewDataSource, NSOutlineViewDelegate {
+public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineViewDataSource, NSOutlineViewDelegate,
+    NSSplitViewDelegate, NSWindowDelegate
+{
     private var window: NSWindow!
+    private var splitView: NSSplitView?
     private let outlineView = NSOutlineView()
     private let detailContainer = NSView()
 
@@ -28,6 +31,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     private var activateShortcutSpec: HotkeySpec?
 
     private var configCache: AppConfig?
+    private let defaultSplitViewWidth: CGFloat = 360
+    private var isApplyingSplitViewWidth = false
+    private var hasAppliedSplitViewWidth = false
 
     private lazy var hotkeyHandlerProc: EventHandlerUPP = { _, event, userData in
         guard let userData else { return noErr }
@@ -84,19 +90,22 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             contentRect: rect, styleMask: [.titled, .resizable, .closable], backing: .buffered, defer: false)
         window.title = "agentmux"
         window.center()
+        window.delegate = self
 
         let splitView = NSSplitView()
         splitView.dividerStyle = .thin
         splitView.isVertical = true
         splitView.translatesAutoresizingMaskIntoConstraints = false
+        splitView.delegate = self
+        self.splitView = splitView
 
         let leftPane = makeLeftPane()
         let rightPane = makeRightPane()
 
         splitView.addArrangedSubview(leftPane)
         splitView.addArrangedSubview(rightPane)
-        splitView.setPosition(320, ofDividerAt: 0)
-
+        splitView.setHoldingPriority(.defaultHigh, forSubviewAt: 0)
+        splitView.setHoldingPriority(.defaultLow, forSubviewAt: 1)
         let content = NSView()
         content.addSubview(splitView)
         NSLayoutConstraint.activate([
@@ -113,24 +122,13 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let container = NSView()
         container.translatesAutoresizingMaskIntoConstraints = false
 
-        let header = NSStackView()
-        header.orientation = .horizontal
-        header.alignment = .centerY
-        header.spacing = 8
-        header.translatesAutoresizingMaskIntoConstraints = false
-
-        let title = NSTextField(labelWithString: "Projects")
-        title.font = .systemFont(ofSize: 14, weight: .semibold)
-
-        let addButton = actionButton(
-            title: "Add Project", symbol: "plus", tooltip: "Add project", action: #selector(addProject), primary: false)
-
-        let reloadButton = iconButton(symbol: "arrow.clockwise", tooltip: "Reload", action: #selector(reloadTapped))
-
-        header.addArrangedSubview(title)
-        header.addArrangedSubview(NSView())
-        header.addArrangedSubview(reloadButton)
-        header.addArrangedSubview(addButton)
+        let sectionHeader = sidebarSectionHeader(
+            title: "Projects",
+            actions: [
+                (symbol: "plus", tooltip: "New project (⇧⌘N)", action: #selector(addProject)),
+                (symbol: "arrow.clockwise", tooltip: "Reload (⌘R)", action: #selector(reloadTapped)),
+            ]
+        )
 
         let scroll = NSScrollView()
         scroll.translatesAutoresizingMaskIntoConstraints = false
@@ -141,24 +139,24 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         outlineView.addTableColumn(column)
         outlineView.outlineTableColumn = column
         outlineView.headerView = nil
-        outlineView.rowSizeStyle = .default
+        outlineView.rowSizeStyle = .medium
         outlineView.delegate = self
         outlineView.dataSource = self
         outlineView.selectionHighlightStyle = .regular
 
         scroll.documentView = outlineView
 
-        container.addSubview(header)
+        container.addSubview(sectionHeader)
         container.addSubview(scroll)
 
         NSLayoutConstraint.activate([
-            header.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 12),
-            header.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -12),
-            header.topAnchor.constraint(equalTo: container.topAnchor, constant: 12),
+            sectionHeader.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 12),
+            sectionHeader.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -12),
+            sectionHeader.topAnchor.constraint(equalTo: container.topAnchor, constant: 12),
 
             scroll.leadingAnchor.constraint(equalTo: container.leadingAnchor),
             scroll.trailingAnchor.constraint(equalTo: container.trailingAnchor),
-            scroll.topAnchor.constraint(equalTo: header.bottomAnchor, constant: 8),
+            scroll.topAnchor.constraint(equalTo: sectionHeader.bottomAnchor, constant: 6),
             scroll.bottomAnchor.constraint(equalTo: container.bottomAnchor),
         ])
 
@@ -702,6 +700,43 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         return stack
     }
 
+    private func sidebarSectionHeader(
+        title: String,
+        actions: [(symbol: String, tooltip: String, action: Selector)]
+    ) -> NSView {
+        let stack = NSStackView()
+        stack.orientation = .horizontal
+        stack.alignment = .centerY
+        stack.spacing = 8
+        stack.translatesAutoresizingMaskIntoConstraints = false
+
+        let label = NSTextField(labelWithString: title)
+        label.font = .systemFont(ofSize: 11, weight: .semibold)
+        label.textColor = .secondaryLabelColor
+
+        stack.addArrangedSubview(label)
+        stack.addArrangedSubview(NSView())
+        for action in actions {
+            stack.addArrangedSubview(
+                sidebarRowIconButton(symbol: action.symbol, tooltip: action.tooltip, action: action.action)
+            )
+        }
+
+        return stack
+    }
+
+    private func sidebarRowIconButton(symbol: String, tooltip: String, action: Selector) -> NSButton {
+        let button = NSButton(title: "", target: self, action: action)
+        button.isBordered = false
+        button.image = NSImage(
+            systemSymbolName: symbol,
+            accessibilityDescription: tooltip
+        )?.withSymbolConfiguration(.init(pointSize: 12, weight: .semibold))
+        button.contentTintColor = .secondaryLabelColor
+        button.toolTip = tooltip
+        return button
+    }
+
     private func iconButton(symbol: String, tooltip: String, action: Selector) -> NSButton {
         let button = NSButton(title: "", target: self, action: action)
         button.bezelStyle = .texturedRounded
@@ -1118,10 +1153,30 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         shortcutMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
             guard let self else { return event }
             if event.modifierFlags.contains(.command),
+                event.modifierFlags.contains(.shift),
+                !event.modifierFlags.contains(.option),
+                !event.modifierFlags.contains(.control),
+                event.charactersIgnoringModifiers?.lowercased() == "n"
+            {
+                self.addProject()
+                return nil
+            }
+            if event.modifierFlags.contains(.command),
                 !event.modifierFlags.contains(.shift),
+                !event.modifierFlags.contains(.option),
+                !event.modifierFlags.contains(.control),
                 event.charactersIgnoringModifiers?.lowercased() == "n"
             {
                 self.addWorkspaceFromShortcut()
+                return nil
+            }
+            if event.modifierFlags.contains(.command),
+                !event.modifierFlags.contains(.shift),
+                !event.modifierFlags.contains(.option),
+                !event.modifierFlags.contains(.control),
+                event.charactersIgnoringModifiers?.lowercased() == "r"
+            {
+                self.reloadData()
                 return nil
             }
             if let windowIndex = windowShortcutIndex(for: event) {
@@ -1339,21 +1394,37 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         icon.translatesAutoresizingMaskIntoConstraints = false
         let text = NSTextField(labelWithString: "")
         text.translatesAutoresizingMaskIntoConstraints = false
+        let accessoryStack = NSStackView()
+        accessoryStack.orientation = .horizontal
+        accessoryStack.alignment = .centerY
+        accessoryStack.spacing = 4
+        accessoryStack.translatesAutoresizingMaskIntoConstraints = false
+        accessoryStack.setContentHuggingPriority(.required, for: .horizontal)
         cell.addSubview(text)
         cell.addSubview(icon)
+        cell.addSubview(accessoryStack)
         NSLayoutConstraint.activate([
             icon.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 6),
             icon.centerYAnchor.constraint(equalTo: cell.centerYAnchor),
             icon.widthAnchor.constraint(equalToConstant: 10),
             icon.heightAnchor.constraint(equalToConstant: 10),
             text.leadingAnchor.constraint(equalTo: icon.trailingAnchor, constant: 6),
-            text.trailingAnchor.constraint(equalTo: cell.trailingAnchor, constant: -6),
+            text.trailingAnchor.constraint(lessThanOrEqualTo: accessoryStack.leadingAnchor, constant: -6),
             text.centerYAnchor.constraint(equalTo: cell.centerYAnchor),
+            accessoryStack.trailingAnchor.constraint(equalTo: cell.trailingAnchor, constant: -6),
+            accessoryStack.centerYAnchor.constraint(equalTo: cell.centerYAnchor),
         ])
         if case .project(let project) = item as? OutlineItem {
             icon.image = nil
             text.stringValue = project.name
             text.font = .systemFont(ofSize: 13, weight: .semibold)
+            let addButton = sidebarRowIconButton(
+                symbol: "plus",
+                tooltip: "New workspace in \(project.name)",
+                action: #selector(addWorkspace(_:))
+            )
+            addButton.identifier = NSUserInterfaceItemIdentifier(project.id)
+            accessoryStack.addArrangedSubview(addButton)
         } else if case .workspace(_, let workspace) = item as? OutlineItem {
             icon.image = NSImage(
                 systemSymbolName: workspace.isRunning ? "circle.fill" : "circle", accessibilityDescription: "Status")
@@ -1401,6 +1472,32 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             selectedWorkspaceID = workspace.id
             showWorkspaceDetail(project: project, workspace: workspace)
         }
+    }
+
+    public func splitViewDidResizeSubviews(_ notification: Notification) {}
+
+    public func splitView(_ splitView: NSSplitView, shouldAdjustSizeOfSubview view: NSView) -> Bool {
+        guard let first = splitView.subviews.first else { return true }
+        return view !== first
+    }
+
+    public func splitView(_ splitView: NSSplitView, resizeSubviewsWithOldSize oldSize: NSSize) {
+        guard splitView.subviews.count == 2 else {
+            splitView.adjustSubviews()
+            return
+        }
+        let divider = splitView.dividerThickness
+        let bounds = splitView.bounds
+        let left = splitView.subviews[0]
+        let right = splitView.subviews[1]
+
+        let preferredWidth = left.frame.width > 0 ? left.frame.width : defaultSplitViewWidth
+        let maxLeftWidth = max(0, bounds.width - divider)
+        let leftWidth = min(preferredWidth, maxLeftWidth)
+
+        left.frame = NSRect(x: 0, y: 0, width: leftWidth, height: bounds.height)
+        let rightX = leftWidth + divider
+        right.frame = NSRect(x: rightX, y: 0, width: max(0, bounds.width - rightX), height: bounds.height)
     }
 
     private func registerDirtyTracking(
@@ -1472,6 +1569,23 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             return saveCurrentWorkspace()
         }
         return saveCurrentProject()
+    }
+
+    private func applySplitViewWidth() {
+        guard let splitView else { return }
+        isApplyingSplitViewWidth = true
+        splitView.layoutSubtreeIfNeeded()
+        splitView.setPosition(defaultSplitViewWidth, ofDividerAt: 0)
+        Task { @MainActor in
+            await Task.yield()
+            self.isApplyingSplitViewWidth = false
+        }
+    }
+
+    public func windowDidBecomeKey(_ notification: Notification) {
+        guard !hasAppliedSplitViewWidth else { return }
+        hasAppliedSplitViewWidth = true
+        applySplitViewWidth()
     }
 
     private func saveCurrentWorkspace() -> Bool {
