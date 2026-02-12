@@ -17,7 +17,7 @@
 
 - Clarify and fix behavior when workspace is considered as "running" but some processes or windows are not open or not tracked or closed by the user. Should launch button them bring them back to life? Should we hide the launch button and show a "restart" button to clarify the action?
 - When a workspace is stopped, ensure that we stop the processes before closing the respective terminal windows to avoid any orphaned and untracked processes.
-- Left panel should show folder name for workspaces (and branch name next to it)
+- Left panel should show the workspace name (and branch name next to it)
 
 
 - Move status checks below the processes. Can we nest them under the process they apply to so we don't need to input which process they apply to when creating.
