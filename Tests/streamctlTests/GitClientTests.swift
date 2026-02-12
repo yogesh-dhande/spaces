@@ -62,6 +62,47 @@ final class GitClientTests: XCTestCase {
         XCTAssertEqual(branch, "remote-feature")
     }
 
+    func testCreateWorktreeWhenBranchExistsOnlyOnRemoteWithoutLocalTrackingRef() throws {
+        let fixture = try makeRemoteFixture()
+        try runGit(["checkout", "-b", "new-remote-only"], cwd: fixture.source.path)
+        try "new remote".write(
+            to: fixture.source.appending(path: "NEW_REMOTE_FOR_WORKTREE.md"),
+            atomically: true,
+            encoding: .utf8
+        )
+        try runGit(["add", "NEW_REMOTE_FOR_WORKTREE.md"], cwd: fixture.source.path)
+        try runGit(
+            ["-c", "user.name=agentmux-test", "-c", "user.email=test@example.com", "commit", "-m", "new remote worktree"],
+            cwd: fixture.source.path
+        )
+        try runGit(["push", fixture.remote.path, "new-remote-only"], cwd: fixture.source.path)
+
+        let trackedBefore = try runGit(
+            ["for-each-ref", "--format=%(refname:short)", "refs/remotes/origin/new-remote-only"],
+            cwd: fixture.clone.path
+        ).trimmingCharacters(in: .whitespacesAndNewlines)
+        XCTAssertTrue(trackedBefore.isEmpty)
+
+        let client = GitClient()
+        XCTAssertFalse(client.branchExists(path: fixture.clone.path, branch: "new-remote-only"))
+        XCTAssertTrue(client.remoteBranchExists(path: fixture.clone.path, branch: "new-remote-only"))
+
+        let worktree = fixture.root.appendingPathComponent("new-remote-only-worktree", isDirectory: true)
+        try client.createWorktree(path: fixture.clone.path, worktreePath: worktree.path, branch: "new-remote-only")
+
+        let trackedAfter = try runGit(
+            ["for-each-ref", "--format=%(refname:short)", "refs/remotes/origin/new-remote-only"],
+            cwd: fixture.clone.path
+        ).trimmingCharacters(in: .whitespacesAndNewlines)
+        XCTAssertEqual(trackedAfter, "origin/new-remote-only")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: worktree.path))
+        XCTAssertTrue(client.branchExists(path: fixture.clone.path, branch: "new-remote-only"))
+        let branch = try runGit(["rev-parse", "--abbrev-ref", "HEAD"], cwd: worktree.path).trimmingCharacters(
+            in: .whitespacesAndNewlines
+        )
+        XCTAssertEqual(branch, "new-remote-only")
+    }
+
     func testCreateAndRemoveWorktreeForNewBranch() throws {
         let root = try makeTempDirectory()
         let repo = root.appendingPathComponent("repo", isDirectory: true)
@@ -104,6 +145,49 @@ final class GitClientTests: XCTestCase {
             targetBranch: "develop"
         )
 
+        let featureHead = try runGit(["rev-parse", "HEAD"], cwd: worktree.path).trimmingCharacters(
+            in: .whitespacesAndNewlines
+        )
+        XCTAssertEqual(featureHead, expectedHead)
+    }
+
+    func testCreateWorktreeForNewBranchUsesRemoteTargetBranchWithoutLocalTrackingRef() throws {
+        let fixture = try makeRemoteFixture()
+        try runGit(["checkout", "-b", "new-remote-target"], cwd: fixture.source.path)
+        try "target".write(
+            to: fixture.source.appending(path: "NEW_REMOTE_TARGET.md"),
+            atomically: true,
+            encoding: .utf8
+        )
+        try runGit(["add", "NEW_REMOTE_TARGET.md"], cwd: fixture.source.path)
+        try runGit(
+            ["-c", "user.name=agentmux-test", "-c", "user.email=test@example.com", "commit", "-m", "remote target"],
+            cwd: fixture.source.path
+        )
+        try runGit(["push", fixture.remote.path, "new-remote-target"], cwd: fixture.source.path)
+
+        let expectedHead = try runGit(["rev-parse", "new-remote-target"], cwd: fixture.source.path).trimmingCharacters(
+            in: .whitespacesAndNewlines
+        )
+        let trackedBefore = try runGit(
+            ["for-each-ref", "--format=%(refname:short)", "refs/remotes/origin/new-remote-target"],
+            cwd: fixture.clone.path
+        ).trimmingCharacters(in: .whitespacesAndNewlines)
+        XCTAssertTrue(trackedBefore.isEmpty)
+
+        let worktree = fixture.root.appendingPathComponent("remote-target-worktree", isDirectory: true)
+        try GitClient().createWorktree(
+            path: fixture.clone.path,
+            worktreePath: worktree.path,
+            branch: "new-feature-from-remote-target",
+            targetBranch: "new-remote-target"
+        )
+
+        let trackedAfter = try runGit(
+            ["for-each-ref", "--format=%(refname:short)", "refs/remotes/origin/new-remote-target"],
+            cwd: fixture.clone.path
+        ).trimmingCharacters(in: .whitespacesAndNewlines)
+        XCTAssertEqual(trackedAfter, "origin/new-remote-target")
         let featureHead = try runGit(["rev-parse", "HEAD"], cwd: worktree.path).trimmingCharacters(
             in: .whitespacesAndNewlines
         )

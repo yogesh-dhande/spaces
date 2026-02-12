@@ -60,6 +60,8 @@ Updates to workspace settings apply immediately when the workspace is running (n
 - Branch name is required for git projects.
 - As you type branch name, workspace name is auto-populated from it by default; you can then edit workspace name to be more descriptive.
 - New branches are created from the latest commit on the selected target branch.
+- If the selected branch exists only on remote, agentmux fetches it first and then creates the worktree from `origin/<branch>`.
+- If the branch exists locally, agentmux uses the local branch as-is (no implicit pull/rebase/merge during workspace creation).
 - Workspace rows in the left pane show workspace name and a second-line branch label with a branch icon.
 - Workspace view includes:
   - Launch/Stop/Archive buttons

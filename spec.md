@@ -176,9 +176,20 @@
         - workspace name, branch, and target branch are separate values in the create form for git projects
         - target branch input is shown first for git projects
         - target branch shows a searchable list of branches and defaults to main/master when available
+            - branch options combine local branches, local `origin/*` refs, and live `git ls-remote --heads origin` results so remote-only branches are visible before a fetch
         - by default, workspace name is auto-populated from branch input until the user customizes workspace name
         - for git projects, branch is required when creating a workspace
-        - agentmux creates a git worktree. agentmux first checks if the specified branch exists locally or remote. If neither, creates a new branch with that name based on latest commit of selected target branch.
+        - agentmux creates a git worktree using this precedence for the supplied branch name:
+            - if the branch exists locally, create the worktree from the local branch as-is (no implicit pull/rebase/merge)
+            - else if the branch exists on origin, fetch that branch tip into a local remote-tracking ref and create the worktree from `origin/<branch>`
+            - else create a new branch with that name from the selected target branch tip
+        - target branch resolution for creating a new branch:
+            - if target exists on origin, fetch that target branch and use `origin/<target>`
+            - else if target exists locally, use local target branch
+            - else fail with a clear "target branch not found" error
+        - when a branch exists both locally and on origin, local branch is the source of truth for workspace creation by default
+            - rationale: avoid mutating user branches during workspace creation
+            - tradeoff: local branch may be behind remote until user syncs manually
     - When launching a workspace
         - identify and reserve 10 open ports for the workspace. pass those as env variables to each process that is started
         - each process also receives the following env vars

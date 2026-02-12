@@ -4,23 +4,17 @@
 ## Short term
 ### Core functionality
 
-- Workspaces should have a name which defaults to the auto-generated folder name when creating a new workspace but the user can change it when creating a new workspace.
-- When creating a new workspace for git projects, let users choose a target branch (default to main/master) - show a searchable list of branches. Newly created branch should be based on the latest commit of the selected target branch.
-
-
-- What happens when we create a new workspace for a git project in cases when the branch with supplied name does not exist, or exists locally, or exists remotely, or both.
-
 
 - What happens when workspace is considered as "running" but some processes or windows are not open or not tracked or closed by the user. Should launch button them bring them back to life? Should we hide the launch button and show a "restart" button to clarify the action?
 - When a workspace is stopped, ensure that we stop the processes before closing the respective terminal windows to avoid any orphaned and untracked processes.
-- Left panel should show the workspace name (and branch name under it with an icon to make it clear that it is a branch name)
+
 
 
 - In project creation form and in workspace settings form, can we nest status checks under the process they apply to so we don't need to specify which process they apply to when creating them?
 
 - Clarify what happens when workspace is archived. We should definitely stop all processes and close all windows. Should we show options to the user to (1) delete the workspace dir (default to true) (2) delete the git branch locally (default to true) (3) delete the git branch on remote (default to false)
 
-- Add a chrome profile setting to project. Use that when opening browser sessions for workspaces of that project.
+- Add a default chrome profile setting. Also add to project settings (initialize with settings default) but user can change when creating a new project or editing an existing project. Use that profile when opening browser sessions for workspaces of that project.
 
 
 ### UI fixes

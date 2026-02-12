@@ -48,6 +48,8 @@ GUI interaction notes:
 - Workspace name auto-fills from branch while untouched, and can then be edited independently.
 - For git projects, branch is required when creating a workspace.
 - Newly created branches are based on the latest commit of the selected target branch.
+- If the requested branch exists only on remote, the orchestrator fetches it into `refs/remotes/origin/*` before creating the worktree from `origin/<branch>`.
+- If the requested branch exists locally, the local branch is used as-is (no implicit pull/rebase/merge in workspace creation).
 - Workspace rows render name on the first line and branch on the second line with a branch icon.
 - Window focus shortcuts in the GUI use `cmd+1` through `cmd+9`.
 - Keyboard shortcut overrides for GUI actions are persisted in SQLite settings and editable in the GUI Settings view and CLI settings commands.

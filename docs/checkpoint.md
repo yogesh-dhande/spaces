@@ -18,6 +18,8 @@
 - Workspace name auto-fills from branch by default, and users can edit workspace name independently.
 - For git projects, branch is required when creating a workspace.
 - Newly created branches are based on the latest commit of the selected target branch.
+- When a branch exists only on remote, workspace creation fetches that branch into `origin/*` before creating the worktree.
+- When a branch exists locally, workspace creation uses local branch state as-is without implicit pull/rebase/merge.
 - Left-pane workspace rows show workspace name plus branch metadata on a second line with a branch icon.
 - Settings view in the GUI lets users pick a preferred editor from installed VS Code, Cursor, or Windsurf; the choice is stored in the YAML config.
 - Settings view in the GUI also allows overriding default shortcuts for global toggle, workspace navigation/activation, and open editor/terminal/Finder; these values are stored in the runtime DB.

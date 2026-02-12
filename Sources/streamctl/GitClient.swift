@@ -75,6 +75,7 @@ public final class GitClient {
             return
         }
         if remoteBranchExists(path: repoPath, branch: branch) {
+            try fetchRemoteBranch(path: repoPath, branch: branch)
             try runGitOrThrow(["-C", repoPath, "worktree", "add", "-b", branch, worktreePath, "origin/\(branch)"])
             return
         }
@@ -146,13 +147,19 @@ public final class GitClient {
             return nil
         }
         if remoteBranchExists(path: path, branch: targetBranch) {
-            _ = try? runGit(["-C", path, "fetch", "origin", targetBranch])
+            try fetchRemoteBranch(path: path, branch: targetBranch)
             return "origin/\(targetBranch)"
         }
         if branchExists(path: path, branch: targetBranch) {
             return targetBranch
         }
         throw AgentmuxError.invalidArgument(message: "Target branch not found: \(targetBranch)")
+    }
+
+    private func fetchRemoteBranch(path: String, branch: String) throws {
+        try runGitOrThrow([
+            "-C", path, "fetch", "origin", "refs/heads/\(branch):refs/remotes/origin/\(branch)",
+        ])
     }
 
     private func makeGitProcess(_ arguments: [String]) -> Process {
