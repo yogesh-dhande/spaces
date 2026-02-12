@@ -13,10 +13,11 @@
 - AppKit GUI is two-pane with in-place forms and editors for processes, browser sessions, and status checks; workspace detail includes run/stop/archive, windows list with shortcut hints, an env/ports tab, and workspace settings.
 - Right-pane forms are scrollable, use left-aligned full-width fields, and use text-labeled actions for create/cancel flows.
 - New workspace `+` actions in project UI are shown only for git projects.
-- New workspace forms now have separate workspace-name and branch-name inputs.
-- Branch name is shown first and starts empty.
+- New workspace forms now have separate target-branch, branch-name, and workspace-name inputs for git projects.
+- Target branch is shown first with a searchable branch list and defaults to main/master when available.
 - Workspace name auto-fills from branch by default, and users can edit workspace name independently.
 - For git projects, branch is required when creating a workspace.
+- Newly created branches are based on the latest commit of the selected target branch.
 - Left-pane workspace rows show workspace name plus branch metadata on a second line with a branch icon.
 - Settings view in the GUI lets users pick a preferred editor from installed VS Code, Cursor, or Windsurf; the choice is stored in the YAML config.
 - Settings view in the GUI also allows overriding default shortcuts for global toggle, workspace navigation/activation, and open editor/terminal/Finder; these values are stored in the runtime DB.

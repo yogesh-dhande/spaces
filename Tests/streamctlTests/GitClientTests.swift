@@ -78,6 +78,75 @@ final class GitClientTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: worktree.path))
     }
 
+    func testCreateWorktreeForNewBranchUsesTargetBranchHead() throws {
+        let root = try makeTempDirectory()
+        let repo = root.appendingPathComponent("repo", isDirectory: true)
+        try FileManager.default.createDirectory(at: repo, withIntermediateDirectories: true)
+        try initializeGitRepository(at: repo, initialBranch: "main")
+        try runGit(["checkout", "-b", "develop"], cwd: repo.path)
+        try "target".write(to: repo.appendingPathComponent("TARGET.txt"), atomically: true, encoding: .utf8)
+        try runGit(["add", "TARGET.txt"], cwd: repo.path)
+        try runGit(
+            ["-c", "user.name=agentmux-test", "-c", "user.email=test@example.com", "commit", "-m", "target"],
+            cwd: repo.path
+        )
+        let expectedHead = try runGit(["rev-parse", "develop"], cwd: repo.path).trimmingCharacters(
+            in: .whitespacesAndNewlines
+        )
+        try runGit(["checkout", "main"], cwd: repo.path)
+
+        let worktree = root.appendingPathComponent("feature-worktree", isDirectory: true)
+        let client = GitClient()
+        try client.createWorktree(
+            path: repo.path,
+            worktreePath: worktree.path,
+            branch: "feature",
+            targetBranch: "develop"
+        )
+
+        let featureHead = try runGit(["rev-parse", "HEAD"], cwd: worktree.path).trimmingCharacters(
+            in: .whitespacesAndNewlines
+        )
+        XCTAssertEqual(featureHead, expectedHead)
+    }
+
+    func testBranchOptionsIncludeLocalAndRemoteBranches() throws {
+        let fixture = try makeRemoteFixture()
+        try runGit(["checkout", "-b", "local-only"], cwd: fixture.clone.path)
+        try runGit(["checkout", "main"], cwd: fixture.clone.path)
+
+        let client = GitClient()
+        let options = client.branchOptions(path: fixture.clone.path)
+
+        XCTAssertTrue(options.contains("main"))
+        XCTAssertTrue(options.contains("remote-feature"))
+        XCTAssertTrue(options.contains("local-only"))
+    }
+
+    func testBranchOptionsIncludeLiveRemoteHeadsWithoutFetch() throws {
+        let fixture = try makeRemoteFixture()
+        try runGit(["checkout", "-b", "new-remote-only"], cwd: fixture.source.path)
+        try "new remote".write(
+            to: fixture.source.appending(path: "NEW_REMOTE.md"),
+            atomically: true,
+            encoding: .utf8
+        )
+        try runGit(["add", "NEW_REMOTE.md"], cwd: fixture.source.path)
+        try runGit(
+            ["-c", "user.name=agentmux-test", "-c", "user.email=test@example.com", "commit", "-m", "new remote"],
+            cwd: fixture.source.path
+        )
+        try runGit(["push", fixture.remote.path, "new-remote-only"], cwd: fixture.source.path)
+        XCTAssertFalse(
+            GitClient().branchExists(path: fixture.clone.path, branch: "new-remote-only"),
+            "Local branch should not exist before fetch."
+        )
+
+        let options = GitClient().branchOptions(path: fixture.clone.path)
+
+        XCTAssertTrue(options.contains("new-remote-only"))
+    }
+
     func testCloneAndDeleteBranch() throws {
         let source = try makeTempDirectory()
         try initializeGitRepository(at: source, initialBranch: "main")
@@ -107,7 +176,7 @@ final class GitClientTests: XCTestCase {
         )
     }
 
-    private func makeRemoteFixture() throws -> (root: URL, clone: URL) {
+    private func makeRemoteFixture() throws -> (root: URL, source: URL, remote: URL, clone: URL) {
         let root = try makeTempDirectory()
         let source = root.appendingPathComponent("source", isDirectory: true)
         try FileManager.default.createDirectory(at: source, withIntermediateDirectories: true)
@@ -131,7 +200,7 @@ final class GitClientTests: XCTestCase {
 
         let clone = root.appendingPathComponent("clone", isDirectory: true)
         try runGit(["clone", remote.path, clone.path], cwd: root.path)
-        return (root, clone)
+        return (root, source, remote, clone)
     }
 
     @discardableResult

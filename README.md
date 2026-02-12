@@ -54,10 +54,12 @@ Updates to workspace settings apply immediately when the workspace is running (n
 - Two panes: projects/workspaces on the left, details on the right.
 - No dialogs for add/edit; all forms are in the right pane.
 - Right-pane forms are scrollable to avoid clipping on smaller window heights.
-- New workspace form has separate inputs for workspace name and branch name.
-- Branch name is the first input and starts empty.
+- New workspace form has separate inputs for target branch, branch name, and workspace name for git projects.
+- Target branch is the first input and shows a searchable list of branches.
+- Target branch defaults to `main`/`master` when available.
+- Branch name is required for git projects.
 - As you type branch name, workspace name is auto-populated from it by default; you can then edit workspace name to be more descriptive.
-- For git projects, branch name is required when creating a workspace.
+- New branches are created from the latest commit on the selected target branch.
 - Workspace rows in the left pane show workspace name and a second-line branch label with a branch icon.
 - Workspace view includes:
   - Launch/Stop/Archive buttons
@@ -94,14 +96,14 @@ agentmux project update --dir /path/to/repo --setup-script "cp ~/.env .env"
 agentmux project remove --dir /path/to/repo
 
 agentmux workspace list --project-dir /path/to/repo --all
-agentmux workspace create --project-dir /path/to/repo --name feature-x [--branch feature-branch]
+agentmux workspace create --project-dir /path/to/repo --name feature-x [--branch feature-branch] [--target-branch main]
 agentmux workspace launch --project-dir /path/to/repo --name feature-x
 agentmux workspace stop --project-dir /path/to/repo --name feature-x
 agentmux workspace archive --project-dir /path/to/repo --name feature-x
 agentmux workspace activate --project-dir /path/to/repo --name feature-x
 ```
 
-For git projects, `workspace create` requires `--branch`.
+For git projects, `workspace create` requires `--branch`; `--target-branch` defaults to `main`/`master` when available.
 
 Project/workspace removal behavior:
 - `agentmux project remove --dir <path>` removes the project from agentmux. For git projects, it also deletes related workspace directories under `~/agentmux/workspaces`.

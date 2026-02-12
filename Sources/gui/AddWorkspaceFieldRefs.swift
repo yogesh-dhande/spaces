@@ -8,6 +8,7 @@ final class AddWorkspaceAutoNameState {
 struct AddWorkspaceFieldRefs {
     let projectID: String
     let isGitRepo: Bool
+    let targetBranchField: NSComboBox?
     let nameField: NSTextField
     let branchField: NSTextField?
     let autoNameState: AddWorkspaceAutoNameState?

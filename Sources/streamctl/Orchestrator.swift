@@ -109,6 +109,14 @@ public final class AgentmuxOrchestrator {
             message: "No available workspace names remain for project \(project.name).")
     }
 
+    public func gitBranchOptions(projectID: String) throws -> [String] {
+        guard let project = try store.project(id: projectID) else {
+            throw AgentmuxError.missingProject(dir: projectID)
+        }
+        guard project.isGitRepo else { return [] }
+        return git.branchOptions(path: project.dir)
+    }
+
     public func projectConfig(projectID: String) throws -> ProjectConfig? {
         let config = try configStore.load()
         guard let project = try store.project(id: projectID) else { return nil }
@@ -228,7 +236,12 @@ public final class AgentmuxOrchestrator {
         }
     }
 
-    public func createWorkspace(projectID: String, name: String, branch: String? = nil) throws -> WorkspaceRecord {
+    public func createWorkspace(
+        projectID: String,
+        name: String,
+        branch: String? = nil,
+        targetBranch: String? = nil
+    ) throws -> WorkspaceRecord {
         guard let project = try store.project(id: projectID) else {
             throw AgentmuxError.missingProject(dir: projectID)
         }
@@ -238,13 +251,16 @@ public final class AgentmuxOrchestrator {
         }
         let trimmedBranch = branch?.trimmingCharacters(in: .whitespacesAndNewlines)
         let resolvedBranch: String?
+        let resolvedTargetBranch: String?
         if project.isGitRepo {
             guard let trimmedBranch, !trimmedBranch.isEmpty else {
                 throw AgentmuxError.invalidArgument(message: "Branch name is required for git projects.")
             }
             resolvedBranch = trimmedBranch
+            resolvedTargetBranch = try resolveWorkspaceTargetBranch(project: project, targetBranch: targetBranch)
         } else {
             resolvedBranch = nil
+            resolvedTargetBranch = nil
         }
         if let existing = try store.workspace(projectID: projectID, name: trimmedName) {
             if !existing.isArchived {
@@ -266,7 +282,12 @@ public final class AgentmuxOrchestrator {
                 try FileManager.default.createDirectory(at: worktreeRoot, withIntermediateDirectories: true)
                 revivedDir = worktreeRoot.appendingPathComponent(dirname, isDirectory: true).path
                 if !FileManager.default.fileExists(atPath: revivedDir) {
-                    try git.createWorktree(path: project.dir, worktreePath: revivedDir, branch: branchName)
+                    try git.createWorktree(
+                        path: project.dir,
+                        worktreePath: revivedDir,
+                        branch: branchName,
+                        targetBranch: resolvedTargetBranch
+                    )
                 }
                 revivedBranch = branchName
             } else {
@@ -310,7 +331,12 @@ public final class AgentmuxOrchestrator {
             let worktreeRoot = try worktreeRoot(project: project)
             try FileManager.default.createDirectory(at: worktreeRoot, withIntermediateDirectories: true)
             workspaceDir = worktreeRoot.appendingPathComponent(dirname, isDirectory: true).path
-            try git.createWorktree(path: project.dir, worktreePath: workspaceDir, branch: branchName)
+            try git.createWorktree(
+                path: project.dir,
+                worktreePath: workspaceDir,
+                branch: branchName,
+                targetBranch: resolvedTargetBranch
+            )
             workspaceBranch = branchName
         } else {
             workspaceDir = project.dir
@@ -340,6 +366,25 @@ public final class AgentmuxOrchestrator {
         _ = try PortAllocator(store: store).allocatePorts(workspaceID: workspace.id, count: 10, range: portRange)
 
         return workspace
+    }
+
+    private func resolveWorkspaceTargetBranch(project: ProjectRecord, targetBranch: String?) throws -> String {
+        if let targetBranch = targetBranch?.trimmingCharacters(in: .whitespacesAndNewlines), !targetBranch.isEmpty {
+            return targetBranch
+        }
+        if let configured = project.defaultBranch, !configured.isEmpty {
+            return configured
+        }
+        if git.branchExists(path: project.dir, branch: "main") || git.remoteBranchExists(path: project.dir, branch: "main")
+        {
+            return "main"
+        }
+        if git.branchExists(path: project.dir, branch: "master")
+            || git.remoteBranchExists(path: project.dir, branch: "master")
+        {
+            return "master"
+        }
+        throw AgentmuxError.invalidArgument(message: "Target branch is required for git projects.")
     }
 
     public func launchWorkspace(workspaceID: String) throws {

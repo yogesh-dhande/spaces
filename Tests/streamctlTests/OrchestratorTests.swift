@@ -281,6 +281,38 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertEqual(workspace.dirname, suggested)
     }
 
+    func testCreateWorkspaceUsesSelectedTargetBranchAsBaseForNewBranch() throws {
+        let repo = try makeTempGitRepo(name: "workspace-target-branch")
+        try runGit(["checkout", "-b", "develop"], cwd: repo.path)
+        try "target".write(to: repo.appendingPathComponent("TARGET.txt"), atomically: true, encoding: .utf8)
+        try runGit(["add", "TARGET.txt"], cwd: repo.path)
+        try runGit(
+            ["-c", "user.name=agentmux-test", "-c", "user.email=test@example.com", "commit", "-m", "target"],
+            cwd: repo.path
+        )
+        try runGit(["checkout", "main"], cwd: repo.path)
+
+        let root = try makeTempDirectory()
+        let workspacesRoot = root.appendingPathComponent("workspaces", isDirectory: true)
+        let configStore = ConfigStore(path: root.appendingPathComponent("config.yaml").path)
+        let store = try makeTemporaryStore()
+        let orchestrator = AgentmuxOrchestrator(
+            store: store,
+            configStore: configStore,
+            workspacesRootDirectory: workspacesRoot
+        )
+
+        let project = try orchestrator.addProject(dir: repo.path)
+        let workspace = try orchestrator.createWorkspace(
+            projectID: project.id,
+            name: "feature-workspace",
+            branch: "feature-branch",
+            targetBranch: "develop"
+        )
+
+        XCTAssertTrue(FileManager.default.fileExists(atPath: workspace.dir + "/TARGET.txt"))
+    }
+
     func testListWorkspacesIncludesBranchMetadata() throws {
         let repo = try makeTempGitRepo(name: "workspace-branch-list")
         let root = try makeTempDirectory()

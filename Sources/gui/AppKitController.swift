@@ -609,6 +609,15 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let suggestedName = (try? orchestrator.suggestedWorkspaceName(projectID: project.id)) ?? ""
         let nameField = NSTextField(string: project.isGitRepo ? "" : suggestedName)
         nameField.placeholderString = "workspace name"
+        let targetBranchField = NSComboBox()
+        targetBranchField.usesDataSource = false
+        targetBranchField.completes = true
+        targetBranchField.numberOfVisibleItems = 10
+        let targetBranches = (try? orchestrator.gitBranchOptions(projectID: project.id)) ?? []
+        targetBranchField.addItems(withObjectValues: targetBranches)
+        if let defaultTargetBranch = defaultWorkspaceTargetBranch(project: project, branches: targetBranches) {
+            targetBranchField.stringValue = defaultTargetBranch
+        }
         let branchField = NSTextField(string: "")
         branchField.placeholderString = "branch name"
         branchField.delegate = self
@@ -632,6 +641,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
         stack.addArrangedSubview(header)
         if project.isGitRepo {
+            stack.addArrangedSubview(label(text: "Target branch"))
+            stack.addArrangedSubview(targetBranchField)
             stack.addArrangedSubview(label(text: "Branch name"))
             stack.addArrangedSubview(branchField)
             stack.addArrangedSubview(label(text: "Workspace name"))
@@ -650,6 +661,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         stack.addArrangedSubview(buttonRow)
         constrainFormFieldToFillWidth(nameField, in: stack)
         if project.isGitRepo {
+            constrainFormFieldToFillWidth(targetBranchField, in: stack)
             constrainFormFieldToFillWidth(branchField, in: stack)
         }
         constrainFormFieldToFillWidth(buttonRow, in: stack)
@@ -659,6 +671,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         createButton.tag = storeAddWorkspaceFields(
             projectID: project.id,
             isGitRepo: project.isGitRepo,
+            targetBranchField: project.isGitRepo ? targetBranchField : nil,
             nameField: nameField,
             branchField: project.isGitRepo ? branchField : nil,
             autoNameState: autoNameState
@@ -1463,6 +1476,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     private func storeAddWorkspaceFields(
         projectID: String,
         isGitRepo: Bool,
+        targetBranchField: NSComboBox?,
         nameField: NSTextField,
         branchField: NSTextField?,
         autoNameState: AddWorkspaceAutoNameState?
@@ -1471,6 +1485,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         AddWorkspaceFieldCache.shared.cache[id] = AddWorkspaceFieldRefs(
             projectID: projectID,
             isGitRepo: isGitRepo,
+            targetBranchField: targetBranchField,
             nameField: nameField,
             branchField: branchField,
             autoNameState: autoNameState
@@ -1682,6 +1697,19 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         refs.cloneSourceSection.isHidden = !cloneSelected
     }
 
+    private func defaultWorkspaceTargetBranch(project: ProjectSummary, branches: [String]) -> String? {
+        if let configured = project.defaultBranch, !configured.isEmpty {
+            return configured
+        }
+        if branches.contains("main") {
+            return "main"
+        }
+        if branches.contains("master") {
+            return "master"
+        }
+        return branches.first
+    }
+
     @objc private func createWorkspace(_ sender: NSButton) {
         guard let refs = AddWorkspaceFieldCache.shared.cache[sender.tag] else { return }
         do {
@@ -1689,11 +1717,20 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             guard !name.isEmpty else {
                 throw AgentmuxError.invalidArgument(message: "Workspace name is required.")
             }
+            let targetBranch = refs.targetBranchField?.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
             let branch = refs.branchField?.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
             if refs.isGitRepo, (branch == nil || branch?.isEmpty == true) {
                 throw AgentmuxError.invalidArgument(message: "Branch name is required for git projects.")
             }
-            _ = try orchestrator.createWorkspace(projectID: refs.projectID, name: name, branch: branch)
+            if refs.isGitRepo, (targetBranch == nil || targetBranch?.isEmpty == true) {
+                throw AgentmuxError.invalidArgument(message: "Target branch is required for git projects.")
+            }
+            _ = try orchestrator.createWorkspace(
+                projectID: refs.projectID,
+                name: name,
+                branch: branch,
+                targetBranch: targetBranch
+            )
             reloadData()
         } catch {
             showError(error)

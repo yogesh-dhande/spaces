@@ -32,13 +32,54 @@ public final class GitClient {
         return status == 0
     }
 
-    public func createWorktree(path repoPath: String, worktreePath: String, branch: String) throws {
+    public func branchOptions(path: String) -> [String] {
+        var branches = Set<String>()
+        if let local = try? runGitAndCapture(["-C", path, "for-each-ref", "--format=%(refname:short)", "refs/heads"]) {
+            let values = local.split(separator: "\n").map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
+            branches.formUnion(values.filter { !$0.isEmpty })
+        }
+        if let remote = try? runGitAndCapture(["-C", path, "for-each-ref", "--format=%(refname:short)", "refs/remotes/origin"])
+        {
+            for raw in remote.split(separator: "\n") {
+                let trimmed = String(raw).trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !trimmed.isEmpty, trimmed != "origin/HEAD" else { continue }
+                if let stripped = trimmed.replacingPrefix("origin/"), !stripped.isEmpty {
+                    branches.insert(stripped)
+                }
+            }
+        }
+        // Include live remote heads so newly created remote branches appear even before local fetch.
+        if let remoteHeads = try? runGitAndCapture(["-C", path, "ls-remote", "--heads", "origin"]) {
+            for raw in remoteHeads.split(separator: "\n") {
+                let columns = raw.split(separator: "\t", omittingEmptySubsequences: true)
+                guard columns.count == 2 else { continue }
+                let ref = String(columns[1]).trimmingCharacters(in: .whitespacesAndNewlines)
+                if let branch = ref.replacingPrefix("refs/heads/"), !branch.isEmpty {
+                    branches.insert(branch)
+                }
+            }
+        }
+        if let defaultBranch = defaultBranch(path: path), !defaultBranch.isEmpty {
+            branches.insert(defaultBranch)
+        }
+        return branches.sorted { lhs, rhs in
+            lhs.localizedStandardCompare(rhs) == .orderedAscending
+        }
+    }
+
+    public func createWorktree(path repoPath: String, worktreePath: String, branch: String, targetBranch: String? = nil)
+        throws
+    {
         if branchExists(path: repoPath, branch: branch) {
             try runGitOrThrow(["-C", repoPath, "worktree", "add", worktreePath, branch])
             return
         }
         if remoteBranchExists(path: repoPath, branch: branch) {
             try runGitOrThrow(["-C", repoPath, "worktree", "add", "-b", branch, worktreePath, "origin/\(branch)"])
+            return
+        }
+        if let startPoint = try resolveStartPoint(path: repoPath, targetBranch: targetBranch) {
+            try runGitOrThrow(["-C", repoPath, "worktree", "add", "-b", branch, worktreePath, startPoint])
             return
         }
         try runGitOrThrow(["-C", repoPath, "worktree", "add", "-b", branch, worktreePath])
@@ -100,6 +141,20 @@ public final class GitClient {
         }
     }
 
+    private func resolveStartPoint(path: String, targetBranch: String?) throws -> String? {
+        guard let targetBranch = targetBranch?.trimmingCharacters(in: .whitespacesAndNewlines), !targetBranch.isEmpty else {
+            return nil
+        }
+        if remoteBranchExists(path: path, branch: targetBranch) {
+            _ = try? runGit(["-C", path, "fetch", "origin", targetBranch])
+            return "origin/\(targetBranch)"
+        }
+        if branchExists(path: path, branch: targetBranch) {
+            return targetBranch
+        }
+        throw AgentmuxError.invalidArgument(message: "Target branch not found: \(targetBranch)")
+    }
+
     private func makeGitProcess(_ arguments: [String]) -> Process {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
@@ -114,5 +169,12 @@ public final class GitClient {
         environment.removeValue(forKey: "GIT_WORK_TREE")
         environment.removeValue(forKey: "GIT_INDEX_FILE")
         return environment
+    }
+}
+
+private extension String {
+    func replacingPrefix(_ prefix: String) -> String? {
+        guard hasPrefix(prefix) else { return nil }
+        return String(dropFirst(prefix.count))
     }
 }
