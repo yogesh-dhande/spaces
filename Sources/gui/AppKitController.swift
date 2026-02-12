@@ -351,6 +351,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             action: #selector(saveProject(_:)), primary: true)
         saveButton.identifier = NSUserInterfaceItemIdentifier(project.id)
         saveButton.keyEquivalent = "\r"
+        let deleteButton = iconButton(symbol: "trash", tooltip: "Delete project", action: #selector(deleteProject(_:)))
+        deleteButton.identifier = NSUserInterfaceItemIdentifier(project.id)
+        deleteButton.contentTintColor = .systemRed
 
         stack.addArrangedSubview(headerRow)
         stack.addArrangedSubview(dirLabel)
@@ -370,6 +373,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let buttonRow = NSStackView()
         buttonRow.orientation = .horizontal
         buttonRow.spacing = 8
+        buttonRow.addArrangedSubview(deleteButton)
         buttonRow.addArrangedSubview(NSView())
         buttonRow.addArrangedSubview(saveButton)
         stack.addArrangedSubview(buttonRow)
@@ -1275,6 +1279,35 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 config.statusChecks = refs.statusEditor.currentChecks()
             }
             projectHasUnsavedChanges = false
+            reloadData()
+        } catch {
+            showError(error)
+        }
+    }
+
+    @objc private func deleteProject(_ sender: NSButton) {
+        guard let projectID = sender.identifier?.rawValue,
+            let project = projects.first(where: { $0.id == projectID })
+        else { return }
+
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "Delete project?"
+        alert.informativeText =
+            """
+            This removes the project and its workspaces from agentmux.
+            If this project was cloned into ~/agentmux/projects by agentmux, that project directory is deleted.
+            For git projects, related workspace directories under ~/agentmux/workspaces are also deleted.
+            """
+        alert.addButton(withTitle: "Delete")
+        alert.addButton(withTitle: "Cancel")
+        let response = alert.runModal()
+        guard response == .alertFirstButtonReturn else { return }
+
+        do {
+            try orchestrator.removeProject(dir: project.dir)
+            projectHasUnsavedChanges = false
+            workspaceHasUnsavedChanges = false
             reloadData()
         } catch {
             showError(error)

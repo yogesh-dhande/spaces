@@ -129,6 +129,7 @@
             - when archived
                 - run the cleanup script defined by the project once
                 - keep git branches but remove worktree and workspace dir
+                - for non-git projects, archiving a workspace must not delete the project directory
                 - release reserved ports
     - RunningProcess
         - fields
@@ -159,6 +160,8 @@
     - Once the app is configured appropriately, prompt the user to create their first project
     - User creates a project by either pointing to a local dir or providing a git repository URL
         - if git URL is provided, agentmux clones it to `/Users/<username>/agentmux/projects/<project_name>` where `<project_name>` is derived from the repository name
+        - when removing a git project, delete related workspace directories under `/Users/<username>/agentmux/workspaces`
+        - when removing a project, delete the on-disk directory only for git repos inside `/Users/<username>/agentmux/projects` (app-managed clone location)
         - We automatically identify if the dir is a git repo. This will inform how we should handle creation of workspaces for that project
             - if not a git repo, create a default workspace corresponding to the project dir
             - if a git repo, create a default workspace corresponding to the main/master branch

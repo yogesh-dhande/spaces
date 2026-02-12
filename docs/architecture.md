@@ -50,6 +50,8 @@ Config file:
 - The GUI Settings view writes `editor` from installed VS Code, Cursor, or Windsurf.
 - Project fields: `dir`, `setup_script`, `cleanup_script`, `processes`, `status_checks`, `browser_sessions`.
 - New projects can be created from an existing directory or by cloning a repository into `/Users/<username>/agentmux/projects/<project_name>`.
+- Removing a project clears agentmux state. For git projects, related workspace directories under `/Users/<username>/agentmux/workspaces` are deleted.
+- The project directory is deleted only for git projects located under `/Users/<username>/agentmux/projects` (app-managed clones).
 
 Workspace settings:
 - Each workspace snapshots project `processes`, `status_checks`, and `browser_sessions` at creation.
@@ -202,6 +204,7 @@ flowchart TD
 Stop or archive:
 - Stop: close tracked windows, stop processes, clear runtime process state.
 - Archive: stop, run `cleanup_script` (if set), remove worktree for git projects, release ports.
+- Archive never deletes the project directory for non-git projects.
 
 ## Window Capture and Focus
 ```mermaid

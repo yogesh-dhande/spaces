@@ -9,11 +9,13 @@ public final class AgentmuxOrchestrator {
     private let iterm: Iterm2Adapter
     private let chrome: ChromeAdapter
     private let projectsRootDirectoryURL: URL?
+    private let workspacesRootDirectoryURL: URL?
 
     public init(
         store: SQLiteStore,
         configStore: ConfigStore,
         projectsRootDirectory: URL? = nil,
+        workspacesRootDirectory: URL? = nil,
         git: GitClient = .init(),
         yabai: YabaiAdapter = .init(),
         iterm: Iterm2Adapter = .init(),
@@ -26,6 +28,7 @@ public final class AgentmuxOrchestrator {
         self.yabai = yabai
         self.iterm = iterm
         self.chrome = chrome
+        self.workspacesRootDirectoryURL = workspacesRootDirectory
     }
 
     @discardableResult
@@ -203,6 +206,8 @@ public final class AgentmuxOrchestrator {
         try configStore.save(config)
         if let project = try store.project(dir: normalizedDir) {
             try store.deleteProject(id: project.id)
+            try removeManagedGitWorkspaceDirectoriesIfNeeded(project: project)
+            try removeManagedProjectDirectoryIfNeeded(project: project)
         }
     }
 
@@ -1298,12 +1303,9 @@ public final class AgentmuxOrchestrator {
     ]
 
     private func worktreeRoot(project: ProjectRecord) throws -> URL {
-        let home = FileManager.default.homeDirectoryForCurrentUser
         let projectDirname = sanitizeDirname(project.name, fallback: "project")
         return
-            home
-            .appending(path: "agentmux", directoryHint: .isDirectory)
-            .appending(path: "workspaces", directoryHint: .isDirectory)
+            workspaceRootDirectory()
             .appending(path: projectDirname, directoryHint: .isDirectory)
     }
 
@@ -1358,6 +1360,73 @@ public final class AgentmuxOrchestrator {
             path: "projects",
             directoryHint: .isDirectory
         )
+    }
+
+    private func workspaceRootDirectory() -> URL {
+        if let workspacesRootDirectoryURL {
+            return workspacesRootDirectoryURL
+        }
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        return home.appending(path: "agentmux", directoryHint: .isDirectory).appending(
+            path: "workspaces",
+            directoryHint: .isDirectory
+        )
+    }
+
+    private func removeManagedGitWorkspaceDirectoriesIfNeeded(project: ProjectRecord) throws {
+        guard project.isGitRepo else { return }
+        let root = try worktreeRoot(project: project)
+        let normalizedRoot = normalizePath(root.path)
+        guard isManagedWorkspacesDirectory(path: normalizedRoot, allowEqual: true) else {
+            return
+        }
+        var isDirectory: ObjCBool = false
+        guard
+            FileManager.default.fileExists(atPath: normalizedRoot, isDirectory: &isDirectory), isDirectory.boolValue
+        else {
+            return
+        }
+        try FileManager.default.removeItem(atPath: normalizedRoot)
+    }
+
+    private func removeManagedProjectDirectoryIfNeeded(project: ProjectRecord) throws {
+        guard project.isGitRepo, isManagedProjectsDirectory(path: project.dir) else {
+            return
+        }
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: project.dir, isDirectory: &isDirectory), isDirectory.boolValue else {
+            return
+        }
+        try FileManager.default.removeItem(atPath: project.dir)
+    }
+
+    private func isManagedProjectsDirectory(path: String) -> Bool {
+        isPath(path, inside: projectsRootDirectory().path)
+    }
+
+    private func isManagedWorkspacesDirectory(path: String, allowEqual: Bool = false) -> Bool {
+        isPath(path, inside: workspaceRootDirectory().path, allowEqual: allowEqual)
+    }
+
+    private func isPath(_ path: String, inside rootPath: String, allowEqual: Bool = false) -> Bool {
+        let root = URL(fileURLWithPath: rootPath, isDirectory: true)
+            .resolvingSymlinksInPath()
+            .standardizedFileURL
+        let candidate = URL(fileURLWithPath: path, isDirectory: true)
+            .resolvingSymlinksInPath()
+            .standardizedFileURL
+        let rootComponents = root.pathComponents
+        let candidateComponents = candidate.pathComponents
+        if allowEqual {
+            guard candidateComponents.count >= rootComponents.count else {
+                return false
+            }
+        } else {
+            guard candidateComponents.count > rootComponents.count else {
+                return false
+            }
+        }
+        return candidateComponents.starts(with: rootComponents)
     }
 
     private func inferredProjectName(from gitURL: String) -> String {

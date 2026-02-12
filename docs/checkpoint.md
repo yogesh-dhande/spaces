@@ -5,7 +5,9 @@
 - Runtime state and workspace settings live in `~/.agentmux/agentmux.db` (projects, workspaces, ports, running processes, status results, windows, settings, workspace settings) and are rebuilt when the schema version changes; workspace settings are re-seeded from project templates when missing.
 - Projects are normalized by real path; a default workspace is ensured per project with reserved ports.
 - Project creation supports either existing directories or git clone; cloned repositories are stored at `/Users/<username>/agentmux/projects/<project_name>`.
+- Project removal clears agentmux state, deletes related git workspace directories under `/Users/<username>/agentmux/workspaces`, and deletes the project directory only for git repositories under `/Users/<username>/agentmux/projects` (managed clones).
 - Workspaces create git worktrees for git projects, run setup/cleanup scripts, and reserve 10 ports per workspace.
+- Archiving non-git workspaces does not delete the project directory.
 - Workspace launch starts processes in iTerm2 with env vars and logs under `~/.agentmux/runtime/<workspace-id>`, opens Chrome browser sessions, optionally opens the editor, and captures window IDs via yabai in browser/editor/terminal order.
 - Workspace settings snapshot project templates on creation into the runtime DB and are editable per workspace; updates to running workspaces reconcile processes and browser sessions immediately.
 - AppKit GUI is two-pane with in-place forms and editors for processes, browser sessions, and status checks; workspace detail includes run/stop/archive, windows list with shortcut hints, an env/ports tab, and workspace settings.

@@ -96,6 +96,11 @@ agentmux workspace archive --project-dir /path/to/repo --name feature-x
 agentmux workspace activate --project-dir /path/to/repo --name feature-x
 ```
 
+Project/workspace removal behavior:
+- `agentmux project remove --dir <path>` removes the project from agentmux. For git projects, it also deletes related workspace directories under `~/agentmux/workspaces`.
+- `agentmux project remove --dir <path>` deletes the project directory only when it is a git repo inside `~/agentmux/projects` (the app-managed clone location).
+- `agentmux workspace archive ...` never deletes the project directory for non-git projects.
+
 ## Build
 Use the SwiftPM wrapper to keep caches inside the workspace (avoids user cache warnings in sandboxed environments).
 ```bash

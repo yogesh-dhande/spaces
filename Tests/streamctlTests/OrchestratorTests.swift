@@ -108,6 +108,113 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertTrue(FileManager.default.fileExists(atPath: "\(expected)/README.md"))
     }
 
+    func testRemoveProjectDeletesManagedGitProjectDirectory() throws {
+        let fixture = try makeTempGitRepo(name: "managed")
+        let root = try makeTempDirectory()
+        let projectsRoot = root.appendingPathComponent("projects", isDirectory: true)
+        let configStore = ConfigStore(path: root.appendingPathComponent("config.yaml").path)
+        let store = try makeTemporaryStore()
+        let orchestrator = AgentmuxOrchestrator(
+            store: store,
+            configStore: configStore,
+            projectsRootDirectory: projectsRoot
+        )
+
+        let project = try orchestrator.addProject(gitURL: fixture.path)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: project.dir))
+
+        try orchestrator.removeProject(dir: project.dir)
+
+        XCTAssertFalse(FileManager.default.fileExists(atPath: project.dir))
+        XCTAssertNil(try store.project(dir: project.dir))
+        XCTAssertTrue(try orchestrator.listProjects().isEmpty)
+    }
+
+    func testRemoveProjectDeletesManagedWorkspaceDirectoriesForManagedGitProject() throws {
+        let fixture = try makeTempGitRepo(name: "managed-with-workspace")
+        let root = try makeTempDirectory()
+        let projectsRoot = root.appendingPathComponent("projects", isDirectory: true)
+        let workspacesRoot = root.appendingPathComponent("workspaces", isDirectory: true)
+        let configStore = ConfigStore(path: root.appendingPathComponent("config.yaml").path)
+        let store = try makeTemporaryStore()
+        let orchestrator = AgentmuxOrchestrator(
+            store: store,
+            configStore: configStore,
+            projectsRootDirectory: projectsRoot,
+            workspacesRootDirectory: workspacesRoot
+        )
+
+        let project = try orchestrator.addProject(gitURL: fixture.path)
+        let projectWorkspaceRoot = workspacesRoot.appendingPathComponent(project.name, isDirectory: true)
+        let workspaceDir = projectWorkspaceRoot.appendingPathComponent("feature", isDirectory: true)
+        try FileManager.default.createDirectory(at: workspaceDir, withIntermediateDirectories: true)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: workspaceDir.path))
+        XCTAssertTrue(workspaceDir.path.hasPrefix(workspacesRoot.path))
+
+        try orchestrator.removeProject(dir: project.dir)
+
+        XCTAssertFalse(FileManager.default.fileExists(atPath: workspaceDir.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: projectWorkspaceRoot.path))
+    }
+
+    func testRemoveProjectDoesNotDeleteUnmanagedProjectDirectoryButDeletesManagedWorkspaceDirectories() throws {
+        let projectDir = try makeTempDirectory()
+        try runGit(["init"], cwd: projectDir.path)
+        try "hello".write(to: projectDir.appendingPathComponent("README.md"), atomically: true, encoding: .utf8)
+        try runGit(["add", "README.md"], cwd: projectDir.path)
+        try runGit(
+            ["-c", "user.name=agentmux-test", "-c", "user.email=test@example.com", "commit", "-m", "init"],
+            cwd: projectDir.path
+        )
+
+        let root = try makeTempDirectory()
+        let projectsRoot = root.appendingPathComponent("projects", isDirectory: true)
+        let workspacesRoot = root.appendingPathComponent("workspaces", isDirectory: true)
+        let configStore = ConfigStore(path: root.appendingPathComponent("config.yaml").path)
+        let store = try makeTemporaryStore()
+        let orchestrator = AgentmuxOrchestrator(
+            store: store,
+            configStore: configStore,
+            projectsRootDirectory: projectsRoot,
+            workspacesRootDirectory: workspacesRoot
+        )
+
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        let projectWorkspaceRoot = workspacesRoot.appendingPathComponent(project.name, isDirectory: true)
+        let workspaceDir = projectWorkspaceRoot.appendingPathComponent("feature", isDirectory: true)
+        try FileManager.default.createDirectory(at: workspaceDir, withIntermediateDirectories: true)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: workspaceDir.path))
+        XCTAssertTrue(workspaceDir.path.hasPrefix(workspacesRoot.path))
+
+        try orchestrator.removeProject(dir: project.dir)
+
+        XCTAssertTrue(FileManager.default.fileExists(atPath: project.dir))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: workspaceDir.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: projectWorkspaceRoot.path))
+    }
+
+    func testArchiveWorkspaceDoesNotDeleteProjectDirectoryForNonGitProject() throws {
+        let root = try makeTempDirectory()
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let marker = projectDir.appendingPathComponent("marker.txt")
+        try "marker".write(to: marker, atomically: true, encoding: .utf8)
+
+        let configStore = ConfigStore(path: root.appendingPathComponent("config.yaml").path)
+        let store = try makeTemporaryStore()
+        let orchestrator = AgentmuxOrchestrator(store: store, configStore: configStore)
+
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
+
+        try orchestrator.archiveWorkspace(workspaceID: workspace.id)
+
+        XCTAssertTrue(FileManager.default.fileExists(atPath: project.dir))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: marker.path))
+        let archivedWorkspace = try store.workspace(id: workspace.id)
+        XCTAssertEqual(archivedWorkspace?.isArchived, true)
+    }
+
     private func makeTempGitRepo(name: String) throws -> URL {
         let root = try makeTempDirectory()
         let repo = root.appendingPathComponent(name, isDirectory: true)

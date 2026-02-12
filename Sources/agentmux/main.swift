@@ -338,7 +338,10 @@ struct CLI {
               - Configuration is stored in ~/.agentmux/config.yaml (YAML is source of truth).
               - GUI settings (⌘,) let you pick a preferred editor (VS Code, Cursor, Windsurf).
               - Runtime state is stored in ~/.agentmux/agentmux.db and rebuilt if schema changes.
+              - Removing a git project deletes related workspace directories under ~/agentmux/workspaces.
+              - Removing a project deletes only agentmux state unless it is an agentmux-cloned git repo under ~/agentmux/projects; those managed project directories are deleted.
               - Workspaces snapshot project processes, status checks, and browser sessions into the runtime DB on creation.
+              - Archiving a non-git workspace never deletes the project directory.
               - Workspaces reserve PORT0-PORT9 from the configured port range.
               - GUI window focus shortcuts: cmd+shift+1 through cmd+shift+9 (when GUI is focused).
               - GUI window cycle shortcuts: cmd+shift+[ and cmd+shift+] (global, when GUI is not focused).
