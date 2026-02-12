@@ -42,6 +42,7 @@ The `gui` target is the reusable UI library. `agentmux-app` is the minimal execu
 Config file:
 - Path: `~/.agentmux/config.yaml`.
 - Top-level fields: `editor`, `port_range`, `projects`.
+- The GUI Settings view writes `editor` from installed VS Code, Cursor, or Windsurf.
 - Project fields: `dir`, `setup_script`, `cleanup_script`, `processes`, `status_checks`, `browser_sessions`.
 
 Workspace settings:
@@ -218,6 +219,9 @@ sequenceDiagram
   GUI->>Orchestrator: focusWorkspaceWindow(...)
   Orchestrator->>Yabai: focusWindow(id)
 ```
+
+Editor and terminal windows opened from the GUI (Open Editor/Open Terminal) are captured via yabai and stored in the
+windows table so they participate in workspace window cycling.
 
 ## External Dependencies
 - macOS 14+

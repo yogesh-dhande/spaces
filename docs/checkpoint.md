@@ -8,8 +8,10 @@
 - Workspace launch starts processes in iTerm2 with env vars and logs under `~/.agentmux/runtime/<workspace-id>`, opens Chrome browser sessions, optionally opens the editor, and captures window IDs via yabai in browser/editor/terminal order.
 - Workspace settings snapshot project templates on creation into the runtime DB and are editable per workspace; updates to running workspaces reconcile processes and browser sessions immediately.
 - AppKit GUI is two-pane with in-place forms and editors for processes, browser sessions, and status checks; workspace detail includes run/stop/archive, windows list with shortcut hints, an env/ports tab, and workspace settings.
+- Settings view in the GUI lets users pick a preferred editor from installed VS Code, Cursor, or Windsurf; the choice is stored in the YAML config.
 - Hotkeys are configurable (settings stored in the runtime DB): global toggle `cmd+shift+=`, global window navigation `cmd+shift+]` and `cmd+shift+[`, activate selected workspace `cmd+shift+return`, new workspace `cmd+n`, window focus `cmd+shift+1` through `cmd+shift+9`.
 - CLI supports config path/show, project list/add/update/remove, workspace list/create/launch/stop/archive/activate, and settings get/set/reset for GUI shortcuts.
+- Workspace run view includes Open Editor/Terminal/Finder actions; editor/terminal windows opened this way are captured and included in window cycling.
 
 ## Accomplished
 - Replaced stream-based model with project/workspace/process design.
@@ -33,7 +35,7 @@
 - Structured logging with log levels and rotating files.
 - Accessibility pass (VoiceOver, keyboard navigation, focus order, contrast checks).
 - Localization scaffolding (even if only en-US ships initially).
-- Preferences UI for editor selection, port range, hotkeys, and default behaviors.
+- Preferences UI for port range, hotkeys, and default behaviors.
 - Data migration strategy for DB schema changes (beyond rebuild if/when persistence matters).
 - Backup/restore for config + workspace settings.
 - Code signing, notarization, and hardened runtime checks in CI.

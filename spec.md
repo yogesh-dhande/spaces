@@ -36,6 +36,7 @@
             - Schema changes rebuild the DB; missing workspace settings are re-seeded from project templates
     - User preferences
         - editor: enum - None, VS Code, Cursor, Windsurf, Vim - if specified, used to open an editor at workspace launch
+            - GUI settings only surface installed VS Code, Cursor, or Windsurf
     - Project
         - fields
             - dir: str, path of the project folder, name can be inferred from it for display in the UI
@@ -117,6 +118,7 @@
                 - start processes defined by the workspace in their own terminal windows. keep track of these windows so they can be focused later when lopping this this workspace’s windows
                 - ensure that browser tabs for the browser sessions defined for the workspace are open, and if not, open them. keep track of them so they can be focused later when lopping this this workspace’s windows
                 - open the workspace dir in user’s preferred editor
+            - user can open the workspace in the preferred editor, a terminal window, or Finder from the GUI; editor and terminal windows are captured and tracked for window cycling
             - when updated while running
                 - start newly added processes in new terminals
                 - restart processes whose commands change in the same terminal window
@@ -188,6 +190,7 @@
                     - 3 tabs
                         - first (default visible) tab for running details
                             - buttons to launch, stop, archive
+                            - buttons to open the workspace in the preferred editor, a terminal window, or Finder
                             - Show running processes and status (based on status checks)
                             - Show list of windows associated with the workspace
                                 - show keyboard shortcut hints for each so user can quickly focus a window if desired. generate these shortcut hits dynamically (e.g. cmd+shift+1)
@@ -195,12 +198,15 @@
                         - second
                             - Show values of env vars related to ports, workspace set for processes (in a separate tab to avoid clutter in main tab)
                         - third
-                            - Workspace settings for processes, status checks, and browser sessions
+                    - Workspace settings for processes, status checks, and browser sessions
+                - settings view for global preferences (preferred editor from installed VS Code, Cursor, or Windsurf)
     - Do not open dialogs when showing forms (e.g. adding a project or worktree, or updating keybindings). Prefer to show them in the existing window (right pane) by replacing content of the main pane like in a web app. This is done for UX since it is easy to lose track of open dialogs.
     - Keyboard shortcuts
         - User can override default keybindings
         - Global hotkey (default: cmd+shift+=) focuses the app
             - If not visible in the currently focused display and space, make it visible in that display and space (that could mean unhiding it, or simply moving it from another display and space)
+        - Preferences: `cmd+,` opens the settings view
+        - Open editor: `cmd+shift+e`, open terminal: `cmd+shift+t`, open Finder: `cmd+shift+f`
         - When agentmux in open and in focus
             - Loop through running workspaces (skips any workspaces that are not launched yet)
                 - forward: `cmd+shift+]`

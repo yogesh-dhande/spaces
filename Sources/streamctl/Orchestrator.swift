@@ -69,6 +69,14 @@ public final class AgentmuxOrchestrator {
         }
     }
 
+    @discardableResult
+    public func updateEditorPreference(_ editor: EditorPreference?) throws -> AppConfig {
+        var config = try configStore.load()
+        config.editor = editor
+        try configStore.save(config)
+        return config
+    }
+
     public func listWorkspaces(projectID: String, includeArchived: Bool = false) throws -> [WorkspaceSummary] {
         let records = try store.workspaces(projectID: projectID, includeArchived: includeArchived)
         return records.map {
@@ -414,6 +422,45 @@ public final class AgentmuxOrchestrator {
 
     public func workspacePorts(workspaceID: String) throws -> [Int] {
         try store.workspacePorts(workspaceID: workspaceID)
+    }
+
+    public func openWorkspaceEditor(workspaceID: String) throws {
+        let (_, workspace) = try resolveWorkspace(id: workspaceID)
+        guard !workspace.isArchived else {
+            throw AgentmuxError.invalidArgument(message: "Workspace is archived.")
+        }
+        guard let editor = try configStore.load().editor, editor != .none else {
+            throw AgentmuxError.configError(message: "Preferred editor is not configured.")
+        }
+        let snapshot = try yabai.listWindows()
+        try EditorLauncher.open(editor: editor, directory: workspace.dir)
+        try attachNewWindows(
+            snapshot: snapshot,
+            workspaceID: workspace.id,
+            role: "editor",
+            appName: editorAppName(editor),
+            orderOffset: 100
+        )
+    }
+
+    public func openWorkspaceTerminal(workspaceID: String) throws {
+        let (_, workspace) = try resolveWorkspace(id: workspaceID)
+        guard !workspace.isArchived else {
+            throw AgentmuxError.invalidArgument(message: "Workspace is archived.")
+        }
+        guard iterm.isAvailable() else {
+            throw AgentmuxError.dependencyMissing(message: "iTerm2 is required to open terminal windows.")
+        }
+        let snapshot = try yabai.listWindows()
+        let escapedDir = workspace.dir.replacingOccurrences(of: "\"", with: "\\\"")
+        _ = try iterm.openWindowAndRun(command: "cd \"\(escapedDir)\"")
+        try attachNewWindows(
+            snapshot: snapshot,
+            workspaceID: workspace.id,
+            role: "terminal",
+            appName: "iTerm2",
+            orderOffset: 200
+        )
     }
 
     public func focusWorkspace(workspaceID: String) throws {
@@ -941,6 +988,62 @@ public final class AgentmuxOrchestrator {
             if !existingIDs.contains(id) {
                 try store.deleteWindow(id: window.id)
             }
+        }
+    }
+
+    static func nextWindowOrderIndex(existing: [WindowRecord], role: String, orderOffset: Int) -> Int {
+        let maxIndex = existing.filter { $0.role == role }.map(\.orderIndex).max() ?? (orderOffset - 1)
+        return max(maxIndex + 1, orderOffset)
+    }
+
+    private func attachNewWindows(
+        snapshot: [YabaiWindow],
+        workspaceID: String,
+        role: String,
+        appName: String,
+        orderOffset: Int
+    ) throws {
+        var captured = try captureNewWindows(
+            snapshot: snapshot,
+            role: role,
+            appName: appName,
+            workspaceID: workspaceID,
+            orderOffset: orderOffset
+        )
+        if captured.isEmpty, let focused = try yabai.focusedWindow(), focused.app == appName {
+            captured = [
+                WindowRecord(
+                    id: UUID().uuidString,
+                    workspaceID: workspaceID,
+                    app: focused.app,
+                    title: focused.title,
+                    windowID: focused.id,
+                    role: role,
+                    orderIndex: orderOffset,
+                    lastSeenAt: nowISO8601()
+                )
+            ]
+        }
+        guard !captured.isEmpty else { return }
+        let existing = try store.windows(workspaceID: workspaceID)
+        var existingIDs = Set(existing.compactMap(\.windowID))
+        var nextIndex = Self.nextWindowOrderIndex(existing: existing, role: role, orderOffset: orderOffset)
+        for window in captured {
+            guard let id = window.windowID else { continue }
+            if existingIDs.contains(id) { continue }
+            existingIDs.insert(id)
+            let stored = WindowRecord(
+                id: window.id,
+                workspaceID: workspaceID,
+                app: window.app,
+                title: window.title,
+                windowID: id,
+                role: role,
+                orderIndex: nextIndex,
+                lastSeenAt: nowISO8601()
+            )
+            nextIndex += 1
+            try store.upsert(window: stored)
         }
     }
 

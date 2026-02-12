@@ -21,6 +21,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     private var lastSelectedRow: Int = -1
     private var projectHasUnsavedChanges = false
     private var workspaceHasUnsavedChanges = false
+    private var showingSettings = false
 
     private var hotkeyHandler: EventHandlerRef?
     private var hotkeyRefs: [UInt32: EventHotKeyRef] = [:]
@@ -126,6 +127,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             title: "Projects",
             actions: [
                 (symbol: "plus", tooltip: "New project (⇧⌘N)", action: #selector(addProject)),
+                (symbol: "gearshape", tooltip: "Settings (⌘,)", action: #selector(showSettings)),
                 (symbol: "arrow.clockwise", tooltip: "Reload (⌘R)", action: #selector(reloadTapped)),
             ]
         )
@@ -196,6 +198,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     }
 
     private func refreshSelection() {
+        if showingSettings {
+            showSettingsDetail()
+            return
+        }
         if let selectedWorkspaceID {
             if let (project, workspace) = findWorkspace(id: selectedWorkspaceID) {
                 showWorkspaceDetail(project: project, workspace: workspace)
@@ -210,6 +216,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     }
 
     private func showPlaceholder() {
+        showingSettings = false
         for view in detailContainer.subviews {
             view.removeFromSuperview()
         }
@@ -224,7 +231,75 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         ])
     }
 
+    private func showSettingsDetail() {
+        showingSettings = true
+        for view in detailContainer.subviews {
+            view.removeFromSuperview()
+        }
+        let stack = NSStackView()
+        stack.orientation = .vertical
+        stack.spacing = 12
+        stack.translatesAutoresizingMaskIntoConstraints = false
+
+        let header = NSTextField(labelWithString: "Settings")
+        header.font = .systemFont(ofSize: 20, weight: .semibold)
+        stack.addArrangedSubview(header)
+        stack.addArrangedSubview(label(text: "Preferred editor"))
+
+        let options = installedEditorOptions()
+        let currentEditor: EditorPreference? = {
+            guard let editor = configCache?.editor, editor != .none else { return nil }
+            return editor
+        }()
+        if options.isEmpty {
+            let note = NSTextField(labelWithString: "No supported editors detected (VS Code, Cursor, Windsurf).")
+            note.font = .systemFont(ofSize: 12)
+            note.textColor = .secondaryLabelColor
+            stack.addArrangedSubview(note)
+        } else {
+            let popUp = NSPopUpButton()
+            popUp.translatesAutoresizingMaskIntoConstraints = false
+            popUp.autoenablesItems = false
+            popUp.addItem(withTitle: "Select editor")
+            popUp.item(at: 0)?.isEnabled = false
+            for option in options {
+                popUp.addItem(withTitle: option.displayName)
+                popUp.itemArray.last?.representedObject = option.preference
+            }
+            if let current = currentEditor,
+                let item = popUp.itemArray.first(where: {
+                    ($0.representedObject as? EditorPreference) == current
+                })
+            {
+                popUp.select(item)
+            } else {
+                popUp.selectItem(at: 0)
+            }
+            popUp.target = self
+            popUp.action = #selector(editorPreferenceChanged(_:))
+            stack.addArrangedSubview(popUp)
+        }
+
+        if let current = currentEditor,
+            !options.contains(where: { $0.preference == current })
+        {
+            let note = NSTextField(
+                labelWithString: "Saved editor \"\(editorDisplayName(current))\" is not installed.")
+            note.font = .systemFont(ofSize: 11)
+            note.textColor = .secondaryLabelColor
+            stack.addArrangedSubview(note)
+        }
+
+        detailContainer.addSubview(stack)
+        NSLayoutConstraint.activate([
+            stack.leadingAnchor.constraint(equalTo: detailContainer.leadingAnchor, constant: 20),
+            stack.trailingAnchor.constraint(equalTo: detailContainer.trailingAnchor, constant: -20),
+            stack.topAnchor.constraint(equalTo: detailContainer.topAnchor, constant: 20),
+        ])
+    }
+
     private func showProjectDetail(project: ProjectSummary) {
+        showingSettings = false
         for view in detailContainer.subviews {
             view.removeFromSuperview()
         }
@@ -322,6 +397,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     }
 
     private func showAddProjectForm() {
+        showingSettings = false
         for view in detailContainer.subviews {
             view.removeFromSuperview()
         }
@@ -405,6 +481,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     }
 
     private func showAddWorkspaceForm(project: ProjectSummary) {
+        showingSettings = false
         for view in detailContainer.subviews {
             view.removeFromSuperview()
         }
@@ -445,6 +522,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     }
 
     private func showWorkspaceDetail(project: ProjectSummary, workspace: WorkspaceSummary) {
+        showingSettings = false
         for view in detailContainer.subviews {
             view.removeFromSuperview()
         }
@@ -520,6 +598,44 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         container.spacing = 10
         container.translatesAutoresizingMaskIntoConstraints = false
 
+        let openRow = NSStackView()
+        openRow.orientation = .horizontal
+        openRow.spacing = 8
+        let openEditorButton = actionButton(
+            title: "Open Editor (⇧⌘E)",
+            symbol: nil,
+            tooltip: "Open preferred editor (⇧⌘E)",
+            action: #selector(openWorkspaceEditor(_:)),
+            primary: false
+        )
+        let openTerminalButton = actionButton(
+            title: "Open Terminal (⇧⌘T)",
+            symbol: nil,
+            tooltip: "Open terminal window (⇧⌘T)",
+            action: #selector(openWorkspaceTerminal(_:)),
+            primary: false
+        )
+        let openFinderButton = actionButton(
+            title: "Open Finder (⇧⌘F)",
+            symbol: nil,
+            tooltip: "Open Finder window (⇧⌘F)",
+            action: #selector(openWorkspaceFinder(_:)),
+            primary: false
+        )
+        openEditorButton.identifier = NSUserInterfaceItemIdentifier(workspace.id)
+        openTerminalButton.identifier = NSUserInterfaceItemIdentifier(workspace.id)
+        openFinderButton.identifier = NSUserInterfaceItemIdentifier(workspace.id)
+        if let editor = configCache?.editor, editor != .none {
+            openEditorButton.toolTip = "Open \(editorDisplayName(editor)) (⇧⌘E)"
+        } else {
+            openEditorButton.isEnabled = false
+            openEditorButton.toolTip = "Preferred editor not configured"
+        }
+        openRow.addArrangedSubview(openEditorButton)
+        openRow.addArrangedSubview(openTerminalButton)
+        openRow.addArrangedSubview(openFinderButton)
+        openRow.addArrangedSubview(NSView())
+
         let processesLabel = label(text: "Running processes")
         let windowsLabel = label(text: "Windows (cmd+shift+<n>)")
 
@@ -548,6 +664,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         }.joined(separator: "\n")
         let windowsScroll = scrollableTextView(windowsList, height: 120)
 
+        container.addArrangedSubview(openRow)
         container.addArrangedSubview(processesLabel)
         container.addArrangedSubview(processScroll)
         container.addArrangedSubview(windowsLabel)
@@ -698,6 +815,47 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         stack.addArrangedSubview(label)
         stack.addArrangedSubview(icon)
         return stack
+    }
+
+    private struct EditorOption {
+        let preference: EditorPreference
+        let displayName: String
+        let bundleName: String
+    }
+
+    private func installedEditorOptions() -> [EditorOption] {
+        let candidates = [
+            EditorOption(preference: .vscode, displayName: "VS Code", bundleName: "Visual Studio Code.app"),
+            EditorOption(preference: .cursor, displayName: "Cursor", bundleName: "Cursor.app"),
+            EditorOption(preference: .windsurf, displayName: "Windsurf", bundleName: "Windsurf.app"),
+        ]
+        return candidates.filter { isEditorInstalled(bundleName: $0.bundleName) }
+    }
+
+    private func isEditorInstalled(bundleName: String) -> Bool {
+        let applications = URL(fileURLWithPath: "/Applications", isDirectory: true)
+        let userApplications = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Applications", isDirectory: true)
+        let paths = [
+            applications.appendingPathComponent(bundleName).path,
+            userApplications.appendingPathComponent(bundleName).path,
+        ]
+        return paths.contains { FileManager.default.fileExists(atPath: $0) }
+    }
+
+    private func editorDisplayName(_ editor: EditorPreference) -> String {
+        switch editor {
+        case .vscode:
+            return "VS Code"
+        case .cursor:
+            return "Cursor"
+        case .windsurf:
+            return "Windsurf"
+        case .vim:
+            return "Vim"
+        case .none:
+            return "None"
+        }
     }
 
     private func sidebarSectionHeader(
@@ -885,6 +1043,40 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         reloadData()
     }
 
+    @objc private func showSettings() {
+        if let row = settingsRowIndex() {
+            outlineView.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
+        }
+    }
+
+    @objc private func openWorkspaceEditor(_ sender: NSButton) {
+        guard let workspaceID = sender.identifier?.rawValue else { return }
+        openWorkspaceEditor(workspaceID: workspaceID)
+    }
+
+    @objc private func openWorkspaceTerminal(_ sender: NSButton) {
+        guard let workspaceID = sender.identifier?.rawValue else { return }
+        openWorkspaceTerminal(workspaceID: workspaceID)
+    }
+
+    @objc private func openWorkspaceFinder(_ sender: NSButton) {
+        guard let workspaceID = sender.identifier?.rawValue,
+            let (_, workspace) = findWorkspace(id: workspaceID)
+        else { return }
+        let url = URL(fileURLWithPath: workspace.dir, isDirectory: true)
+        NSWorkspace.shared.open(url)
+    }
+
+    @objc private func editorPreferenceChanged(_ sender: NSPopUpButton) {
+        guard let preference = sender.selectedItem?.representedObject as? EditorPreference else { return }
+        if configCache?.editor == preference { return }
+        do {
+            configCache = try orchestrator.updateEditorPreference(preference)
+        } catch {
+            showError(error)
+        }
+    }
+
     @objc private func addProject() {
         showAddProjectForm()
     }
@@ -1056,6 +1248,24 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         alert.runModal()
     }
 
+    private func openWorkspaceEditor(workspaceID: String) {
+        do {
+            try orchestrator.openWorkspaceEditor(workspaceID: workspaceID)
+            reloadData()
+        } catch {
+            showError(error)
+        }
+    }
+
+    private func openWorkspaceTerminal(workspaceID: String) {
+        do {
+            try orchestrator.openWorkspaceTerminal(workspaceID: workspaceID)
+            reloadData()
+        } catch {
+            showError(error)
+        }
+    }
+
     private func findWorkspace(id: String) -> (ProjectSummary, WorkspaceSummary)? {
         for project in projects {
             if let workspaces = workspacesByProject[project.id],
@@ -1177,6 +1387,51 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 event.charactersIgnoringModifiers?.lowercased() == "r"
             {
                 self.reloadData()
+                return nil
+            }
+            if event.modifierFlags.contains(.command),
+                event.modifierFlags.contains(.shift),
+                !event.modifierFlags.contains(.option),
+                !event.modifierFlags.contains(.control),
+                event.charactersIgnoringModifiers?.lowercased() == "e"
+            {
+                if let workspaceID = self.selectedWorkspaceID {
+                    self.openWorkspaceEditor(workspaceID: workspaceID)
+                }
+                return nil
+            }
+            if event.modifierFlags.contains(.command),
+                event.modifierFlags.contains(.shift),
+                !event.modifierFlags.contains(.option),
+                !event.modifierFlags.contains(.control),
+                event.charactersIgnoringModifiers?.lowercased() == "t"
+            {
+                if let workspaceID = self.selectedWorkspaceID {
+                    self.openWorkspaceTerminal(workspaceID: workspaceID)
+                }
+                return nil
+            }
+            if event.modifierFlags.contains(.command),
+                event.modifierFlags.contains(.shift),
+                !event.modifierFlags.contains(.option),
+                !event.modifierFlags.contains(.control),
+                event.charactersIgnoringModifiers?.lowercased() == "f"
+            {
+                if let workspaceID = self.selectedWorkspaceID,
+                    let (_, workspace) = self.findWorkspace(id: workspaceID)
+                {
+                    let url = URL(fileURLWithPath: workspace.dir, isDirectory: true)
+                    NSWorkspace.shared.open(url)
+                }
+                return nil
+            }
+            if event.modifierFlags.contains(.command),
+                !event.modifierFlags.contains(.shift),
+                !event.modifierFlags.contains(.option),
+                !event.modifierFlags.contains(.control),
+                event.charactersIgnoringModifiers == ","
+            {
+                self.showSettings()
                 return nil
             }
             if let windowIndex = windowShortcutIndex(for: event) {
@@ -1316,6 +1571,15 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         }
     }
 
+    private func settingsRowIndex() -> Int? {
+        for row in 0..<outlineView.numberOfRows {
+            if let item = outlineView.item(atRow: row) as? OutlineItem, case .settings = item {
+                return row
+            }
+        }
+        return nil
+    }
+
     private func focusGlobalWindowNavigation(direction: Int) {
         guard !NSApp.isActive else { return }
         guard let workspaceID = globalWindowNavigationWorkspaceID() else { return }
@@ -1360,7 +1624,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
     public func outlineView(_ outlineView: NSOutlineView, numberOfChildrenOfItem item: Any?) -> Int {
         if item == nil {
-            return projects.count
+            return projects.count + 1
         }
         if case .project(let project) = item as? OutlineItem {
             return workspacesByProject[project.id]?.count ?? 0
@@ -1377,7 +1641,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
     public func outlineView(_ outlineView: NSOutlineView, child index: Int, ofItem item: Any?) -> Any {
         if item == nil {
-            return OutlineItem.project(projects[index])
+            if index == 0 {
+                return OutlineItem.settings
+            }
+            return OutlineItem.project(projects[index - 1])
         }
         if case .project(let project) = item as? OutlineItem {
             let workspace =
@@ -1425,6 +1692,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             )
             addButton.identifier = NSUserInterfaceItemIdentifier(project.id)
             accessoryStack.addArrangedSubview(addButton)
+        } else if case .settings = item as? OutlineItem {
+            icon.image = NSImage(systemSymbolName: "gearshape", accessibilityDescription: "Settings")
+            icon.contentTintColor = .secondaryLabelColor
+            text.stringValue = "Settings"
+            text.font = .systemFont(ofSize: 12, weight: .semibold)
         } else if case .workspace(_, let workspace) = item as? OutlineItem {
             icon.image = NSImage(
                 systemSymbolName: workspace.isRunning ? "circle.fill" : "circle", accessibilityDescription: "Status")
@@ -1458,18 +1730,26 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         guard row >= 0, let item = outlineView.item(atRow: row) as? OutlineItem else {
             selectedProjectID = nil
             selectedWorkspaceID = nil
+            showingSettings = false
             showPlaceholder()
             return
         }
         lastSelectedRow = row
         switch item {
+        case .settings:
+            selectedProjectID = nil
+            selectedWorkspaceID = nil
+            showingSettings = true
+            showSettingsDetail()
         case .project(let project):
             selectedProjectID = project.id
             selectedWorkspaceID = nil
+            showingSettings = false
             showProjectDetail(project: project)
         case .workspace(let project, let workspace):
             selectedProjectID = project.id
             selectedWorkspaceID = workspace.id
+            showingSettings = false
             showWorkspaceDetail(project: project, workspace: workspace)
         }
     }

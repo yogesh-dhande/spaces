@@ -54,10 +54,12 @@ Updates to workspace settings apply immediately when the workspace is running (n
 - No dialogs for add/edit; all forms are in the right pane.
 - Workspace view includes:
   - Launch/Stop/Archive buttons
+  - Open Editor/Terminal/Finder buttons (editor/terminal windows are tracked for cycling)
   - Processes and status
   - Windows list with shortcut hints
   - Env vars/ports tab
   - Workspace settings tab
+- Settings view lets you choose a preferred editor from installed VS Code, Cursor, or Windsurf.
 
 Hotkeys:
 - Global focus: `cmd+shift+=`
@@ -65,6 +67,10 @@ Hotkeys:
 - Previous running workspace: `cmd+shift+[`
 - Activate selected workspace: `cmd+shift+return`
 - New workspace (when app is focused): `cmd+n`
+- Preferences: `cmd+,`
+- Open editor: `cmd+shift+e`
+- Open terminal: `cmd+shift+t`
+- Open Finder: `cmd+shift+f`
 
 ## CLI
 ```bash
