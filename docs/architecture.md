@@ -42,6 +42,8 @@ The `gui` target is the reusable UI library. `agentmux-app` is the minimal execu
 GUI interaction notes:
 - Right-pane forms are hosted in a scroll view so long forms do not clip at smaller window heights.
 - The "new workspace" affordance is shown in project UI only when the project is a git repository.
+- Window focus shortcuts in the GUI use `cmd+1` through `cmd+9`.
+- Keyboard shortcut overrides for GUI actions are persisted in SQLite settings and editable in the GUI Settings view and CLI settings commands.
 
 ## Data Model
 Config file:

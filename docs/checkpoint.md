@@ -14,7 +14,8 @@
 - Right-pane forms are scrollable, use left-aligned full-width fields, and use text-labeled actions for create/cancel flows.
 - New workspace `+` actions in project UI are shown only for git projects.
 - Settings view in the GUI lets users pick a preferred editor from installed VS Code, Cursor, or Windsurf; the choice is stored in the YAML config.
-- Hotkeys are configurable (settings stored in the runtime DB): global toggle `cmd+shift+=`, global window navigation `cmd+shift+]` and `cmd+shift+[`, activate selected workspace `cmd+shift+return`, new workspace `cmd+n`, window focus `cmd+shift+1` through `cmd+shift+9`.
+- Settings view in the GUI also allows overriding default shortcuts for global toggle, workspace navigation/activation, and open editor/terminal/Finder; these values are stored in the runtime DB.
+- Window focus shortcuts are `cmd+1` through `cmd+9` while the GUI is focused.
 - The local key monitor defers to focused text inputs so standard edit shortcuts like `cmd+v` work in forms.
 - CLI supports config path/show, project list/add/update/remove (including `project add --git-url ...`), workspace list/create/launch/stop/archive/activate, and settings get/set/reset for GUI shortcuts.
 - Workspace run view includes Open Editor/Terminal/Finder actions; editor/terminal windows opened this way are captured and included in window cycling.

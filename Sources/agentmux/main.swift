@@ -210,13 +210,34 @@ struct CLI {
             } else if args.contains("--gui-show-shortcut") {
                 let current = try orchestrator.guiShowShortcut()
                 print("gui-show-shortcut\t\(current)")
+            } else if args.contains("--gui-add-project-shortcut") {
+                let current = try orchestrator.guiAddProjectShortcut()
+                print("gui-add-project-shortcut\t\(current)")
+            } else if args.contains("--gui-add-workspace-shortcut") {
+                let current = try orchestrator.guiAddWorkspaceShortcut()
+                print("gui-add-workspace-shortcut\t\(current)")
+            } else if args.contains("--gui-reload-shortcut") {
+                let current = try orchestrator.guiReloadShortcut()
+                print("gui-reload-shortcut\t\(current)")
+            } else if args.contains("--gui-open-editor-shortcut") {
+                let current = try orchestrator.guiOpenEditorShortcut()
+                print("gui-open-editor-shortcut\t\(current)")
+            } else if args.contains("--gui-open-terminal-shortcut") {
+                let current = try orchestrator.guiOpenTerminalShortcut()
+                print("gui-open-terminal-shortcut\t\(current)")
+            } else if args.contains("--gui-open-finder-shortcut") {
+                let current = try orchestrator.guiOpenFinderShortcut()
+                print("gui-open-finder-shortcut\t\(current)")
+            } else if args.contains("--gui-open-settings-shortcut") {
+                let current = try orchestrator.guiOpenSettingsShortcut()
+                print("gui-open-settings-shortcut\t\(current)")
             } else {
                 throw NSError(
                     domain: "agentmux.cli",
                     code: 2,
                     userInfo: [
                         NSLocalizedDescriptionKey:
-                            "Missing setting flag. Use: settings get --gui-hotkey|--gui-next-shortcut|--gui-prev-shortcut|--gui-show-shortcut"
+                            "Missing setting flag. Use: settings get --gui-hotkey|--gui-next-shortcut|--gui-prev-shortcut|--gui-show-shortcut|--gui-add-project-shortcut|--gui-add-workspace-shortcut|--gui-reload-shortcut|--gui-open-editor-shortcut|--gui-open-terminal-shortcut|--gui-open-finder-shortcut|--gui-open-settings-shortcut"
                     ]
                 )
             }
@@ -238,13 +259,41 @@ struct CLI {
                 let spec = try HotkeySpec.parse(raw)
                 try orchestrator.setGUIShowShortcut(spec.normalized)
                 print("Updated gui-show-shortcut\t\(spec.normalized)")
+            } else if let raw = optionalValue(for: "--gui-add-project-shortcut") {
+                let spec = try HotkeySpec.parse(raw)
+                try orchestrator.setGUIAddProjectShortcut(spec.normalized)
+                print("Updated gui-add-project-shortcut\t\(spec.normalized)")
+            } else if let raw = optionalValue(for: "--gui-add-workspace-shortcut") {
+                let spec = try HotkeySpec.parse(raw)
+                try orchestrator.setGUIAddWorkspaceShortcut(spec.normalized)
+                print("Updated gui-add-workspace-shortcut\t\(spec.normalized)")
+            } else if let raw = optionalValue(for: "--gui-reload-shortcut") {
+                let spec = try HotkeySpec.parse(raw)
+                try orchestrator.setGUIReloadShortcut(spec.normalized)
+                print("Updated gui-reload-shortcut\t\(spec.normalized)")
+            } else if let raw = optionalValue(for: "--gui-open-editor-shortcut") {
+                let spec = try HotkeySpec.parse(raw)
+                try orchestrator.setGUIOpenEditorShortcut(spec.normalized)
+                print("Updated gui-open-editor-shortcut\t\(spec.normalized)")
+            } else if let raw = optionalValue(for: "--gui-open-terminal-shortcut") {
+                let spec = try HotkeySpec.parse(raw)
+                try orchestrator.setGUIOpenTerminalShortcut(spec.normalized)
+                print("Updated gui-open-terminal-shortcut\t\(spec.normalized)")
+            } else if let raw = optionalValue(for: "--gui-open-finder-shortcut") {
+                let spec = try HotkeySpec.parse(raw)
+                try orchestrator.setGUIOpenFinderShortcut(spec.normalized)
+                print("Updated gui-open-finder-shortcut\t\(spec.normalized)")
+            } else if let raw = optionalValue(for: "--gui-open-settings-shortcut") {
+                let spec = try HotkeySpec.parse(raw)
+                try orchestrator.setGUIOpenSettingsShortcut(spec.normalized)
+                print("Updated gui-open-settings-shortcut\t\(spec.normalized)")
             } else {
                 throw NSError(
                     domain: "agentmux.cli",
                     code: 2,
                     userInfo: [
                         NSLocalizedDescriptionKey:
-                            "Missing setting flag/value. Use: settings set --gui-hotkey|--gui-next-shortcut|--gui-prev-shortcut|--gui-show-shortcut <spec>"
+                            "Missing setting flag/value. Use: settings set --gui-hotkey|--gui-next-shortcut|--gui-prev-shortcut|--gui-show-shortcut|--gui-add-project-shortcut|--gui-add-workspace-shortcut|--gui-reload-shortcut|--gui-open-editor-shortcut|--gui-open-terminal-shortcut|--gui-open-finder-shortcut|--gui-open-settings-shortcut <spec>"
                     ]
                 )
             }
@@ -262,13 +311,34 @@ struct CLI {
             } else if args.contains("--gui-show-shortcut") {
                 try orchestrator.setGUIShowShortcut(nil)
                 print("Reset gui-show-shortcut\t\(SettingsKey.defaultGUIShowShortcut)")
+            } else if args.contains("--gui-add-project-shortcut") {
+                try orchestrator.setGUIAddProjectShortcut(nil)
+                print("Reset gui-add-project-shortcut\t\(SettingsKey.defaultGUIAddProjectShortcut)")
+            } else if args.contains("--gui-add-workspace-shortcut") {
+                try orchestrator.setGUIAddWorkspaceShortcut(nil)
+                print("Reset gui-add-workspace-shortcut\t\(SettingsKey.defaultGUIAddWorkspaceShortcut)")
+            } else if args.contains("--gui-reload-shortcut") {
+                try orchestrator.setGUIReloadShortcut(nil)
+                print("Reset gui-reload-shortcut\t\(SettingsKey.defaultGUIReloadShortcut)")
+            } else if args.contains("--gui-open-editor-shortcut") {
+                try orchestrator.setGUIOpenEditorShortcut(nil)
+                print("Reset gui-open-editor-shortcut\t\(SettingsKey.defaultGUIOpenEditorShortcut)")
+            } else if args.contains("--gui-open-terminal-shortcut") {
+                try orchestrator.setGUIOpenTerminalShortcut(nil)
+                print("Reset gui-open-terminal-shortcut\t\(SettingsKey.defaultGUIOpenTerminalShortcut)")
+            } else if args.contains("--gui-open-finder-shortcut") {
+                try orchestrator.setGUIOpenFinderShortcut(nil)
+                print("Reset gui-open-finder-shortcut\t\(SettingsKey.defaultGUIOpenFinderShortcut)")
+            } else if args.contains("--gui-open-settings-shortcut") {
+                try orchestrator.setGUIOpenSettingsShortcut(nil)
+                print("Reset gui-open-settings-shortcut\t\(SettingsKey.defaultGUIOpenSettingsShortcut)")
             } else {
                 throw NSError(
                     domain: "agentmux.cli",
                     code: 2,
                     userInfo: [
                         NSLocalizedDescriptionKey:
-                            "Missing setting flag. Use: settings reset --gui-hotkey|--gui-next-shortcut|--gui-prev-shortcut|--gui-show-shortcut"
+                            "Missing setting flag. Use: settings reset --gui-hotkey|--gui-next-shortcut|--gui-prev-shortcut|--gui-show-shortcut|--gui-add-project-shortcut|--gui-add-workspace-shortcut|--gui-reload-shortcut|--gui-open-editor-shortcut|--gui-open-terminal-shortcut|--gui-open-finder-shortcut|--gui-open-settings-shortcut"
                     ]
                 )
             }
@@ -312,14 +382,35 @@ struct CLI {
               agentmux settings get --gui-next-shortcut
               agentmux settings get --gui-prev-shortcut
               agentmux settings get --gui-show-shortcut
+              agentmux settings get --gui-add-project-shortcut
+              agentmux settings get --gui-add-workspace-shortcut
+              agentmux settings get --gui-reload-shortcut
+              agentmux settings get --gui-open-editor-shortcut
+              agentmux settings get --gui-open-terminal-shortcut
+              agentmux settings get --gui-open-finder-shortcut
+              agentmux settings get --gui-open-settings-shortcut
               agentmux settings set --gui-hotkey <spec>
               agentmux settings set --gui-next-shortcut <spec>
               agentmux settings set --gui-prev-shortcut <spec>
               agentmux settings set --gui-show-shortcut <spec>
+              agentmux settings set --gui-add-project-shortcut <spec>
+              agentmux settings set --gui-add-workspace-shortcut <spec>
+              agentmux settings set --gui-reload-shortcut <spec>
+              agentmux settings set --gui-open-editor-shortcut <spec>
+              agentmux settings set --gui-open-terminal-shortcut <spec>
+              agentmux settings set --gui-open-finder-shortcut <spec>
+              agentmux settings set --gui-open-settings-shortcut <spec>
               agentmux settings reset --gui-hotkey
               agentmux settings reset --gui-next-shortcut
               agentmux settings reset --gui-prev-shortcut
               agentmux settings reset --gui-show-shortcut
+              agentmux settings reset --gui-add-project-shortcut
+              agentmux settings reset --gui-add-workspace-shortcut
+              agentmux settings reset --gui-reload-shortcut
+              agentmux settings reset --gui-open-editor-shortcut
+              agentmux settings reset --gui-open-terminal-shortcut
+              agentmux settings reset --gui-open-finder-shortcut
+              agentmux settings reset --gui-open-settings-shortcut
 
               agentmux project list
               agentmux project add --dir <path>
@@ -343,9 +434,9 @@ struct CLI {
               - Workspaces snapshot project processes, status checks, and browser sessions into the runtime DB on creation.
               - Archiving a non-git workspace never deletes the project directory.
               - Workspaces reserve PORT0-PORT9 from the configured port range.
-              - GUI window focus shortcuts: cmd+shift+1 through cmd+shift+9 (when GUI is focused).
+              - GUI window focus shortcuts: cmd+1 through cmd+9 (when GUI is focused).
               - GUI window cycle shortcuts: cmd+shift+[ and cmd+shift+] (global, when GUI is not focused).
-              - GUI open shortcuts (when workspace is selected): cmd+shift+e (editor), cmd+shift+t (terminal), cmd+shift+f (Finder).
+              - GUI action shortcuts can be overridden in Settings or via `agentmux settings set ...`.
             """)
     }
 }

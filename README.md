@@ -20,7 +20,7 @@ YAML is the source of truth:
 - Runtime DB: `~/.agentmux/agentmux.db` (ephemeral)
 - Cloned projects: `/Users/<username>/agentmux/projects/<project_name>`
 - Git worktrees: `/Users/<username>/agentmux/workspaces/<projectname>/<dirname>` (dirname is a unique food name)
-- GUI shortcuts (when focused): `cmd+shift+1` through `cmd+shift+9` focus workspace windows
+- GUI shortcuts (when focused): `cmd+1` through `cmd+9` focus workspace windows
 - Global window navigation (when GUI not focused): `cmd+shift+]` and `cmd+shift+[`
 
 Example config:
@@ -62,6 +62,7 @@ Updates to workspace settings apply immediately when the workspace is running (n
   - Env vars/ports tab
   - Workspace settings tab
 - Settings view lets you choose a preferred editor from installed VS Code, Cursor, or Windsurf.
+- Settings view also lets you override default keyboard shortcuts for app actions.
 - New workspace `+` actions are shown for git projects only.
 
 Hotkeys:
@@ -69,11 +70,10 @@ Hotkeys:
 - Next running workspace: `cmd+shift+]`
 - Previous running workspace: `cmd+shift+[`
 - Activate selected workspace: `cmd+shift+return`
-- New workspace (when app is focused): `cmd+n`
-- Preferences: `cmd+,`
 - Open editor: `cmd+shift+e`
 - Open terminal: `cmd+shift+t`
 - Open Finder: `cmd+shift+f`
+- Focus workspace window 1-9: `cmd+1` through `cmd+9`
 
 When text input is focused in the GUI, standard editing shortcuts (including `cmd+v`) are handled normally.
 

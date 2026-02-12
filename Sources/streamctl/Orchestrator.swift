@@ -601,6 +601,62 @@ public final class AgentmuxOrchestrator {
         try store.setSetting(key: SettingsKey.guiShowShortcut, value: raw)
     }
 
+    public func guiAddProjectShortcut() throws -> String {
+        try store.setting(key: SettingsKey.guiAddProjectShortcut) ?? SettingsKey.defaultGUIAddProjectShortcut
+    }
+
+    public func setGUIAddProjectShortcut(_ raw: String?) throws {
+        try store.setSetting(key: SettingsKey.guiAddProjectShortcut, value: raw)
+    }
+
+    public func guiAddWorkspaceShortcut() throws -> String {
+        try store.setting(key: SettingsKey.guiAddWorkspaceShortcut) ?? SettingsKey.defaultGUIAddWorkspaceShortcut
+    }
+
+    public func setGUIAddWorkspaceShortcut(_ raw: String?) throws {
+        try store.setSetting(key: SettingsKey.guiAddWorkspaceShortcut, value: raw)
+    }
+
+    public func guiReloadShortcut() throws -> String {
+        try store.setting(key: SettingsKey.guiReloadShortcut) ?? SettingsKey.defaultGUIReloadShortcut
+    }
+
+    public func setGUIReloadShortcut(_ raw: String?) throws {
+        try store.setSetting(key: SettingsKey.guiReloadShortcut, value: raw)
+    }
+
+    public func guiOpenEditorShortcut() throws -> String {
+        try store.setting(key: SettingsKey.guiOpenEditorShortcut) ?? SettingsKey.defaultGUIOpenEditorShortcut
+    }
+
+    public func setGUIOpenEditorShortcut(_ raw: String?) throws {
+        try store.setSetting(key: SettingsKey.guiOpenEditorShortcut, value: raw)
+    }
+
+    public func guiOpenTerminalShortcut() throws -> String {
+        try store.setting(key: SettingsKey.guiOpenTerminalShortcut) ?? SettingsKey.defaultGUIOpenTerminalShortcut
+    }
+
+    public func setGUIOpenTerminalShortcut(_ raw: String?) throws {
+        try store.setSetting(key: SettingsKey.guiOpenTerminalShortcut, value: raw)
+    }
+
+    public func guiOpenFinderShortcut() throws -> String {
+        try store.setting(key: SettingsKey.guiOpenFinderShortcut) ?? SettingsKey.defaultGUIOpenFinderShortcut
+    }
+
+    public func setGUIOpenFinderShortcut(_ raw: String?) throws {
+        try store.setSetting(key: SettingsKey.guiOpenFinderShortcut, value: raw)
+    }
+
+    public func guiOpenSettingsShortcut() throws -> String {
+        try store.setting(key: SettingsKey.guiOpenSettingsShortcut) ?? SettingsKey.defaultGUIOpenSettingsShortcut
+    }
+
+    public func setGUIOpenSettingsShortcut(_ raw: String?) throws {
+        try store.setSetting(key: SettingsKey.guiOpenSettingsShortcut, value: raw)
+    }
+
     public func activeWorkspaceID() throws -> String? {
         try store.setting(key: "active_workspace_id")
     }

@@ -25,14 +25,20 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
     private var hotkeyHandler: EventHandlerRef?
     private var hotkeyRefs: [UInt32: EventHotKeyRef] = [:]
-    private var registeredHotkey: HotkeySpec?
+    private var toggleShortcutSpec: HotkeySpec?
     private var shortcutMonitor: Any?
     private var nextShortcutSpec: HotkeySpec?
     private var previousShortcutSpec: HotkeySpec?
     private var activateShortcutSpec: HotkeySpec?
+    private var openEditorShortcutSpec: HotkeySpec?
+    private var openTerminalShortcutSpec: HotkeySpec?
+    private var openFinderShortcutSpec: HotkeySpec?
+    private var shortcutButtonsBySetting: [String: NSButton] = [:]
+    private var activeShortcutCaptureSetting: ShortcutSetting?
 
     private var configCache: AppConfig?
     private let defaultSplitViewWidth: CGFloat = 360
+    private let shortcutLabelColumnWidth: CGFloat = 250
     private var isApplyingSplitViewWidth = false
     private var hasAppliedSplitViewWidth = false
 
@@ -126,9 +132,17 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let sectionHeader = sidebarSectionHeader(
             title: "Projects",
             actions: [
-                (symbol: "plus", tooltip: "New project (⇧⌘N)", action: #selector(addProject)),
-                (symbol: "gearshape", tooltip: "Settings (⌘,)", action: #selector(showSettings)),
-                (symbol: "arrow.clockwise", tooltip: "Reload (⌘R)", action: #selector(reloadTapped)),
+                (symbol: "plus", tooltip: "New project", action: #selector(addProject)),
+                (
+                    symbol: "gearshape",
+                    tooltip: "Settings",
+                    action: #selector(showSettings)
+                ),
+                (
+                    symbol: "arrow.clockwise",
+                    tooltip: "Reload",
+                    action: #selector(reloadTapped)
+                ),
             ]
         )
 
@@ -217,6 +231,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
     private func showPlaceholder() {
         showingSettings = false
+        activeShortcutCaptureSetting = nil
         for view in detailContainer.subviews {
             view.removeFromSuperview()
         }
@@ -233,6 +248,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
     private func showSettingsDetail() {
         showingSettings = true
+        shortcutButtonsBySetting.removeAll()
+        activeShortcutCaptureSetting = nil
         for view in detailContainer.subviews {
             view.removeFromSuperview()
         }
@@ -292,11 +309,29 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             stack.addArrangedSubview(note)
         }
 
+        stack.addArrangedSubview(label(text: "Keyboard shortcuts"))
+        let shortcutsNote = NSTextField(
+            labelWithString:
+                "Click a shortcut, then press the key combination you want. Next/Previous cycle running workspaces when agentmux is focused, and cycle workspace windows when a workspace window is focused."
+        )
+        shortcutsNote.font = .systemFont(ofSize: 11)
+        shortcutsNote.textColor = .secondaryLabelColor
+        shortcutsNote.maximumNumberOfLines = 0
+        shortcutsNote.lineBreakMode = .byWordWrapping
+        stack.addArrangedSubview(shortcutsNote)
+
+        for setting in ShortcutSetting.settingsPanelCases {
+            let row = shortcutSettingsRow(setting: setting)
+            stack.addArrangedSubview(row)
+            constrainFormFieldToFillWidth(row, in: stack)
+        }
+
         showScrollableDetailStack(stack)
     }
 
     private func showProjectDetail(project: ProjectSummary) {
         showingSettings = false
+        activeShortcutCaptureSetting = nil
         for view in detailContainer.subviews {
             view.removeFromSuperview()
         }
@@ -315,7 +350,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let addWorkspaceButton = actionButton(
             title: "New Workspace",
             symbol: "plus.rectangle.on.rectangle",
-            tooltip: "New workspace for \(project.name) (⌘N)",
+            tooltip: "New workspace for \(project.name)",
             action: #selector(addWorkspaceFromToolbar),
             primary: false
         )
@@ -611,6 +646,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
     private func showWorkspaceDetail(project: ProjectSummary, workspace: WorkspaceSummary) {
         showingSettings = false
+        activeShortcutCaptureSetting = nil
         for view in detailContainer.subviews {
             view.removeFromSuperview()
         }
@@ -693,23 +729,23 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         openRow.orientation = .horizontal
         openRow.spacing = 8
         let openEditorButton = actionButton(
-            title: "Open Editor (⇧⌘E)",
+            title: actionTitle(base: "Open Editor", setting: .guiOpenEditorShortcut),
             symbol: nil,
-            tooltip: "Open preferred editor (⇧⌘E)",
+            tooltip: actionTooltip(base: "Open preferred editor", setting: .guiOpenEditorShortcut),
             action: #selector(openWorkspaceEditor(_:)),
             primary: false
         )
         let openTerminalButton = actionButton(
-            title: "Open Terminal (⇧⌘T)",
+            title: actionTitle(base: "Open Terminal", setting: .guiOpenTerminalShortcut),
             symbol: nil,
-            tooltip: "Open terminal window (⇧⌘T)",
+            tooltip: actionTooltip(base: "Open terminal window", setting: .guiOpenTerminalShortcut),
             action: #selector(openWorkspaceTerminal(_:)),
             primary: false
         )
         let openFinderButton = actionButton(
-            title: "Open Finder (⇧⌘F)",
+            title: actionTitle(base: "Open Finder", setting: .guiOpenFinderShortcut),
             symbol: nil,
-            tooltip: "Open Finder window (⇧⌘F)",
+            tooltip: actionTooltip(base: "Open Finder window", setting: .guiOpenFinderShortcut),
             action: #selector(openWorkspaceFinder(_:)),
             primary: false
         )
@@ -717,7 +753,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         openTerminalButton.identifier = NSUserInterfaceItemIdentifier(workspace.id)
         openFinderButton.identifier = NSUserInterfaceItemIdentifier(workspace.id)
         if let editor = configCache?.editor, editor != .none {
-            openEditorButton.toolTip = "Open \(editorDisplayName(editor)) (⇧⌘E)"
+            openEditorButton.toolTip = "\(editorDisplayName(editor)) (\(shortcutHint(for: .guiOpenEditorShortcut)))"
         } else {
             openEditorButton.isEnabled = false
             openEditorButton.toolTip = "Preferred editor not configured"
@@ -728,7 +764,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         openRow.addArrangedSubview(NSView())
 
         let processesLabel = label(text: "Running processes")
-        let windowsLabel = label(text: "Windows (cmd+shift+<n>)")
+        let windowsLabel = label(text: "Windows (cmd+<n>)")
 
         let processList = NSTextView()
         processList.isEditable = false
@@ -751,7 +787,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let windows = (try? orchestrator.windows(workspaceID: workspace.id)) ?? []
         windowsList.string = windows.enumerated().map { idx, win in
             let title = win.title ?? win.app
-            return "cmd+shift+\(idx + 1)  \(win.app) — \(title)"
+            return "cmd+\(idx + 1)  \(win.app) — \(title)"
         }.joined(separator: "\n")
         let windowsScroll = scrollableTextView(windowsList, height: 120)
 
@@ -958,6 +994,223 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             return "Vim"
         case .none:
             return "None"
+        }
+    }
+
+    private func shortcutSettingsRow(setting: ShortcutSetting) -> NSView {
+        let row = NSStackView()
+        row.orientation = .horizontal
+        row.alignment = .centerY
+        row.spacing = 8
+
+        let title = NSTextField(labelWithString: setting.label)
+        title.font = .systemFont(ofSize: 12)
+        title.setContentHuggingPriority(.required, for: .horizontal)
+        title.widthAnchor.constraint(equalToConstant: shortcutLabelColumnWidth).isActive = true
+
+        let captureButton = actionButton(
+            title: shortcutCaptureButtonTitle(setting: setting),
+            symbol: nil,
+            tooltip: "Click to capture shortcut",
+            action: #selector(beginShortcutCapture(_:)),
+            primary: false
+        )
+        captureButton.identifier = NSUserInterfaceItemIdentifier(setting.settingKey)
+        captureButton.alignment = .center
+        captureButton.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
+        captureButton.isBordered = false
+        captureButton.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        captureButton.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        captureButton.heightAnchor.constraint(equalToConstant: 34).isActive = true
+        captureButton.widthAnchor.constraint(equalToConstant: 170).isActive = true
+        updateShortcutCaptureButtonText(
+            captureButton,
+            text: shortcutCaptureButtonTitle(setting: setting),
+            active: false
+        )
+        styleShortcutCaptureButton(captureButton, active: false)
+        shortcutButtonsBySetting[setting.settingKey] = captureButton
+
+        let resetButton = actionButton(
+            title: "Reset",
+            symbol: nil,
+            tooltip: "Reset to default shortcut",
+            action: #selector(resetShortcutSetting(_:)),
+            primary: false
+        )
+        resetButton.identifier = NSUserInterfaceItemIdentifier(setting.settingKey)
+        resetButton.setContentHuggingPriority(.required, for: .horizontal)
+
+        row.addArrangedSubview(title)
+        row.addArrangedSubview(captureButton)
+        row.addArrangedSubview(resetButton)
+        return row
+    }
+
+    private func shortcutCaptureButtonTitle(setting: ShortcutSetting) -> String {
+        if activeShortcutCaptureSetting == setting {
+            return "Press shortcut"
+        }
+        return shortcutDisplayText(for: setting)
+    }
+
+    private func shortcutDisplayText(for setting: ShortcutSetting) -> String {
+        shortcutSpec(for: setting)?.normalized ?? setting.defaultSpec
+    }
+
+    private func actionTitle(base: String, setting: ShortcutSetting) -> String {
+        "\(base) (\(shortcutHint(for: setting)))"
+    }
+
+    private func actionTooltip(base: String, setting: ShortcutSetting) -> String {
+        "\(base) (\(shortcutHint(for: setting)))"
+    }
+
+    private func shortcutHint(for setting: ShortcutSetting) -> String {
+        guard let spec = shortcutSpec(for: setting) else { return setting.defaultSpec }
+        return displayShortcut(spec)
+    }
+
+    private func displayShortcut(_ spec: HotkeySpec) -> String {
+        var parts: [String] = []
+        if spec.modifiers.contains(.cmd) {
+            parts.append("⌘")
+        }
+        if spec.modifiers.contains(.shift) {
+            parts.append("⇧")
+        }
+        if spec.modifiers.contains(.alt) {
+            parts.append("⌥")
+        }
+        if spec.modifiers.contains(.ctrl) {
+            parts.append("⌃")
+        }
+        parts.append(displayShortcutKey(spec.key))
+        return parts.joined()
+    }
+
+    private func displayShortcutKey(_ key: String) -> String {
+        switch key {
+        case "return", "enter":
+            return "↩"
+        case "space":
+            return "Space"
+        case "tab":
+            return "⇥"
+        case "escape":
+            return "⎋"
+        case "delete", "backspace":
+            return "⌫"
+        case "forwarddelete":
+            return "⌦"
+        case "left":
+            return "←"
+        case "right":
+            return "→"
+        case "up":
+            return "↑"
+        case "down":
+            return "↓"
+        default:
+            return key.uppercased()
+        }
+    }
+
+    @objc private func beginShortcutCapture(_ sender: NSButton) {
+        guard let settingKey = sender.identifier?.rawValue,
+            let setting = ShortcutSetting(settingKey: settingKey)
+        else { return }
+
+        if activeShortcutCaptureSetting == setting {
+            activeShortcutCaptureSetting = nil
+        } else {
+            activeShortcutCaptureSetting = setting
+        }
+        refreshShortcutCaptureButtons()
+    }
+
+    @objc private func resetShortcutSetting(_ sender: NSButton) {
+        guard let settingKey = sender.identifier?.rawValue,
+            let setting = ShortcutSetting(settingKey: settingKey)
+        else { return }
+
+        if activeShortcutCaptureSetting == setting {
+            activeShortcutCaptureSetting = nil
+            refreshShortcutCaptureButtons()
+        }
+
+        do {
+            try setShortcutSetting(setting: setting, value: nil)
+            loadShortcutSpecs()
+            setupGlobalHotkey()
+            refreshSelection()
+        } catch {
+            showError(error)
+        }
+    }
+
+    private func refreshShortcutCaptureButtons() {
+        for (settingKey, button) in shortcutButtonsBySetting {
+            guard let setting = ShortcutSetting(settingKey: settingKey) else { continue }
+            let isActive = activeShortcutCaptureSetting == setting
+            updateShortcutCaptureButtonText(
+                button,
+                text: shortcutCaptureButtonTitle(setting: setting),
+                active: isActive
+            )
+            styleShortcutCaptureButton(button, active: isActive)
+            if activeShortcutCaptureSetting == setting {
+                button.toolTip = "Press a key combination (Esc to cancel)"
+            } else {
+                button.toolTip = "Click to capture shortcut"
+            }
+        }
+    }
+
+    private func styleShortcutCaptureButton(_ button: NSButton, active: Bool) {
+        button.wantsLayer = true
+        button.layer?.cornerRadius = 6
+        button.layer?.borderWidth = 1
+        button.layer?.backgroundColor = shortcutKeycapBackgroundColor(active: active).cgColor
+        button.layer?.borderColor = shortcutKeycapBorderColor(active: active).cgColor
+    }
+
+    private func updateShortcutCaptureButtonText(_ button: NSButton, text: String, active: Bool) {
+        let color: NSColor = active ? .white : .labelColor
+        let paragraph = NSMutableParagraphStyle()
+        paragraph.alignment = .center
+        paragraph.lineBreakMode = .byTruncatingTail
+        let attrs: [NSAttributedString.Key: Any] = [
+            .foregroundColor: color,
+            .font: NSFont.monospacedSystemFont(ofSize: 12, weight: .regular),
+            .paragraphStyle: paragraph,
+        ]
+        button.attributedTitle = NSAttributedString(string: "  \(text)  ", attributes: attrs)
+    }
+
+    private func shortcutKeycapBackgroundColor(active: Bool) -> NSColor {
+        NSColor(name: nil) { appearance in
+            let isDark = appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+            if active {
+                return isDark
+                    ? NSColor(calibratedRed: 0.13, green: 0.28, blue: 0.42, alpha: 1.0)
+                    : NSColor(calibratedRed: 0.80, green: 0.89, blue: 0.97, alpha: 1.0)
+            }
+            return isDark
+                ? NSColor(calibratedWhite: 0.16, alpha: 1.0)
+                : NSColor(calibratedWhite: 0.82, alpha: 1.0)
+        }
+    }
+
+    private func shortcutKeycapBorderColor(active: Bool) -> NSColor {
+        NSColor(name: nil) { appearance in
+            if active {
+                return .systemBlue
+            }
+            let isDark = appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+            return isDark
+                ? NSColor(calibratedWhite: 0.28, alpha: 1.0)
+                : NSColor(calibratedWhite: 0.65, alpha: 1.0)
         }
     }
 
@@ -1197,9 +1450,24 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     }
 
     @objc private func showSettings() {
-        if let row = settingsRowIndex() {
-            outlineView.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
+        if projectHasUnsavedChanges || workspaceHasUnsavedChanges {
+            let response = unsavedChangesPrompt()
+            if response == .alertFirstButtonReturn {
+                if !saveCurrentDetail() {
+                    return
+                }
+            } else if response == .alertThirdButtonReturn {
+                return
+            } else {
+                projectHasUnsavedChanges = false
+                workspaceHasUnsavedChanges = false
+            }
         }
+        outlineView.deselectAll(nil)
+        selectedProjectID = nil
+        selectedWorkspaceID = nil
+        lastSelectedRow = -1
+        showSettingsDetail()
     }
 
     @objc private func openWorkspaceEditor(_ sender: NSButton) {
@@ -1213,11 +1481,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     }
 
     @objc private func openWorkspaceFinder(_ sender: NSButton) {
-        guard let workspaceID = sender.identifier?.rawValue,
-            let (_, workspace) = findWorkspace(id: workspaceID)
-        else { return }
-        let url = URL(fileURLWithPath: workspace.dir, isDirectory: true)
-        NSWorkspace.shared.open(url)
+        guard let workspaceID = sender.identifier?.rawValue else { return }
+        openWorkspaceFinder(workspaceID: workspaceID)
     }
 
     @objc private func editorPreferenceChanged(_ sender: NSPopUpButton) {
@@ -1470,6 +1735,12 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         }
     }
 
+    private func openWorkspaceFinder(workspaceID: String) {
+        guard let (_, workspace) = findWorkspace(id: workspaceID) else { return }
+        let url = URL(fileURLWithPath: workspace.dir, isDirectory: true)
+        NSWorkspace.shared.open(url)
+    }
+
     private func findWorkspace(id: String) -> (ProjectSummary, WorkspaceSummary)? {
         for project in projects {
             if let workspaces = workspacesByProject[project.id],
@@ -1493,13 +1764,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     }
 
     private func setupGlobalHotkey() {
-        do {
-            let raw = try orchestrator.guiHotkey()
-            let spec = try HotkeySpec.parse(raw)
-            registerHotkeys(toggle: spec, next: nextShortcutSpec, previous: previousShortcutSpec)
-        } catch {
-            showError(error)
+        guard let toggleShortcutSpec else {
+            teardownGlobalHotkey()
+            return
         }
+        registerHotkeys(toggle: toggleShortcutSpec, next: nextShortcutSpec, previous: previousShortcutSpec)
     }
 
     private func teardownGlobalHotkey() {
@@ -1541,7 +1810,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         }
 
         var eventSpec = EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyPressed))
-        let handlerStatus = InstallEventHandler(
+        _ = InstallEventHandler(
             target,
             hotkeyHandlerProc,
             1,
@@ -1549,9 +1818,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             UnsafeMutableRawPointer(Unmanaged.passUnretained(self).toOpaque()),
             &hotkeyHandler
         )
-        if handlerStatus == noErr {
-            registeredHotkey = toggle
-        }
     }
 
     private func registerHotkey(spec: HotkeySpec, id: UInt32, signature: OSType, target: EventTargetRef?) {
@@ -1566,82 +1832,31 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     private func setupShortcutMonitor() {
         shortcutMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
             guard let self else { return event }
+            if self.handleShortcutCaptureEvent(event: event) {
+                return nil
+            }
             if self.handleFocusedTextInputShortcut(event: event) {
                 return nil
             }
             if self.isTextInputFocused() {
                 return event
             }
-            if event.modifierFlags.contains(.command),
-                event.modifierFlags.contains(.shift),
-                !event.modifierFlags.contains(.option),
-                !event.modifierFlags.contains(.control),
-                event.charactersIgnoringModifiers?.lowercased() == "n"
-            {
-                self.addProject()
-                return nil
-            }
-            if event.modifierFlags.contains(.command),
-                !event.modifierFlags.contains(.shift),
-                !event.modifierFlags.contains(.option),
-                !event.modifierFlags.contains(.control),
-                event.charactersIgnoringModifiers?.lowercased() == "n"
-            {
-                self.addWorkspaceFromShortcut()
-                return nil
-            }
-            if event.modifierFlags.contains(.command),
-                !event.modifierFlags.contains(.shift),
-                !event.modifierFlags.contains(.option),
-                !event.modifierFlags.contains(.control),
-                event.charactersIgnoringModifiers?.lowercased() == "r"
-            {
-                self.reloadData()
-                return nil
-            }
-            if event.modifierFlags.contains(.command),
-                event.modifierFlags.contains(.shift),
-                !event.modifierFlags.contains(.option),
-                !event.modifierFlags.contains(.control),
-                event.charactersIgnoringModifiers?.lowercased() == "e"
-            {
+            if let openEditorShortcutSpec, matches(event: event, spec: openEditorShortcutSpec) {
                 if let workspaceID = self.selectedWorkspaceID {
                     self.openWorkspaceEditor(workspaceID: workspaceID)
                 }
                 return nil
             }
-            if event.modifierFlags.contains(.command),
-                event.modifierFlags.contains(.shift),
-                !event.modifierFlags.contains(.option),
-                !event.modifierFlags.contains(.control),
-                event.charactersIgnoringModifiers?.lowercased() == "t"
-            {
+            if let openTerminalShortcutSpec, matches(event: event, spec: openTerminalShortcutSpec) {
                 if let workspaceID = self.selectedWorkspaceID {
                     self.openWorkspaceTerminal(workspaceID: workspaceID)
                 }
                 return nil
             }
-            if event.modifierFlags.contains(.command),
-                event.modifierFlags.contains(.shift),
-                !event.modifierFlags.contains(.option),
-                !event.modifierFlags.contains(.control),
-                event.charactersIgnoringModifiers?.lowercased() == "f"
-            {
-                if let workspaceID = self.selectedWorkspaceID,
-                    let (_, workspace) = self.findWorkspace(id: workspaceID)
-                {
-                    let url = URL(fileURLWithPath: workspace.dir, isDirectory: true)
-                    NSWorkspace.shared.open(url)
+            if let openFinderShortcutSpec, matches(event: event, spec: openFinderShortcutSpec) {
+                if let workspaceID = self.selectedWorkspaceID {
+                    self.openWorkspaceFinder(workspaceID: workspaceID)
                 }
-                return nil
-            }
-            if event.modifierFlags.contains(.command),
-                !event.modifierFlags.contains(.shift),
-                !event.modifierFlags.contains(.option),
-                !event.modifierFlags.contains(.control),
-                event.charactersIgnoringModifiers == ","
-            {
-                self.showSettings()
                 return nil
             }
             if let windowIndex = windowShortcutIndex(for: event) {
@@ -1663,6 +1878,143 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             return event
         }
     }
+
+    private func handleShortcutCaptureEvent(event: NSEvent) -> Bool {
+        guard let setting = activeShortcutCaptureSetting else { return false }
+        if event.keyCode == UInt16(kVK_Escape) {
+            activeShortcutCaptureSetting = nil
+            refreshShortcutCaptureButtons()
+            return true
+        }
+        guard let spec = shortcutCaptureSpec(from: event) else {
+            NSSound.beep()
+            return true
+        }
+        guard !spec.modifiers.isEmpty else {
+            NSSound.beep()
+            return true
+        }
+
+        do {
+            try setShortcutSetting(setting: setting, value: spec.normalized)
+            activeShortcutCaptureSetting = nil
+            loadShortcutSpecs()
+            setupGlobalHotkey()
+            refreshSelection()
+        } catch {
+            activeShortcutCaptureSetting = nil
+            refreshShortcutCaptureButtons()
+            showError(error)
+        }
+        return true
+    }
+
+    private func shortcutCaptureSpec(from event: NSEvent) -> HotkeySpec? {
+        guard let key = shortcutCaptureKey(for: event.keyCode) else { return nil }
+        return HotkeySpec(key: key, modifiers: shortcutModifiers(from: event.modifierFlags))
+    }
+
+    private func shortcutCaptureKey(for keyCode: UInt16) -> String? {
+        AppKitController.shortcutCaptureKeyMap[keyCode]
+    }
+
+    private func shortcutModifiers(from flags: NSEvent.ModifierFlags) -> Set<HotkeyModifier> {
+        let filtered = flags.intersection([.command, .shift, .option, .control])
+        var modifiers = Set<HotkeyModifier>()
+        if filtered.contains(.command) {
+            modifiers.insert(.cmd)
+        }
+        if filtered.contains(.shift) {
+            modifiers.insert(.shift)
+        }
+        if filtered.contains(.option) {
+            modifiers.insert(.alt)
+        }
+        if filtered.contains(.control) {
+            modifiers.insert(.ctrl)
+        }
+        return modifiers
+    }
+
+    private static let shortcutCaptureKeyMap: [UInt16: String] = [
+        UInt16(kVK_ANSI_A): "a",
+        UInt16(kVK_ANSI_B): "b",
+        UInt16(kVK_ANSI_C): "c",
+        UInt16(kVK_ANSI_D): "d",
+        UInt16(kVK_ANSI_E): "e",
+        UInt16(kVK_ANSI_F): "f",
+        UInt16(kVK_ANSI_G): "g",
+        UInt16(kVK_ANSI_H): "h",
+        UInt16(kVK_ANSI_I): "i",
+        UInt16(kVK_ANSI_J): "j",
+        UInt16(kVK_ANSI_K): "k",
+        UInt16(kVK_ANSI_L): "l",
+        UInt16(kVK_ANSI_M): "m",
+        UInt16(kVK_ANSI_N): "n",
+        UInt16(kVK_ANSI_O): "o",
+        UInt16(kVK_ANSI_P): "p",
+        UInt16(kVK_ANSI_Q): "q",
+        UInt16(kVK_ANSI_R): "r",
+        UInt16(kVK_ANSI_S): "s",
+        UInt16(kVK_ANSI_T): "t",
+        UInt16(kVK_ANSI_U): "u",
+        UInt16(kVK_ANSI_V): "v",
+        UInt16(kVK_ANSI_W): "w",
+        UInt16(kVK_ANSI_X): "x",
+        UInt16(kVK_ANSI_Y): "y",
+        UInt16(kVK_ANSI_Z): "z",
+        UInt16(kVK_ANSI_0): "0",
+        UInt16(kVK_ANSI_1): "1",
+        UInt16(kVK_ANSI_2): "2",
+        UInt16(kVK_ANSI_3): "3",
+        UInt16(kVK_ANSI_4): "4",
+        UInt16(kVK_ANSI_5): "5",
+        UInt16(kVK_ANSI_6): "6",
+        UInt16(kVK_ANSI_7): "7",
+        UInt16(kVK_ANSI_8): "8",
+        UInt16(kVK_ANSI_9): "9",
+        UInt16(kVK_ANSI_Equal): "=",
+        UInt16(kVK_ANSI_Minus): "minus",
+        UInt16(kVK_ANSI_LeftBracket): "[",
+        UInt16(kVK_ANSI_RightBracket): "]",
+        UInt16(kVK_ANSI_Semicolon): ";",
+        UInt16(kVK_ANSI_Quote): "'",
+        UInt16(kVK_ANSI_Comma): ",",
+        UInt16(kVK_ANSI_Period): ".",
+        UInt16(kVK_ANSI_Slash): "/",
+        UInt16(kVK_ANSI_Backslash): "\\",
+        UInt16(kVK_ANSI_Grave): "`",
+        UInt16(kVK_Space): "space",
+        UInt16(kVK_Tab): "tab",
+        UInt16(kVK_Return): "return",
+        UInt16(kVK_Escape): "escape",
+        UInt16(kVK_Delete): "delete",
+        UInt16(kVK_ForwardDelete): "forwarddelete",
+        UInt16(kVK_LeftArrow): "left",
+        UInt16(kVK_RightArrow): "right",
+        UInt16(kVK_UpArrow): "up",
+        UInt16(kVK_DownArrow): "down",
+        UInt16(kVK_F1): "f1",
+        UInt16(kVK_F2): "f2",
+        UInt16(kVK_F3): "f3",
+        UInt16(kVK_F4): "f4",
+        UInt16(kVK_F5): "f5",
+        UInt16(kVK_F6): "f6",
+        UInt16(kVK_F7): "f7",
+        UInt16(kVK_F8): "f8",
+        UInt16(kVK_F9): "f9",
+        UInt16(kVK_F10): "f10",
+        UInt16(kVK_F11): "f11",
+        UInt16(kVK_F12): "f12",
+        UInt16(kVK_F13): "f13",
+        UInt16(kVK_F14): "f14",
+        UInt16(kVK_F15): "f15",
+        UInt16(kVK_F16): "f16",
+        UInt16(kVK_F17): "f17",
+        UInt16(kVK_F18): "f18",
+        UInt16(kVK_F19): "f19",
+        UInt16(kVK_F20): "f20",
+    ]
 
     private func isTextInputFocused() -> Bool {
         guard let window else { return false }
@@ -1711,14 +2063,100 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     }
 
     private func loadShortcutSpecs() {
-        do {
-            nextShortcutSpec = try HotkeySpec.parse(orchestrator.guiNextShortcut())
-            previousShortcutSpec = try HotkeySpec.parse(orchestrator.guiPreviousShortcut())
-            activateShortcutSpec = try HotkeySpec.parse(orchestrator.guiShowShortcut())
-        } catch {
-            nextShortcutSpec = nil
-            previousShortcutSpec = nil
-            activateShortcutSpec = nil
+        toggleShortcutSpec = loadShortcutSpec(setting: .guiHotkey)
+        nextShortcutSpec = loadShortcutSpec(setting: .guiNextShortcut)
+        previousShortcutSpec = loadShortcutSpec(setting: .guiPreviousShortcut)
+        activateShortcutSpec = loadShortcutSpec(setting: .guiShowShortcut)
+        openEditorShortcutSpec = loadShortcutSpec(setting: .guiOpenEditorShortcut)
+        openTerminalShortcutSpec = loadShortcutSpec(setting: .guiOpenTerminalShortcut)
+        openFinderShortcutSpec = loadShortcutSpec(setting: .guiOpenFinderShortcut)
+    }
+
+    private func loadShortcutSpec(setting: ShortcutSetting) -> HotkeySpec? {
+        if let stored = try? HotkeySpec.parse(shortcutRawValue(for: setting)) {
+            return stored
+        }
+        return try? HotkeySpec.parse(setting.defaultSpec)
+    }
+
+    private func shortcutRawValue(for setting: ShortcutSetting) throws -> String {
+        switch setting {
+        case .guiHotkey:
+            return try orchestrator.guiHotkey()
+        case .guiNextShortcut:
+            return try orchestrator.guiNextShortcut()
+        case .guiPreviousShortcut:
+            return try orchestrator.guiPreviousShortcut()
+        case .guiShowShortcut:
+            return try orchestrator.guiShowShortcut()
+        case .guiAddProjectShortcut:
+            return try orchestrator.guiAddProjectShortcut()
+        case .guiAddWorkspaceShortcut:
+            return try orchestrator.guiAddWorkspaceShortcut()
+        case .guiReloadShortcut:
+            return try orchestrator.guiReloadShortcut()
+        case .guiOpenEditorShortcut:
+            return try orchestrator.guiOpenEditorShortcut()
+        case .guiOpenTerminalShortcut:
+            return try orchestrator.guiOpenTerminalShortcut()
+        case .guiOpenFinderShortcut:
+            return try orchestrator.guiOpenFinderShortcut()
+        case .guiOpenSettingsShortcut:
+            return try orchestrator.guiOpenSettingsShortcut()
+        }
+    }
+
+    private func setShortcutSetting(setting: ShortcutSetting, value: String?) throws {
+        switch setting {
+        case .guiHotkey:
+            try orchestrator.setGUIHotkey(value)
+        case .guiNextShortcut:
+            try orchestrator.setGUINextShortcut(value)
+        case .guiPreviousShortcut:
+            try orchestrator.setGUIPreviousShortcut(value)
+        case .guiShowShortcut:
+            try orchestrator.setGUIShowShortcut(value)
+        case .guiAddProjectShortcut:
+            try orchestrator.setGUIAddProjectShortcut(value)
+        case .guiAddWorkspaceShortcut:
+            try orchestrator.setGUIAddWorkspaceShortcut(value)
+        case .guiReloadShortcut:
+            try orchestrator.setGUIReloadShortcut(value)
+        case .guiOpenEditorShortcut:
+            try orchestrator.setGUIOpenEditorShortcut(value)
+        case .guiOpenTerminalShortcut:
+            try orchestrator.setGUIOpenTerminalShortcut(value)
+        case .guiOpenFinderShortcut:
+            try orchestrator.setGUIOpenFinderShortcut(value)
+        case .guiOpenSettingsShortcut:
+            try orchestrator.setGUIOpenSettingsShortcut(value)
+        }
+    }
+
+    private func shortcutSpec(for setting: ShortcutSetting) -> HotkeySpec? {
+        switch setting {
+        case .guiHotkey:
+            return toggleShortcutSpec
+        case .guiNextShortcut:
+            return nextShortcutSpec
+        case .guiPreviousShortcut:
+            return previousShortcutSpec
+        case .guiShowShortcut:
+            return activateShortcutSpec
+        case .guiAddProjectShortcut:
+            return nil
+        case .guiAddWorkspaceShortcut:
+            return nil
+        case .guiReloadShortcut:
+            return nil
+        case .guiOpenEditorShortcut:
+            return openEditorShortcutSpec
+        case .guiOpenTerminalShortcut:
+            return openTerminalShortcutSpec
+        case .guiOpenFinderShortcut:
+            return openFinderShortcutSpec
+        case .guiOpenSettingsShortcut:
+            return nil
         }
     }
 
@@ -1784,7 +2222,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
     private func windowShortcutIndex(for event: NSEvent) -> Int? {
         guard event.modifierFlags.contains(.command),
-            event.modifierFlags.contains(.shift),
+            !event.modifierFlags.contains(.shift),
             !event.modifierFlags.contains(.option),
             !event.modifierFlags.contains(.control)
         else {
@@ -1813,15 +2251,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 }
             }
         }
-    }
-
-    private func settingsRowIndex() -> Int? {
-        for row in 0..<outlineView.numberOfRows {
-            if let item = outlineView.item(atRow: row) as? OutlineItem, case .settings = item {
-                return row
-            }
-        }
-        return nil
     }
 
     private func focusGlobalWindowNavigation(direction: Int) {
@@ -1868,7 +2297,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
     public func outlineView(_ outlineView: NSOutlineView, numberOfChildrenOfItem item: Any?) -> Int {
         if item == nil {
-            return projects.count + 1
+            return projects.count
         }
         if case .project(let project) = item as? OutlineItem {
             return workspacesByProject[project.id]?.count ?? 0
@@ -1885,10 +2314,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
     public func outlineView(_ outlineView: NSOutlineView, child index: Int, ofItem item: Any?) -> Any {
         if item == nil {
-            if index == 0 {
-                return OutlineItem.settings
-            }
-            return OutlineItem.project(projects[index - 1])
+            return OutlineItem.project(projects[index])
         }
         if case .project(let project) = item as? OutlineItem {
             let workspace =
@@ -1938,11 +2364,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 addButton.identifier = NSUserInterfaceItemIdentifier(project.id)
                 accessoryStack.addArrangedSubview(addButton)
             }
-        } else if case .settings = item as? OutlineItem {
-            icon.image = NSImage(systemSymbolName: "gearshape", accessibilityDescription: "Settings")
-            icon.contentTintColor = .secondaryLabelColor
-            text.stringValue = "Settings"
-            text.font = .systemFont(ofSize: 12, weight: .semibold)
         } else if case .workspace(_, let workspace) = item as? OutlineItem {
             icon.image = NSImage(
                 systemSymbolName: workspace.isRunning ? "circle.fill" : "circle", accessibilityDescription: "Status")
@@ -1982,11 +2403,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         }
         lastSelectedRow = row
         switch item {
-        case .settings:
-            selectedProjectID = nil
-            selectedWorkspaceID = nil
-            showingSettings = true
-            showSettingsDetail()
         case .project(let project):
             selectedProjectID = project.id
             selectedWorkspaceID = nil
