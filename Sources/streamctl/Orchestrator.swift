@@ -87,9 +87,26 @@ public final class AgentmuxOrchestrator {
         let records = try store.workspaces(projectID: projectID, includeArchived: includeArchived)
         return records.map {
             WorkspaceSummary(
-                id: $0.id, name: $0.name, dir: $0.dir, isRunning: $0.isRunning, isArchived: $0.isArchived,
+                id: $0.id,
+                name: $0.name,
+                branch: $0.branch,
+                dir: $0.dir,
+                isRunning: $0.isRunning,
+                isArchived: $0.isArchived,
                 isDefault: $0.isDefault)
         }
+    }
+
+    public func suggestedWorkspaceName(projectID: String) throws -> String {
+        guard let project = try store.project(id: projectID) else {
+            throw AgentmuxError.missingProject(dir: projectID)
+        }
+        let existingNames = Set(try store.workspaces(projectID: project.id, includeArchived: true).map(\.name))
+        for candidate in AgentmuxOrchestrator.workspaceFoodNames where !existingNames.contains(candidate) {
+            return candidate
+        }
+        throw AgentmuxError.invalidArgument(
+            message: "No available workspace names remain for project \(project.name).")
     }
 
     public func projectConfig(projectID: String) throws -> ProjectConfig? {
@@ -211,22 +228,37 @@ public final class AgentmuxOrchestrator {
         }
     }
 
-    public func createWorkspace(projectID: String, name: String) throws -> WorkspaceRecord {
+    public func createWorkspace(projectID: String, name: String, branch: String? = nil) throws -> WorkspaceRecord {
         guard let project = try store.project(id: projectID) else {
             throw AgentmuxError.missingProject(dir: projectID)
         }
-        if let existing = try store.workspace(projectID: projectID, name: name) {
+        let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedName.isEmpty else {
+            throw AgentmuxError.invalidArgument(message: "Workspace name is required.")
+        }
+        let trimmedBranch = branch?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let resolvedBranch: String?
+        if project.isGitRepo {
+            guard let trimmedBranch, !trimmedBranch.isEmpty else {
+                throw AgentmuxError.invalidArgument(message: "Branch name is required for git projects.")
+            }
+            resolvedBranch = trimmedBranch
+        } else {
+            resolvedBranch = nil
+        }
+        if let existing = try store.workspace(projectID: projectID, name: trimmedName) {
             if !existing.isArchived {
-                throw AgentmuxError.workspaceAlreadyExists(project: project.name, workspace: name)
+                throw AgentmuxError.workspaceAlreadyExists(project: project.name, workspace: trimmedName)
             }
             let revivedDir: String
             let revivedDirname: String?
             let revivedBranch: String?
             if project.isGitRepo {
+                guard let branchName = resolvedBranch else {
+                    throw AgentmuxError.invalidArgument(message: "Branch name is required for git projects.")
+                }
                 let dirname = try makeWorkspaceDirname(
                     project: project,
-                    workspaceName: name,
-                    branch: name,
                     existingDirname: existing.dirname
                 )
                 revivedDirname = dirname
@@ -234,9 +266,9 @@ public final class AgentmuxOrchestrator {
                 try FileManager.default.createDirectory(at: worktreeRoot, withIntermediateDirectories: true)
                 revivedDir = worktreeRoot.appendingPathComponent(dirname, isDirectory: true).path
                 if !FileManager.default.fileExists(atPath: revivedDir) {
-                    try git.createWorktree(path: project.dir, worktreePath: revivedDir, branch: name)
+                    try git.createWorktree(path: project.dir, worktreePath: revivedDir, branch: branchName)
                 }
-                revivedBranch = name
+                revivedBranch = branchName
             } else {
                 revivedDir = project.dir
                 revivedDirname = nil
@@ -245,7 +277,7 @@ public final class AgentmuxOrchestrator {
             let revived = WorkspaceRecord(
                 id: existing.id,
                 projectID: project.id,
-                name: name,
+                name: trimmedName,
                 dir: revivedDir,
                 dirname: revivedDirname,
                 branch: revivedBranch,
@@ -265,28 +297,33 @@ public final class AgentmuxOrchestrator {
         }
         let workspaceDir: String
         let workspaceDirname: String?
-        let branch: String?
+        let workspaceBranch: String?
         if project.isGitRepo {
+            guard let branchName = resolvedBranch else {
+                throw AgentmuxError.invalidArgument(message: "Branch name is required for git projects.")
+            }
             let dirname = try makeWorkspaceDirname(
-                project: project, workspaceName: name, branch: name, existingDirname: nil)
+                project: project,
+                existingDirname: nil
+            )
             workspaceDirname = dirname
             let worktreeRoot = try worktreeRoot(project: project)
             try FileManager.default.createDirectory(at: worktreeRoot, withIntermediateDirectories: true)
             workspaceDir = worktreeRoot.appendingPathComponent(dirname, isDirectory: true).path
-            try git.createWorktree(path: project.dir, worktreePath: workspaceDir, branch: name)
-            branch = name
+            try git.createWorktree(path: project.dir, worktreePath: workspaceDir, branch: branchName)
+            workspaceBranch = branchName
         } else {
             workspaceDir = project.dir
             workspaceDirname = nil
-            branch = nil
+            workspaceBranch = nil
         }
         let workspace = WorkspaceRecord(
             id: UUID().uuidString,
             projectID: project.id,
-            name: name,
+            name: trimmedName,
             dir: workspaceDir,
             dirname: workspaceDirname,
-            branch: branch,
+            branch: workspaceBranch,
             isDefault: false,
             isArchived: false,
             isRunning: false,
@@ -1365,21 +1402,16 @@ public final class AgentmuxOrchestrator {
             .appending(path: projectDirname, directoryHint: .isDirectory)
     }
 
-    private func makeWorkspaceDirname(
-        project: ProjectRecord, workspaceName: String, branch: String, existingDirname: String?
-    ) throws -> String {
+    private func makeWorkspaceDirname(project: ProjectRecord, existingDirname: String?) throws -> String {
         if let existingDirname, !existingDirname.isEmpty {
             return existingDirname
         }
         let used = try usedWorkspaceDirnames(project: project)
-        let available = AgentmuxOrchestrator.workspaceFoodNames.filter { !used.contains($0) }
-        guard !available.isEmpty else {
-            throw AgentmuxError.invalidArgument(
-                message: "No available workspace dirnames remain for project \(project.name).")
+        if let available = AgentmuxOrchestrator.workspaceFoodNames.first(where: { !used.contains($0) }) {
+            return available
         }
-        let seed = UInt(bitPattern: project.dir.hashValue ^ workspaceName.hashValue ^ branch.hashValue)
-        let index = Int(seed % UInt(available.count))
-        return available[index]
+        throw AgentmuxError.invalidArgument(
+            message: "No available workspace dirnames remain for project \(project.name).")
     }
 
     private func usedWorkspaceDirnames(project: ProjectRecord) throws -> Set<String> {

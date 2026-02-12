@@ -148,8 +148,9 @@ struct CLI {
         case "create":
             let projectDir = try value(for: "--project-dir")
             let name = try value(for: "--name")
+            let branch = optionalValue(for: "--branch")
             let projectID = normalizePath(projectDir)
-            let workspace = try orchestrator.createWorkspace(projectID: projectID, name: name)
+            let workspace = try orchestrator.createWorkspace(projectID: projectID, name: name, branch: branch)
             print("Created workspace \(workspace.name)\t\(workspace.dir)")
         case "launch":
             let id = try workspaceID(orchestrator: orchestrator)
@@ -419,7 +420,7 @@ struct CLI {
               agentmux project remove --dir <path>
 
               agentmux workspace list --project-dir <path> [--all]
-              agentmux workspace create --project-dir <path> --name <name>
+              agentmux workspace create --project-dir <path> --name <name> [--branch <branch>]
               agentmux workspace launch --project-dir <path> --name <name>
               agentmux workspace stop --project-dir <path> --name <name>
               agentmux workspace archive --project-dir <path> --name <name>
@@ -432,6 +433,7 @@ struct CLI {
               - Removing a git project deletes related workspace directories under ~/agentmux/workspaces.
               - Removing a project deletes only agentmux state unless it is an agentmux-cloned git repo under ~/agentmux/projects; those managed project directories are deleted.
               - Workspaces snapshot project processes, status checks, and browser sessions into the runtime DB on creation.
+              - For git projects, `workspace create` requires `--branch`.
               - Archiving a non-git workspace never deletes the project directory.
               - Workspaces reserve PORT0-PORT9 from the configured port range.
               - GUI window focus shortcuts: cmd+1 through cmd+9 (when GUI is focused).

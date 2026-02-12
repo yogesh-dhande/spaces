@@ -5,7 +5,7 @@ import streamctl
 
 @MainActor
 public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineViewDataSource, NSOutlineViewDelegate,
-    NSSplitViewDelegate, NSWindowDelegate
+    NSSplitViewDelegate, NSWindowDelegate, NSTextFieldDelegate
 {
     private var window: NSWindow!
     private var splitView: NSSplitView?
@@ -606,8 +606,13 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
         let header = NSTextField(labelWithString: "New Workspace for \(project.name)")
         header.font = .systemFont(ofSize: 20, weight: .semibold)
-        let nameField = NSTextField(string: "")
+        let suggestedName = (try? orchestrator.suggestedWorkspaceName(projectID: project.id)) ?? ""
+        let nameField = NSTextField(string: project.isGitRepo ? "" : suggestedName)
         nameField.placeholderString = "workspace name"
+        let branchField = NSTextField(string: "")
+        branchField.placeholderString = "branch name"
+        branchField.delegate = self
+        let autoNameState = project.isGitRepo ? AddWorkspaceAutoNameState() : nil
 
         let createButton = actionButton(
             title: "Create Workspace",
@@ -626,8 +631,15 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         )
 
         stack.addArrangedSubview(header)
-        stack.addArrangedSubview(label(text: "Workspace name (branch name for git)"))
-        stack.addArrangedSubview(nameField)
+        if project.isGitRepo {
+            stack.addArrangedSubview(label(text: "Branch name"))
+            stack.addArrangedSubview(branchField)
+            stack.addArrangedSubview(label(text: "Workspace name"))
+            stack.addArrangedSubview(nameField)
+        } else {
+            stack.addArrangedSubview(label(text: "Workspace name"))
+            stack.addArrangedSubview(nameField)
+        }
 
         let buttonRow = NSStackView()
         buttonRow.orientation = .horizontal
@@ -637,11 +649,20 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         buttonRow.addArrangedSubview(createButton)
         stack.addArrangedSubview(buttonRow)
         constrainFormFieldToFillWidth(nameField, in: stack)
+        if project.isGitRepo {
+            constrainFormFieldToFillWidth(branchField, in: stack)
+        }
         constrainFormFieldToFillWidth(buttonRow, in: stack)
 
         showScrollableDetailStack(stack)
 
-        createButton.tag = storeAddWorkspaceFields(projectID: project.id, nameField: nameField)
+        createButton.tag = storeAddWorkspaceFields(
+            projectID: project.id,
+            isGitRepo: project.isGitRepo,
+            nameField: nameField,
+            branchField: project.isGitRepo ? branchField : nil,
+            autoNameState: autoNameState
+        )
     }
 
     private func showWorkspaceDetail(project: ProjectSummary, workspace: WorkspaceSummary) {
@@ -1439,9 +1460,21 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         return id
     }
 
-    private func storeAddWorkspaceFields(projectID: String, nameField: NSTextField) -> Int {
+    private func storeAddWorkspaceFields(
+        projectID: String,
+        isGitRepo: Bool,
+        nameField: NSTextField,
+        branchField: NSTextField?,
+        autoNameState: AddWorkspaceAutoNameState?
+    ) -> Int {
         let id = UUID().uuidString.hashValue
-        AddWorkspaceFieldCache.shared.cache[id] = AddWorkspaceFieldRefs(projectID: projectID, nameField: nameField)
+        AddWorkspaceFieldCache.shared.cache[id] = AddWorkspaceFieldRefs(
+            projectID: projectID,
+            isGitRepo: isGitRepo,
+            nameField: nameField,
+            branchField: branchField,
+            autoNameState: autoNameState
+        )
         return id
     }
 
@@ -1653,11 +1686,31 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         guard let refs = AddWorkspaceFieldCache.shared.cache[sender.tag] else { return }
         do {
             let name = refs.nameField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !name.isEmpty else { return }
-            _ = try orchestrator.createWorkspace(projectID: refs.projectID, name: name)
+            guard !name.isEmpty else {
+                throw AgentmuxError.invalidArgument(message: "Workspace name is required.")
+            }
+            let branch = refs.branchField?.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            if refs.isGitRepo, (branch == nil || branch?.isEmpty == true) {
+                throw AgentmuxError.invalidArgument(message: "Branch name is required for git projects.")
+            }
+            _ = try orchestrator.createWorkspace(projectID: refs.projectID, name: name, branch: branch)
             reloadData()
         } catch {
             showError(error)
+        }
+    }
+
+    public func controlTextDidChange(_ obj: Notification) {
+        guard let changedField = obj.object as? NSTextField else { return }
+        for refs in AddWorkspaceFieldCache.shared.cache.values {
+            guard refs.branchField === changedField, let autoNameState = refs.autoNameState else { continue }
+            let branchValue = changedField.stringValue
+            let currentName = refs.nameField.stringValue
+            if currentName.isEmpty || currentName == autoNameState.lastAutoWorkspaceName {
+                refs.nameField.stringValue = branchValue
+                autoNameState.lastAutoWorkspaceName = branchValue
+            }
+            return
         }
     }
 
@@ -2319,17 +2372,36 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         if case .project(let project) = item as? OutlineItem {
             let workspace =
                 workspacesByProject[project.id]?[index]
-                ?? WorkspaceSummary(id: "", name: "", dir: "", isRunning: false, isArchived: false, isDefault: false)
+                ?? WorkspaceSummary(
+                    id: "",
+                    name: "",
+                    branch: nil,
+                    dir: "",
+                    isRunning: false,
+                    isArchived: false,
+                    isDefault: false
+                )
             return OutlineItem.workspace(project, workspace)
         }
         return OutlineItem.project(projects[0])
     }
 
     public func outlineView(_ outlineView: NSOutlineView, viewFor tableColumn: NSTableColumn?, item: Any) -> NSView? {
+        if case .project(let project) = item as? OutlineItem {
+            return projectRowCell(project: project)
+        }
+        if case .workspace(_, let workspace) = item as? OutlineItem {
+            return workspaceRowCell(workspace: workspace)
+        }
+        return nil
+    }
+
+    private func projectRowCell(project: ProjectSummary) -> NSTableCellView {
         let cell = NSTableCellView()
         let icon = NSImageView()
         icon.translatesAutoresizingMaskIntoConstraints = false
-        let text = NSTextField(labelWithString: "")
+        let text = NSTextField(labelWithString: project.name)
+        text.font = .systemFont(ofSize: 13, weight: .semibold)
         text.translatesAutoresizingMaskIntoConstraints = false
         let accessoryStack = NSStackView()
         accessoryStack.orientation = .horizontal
@@ -2351,30 +2423,83 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             accessoryStack.trailingAnchor.constraint(equalTo: cell.trailingAnchor, constant: -6),
             accessoryStack.centerYAnchor.constraint(equalTo: cell.centerYAnchor),
         ])
-        if case .project(let project) = item as? OutlineItem {
-            icon.image = nil
-            text.stringValue = project.name
-            text.font = .systemFont(ofSize: 13, weight: .semibold)
-            if project.isGitRepo {
-                let addButton = sidebarRowIconButton(
-                    symbol: "plus",
-                    tooltip: "New workspace in \(project.name)",
-                    action: #selector(addWorkspace(_:))
-                )
-                addButton.identifier = NSUserInterfaceItemIdentifier(project.id)
-                accessoryStack.addArrangedSubview(addButton)
-            }
-        } else if case .workspace(_, let workspace) = item as? OutlineItem {
-            icon.image = NSImage(
-                systemSymbolName: workspace.isRunning ? "circle.fill" : "circle", accessibilityDescription: "Status")
-            icon.contentTintColor = workspace.isRunning ? .systemGreen : .tertiaryLabelColor
-            text.stringValue = workspace.name
-            text.font = .systemFont(ofSize: 12)
-            if workspace.isArchived {
-                text.textColor = .secondaryLabelColor
-            }
+        if project.isGitRepo {
+            let addButton = sidebarRowIconButton(
+                symbol: "plus",
+                tooltip: "New workspace in \(project.name)",
+                action: #selector(addWorkspace(_:))
+            )
+            addButton.identifier = NSUserInterfaceItemIdentifier(project.id)
+            accessoryStack.addArrangedSubview(addButton)
         }
         return cell
+    }
+
+    private func workspaceRowCell(workspace: WorkspaceSummary) -> NSTableCellView {
+        let cell = NSTableCellView()
+        let statusIcon = NSImageView()
+        statusIcon.translatesAutoresizingMaskIntoConstraints = false
+        statusIcon.image = NSImage(
+            systemSymbolName: workspace.isRunning ? "circle.fill" : "circle",
+            accessibilityDescription: "Status"
+        )
+        statusIcon.contentTintColor = workspace.isRunning ? .systemGreen : .tertiaryLabelColor
+
+        let textStack = NSStackView()
+        textStack.orientation = .vertical
+        textStack.alignment = .leading
+        textStack.spacing = 1
+        textStack.translatesAutoresizingMaskIntoConstraints = false
+
+        let nameLabel = NSTextField(labelWithString: workspace.name)
+        nameLabel.font = .systemFont(ofSize: 12)
+        if workspace.isArchived {
+            nameLabel.textColor = .secondaryLabelColor
+        }
+        textStack.addArrangedSubview(nameLabel)
+
+        if let branch = workspace.branch, !branch.isEmpty {
+            let branchRow = NSStackView()
+            branchRow.orientation = .horizontal
+            branchRow.alignment = .centerY
+            branchRow.spacing = 4
+
+            let branchIcon = NSImageView()
+            branchIcon.image = NSImage(systemSymbolName: "arrow.triangle.branch", accessibilityDescription: "Branch")
+            branchIcon.contentTintColor = .secondaryLabelColor
+            branchIcon.translatesAutoresizingMaskIntoConstraints = false
+            branchIcon.widthAnchor.constraint(equalToConstant: 10).isActive = true
+            branchIcon.heightAnchor.constraint(equalToConstant: 10).isActive = true
+
+            let branchLabel = NSTextField(labelWithString: branch)
+            branchLabel.font = .systemFont(ofSize: 11)
+            branchLabel.textColor = .secondaryLabelColor
+
+            branchRow.addArrangedSubview(branchIcon)
+            branchRow.addArrangedSubview(branchLabel)
+            textStack.addArrangedSubview(branchRow)
+        }
+
+        cell.addSubview(statusIcon)
+        cell.addSubview(textStack)
+        NSLayoutConstraint.activate([
+            statusIcon.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 6),
+            statusIcon.topAnchor.constraint(equalTo: cell.topAnchor, constant: 8),
+            statusIcon.widthAnchor.constraint(equalToConstant: 10),
+            statusIcon.heightAnchor.constraint(equalToConstant: 10),
+            textStack.leadingAnchor.constraint(equalTo: statusIcon.trailingAnchor, constant: 6),
+            textStack.trailingAnchor.constraint(lessThanOrEqualTo: cell.trailingAnchor, constant: -6),
+            textStack.topAnchor.constraint(equalTo: cell.topAnchor, constant: 3),
+            textStack.bottomAnchor.constraint(equalTo: cell.bottomAnchor, constant: -3),
+        ])
+        return cell
+    }
+
+    public func outlineView(_ outlineView: NSOutlineView, heightOfRowByItem item: Any) -> CGFloat {
+        if case .workspace = item as? OutlineItem {
+            return 36
+        }
+        return 24
     }
 
     public func outlineViewSelectionDidChange(_ notification: Notification) {
