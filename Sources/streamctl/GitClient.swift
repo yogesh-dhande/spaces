@@ -5,12 +5,12 @@ public final class GitClient {
     public init() {}
 
     public func isRepo(path: String) -> Bool {
-        (try? Shell.runAndCapture(["git", "-C", path, "rev-parse", "--is-inside-work-tree"])) != nil
+        (try? runGitAndCapture(["-C", path, "rev-parse", "--is-inside-work-tree"])) != nil
     }
 
     public func defaultBranch(path: String) -> String? {
-        if let output = try? Shell.runAndCapture([
-            "git", "-C", path, "symbolic-ref", "--short", "refs/remotes/origin/HEAD",
+        if let output = try? runGitAndCapture([
+            "-C", path, "symbolic-ref", "--short", "refs/remotes/origin/HEAD",
         ]) {
             let trimmed = output.trimmingCharacters(in: .whitespacesAndNewlines)
             if let slash = trimmed.split(separator: "/").last {
@@ -23,48 +23,69 @@ public final class GitClient {
     }
 
     public func branchExists(path: String, branch: String) -> Bool {
-        let status =
-            (try? Shell.run(["git", "-C", path, "show-ref", "--verify", "--quiet", "refs/heads/\(branch)"])) ?? 1
+        let status = (try? runGit(["-C", path, "show-ref", "--verify", "--quiet", "refs/heads/\(branch)"])) ?? 1
         return status == 0
     }
 
     public func remoteBranchExists(path: String, branch: String) -> Bool {
-        let status =
-            (try? Shell.run(["git", "-C", path, "ls-remote", "--exit-code", "--heads", "origin", branch])) ?? 1
+        let status = (try? runGit(["-C", path, "ls-remote", "--exit-code", "--heads", "origin", branch])) ?? 1
         return status == 0
     }
 
     public func createWorktree(path repoPath: String, worktreePath: String, branch: String) throws {
         if branchExists(path: repoPath, branch: branch) {
-            try runGit(["-C", repoPath, "worktree", "add", worktreePath, branch])
+            try runGitOrThrow(["-C", repoPath, "worktree", "add", worktreePath, branch])
             return
         }
         if remoteBranchExists(path: repoPath, branch: branch) {
-            try runGit(["-C", repoPath, "worktree", "add", "-b", branch, worktreePath, "origin/\(branch)"])
+            try runGitOrThrow(["-C", repoPath, "worktree", "add", "-b", branch, worktreePath, "origin/\(branch)"])
             return
         }
-        try runGit(["-C", repoPath, "worktree", "add", "-b", branch, worktreePath])
+        try runGitOrThrow(["-C", repoPath, "worktree", "add", "-b", branch, worktreePath])
     }
 
     public func removeWorktree(path repoPath: String, worktreePath: String) throws {
-        try runGit(["-C", repoPath, "worktree", "remove", "--force", worktreePath])
+        try runGitOrThrow(["-C", repoPath, "worktree", "remove", "--force", worktreePath])
     }
 
     public func clone(url: String, destination: String) throws {
-        try runGit(["clone", url, destination])
+        try runGitOrThrow(["clone", url, destination])
     }
 
     public func deleteBranch(path repoPath: String, branch: String) {
-        _ = try? Shell.run(["git", "-C", repoPath, "branch", "-D", branch])
+        _ = try? runGit(["-C", repoPath, "branch", "-D", branch])
     }
 
-    private func runGit(_ arguments: [String]) throws {
-        let process = Process()
+    private func runGit(_ arguments: [String]) throws -> Int32 {
+        let process = makeGitProcess(arguments)
+        try process.run()
+        process.waitUntilExit()
+        return process.terminationStatus
+    }
+
+    private func runGitAndCapture(_ arguments: [String]) throws -> String {
+        let process = makeGitProcess(arguments)
+        let out = Pipe()
+        let err = Pipe()
+        process.standardOutput = out
+        process.standardError = err
+        try process.run()
+        process.waitUntilExit()
+        let outputData = out.fileHandleForReading.readDataToEndOfFile()
+        if process.terminationStatus != 0 {
+            let errData = err.fileHandleForReading.readDataToEndOfFile()
+            let message =
+                String(data: errData, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "unknown"
+            throw AgentmuxError.gitCommandFailed(message: message)
+        }
+        return String(data: outputData, encoding: .utf8) ?? ""
+    }
+
+    private func runGitOrThrow(_ arguments: [String]) throws {
+        let process = makeGitProcess(arguments)
         let out = Pipe()
         let err = Pipe()
 
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-        process.arguments = ["git"] + arguments
         process.standardOutput = out
         process.standardError = err
 
@@ -77,5 +98,21 @@ public final class GitClient {
                 String(data: errData, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "unknown"
             throw AgentmuxError.gitCommandFailed(message: message)
         }
+    }
+
+    private func makeGitProcess(_ arguments: [String]) -> Process {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+        process.arguments = ["git"] + arguments
+        process.environment = gitEnvironment()
+        return process
+    }
+
+    private func gitEnvironment() -> [String: String] {
+        var environment = ProcessInfo.processInfo.environment
+        environment.removeValue(forKey: "GIT_DIR")
+        environment.removeValue(forKey: "GIT_WORK_TREE")
+        environment.removeValue(forKey: "GIT_INDEX_FILE")
+        return environment
     }
 }

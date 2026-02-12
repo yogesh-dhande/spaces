@@ -37,14 +37,21 @@
 
 ## Polish
 - Auto-update system (Sparkle) with signed releases and staged rollouts.
+- Make a plan for charging users by selling licenses 
 - Crash reporting + opt-in analytics, plus a diagnostics export (logs, db schema version, config summary).
 - Structured logging with log levels and rotating files.
 - Accessibility pass (VoiceOver, keyboard navigation, focus order, contrast checks).
 - Localization scaffolding (even if only en-US ships initially).
-- Preferences UI for port range, hotkeys, and default behaviors.
 - Data migration strategy for DB schema changes (beyond rebuild if/when persistence matters).
 - Backup/restore for config + workspace settings.
 - Code signing, notarization, and hardened runtime checks in CI.
 - Performance/energy budget for background polling (status checks, agent idle detection).
 - Security review for shell command execution and AppleScript boundaries.
 - App health view (dependency status, permissions, last run errors).
+
+
+### V2 features
+- UX: Show autocomplete for ENV variables when editing a process command, or setup script or cleanup script
+- Functionality: Integrate with GitHub for creating pull requests on behalf of users
+- UX: AI agents to enhance user workflow (e.g. autogenerate summaries)
+    - "run a small haiku bot looking at what I'm doing in any given instance and give me 200 characters on what I seem to be trying to do in a small div above my input box"

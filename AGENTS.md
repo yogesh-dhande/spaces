@@ -26,6 +26,7 @@
 - Build with `scripts/swiftpm.sh build` before finishing changes (workspace-local SwiftPM cache).
 - Always run `scripts/swiftpm.sh build` after making changes.
 - Always run `scripts/coverage.sh` after making changes.
+- Always consider adding or expanding tests to increase coverage before finalizing changes.
 - Before committing changes, always ensure `spec.md`, `docs/architecture.md`, `docs/checkpoint.md`, and `README.md` are also updated as appropriate.
 - Keep changes local-first and deterministic.
 - When adding behavior, update CLI help and architecture docs in the same change.

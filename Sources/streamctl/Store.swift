@@ -162,7 +162,7 @@ public final class SQLiteStore {
             sql: """
                 SELECT id, project_id, name, dir, dirname, branch, is_default, is_archived, is_running, last_launched_at
                 FROM workspaces
-                WHERE project_id = ? AND (? = 1 OR is_archived = 0)
+                WHERE project_id = ? AND (? = '1' OR is_archived = 0)
                 ORDER BY is_default DESC, name
                 """,
             bindings: [projectID, includeArchived ? "1" : "0"]

@@ -29,6 +29,6 @@ let package = Package(
         .target(name: "gui", dependencies: ["streamctl"]),
         .executableTarget(name: "agentmux", dependencies: ["streamctl", "appctl"]),
         .executableTarget(name: "agentmux-app", dependencies: ["gui"]),
-        .testTarget(name: "streamctlTests", dependencies: ["streamctl"])
+        .testTarget(name: "streamctlTests", dependencies: ["streamctl", "appctl"])
     ]
 )
