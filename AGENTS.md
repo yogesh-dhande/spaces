@@ -26,6 +26,8 @@
 - Build with `scripts/swiftpm.sh build` before finishing changes (workspace-local SwiftPM cache).
 - Always run `scripts/swiftpm.sh build` after making changes.
 - Always run `scripts/coverage.sh` after making changes.
+- When running `git commit` via Codex, allow at least a 10-minute command timeout so pre-commit lint/coverage checks are not interrupted; this is a safety ceiling, not an expected runtime.
+- When creating commits via Codex, exclude `future.md` unless the user explicitly asks to include it.
 - Always consider adding or expanding tests to increase coverage before finalizing changes.
 - Before committing changes, always ensure `spec.md`, `docs/architecture.md`, `docs/checkpoint.md`, and `README.md` are also updated as appropriate.
 - Keep changes local-first and deterministic.
