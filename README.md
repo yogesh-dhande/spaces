@@ -18,6 +18,7 @@ It manages projects, workspaces, processes, and window sets so you can move betw
 YAML is the source of truth:
 - Path: `~/.agentmux/config.yaml`
 - Runtime DB: `~/.agentmux/agentmux.db` (ephemeral)
+- Cloned projects: `/Users/<username>/agentmux/projects/<project_name>`
 - Git worktrees: `/Users/<username>/agentmux/workspaces/<projectname>/<dirname>` (dirname is a unique food name)
 - GUI shortcuts (when focused): `cmd+shift+1` through `cmd+shift+9` focus workspace windows
 - Global window navigation (when GUI not focused): `cmd+shift+]` and `cmd+shift+[`
@@ -52,6 +53,7 @@ Updates to workspace settings apply immediately when the workspace is running (n
 ## GUI
 - Two panes: projects/workspaces on the left, details on the right.
 - No dialogs for add/edit; all forms are in the right pane.
+- Right-pane forms are scrollable to avoid clipping on smaller window heights.
 - Workspace view includes:
   - Launch/Stop/Archive buttons
   - Open Editor/Terminal/Finder buttons (editor/terminal windows are tracked for cycling)
@@ -60,6 +62,7 @@ Updates to workspace settings apply immediately when the workspace is running (n
   - Env vars/ports tab
   - Workspace settings tab
 - Settings view lets you choose a preferred editor from installed VS Code, Cursor, or Windsurf.
+- New workspace `+` actions are shown for git projects only.
 
 Hotkeys:
 - Global focus: `cmd+shift+=`
@@ -72,6 +75,8 @@ Hotkeys:
 - Open terminal: `cmd+shift+t`
 - Open Finder: `cmd+shift+f`
 
+When text input is focused in the GUI, standard editing shortcuts (including `cmd+v`) are handled normally.
+
 ## CLI
 ```bash
 agentmux config path
@@ -79,6 +84,7 @@ agentmux config show
 
 agentmux project list
 agentmux project add --dir /path/to/repo
+agentmux project add --git-url https://github.com/org/repo.git
 agentmux project update --dir /path/to/repo --setup-script "cp ~/.env .env"
 agentmux project remove --dir /path/to/repo
 

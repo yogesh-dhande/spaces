@@ -50,6 +50,10 @@ public final class GitClient {
         try runGit(["-C", repoPath, "worktree", "remove", "--force", worktreePath])
     }
 
+    public func clone(url: String, destination: String) throws {
+        try runGit(["clone", url, destination])
+    }
+
     public func deleteBranch(path repoPath: String, branch: String) {
         _ = try? Shell.run(["git", "-C", repoPath, "branch", "-D", branch])
     }

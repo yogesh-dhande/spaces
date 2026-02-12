@@ -8,10 +8,12 @@ public final class AgentmuxOrchestrator {
     private let yabai: YabaiAdapter
     private let iterm: Iterm2Adapter
     private let chrome: ChromeAdapter
+    private let projectsRootDirectoryURL: URL?
 
     public init(
         store: SQLiteStore,
         configStore: ConfigStore,
+        projectsRootDirectory: URL? = nil,
         git: GitClient = .init(),
         yabai: YabaiAdapter = .init(),
         iterm: Iterm2Adapter = .init(),
@@ -19,6 +21,7 @@ public final class AgentmuxOrchestrator {
     ) {
         self.store = store
         self.configStore = configStore
+        projectsRootDirectoryURL = projectsRootDirectory
         self.git = git
         self.yabai = yabai
         self.iterm = iterm
@@ -139,6 +142,31 @@ public final class AgentmuxOrchestrator {
         try store.upsert(project: normalized.record)
         try ensureDefaultWorkspace(for: normalized.record)
         return normalized.record
+    }
+
+    public func addProject(gitURL: String) throws -> ProjectRecord {
+        let trimmedURL = gitURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedURL.isEmpty else {
+            throw AgentmuxError.invalidArgument(message: "Git repository URL is required.")
+        }
+        let inferredName = inferredProjectName(from: trimmedURL)
+        let projectDirname = sanitizeDirname(inferredName, fallback: "project")
+        let destination = projectsRootDirectory().appending(path: projectDirname, directoryHint: .isDirectory)
+        let normalizedDestination = normalizePath(destination.path)
+
+        let config = try configStore.load()
+        if config.projects.contains(where: { normalizePath($0.dir) == normalizedDestination }) {
+            throw AgentmuxError.projectAlreadyExists(dir: normalizedDestination)
+        }
+        if FileManager.default.fileExists(atPath: destination.path) {
+            throw AgentmuxError.invalidArgument(message: "Project directory already exists: \(normalizedDestination)")
+        }
+        try FileManager.default.createDirectory(
+            at: destination.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try git.clone(url: trimmedURL, destination: destination.path)
+        return try addProject(dir: destination.path)
     }
 
     public func updateProjectConfig(_ updated: ProjectConfig) throws {
@@ -1319,6 +1347,32 @@ public final class AgentmuxOrchestrator {
         }.joined()
         let trimmed = cleaned.trimmingCharacters(in: CharacterSet(charactersIn: "-_"))
         return trimmed.isEmpty ? fallback : trimmed
+    }
+
+    private func projectsRootDirectory() -> URL {
+        if let projectsRootDirectoryURL {
+            return projectsRootDirectoryURL
+        }
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        return home.appending(path: "agentmux", directoryHint: .isDirectory).appending(
+            path: "projects",
+            directoryHint: .isDirectory
+        )
+    }
+
+    private func inferredProjectName(from gitURL: String) -> String {
+        var raw = gitURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        while raw.hasSuffix("/") {
+            raw.removeLast()
+        }
+        if !raw.contains("://"), let colon = raw.lastIndex(of: ":"), let slash = raw.lastIndex(of: "/"), colon > slash {
+            raw = String(raw[raw.index(after: colon)...])
+        }
+        let lastSegment = raw.split(separator: "/").last.map(String.init) ?? raw
+        if lastSegment.hasSuffix(".git") {
+            return String(lastSegment.dropLast(4))
+        }
+        return lastSegment
     }
 
     private func sanitizeEnvKey(_ raw: String) -> String {

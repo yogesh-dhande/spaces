@@ -70,8 +70,29 @@ struct CLI {
                 )
             }
         case "add":
-            let dir = try value(for: "--dir")
-            let record = try orchestrator.addProject(dir: dir)
+            let dir = optionalValue(for: "--dir")
+            let gitURL = optionalValue(for: "--git-url")
+            if dir != nil, gitURL != nil {
+                throw NSError(
+                    domain: "agentmux.cli", code: 2,
+                    userInfo: [
+                        NSLocalizedDescriptionKey:
+                            "Use either --dir <path> or --git-url <url>, but not both."
+                    ])
+            }
+            let record: ProjectRecord
+            if let gitURL {
+                record = try orchestrator.addProject(gitURL: gitURL)
+            } else if let dir {
+                record = try orchestrator.addProject(dir: dir)
+            } else {
+                throw NSError(
+                    domain: "agentmux.cli", code: 2,
+                    userInfo: [
+                        NSLocalizedDescriptionKey:
+                            "Missing required flags. Use: project add --dir <path> or project add --git-url <url>"
+                    ])
+            }
             print("Added project \(record.name)\t\(record.dir)")
         case "update":
             let dir = try value(for: "--dir")
@@ -302,6 +323,7 @@ struct CLI {
 
               agentmux project list
               agentmux project add --dir <path>
+              agentmux project add --git-url <url>
               agentmux project update --dir <path> [--setup-script <script>] [--cleanup-script <script>]
               agentmux project remove --dir <path>
 

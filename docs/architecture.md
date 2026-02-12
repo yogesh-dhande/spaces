@@ -10,6 +10,7 @@ Key invariants:
 - yabai is the source of truth for window IDs and focus.
 - Stream capture must happen before a stream is shown or focused.
 - Avoid window-level automation outside yabai.
+- Local key monitors must not override standard text-edit shortcuts while an input has focus.
 
 ## Module Map
 ```mermaid
@@ -38,12 +39,17 @@ Module responsibilities:
 
 The `gui` target is the reusable UI library. `agentmux-app` is the minimal executable that boots AppKit and delegates to `gui`.
 
+GUI interaction notes:
+- Right-pane forms are hosted in a scroll view so long forms do not clip at smaller window heights.
+- The "new workspace" affordance is shown in project UI only when the project is a git repository.
+
 ## Data Model
 Config file:
 - Path: `~/.agentmux/config.yaml`.
 - Top-level fields: `editor`, `port_range`, `projects`.
 - The GUI Settings view writes `editor` from installed VS Code, Cursor, or Windsurf.
 - Project fields: `dir`, `setup_script`, `cleanup_script`, `processes`, `status_checks`, `browser_sessions`.
+- New projects can be created from an existing directory or by cloning a repository into `/Users/<username>/agentmux/projects/<project_name>`.
 
 Workspace settings:
 - Each workspace snapshots project `processes`, `status_checks`, and `browser_sessions` at creation.

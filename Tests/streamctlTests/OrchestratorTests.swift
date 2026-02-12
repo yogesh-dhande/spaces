@@ -67,4 +67,77 @@ final class OrchestratorTests: XCTestCase {
         )
         XCTAssertEqual(nextEditor, 100)
     }
+
+    func testAddProjectByCloningUsesProjectsRootAndRepoName() throws {
+        let fixture = try makeTempGitRepo(name: "sample-repo")
+        let root = try makeTempDirectory()
+        let projectsRoot = root.appendingPathComponent("projects", isDirectory: true)
+        let configStore = ConfigStore(path: root.appendingPathComponent("config.yaml").path)
+        let store = try makeTemporaryStore()
+        let orchestrator = AgentmuxOrchestrator(
+            store: store,
+            configStore: configStore,
+            projectsRootDirectory: projectsRoot
+        )
+
+        let project = try orchestrator.addProject(gitURL: fixture.path)
+
+        let expected = projectsRoot.appendingPathComponent("sample-repo", isDirectory: true).path
+        XCTAssertEqual(project.dir, expected)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: expected))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: "\(expected)/README.md"))
+    }
+
+    func testAddProjectByCloningStripsGitSuffixFromRepoName() throws {
+        let fixture = try makeTempGitRepo(name: "source.git")
+        let root = try makeTempDirectory()
+        let projectsRoot = root.appendingPathComponent("projects", isDirectory: true)
+        let configStore = ConfigStore(path: root.appendingPathComponent("config.yaml").path)
+        let store = try makeTemporaryStore()
+        let orchestrator = AgentmuxOrchestrator(
+            store: store,
+            configStore: configStore,
+            projectsRootDirectory: projectsRoot
+        )
+
+        let project = try orchestrator.addProject(gitURL: fixture.path)
+
+        let expected = projectsRoot.appendingPathComponent("source", isDirectory: true).path
+        XCTAssertEqual(project.dir, expected)
+        XCTAssertEqual(project.name, "source")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: "\(expected)/README.md"))
+    }
+
+    private func makeTempGitRepo(name: String) throws -> URL {
+        let root = try makeTempDirectory()
+        let repo = root.appendingPathComponent(name, isDirectory: true)
+        try FileManager.default.createDirectory(at: repo, withIntermediateDirectories: true)
+        try runGit(["init"], cwd: repo.path)
+        try "hello".write(to: repo.appendingPathComponent("README.md"), atomically: true, encoding: .utf8)
+        try runGit(["add", "README.md"], cwd: repo.path)
+        try runGit(
+            ["-c", "user.name=agentmux-test", "-c", "user.email=test@example.com", "commit", "-m", "init"],
+            cwd: repo.path
+        )
+        return repo
+    }
+
+    private func runGit(_ arguments: [String], cwd: String) throws {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+        process.arguments = ["git"] + arguments
+        process.currentDirectoryURL = URL(fileURLWithPath: cwd)
+        let stderr = Pipe()
+        process.standardError = stderr
+        try process.run()
+        process.waitUntilExit()
+        if process.terminationStatus != 0 {
+            let message = String(data: stderr.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+            throw NSError(
+                domain: "agentmux.tests",
+                code: Int(process.terminationStatus),
+                userInfo: [NSLocalizedDescriptionKey: "git \(arguments.joined(separator: " ")) failed: \(message)"]
+            )
+        }
+    }
 }

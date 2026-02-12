@@ -238,6 +238,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         }
         let stack = NSStackView()
         stack.orientation = .vertical
+        stack.alignment = .leading
         stack.spacing = 12
         stack.translatesAutoresizingMaskIntoConstraints = false
 
@@ -278,6 +279,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             popUp.target = self
             popUp.action = #selector(editorPreferenceChanged(_:))
             stack.addArrangedSubview(popUp)
+            constrainFormFieldToFillWidth(popUp, in: stack)
         }
 
         if let current = currentEditor,
@@ -290,12 +292,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             stack.addArrangedSubview(note)
         }
 
-        detailContainer.addSubview(stack)
-        NSLayoutConstraint.activate([
-            stack.leadingAnchor.constraint(equalTo: detailContainer.leadingAnchor, constant: 20),
-            stack.trailingAnchor.constraint(equalTo: detailContainer.trailingAnchor, constant: -20),
-            stack.topAnchor.constraint(equalTo: detailContainer.topAnchor, constant: 20),
-        ])
+        showScrollableDetailStack(stack)
     }
 
     private func showProjectDetail(project: ProjectSummary) {
@@ -305,6 +302,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         }
         let stack = NSStackView()
         stack.orientation = .vertical
+        stack.alignment = .leading
         stack.spacing = 12
         stack.translatesAutoresizingMaskIntoConstraints = false
 
@@ -324,7 +322,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         addWorkspaceButton.identifier = NSUserInterfaceItemIdentifier(project.id)
         headerRow.addArrangedSubview(header)
         headerRow.addArrangedSubview(NSView())
-        headerRow.addArrangedSubview(addWorkspaceButton)
+        if project.isGitRepo {
+            headerRow.addArrangedSubview(addWorkspaceButton)
+        }
 
         let dirLabel = labeledValue(title: "Directory", value: project.dir)
 
@@ -355,15 +355,17 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         stack.addArrangedSubview(headerRow)
         stack.addArrangedSubview(dirLabel)
         stack.addArrangedSubview(label(text: "Setup script"))
-        stack.addArrangedSubview(scrollableTextView(setupView, height: 90))
-        stack.addArrangedSubview(label(text: "Cleanup script"))
-        stack.addArrangedSubview(scrollableTextView(cleanupView, height: 90))
+        let setupScroll = scrollableTextView(setupView, height: 90)
+        stack.addArrangedSubview(setupScroll)
         stack.addArrangedSubview(label(text: "Processes"))
         stack.addArrangedSubview(processEditor.container)
         stack.addArrangedSubview(label(text: "Browser sessions (URL per line)"))
         stack.addArrangedSubview(browserScroll)
         stack.addArrangedSubview(label(text: "Status checks (per process)"))
         stack.addArrangedSubview(statusEditor.container)
+        stack.addArrangedSubview(label(text: "Cleanup script"))
+        let cleanupScroll = scrollableTextView(cleanupView, height: 90)
+        stack.addArrangedSubview(cleanupScroll)
 
         let buttonRow = NSStackView()
         buttonRow.orientation = .horizontal
@@ -371,13 +373,14 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         buttonRow.addArrangedSubview(NSView())
         buttonRow.addArrangedSubview(saveButton)
         stack.addArrangedSubview(buttonRow)
+        constrainFormFieldToFillWidth(setupScroll, in: stack)
+        constrainFormFieldToFillWidth(processEditor.container, in: stack)
+        constrainFormFieldToFillWidth(browserScroll, in: stack)
+        constrainFormFieldToFillWidth(statusEditor.container, in: stack)
+        constrainFormFieldToFillWidth(cleanupScroll, in: stack)
+        constrainFormFieldToFillWidth(buttonRow, in: stack)
 
-        detailContainer.addSubview(stack)
-        NSLayoutConstraint.activate([
-            stack.leadingAnchor.constraint(equalTo: detailContainer.leadingAnchor, constant: 20),
-            stack.trailingAnchor.constraint(equalTo: detailContainer.trailingAnchor, constant: -20),
-            stack.topAnchor.constraint(equalTo: detailContainer.topAnchor, constant: 20),
-        ])
+        showScrollableDetailStack(stack)
 
         saveButton.tag = storeProjectFields(
             projectID: project.id,
@@ -403,19 +406,31 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         }
         let stack = NSStackView()
         stack.orientation = .vertical
+        stack.alignment = .leading
         stack.spacing = 12
+        stack.detachesHiddenViews = true
         stack.translatesAutoresizingMaskIntoConstraints = false
 
         let header = NSTextField(labelWithString: "New Project")
         header.font = .systemFont(ofSize: 20, weight: .semibold)
 
-        let dirField = NSTextField(string: "")
-        dirField.isEditable = false
-        dirField.placeholderString = "Choose a project directory"
+        let sourcePopup = NSPopUpButton()
+        sourcePopup.addItems(withTitles: ["Existing directory", "Clone repository"])
+        sourcePopup.selectItem(at: 0)
+        sourcePopup.target = self
+        sourcePopup.action = #selector(projectSourceChanged(_:))
+
+        let dirField = NSTextField(labelWithString: "Choose a project directory")
+        dirField.toolTip = nil
+        dirField.textColor = .secondaryLabelColor
+        dirField.lineBreakMode = .byTruncatingMiddle
         let browseButton = NSButton(title: "", target: self, action: #selector(browseProjectDir(_:)))
         browseButton.bezelStyle = .texturedRounded
+        browseButton.controlSize = .small
         browseButton.image = NSImage(systemSymbolName: "folder", accessibilityDescription: "Choose directory")
         browseButton.toolTip = "Choose directory"
+        let repoURLField = NSTextField(string: "")
+        repoURLField.placeholderString = "https://github.com/org/repo.git"
 
         let setupView = makeEditableTextView()
         let cleanupView = makeEditableTextView()
@@ -428,31 +443,77 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let statusEditor = StatusCheckEditor(processNamesProvider: { processEditor.processNames() })
         statusEditor.setChecks([])
 
-        let createButton = iconButton(
-            symbol: "checkmark.circle", tooltip: "Create project", action: #selector(createProject(_:)))
+        let createButton = actionButton(
+            title: "Create Project",
+            symbol: nil,
+            tooltip: "Create project",
+            action: #selector(createProject(_:)),
+            primary: true
+        )
+        createButton.keyEquivalent = "\r"
+        let cancelButton = actionButton(
+            title: "Cancel",
+            symbol: nil,
+            tooltip: "Cancel",
+            action: #selector(cancelProjectForm),
+            primary: false
+        )
 
-        let cancelButton = iconButton(symbol: "xmark.circle", tooltip: "Cancel", action: #selector(cancelProjectForm))
+        let localSourceSection = NSStackView()
+        localSourceSection.orientation = .vertical
+        localSourceSection.alignment = .leading
+        localSourceSection.spacing = 8
+        localSourceSection.detachesHiddenViews = true
+        localSourceSection.addArrangedSubview(label(text: "Project directory"))
+        let dirRow = NSView()
+        dirRow.translatesAutoresizingMaskIntoConstraints = false
+        browseButton.translatesAutoresizingMaskIntoConstraints = false
+        dirField.translatesAutoresizingMaskIntoConstraints = false
+        dirField.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        dirField.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        dirRow.addSubview(browseButton)
+        dirRow.addSubview(dirField)
+        NSLayoutConstraint.activate([
+            browseButton.leadingAnchor.constraint(equalTo: dirRow.leadingAnchor),
+            browseButton.centerYAnchor.constraint(equalTo: dirRow.centerYAnchor),
+            browseButton.widthAnchor.constraint(equalToConstant: 36),
+            browseButton.heightAnchor.constraint(equalToConstant: 28),
+
+            dirField.leadingAnchor.constraint(equalTo: browseButton.trailingAnchor, constant: 8),
+            dirField.trailingAnchor.constraint(equalTo: dirRow.trailingAnchor),
+            dirField.centerYAnchor.constraint(equalTo: browseButton.centerYAnchor),
+            dirField.topAnchor.constraint(equalTo: dirRow.topAnchor),
+            dirField.bottomAnchor.constraint(equalTo: dirRow.bottomAnchor),
+
+            dirRow.heightAnchor.constraint(greaterThanOrEqualTo: browseButton.heightAnchor),
+        ])
+        localSourceSection.addArrangedSubview(dirRow)
+
+        let cloneSourceSection = NSStackView()
+        cloneSourceSection.orientation = .vertical
+        cloneSourceSection.alignment = .leading
+        cloneSourceSection.spacing = 8
+        cloneSourceSection.detachesHiddenViews = true
+        cloneSourceSection.addArrangedSubview(label(text: "Git repository URL"))
+        cloneSourceSection.addArrangedSubview(repoURLField)
 
         stack.addArrangedSubview(header)
-        stack.addArrangedSubview(label(text: "Project directory"))
-        let dirRow = NSStackView()
-        dirRow.orientation = .horizontal
-        dirRow.spacing = 8
-        dirField.setContentHuggingPriority(.defaultLow, for: .horizontal)
-        browseButton.setContentHuggingPriority(.defaultHigh, for: .horizontal)
-        dirRow.addArrangedSubview(dirField)
-        dirRow.addArrangedSubview(browseButton)
-        stack.addArrangedSubview(dirRow)
+        stack.addArrangedSubview(label(text: "Project source"))
+        stack.addArrangedSubview(sourcePopup)
+        stack.addArrangedSubview(localSourceSection)
+        stack.addArrangedSubview(cloneSourceSection)
         stack.addArrangedSubview(label(text: "Setup script"))
-        stack.addArrangedSubview(scrollableTextView(setupView, height: 90))
-        stack.addArrangedSubview(label(text: "Cleanup script"))
-        stack.addArrangedSubview(scrollableTextView(cleanupView, height: 90))
+        let setupScroll = scrollableTextView(setupView, height: 90)
+        stack.addArrangedSubview(setupScroll)
         stack.addArrangedSubview(label(text: "Processes"))
         stack.addArrangedSubview(processEditor.container)
         stack.addArrangedSubview(label(text: "Browser sessions (URL per line)"))
         stack.addArrangedSubview(browserScroll)
         stack.addArrangedSubview(label(text: "Status checks (per process)"))
         stack.addArrangedSubview(statusEditor.container)
+        stack.addArrangedSubview(label(text: "Cleanup script"))
+        let cleanupScroll = scrollableTextView(cleanupView, height: 90)
+        stack.addArrangedSubview(cleanupScroll)
 
         let buttonRow = NSStackView()
         buttonRow.orientation = .horizontal
@@ -461,16 +522,26 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         buttonRow.addArrangedSubview(NSView())
         buttonRow.addArrangedSubview(createButton)
         stack.addArrangedSubview(buttonRow)
+        constrainFormFieldToFillWidth(sourcePopup, in: stack)
+        constrainFormFieldToFillWidth(localSourceSection, in: stack)
+        constrainFormFieldToFillWidth(dirRow, in: localSourceSection)
+        constrainFormFieldToFillWidth(cloneSourceSection, in: stack)
+        constrainFormFieldToFillWidth(repoURLField, in: cloneSourceSection)
+        constrainFormFieldToFillWidth(setupScroll, in: stack)
+        constrainFormFieldToFillWidth(processEditor.container, in: stack)
+        constrainFormFieldToFillWidth(browserScroll, in: stack)
+        constrainFormFieldToFillWidth(statusEditor.container, in: stack)
+        constrainFormFieldToFillWidth(cleanupScroll, in: stack)
+        constrainFormFieldToFillWidth(buttonRow, in: stack)
 
-        detailContainer.addSubview(stack)
-        NSLayoutConstraint.activate([
-            stack.leadingAnchor.constraint(equalTo: detailContainer.leadingAnchor, constant: 20),
-            stack.trailingAnchor.constraint(equalTo: detailContainer.trailingAnchor, constant: -20),
-            stack.topAnchor.constraint(equalTo: detailContainer.topAnchor, constant: 20),
-        ])
+        showScrollableDetailStack(stack)
 
         createButton.tag = storeAddProjectFields(
+            sourcePopup: sourcePopup,
+            localSourceSection: localSourceSection,
+            cloneSourceSection: cloneSourceSection,
             dirField: dirField,
+            repoURLField: repoURLField,
             setupView: setupView,
             cleanupView: cleanupView,
             processEditor: processEditor,
@@ -478,6 +549,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             statusEditor: statusEditor,
             browseButton: browseButton
         )
+        if let refs = AddProjectFieldCache.shared.cache[createButton.tag] {
+            updateAddProjectSourceUI(refs)
+        }
     }
 
     private func showAddWorkspaceForm(project: ProjectSummary) {
@@ -487,6 +561,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         }
         let stack = NSStackView()
         stack.orientation = .vertical
+        stack.alignment = .leading
         stack.spacing = 12
         stack.translatesAutoresizingMaskIntoConstraints = false
 
@@ -495,9 +570,21 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let nameField = NSTextField(string: "")
         nameField.placeholderString = "workspace name"
 
-        let createButton = iconButton(
-            symbol: "checkmark.circle", tooltip: "Create workspace", action: #selector(createWorkspace(_:)))
-        let cancelButton = iconButton(symbol: "xmark.circle", tooltip: "Cancel", action: #selector(cancelProjectForm))
+        let createButton = actionButton(
+            title: "Create Workspace",
+            symbol: nil,
+            tooltip: "Create workspace",
+            action: #selector(createWorkspace(_:)),
+            primary: true
+        )
+        createButton.keyEquivalent = "\r"
+        let cancelButton = actionButton(
+            title: "Cancel",
+            symbol: nil,
+            tooltip: "Cancel",
+            action: #selector(cancelProjectForm),
+            primary: false
+        )
 
         stack.addArrangedSubview(header)
         stack.addArrangedSubview(label(text: "Workspace name (branch name for git)"))
@@ -510,13 +597,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         buttonRow.addArrangedSubview(NSView())
         buttonRow.addArrangedSubview(createButton)
         stack.addArrangedSubview(buttonRow)
+        constrainFormFieldToFillWidth(nameField, in: stack)
+        constrainFormFieldToFillWidth(buttonRow, in: stack)
 
-        detailContainer.addSubview(stack)
-        NSLayoutConstraint.activate([
-            stack.leadingAnchor.constraint(equalTo: detailContainer.leadingAnchor, constant: 20),
-            stack.trailingAnchor.constraint(equalTo: detailContainer.trailingAnchor, constant: -20),
-            stack.topAnchor.constraint(equalTo: detailContainer.topAnchor, constant: 20),
-        ])
+        showScrollableDetailStack(stack)
 
         createButton.tag = storeAddWorkspaceFields(projectID: project.id, nameField: nameField)
     }
@@ -528,6 +612,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         }
         let stack = NSStackView()
         stack.orientation = .vertical
+        stack.alignment = .leading
         stack.spacing = 12
         stack.translatesAutoresizingMaskIntoConstraints = false
 
@@ -580,6 +665,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         stack.addArrangedSubview(statusLabel)
         stack.addArrangedSubview(buttonRow)
         stack.addArrangedSubview(tabs)
+        constrainFormFieldToFillWidth(buttonRow, in: stack)
 
         detailContainer.addSubview(stack)
         NSLayoutConstraint.activate([
@@ -595,6 +681,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     private func workspaceRunView(workspace: WorkspaceSummary) -> NSView {
         let container = NSStackView()
         container.orientation = .vertical
+        container.alignment = .leading
         container.spacing = 10
         container.translatesAutoresizingMaskIntoConstraints = false
 
@@ -669,12 +756,16 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         container.addArrangedSubview(processScroll)
         container.addArrangedSubview(windowsLabel)
         container.addArrangedSubview(windowsScroll)
+        constrainFormFieldToFillWidth(openRow, in: container)
+        constrainFormFieldToFillWidth(processScroll, in: container)
+        constrainFormFieldToFillWidth(windowsScroll, in: container)
         return insetContainerView(container)
     }
 
     private func workspaceEnvView(project: ProjectSummary, workspace: WorkspaceSummary) -> NSView {
         let container = NSStackView()
         container.orientation = .vertical
+        container.alignment = .leading
         container.spacing = 10
         container.translatesAutoresizingMaskIntoConstraints = false
         let envView = NSTextView()
@@ -694,17 +785,20 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         }
         let scroll = scrollableTextView(envView, height: 240)
         container.addArrangedSubview(scroll)
+        constrainFormFieldToFillWidth(scroll, in: container)
         return insetContainerView(container)
     }
 
     private func workspaceSettingsView(project: ProjectSummary, workspace: WorkspaceSummary) -> NSView {
         let container = NSStackView()
         container.orientation = .vertical
+        container.alignment = .leading
         container.spacing = 10
         container.translatesAutoresizingMaskIntoConstraints = false
 
         let contentStack = NSStackView()
         contentStack.orientation = .vertical
+        contentStack.alignment = .leading
         contentStack.spacing = 10
         contentStack.translatesAutoresizingMaskIntoConstraints = false
 
@@ -765,6 +859,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         buttonRow.addArrangedSubview(saveButton)
         container.addArrangedSubview(scroll)
         container.addArrangedSubview(buttonRow)
+        constrainFormFieldToFillWidth(scroll, in: container)
+        constrainFormFieldToFillWidth(buttonRow, in: container)
+        constrainFormFieldToFillWidth(processEditor.container, in: contentStack)
+        constrainFormFieldToFillWidth(browserScroll, in: contentStack)
+        constrainFormFieldToFillWidth(statusEditor.container, in: contentStack)
 
         saveButton.tag = storeWorkspaceFields(
             workspaceID: workspace.id,
@@ -920,6 +1019,46 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         return button
     }
 
+    private func constrainFormFieldToFillWidth(_ view: NSView, in stack: NSStackView) {
+        view.translatesAutoresizingMaskIntoConstraints = false
+        view.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
+    }
+
+    private func showScrollableDetailStack(_ stack: NSStackView) {
+        let scroll = NSScrollView()
+        scroll.translatesAutoresizingMaskIntoConstraints = false
+        scroll.hasVerticalScroller = true
+        scroll.hasHorizontalScroller = false
+        scroll.autohidesScrollers = true
+        scroll.borderType = .noBorder
+        scroll.drawsBackground = false
+        scroll.contentView.drawsBackground = false
+
+        let contentView = NSView()
+        contentView.translatesAutoresizingMaskIntoConstraints = false
+        scroll.documentView = contentView
+        contentView.addSubview(stack)
+
+        detailContainer.addSubview(scroll)
+        NSLayoutConstraint.activate([
+            scroll.leadingAnchor.constraint(equalTo: detailContainer.leadingAnchor),
+            scroll.trailingAnchor.constraint(equalTo: detailContainer.trailingAnchor),
+            scroll.topAnchor.constraint(equalTo: detailContainer.topAnchor),
+            scroll.bottomAnchor.constraint(equalTo: detailContainer.bottomAnchor),
+
+            contentView.leadingAnchor.constraint(equalTo: scroll.contentView.leadingAnchor),
+            contentView.trailingAnchor.constraint(equalTo: scroll.contentView.trailingAnchor),
+            contentView.topAnchor.constraint(equalTo: scroll.contentView.topAnchor),
+            contentView.widthAnchor.constraint(equalTo: scroll.contentView.widthAnchor),
+            contentView.bottomAnchor.constraint(greaterThanOrEqualTo: scroll.contentView.bottomAnchor),
+
+            stack.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 20),
+            stack.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -20),
+            stack.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 20),
+            stack.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -20),
+        ])
+    }
+
     private func scrollableTextView(_ textView: NSTextView, height: CGFloat) -> NSScrollView {
         let scroll = NSScrollView()
         scroll.hasVerticalScroller = true
@@ -1012,7 +1151,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     }
 
     private func storeAddProjectFields(
+        sourcePopup: NSPopUpButton,
+        localSourceSection: NSStackView,
+        cloneSourceSection: NSStackView,
         dirField: NSTextField,
+        repoURLField: NSTextField,
         setupView: NSTextView,
         cleanupView: NSTextView,
         processEditor: ProcessEditor,
@@ -1022,13 +1165,19 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     ) -> Int {
         let id = UUID().uuidString.hashValue
         AddProjectFieldCache.shared.cache[id] = AddProjectFieldRefs(
+            sourcePopup: sourcePopup,
+            localSourceSection: localSourceSection,
+            cloneSourceSection: cloneSourceSection,
             dirField: dirField,
+            repoURLField: repoURLField,
+            browseButton: browseButton,
             setupView: setupView,
             cleanupView: cleanupView,
             processEditor: processEditor,
             browserView: browserView,
             statusEditor: statusEditor
         )
+        sourcePopup.tag = id
         browseButton.tag = id
         return id
     }
@@ -1151,9 +1300,18 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     @objc private func createProject(_ sender: NSButton) {
         guard let refs = AddProjectFieldCache.shared.cache[sender.tag] else { return }
         do {
-            let dir = refs.dirField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !dir.isEmpty else { return }
-            let record = try orchestrator.addProject(dir: dir)
+            let record: ProjectRecord
+            if refs.sourcePopup.indexOfSelectedItem == 1 {
+                let repoURL = refs.repoURLField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !repoURL.isEmpty else {
+                    throw AgentmuxError.invalidArgument(message: "Git repository URL is required.")
+                }
+                record = try orchestrator.addProject(gitURL: repoURL)
+            } else {
+                let dir = refs.dirField.toolTip?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                guard !dir.isEmpty else { return }
+                record = try orchestrator.addProject(dir: dir)
+            }
             var config = ProjectConfig(dir: record.dir)
             config.setupScript = refs.setupView.string.isEmpty ? nil : refs.setupView.string
             config.cleanupScript = refs.cleanupView.string.isEmpty ? nil : refs.cleanupView.string
@@ -1167,6 +1325,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         }
     }
 
+    @objc private func projectSourceChanged(_ sender: NSPopUpButton) {
+        guard let refs = AddProjectFieldCache.shared.cache[sender.tag] else { return }
+        updateAddProjectSourceUI(refs)
+    }
+
     @objc private func browseProjectDir(_ sender: NSButton) {
         guard let refs = AddProjectFieldCache.shared.cache[sender.tag] else { return }
         let panel = NSOpenPanel()
@@ -1176,8 +1339,16 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         panel.begin { result in
             if result == .OK, let url = panel.url {
                 refs.dirField.stringValue = url.path
+                refs.dirField.toolTip = url.path
+                refs.dirField.textColor = .labelColor
             }
         }
+    }
+
+    private func updateAddProjectSourceUI(_ refs: AddProjectFieldRefs) {
+        let cloneSelected = refs.sourcePopup.indexOfSelectedItem == 1
+        refs.localSourceSection.isHidden = cloneSelected
+        refs.cloneSourceSection.isHidden = !cloneSelected
     }
 
     @objc private func createWorkspace(_ sender: NSButton) {
@@ -1362,6 +1533,12 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     private func setupShortcutMonitor() {
         shortcutMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
             guard let self else { return event }
+            if self.handleFocusedTextInputShortcut(event: event) {
+                return nil
+            }
+            if self.isTextInputFocused() {
+                return event
+            }
             if event.modifierFlags.contains(.command),
                 event.modifierFlags.contains(.shift),
                 !event.modifierFlags.contains(.option),
@@ -1452,6 +1629,40 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             }
             return event
         }
+    }
+
+    private func isTextInputFocused() -> Bool {
+        guard let window else { return false }
+        if let textView = window.firstResponder as? NSTextView {
+            return textView.isEditable || textView.isFieldEditor
+        }
+        return false
+    }
+
+    private func handleFocusedTextInputShortcut(event: NSEvent) -> Bool {
+        guard isTextInputFocused() else { return false }
+        let flags = event.modifierFlags.intersection([.command, .shift, .option, .control])
+        let key = event.charactersIgnoringModifiers?.lowercased() ?? ""
+        if flags == .command {
+            switch key {
+            case "v":
+                return NSApp.sendAction(#selector(NSText.paste(_:)), to: nil, from: nil)
+            case "c":
+                return NSApp.sendAction(#selector(NSText.copy(_:)), to: nil, from: nil)
+            case "x":
+                return NSApp.sendAction(#selector(NSText.cut(_:)), to: nil, from: nil)
+            case "a":
+                return NSApp.sendAction(#selector(NSText.selectAll(_:)), to: nil, from: nil)
+            case "z":
+                return NSApp.sendAction(Selector(("undo:")), to: nil, from: nil)
+            default:
+                return false
+            }
+        }
+        if flags == [.command, .shift], key == "z" {
+            return NSApp.sendAction(Selector(("redo:")), to: nil, from: nil)
+        }
+        return false
     }
 
     private func handleGlobalHotkey(id: UInt32) {
@@ -1685,13 +1896,15 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             icon.image = nil
             text.stringValue = project.name
             text.font = .systemFont(ofSize: 13, weight: .semibold)
-            let addButton = sidebarRowIconButton(
-                symbol: "plus",
-                tooltip: "New workspace in \(project.name)",
-                action: #selector(addWorkspace(_:))
-            )
-            addButton.identifier = NSUserInterfaceItemIdentifier(project.id)
-            accessoryStack.addArrangedSubview(addButton)
+            if project.isGitRepo {
+                let addButton = sidebarRowIconButton(
+                    symbol: "plus",
+                    tooltip: "New workspace in \(project.name)",
+                    action: #selector(addWorkspace(_:))
+                )
+                addButton.identifier = NSUserInterfaceItemIdentifier(project.id)
+                accessoryStack.addArrangedSubview(addButton)
+            }
         } else if case .settings = item as? OutlineItem {
             icon.image = NSImage(systemSymbolName: "gearshape", accessibilityDescription: "Settings")
             icon.contentTintColor = .secondaryLabelColor
