@@ -3,6 +3,7 @@
 ## Purpose
 - `agentmux` is a macOS Swift app for stream-based workspace orchestration.
 - Streams map to **captured window sets** managed via yabai.
+- The macOS app source lives under `apps/macos`.
 
 ## Contributor Contract
 - Use yabai as the single source of truth for window IDs.
@@ -12,7 +13,7 @@
 
 ## Data & Paths
 - DB path: `~/.agentmux/agentmux.db` (managed automatically).
-- Schema and architecture details live in `docs/architecture.md`.
+- Schema and architecture details live in `apps/macos/docs/architecture.md`.
 
 ## GUI
 - UI design should be modern and compact
@@ -30,7 +31,7 @@
 - When running `git commit` via Codex, allow at least a 10-minute command timeout so pre-commit lint/coverage checks are not interrupted; this is a safety ceiling, not an expected runtime.
 - When creating commits via Codex, exclude `future.md` unless the user explicitly asks to include it.
 - Always consider adding or expanding tests to increase coverage before finalizing changes.
-- Before committing changes, always ensure `spec.md`, `docs/architecture.md`, `docs/checkpoint.md`, and `README.md` are also updated as appropriate.
+- Before committing changes, always ensure `apps/macos/spec.md`, `apps/macos/docs/architecture.md`, `apps/macos/docs/checkpoint.md`, and `apps/macos/README.md` are also updated as appropriate.
 - Keep changes local-first and deterministic.
 - When adding behavior, update CLI help and architecture docs in the same change.
 

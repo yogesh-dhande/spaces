@@ -1,145 +1,20 @@
-# agentmux
+# agentmux monorepo
 
-`agentmux` is a local macOS control plane for workspace orchestration.
-It manages projects, workspaces, processes, and window sets so you can move between coding contexts quickly.
+This repository is now structured to host multiple projects.
 
-## Docs
-- Architecture: `docs/architecture.md`
-- Specification: `spec.md`
+## Layout
+- `apps/macos`: the `agentmux` macOS Swift app
+- `scripts`: root wrappers that delegate to `apps/macos/scripts`
 
-## Requirements
-- macOS 14+
-- `yabai` installed and running (window IDs and focus)
-- iTerm2 (terminal windows)
-- Google Chrome (browser sessions)
-- Accessibility permissions granted for window focus and control
+## macOS app
+- App docs: `apps/macos/README.md`
+- Architecture: `apps/macos/docs/architecture.md`
+- Spec: `apps/macos/spec.md`
 
-## Configuration
-YAML is the source of truth:
-- Path: `~/.agentmux/config.yaml`
-- Runtime DB: `~/.agentmux/agentmux.db` (ephemeral)
-- Cloned projects: `/Users/<username>/agentmux/projects/<project_name>`
-- Git worktrees: `/Users/<username>/agentmux/workspaces/<projectname>/<dirname>` (dirname is a unique food name)
-- GUI shortcuts (when focused): `cmd+1` through `cmd+9` focus workspace windows
-- Global window navigation (when GUI not focused): `cmd+shift+]` and `cmd+shift+[`
-
-Example config:
-```yaml
-editor: vscode
-port_range:
-  start: 20000
-  end: 30000
-projects:
-  - dir: /path/to/repo
-    setup_script: cp /shared/.env .env
-    cleanup_script: rm -f .env
-    processes:
-      - name: server
-        command: PORT=$PORT0 npm run dev
-    status_checks:
-      - name: web
-        process: server
-        command: curl -fsS http://localhost:$PORT0/health
-        interval: 10
-        timeout: 2
-        onExit: notify
-    browser_sessions:
-      - url: http://localhost:$PORT0
-```
-
-Workspaces snapshot project processes, status checks, and browser sessions at creation time into the runtime DB.
-Updates to workspace settings apply immediately when the workspace is running (new processes start, changed commands restart, and new browser sessions open).
-
-## GUI
-- Two panes: projects/workspaces on the left, details on the right.
-- No dialogs for add/edit; all forms are in the right pane.
-- Right-pane forms are scrollable to avoid clipping on smaller window heights.
-- New workspace form has separate inputs for target branch, branch name, and workspace name for git projects.
-- Target branch is the first input and shows a searchable list of branches.
-- Target branch defaults to `main`/`master` when available.
-- Branch name is required for git projects.
-- As you type branch name, workspace name is auto-populated from it by default; you can then edit workspace name to be more descriptive.
-- New branches are created from the latest commit on the selected target branch.
-- If the selected branch exists only on remote, agentmux fetches it first and then creates the worktree from `origin/<branch>`.
-- If the branch exists locally, agentmux uses the local branch as-is (no implicit pull/rebase/merge during workspace creation).
-- Workspace rows in the left pane show workspace name and a second-line branch label with a branch icon.
-- Workspace view includes:
-  - Launch/Restart/Stop/Archive buttons
-  - Open Editor/Terminal/Finder buttons (editor/terminal windows are tracked for cycling)
-  - Browser session entries track target URLs and focus the matching Chrome tab during window navigation
-  - Launch/Restart reuses existing matching Chrome tabs and tracks all matches instead of opening duplicate tabs when matches already exist
-  - Stop/Restart/browser-session updates close tracked Chrome tabs only and never close full Chrome windows
-  - Workspace window list/navigation rescans Chrome tabs each time and includes tabs whose URLs start with configured browser session URLs (deduped by window+tab URL)
-  - Browser tab rows are sorted by configured browser-session order and then URL so shortcut indices remain stable
-  - Window cycling order is browser tabs first, then terminals, then other windows; once cycling starts, next/previous uses remembered cycle position
-  - Global next/previous window navigation disambiguates reused Chrome windows by active tab URL, so shortcuts stay on the correct workspace
-  - Processes and status
-  - Windows list with shortcut hints
-  - Env vars/ports tab
-  - Workspace settings tab
-- Settings view lets you choose a preferred editor from installed VS Code, Cursor, or Windsurf.
-- Settings view also lets you override default keyboard shortcuts for app actions.
-- New workspace `+` actions are shown for git projects only.
-
-Hotkeys:
-- Global focus: `cmd+shift+=`
-  - When this hotkey brings agentmux to front, the selected workspace detail is refreshed so the windows list shows current Chrome tab matches
-- Next running workspace: `cmd+shift+]`
-- Previous running workspace: `cmd+shift+[`
-- Activate selected workspace: `cmd+shift+return`
-- Open editor: `cmd+shift+e`
-- Open terminal: `cmd+shift+t`
-- Open Finder: `cmd+shift+f`
-- Focus workspace window 1-9: `cmd+1` through `cmd+9`
-
-When text input is focused in the GUI, standard editing shortcuts (including `cmd+v`) are handled normally.
-
-Set `AGENTMUX_DEBUG_BROWSER_SCAN=1` when launching agentmux to log Chrome scan timing (`tabs`, `matches`, `elapsed_ms`) to stderr.
-
-## CLI
-```bash
-agentmux config path
-agentmux config show
-
-agentmux project list
-agentmux project add --dir /path/to/repo
-agentmux project add --git-url https://github.com/org/repo.git
-agentmux project update --dir /path/to/repo --setup-script "cp ~/.env .env"
-agentmux project remove --dir /path/to/repo
-
-agentmux workspace list --project-dir /path/to/repo --all
-agentmux workspace create --project-dir /path/to/repo --name feature-x [--branch feature-branch] [--target-branch main]
-agentmux workspace launch --project-dir /path/to/repo --name feature-x
-agentmux workspace restart --project-dir /path/to/repo --name feature-x
-agentmux workspace stop --project-dir /path/to/repo --name feature-x
-agentmux workspace archive --project-dir /path/to/repo --name feature-x
-agentmux workspace activate --project-dir /path/to/repo --name feature-x
-```
-
-For git projects, `workspace create` requires `--branch`; `--target-branch` defaults to `main`/`master` when available.
-
-Project/workspace removal behavior:
-- `agentmux project remove --dir <path>` removes the project from agentmux. For git projects, it also deletes related workspace directories under `~/agentmux/workspaces`.
-- `agentmux project remove --dir <path>` deletes the project directory only when it is a git repo inside `~/agentmux/projects` (the app-managed clone location).
-- `agentmux workspace archive ...` never deletes the project directory for non-git projects.
-
-## Build
-Use the SwiftPM wrapper to keep caches inside the workspace (avoids user cache warnings in sandboxed environments).
+## Build and test (from repo root)
 ```bash
 scripts/swiftpm.sh build
-```
-
-## Tests
-```bash
 scripts/swiftpm.sh test
-```
-
-## Lint
-```bash
 scripts/lint.sh
-```
-
-## Coverage
-```bash
 scripts/coverage.sh
 ```
