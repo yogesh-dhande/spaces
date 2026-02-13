@@ -180,17 +180,26 @@ final class OrchestratorTests: XCTestCase {
         )
 
         let project = try orchestrator.addProject(dir: projectDir.path)
+        let workspace = try orchestrator.createWorkspace(
+            projectID: project.id,
+            name: "feature",
+            branch: "feature"
+        )
         let projectWorkspaceRoot = workspacesRoot.appendingPathComponent(project.name, isDirectory: true)
-        let workspaceDir = projectWorkspaceRoot.appendingPathComponent("feature", isDirectory: true)
-        try FileManager.default.createDirectory(at: workspaceDir, withIntermediateDirectories: true)
-        XCTAssertTrue(FileManager.default.fileExists(atPath: workspaceDir.path))
-        XCTAssertTrue(workspaceDir.path.hasPrefix(workspacesRoot.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: workspace.dir))
+        XCTAssertTrue(workspace.dir.hasPrefix(workspacesRoot.path))
+
+        let normalizedWorkspaceDir = normalizeTestPath(workspace.dir)
+        let worktreesBefore = try runGitAndCapture(["worktree", "list", "--porcelain"], cwd: project.dir)
+        XCTAssertTrue(parseWorktreePaths(worktreesBefore).contains(normalizedWorkspaceDir))
 
         try orchestrator.removeProject(dir: project.dir)
 
         XCTAssertTrue(FileManager.default.fileExists(atPath: project.dir))
-        XCTAssertFalse(FileManager.default.fileExists(atPath: workspaceDir.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: workspace.dir))
         XCTAssertFalse(FileManager.default.fileExists(atPath: projectWorkspaceRoot.path))
+        let worktreesAfter = try runGitAndCapture(["worktree", "list", "--porcelain"], cwd: project.dir)
+        XCTAssertFalse(parseWorktreePaths(worktreesAfter).contains(normalizedWorkspaceDir))
     }
 
     func testArchiveWorkspaceDoesNotDeleteProjectDirectoryForNonGitProject() throws {
@@ -230,6 +239,27 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertEqual(workspace.dir, projectDir.path)
         XCTAssertFalse(workspace.isArchived)
         XCTAssertEqual(try orchestrator.workspacePorts(workspaceID: workspace.id).count, 10)
+    }
+
+    func testCreateWorkspaceRejectsDirectoryNameOverrideForNonGitProject() throws {
+        let root = try makeTempDirectory()
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+
+        let configStore = ConfigStore(path: root.appendingPathComponent("config.yaml").path)
+        let store = try makeTemporaryStore()
+        let orchestrator = SpaceshipOrchestrator(store: store, configStore: configStore)
+
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        XCTAssertThrowsError(
+            try orchestrator.createWorkspace(
+                projectID: project.id,
+                name: "feature",
+                directoryName: "feature_dir"
+            )
+        ) { error in
+            XCTAssertTrue(error.localizedDescription.contains("only supported for git projects"))
+        }
     }
 
     func testWorkspaceStopScriptIsSeededFromProjectAndCanBeOverridden() throws {
@@ -308,6 +338,80 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertEqual(workspace.name, "feature-name")
         XCTAssertEqual(workspace.branch, "feature-branch")
         XCTAssertEqual(workspace.dirname, suggested)
+    }
+
+    func testCreateWorkspaceUsesProvidedDirectoryNameForGitProject() throws {
+        let repo = try makeTempGitRepo(name: "workspace-name-override")
+        let root = try makeTempDirectory()
+        let workspacesRoot = root.appendingPathComponent("workspaces", isDirectory: true)
+        let configStore = ConfigStore(path: root.appendingPathComponent("config.yaml").path)
+        let store = try makeTemporaryStore()
+        let orchestrator = SpaceshipOrchestrator(
+            store: store,
+            configStore: configStore,
+            workspacesRootDirectory: workspacesRoot
+        )
+
+        let project = try orchestrator.addProject(dir: repo.path)
+        let workspace = try orchestrator.createWorkspace(
+            projectID: project.id,
+            name: "feature-name",
+            branch: "feature-branch",
+            directoryName: "feature_branch_1"
+        )
+
+        XCTAssertEqual(workspace.dirname, "feature_branch_1")
+        XCTAssertTrue(workspace.dir.hasSuffix("/feature_branch_1"))
+    }
+
+    func testCreateWorkspaceRejectsDirectoryNameWithInvalidCharacters() throws {
+        let repo = try makeTempGitRepo(name: "workspace-name-invalid-dirname")
+        let root = try makeTempDirectory()
+        let workspacesRoot = root.appendingPathComponent("workspaces", isDirectory: true)
+        let configStore = ConfigStore(path: root.appendingPathComponent("config.yaml").path)
+        let store = try makeTemporaryStore()
+        let orchestrator = SpaceshipOrchestrator(
+            store: store,
+            configStore: configStore,
+            workspacesRootDirectory: workspacesRoot
+        )
+
+        let project = try orchestrator.addProject(dir: repo.path)
+        XCTAssertThrowsError(
+            try orchestrator.createWorkspace(
+                projectID: project.id,
+                name: "feature-name",
+                branch: "feature-branch",
+                directoryName: "feature/branch"
+            )
+        ) { error in
+            XCTAssertTrue(error.localizedDescription.contains("letters, numbers, '-', and '_'"))
+        }
+    }
+
+    func testCreateWorkspaceRejectsDirectoryNameWithSpaces() throws {
+        let repo = try makeTempGitRepo(name: "workspace-name-space-dirname")
+        let root = try makeTempDirectory()
+        let workspacesRoot = root.appendingPathComponent("workspaces", isDirectory: true)
+        let configStore = ConfigStore(path: root.appendingPathComponent("config.yaml").path)
+        let store = try makeTemporaryStore()
+        let orchestrator = SpaceshipOrchestrator(
+            store: store,
+            configStore: configStore,
+            workspacesRootDirectory: workspacesRoot
+        )
+
+        let project = try orchestrator.addProject(dir: repo.path)
+        XCTAssertThrowsError(
+            try orchestrator.createWorkspace(
+                projectID: project.id,
+                name: "feature-name",
+                branch: "feature-branch",
+                directoryName: "feature branch"
+            )
+        ) { error in
+            XCTAssertTrue(error.localizedDescription.contains("cannot contain spaces"))
+        }
     }
 
     func testCreateWorkspaceUsesSelectedTargetBranchAsBaseForNewBranch() throws {
@@ -405,6 +509,37 @@ final class OrchestratorTests: XCTestCase {
 
         let all = try orchestrator.listWorkspaces(projectID: project.id, includeArchived: true)
         XCTAssertEqual(Set(all.map(\.name)), Set(["default", "feature"]))
+    }
+
+    func testArchiveWorkspaceRemovesGitWorktreeRegistration() throws {
+        let repo = try makeTempGitRepo(name: "workspace-archive-git-worktree-remove")
+        let root = try makeTempDirectory()
+        let workspacesRoot = root.appendingPathComponent("workspaces", isDirectory: true)
+        let configStore = ConfigStore(path: root.appendingPathComponent("config.yaml").path)
+        let store = try makeTemporaryStore()
+        let orchestrator = SpaceshipOrchestrator(
+            store: store,
+            configStore: configStore,
+            workspacesRootDirectory: workspacesRoot
+        )
+
+        let project = try orchestrator.addProject(dir: repo.path)
+        let workspace = try orchestrator.createWorkspace(
+            projectID: project.id,
+            name: "feature-archive",
+            branch: "feature-archive"
+        )
+
+        let normalizedWorkspaceDir = normalizeTestPath(workspace.dir)
+        let before = try runGitAndCapture(["worktree", "list", "--porcelain"], cwd: repo.path)
+        XCTAssertTrue(parseWorktreePaths(before).contains(normalizedWorkspaceDir))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: workspace.dir))
+
+        try orchestrator.archiveWorkspace(workspaceID: workspace.id)
+
+        let after = try runGitAndCapture(["worktree", "list", "--porcelain"], cwd: repo.path)
+        XCTAssertFalse(parseWorktreePaths(after).contains(normalizedWorkspaceDir))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: workspace.dir))
     }
 
     func testGUIShortcutsAndActiveWorkspaceRoundTrip() throws {
@@ -2592,5 +2727,44 @@ final class OrchestratorTests: XCTestCase {
                 userInfo: [NSLocalizedDescriptionKey: "git \(arguments.joined(separator: " ")) failed: \(message)"]
             )
         }
+    }
+
+    private func runGitAndCapture(_ arguments: [String], cwd: String) throws -> String {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+        process.arguments = ["git"] + arguments
+        process.currentDirectoryURL = URL(fileURLWithPath: cwd)
+        let stdout = Pipe()
+        let stderr = Pipe()
+        process.standardOutput = stdout
+        process.standardError = stderr
+        try process.run()
+        process.waitUntilExit()
+        if process.terminationStatus != 0 {
+            let message = String(data: stderr.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+            throw NSError(
+                domain: "spaceship.tests",
+                code: Int(process.terminationStatus),
+                userInfo: [NSLocalizedDescriptionKey: "git \(arguments.joined(separator: " ")) failed: \(message)"]
+            )
+        }
+        return String(data: stdout.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+    }
+
+    private func parseWorktreePaths(_ porcelainOutput: String) -> Set<String> {
+        Set(
+            porcelainOutput
+                .split(separator: "\n")
+                .compactMap { rawLine -> String? in
+                    let line = String(rawLine)
+                    guard line.hasPrefix("worktree ") else { return nil }
+                    let path = String(line.dropFirst("worktree ".count))
+                    return normalizeTestPath(path)
+                }
+        )
+    }
+
+    private func normalizeTestPath(_ path: String) -> String {
+        URL(fileURLWithPath: path).resolvingSymlinksInPath().standardizedFileURL.path
     }
 }

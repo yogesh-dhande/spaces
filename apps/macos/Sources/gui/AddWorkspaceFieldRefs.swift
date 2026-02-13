@@ -10,6 +10,7 @@ struct AddWorkspaceFieldRefs {
     let isGitRepo: Bool
     let targetBranchField: NSComboBox?
     let nameField: NSTextField
+    let directoryNameField: NSTextField?
     let branchField: NSTextField?
     let autoNameState: AddWorkspaceAutoNameState?
 }

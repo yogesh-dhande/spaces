@@ -149,6 +149,12 @@ public final class SpaceshipOrchestrator {
         return git.branchOptions(path: project.dir)
     }
 
+    public func workspaceGitTrackedFileActivity(workspaceID: String) throws -> GitTrackedFileActivity? {
+        let (project, workspace) = try resolveWorkspace(id: workspaceID)
+        guard project.isGitRepo else { return nil }
+        return git.trackedFileActivity(path: workspace.dir)
+    }
+
     public func projectConfig(projectID: String) throws -> ProjectConfig? {
         let config = try configStore.load()
         guard let project = try store.project(id: projectID) else { return nil }
@@ -277,6 +283,8 @@ public final class SpaceshipOrchestrator {
         config.projects.removeAll { normalizePath($0.dir) == normalizedDir }
         try configStore.save(config)
         if let project = try store.project(dir: normalizedDir) {
+            let workspaces = try store.workspaces(projectID: project.id, includeArchived: true)
+            try removeManagedGitWorktreesIfNeeded(project: project, workspaces: workspaces)
             try store.deleteProject(id: project.id)
             try removeManagedGitWorkspaceDirectoriesIfNeeded(project: project)
             try removeManagedProjectDirectoryIfNeeded(project: project)
@@ -287,7 +295,8 @@ public final class SpaceshipOrchestrator {
         projectID: String,
         name: String,
         branch: String? = nil,
-        targetBranch: String? = nil
+        targetBranch: String? = nil,
+        directoryName: String? = nil
     ) throws -> WorkspaceRecord {
         guard let project = try store.project(id: projectID) else {
             throw SpaceshipError.missingProject(dir: projectID)
@@ -296,6 +305,7 @@ public final class SpaceshipOrchestrator {
         guard !trimmedName.isEmpty else {
             throw SpaceshipError.invalidArgument(message: "Workspace name is required.")
         }
+        let trimmedDirectoryName = directoryName?.trimmingCharacters(in: .whitespacesAndNewlines)
         let trimmedBranch = branch?.trimmingCharacters(in: .whitespacesAndNewlines)
         let resolvedBranch: String?
         let resolvedTargetBranch: String?
@@ -306,6 +316,10 @@ public final class SpaceshipOrchestrator {
             resolvedBranch = trimmedBranch
             resolvedTargetBranch = try resolveWorkspaceTargetBranch(project: project, targetBranch: targetBranch)
         } else {
+            if let trimmedDirectoryName, !trimmedDirectoryName.isEmpty {
+                throw SpaceshipError.invalidArgument(
+                    message: "Directory name override is only supported for git projects.")
+            }
             resolvedBranch = nil
             resolvedTargetBranch = nil
         }
@@ -322,7 +336,8 @@ public final class SpaceshipOrchestrator {
                 }
                 let dirname = try makeWorkspaceDirname(
                     project: project,
-                    existingDirname: existing.dirname
+                    existingDirname: existing.dirname,
+                    requestedDirname: trimmedDirectoryName
                 )
                 revivedDirname = dirname
                 let worktreeRoot = try worktreeRoot(project: project)
@@ -372,7 +387,8 @@ public final class SpaceshipOrchestrator {
             }
             let dirname = try makeWorkspaceDirname(
                 project: project,
-                existingDirname: nil
+                existingDirname: nil,
+                requestedDirname: trimmedDirectoryName
             )
             workspaceDirname = dirname
             let worktreeRoot = try worktreeRoot(project: project)
@@ -611,7 +627,9 @@ public final class SpaceshipOrchestrator {
             do {
                 try git.removeWorktree(path: project.dir, worktreePath: workspace.dir)
             } catch {
-                // ignore missing worktree errors
+                if !isMissingWorktreeError(error) {
+                    throw error
+                }
             }
         }
         try PortAllocator(store: store).releasePorts(workspaceID: workspace.id)
@@ -2341,11 +2359,24 @@ public final class SpaceshipOrchestrator {
             .appending(path: projectDirname, directoryHint: .isDirectory)
     }
 
-    private func makeWorkspaceDirname(project: ProjectRecord, existingDirname: String?) throws -> String {
+    private func makeWorkspaceDirname(
+        project: ProjectRecord,
+        existingDirname: String?,
+        requestedDirname: String?
+    ) throws -> String {
+        if let requestedDirname, !requestedDirname.isEmpty {
+            try validateWorkspaceDirname(requestedDirname)
+            let used = try usedWorkspaceDirnames(project: project, excludingDirname: existingDirname)
+            guard !used.contains(requestedDirname) else {
+                throw SpaceshipError.invalidArgument(
+                    message: "Workspace directory name is already in use: \(requestedDirname)")
+            }
+            return requestedDirname
+        }
         if let existingDirname, !existingDirname.isEmpty {
             return existingDirname
         }
-        let used = try usedWorkspaceDirnames(project: project)
+        let used = try usedWorkspaceDirnames(project: project, excludingDirname: nil)
         if let available = SpaceshipOrchestrator.workspaceFoodNames.first(where: { !used.contains($0) }) {
             return available
         }
@@ -2353,19 +2384,57 @@ public final class SpaceshipOrchestrator {
             message: "No available workspace dirnames remain for project \(project.name).")
     }
 
-    private func usedWorkspaceDirnames(project: ProjectRecord) throws -> Set<String> {
+    private func usedWorkspaceDirnames(project: ProjectRecord, excludingDirname: String?) throws -> Set<String> {
         let records = try store.workspaces(projectID: project.id, includeArchived: true)
         var used = Set<String>()
         for record in records {
-            if let dirname = record.dirname, !dirname.isEmpty {
+            if let dirname = record.dirname, !dirname.isEmpty, dirname != excludingDirname {
                 used.insert(dirname)
             }
         }
         let root = try worktreeRoot(project: project)
         if let entries = try? FileManager.default.contentsOfDirectory(atPath: root.path) {
-            used.formUnion(entries)
+            for entry in entries where entry != excludingDirname {
+                used.insert(entry)
+            }
         }
         return used
+    }
+
+    private func validateWorkspaceDirname(_ dirname: String) throws {
+        guard !dirname.isEmpty else {
+            throw SpaceshipError.invalidArgument(message: "Workspace directory name cannot be empty.")
+        }
+        if dirname.rangeOfCharacter(from: .whitespacesAndNewlines) != nil {
+            throw SpaceshipError.invalidArgument(
+                message: "Workspace directory name cannot contain spaces.")
+        }
+        for scalar in dirname.unicodeScalars {
+            guard scalar.isASCII else {
+                throw SpaceshipError.invalidArgument(
+                    message: "Workspace directory name can only use letters, numbers, '-', and '_'.")
+            }
+            let value = scalar.value
+            let isUppercaseLetter = value >= 65 && value <= 90
+            let isLowercaseLetter = value >= 97 && value <= 122
+            let isDigit = value >= 48 && value <= 57
+            let isHyphen = value == 45
+            let isUnderscore = value == 95
+            guard isUppercaseLetter || isLowercaseLetter || isDigit || isHyphen || isUnderscore else {
+                throw SpaceshipError.invalidArgument(
+                    message: "Workspace directory name can only use letters, numbers, '-', and '_'.")
+            }
+        }
+    }
+
+    private func isMissingWorktreeError(_ error: Error) -> Bool {
+        guard case let SpaceshipError.gitCommandFailed(message) = error else {
+            return false
+        }
+        let lowered = message.lowercased()
+        return lowered.contains("not a working tree")
+            || lowered.contains("does not exist")
+            || lowered.contains("no such file or directory")
     }
 
     private func sanitizeDirname(_ raw: String, fallback: String) -> String {
@@ -2414,6 +2483,31 @@ public final class SpaceshipOrchestrator {
             return
         }
         try FileManager.default.removeItem(atPath: normalizedRoot)
+    }
+
+    private func removeManagedGitWorktreesIfNeeded(project: ProjectRecord, workspaces: [WorkspaceRecord]) throws {
+        guard project.isGitRepo else { return }
+        var processedPaths = Set<String>()
+        for workspace in workspaces {
+            let normalizedWorkspacePath = normalizePath(workspace.dir)
+            guard normalizedWorkspacePath != project.dir else {
+                continue
+            }
+            guard isManagedWorkspacesDirectory(path: normalizedWorkspacePath) else {
+                continue
+            }
+            guard !processedPaths.contains(normalizedWorkspacePath) else {
+                continue
+            }
+            processedPaths.insert(normalizedWorkspacePath)
+            do {
+                try git.removeWorktree(path: project.dir, worktreePath: workspace.dir)
+            } catch {
+                if !isMissingWorktreeError(error) {
+                    throw error
+                }
+            }
+        }
     }
 
     private func removeManagedProjectDirectoryIfNeeded(project: ProjectRecord) throws {

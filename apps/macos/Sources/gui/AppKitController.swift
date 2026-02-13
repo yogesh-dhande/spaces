@@ -15,6 +15,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     private var orchestrator: SpaceshipOrchestrator!
     private var projects: [ProjectSummary] = []
     private var workspacesByProject: [String: [WorkspaceSummary]] = [:]
+    private var gitActivityByWorkspaceID: [String: GitTrackedFileActivity] = [:]
 
     private var selectedProjectID: String?
     private var selectedWorkspaceID: String?
@@ -41,6 +42,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     private let shortcutLabelColumnWidth: CGFloat = 250
     private var isApplyingSplitViewWidth = false
     private var hasAppliedSplitViewWidth = false
+    private lazy var relativeDateFormatter: RelativeDateTimeFormatter = {
+        let formatter = RelativeDateTimeFormatter()
+        formatter.unitsStyle = .short
+        return formatter
+    }()
 
     private lazy var hotkeyHandlerProc: EventHandlerUPP = { _, event, userData in
         guard let userData else { return noErr }
@@ -128,6 +134,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     private func makeLeftPane() -> NSView {
         let container = NSView()
         container.translatesAutoresizingMaskIntoConstraints = false
+        container.wantsLayer = true
+        container.layer?.backgroundColor = sidebarPanelBackgroundColor().cgColor
 
         let sectionHeader = sidebarSectionHeader(
             title: "Projects",
@@ -149,6 +157,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let scroll = NSScrollView()
         scroll.translatesAutoresizingMaskIntoConstraints = false
         scroll.hasVerticalScroller = true
+        scroll.drawsBackground = false
 
         let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("name"))
         column.title = "Projects"
@@ -156,9 +165,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         outlineView.outlineTableColumn = column
         outlineView.headerView = nil
         outlineView.rowSizeStyle = .medium
+        outlineView.style = .sourceList
+        outlineView.selectionHighlightStyle = .none
+        outlineView.backgroundColor = .clear
         outlineView.delegate = self
         outlineView.dataSource = self
-        outlineView.selectionHighlightStyle = .regular
 
         scroll.documentView = outlineView
 
@@ -199,9 +210,16 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             loadShortcutSpecs()
             projects = try orchestrator.listProjects()
             workspacesByProject = [:]
+            gitActivityByWorkspaceID = [:]
             for project in projects {
                 let workspaces = try orchestrator.listWorkspaces(projectID: project.id, includeArchived: true)
                 workspacesByProject[project.id] = workspaces
+                guard project.isGitRepo else { continue }
+                for workspace in workspaces {
+                    if let activity = try orchestrator.workspaceGitTrackedFileActivity(workspaceID: workspace.id) {
+                        gitActivityByWorkspaceID[workspace.id] = activity
+                    }
+                }
             }
             outlineView.reloadData()
             outlineView.expandItem(nil, expandChildren: true)
@@ -633,6 +651,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let branchField = NSTextField(string: "")
         branchField.placeholderString = "branch name"
         branchField.delegate = self
+        let directoryNameField = NSTextField(string: "")
+        directoryNameField.placeholderString = "optional: letters, numbers, -, _"
         let autoNameState = project.isGitRepo ? AddWorkspaceAutoNameState() : nil
 
         let createButton = actionButton(
@@ -659,6 +679,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             stack.addArrangedSubview(branchField)
             stack.addArrangedSubview(label(text: "Workspace name"))
             stack.addArrangedSubview(nameField)
+            stack.addArrangedSubview(label(text: "Directory name (optional)"))
+            stack.addArrangedSubview(
+                helpTextLabel("Overrides auto-generated worktree folder name. No spaces. Allowed: letters, numbers, -, _.")
+            )
+            stack.addArrangedSubview(directoryNameField)
         } else {
             stack.addArrangedSubview(label(text: "Workspace name"))
             stack.addArrangedSubview(nameField)
@@ -675,6 +700,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         if project.isGitRepo {
             constrainFormFieldToFillWidth(targetBranchField, in: stack)
             constrainFormFieldToFillWidth(branchField, in: stack)
+            constrainFormFieldToFillWidth(directoryNameField, in: stack)
         }
         constrainFormFieldToFillWidth(buttonRow, in: stack)
 
@@ -685,6 +711,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             isGitRepo: project.isGitRepo,
             targetBranchField: project.isGitRepo ? targetBranchField : nil,
             nameField: nameField,
+            directoryNameField: project.isGitRepo ? directoryNameField : nil,
             branchField: project.isGitRepo ? branchField : nil,
             autoNameState: autoNameState
         )
@@ -1538,6 +1565,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         isGitRepo: Bool,
         targetBranchField: NSComboBox?,
         nameField: NSTextField,
+        directoryNameField: NSTextField?,
         branchField: NSTextField?,
         autoNameState: AddWorkspaceAutoNameState?
     ) -> Int {
@@ -1547,6 +1575,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             isGitRepo: isGitRepo,
             targetBranchField: targetBranchField,
             nameField: nameField,
+            directoryNameField: directoryNameField,
             branchField: branchField,
             autoNameState: autoNameState
         )
@@ -1780,6 +1809,13 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             }
             let targetBranch = refs.targetBranchField?.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
             let branch = refs.branchField?.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            let directoryName = refs.directoryNameField?.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            let resolvedDirectoryName: String?
+            if let directoryName, directoryName.isEmpty {
+                resolvedDirectoryName = nil
+            } else {
+                resolvedDirectoryName = directoryName
+            }
             if refs.isGitRepo, (branch == nil || branch?.isEmpty == true) {
                 throw SpaceshipError.invalidArgument(message: "Branch name is required for git projects.")
             }
@@ -1790,7 +1826,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 projectID: refs.projectID,
                 name: name,
                 branch: branch,
-                targetBranch: targetBranch
+                targetBranch: targetBranch,
+                directoryName: resolvedDirectoryName
             )
             reloadData()
         } catch {
@@ -2501,8 +2538,12 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         if case .project(let project) = item as? OutlineItem {
             return projectRowCell(project: project)
         }
-        if case .workspace(_, let workspace) = item as? OutlineItem {
-            return workspaceRowCell(workspace: workspace)
+        if case .workspace(let project, let workspace) = item as? OutlineItem {
+            return workspaceRowCell(
+                project: project,
+                workspace: workspace,
+                isSelected: selectedWorkspaceID == workspace.id
+            )
         }
         return nil
     }
@@ -2546,75 +2587,238 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         return cell
     }
 
-    private func workspaceRowCell(workspace: WorkspaceSummary) -> NSTableCellView {
+    private func workspaceRowCell(project: ProjectSummary, workspace: WorkspaceSummary, isSelected: Bool)
+        -> NSTableCellView
+    {
         let cell = NSTableCellView()
+
+        let cardView = NSView()
+        cardView.translatesAutoresizingMaskIntoConstraints = false
+        cardView.wantsLayer = true
+        cardView.layer?.cornerRadius = 10
+        cardView.layer?.borderWidth = 1
+        cardView.layer?.borderColor = sidebarCardBorderColor(isSelected: isSelected).cgColor
+        let cardBackgroundColor =
+            if isSelected {
+                sidebarSelectedCardBackgroundColor()
+            } else {
+                sidebarCardBackgroundColor(isArchived: workspace.isArchived)
+            }
+        cardView.layer?.backgroundColor = cardBackgroundColor.cgColor
+
+        let contentStack = NSStackView()
+        contentStack.orientation = .vertical
+        contentStack.alignment = .leading
+        contentStack.spacing = 4
+        contentStack.translatesAutoresizingMaskIntoConstraints = false
+
+        let titleRow = NSStackView()
+        titleRow.orientation = .horizontal
+        titleRow.alignment = .centerY
+        titleRow.spacing = 6
+        titleRow.translatesAutoresizingMaskIntoConstraints = false
+
         let statusIcon = NSImageView()
         statusIcon.translatesAutoresizingMaskIntoConstraints = false
         statusIcon.image = NSImage(
             systemSymbolName: workspace.isRunning ? "circle.fill" : "circle",
             accessibilityDescription: "Status"
         )
-        statusIcon.contentTintColor = workspace.isRunning ? .systemGreen : .tertiaryLabelColor
-
-        let textStack = NSStackView()
-        textStack.orientation = .vertical
-        textStack.alignment = .leading
-        textStack.spacing = 1
-        textStack.translatesAutoresizingMaskIntoConstraints = false
+        statusIcon.contentTintColor = workspace.isRunning ? sidebarRunningIndicatorColor() : sidebarIdleIndicatorColor()
+        statusIcon.widthAnchor.constraint(equalToConstant: 10).isActive = true
+        statusIcon.heightAnchor.constraint(equalToConstant: 10).isActive = true
 
         let nameLabel = NSTextField(labelWithString: workspace.name)
-        nameLabel.font = .systemFont(ofSize: 12)
-        if workspace.isArchived {
-            nameLabel.textColor = .secondaryLabelColor
-        }
-        textStack.addArrangedSubview(nameLabel)
+        nameLabel.font = .systemFont(ofSize: 12, weight: .medium)
+        nameLabel.lineBreakMode = .byTruncatingTail
+        nameLabel.textColor = sidebarPrimaryTextColor(isSelected: isSelected, isArchived: workspace.isArchived)
 
-        if let branch = workspace.branch, !branch.isEmpty {
-            let branchRow = NSStackView()
-            branchRow.orientation = .horizontal
-            branchRow.alignment = .centerY
-            branchRow.spacing = 4
+        titleRow.addArrangedSubview(statusIcon)
+        titleRow.addArrangedSubview(nameLabel)
+        contentStack.addArrangedSubview(titleRow)
 
-            let branchIcon = NSImageView()
-            branchIcon.image = NSImage(systemSymbolName: "arrow.triangle.branch", accessibilityDescription: "Branch")
-            branchIcon.contentTintColor = .secondaryLabelColor
-            branchIcon.translatesAutoresizingMaskIntoConstraints = false
-            branchIcon.widthAnchor.constraint(equalToConstant: 10).isActive = true
-            branchIcon.heightAnchor.constraint(equalToConstant: 10).isActive = true
-
-            let branchLabel = NSTextField(labelWithString: branch)
-            branchLabel.font = .systemFont(ofSize: 11)
-            branchLabel.textColor = .secondaryLabelColor
-
-            branchRow.addArrangedSubview(branchIcon)
-            branchRow.addArrangedSubview(branchLabel)
-            textStack.addArrangedSubview(branchRow)
+        if let folderName = workspaceFolderName(for: workspace),
+            shouldShowSidebarMetadata(value: folderName, workspaceName: workspace.name)
+        {
+            contentStack.addArrangedSubview(sidebarMetadataRow(symbol: "folder", text: folderName, isSelected: isSelected))
         }
 
-        cell.addSubview(statusIcon)
-        cell.addSubview(textStack)
+        if let branch = workspace.branch,
+            shouldShowSidebarMetadata(value: branch, workspaceName: workspace.name)
+        {
+            contentStack.addArrangedSubview(sidebarMetadataRow(symbol: "arrow.triangle.branch", text: branch, isSelected: isSelected))
+        }
+
+        if project.isGitRepo {
+            let activity = gitActivityByWorkspaceID[workspace.id]
+                ?? GitTrackedFileActivity(latestTrackedFileModificationDate: nil, modifiedTrackedFileCount: 0)
+            contentStack.addArrangedSubview(
+                sidebarMetadataRow(symbol: "clock", text: gitActivitySummaryLabel(activity), isSelected: isSelected)
+            )
+        }
+
+        cardView.addSubview(contentStack)
+        cell.addSubview(cardView)
+
         NSLayoutConstraint.activate([
-            statusIcon.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 6),
-            statusIcon.topAnchor.constraint(equalTo: cell.topAnchor, constant: 8),
-            statusIcon.widthAnchor.constraint(equalToConstant: 10),
-            statusIcon.heightAnchor.constraint(equalToConstant: 10),
-            textStack.leadingAnchor.constraint(equalTo: statusIcon.trailingAnchor, constant: 6),
-            textStack.trailingAnchor.constraint(lessThanOrEqualTo: cell.trailingAnchor, constant: -6),
-            textStack.topAnchor.constraint(equalTo: cell.topAnchor, constant: 3),
-            textStack.bottomAnchor.constraint(equalTo: cell.bottomAnchor, constant: -3),
+            cardView.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 4),
+            cardView.trailingAnchor.constraint(equalTo: cell.trailingAnchor, constant: -4),
+            cardView.topAnchor.constraint(equalTo: cell.topAnchor, constant: 2),
+            cardView.bottomAnchor.constraint(equalTo: cell.bottomAnchor, constant: -2),
+
+            contentStack.leadingAnchor.constraint(equalTo: cardView.leadingAnchor, constant: 10),
+            contentStack.trailingAnchor.constraint(equalTo: cardView.trailingAnchor, constant: -10),
+            contentStack.topAnchor.constraint(equalTo: cardView.topAnchor, constant: 8),
+            contentStack.bottomAnchor.constraint(equalTo: cardView.bottomAnchor, constant: -8),
         ])
+
         return cell
     }
 
+    private func workspaceFolderName(for workspace: WorkspaceSummary) -> String? {
+        let folderName = URL(fileURLWithPath: workspace.dir, isDirectory: true).lastPathComponent
+        guard !folderName.isEmpty else { return nil }
+        return folderName
+    }
+
+    private func shouldShowSidebarMetadata(value: String, workspaceName: String) -> Bool {
+        let trimmedValue = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedWorkspaceName = workspaceName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedValue.isEmpty else { return false }
+        return trimmedValue.localizedStandardCompare(trimmedWorkspaceName) != .orderedSame
+    }
+
+    private func sidebarMetadataRow(symbol: String, text: String, isSelected: Bool) -> NSStackView {
+        let row = NSStackView()
+        row.orientation = .horizontal
+        row.alignment = .centerY
+        row.spacing = 4
+        row.translatesAutoresizingMaskIntoConstraints = false
+
+        let icon = NSImageView()
+        icon.image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)
+        icon.contentTintColor = sidebarMetadataTextColor(isSelected: isSelected)
+        icon.translatesAutoresizingMaskIntoConstraints = false
+        icon.widthAnchor.constraint(equalToConstant: 10).isActive = true
+        icon.heightAnchor.constraint(equalToConstant: 10).isActive = true
+
+        let label = NSTextField(labelWithString: text)
+        label.font = .systemFont(ofSize: 11)
+        label.textColor = sidebarMetadataTextColor(isSelected: isSelected)
+        label.lineBreakMode = .byTruncatingTail
+
+        row.addArrangedSubview(icon)
+        row.addArrangedSubview(label)
+        return row
+    }
+
+    private func gitActivitySummaryLabel(_ activity: GitTrackedFileActivity) -> String {
+        let modifiedLabel =
+            if activity.modifiedTrackedFileCount == 1 {
+                "1 file modified"
+            } else {
+                "\(activity.modifiedTrackedFileCount) files modified"
+            }
+
+        guard let latestModificationDate = activity.latestTrackedFileModificationDate else {
+            return "No tracked files • \(modifiedLabel)"
+        }
+
+        let relativeDate = relativeDateFormatter.localizedString(for: latestModificationDate, relativeTo: Date())
+        return "\(relativeDate) • \(modifiedLabel)"
+    }
+
+    private func workspaceSidebarLineCount(project: ProjectSummary, workspace: WorkspaceSummary) -> Int {
+        var count = 1 // workspace name + status
+
+        if let folderName = workspaceFolderName(for: workspace),
+            shouldShowSidebarMetadata(value: folderName, workspaceName: workspace.name)
+        {
+            count += 1
+        }
+
+        if let branch = workspace.branch,
+            shouldShowSidebarMetadata(value: branch, workspaceName: workspace.name)
+        {
+            count += 1
+        }
+
+        if project.isGitRepo {
+            count += 1
+        }
+
+        return count
+    }
+
     public func outlineView(_ outlineView: NSOutlineView, heightOfRowByItem item: Any) -> CGFloat {
-        if case .workspace = item as? OutlineItem {
-            return 36
+        if case .workspace(let project, let workspace) = item as? OutlineItem {
+            let lineCount = workspaceSidebarLineCount(project: project, workspace: workspace)
+            return max(52, CGFloat(22 + (lineCount * 16)))
         }
         return 24
     }
 
+    private func sidebarPanelBackgroundColor() -> NSColor {
+        sidebarThemeColor(light: (248, 247, 241), dark: (15, 21, 23))
+    }
+
+    private func sidebarCardBackgroundColor(isArchived: Bool) -> NSColor {
+        let alpha: CGFloat = isArchived ? 0.52 : 0.82
+        return sidebarThemeColor(light: (255, 255, 255), dark: (29, 42, 45), alpha: alpha)
+    }
+
+    private func sidebarSelectedCardBackgroundColor() -> NSColor {
+        sidebarThemeColor(light: (207, 222, 213), dark: (39, 77, 76), alpha: 0.95)
+    }
+
+    private func sidebarCardBorderColor(isSelected: Bool) -> NSColor {
+        if isSelected {
+            return sidebarThemeColor(light: (13, 95, 93), dark: (61, 198, 184), alpha: 0.50)
+        }
+        return sidebarThemeColor(light: (213, 216, 211), dark: (48, 67, 70), alpha: 0.72)
+    }
+
+    private func sidebarPrimaryTextColor(isSelected: Bool, isArchived: Bool) -> NSColor {
+        let alpha: CGFloat =
+            if isArchived {
+                0.70
+            } else if isSelected {
+                0.96
+            } else {
+                0.92
+            }
+        return sidebarThemeColor(light: (16, 32, 40), dark: (234, 240, 239), alpha: alpha)
+    }
+
+    private func sidebarMetadataTextColor(isSelected: Bool) -> NSColor {
+        let alpha: CGFloat = isSelected ? 0.88 : 0.82
+        return sidebarThemeColor(light: (58, 77, 87), dark: (173, 192, 196), alpha: alpha)
+    }
+
+    private func sidebarRunningIndicatorColor() -> NSColor {
+        sidebarThemeColor(light: (13, 95, 93), dark: (61, 198, 184), alpha: 0.95)
+    }
+
+    private func sidebarIdleIndicatorColor() -> NSColor {
+        sidebarThemeColor(light: (213, 216, 211), dark: (48, 67, 70), alpha: 0.85)
+    }
+
+    private func sidebarThemeColor(light: (Int, Int, Int), dark: (Int, Int, Int), alpha: CGFloat = 1) -> NSColor {
+        NSColor(name: nil) { appearance in
+            let isDark = appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+            let source = isDark ? dark : light
+            return NSColor(
+                calibratedRed: CGFloat(source.0) / 255,
+                green: CGFloat(source.1) / 255,
+                blue: CGFloat(source.2) / 255,
+                alpha: alpha
+            )
+        }
+    }
+
     public func outlineViewSelectionDidChange(_ notification: Notification) {
         let row = outlineView.selectedRow
+        let previousRow = lastSelectedRow
         if projectHasUnsavedChanges || workspaceHasUnsavedChanges {
             let response = unsavedChangesPrompt()
             if response == .alertFirstButtonReturn {
@@ -2635,6 +2839,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             selectedWorkspaceID = nil
             showingSettings = false
             showPlaceholder()
+            refreshSidebarSelectionRows(previousRow: previousRow, currentRow: row)
             return
         }
         lastSelectedRow = row
@@ -2650,6 +2855,19 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             showingSettings = false
             showWorkspaceDetail(project: project, workspace: workspace)
         }
+        refreshSidebarSelectionRows(previousRow: previousRow, currentRow: row)
+    }
+
+    private func refreshSidebarSelectionRows(previousRow: Int, currentRow: Int) {
+        var rowsToReload = IndexSet()
+        if previousRow >= 0, previousRow < outlineView.numberOfRows {
+            rowsToReload.insert(previousRow)
+        }
+        if currentRow >= 0, currentRow < outlineView.numberOfRows {
+            rowsToReload.insert(currentRow)
+        }
+        guard !rowsToReload.isEmpty else { return }
+        outlineView.reloadData(forRowIndexes: rowsToReload, columnIndexes: IndexSet(integer: 0))
     }
 
     public func splitViewDidResizeSubviews(_ notification: Notification) {}

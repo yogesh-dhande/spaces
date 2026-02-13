@@ -46,11 +46,15 @@ GUI interaction notes:
 - Target branch is first and uses a searchable branch list.
 - Target branch defaults to `main`/`master` when available.
 - Workspace name auto-fills from branch while untouched, and can then be edited independently.
+- New workspace forms also include an optional git-only worktree directory-name override.
+- Directory-name overrides are validated to filesystem-safe ASCII (`A-Z`, `a-z`, `0-9`, `-`, `_`) and cannot contain spaces.
 - For git projects, branch is required when creating a workspace.
 - Newly created branches are based on the latest commit of the selected target branch.
 - If the requested branch exists only on remote, the orchestrator fetches it into `refs/remotes/origin/*` before creating the worktree from `origin/<branch>`.
 - If the requested branch exists locally, the local branch is used as-is (no implicit pull/rebase/merge in workspace creation).
-- Workspace rows render name on the first line and branch on the second line with a branch icon.
+- Workspace rows use compact card styling with status + workspace name on top.
+- Workspace metadata rows show folder and branch labels with icons only when those values differ from workspace name.
+- Git workspace rows include relative last-modified time (from latest tracked-file mtime) and tracked modified-file count.
 - Window focus shortcuts in the GUI use `cmd+1` through `cmd+9`.
 - Keyboard shortcut overrides for GUI actions are persisted in SQLite settings and editable in the GUI Settings view and CLI settings commands.
 
@@ -64,7 +68,7 @@ Config file:
   - `setup_script` runs when a workspace is created or revived.
   - `stop_script` runs on stop/restart/archive stop phase after automatic process termination.
 - New projects can be created from an existing directory or by cloning a repository into `/Users/<username>/spaceship/projects/<project_name>`.
-- Removing a project clears spaceship state. For git projects, related workspace directories under `/Users/<username>/spaceship/workspaces` are deleted.
+- Removing a project clears spaceship state. For git projects, spaceship first removes managed worktrees with `git worktree remove --force`, then deletes related workspace directories under `/Users/<username>/spaceship/workspaces`.
 - The project directory is deleted only for git projects located under `/Users/<username>/spaceship/projects` (app-managed clones).
 
 Workspace settings:
@@ -199,7 +203,8 @@ Create and prepare a workspace:
 ```mermaid
 flowchart TD
   start["Create workspace"] --> git{"Project is git repo?"}
-  git -->|"yes"| worktree["Create or reuse worktree"]
+  git -->|"yes"| dirname["Resolve dirname (override or auto-generated)"]
+  dirname --> worktree["Create or reuse worktree"]
   git -->|"no"| dir["Use project dir"]
   worktree --> setup["Run setup_script (if set)"]
   dir --> setup
@@ -219,7 +224,7 @@ flowchart TD
 
 Stop or archive:
 - Stop: signal each tracked process group (`SIGINT` then `SIGTERM`), then run workspace `stop_script` (if set), then close tracked windows and clear runtime process state.
-- Archive: reuse stop flow, remove worktree for git projects, release ports.
+- Archive: reuse stop flow, run `git worktree remove --force` for git projects, release ports.
 - Archive never deletes the project directory for non-git projects.
 - Browser safety invariant: stop/restart/settings reconciliation closes tracked Chrome tabs by URL prefix, never full Chrome windows.
 

@@ -19,7 +19,7 @@ YAML is the source of truth:
 - Path: `~/.spaceship/config.yaml`
 - Runtime DB: `~/.spaceship/spaceship.db` (ephemeral)
 - Cloned projects: `/Users/<username>/spaceship/projects/<project_name>`
-- Git worktrees: `/Users/<username>/spaceship/workspaces/<projectname>/<dirname>` (dirname is a unique food name)
+- Git worktrees: `/Users/<username>/spaceship/workspaces/<projectname>/<dirname>` (dirname defaults to a unique food name and can be overridden on workspace creation)
 - GUI shortcuts (when focused): `cmd+1` through `cmd+9` focus workspace windows
 - Global window navigation (when GUI not focused): `cmd+shift+]` and `cmd+shift+[`
 
@@ -60,10 +60,14 @@ Updates to workspace settings apply immediately when the workspace is running (n
 - Target branch defaults to `main`/`master` when available.
 - Branch name is required for git projects.
 - As you type branch name, workspace name is auto-populated from it by default; you can then edit workspace name to be more descriptive.
+- Directory name is an optional git-only input that overrides the auto-generated worktree folder name.
+- Directory name validation allows only letters, numbers, `-`, and `_` (no spaces).
 - New branches are created from the latest commit on the selected target branch.
 - If the selected branch exists only on remote, spaceship fetches it first and then creates the worktree from `origin/<branch>`.
 - If the branch exists locally, spaceship uses the local branch as-is (no implicit pull/rebase/merge during workspace creation).
-- Workspace rows in the left pane show workspace name and a second-line branch label with a branch icon.
+- Workspace rows in the left pane use compact cards with workspace status + name.
+- Folder and branch labels (with icons) are shown only when those values differ from workspace name.
+- Git workspace rows also show relative last-modified time (latest tracked-file mtime) and tracked modified-file count.
 - Workspace view includes:
   - Launch/Restart/Stop/Archive buttons
   - Open Editor/Terminal/Finder buttons (editor/terminal windows are tracked for cycling)
@@ -111,7 +115,7 @@ spaceship project update --dir /path/to/repo --setup-script "cp ~/.env .env" --s
 spaceship project remove --dir /path/to/repo
 
 spaceship workspace list --project-dir /path/to/repo --all
-spaceship workspace create --project-dir /path/to/repo --name feature-x [--branch feature-branch] [--target-branch main]
+spaceship workspace create --project-dir /path/to/repo --name feature-x [--branch feature-branch] [--target-branch main] [--directory-name feature_branch]
 spaceship workspace launch --project-dir /path/to/repo --name feature-x
 spaceship workspace restart --project-dir /path/to/repo --name feature-x
 spaceship workspace stop --project-dir /path/to/repo --name feature-x
@@ -120,11 +124,12 @@ spaceship workspace activate --project-dir /path/to/repo --name feature-x
 ```
 
 For git projects, `workspace create` requires `--branch`; `--target-branch` defaults to `main`/`master` when available.
+`workspace create --directory-name` (alias: `--dirname`) is optional for git projects and must use only letters, numbers, `-`, and `_` with no spaces.
 
 Project/workspace removal behavior:
-- `spaceship project remove --dir <path>` removes the project from spaceship. For git projects, it also deletes related workspace directories under `~/spaceship/workspaces`.
+- `spaceship project remove --dir <path>` removes the project from spaceship. For git projects, it first removes related managed worktrees with `git worktree remove --force`, then deletes related workspace directories under `~/spaceship/workspaces`.
 - `spaceship project remove --dir <path>` deletes the project directory only when it is a git repo inside `~/spaceship/projects` (the app-managed clone location).
-- `spaceship workspace archive ...` never deletes the project directory for non-git projects.
+- `spaceship workspace archive ...` removes git worktrees via `git worktree remove` and never deletes the project directory for non-git projects.
 
 ## Build
 Use the SwiftPM wrapper to keep caches inside the workspace (avoids user cache warnings in sandboxed environments).

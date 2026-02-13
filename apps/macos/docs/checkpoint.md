@@ -5,9 +5,11 @@
 - Runtime state and workspace settings live in `~/.spaceship/spaceship.db` (projects, workspaces, ports, running processes, status results, windows, settings, workspace settings) and are rebuilt when the schema version changes; workspace settings are re-seeded from project templates when missing.
 - Projects are normalized by real path; a default workspace is ensured per project with reserved ports.
 - Project creation supports either existing directories or git clone; cloned repositories are stored at `/Users/<username>/spaceship/projects/<project_name>`.
-- Project removal clears spaceship state, deletes related git workspace directories under `/Users/<username>/spaceship/workspaces`, and deletes the project directory only for git repositories under `/Users/<username>/spaceship/projects` (managed clones).
+- Project removal clears spaceship state, removes related managed git worktrees via `git worktree remove --force`, deletes related git workspace directories under `/Users/<username>/spaceship/workspaces`, and deletes the project directory only for git repositories under `/Users/<username>/spaceship/projects` (managed clones).
 - Workspaces create git worktrees for git projects, run setup/stop scripts, and reserve 10 ports per workspace.
+- Git workspace creation supports an optional directory-name override for the worktree folder; overrides must use only `A-Z`, `a-z`, `0-9`, `-`, `_` and cannot contain spaces.
 - Archiving non-git workspaces does not delete the project directory.
+- Archiving git workspaces removes the worktree via `git worktree remove --force` (and then archives workspace metadata/ports).
 - Workspace launch starts processes in iTerm2 with env vars and logs under `~/.spaceship/runtime/<workspace-id>`, opens Chrome browser sessions, optionally opens the editor, and captures window IDs via yabai in browser/editor/terminal order.
 - Browser window tracking includes target session URL so workspace focus actions can activate the matching Chrome tab (not just focus the window).
 - Browser session mapping is URL-based; title-based fallback matching is removed to avoid binding sessions to unrelated active tabs in shared Chrome windows.
@@ -29,13 +31,16 @@
 - Right-pane forms are scrollable, use left-aligned full-width fields, and use text-labeled actions for create/cancel flows.
 - New workspace `+` actions in project UI are shown only for git projects.
 - New workspace forms now have separate target-branch, branch-name, and workspace-name inputs for git projects.
+- New workspace forms also include an optional directory-name input for git projects to override auto-generated worktree folder names.
 - Target branch is shown first with a searchable branch list and defaults to main/master when available.
 - Workspace name auto-fills from branch by default, and users can edit workspace name independently.
 - For git projects, branch is required when creating a workspace.
 - Newly created branches are based on the latest commit of the selected target branch.
 - When a branch exists only on remote, workspace creation fetches that branch into `origin/*` before creating the worktree.
 - When a branch exists locally, workspace creation uses local branch state as-is without implicit pull/rebase/merge.
-- Left-pane workspace rows show workspace name plus branch metadata on a second line with a branch icon.
+- Left-pane workspace rows now use compact cards with workspace status + name.
+- Folder and branch metadata rows are shown with icons only when the value differs from workspace name.
+- Git workspace rows show relative last-modified time (from latest tracked-file mtime) plus tracked modified-file count.
 - Settings view in the GUI lets users pick a preferred editor from installed VS Code, Cursor, or Windsurf; the choice is stored in the YAML config.
 - Settings view in the GUI also allows overriding default shortcuts for global toggle, workspace navigation/activation, and open editor/terminal/Finder; these values are stored in the runtime DB.
 - Window focus shortcuts are `cmd+1` through `cmd+9` while the GUI is focused.

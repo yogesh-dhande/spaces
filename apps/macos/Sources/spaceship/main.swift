@@ -150,12 +150,26 @@ struct CLI {
             let name = try value(for: "--name")
             let branch = optionalValue(for: "--branch")
             let targetBranch = optionalValue(for: "--target-branch")
+            let directoryNameFlag = optionalValue(for: "--directory-name")
+            let dirnameFlag = optionalValue(for: "--dirname")
+            if directoryNameFlag != nil, dirnameFlag != nil {
+                throw NSError(
+                    domain: "spaceship.cli",
+                    code: 2,
+                    userInfo: [
+                        NSLocalizedDescriptionKey:
+                            "Use either --directory-name <name> or --dirname <name>, but not both."
+                    ]
+                )
+            }
+            let directoryName = directoryNameFlag ?? dirnameFlag
             let projectID = normalizePath(projectDir)
             let workspace = try orchestrator.createWorkspace(
                 projectID: projectID,
                 name: name,
                 branch: branch,
-                targetBranch: targetBranch
+                targetBranch: targetBranch,
+                directoryName: directoryName
             )
             print("Created workspace \(workspace.name)\t\(workspace.dir)")
         case "launch":
@@ -430,7 +444,7 @@ struct CLI {
               spaceship project remove --dir <path>
 
               spaceship workspace list --project-dir <path> [--all]
-              spaceship workspace create --project-dir <path> --name <name> [--branch <branch>] [--target-branch <branch>]
+              spaceship workspace create --project-dir <path> --name <name> [--branch <branch>] [--target-branch <branch>] [--directory-name <name>]
               spaceship workspace launch --project-dir <path> --name <name>
               spaceship workspace restart --project-dir <path> --name <name>
               spaceship workspace stop --project-dir <path> --name <name>
@@ -441,12 +455,13 @@ struct CLI {
               - Configuration is stored in ~/.spaceship/config.yaml (YAML is source of truth).
               - GUI settings (⌘,) let you pick a preferred editor (VS Code, Cursor, Windsurf).
               - Runtime state is stored in ~/.spaceship/spaceship.db and rebuilt if schema changes.
-              - Removing a git project deletes related workspace directories under ~/spaceship/workspaces.
+              - Removing a git project first removes managed worktrees via `git worktree remove --force`, then deletes related workspace directories under ~/spaceship/workspaces.
               - Removing a project deletes only spaceship state unless it is an spaceship-cloned git repo under ~/spaceship/projects; those managed project directories are deleted.
               - Workspaces snapshot project processes, status checks, and browser sessions into the runtime DB on creation.
               - Project `setup_script` runs when a workspace is created/revived.
               - Project/workspace `stop_script` runs whenever a workspace is stopped (including restart/archive stop phase), after automatic process termination attempts.
               - For git projects, `workspace create` requires `--branch`; `--target-branch` defaults to main/master if available.
+              - `workspace create --directory-name` (or `--dirname`) overrides the auto-generated git worktree directory name; allowed characters are letters, numbers, '-', and '_', with no spaces.
               - Archiving a non-git workspace never deletes the project directory.
               - Workspaces reserve PORT0-PORT9 from the configured port range.
               - GUI window focus shortcuts: cmd+1 through cmd+9 (when GUI is focused).

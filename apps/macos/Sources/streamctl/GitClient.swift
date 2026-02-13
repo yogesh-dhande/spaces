@@ -67,6 +67,21 @@ public final class GitClient {
         }
     }
 
+    public func trackedFileActivity(path: String) -> GitTrackedFileActivity {
+        guard isRepo(path: path) else {
+            return GitTrackedFileActivity(latestTrackedFileModificationDate: nil, modifiedTrackedFileCount: 0)
+        }
+
+        let trackedPaths = trackedFilePaths(path: path)
+        let latestModificationDate = latestTrackedFileModificationDate(path: path, trackedPaths: trackedPaths)
+        let modifiedTrackedFileCount = modifiedTrackedFileCount(path: path)
+
+        return GitTrackedFileActivity(
+            latestTrackedFileModificationDate: latestModificationDate,
+            modifiedTrackedFileCount: modifiedTrackedFileCount
+        )
+    }
+
     public func createWorktree(path repoPath: String, worktreePath: String, branch: String, targetBranch: String? = nil)
         throws
     {
@@ -160,6 +175,61 @@ public final class GitClient {
         try runGitOrThrow([
             "-C", path, "fetch", "origin", "refs/heads/\(branch):refs/remotes/origin/\(branch)",
         ])
+    }
+
+    private func trackedFilePaths(path: String) -> [String] {
+        guard let output = try? runGitAndCapture(["-C", path, "ls-files", "-z"]) else {
+            return []
+        }
+        return parseNullSeparatedOutput(output)
+    }
+
+    private func latestTrackedFileModificationDate(path: String, trackedPaths: [String]) -> Date? {
+        let fileManager = FileManager.default
+        let rootURL = URL(fileURLWithPath: path, isDirectory: true)
+        var latestDate: Date?
+
+        for trackedPath in trackedPaths {
+            guard !trackedPath.isEmpty else { continue }
+            let fileURL = rootURL.appending(path: trackedPath)
+            guard let attributes = try? fileManager.attributesOfItem(atPath: fileURL.path),
+                let modificationDate = attributes[.modificationDate] as? Date
+            else {
+                continue
+            }
+            if let existingLatestDate = latestDate {
+                if modificationDate > existingLatestDate {
+                    latestDate = modificationDate
+                }
+            } else {
+                latestDate = modificationDate
+            }
+        }
+
+        return latestDate
+    }
+
+    private func modifiedTrackedFileCount(path: String) -> Int {
+        let staged = trackedDiffPaths(path: path, includeStaged: true)
+        let unstaged = trackedDiffPaths(path: path, includeStaged: false)
+        return staged.union(unstaged).count
+    }
+
+    private func trackedDiffPaths(path: String, includeStaged: Bool) -> Set<String> {
+        var arguments = ["-C", path, "diff", "--name-only", "-z"]
+        if includeStaged {
+            arguments.insert("--cached", at: 3)
+        }
+        guard let output = try? runGitAndCapture(arguments) else {
+            return []
+        }
+        return Set(parseNullSeparatedOutput(output))
+    }
+
+    private func parseNullSeparatedOutput(_ output: String) -> [String] {
+        output
+            .split(separator: "\u{0}", omittingEmptySubsequences: true)
+            .map { String($0) }
     }
 
     private func makeGitProcess(_ arguments: [String]) -> Process {

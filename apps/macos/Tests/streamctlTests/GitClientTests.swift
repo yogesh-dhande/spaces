@@ -231,6 +231,50 @@ final class GitClientTests: XCTestCase {
         XCTAssertTrue(options.contains("new-remote-only"))
     }
 
+    func testTrackedFileActivityUsesTrackedFilesForLatestTimestampAndCount() throws {
+        let root = try makeTempDirectory()
+        let repo = root.appending(path: "repo", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: repo, withIntermediateDirectories: true)
+        try initializeGitRepository(at: repo, initialBranch: "main")
+
+        let trackedFile = repo.appending(path: "TRACKED.md")
+        try "tracked".write(to: trackedFile, atomically: true, encoding: .utf8)
+        try runGit(["add", "TRACKED.md"], cwd: repo.path)
+        try runGit(
+            ["-c", "user.name=spaceship-test", "-c", "user.email=test@example.com", "commit", "-m", "add tracked"],
+            cwd: repo.path
+        )
+
+        let readmeFile = repo.appending(path: "README.md")
+        let oldDate = Date(timeIntervalSinceNow: -600)
+        let newerTrackedDate = Date(timeIntervalSinceNow: -300)
+        try setModificationDate(oldDate, for: readmeFile)
+        try setModificationDate(newerTrackedDate, for: trackedFile)
+
+        let untrackedFile = repo.appending(path: "UNTRACKED.md")
+        try "scratch".write(to: untrackedFile, atomically: true, encoding: .utf8)
+        try setModificationDate(Date(), for: untrackedFile)
+
+        let client = GitClient()
+        let initialActivity = client.trackedFileActivity(path: repo.path)
+        XCTAssertEqual(initialActivity.modifiedTrackedFileCount, 0)
+        assertEqualDate(initialActivity.latestTrackedFileModificationDate, newerTrackedDate)
+
+        try "updated readme".write(to: readmeFile, atomically: true, encoding: .utf8)
+        let expectedLatestDate = try modificationDate(for: readmeFile)
+        let updatedActivity = client.trackedFileActivity(path: repo.path)
+
+        XCTAssertEqual(updatedActivity.modifiedTrackedFileCount, 1)
+        assertEqualDate(updatedActivity.latestTrackedFileModificationDate, expectedLatestDate)
+    }
+
+    func testTrackedFileActivityReturnsEmptySnapshotForNonRepository() throws {
+        let directory = try makeTempDirectory()
+        let activity = GitClient().trackedFileActivity(path: directory.path)
+        XCTAssertNil(activity.latestTrackedFileModificationDate)
+        XCTAssertEqual(activity.modifiedTrackedFileCount, 0)
+    }
+
     func testCloneAndDeleteBranch() throws {
         let source = try makeTempDirectory()
         try initializeGitRepository(at: source, initialBranch: "main")
@@ -321,5 +365,35 @@ final class GitClientTests: XCTestCase {
             )
         }
         return outputText
+    }
+
+    private func setModificationDate(_ date: Date, for fileURL: URL) throws {
+        try FileManager.default.setAttributes([.modificationDate: date], ofItemAtPath: fileURL.path)
+    }
+
+    private func modificationDate(for fileURL: URL) throws -> Date {
+        let attributes = try FileManager.default.attributesOfItem(atPath: fileURL.path)
+        guard let date = attributes[.modificationDate] as? Date else {
+            throw NSError(
+                domain: "spaceship.tests",
+                code: 1,
+                userInfo: [NSLocalizedDescriptionKey: "Missing modification date for \(fileURL.path)"]
+            )
+        }
+        return date
+    }
+
+    private func assertEqualDate(
+        _ lhs: Date?,
+        _ rhs: Date,
+        tolerance: TimeInterval = 1,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) {
+        guard let lhs else {
+            XCTFail("Expected date value.", file: file, line: line)
+            return
+        }
+        XCTAssertLessThanOrEqual(abs(lhs.timeIntervalSince(rhs)), tolerance, file: file, line: line)
     }
 }
