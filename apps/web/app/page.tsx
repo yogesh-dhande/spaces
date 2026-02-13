@@ -1,7 +1,6 @@
 import Link from "next/link";
 import { AppHeroPreview } from "./components/app-hero-preview";
 import { ProblemSimulation } from "./components/problem-simulation";
-import { ScreenshotFrame } from "./components/screenshot-frame";
 import { SiteHeader } from "./components/site-header";
 
 const painSignals = [
@@ -9,6 +8,34 @@ const painSignals = [
   "Desktop/app switching reduces clutter, but still sends you to the wrong window when context changes quickly.",
   "UI bugs force a reverse lookup: from page issue to repo tab to the exact terminal or agent session.",
   "Default port collisions keep resurfacing, which causes local route and auth redirect drift.",
+];
+
+const keyFeatures = [
+  {
+    title: "Manage Git worktrees",
+    description:
+      "Create and run isolated workspace directories per branch so parallel feature work does not collide.",
+  },
+  {
+    title: "Reserved ports per worktree",
+    description:
+      "Each workspace gets reserved ports so local services can run side by side without recurring port conflicts.",
+  },
+  {
+    title: "Switch between workspaces with ease",
+    description:
+      "Jump between active workstreams quickly without rebuilding process, browser, and editor context.",
+  },
+  {
+    title: "Switch between windows of the current workspace",
+    description:
+      "Cycle through the current workspace windows with deterministic shortcuts, instead of hunting across apps.",
+  },
+  {
+    title: "Bring your own tools",
+    description:
+      "Spaceship works with your preferred stack, whether it is Claude Code or Codex, Cursor or Windsurf. You do not need to learn a new tool or settle for a weaker coding agent just for UX.",
+  },
 ];
 
 export default function HomePage() {
@@ -141,6 +168,30 @@ export default function HomePage() {
 
           </div>
     <AppHeroPreview />
+        </section>
+
+        <section className="rounded-3xl border border-line bg-surface/86 p-7 backdrop-blur-sm md:p-8">
+          <p className="font-mono text-xs uppercase tracking-[0.16em] text-foreground-soft">
+            Key Features
+          </p>
+          <h2 className="mt-3 text-3xl font-semibold tracking-tight">
+            Built for parallel streams of work
+          </h2>
+          <div className="mt-5 grid gap-4 md:grid-cols-2">
+            {keyFeatures.map((feature) => (
+              <article
+                key={feature.title}
+                className="rounded-2xl border border-line bg-surface/75 p-4"
+              >
+                <h3 className="text-base font-semibold tracking-tight">
+                  {feature.title}
+                </h3>
+                <p className="mt-2 text-sm leading-6 text-foreground-soft">
+                  {feature.description}
+                </p>
+              </article>
+            ))}
+          </div>
         </section>
 
         <section className="rounded-3xl border border-line bg-surface/88 p-8 text-center backdrop-blur-sm md:p-10">
