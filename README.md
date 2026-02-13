@@ -1,9 +1,9 @@
-# agentmux monorepo
+# spaceship monorepo
 
 This repository is now structured to host multiple projects.
 
 ## Layout
-- `apps/macos`: the `agentmux` macOS Swift app
+- `apps/macos`: the `spaceship` macOS Swift app
 - `scripts`: root wrappers that delegate to `apps/macos/scripts`
 
 ## macOS app

@@ -72,7 +72,7 @@ final class GitClientTests: XCTestCase {
         )
         try runGit(["add", "NEW_REMOTE_FOR_WORKTREE.md"], cwd: fixture.source.path)
         try runGit(
-            ["-c", "user.name=agentmux-test", "-c", "user.email=test@example.com", "commit", "-m", "new remote worktree"],
+            ["-c", "user.name=spaceship-test", "-c", "user.email=test@example.com", "commit", "-m", "new remote worktree"],
             cwd: fixture.source.path
         )
         try runGit(["push", fixture.remote.path, "new-remote-only"], cwd: fixture.source.path)
@@ -128,7 +128,7 @@ final class GitClientTests: XCTestCase {
         try "target".write(to: repo.appendingPathComponent("TARGET.txt"), atomically: true, encoding: .utf8)
         try runGit(["add", "TARGET.txt"], cwd: repo.path)
         try runGit(
-            ["-c", "user.name=agentmux-test", "-c", "user.email=test@example.com", "commit", "-m", "target"],
+            ["-c", "user.name=spaceship-test", "-c", "user.email=test@example.com", "commit", "-m", "target"],
             cwd: repo.path
         )
         let expectedHead = try runGit(["rev-parse", "develop"], cwd: repo.path).trimmingCharacters(
@@ -161,7 +161,7 @@ final class GitClientTests: XCTestCase {
         )
         try runGit(["add", "NEW_REMOTE_TARGET.md"], cwd: fixture.source.path)
         try runGit(
-            ["-c", "user.name=agentmux-test", "-c", "user.email=test@example.com", "commit", "-m", "remote target"],
+            ["-c", "user.name=spaceship-test", "-c", "user.email=test@example.com", "commit", "-m", "remote target"],
             cwd: fixture.source.path
         )
         try runGit(["push", fixture.remote.path, "new-remote-target"], cwd: fixture.source.path)
@@ -217,7 +217,7 @@ final class GitClientTests: XCTestCase {
         )
         try runGit(["add", "NEW_REMOTE.md"], cwd: fixture.source.path)
         try runGit(
-            ["-c", "user.name=agentmux-test", "-c", "user.email=test@example.com", "commit", "-m", "new remote"],
+            ["-c", "user.name=spaceship-test", "-c", "user.email=test@example.com", "commit", "-m", "new remote"],
             cwd: fixture.source.path
         )
         try runGit(["push", fixture.remote.path, "new-remote-only"], cwd: fixture.source.path)
@@ -255,7 +255,7 @@ final class GitClientTests: XCTestCase {
         try "hello".write(to: readme, atomically: true, encoding: .utf8)
         try runGit(["add", "README.md"], cwd: directory.path)
         try runGit(
-            ["-c", "user.name=agentmux-test", "-c", "user.email=test@example.com", "commit", "-m", "init"],
+            ["-c", "user.name=spaceship-test", "-c", "user.email=test@example.com", "commit", "-m", "init"],
             cwd: directory.path
         )
     }
@@ -274,7 +274,7 @@ final class GitClientTests: XCTestCase {
         )
         try runGit(["add", "FEATURE.md"], cwd: source.path)
         try runGit(
-            ["-c", "user.name=agentmux-test", "-c", "user.email=test@example.com", "commit", "-m", "feature"],
+            ["-c", "user.name=spaceship-test", "-c", "user.email=test@example.com", "commit", "-m", "feature"],
             cwd: source.path
         )
         try runGit(["checkout", "main"], cwd: source.path)
@@ -315,7 +315,7 @@ final class GitClientTests: XCTestCase {
         if process.terminationStatus != 0 {
             let errorText = String(data: error.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
             throw NSError(
-                domain: "agentmux.tests",
+                domain: "spaceship.tests",
                 code: Int(process.terminationStatus),
                 userInfo: [NSLocalizedDescriptionKey: errorText]
             )

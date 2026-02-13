@@ -2,7 +2,7 @@ import Foundation
 import Darwin
 import appctl
 
-public final class AgentmuxOrchestrator {
+public final class SpaceshipOrchestrator {
     private let store: SQLiteStore
     private let configStore: ConfigStore
     private let git: GitClient
@@ -52,7 +52,7 @@ public final class AgentmuxOrchestrator {
                     updatedPaths = true
                 }
             } catch {
-                fputs("agentmux: skipped project due to error: \(error.localizedDescription)\n", stderr)
+                fputs("spaceship: skipped project due to error: \(error.localizedDescription)\n", stderr)
                 removedInvalid = true
             }
         }
@@ -104,19 +104,19 @@ public final class AgentmuxOrchestrator {
 
     public func suggestedWorkspaceName(projectID: String) throws -> String {
         guard let project = try store.project(id: projectID) else {
-            throw AgentmuxError.missingProject(dir: projectID)
+            throw SpaceshipError.missingProject(dir: projectID)
         }
         let existingNames = Set(try store.workspaces(projectID: project.id, includeArchived: true).map(\.name))
-        for candidate in AgentmuxOrchestrator.workspaceFoodNames where !existingNames.contains(candidate) {
+        for candidate in SpaceshipOrchestrator.workspaceFoodNames where !existingNames.contains(candidate) {
             return candidate
         }
-        throw AgentmuxError.invalidArgument(
+        throw SpaceshipError.invalidArgument(
             message: "No available workspace names remain for project \(project.name).")
     }
 
     public func gitBranchOptions(projectID: String) throws -> [String] {
         guard let project = try store.project(id: projectID) else {
-            throw AgentmuxError.missingProject(dir: projectID)
+            throw SpaceshipError.missingProject(dir: projectID)
         }
         guard project.isGitRepo else { return [] }
         return git.branchOptions(path: project.dir)
@@ -138,7 +138,7 @@ public final class AgentmuxOrchestrator {
         let (project, workspace) = try resolveWorkspace(id: workspaceID)
         let config = try projectConfig(projectID: project.id)
         guard var existing = try loadWorkspaceSettings(project: project, workspace: workspace, config: config) else {
-            throw AgentmuxError.missingProject(dir: project.dir)
+            throw SpaceshipError.missingProject(dir: project.dir)
         }
         let previous = existing
         update(&existing)
@@ -165,10 +165,10 @@ public final class AgentmuxOrchestrator {
         let normalizedDir = normalizePath(dir)
         var isDir: ObjCBool = false
         guard FileManager.default.fileExists(atPath: normalizedDir, isDirectory: &isDir), isDir.boolValue else {
-            throw AgentmuxError.invalidArgument(message: "Project directory not found: \(normalizedDir)")
+            throw SpaceshipError.invalidArgument(message: "Project directory not found: \(normalizedDir)")
         }
         if config.projects.contains(where: { normalizePath($0.dir) == normalizedDir }) {
-            throw AgentmuxError.projectAlreadyExists(dir: normalizedDir)
+            throw SpaceshipError.projectAlreadyExists(dir: normalizedDir)
         }
         config.projects.append(ProjectConfig(dir: normalizedDir))
         try configStore.save(config)
@@ -181,7 +181,7 @@ public final class AgentmuxOrchestrator {
     public func addProject(gitURL: String) throws -> ProjectRecord {
         let trimmedURL = gitURL.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedURL.isEmpty else {
-            throw AgentmuxError.invalidArgument(message: "Git repository URL is required.")
+            throw SpaceshipError.invalidArgument(message: "Git repository URL is required.")
         }
         let inferredName = inferredProjectName(from: trimmedURL)
         let projectDirname = sanitizeDirname(inferredName, fallback: "project")
@@ -190,10 +190,10 @@ public final class AgentmuxOrchestrator {
 
         let config = try configStore.load()
         if config.projects.contains(where: { normalizePath($0.dir) == normalizedDestination }) {
-            throw AgentmuxError.projectAlreadyExists(dir: normalizedDestination)
+            throw SpaceshipError.projectAlreadyExists(dir: normalizedDestination)
         }
         if FileManager.default.fileExists(atPath: destination.path) {
-            throw AgentmuxError.invalidArgument(message: "Project directory already exists: \(normalizedDestination)")
+            throw SpaceshipError.invalidArgument(message: "Project directory already exists: \(normalizedDestination)")
         }
         try FileManager.default.createDirectory(
             at: destination.deletingLastPathComponent(),
@@ -207,19 +207,28 @@ public final class AgentmuxOrchestrator {
         var config = try configStore.load()
         let normalizedDir = normalizePath(updated.dir)
         let idx = config.projects.firstIndex { normalizePath($0.dir) == normalizedDir }
-        guard let idx else { throw AgentmuxError.missingProject(dir: normalizedDir) }
-        config.projects[idx] = updated
+        guard let idx else { throw SpaceshipError.missingProject(dir: normalizedDir) }
+        let previous = config.projects[idx]
+        var normalizedUpdated = updated
+        normalizedUpdated.dir = normalizedDir
+        config.projects[idx] = normalizedUpdated
         try configStore.save(config)
-        let normalized = try normalize(project: updated)
+        let normalized = try normalize(project: normalizedUpdated)
         try store.upsert(project: normalized.record)
         try ensureDefaultWorkspace(for: normalized.record)
+        try syncDefaultWorkspaceSettingsIfTemplateBased(
+            project: normalized.record,
+            previousConfig: previous,
+            updatedConfig: normalized.config
+        )
     }
 
     public func updateProjectConfig(projectID: String, update: (inout ProjectConfig) -> Void) throws {
         var config = try configStore.load()
         let normalizedDir = normalizePath(projectID)
         let idx = config.projects.firstIndex { normalizePath($0.dir) == normalizedDir }
-        guard let idx else { throw AgentmuxError.missingProject(dir: normalizedDir) }
+        guard let idx else { throw SpaceshipError.missingProject(dir: normalizedDir) }
+        let previous = config.projects[idx]
         var updated = config.projects[idx]
         update(&updated)
         updated.dir = normalizedDir
@@ -228,6 +237,11 @@ public final class AgentmuxOrchestrator {
         let normalized = try normalize(project: updated)
         try store.upsert(project: normalized.record)
         try ensureDefaultWorkspace(for: normalized.record)
+        try syncDefaultWorkspaceSettingsIfTemplateBased(
+            project: normalized.record,
+            previousConfig: previous,
+            updatedConfig: normalized.config
+        )
     }
 
     public func removeProject(dir: String) throws {
@@ -249,18 +263,18 @@ public final class AgentmuxOrchestrator {
         targetBranch: String? = nil
     ) throws -> WorkspaceRecord {
         guard let project = try store.project(id: projectID) else {
-            throw AgentmuxError.missingProject(dir: projectID)
+            throw SpaceshipError.missingProject(dir: projectID)
         }
         let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedName.isEmpty else {
-            throw AgentmuxError.invalidArgument(message: "Workspace name is required.")
+            throw SpaceshipError.invalidArgument(message: "Workspace name is required.")
         }
         let trimmedBranch = branch?.trimmingCharacters(in: .whitespacesAndNewlines)
         let resolvedBranch: String?
         let resolvedTargetBranch: String?
         if project.isGitRepo {
             guard let trimmedBranch, !trimmedBranch.isEmpty else {
-                throw AgentmuxError.invalidArgument(message: "Branch name is required for git projects.")
+                throw SpaceshipError.invalidArgument(message: "Branch name is required for git projects.")
             }
             resolvedBranch = trimmedBranch
             resolvedTargetBranch = try resolveWorkspaceTargetBranch(project: project, targetBranch: targetBranch)
@@ -270,14 +284,14 @@ public final class AgentmuxOrchestrator {
         }
         if let existing = try store.workspace(projectID: projectID, name: trimmedName) {
             if !existing.isArchived {
-                throw AgentmuxError.workspaceAlreadyExists(project: project.name, workspace: trimmedName)
+                throw SpaceshipError.workspaceAlreadyExists(project: project.name, workspace: trimmedName)
             }
             let revivedDir: String
             let revivedDirname: String?
             let revivedBranch: String?
             if project.isGitRepo {
                 guard let branchName = resolvedBranch else {
-                    throw AgentmuxError.invalidArgument(message: "Branch name is required for git projects.")
+                    throw SpaceshipError.invalidArgument(message: "Branch name is required for git projects.")
                 }
                 let dirname = try makeWorkspaceDirname(
                     project: project,
@@ -327,7 +341,7 @@ public final class AgentmuxOrchestrator {
         let workspaceBranch: String?
         if project.isGitRepo {
             guard let branchName = resolvedBranch else {
-                throw AgentmuxError.invalidArgument(message: "Branch name is required for git projects.")
+                throw SpaceshipError.invalidArgument(message: "Branch name is required for git projects.")
             }
             let dirname = try makeWorkspaceDirname(
                 project: project,
@@ -390,7 +404,7 @@ public final class AgentmuxOrchestrator {
         {
             return "master"
         }
-        throw AgentmuxError.invalidArgument(message: "Target branch is required for git projects.")
+        throw SpaceshipError.invalidArgument(message: "Target branch is required for git projects.")
     }
 
     public func launchWorkspace(workspaceID: String) throws {
@@ -409,11 +423,11 @@ public final class AgentmuxOrchestrator {
     private func launchWorkspaceUnlocked(workspaceID: String) throws {
         let (project, workspace) = try resolveWorkspace(id: workspaceID)
         guard !workspace.isArchived else {
-            throw AgentmuxError.invalidArgument(message: "Workspace is archived.")
+            throw SpaceshipError.invalidArgument(message: "Workspace is archived.")
         }
         let hasTrackedRuntime = try hasTrackedRuntimeIndicators(workspaceID: workspace.id)
         guard !(workspace.isRunning || hasTrackedRuntime) else {
-            throw AgentmuxError.invalidArgument(message: "Workspace is already running. Use restart.")
+            throw SpaceshipError.invalidArgument(message: "Workspace is already running. Use restart.")
         }
         let config = try loadWorkspaceSettings(project: project, workspace: workspace, config: try projectConfig(projectID: project.id))
         let ports = try store.workspacePorts(workspaceID: workspace.id)
@@ -563,7 +577,7 @@ public final class AgentmuxOrchestrator {
     private func archiveWorkspaceUnlocked(workspaceID: String) throws {
         let (project, workspace) = try resolveWorkspace(id: workspaceID)
         guard !workspace.isDefault else {
-            throw AgentmuxError.invalidArgument(message: "Default workspace cannot be archived.")
+            throw SpaceshipError.invalidArgument(message: "Default workspace cannot be archived.")
         }
         try stopWorkspaceUnlocked(workspaceID: workspaceID)
         if project.isGitRepo {
@@ -587,7 +601,7 @@ public final class AgentmuxOrchestrator {
         workspaceLifecycleLock.lock()
         if workspaceLifecycleInFlight.contains(workspaceID) {
             workspaceLifecycleLock.unlock()
-            throw AgentmuxError.invalidArgument(message: "Workspace action is already in progress.")
+            throw SpaceshipError.invalidArgument(message: "Workspace action is already in progress.")
         }
         workspaceLifecycleInFlight.insert(workspaceID)
         workspaceLifecycleLock.unlock()
@@ -645,10 +659,10 @@ public final class AgentmuxOrchestrator {
     public func openWorkspaceEditor(workspaceID: String) throws {
         let (_, workspace) = try resolveWorkspace(id: workspaceID)
         guard !workspace.isArchived else {
-            throw AgentmuxError.invalidArgument(message: "Workspace is archived.")
+            throw SpaceshipError.invalidArgument(message: "Workspace is archived.")
         }
         guard let editor = try configStore.load().editor, editor != .none else {
-            throw AgentmuxError.configError(message: "Preferred editor is not configured.")
+            throw SpaceshipError.configError(message: "Preferred editor is not configured.")
         }
         let snapshot = try yabai.listWindows()
         try EditorLauncher.open(editor: editor, directory: workspace.dir)
@@ -664,10 +678,10 @@ public final class AgentmuxOrchestrator {
     public func openWorkspaceTerminal(workspaceID: String) throws {
         let (_, workspace) = try resolveWorkspace(id: workspaceID)
         guard !workspace.isArchived else {
-            throw AgentmuxError.invalidArgument(message: "Workspace is archived.")
+            throw SpaceshipError.invalidArgument(message: "Workspace is archived.")
         }
         guard iterm.isAvailable() else {
-            throw AgentmuxError.dependencyMissing(message: "iTerm2 is required to open terminal windows.")
+            throw SpaceshipError.dependencyMissing(message: "iTerm2 is required to open terminal windows.")
         }
         let snapshot = try yabai.listWindows()
         let escapedDir = workspace.dir.replacingOccurrences(of: "\"", with: "\\\"")
@@ -965,10 +979,10 @@ public final class AgentmuxOrchestrator {
                 )
             )
         }
-        if ProcessInfo.processInfo.environment["AGENTMUX_DEBUG_BROWSER_SCAN"] == "1" {
+        if ProcessInfo.processInfo.environment["SPACESHIP_DEBUG_BROWSER_SCAN"] == "1" {
             let elapsedMS = Int(Date().timeIntervalSince(scanStartedAt) * 1000)
             fputs(
-                "agentmux: browser scan workspace=\(workspaceID) tabs=\(tabs.count) matches=\(browserWindows.count) elapsed_ms=\(elapsedMS)\n",
+                "spaceship: browser scan workspace=\(workspaceID) tabs=\(tabs.count) matches=\(browserWindows.count) elapsed_ms=\(elapsedMS)\n",
                 stderr
             )
         }
@@ -1109,7 +1123,7 @@ public final class AgentmuxOrchestrator {
         let dir = normalizePath(project.dir)
         var isDir: ObjCBool = false
         guard FileManager.default.fileExists(atPath: dir, isDirectory: &isDir), isDir.boolValue else {
-            throw AgentmuxError.invalidArgument(message: "Project directory not found: \(dir)")
+            throw SpaceshipError.invalidArgument(message: "Project directory not found: \(dir)")
         }
         let isGit = git.isRepo(path: dir)
         let branch = isGit ? git.defaultBranch(path: dir) : nil
@@ -1163,10 +1177,10 @@ public final class AgentmuxOrchestrator {
 
     private func resolveWorkspace(id: String) throws -> (ProjectRecord, WorkspaceRecord) {
         guard let workspace = try store.workspace(id: id) else {
-            throw AgentmuxError.invalidArgument(message: "Workspace not found.")
+            throw SpaceshipError.invalidArgument(message: "Workspace not found.")
         }
         guard let project = try store.project(id: workspace.projectID) else {
-            throw AgentmuxError.missingProject(dir: workspace.projectID)
+            throw SpaceshipError.missingProject(dir: workspace.projectID)
         }
         return (project, workspace)
     }
@@ -1179,6 +1193,84 @@ public final class AgentmuxOrchestrator {
                 try seedWorkspaceSettings(project: project, workspace: workspace, config: config)
             }
         }
+    }
+
+    private func syncDefaultWorkspaceSettingsIfTemplateBased(
+        project: ProjectRecord,
+        previousConfig: ProjectConfig,
+        updatedConfig: ProjectConfig
+    ) throws {
+        guard let defaultWorkspace = try store.workspace(projectID: project.id, name: "default") else {
+            return
+        }
+
+        let hasSettings = try store.workspaceSettingsExists(workspaceID: defaultWorkspace.id)
+        if !hasSettings {
+            try seedWorkspaceSettings(project: project, workspace: defaultWorkspace, config: updatedConfig)
+            return
+        }
+
+        let currentSettings = WorkspaceSettings(
+            stopScript: try store.workspaceStopScript(workspaceID: defaultWorkspace.id),
+            processes: try store.workspaceProcesses(workspaceID: defaultWorkspace.id),
+            statusChecks: try store.workspaceStatusChecks(workspaceID: defaultWorkspace.id),
+            browserSessions: try store.workspaceBrowserSessions(workspaceID: defaultWorkspace.id)
+        )
+
+        let previousTemplate = WorkspaceSettings(
+            stopScript: previousConfig.stopScript,
+            processes: previousConfig.processes,
+            statusChecks: previousConfig.statusChecks,
+            browserSessions: previousConfig.browserSessions
+        )
+
+        guard workspaceSettingsMatch(currentSettings, previousTemplate) else {
+            return
+        }
+
+        try seedWorkspaceSettings(project: project, workspace: defaultWorkspace, config: updatedConfig)
+    }
+
+    private func workspaceSettingsMatch(_ lhs: WorkspaceSettings, _ rhs: WorkspaceSettings) -> Bool {
+        guard lhs.stopScript == rhs.stopScript else { return false }
+        guard processTemplatesMatch(lhs.processes, rhs.processes) else { return false }
+        guard statusChecksMatch(lhs.statusChecks, rhs.statusChecks) else { return false }
+        guard browserSessionsMatch(lhs.browserSessions, rhs.browserSessions) else { return false }
+        return true
+    }
+
+    private func processTemplatesMatch(_ lhs: [ProcessTemplate], _ rhs: [ProcessTemplate]) -> Bool {
+        guard lhs.count == rhs.count else { return false }
+        for (left, right) in zip(lhs, rhs) {
+            if left.name != right.name || left.command != right.command || left.kind != right.kind {
+                return false
+            }
+        }
+        return true
+    }
+
+    private func statusChecksMatch(_ lhs: [StatusCheckDefinition], _ rhs: [StatusCheckDefinition]) -> Bool {
+        guard lhs.count == rhs.count else { return false }
+        for (left, right) in zip(lhs, rhs) {
+            if left.name != right.name
+                || left.process != right.process
+                || left.command != right.command
+                || left.interval != right.interval
+                || left.timeout != right.timeout
+                || left.onExit != right.onExit
+            {
+                return false
+            }
+        }
+        return true
+    }
+
+    private func browserSessionsMatch(_ lhs: [BrowserSession], _ rhs: [BrowserSession]) -> Bool {
+        guard lhs.count == rhs.count else { return false }
+        for (left, right) in zip(lhs, rhs) where left.url != right.url {
+            return false
+        }
+        return true
     }
 
     private func seedWorkspaceSettings(project: ProjectRecord, workspace: WorkspaceRecord) throws {
@@ -1231,8 +1323,8 @@ public final class AgentmuxOrchestrator {
         for (idx, port) in ports.enumerated() {
             env["PORT\(idx)"] = String(port)
         }
-        env["agentmux_WORKSPACE_DIR"] = workspace.dir
-        let scopedKey = "agentmux_\(sanitizeEnvKey(project.name))_\(sanitizeEnvKey(workspace.name))_WORKSPACE_DIR"
+        env["spaceship_WORKSPACE_DIR"] = workspace.dir
+        let scopedKey = "spaceship_\(sanitizeEnvKey(project.name))_\(sanitizeEnvKey(workspace.name))_WORKSPACE_DIR"
         env[scopedKey] = workspace.dir
         return env
     }
@@ -1321,7 +1413,7 @@ public final class AgentmuxOrchestrator {
         }
 
         if (!toStart.isEmpty || !toRestart.isEmpty), !iterm.isAvailable() {
-            throw AgentmuxError.dependencyMissing(message: "iTerm2 is required to launch processes.")
+            throw SpaceshipError.dependencyMissing(message: "iTerm2 is required to launch processes.")
         }
 
         for process in toStop {
@@ -1490,7 +1582,7 @@ public final class AgentmuxOrchestrator {
             return
         }
         guard chrome.isAvailable() else {
-            throw AgentmuxError.dependencyMissing(message: "Google Chrome is required for browser sessions.")
+            throw SpaceshipError.dependencyMissing(message: "Google Chrome is required for browser sessions.")
         }
         let snapshot = try yabai.listWindows()
         let attached = try ensureBrowserSessions(project: project, workspace: workspace, sessions: sessions, env: env)
@@ -1685,7 +1777,7 @@ public final class AgentmuxOrchestrator {
             return
         }
         guard iterm.isAvailable() else {
-            throw AgentmuxError.dependencyMissing(message: "iTerm2 is required to launch processes.")
+            throw SpaceshipError.dependencyMissing(message: "iTerm2 is required to launch processes.")
         }
         let runtimeRoot = try runtimeDirectory()
         let workspaceRuntime = URL(fileURLWithPath: runtimeRoot).appendingPathComponent(workspace.id, isDirectory: true)
@@ -1742,7 +1834,7 @@ public final class AgentmuxOrchestrator {
         _ = project
         guard !sessions.isEmpty else { return [] }
         guard chrome.isAvailable() else {
-            throw AgentmuxError.dependencyMissing(message: "Google Chrome is required for browser sessions.")
+            throw SpaceshipError.dependencyMissing(message: "Google Chrome is required for browser sessions.")
         }
         var attached: [WindowRecord] = []
         var seenKeys = Set<String>()
@@ -1826,11 +1918,11 @@ public final class AgentmuxOrchestrator {
 
     private func runtimeDirectory() throws -> String {
         let dir: URL
-        if let override = ProcessInfo.processInfo.environment["AGENTMUX_RUNTIME_DIR"], !override.isEmpty {
+        if let override = ProcessInfo.processInfo.environment["SPACESHIP_RUNTIME_DIR"], !override.isEmpty {
             dir = URL(fileURLWithPath: override, isDirectory: true)
         } else {
             let home = FileManager.default.homeDirectoryForCurrentUser
-            dir = home.appendingPathComponent(".agentmux", isDirectory: true).appendingPathComponent(
+            dir = home.appendingPathComponent(".spaceship", isDirectory: true).appendingPathComponent(
                 "runtime", isDirectory: true)
         }
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
@@ -2027,10 +2119,10 @@ public final class AgentmuxOrchestrator {
             return existingDirname
         }
         let used = try usedWorkspaceDirnames(project: project)
-        if let available = AgentmuxOrchestrator.workspaceFoodNames.first(where: { !used.contains($0) }) {
+        if let available = SpaceshipOrchestrator.workspaceFoodNames.first(where: { !used.contains($0) }) {
             return available
         }
-        throw AgentmuxError.invalidArgument(
+        throw SpaceshipError.invalidArgument(
             message: "No available workspace dirnames remain for project \(project.name).")
     }
 
@@ -2064,7 +2156,7 @@ public final class AgentmuxOrchestrator {
             return projectsRootDirectoryURL
         }
         let home = FileManager.default.homeDirectoryForCurrentUser
-        return home.appending(path: "agentmux", directoryHint: .isDirectory).appending(
+        return home.appending(path: "spaceship", directoryHint: .isDirectory).appending(
             path: "projects",
             directoryHint: .isDirectory
         )
@@ -2075,7 +2167,7 @@ public final class AgentmuxOrchestrator {
             return workspacesRootDirectoryURL
         }
         let home = FileManager.default.homeDirectoryForCurrentUser
-        return home.appending(path: "agentmux", directoryHint: .isDirectory).appending(
+        return home.appending(path: "spaceship", directoryHint: .isDirectory).appending(
             path: "workspaces",
             directoryHint: .isDirectory
         )

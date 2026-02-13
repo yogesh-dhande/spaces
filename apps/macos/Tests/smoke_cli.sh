@@ -2,19 +2,19 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd -P)"
-BIN="$ROOT_DIR/.build/debug/agentmux"
+BIN="$ROOT_DIR/.build/debug/spaceship"
 
 if [[ ! -x "$BIN" ]]; then
-  echo "Building agentmux..."
+  echo "Building spaceship..."
   (cd "$ROOT_DIR" && swift build >/dev/null)
 fi
 
-TMP_HOME="$(mktemp -d /tmp/agentmux-smoke-home.XXXXXX)"
+TMP_HOME="$(mktemp -d /tmp/spaceship-smoke-home.XXXXXX)"
 trap 'rm -rf "$TMP_HOME"' EXIT
 export HOME="$TMP_HOME"
 
 # Project + workspace CRUD
-TEST_REPO="/tmp/agentmux-smoke-repo"
+TEST_REPO="/tmp/spaceship-smoke-repo"
 rm -rf "$TEST_REPO"
 mkdir -p "$TEST_REPO"
 (

@@ -9,11 +9,11 @@ public final class SQLiteStore {
         var handle: OpaquePointer?
         if sqlite3_open(path, &handle) != SQLITE_OK {
             throw NSError(
-                domain: "agentmux.store", code: 1,
+                domain: "spaceship.store", code: 1,
                 userInfo: [NSLocalizedDescriptionKey: "Failed opening sqlite db at \(path)"])
         }
         guard let handle else {
-            throw NSError(domain: "agentmux.store", code: 1, userInfo: [NSLocalizedDescriptionKey: "DB handle is nil"])
+            throw NSError(domain: "spaceship.store", code: 1, userInfo: [NSLocalizedDescriptionKey: "DB handle is nil"])
         }
         db = handle
         try rebuildSchemaIfNeeded()
@@ -764,7 +764,7 @@ public final class SQLiteStore {
     private func executeBatch(sql: String) throws {
         if sqlite3_exec(db, sql, nil, nil, nil) != SQLITE_OK {
             let message = String(cString: sqlite3_errmsg(db))
-            throw NSError(domain: "agentmux.store", code: 2, userInfo: [NSLocalizedDescriptionKey: message])
+            throw NSError(domain: "spaceship.store", code: 2, userInfo: [NSLocalizedDescriptionKey: message])
         }
     }
 
@@ -772,7 +772,7 @@ public final class SQLiteStore {
         var statement: OpaquePointer?
         guard sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK, let statement else {
             let message = String(cString: sqlite3_errmsg(db))
-            throw NSError(domain: "agentmux.store", code: 3, userInfo: [NSLocalizedDescriptionKey: message])
+            throw NSError(domain: "spaceship.store", code: 3, userInfo: [NSLocalizedDescriptionKey: message])
         }
         defer { sqlite3_finalize(statement) }
 
@@ -780,7 +780,7 @@ public final class SQLiteStore {
 
         if sqlite3_step(statement) != SQLITE_DONE {
             let message = String(cString: sqlite3_errmsg(db))
-            throw NSError(domain: "agentmux.store", code: 4, userInfo: [NSLocalizedDescriptionKey: message])
+            throw NSError(domain: "spaceship.store", code: 4, userInfo: [NSLocalizedDescriptionKey: message])
         }
     }
 
@@ -788,7 +788,7 @@ public final class SQLiteStore {
         var statement: OpaquePointer?
         guard sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK, let statement else {
             let message = String(cString: sqlite3_errmsg(db))
-            throw NSError(domain: "agentmux.store", code: 5, userInfo: [NSLocalizedDescriptionKey: message])
+            throw NSError(domain: "spaceship.store", code: 5, userInfo: [NSLocalizedDescriptionKey: message])
         }
         defer { sqlite3_finalize(statement) }
         try bind(bindings, to: statement)
@@ -801,7 +801,7 @@ public final class SQLiteStore {
         var statement: OpaquePointer?
         guard sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK, let statement else {
             let message = String(cString: sqlite3_errmsg(db))
-            throw NSError(domain: "agentmux.store", code: 7, userInfo: [NSLocalizedDescriptionKey: message])
+            throw NSError(domain: "spaceship.store", code: 7, userInfo: [NSLocalizedDescriptionKey: message])
         }
         defer { sqlite3_finalize(statement) }
         try bind(bindings, to: statement)
@@ -831,7 +831,7 @@ public final class SQLiteStore {
                 sqlite3_bind_text(statement, slot, text, -1, sqliteTransient)
             default:
                 throw NSError(
-                    domain: "agentmux.store", code: 8, userInfo: [NSLocalizedDescriptionKey: "Unsupported binding type"]
+                    domain: "spaceship.store", code: 8, userInfo: [NSLocalizedDescriptionKey: "Unsupported binding type"]
                 )
             }
         }

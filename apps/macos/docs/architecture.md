@@ -1,7 +1,7 @@
 # Architecture
 
 ## Overview
-`agentmux` is a macOS Swift app for stream-based workspace orchestration. A stream is a captured set of windows tied to a workspace. YAML is the source of truth for global settings and project templates, while SQLite stores runtime state plus per-workspace settings that are not written back to YAML.
+`spaceship` is a macOS Swift app for stream-based workspace orchestration. A stream is a captured set of windows tied to a workspace. YAML is the source of truth for global settings and project templates, while SQLite stores runtime state plus per-workspace settings that are not written back to YAML.
 
 Key invariants:
 - YAML config is the source of truth for global settings and project templates and is normalized on load.
@@ -15,8 +15,8 @@ Key invariants:
 ## Module Map
 ```mermaid
 flowchart LR
-  cli["agentmux (CLI)"] --> stream["streamctl"]
-  guiapp["agentmux-app (App entrypoint)"] --> gui["gui (AppKit UI)"]
+  cli["spaceship (CLI)"] --> stream["streamctl"]
+  guiapp["spaceship-app (App entrypoint)"] --> gui["gui (AppKit UI)"]
   gui --> stream
 
   stream --> config["YAML config"]
@@ -34,10 +34,10 @@ Module responsibilities:
 - `appctl`: Shell + AppleScript adapters for yabai, iTerm2, and Chrome.
 - `streamctl`: Orchestration, config normalization, port allocation, workspace lifecycle, and persistence.
 - `gui`: AppKit UI library that calls into `streamctl`.
-- `agentmux`: CLI entrypoint that calls into `streamctl`.
-- `agentmux-app`: GUI executable entrypoint that wires `NSApplication` to the `gui` library.
+- `spaceship`: CLI entrypoint that calls into `streamctl`.
+- `spaceship-app`: GUI executable entrypoint that wires `NSApplication` to the `gui` library.
 
-The `gui` target is the reusable UI library. `agentmux-app` is the minimal executable that boots AppKit and delegates to `gui`.
+The `gui` target is the reusable UI library. `spaceship-app` is the minimal executable that boots AppKit and delegates to `gui`.
 
 GUI interaction notes:
 - Right-pane forms are hosted in a scroll view so long forms do not clip at smaller window heights.
@@ -56,16 +56,16 @@ GUI interaction notes:
 
 ## Data Model
 Config file:
-- Path: `~/.agentmux/config.yaml`.
+- Path: `~/.spaceship/config.yaml`.
 - Top-level fields: `editor`, `port_range`, `projects`.
 - The GUI Settings view writes `editor` from installed VS Code, Cursor, or Windsurf.
 - Project fields: `dir`, `setup_script`, `stop_script`, `processes`, `status_checks`, `browser_sessions`.
 - Script timing:
   - `setup_script` runs when a workspace is created or revived.
   - `stop_script` runs on stop/restart/archive stop phase after automatic process termination.
-- New projects can be created from an existing directory or by cloning a repository into `/Users/<username>/agentmux/projects/<project_name>`.
-- Removing a project clears agentmux state. For git projects, related workspace directories under `/Users/<username>/agentmux/workspaces` are deleted.
-- The project directory is deleted only for git projects located under `/Users/<username>/agentmux/projects` (app-managed clones).
+- New projects can be created from an existing directory or by cloning a repository into `/Users/<username>/spaceship/projects/<project_name>`.
+- Removing a project clears spaceship state. For git projects, related workspace directories under `/Users/<username>/spaceship/workspaces` are deleted.
+- The project directory is deleted only for git projects located under `/Users/<username>/spaceship/projects` (app-managed clones).
 
 Workspace settings:
 - Each workspace snapshots project `stop_script`, `processes`, `status_checks`, and `browser_sessions` at creation.
@@ -74,7 +74,7 @@ Workspace settings:
 - Edits to a running workspace reconcile processes and browser sessions immediately.
 
 Runtime database:
-- Path: `~/.agentmux/agentmux.db`.
+- Path: `~/.spaceship/spaceship.db`.
 - Schema is recreated when `schema_version` changes; workspace settings are re-seeded from project templates as needed.
 
 ```mermaid
@@ -233,15 +233,15 @@ Degraded runtime edge cases and handling:
 - `is_running` can drift from real OS state because users can close windows/processes manually.
 - Restart is the user-visible "bring everything back" action for partial or stale runtime state.
 - Chrome session discovery and focus are URL-prefix based end-to-end; title-based fallback matching is intentionally avoided to prevent binding sessions to the wrong tab.
-- On launch/restart, agentmux reuses existing Chrome tabs whose URLs match configured browser-session prefixes and tracks all matching tabs for workspace cycling.
-- Browser windows store an optional `target_url`; when focusing browser entries, agentmux uses AppleScript to activate the matching tab (including when multiple tracked targets share one Chrome window) before falling back to raw window focus.
+- On launch/restart, spaceship reuses existing Chrome tabs whose URLs match configured browser-session prefixes and tracks all matching tabs for workspace cycling.
+- Browser windows store an optional `target_url`; when focusing browser entries, spaceship uses AppleScript to activate the matching tab (including when multiple tracked targets share one Chrome window) before falling back to raw window focus.
 - If a Chrome window is tracked both as targeted browser tabs and as an untargeted browser row, untargeted rows are filtered from workspace window navigation/listing to keep forward/backward traversal deterministic.
 - Workspace window navigation/listing rebuilds browser rows from a live Chrome tab scan each time, including every tab whose URL starts with any configured browser-session URL (deduplicated by `window_id + tab URL`); tabs with missing URLs are skipped.
 - Live browser rows are ordered deterministically by browser-session prefix order and then tab URL so `cmd+<n>` shortcut indices stay aligned with the on-screen list even as Chrome window z-order changes.
 - Window cycling tracks a workspace-local navigation pointer, and Chrome row resolution uses the frontmost active tab URL with prefix checks to keep next/previous stable.
 - Window cycling order is role-grouped for consistency: all browser tabs first, then terminal windows, then other window roles. Relative navigation prefers the remembered workspace-local index once cycling begins.
 - Global next/previous shortcut routing resolves focused Chrome windows by `(window_id + active tab URL prefix)` so one reused Chrome window can be safely tracked by multiple workspaces without selecting the wrong workspace.
-- Optional diagnostics: when `AGENTMUX_DEBUG_BROWSER_SCAN=1`, each live scan logs tab count, match count, and elapsed milliseconds to stderr.
+- Optional diagnostics: when `SPACESHIP_DEBUG_BROWSER_SCAN=1`, each live scan logs tab count, match count, and elapsed milliseconds to stderr.
 - Terminal capture uses both yabai snapshot-diff and running-process window IDs to avoid dropping terminals when window discovery lags.
 - Window IDs can become stale across app/desktop changes; stale rows are pruned during reconciliation paths.
 - When the GUI is brought to front via the global toggle hotkey, the selected workspace detail view is refreshed so the on-screen windows list reflects the latest live scan.

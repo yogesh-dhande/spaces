@@ -48,7 +48,7 @@ final class PortAllocatorTests: XCTestCase {
                 range: PortRange(start: 20000, end: 20002)
             )
         ) { error in
-            guard case AgentmuxError.invalidArgument = error else {
+            guard case SpaceshipError.invalidArgument = error else {
                 return XCTFail("Unexpected error: \(error)")
             }
         }

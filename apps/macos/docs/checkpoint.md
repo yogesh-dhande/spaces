@@ -1,14 +1,14 @@
 # Checkpoint
 
 ## Current Status
-- YAML config at `~/.agentmux/config.yaml` is the source of truth for editor preference, port range, projects, and project templates (processes, browser sessions, status checks).
-- Runtime state and workspace settings live in `~/.agentmux/agentmux.db` (projects, workspaces, ports, running processes, status results, windows, settings, workspace settings) and are rebuilt when the schema version changes; workspace settings are re-seeded from project templates when missing.
+- YAML config at `~/.spaceship/config.yaml` is the source of truth for editor preference, port range, projects, and project templates (processes, browser sessions, status checks).
+- Runtime state and workspace settings live in `~/.spaceship/spaceship.db` (projects, workspaces, ports, running processes, status results, windows, settings, workspace settings) and are rebuilt when the schema version changes; workspace settings are re-seeded from project templates when missing.
 - Projects are normalized by real path; a default workspace is ensured per project with reserved ports.
-- Project creation supports either existing directories or git clone; cloned repositories are stored at `/Users/<username>/agentmux/projects/<project_name>`.
-- Project removal clears agentmux state, deletes related git workspace directories under `/Users/<username>/agentmux/workspaces`, and deletes the project directory only for git repositories under `/Users/<username>/agentmux/projects` (managed clones).
+- Project creation supports either existing directories or git clone; cloned repositories are stored at `/Users/<username>/spaceship/projects/<project_name>`.
+- Project removal clears spaceship state, deletes related git workspace directories under `/Users/<username>/spaceship/workspaces`, and deletes the project directory only for git repositories under `/Users/<username>/spaceship/projects` (managed clones).
 - Workspaces create git worktrees for git projects, run setup/stop scripts, and reserve 10 ports per workspace.
 - Archiving non-git workspaces does not delete the project directory.
-- Workspace launch starts processes in iTerm2 with env vars and logs under `~/.agentmux/runtime/<workspace-id>`, opens Chrome browser sessions, optionally opens the editor, and captures window IDs via yabai in browser/editor/terminal order.
+- Workspace launch starts processes in iTerm2 with env vars and logs under `~/.spaceship/runtime/<workspace-id>`, opens Chrome browser sessions, optionally opens the editor, and captures window IDs via yabai in browser/editor/terminal order.
 - Browser window tracking includes target session URL so workspace focus actions can activate the matching Chrome tab (not just focus the window).
 - Browser session mapping is URL-based; title-based fallback matching is removed to avoid binding sessions to unrelated active tabs in shared Chrome windows.
 - Workspace launch/restart reuses existing matching Chrome tabs and tracks all matches for workspace window cycling.
@@ -16,7 +16,7 @@
 - Browser tab rows are emitted in deterministic order (browser-session prefix order, then URL) so displayed `cmd+<n>` hints map to stable targets.
 - Stop/restart/settings reconciliation now close tracked Chrome tabs by URL prefix and do not close full Chrome windows.
 - Window cycling order is now grouped as browser tabs, then terminals, then other roles; once cycling starts, navigation uses the remembered index for deterministic forward/backward traversal.
-- `AGENTMUX_DEBUG_BROWSER_SCAN=1` enables stderr timing logs for each Chrome tab scan (tab count, match count, elapsed ms).
+- `SPACESHIP_DEBUG_BROWSER_SCAN=1` enables stderr timing logs for each Chrome tab scan (tab count, match count, elapsed ms).
 - Window cycling keeps a workspace-local navigation pointer but resolves Chrome entries using the currently active frontmost tab URL when multiple tracked tabs share one window.
 - Focused Chrome windows now map to workspaces using both `window_id` and active tab URL prefix so global next/previous shortcuts choose the correct workspace even when Chrome windows are reused across workspaces.
 - Workspace window listing/navigation filters untargeted browser rows when a targeted browser row already exists for the same Chrome `window_id`.
@@ -37,7 +37,7 @@
 - Settings view in the GUI lets users pick a preferred editor from installed VS Code, Cursor, or Windsurf; the choice is stored in the YAML config.
 - Settings view in the GUI also allows overriding default shortcuts for global toggle, workspace navigation/activation, and open editor/terminal/Finder; these values are stored in the runtime DB.
 - Window focus shortcuts are `cmd+1` through `cmd+9` while the GUI is focused.
-- Bringing agentmux to front with the global toggle hotkey refreshes the selected workspace detail view so the displayed window list reflects the latest Chrome tab scan.
+- Bringing spaceship to front with the global toggle hotkey refreshes the selected workspace detail view so the displayed window list reflects the latest Chrome tab scan.
 - The local key monitor defers to focused text inputs so standard edit shortcuts like `cmd+v` work in forms.
 - CLI supports config path/show, project list/add/update/remove (including `project add --git-url ...`), workspace list/create/launch/stop/archive/activate, and settings get/set/reset for GUI shortcuts.
 - Workspace run view includes Open Editor/Terminal/Finder actions; editor/terminal windows opened this way are captured and included in window cycling.

@@ -24,31 +24,31 @@ Show the focused window:
 yabai -m query --windows --window
 ```
 
-## agentmux Diagnostics
+## spaceship Diagnostics
 
 Show config path:
 ```bash
-agentmux config path
+spaceship config path
 ```
 
 List projects:
 ```bash
-agentmux project list
+spaceship project list
 ```
 
 List workspaces (including archived):
 ```bash
-agentmux workspace list --project-dir /path/to/repo --all
+spaceship workspace list --project-dir /path/to/repo --all
 ```
 
 ## Runtime Logs
 
 Process logs are stored under:
 ```
-~/.agentmux/runtime/<workspace-id>/*.log
+~/.spaceship/runtime/<workspace-id>/*.log
 ```
 
 Inspect a log:
 ```bash
-tail -n 200 ~/.agentmux/runtime/<workspace-id>/<process>.log
+tail -n 200 ~/.spaceship/runtime/<workspace-id>/<process>.log
 ```

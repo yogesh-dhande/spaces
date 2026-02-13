@@ -15,7 +15,7 @@ struct CLI {
         let configPath = try ConfigStore.defaultPath()
         let store = try SQLiteStore(path: db)
         let configStore = ConfigStore(path: configPath)
-        let orchestrator = AgentmuxOrchestrator(store: store, configStore: configStore)
+        let orchestrator = SpaceshipOrchestrator(store: store, configStore: configStore)
 
         _ = try orchestrator.syncConfig()
 
@@ -33,10 +33,10 @@ struct CLI {
         }
     }
 
-    private func runConfigSubcommand(orchestrator: AgentmuxOrchestrator, path: String) throws {
+    private func runConfigSubcommand(orchestrator: SpaceshipOrchestrator, path: String) throws {
         guard args.count >= 3 else {
             throw NSError(
-                domain: "agentmux.cli", code: 2,
+                domain: "spaceship.cli", code: 2,
                 userInfo: [NSLocalizedDescriptionKey: "Missing config action. Use: config path|show"])
         }
         switch args[2] {
@@ -49,15 +49,15 @@ struct CLI {
             )
         default:
             throw NSError(
-                domain: "agentmux.cli", code: 2,
+                domain: "spaceship.cli", code: 2,
                 userInfo: [NSLocalizedDescriptionKey: "Unknown config action: \(args[2])"])
         }
     }
 
-    private func runProjectSubcommand(orchestrator: AgentmuxOrchestrator) throws {
+    private func runProjectSubcommand(orchestrator: SpaceshipOrchestrator) throws {
         guard args.count >= 3 else {
             throw NSError(
-                domain: "agentmux.cli", code: 2,
+                domain: "spaceship.cli", code: 2,
                 userInfo: [NSLocalizedDescriptionKey: "Missing project action. Use: project list|add|update|remove"])
         }
 
@@ -74,7 +74,7 @@ struct CLI {
             let gitURL = optionalValue(for: "--git-url")
             if dir != nil, gitURL != nil {
                 throw NSError(
-                    domain: "agentmux.cli", code: 2,
+                    domain: "spaceship.cli", code: 2,
                     userInfo: [
                         NSLocalizedDescriptionKey:
                             "Use either --dir <path> or --git-url <url>, but not both."
@@ -87,7 +87,7 @@ struct CLI {
                 record = try orchestrator.addProject(dir: dir)
             } else {
                 throw NSError(
-                    domain: "agentmux.cli", code: 2,
+                    domain: "spaceship.cli", code: 2,
                     userInfo: [
                         NSLocalizedDescriptionKey:
                             "Missing required flags. Use: project add --dir <path> or project add --git-url <url>"
@@ -100,7 +100,7 @@ struct CLI {
             let stopScript = optionalValue(for: "--stop-script")
             guard var config = try orchestrator.projectConfig(projectID: normalizePath(dir)) else {
                 throw NSError(
-                    domain: "agentmux.cli", code: 2,
+                    domain: "spaceship.cli", code: 2,
                     userInfo: [NSLocalizedDescriptionKey: "Project not found for dir \(dir)"])
             }
             if let setupScript {
@@ -117,15 +117,15 @@ struct CLI {
             print("Removed project \(dir)")
         default:
             throw NSError(
-                domain: "agentmux.cli", code: 2,
+                domain: "spaceship.cli", code: 2,
                 userInfo: [NSLocalizedDescriptionKey: "Unknown project action: \(args[2])"])
         }
     }
 
-    private func runWorkspaceSubcommand(orchestrator: AgentmuxOrchestrator) throws {
+    private func runWorkspaceSubcommand(orchestrator: SpaceshipOrchestrator) throws {
         guard args.count >= 3 else {
             throw NSError(
-                domain: "agentmux.cli", code: 2,
+                domain: "spaceship.cli", code: 2,
                 userInfo: [
                     NSLocalizedDescriptionKey:
                         "Missing workspace action. Use: workspace list|create|launch|restart|stop|archive|activate"
@@ -180,12 +180,12 @@ struct CLI {
             print("Activated workspace \(id)")
         default:
             throw NSError(
-                domain: "agentmux.cli", code: 2,
+                domain: "spaceship.cli", code: 2,
                 userInfo: [NSLocalizedDescriptionKey: "Unknown workspace action: \(args[2])"])
         }
     }
 
-    private func workspaceID(orchestrator: AgentmuxOrchestrator) throws -> String {
+    private func workspaceID(orchestrator: SpaceshipOrchestrator) throws -> String {
         let projectDir = try value(for: "--project-dir")
         let name = try value(for: "--name")
         let projectID = normalizePath(projectDir)
@@ -195,15 +195,15 @@ struct CLI {
             })
         else {
             throw NSError(
-                domain: "agentmux.cli", code: 2, userInfo: [NSLocalizedDescriptionKey: "Workspace not found: \(name)"])
+                domain: "spaceship.cli", code: 2, userInfo: [NSLocalizedDescriptionKey: "Workspace not found: \(name)"])
         }
         return workspace.id
     }
 
-    private func runSettingsSubcommand(orchestrator: AgentmuxOrchestrator) throws {
+    private func runSettingsSubcommand(orchestrator: SpaceshipOrchestrator) throws {
         guard args.count >= 3 else {
             throw NSError(
-                domain: "agentmux.cli", code: 2,
+                domain: "spaceship.cli", code: 2,
                 userInfo: [NSLocalizedDescriptionKey: "Missing settings action. Use: settings get|set|reset"])
         }
 
@@ -244,7 +244,7 @@ struct CLI {
                 print("gui-open-settings-shortcut\t\(current)")
             } else {
                 throw NSError(
-                    domain: "agentmux.cli",
+                    domain: "spaceship.cli",
                     code: 2,
                     userInfo: [
                         NSLocalizedDescriptionKey:
@@ -300,7 +300,7 @@ struct CLI {
                 print("Updated gui-open-settings-shortcut\t\(spec.normalized)")
             } else {
                 throw NSError(
-                    domain: "agentmux.cli",
+                    domain: "spaceship.cli",
                     code: 2,
                     userInfo: [
                         NSLocalizedDescriptionKey:
@@ -345,7 +345,7 @@ struct CLI {
                 print("Reset gui-open-settings-shortcut\t\(SettingsKey.defaultGUIOpenSettingsShortcut)")
             } else {
                 throw NSError(
-                    domain: "agentmux.cli",
+                    domain: "spaceship.cli",
                     code: 2,
                     userInfo: [
                         NSLocalizedDescriptionKey:
@@ -356,7 +356,7 @@ struct CLI {
 
         default:
             throw NSError(
-                domain: "agentmux.cli", code: 2,
+                domain: "spaceship.cli", code: 2,
                 userInfo: [NSLocalizedDescriptionKey: "Unknown settings action: \(args[2])"])
         }
     }
@@ -364,7 +364,7 @@ struct CLI {
     private func value(for flag: String) throws -> String {
         guard let idx = args.firstIndex(of: flag), idx + 1 < args.count else {
             throw NSError(
-                domain: "agentmux.cli", code: 2, userInfo: [NSLocalizedDescriptionKey: "Missing required flag \(flag)"])
+                domain: "spaceship.cli", code: 2, userInfo: [NSLocalizedDescriptionKey: "Missing required flag \(flag)"])
         }
         return args[idx + 1]
     }
@@ -383,66 +383,66 @@ struct CLI {
     private func printHelp() {
         print(
             """
-            agentmux command line
+            spaceship command line
 
             Usage:
-              agentmux config path
-              agentmux config show
+              spaceship config path
+              spaceship config show
 
-              agentmux settings get --gui-hotkey
-              agentmux settings get --gui-next-shortcut
-              agentmux settings get --gui-prev-shortcut
-              agentmux settings get --gui-show-shortcut
-              agentmux settings get --gui-add-project-shortcut
-              agentmux settings get --gui-add-workspace-shortcut
-              agentmux settings get --gui-reload-shortcut
-              agentmux settings get --gui-open-editor-shortcut
-              agentmux settings get --gui-open-terminal-shortcut
-              agentmux settings get --gui-open-finder-shortcut
-              agentmux settings get --gui-open-settings-shortcut
-              agentmux settings set --gui-hotkey <spec>
-              agentmux settings set --gui-next-shortcut <spec>
-              agentmux settings set --gui-prev-shortcut <spec>
-              agentmux settings set --gui-show-shortcut <spec>
-              agentmux settings set --gui-add-project-shortcut <spec>
-              agentmux settings set --gui-add-workspace-shortcut <spec>
-              agentmux settings set --gui-reload-shortcut <spec>
-              agentmux settings set --gui-open-editor-shortcut <spec>
-              agentmux settings set --gui-open-terminal-shortcut <spec>
-              agentmux settings set --gui-open-finder-shortcut <spec>
-              agentmux settings set --gui-open-settings-shortcut <spec>
-              agentmux settings reset --gui-hotkey
-              agentmux settings reset --gui-next-shortcut
-              agentmux settings reset --gui-prev-shortcut
-              agentmux settings reset --gui-show-shortcut
-              agentmux settings reset --gui-add-project-shortcut
-              agentmux settings reset --gui-add-workspace-shortcut
-              agentmux settings reset --gui-reload-shortcut
-              agentmux settings reset --gui-open-editor-shortcut
-              agentmux settings reset --gui-open-terminal-shortcut
-              agentmux settings reset --gui-open-finder-shortcut
-              agentmux settings reset --gui-open-settings-shortcut
+              spaceship settings get --gui-hotkey
+              spaceship settings get --gui-next-shortcut
+              spaceship settings get --gui-prev-shortcut
+              spaceship settings get --gui-show-shortcut
+              spaceship settings get --gui-add-project-shortcut
+              spaceship settings get --gui-add-workspace-shortcut
+              spaceship settings get --gui-reload-shortcut
+              spaceship settings get --gui-open-editor-shortcut
+              spaceship settings get --gui-open-terminal-shortcut
+              spaceship settings get --gui-open-finder-shortcut
+              spaceship settings get --gui-open-settings-shortcut
+              spaceship settings set --gui-hotkey <spec>
+              spaceship settings set --gui-next-shortcut <spec>
+              spaceship settings set --gui-prev-shortcut <spec>
+              spaceship settings set --gui-show-shortcut <spec>
+              spaceship settings set --gui-add-project-shortcut <spec>
+              spaceship settings set --gui-add-workspace-shortcut <spec>
+              spaceship settings set --gui-reload-shortcut <spec>
+              spaceship settings set --gui-open-editor-shortcut <spec>
+              spaceship settings set --gui-open-terminal-shortcut <spec>
+              spaceship settings set --gui-open-finder-shortcut <spec>
+              spaceship settings set --gui-open-settings-shortcut <spec>
+              spaceship settings reset --gui-hotkey
+              spaceship settings reset --gui-next-shortcut
+              spaceship settings reset --gui-prev-shortcut
+              spaceship settings reset --gui-show-shortcut
+              spaceship settings reset --gui-add-project-shortcut
+              spaceship settings reset --gui-add-workspace-shortcut
+              spaceship settings reset --gui-reload-shortcut
+              spaceship settings reset --gui-open-editor-shortcut
+              spaceship settings reset --gui-open-terminal-shortcut
+              spaceship settings reset --gui-open-finder-shortcut
+              spaceship settings reset --gui-open-settings-shortcut
 
-              agentmux project list
-              agentmux project add --dir <path>
-              agentmux project add --git-url <url>
-              agentmux project update --dir <path> [--setup-script <script>] [--stop-script <script>]
-              agentmux project remove --dir <path>
+              spaceship project list
+              spaceship project add --dir <path>
+              spaceship project add --git-url <url>
+              spaceship project update --dir <path> [--setup-script <script>] [--stop-script <script>]
+              spaceship project remove --dir <path>
 
-              agentmux workspace list --project-dir <path> [--all]
-              agentmux workspace create --project-dir <path> --name <name> [--branch <branch>] [--target-branch <branch>]
-              agentmux workspace launch --project-dir <path> --name <name>
-              agentmux workspace restart --project-dir <path> --name <name>
-              agentmux workspace stop --project-dir <path> --name <name>
-              agentmux workspace archive --project-dir <path> --name <name>
-              agentmux workspace activate --project-dir <path> --name <name>
+              spaceship workspace list --project-dir <path> [--all]
+              spaceship workspace create --project-dir <path> --name <name> [--branch <branch>] [--target-branch <branch>]
+              spaceship workspace launch --project-dir <path> --name <name>
+              spaceship workspace restart --project-dir <path> --name <name>
+              spaceship workspace stop --project-dir <path> --name <name>
+              spaceship workspace archive --project-dir <path> --name <name>
+              spaceship workspace activate --project-dir <path> --name <name>
 
             Notes:
-              - Configuration is stored in ~/.agentmux/config.yaml (YAML is source of truth).
+              - Configuration is stored in ~/.spaceship/config.yaml (YAML is source of truth).
               - GUI settings (⌘,) let you pick a preferred editor (VS Code, Cursor, Windsurf).
-              - Runtime state is stored in ~/.agentmux/agentmux.db and rebuilt if schema changes.
-              - Removing a git project deletes related workspace directories under ~/agentmux/workspaces.
-              - Removing a project deletes only agentmux state unless it is an agentmux-cloned git repo under ~/agentmux/projects; those managed project directories are deleted.
+              - Runtime state is stored in ~/.spaceship/spaceship.db and rebuilt if schema changes.
+              - Removing a git project deletes related workspace directories under ~/spaceship/workspaces.
+              - Removing a project deletes only spaceship state unless it is an spaceship-cloned git repo under ~/spaceship/projects; those managed project directories are deleted.
               - Workspaces snapshot project processes, status checks, and browser sessions into the runtime DB on creation.
               - Project `setup_script` runs when a workspace is created/revived.
               - Project/workspace `stop_script` runs whenever a workspace is stopped (including restart/archive stop phase), after automatic process termination attempts.
@@ -451,7 +451,7 @@ struct CLI {
               - Workspaces reserve PORT0-PORT9 from the configured port range.
               - GUI window focus shortcuts: cmd+1 through cmd+9 (when GUI is focused).
               - GUI window cycle shortcuts: cmd+shift+[ and cmd+shift+] (global, when GUI is not focused).
-              - GUI action shortcuts can be overridden in Settings or via `agentmux settings set ...`.
+              - GUI action shortcuts can be overridden in Settings or via `spaceship settings set ...`.
             """)
     }
 }

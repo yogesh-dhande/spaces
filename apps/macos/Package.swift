@@ -2,7 +2,7 @@
 import PackageDescription
 
 let package = Package(
-    name: "agentmux",
+    name: "spaceship",
     platforms: [
         .macOS(.v14)
     ],
@@ -10,8 +10,8 @@ let package = Package(
         .library(name: "appctl", targets: ["appctl"]),
         .library(name: "streamctl", targets: ["streamctl"]),
         .library(name: "gui", targets: ["gui"]),
-        .executable(name: "agentmux", targets: ["agentmux"]),
-        .executable(name: "agentmux-app", targets: ["agentmux-app"])
+        .executable(name: "spaceship", targets: ["spaceship"]),
+        .executable(name: "spaceship-app", targets: ["spaceship-app"])
     ],
     dependencies: [
         .package(url: "https://github.com/jpsim/Yams.git", from: "5.1.3")
@@ -27,8 +27,8 @@ let package = Package(
             linkerSettings: [.linkedLibrary("sqlite3")]
         ),
         .target(name: "gui", dependencies: ["streamctl"]),
-        .executableTarget(name: "agentmux", dependencies: ["streamctl", "appctl"]),
-        .executableTarget(name: "agentmux-app", dependencies: ["gui"]),
+        .executableTarget(name: "spaceship", dependencies: ["streamctl", "appctl"]),
+        .executableTarget(name: "spaceship-app", dependencies: ["gui"]),
         .testTarget(name: "streamctlTests", dependencies: ["streamctl", "appctl"])
     ]
 )

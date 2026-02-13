@@ -1,7 +1,7 @@
 # AGENTS.md
 
 ## Purpose
-- `agentmux` is a macOS Swift app for stream-based workspace orchestration.
+- `spaceship` is a macOS Swift app for stream-based workspace orchestration.
 - Streams map to **captured window sets** managed via yabai.
 - The macOS app source lives under `apps/macos`.
 
@@ -12,7 +12,7 @@
 - Do not add backward compatibility layers unless explicitly requested.
 
 ## Data & Paths
-- DB path: `~/.agentmux/agentmux.db` (managed automatically).
+- DB path: `~/.spaceship/spaceship.db` (managed automatically).
 - Schema and architecture details live in `apps/macos/docs/architecture.md`.
 
 ## GUI

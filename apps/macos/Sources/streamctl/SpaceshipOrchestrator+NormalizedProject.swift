@@ -1,6 +1,6 @@
 import Foundation
 
-extension AgentmuxOrchestrator {
+extension SpaceshipOrchestrator {
     struct NormalizedProject {
         let id: String
         let record: ProjectRecord

@@ -8,7 +8,7 @@ final class OrchestratorTests: XCTestCase {
         let path = dir.appendingPathComponent("config.yaml").path
         let configStore = ConfigStore(path: path)
         let store = try makeTemporaryStore()
-        let orchestrator = AgentmuxOrchestrator(store: store, configStore: configStore)
+        let orchestrator = SpaceshipOrchestrator(store: store, configStore: configStore)
 
         _ = try orchestrator.updateEditorPreference(.cursor)
         let reloaded = try configStore.load()
@@ -53,14 +53,14 @@ final class OrchestratorTests: XCTestCase {
             ),
         ]
 
-        let nextTerminal = AgentmuxOrchestrator.nextWindowOrderIndex(
+        let nextTerminal = SpaceshipOrchestrator.nextWindowOrderIndex(
             existing: windows,
             role: "terminal",
             orderOffset: 200
         )
         XCTAssertEqual(nextTerminal, 206)
 
-        let nextEditor = AgentmuxOrchestrator.nextWindowOrderIndex(
+        let nextEditor = SpaceshipOrchestrator.nextWindowOrderIndex(
             existing: windows,
             role: "editor",
             orderOffset: 100
@@ -74,7 +74,7 @@ final class OrchestratorTests: XCTestCase {
         let projectsRoot = root.appendingPathComponent("projects", isDirectory: true)
         let configStore = ConfigStore(path: root.appendingPathComponent("config.yaml").path)
         let store = try makeTemporaryStore()
-        let orchestrator = AgentmuxOrchestrator(
+        let orchestrator = SpaceshipOrchestrator(
             store: store,
             configStore: configStore,
             projectsRootDirectory: projectsRoot
@@ -94,7 +94,7 @@ final class OrchestratorTests: XCTestCase {
         let projectsRoot = root.appendingPathComponent("projects", isDirectory: true)
         let configStore = ConfigStore(path: root.appendingPathComponent("config.yaml").path)
         let store = try makeTemporaryStore()
-        let orchestrator = AgentmuxOrchestrator(
+        let orchestrator = SpaceshipOrchestrator(
             store: store,
             configStore: configStore,
             projectsRootDirectory: projectsRoot
@@ -114,7 +114,7 @@ final class OrchestratorTests: XCTestCase {
         let projectsRoot = root.appendingPathComponent("projects", isDirectory: true)
         let configStore = ConfigStore(path: root.appendingPathComponent("config.yaml").path)
         let store = try makeTemporaryStore()
-        let orchestrator = AgentmuxOrchestrator(
+        let orchestrator = SpaceshipOrchestrator(
             store: store,
             configStore: configStore,
             projectsRootDirectory: projectsRoot
@@ -137,7 +137,7 @@ final class OrchestratorTests: XCTestCase {
         let workspacesRoot = root.appendingPathComponent("workspaces", isDirectory: true)
         let configStore = ConfigStore(path: root.appendingPathComponent("config.yaml").path)
         let store = try makeTemporaryStore()
-        let orchestrator = AgentmuxOrchestrator(
+        let orchestrator = SpaceshipOrchestrator(
             store: store,
             configStore: configStore,
             projectsRootDirectory: projectsRoot,
@@ -163,7 +163,7 @@ final class OrchestratorTests: XCTestCase {
         try "hello".write(to: projectDir.appendingPathComponent("README.md"), atomically: true, encoding: .utf8)
         try runGit(["add", "README.md"], cwd: projectDir.path)
         try runGit(
-            ["-c", "user.name=agentmux-test", "-c", "user.email=test@example.com", "commit", "-m", "init"],
+            ["-c", "user.name=spaceship-test", "-c", "user.email=test@example.com", "commit", "-m", "init"],
             cwd: projectDir.path
         )
 
@@ -172,7 +172,7 @@ final class OrchestratorTests: XCTestCase {
         let workspacesRoot = root.appendingPathComponent("workspaces", isDirectory: true)
         let configStore = ConfigStore(path: root.appendingPathComponent("config.yaml").path)
         let store = try makeTemporaryStore()
-        let orchestrator = AgentmuxOrchestrator(
+        let orchestrator = SpaceshipOrchestrator(
             store: store,
             configStore: configStore,
             projectsRootDirectory: projectsRoot,
@@ -202,7 +202,7 @@ final class OrchestratorTests: XCTestCase {
 
         let configStore = ConfigStore(path: root.appendingPathComponent("config.yaml").path)
         let store = try makeTemporaryStore()
-        let orchestrator = AgentmuxOrchestrator(store: store, configStore: configStore)
+        let orchestrator = SpaceshipOrchestrator(store: store, configStore: configStore)
 
         let project = try orchestrator.addProject(dir: projectDir.path)
         let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
@@ -222,7 +222,7 @@ final class OrchestratorTests: XCTestCase {
 
         let configStore = ConfigStore(path: root.appendingPathComponent("config.yaml").path)
         let store = try makeTemporaryStore()
-        let orchestrator = AgentmuxOrchestrator(store: store, configStore: configStore)
+        let orchestrator = SpaceshipOrchestrator(store: store, configStore: configStore)
 
         let project = try orchestrator.addProject(dir: projectDir.path)
         let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
@@ -239,7 +239,7 @@ final class OrchestratorTests: XCTestCase {
 
         let configStore = ConfigStore(path: root.appendingPathComponent("config.yaml").path)
         let store = try makeTemporaryStore()
-        let orchestrator = AgentmuxOrchestrator(store: store, configStore: configStore)
+        let orchestrator = SpaceshipOrchestrator(store: store, configStore: configStore)
 
         let project = try orchestrator.addProject(dir: projectDir.path)
         try orchestrator.updateProjectConfig(projectID: project.id) { config in
@@ -267,7 +267,7 @@ final class OrchestratorTests: XCTestCase {
         let workspacesRoot = root.appendingPathComponent("workspaces", isDirectory: true)
         let configStore = ConfigStore(path: root.appendingPathComponent("config.yaml").path)
         let store = try makeTemporaryStore()
-        let orchestrator = AgentmuxOrchestrator(
+        let orchestrator = SpaceshipOrchestrator(
             store: store,
             configStore: configStore,
             workspacesRootDirectory: workspacesRoot
@@ -291,7 +291,7 @@ final class OrchestratorTests: XCTestCase {
         let workspacesRoot = root.appendingPathComponent("workspaces", isDirectory: true)
         let configStore = ConfigStore(path: root.appendingPathComponent("config.yaml").path)
         let store = try makeTemporaryStore()
-        let orchestrator = AgentmuxOrchestrator(
+        let orchestrator = SpaceshipOrchestrator(
             store: store,
             configStore: configStore,
             workspacesRootDirectory: workspacesRoot
@@ -316,7 +316,7 @@ final class OrchestratorTests: XCTestCase {
         try "target".write(to: repo.appendingPathComponent("TARGET.txt"), atomically: true, encoding: .utf8)
         try runGit(["add", "TARGET.txt"], cwd: repo.path)
         try runGit(
-            ["-c", "user.name=agentmux-test", "-c", "user.email=test@example.com", "commit", "-m", "target"],
+            ["-c", "user.name=spaceship-test", "-c", "user.email=test@example.com", "commit", "-m", "target"],
             cwd: repo.path
         )
         try runGit(["checkout", "main"], cwd: repo.path)
@@ -325,7 +325,7 @@ final class OrchestratorTests: XCTestCase {
         let workspacesRoot = root.appendingPathComponent("workspaces", isDirectory: true)
         let configStore = ConfigStore(path: root.appendingPathComponent("config.yaml").path)
         let store = try makeTemporaryStore()
-        let orchestrator = AgentmuxOrchestrator(
+        let orchestrator = SpaceshipOrchestrator(
             store: store,
             configStore: configStore,
             workspacesRootDirectory: workspacesRoot
@@ -348,7 +348,7 @@ final class OrchestratorTests: XCTestCase {
         let workspacesRoot = root.appendingPathComponent("workspaces", isDirectory: true)
         let configStore = ConfigStore(path: root.appendingPathComponent("config.yaml").path)
         let store = try makeTemporaryStore()
-        let orchestrator = AgentmuxOrchestrator(
+        let orchestrator = SpaceshipOrchestrator(
             store: store,
             configStore: configStore,
             workspacesRootDirectory: workspacesRoot
@@ -373,7 +373,7 @@ final class OrchestratorTests: XCTestCase {
 
         let configStore = ConfigStore(path: root.appendingPathComponent("config.yaml").path)
         let store = try makeTemporaryStore()
-        let orchestrator = AgentmuxOrchestrator(store: store, configStore: configStore)
+        let orchestrator = SpaceshipOrchestrator(store: store, configStore: configStore)
 
         let project = try orchestrator.addProject(dir: projectDir.path)
         let created = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
@@ -394,7 +394,7 @@ final class OrchestratorTests: XCTestCase {
 
         let configStore = ConfigStore(path: root.appendingPathComponent("config.yaml").path)
         let store = try makeTemporaryStore()
-        let orchestrator = AgentmuxOrchestrator(store: store, configStore: configStore)
+        let orchestrator = SpaceshipOrchestrator(store: store, configStore: configStore)
 
         let project = try orchestrator.addProject(dir: projectDir.path)
         let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
@@ -411,7 +411,7 @@ final class OrchestratorTests: XCTestCase {
         let root = try makeTempDirectory()
         let configStore = ConfigStore(path: root.appendingPathComponent("config.yaml").path)
         let store = try makeTemporaryStore()
-        let orchestrator = AgentmuxOrchestrator(store: store, configStore: configStore)
+        let orchestrator = SpaceshipOrchestrator(store: store, configStore: configStore)
 
         XCTAssertEqual(try orchestrator.guiHotkey(), SettingsKey.defaultGUIHotkey)
         XCTAssertEqual(try orchestrator.guiNextShortcut(), SettingsKey.defaultGUINextShortcut)
@@ -462,7 +462,7 @@ final class OrchestratorTests: XCTestCase {
 
         let configStore = ConfigStore(path: root.appendingPathComponent("config.yaml").path)
         let store = try makeTemporaryStore()
-        let orchestrator = AgentmuxOrchestrator(store: store, configStore: configStore)
+        let orchestrator = SpaceshipOrchestrator(store: store, configStore: configStore)
 
         let project = try orchestrator.addProject(dir: projectDir.path)
         let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
@@ -512,7 +512,7 @@ final class OrchestratorTests: XCTestCase {
         let root = try makeTempDirectory()
         let configStore = ConfigStore(path: root.appendingPathComponent("config.yaml").path)
         let store = try makeTemporaryStore()
-        let orchestrator = AgentmuxOrchestrator(store: store, configStore: configStore)
+        let orchestrator = SpaceshipOrchestrator(store: store, configStore: configStore)
 
         XCTAssertThrowsError(try orchestrator.createWorkspace(projectID: "missing", name: "feature"))
     }
@@ -523,7 +523,7 @@ final class OrchestratorTests: XCTestCase {
         let workspacesRoot = root.appendingPathComponent("workspaces", isDirectory: true)
         let configStore = ConfigStore(path: root.appendingPathComponent("config.yaml").path)
         let store = try makeTemporaryStore()
-        let orchestrator = AgentmuxOrchestrator(
+        let orchestrator = SpaceshipOrchestrator(
             store: store,
             configStore: configStore,
             workspacesRootDirectory: workspacesRoot
@@ -1256,7 +1256,7 @@ final class OrchestratorTests: XCTestCase {
                 "osascript": Self.orchestratorOsaScriptMock,
             ]
         ) {
-            try withEnv(name: "AGENTMUX_RUNTIME_DIR", value: runtimeDir.path) {
+            try withEnv(name: "SPACESHIP_RUNTIME_DIR", value: runtimeDir.path) {
                 try withEnv(name: "MOCK_ITERM_WINDOW_IDS_FILE", value: itermWindowIDsFile.path) {
                     try withEnv(name: "YABAI_WINDOWS_JSON", value: windowsJSON) {
                         try orchestrator.launchWorkspace(workspaceID: workspace.id)
@@ -1397,7 +1397,7 @@ final class OrchestratorTests: XCTestCase {
         let root = try makeTempDirectory()
         let configStore = ConfigStore(path: root.appendingPathComponent("config.yaml").path)
         let store = try makeTemporaryStore()
-        let orchestrator = AgentmuxOrchestrator(store: store, configStore: configStore)
+        let orchestrator = SpaceshipOrchestrator(store: store, configStore: configStore)
 
         // Mocked dependency: `yabai --spaces` payload ordering.
         // Why: guarantee sort assertions independently of host window-manager state.
@@ -1449,7 +1449,7 @@ final class OrchestratorTests: XCTestCase {
 
         let configStore = ConfigStore(path: root.appendingPathComponent("config.yaml").path)
         let store = try makeTemporaryStore()
-        let orchestrator = AgentmuxOrchestrator(store: store, configStore: configStore)
+        let orchestrator = SpaceshipOrchestrator(store: store, configStore: configStore)
 
         _ = try orchestrator.addProject(dir: bDir.path)
         _ = try orchestrator.addProject(dir: aDir.path)
@@ -1478,7 +1478,7 @@ final class OrchestratorTests: XCTestCase {
         )
 
         let store = try makeTemporaryStore()
-        let orchestrator = AgentmuxOrchestrator(store: store, configStore: configStore)
+        let orchestrator = SpaceshipOrchestrator(store: store, configStore: configStore)
         let synced = try orchestrator.syncConfig()
 
         XCTAssertEqual(synced.projects.map(\.dir), [validDir.path])
@@ -1527,6 +1527,79 @@ final class OrchestratorTests: XCTestCase {
         let loaded = try orchestrator.projectConfig(projectID: project.id)
         XCTAssertEqual(loaded?.stopScript, "echo bye")
         XCTAssertEqual(loaded?.processes.first?.command, "echo process")
+    }
+
+    func testUpdateProjectConfigSeedsDefaultWorkspaceWhenSettingsMatchPreviousTemplate() throws {
+        let root = try makeTempDirectory()
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let configStore = ConfigStore(path: root.appendingPathComponent("config.yaml").path)
+        let store = try makeTemporaryStore()
+        let orchestrator = SpaceshipOrchestrator(store: store, configStore: configStore)
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        let defaultWorkspace = try XCTUnwrap(
+            try orchestrator.listWorkspaces(projectID: project.id, includeArchived: true).first(where: { $0.isDefault })
+        )
+
+        try orchestrator.updateProjectConfig(projectID: project.id) { config in
+            config.stopScript = "echo stop"
+            config.processes = [ProcessTemplate(name: "api", command: "npm run api")]
+            config.statusChecks = [
+                StatusCheckDefinition(name: "health", process: "api", command: "echo ok", interval: 30, timeout: 3)
+            ]
+            config.browserSessions = [BrowserSession(url: "https://example.com")]
+        }
+
+        let settings = try orchestrator.workspaceSettings(workspaceID: defaultWorkspace.id)
+        XCTAssertEqual(settings?.stopScript, "echo stop")
+        XCTAssertEqual(settings?.processes.first?.name, "api")
+        XCTAssertEqual(settings?.statusChecks.first?.name, "health")
+        XCTAssertEqual(settings?.browserSessions.first?.url, "https://example.com")
+    }
+
+    func testUpdateProjectConfigDoesNotOverwriteCustomizedDefaultWorkspaceSettings() throws {
+        let root = try makeTempDirectory()
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let configStore = ConfigStore(path: root.appendingPathComponent("config.yaml").path)
+        let store = try makeTemporaryStore()
+        let orchestrator = SpaceshipOrchestrator(store: store, configStore: configStore)
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        let defaultWorkspace = try XCTUnwrap(
+            try orchestrator.listWorkspaces(projectID: project.id, includeArchived: true).first(where: { $0.isDefault })
+        )
+
+        try orchestrator.updateProjectConfig(projectID: project.id) { config in
+            config.stopScript = "echo project-stop"
+            config.processes = [ProcessTemplate(name: "api", command: "npm run api")]
+            config.statusChecks = [
+                StatusCheckDefinition(name: "health", process: "api", command: "echo ok", interval: 30, timeout: 3)
+            ]
+            config.browserSessions = [BrowserSession(url: "https://example.com")]
+        }
+
+        try orchestrator.updateWorkspaceSettings(workspaceID: defaultWorkspace.id) { settings in
+            settings.stopScript = "echo workspace-stop"
+            settings.processes = [ProcessTemplate(name: "custom", command: "echo custom")]
+            settings.statusChecks = []
+            settings.browserSessions = [BrowserSession(url: "https://custom.example.com")]
+        }
+
+        try orchestrator.updateProjectConfig(projectID: project.id) { config in
+            config.stopScript = "echo project-stop-v2"
+            config.processes = [ProcessTemplate(name: "api", command: "npm run api:v2")]
+            config.statusChecks = [
+                StatusCheckDefinition(name: "health-v2", process: "api", command: "echo ok v2", interval: 45, timeout: 5)
+            ]
+            config.browserSessions = [BrowserSession(url: "https://example.com/v2")]
+        }
+
+        let settings = try orchestrator.workspaceSettings(workspaceID: defaultWorkspace.id)
+        XCTAssertEqual(settings?.stopScript, "echo workspace-stop")
+        XCTAssertEqual(settings?.processes.first?.name, "custom")
+        XCTAssertEqual(settings?.processes.first?.command, "echo custom")
+        XCTAssertTrue(settings?.statusChecks.isEmpty ?? false)
+        XCTAssertEqual(settings?.browserSessions.first?.url, "https://custom.example.com")
     }
 
     func testCreateWorkspaceRejectsDuplicateActiveWorkspace() throws {
@@ -1704,7 +1777,7 @@ final class OrchestratorTests: XCTestCase {
                 "kill": Self.killMockScript,
             ]
         ) {
-            try withEnv(name: "AGENTMUX_RUNTIME_DIR", value: runtimeDir.path) {
+            try withEnv(name: "SPACESHIP_RUNTIME_DIR", value: runtimeDir.path) {
                 try withEnv(name: "MOCK_KILL_LOG_FILE", value: eventLog.path) {
                     try withEnv(name: "MOCK_ITERM_CLOSE_LOG_FILE", value: eventLog.path) {
                         try orchestrator.stopWorkspace(workspaceID: workspace.id)
@@ -2013,7 +2086,7 @@ final class OrchestratorTests: XCTestCase {
     }
 
     private func makeOrchestratorWithWorkspace(editor: EditorPreference? = nil) throws
-        -> (AgentmuxOrchestrator, SQLiteStore, ProjectRecord, WorkspaceRecord, URL)
+        -> (SpaceshipOrchestrator, SQLiteStore, ProjectRecord, WorkspaceRecord, URL)
     {
         let root = try makeTempDirectory()
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
@@ -2021,7 +2094,7 @@ final class OrchestratorTests: XCTestCase {
 
         let configStore = ConfigStore(path: root.appendingPathComponent("config.yaml").path)
         let store = try makeTemporaryStore()
-        let orchestrator = AgentmuxOrchestrator(store: store, configStore: configStore)
+        let orchestrator = SpaceshipOrchestrator(store: store, configStore: configStore)
         if let editor {
             _ = try orchestrator.updateEditorPreference(editor)
         }
@@ -2289,7 +2362,7 @@ final class OrchestratorTests: XCTestCase {
         try "hello".write(to: repo.appendingPathComponent("README.md"), atomically: true, encoding: .utf8)
         try runGit(["add", "README.md"], cwd: repo.path)
         try runGit(
-            ["-c", "user.name=agentmux-test", "-c", "user.email=test@example.com", "commit", "-m", "init"],
+            ["-c", "user.name=spaceship-test", "-c", "user.email=test@example.com", "commit", "-m", "init"],
             cwd: repo.path
         )
         return repo
@@ -2307,7 +2380,7 @@ final class OrchestratorTests: XCTestCase {
         if process.terminationStatus != 0 {
             let message = String(data: stderr.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
             throw NSError(
-                domain: "agentmux.tests",
+                domain: "spaceship.tests",
                 code: Int(process.terminationStatus),
                 userInfo: [NSLocalizedDescriptionKey: "git \(arguments.joined(separator: " ")) failed: \(message)"]
             )

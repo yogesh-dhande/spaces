@@ -1,6 +1,6 @@
-# agentmux
+# spaceship
 
-`agentmux` is a local macOS control plane for workspace orchestration.
+`spaceship` is a local macOS control plane for workspace orchestration.
 It manages projects, workspaces, processes, and window sets so you can move between coding contexts quickly.
 
 ## Docs
@@ -16,10 +16,10 @@ It manages projects, workspaces, processes, and window sets so you can move betw
 
 ## Configuration
 YAML is the source of truth:
-- Path: `~/.agentmux/config.yaml`
-- Runtime DB: `~/.agentmux/agentmux.db` (ephemeral)
-- Cloned projects: `/Users/<username>/agentmux/projects/<project_name>`
-- Git worktrees: `/Users/<username>/agentmux/workspaces/<projectname>/<dirname>` (dirname is a unique food name)
+- Path: `~/.spaceship/config.yaml`
+- Runtime DB: `~/.spaceship/spaceship.db` (ephemeral)
+- Cloned projects: `/Users/<username>/spaceship/projects/<project_name>`
+- Git worktrees: `/Users/<username>/spaceship/workspaces/<projectname>/<dirname>` (dirname is a unique food name)
 - GUI shortcuts (when focused): `cmd+1` through `cmd+9` focus workspace windows
 - Global window navigation (when GUI not focused): `cmd+shift+]` and `cmd+shift+[`
 
@@ -61,8 +61,8 @@ Updates to workspace settings apply immediately when the workspace is running (n
 - Branch name is required for git projects.
 - As you type branch name, workspace name is auto-populated from it by default; you can then edit workspace name to be more descriptive.
 - New branches are created from the latest commit on the selected target branch.
-- If the selected branch exists only on remote, agentmux fetches it first and then creates the worktree from `origin/<branch>`.
-- If the branch exists locally, agentmux uses the local branch as-is (no implicit pull/rebase/merge during workspace creation).
+- If the selected branch exists only on remote, spaceship fetches it first and then creates the worktree from `origin/<branch>`.
+- If the branch exists locally, spaceship uses the local branch as-is (no implicit pull/rebase/merge during workspace creation).
 - Workspace rows in the left pane show workspace name and a second-line branch label with a branch icon.
 - Workspace view includes:
   - Launch/Restart/Stop/Archive buttons
@@ -84,7 +84,7 @@ Updates to workspace settings apply immediately when the workspace is running (n
 
 Hotkeys:
 - Global focus: `cmd+shift+=`
-  - When this hotkey brings agentmux to front, the selected workspace detail is refreshed so the windows list shows current Chrome tab matches
+  - When this hotkey brings spaceship to front, the selected workspace detail is refreshed so the windows list shows current Chrome tab matches
 - Next running workspace: `cmd+shift+]`
 - Previous running workspace: `cmd+shift+[`
 - Activate selected workspace: `cmd+shift+return`
@@ -95,34 +95,34 @@ Hotkeys:
 
 When text input is focused in the GUI, standard editing shortcuts (including `cmd+v`) are handled normally.
 
-Set `AGENTMUX_DEBUG_BROWSER_SCAN=1` when launching agentmux to log Chrome scan timing (`tabs`, `matches`, `elapsed_ms`) to stderr.
+Set `SPACESHIP_DEBUG_BROWSER_SCAN=1` when launching spaceship to log Chrome scan timing (`tabs`, `matches`, `elapsed_ms`) to stderr.
 
 ## CLI
 ```bash
-agentmux config path
-agentmux config show
+spaceship config path
+spaceship config show
 
-agentmux project list
-agentmux project add --dir /path/to/repo
-agentmux project add --git-url https://github.com/org/repo.git
-agentmux project update --dir /path/to/repo --setup-script "cp ~/.env .env" --stop-script "docker compose down --remove-orphans"
-agentmux project remove --dir /path/to/repo
+spaceship project list
+spaceship project add --dir /path/to/repo
+spaceship project add --git-url https://github.com/org/repo.git
+spaceship project update --dir /path/to/repo --setup-script "cp ~/.env .env" --stop-script "docker compose down --remove-orphans"
+spaceship project remove --dir /path/to/repo
 
-agentmux workspace list --project-dir /path/to/repo --all
-agentmux workspace create --project-dir /path/to/repo --name feature-x [--branch feature-branch] [--target-branch main]
-agentmux workspace launch --project-dir /path/to/repo --name feature-x
-agentmux workspace restart --project-dir /path/to/repo --name feature-x
-agentmux workspace stop --project-dir /path/to/repo --name feature-x
-agentmux workspace archive --project-dir /path/to/repo --name feature-x
-agentmux workspace activate --project-dir /path/to/repo --name feature-x
+spaceship workspace list --project-dir /path/to/repo --all
+spaceship workspace create --project-dir /path/to/repo --name feature-x [--branch feature-branch] [--target-branch main]
+spaceship workspace launch --project-dir /path/to/repo --name feature-x
+spaceship workspace restart --project-dir /path/to/repo --name feature-x
+spaceship workspace stop --project-dir /path/to/repo --name feature-x
+spaceship workspace archive --project-dir /path/to/repo --name feature-x
+spaceship workspace activate --project-dir /path/to/repo --name feature-x
 ```
 
 For git projects, `workspace create` requires `--branch`; `--target-branch` defaults to `main`/`master` when available.
 
 Project/workspace removal behavior:
-- `agentmux project remove --dir <path>` removes the project from agentmux. For git projects, it also deletes related workspace directories under `~/agentmux/workspaces`.
-- `agentmux project remove --dir <path>` deletes the project directory only when it is a git repo inside `~/agentmux/projects` (the app-managed clone location).
-- `agentmux workspace archive ...` never deletes the project directory for non-git projects.
+- `spaceship project remove --dir <path>` removes the project from spaceship. For git projects, it also deletes related workspace directories under `~/spaceship/workspaces`.
+- `spaceship project remove --dir <path>` deletes the project directory only when it is a git repo inside `~/spaceship/projects` (the app-managed clone location).
+- `spaceship workspace archive ...` never deletes the project directory for non-git projects.
 
 ## Build
 Use the SwiftPM wrapper to keep caches inside the workspace (avoids user cache warnings in sandboxed environments).

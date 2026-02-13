@@ -118,7 +118,7 @@ public final class GitClient {
             let errData = err.fileHandleForReading.readDataToEndOfFile()
             let message =
                 String(data: errData, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "unknown"
-            throw AgentmuxError.gitCommandFailed(message: message)
+            throw SpaceshipError.gitCommandFailed(message: message)
         }
         return String(data: outputData, encoding: .utf8) ?? ""
     }
@@ -138,7 +138,7 @@ public final class GitClient {
             let errData = err.fileHandleForReading.readDataToEndOfFile()
             let message =
                 String(data: errData, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "unknown"
-            throw AgentmuxError.gitCommandFailed(message: message)
+            throw SpaceshipError.gitCommandFailed(message: message)
         }
     }
 
@@ -153,7 +153,7 @@ public final class GitClient {
         if branchExists(path: path, branch: targetBranch) {
             return targetBranch
         }
-        throw AgentmuxError.invalidArgument(message: "Target branch not found: \(targetBranch)")
+        throw SpaceshipError.invalidArgument(message: "Target branch not found: \(targetBranch)")
     }
 
     private func fetchRemoteBranch(path: String, branch: String) throws {

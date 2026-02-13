@@ -35,7 +35,7 @@ public final class ConfigStore {
 
     public static func defaultPath() throws -> String {
         let home = FileManager.default.homeDirectoryForCurrentUser
-        let dir = home.appendingPathComponent(".agentmux", isDirectory: true)
+        let dir = home.appendingPathComponent(".spaceship", isDirectory: true)
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         return dir.appendingPathComponent(defaultFilename).path
     }

@@ -12,7 +12,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     private let outlineView = NSOutlineView()
     private let detailContainer = NSView()
 
-    private var orchestrator: AgentmuxOrchestrator!
+    private var orchestrator: SpaceshipOrchestrator!
     private var projects: [ProjectSummary] = []
     private var workspacesByProject: [String: [WorkspaceSummary]] = [:]
 
@@ -70,7 +70,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             let configPath = try ConfigStore.defaultPath()
             let store = try SQLiteStore(path: db)
             let configStore = ConfigStore(path: configPath)
-            orchestrator = AgentmuxOrchestrator(store: store, configStore: configStore)
+            orchestrator = SpaceshipOrchestrator(store: store, configStore: configStore)
             configCache = try orchestrator.syncConfig()
             loadShortcutSpecs()
         } catch {
@@ -95,7 +95,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let rect = NSRect(x: 200, y: 200, width: 1100, height: 700)
         window = NSWindow(
             contentRect: rect, styleMask: [.titled, .resizable, .closable], backing: .buffered, defer: false)
-        window.title = "agentmux"
+        window.title = "spaceship"
         window.center()
         window.delegate = self
 
@@ -312,7 +312,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         stack.addArrangedSubview(label(text: "Keyboard shortcuts"))
         let shortcutsNote = NSTextField(
             labelWithString:
-                "Click a shortcut, then press the key combination you want. Next/Previous cycle running workspaces when agentmux is focused, and cycle workspace windows when a workspace window is focused."
+                "Click a shortcut, then press the key combination you want. Next/Previous cycle running workspaces when spaceship is focused, and cycle workspace windows when a workspace window is focused."
         )
         shortcutsNote.font = .systemFont(ofSize: 11)
         shortcutsNote.textColor = .secondaryLabelColor
@@ -877,8 +877,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         for (idx, port) in reservedPorts.enumerated() {
             lines.append("PORT\(idx)=\(port)")
         }
-        lines.append("agentmux_WORKSPACE_DIR=\(workspace.dir)")
-        let scopedKey = "agentmux_\(sanitizeEnvKey(project.name))_\(sanitizeEnvKey(workspace.name))_WORKSPACE_DIR"
+        lines.append("spaceship_WORKSPACE_DIR=\(workspace.dir)")
+        let scopedKey = "spaceship_\(sanitizeEnvKey(project.name))_\(sanitizeEnvKey(workspace.name))_WORKSPACE_DIR"
         lines.append("\(scopedKey)=\(workspace.dir)")
         envView.string = lines.joined(separator: "\n")
         if let container = envView.textContainer, let layout = envView.layoutManager {
@@ -1668,9 +1668,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         alert.messageText = "Delete project?"
         alert.informativeText =
             """
-            This removes the project and its workspaces from agentmux.
-            If this project was cloned into ~/agentmux/projects by agentmux, that project directory is deleted.
-            For git projects, related workspace directories under ~/agentmux/workspaces are also deleted.
+            This removes the project and its workspaces from spaceship.
+            If this project was cloned into ~/spaceship/projects by spaceship, that project directory is deleted.
+            For git projects, related workspace directories under ~/spaceship/workspaces are also deleted.
             """
         alert.addButton(withTitle: "Delete")
         alert.addButton(withTitle: "Cancel")
@@ -1711,7 +1711,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             if refs.sourcePopup.indexOfSelectedItem == 1 {
                 let repoURL = refs.repoURLField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
                 guard !repoURL.isEmpty else {
-                    throw AgentmuxError.invalidArgument(message: "Git repository URL is required.")
+                    throw SpaceshipError.invalidArgument(message: "Git repository URL is required.")
                 }
                 record = try orchestrator.addProject(gitURL: repoURL)
             } else {
@@ -1776,15 +1776,15 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         do {
             let name = refs.nameField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !name.isEmpty else {
-                throw AgentmuxError.invalidArgument(message: "Workspace name is required.")
+                throw SpaceshipError.invalidArgument(message: "Workspace name is required.")
             }
             let targetBranch = refs.targetBranchField?.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
             let branch = refs.branchField?.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
             if refs.isGitRepo, (branch == nil || branch?.isEmpty == true) {
-                throw AgentmuxError.invalidArgument(message: "Branch name is required for git projects.")
+                throw SpaceshipError.invalidArgument(message: "Branch name is required for git projects.")
             }
             if refs.isGitRepo, (targetBranch == nil || targetBranch?.isEmpty == true) {
-                throw AgentmuxError.invalidArgument(message: "Target branch is required for git projects.")
+                throw SpaceshipError.invalidArgument(message: "Target branch is required for git projects.")
             }
             _ = try orchestrator.createWorkspace(
                 projectID: refs.projectID,

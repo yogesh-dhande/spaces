@@ -16,7 +16,7 @@ public final class PortAllocator {
             if allocated.count == count { break }
         }
         guard allocated.count == count else {
-            throw AgentmuxError.invalidArgument(
+            throw SpaceshipError.invalidArgument(
                 message: "Insufficient free ports in range \(range.start)-\(range.end).")
         }
         try store.setWorkspacePorts(workspaceID: workspaceID, ports: allocated)

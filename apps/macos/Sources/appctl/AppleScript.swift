@@ -7,10 +7,10 @@ public enum AppleScript {
             let output = try Shell.runAndCapture(["osascript", "-e", script])
             return output.trimmingCharacters(in: .whitespacesAndNewlines)
         } catch {
-            fputs("agentmux: AppleScript failed.\n", stderr)
-            fputs("agentmux: script begin\n", stderr)
+            fputs("spaceship: AppleScript failed.\n", stderr)
+            fputs("spaceship: script begin\n", stderr)
             fputs(script, stderr)
-            fputs("\nagentmux: script end\n", stderr)
+            fputs("\nspaceship: script end\n", stderr)
             throw error
         }
     }
