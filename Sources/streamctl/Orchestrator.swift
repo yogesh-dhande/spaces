@@ -513,9 +513,15 @@ public final class AgentmuxOrchestrator {
 
     private func stopWorkspaceUnlocked(workspaceID: String) throws {
         let (_, workspace) = try resolveWorkspace(id: workspaceID)
-        let windows = try store.windows(workspaceID: workspace.id)
+        let windows = try trackedWindows(workspaceID: workspace.id)
+        var closedWindowIDs = Set<Int>()
         for window in windows {
-            if let id = window.windowID {
+            if window.role == "browser" {
+                closeTrackedBrowserTab(window)
+                continue
+            }
+            if let id = window.windowID, !closedWindowIDs.contains(id) {
+                closedWindowIDs.insert(id)
                 _ = try? yabai.closeWindow(id: id)
             }
         }
@@ -1456,9 +1462,7 @@ public final class AgentmuxOrchestrator {
         let tracked = try store.windows(workspaceID: workspace.id).filter { $0.role == "browser" }
         if sessions.isEmpty {
             for window in tracked {
-                if let id = window.windowID {
-                    _ = try? yabai.closeWindow(id: id)
-                }
+                closeTrackedBrowserTab(window)
                 try store.deleteWindow(id: window.id)
             }
             return
@@ -1491,7 +1495,7 @@ public final class AgentmuxOrchestrator {
             let key = windowTrackingKey(window)
             if !desiredKeys.contains(key) {
                 if !desiredIDs.contains(id) {
-                    _ = try? yabai.closeWindow(id: id)
+                    closeTrackedBrowserTab(window)
                 }
                 try store.deleteWindow(id: window.id)
             }
@@ -1527,6 +1531,19 @@ public final class AgentmuxOrchestrator {
             return "browser:\(idPart):\(window.targetURL ?? "")"
         }
         return "\(window.role):\(idPart)"
+    }
+
+    private func closeTrackedBrowserTab(_ window: WindowRecord) {
+        guard window.role == "browser", let targetURL = window.targetURL, chrome.isAvailable() else {
+            return
+        }
+        if let trackedWindowID = window.windowID {
+            let closedTrackedWindowTabs = (try? chrome.closeTabs(forURLPrefix: targetURL, windowID: trackedWindowID)) ?? false
+            if closedTrackedWindowTabs {
+                return
+            }
+        }
+        _ = try? chrome.closeTabs(forURLPrefix: targetURL)
     }
 
     private func upsertCapturedTerminalWindows(

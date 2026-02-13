@@ -68,6 +68,7 @@ Updates to workspace settings apply immediately when the workspace is running (n
   - Open Editor/Terminal/Finder buttons (editor/terminal windows are tracked for cycling)
   - Browser session entries track target URLs and focus the matching Chrome tab during window navigation
   - Launch/Restart reuses existing matching Chrome tabs and tracks all matches instead of opening duplicate tabs when matches already exist
+  - Stop/Restart/browser-session updates close tracked Chrome tabs only and never close full Chrome windows
   - Workspace window list/navigation rescans Chrome tabs each time and includes tabs whose URLs start with configured browser session URLs (deduped by window+tab URL)
   - Browser tab rows are sorted by configured browser-session order and then URL so shortcut indices remain stable
   - Window cycling order is browser tabs first, then terminals, then other windows; once cycling starts, next/previous uses remembered cycle position

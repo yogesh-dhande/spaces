@@ -142,6 +142,100 @@ public final class ChromeAdapter {
         return output.isEmpty ? nil : output
     }
 
+    public func closeTabs(forExactURL url: String) throws -> Bool {
+        let escaped = url.replacingOccurrences(of: "\"", with: "\\\"")
+        let script = """
+            tell application "Google Chrome"
+              set closedCount to 0
+              repeat with w in windows
+                set tabCount to count of tabs of w
+                repeat with i from tabCount to 1 by -1
+                  set u to URL of tab i of w
+                  if u is not missing value and u is "\(escaped)" then
+                    close tab i of w
+                    set closedCount to closedCount + 1
+                  end if
+                end repeat
+              end repeat
+              return closedCount
+            end tell
+            """
+        let output = try AppleScript.run(script).trimmingCharacters(in: .whitespacesAndNewlines)
+        return (Int(output) ?? 0) > 0
+    }
+
+    public func closeTabs(forURLPrefix prefix: String) throws -> Bool {
+        let escaped = prefix.replacingOccurrences(of: "\"", with: "\\\"")
+        let script = """
+            tell application "Google Chrome"
+              set closedCount to 0
+              repeat with w in windows
+                set tabCount to count of tabs of w
+                repeat with i from tabCount to 1 by -1
+                  set u to URL of tab i of w
+                  if u is not missing value and u starts with "\(escaped)" then
+                    close tab i of w
+                    set closedCount to closedCount + 1
+                  end if
+                end repeat
+              end repeat
+              return closedCount
+            end tell
+            """
+        let output = try AppleScript.run(script).trimmingCharacters(in: .whitespacesAndNewlines)
+        return (Int(output) ?? 0) > 0
+    }
+
+    public func closeTabs(forExactURL url: String, windowID: Int) throws -> Bool {
+        let escaped = url.replacingOccurrences(of: "\"", with: "\\\"")
+        let script = """
+            tell application "Google Chrome"
+              set closedCount to 0
+              repeat with w in windows
+                if id of w is \(windowID) then
+                  set tabCount to count of tabs of w
+                  repeat with i from tabCount to 1 by -1
+                    set u to URL of tab i of w
+                    if u is not missing value and u is "\(escaped)" then
+                      close tab i of w
+                      set closedCount to closedCount + 1
+                    end if
+                  end repeat
+                  exit repeat
+                end if
+              end repeat
+              return closedCount
+            end tell
+            """
+        let output = try AppleScript.run(script).trimmingCharacters(in: .whitespacesAndNewlines)
+        return (Int(output) ?? 0) > 0
+    }
+
+    public func closeTabs(forURLPrefix prefix: String, windowID: Int) throws -> Bool {
+        let escaped = prefix.replacingOccurrences(of: "\"", with: "\\\"")
+        let script = """
+            tell application "Google Chrome"
+              set closedCount to 0
+              repeat with w in windows
+                if id of w is \(windowID) then
+                  set tabCount to count of tabs of w
+                  repeat with i from tabCount to 1 by -1
+                    set u to URL of tab i of w
+                    if u is not missing value and u starts with "\(escaped)" then
+                      close tab i of w
+                      set closedCount to closedCount + 1
+                    end if
+                  end repeat
+                  exit repeat
+                end if
+              end repeat
+              return closedCount
+            end tell
+            """
+        let output = try AppleScript.run(script).trimmingCharacters(in: .whitespacesAndNewlines)
+        return (Int(output) ?? 0) > 0
+    }
+
     private func queryTabs(urlPrefix: String?) throws -> [ChromeWindowMatch] {
         let filterCondition: String
         if let urlPrefix {

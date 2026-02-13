@@ -1562,6 +1562,115 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertTrue(try orchestrator.runningProcesses(workspaceID: workspace.id).isEmpty)
     }
 
+    func testStopWorkspaceClosesTrackedBrowserTabsWithoutClosingChromeWindow() throws {
+        let (orchestrator, store, _, workspace, root) = try makeOrchestratorWithWorkspace()
+        let closeLog = root.appendingPathComponent("yabai-close.log")
+        let chromeCloseLog = root.appendingPathComponent("chrome-close.log")
+        try store.updateWorkspaceRunning(id: workspace.id, isRunning: true, launchedAt: "now")
+        try store.upsert(
+            window: WindowRecord(
+                id: UUID().uuidString,
+                workspaceID: workspace.id,
+                app: "Google Chrome",
+                title: "localhost",
+                targetURL: "http://localhost:3001",
+                windowID: 202,
+                role: "browser",
+                orderIndex: 0,
+                lastSeenAt: "now"
+            )
+        )
+        try store.upsert(
+            window: WindowRecord(
+                id: UUID().uuidString,
+                workspaceID: workspace.id,
+                app: "iTerm2",
+                title: "shell",
+                windowID: 501,
+                role: "terminal",
+                orderIndex: 1,
+                lastSeenAt: "now"
+            )
+        )
+
+        // Mocked dependencies: yabai close command and Chrome AppleScript tab-close command.
+        // Why: enforce safety contract that stop/restart never closes full Chrome windows, only tracked tabs.
+        // Remaining risk: real Chrome could refuse tab close (permissions/profile), but window-close safety still holds.
+        try withMockCommands(
+            [
+                "yabai": Self.orchestratorYabaiMockScript,
+                "osascript": Self.orchestratorOsaScriptMock,
+            ]
+        ) {
+            try withEnv(name: "YABAI_CLOSE_LOG_FILE", value: closeLog.path) {
+                try withEnv(name: "MOCK_CHROME_CLOSE_LOG_FILE", value: chromeCloseLog.path) {
+                    try withEnv(name: "MOCK_CHROME_CLOSE_REQUIRE_PREFIX", value: "1") {
+                        try orchestrator.stopWorkspace(workspaceID: workspace.id)
+                    }
+                }
+            }
+        }
+
+        let closedWindowIDs = (try? String(contentsOf: closeLog).split(separator: "\n").map(String.init)) ?? []
+        XCTAssertFalse(closedWindowIDs.contains("202"))
+        XCTAssertTrue(closedWindowIDs.contains("501"))
+        let closedTabs = try String(contentsOf: chromeCloseLog)
+        XCTAssertTrue(closedTabs.contains("http://localhost:3001"))
+    }
+
+    func testStopWorkspaceClosesAllLiveDetectedBrowserSessionTabs() throws {
+        let (orchestrator, store, _, workspace, root) = try makeOrchestratorWithWorkspace()
+        let closeLog = root.appendingPathComponent("yabai-close-live.log")
+        let chromeCloseLog = root.appendingPathComponent("chrome-close-live.log")
+        try store.updateWorkspaceRunning(id: workspace.id, isRunning: true, launchedAt: "now")
+        try store.setWorkspaceBrowserSessions(
+            workspaceID: workspace.id,
+            sessions: [BrowserSession(url: "http://localhost:3001")]
+        )
+        try store.upsert(
+            window: WindowRecord(
+                id: UUID().uuidString,
+                workspaceID: workspace.id,
+                app: "iTerm2",
+                title: "shell",
+                windowID: 501,
+                role: "terminal",
+                orderIndex: 1,
+                lastSeenAt: "now"
+            )
+        )
+        let chromeMatches =
+            "202\tGoogle Chrome — localhost root\thttp://localhost:3001/\n202\tGoogle Chrome — localhost login\thttp://localhost:3001/login?redirect=/account\n303\tGoogle Chrome — localhost admin\thttp://localhost:3001/admin\n404\tGoogle Chrome — calendar\thttps://calendar.google.com\n"
+
+        // Mocked dependencies: live browser scan and Chrome tab-close commands.
+        // Why: ensure stop closes every currently detected matching browser-session tab, not only stale stored rows.
+        // Remaining risk: very broad user prefixes can intentionally match many tabs and all matches will be closed.
+        try withMockCommands(
+            [
+                "yabai": Self.orchestratorYabaiMockScript,
+                "osascript": Self.orchestratorOsaScriptMock,
+            ]
+        ) {
+            try withEnv(name: "YABAI_CLOSE_LOG_FILE", value: closeLog.path) {
+                try withEnv(name: "MOCK_CHROME_CLOSE_LOG_FILE", value: chromeCloseLog.path) {
+                    try withEnv(name: "MOCK_CHROME_WINDOW_MATCHES", value: chromeMatches) {
+                        try orchestrator.stopWorkspace(workspaceID: workspace.id)
+                    }
+                }
+            }
+        }
+
+        let closedWindowIDs = (try? String(contentsOf: closeLog).split(separator: "\n").map(String.init)) ?? []
+        XCTAssertFalse(closedWindowIDs.contains("202"))
+        XCTAssertFalse(closedWindowIDs.contains("303"))
+        XCTAssertTrue(closedWindowIDs.contains("501"))
+        let closedTabs = try String(contentsOf: chromeCloseLog)
+        XCTAssertTrue(closedTabs.contains("http://localhost:3001/"))
+        XCTAssertTrue(closedTabs.contains("http://localhost:3001/login?redirect=/account"))
+        XCTAssertTrue(closedTabs.contains("http://localhost:3001/admin"))
+        XCTAssertFalse(closedTabs.contains("https://calendar.google.com"))
+    }
+
     func testLaunchWorkspaceThrowsWhenRuntimeIndicatorsExist() throws {
         let (orchestrator, store, _, workspace, _) = try makeOrchestratorWithWorkspace()
         try store.upsert(
@@ -1639,6 +1748,54 @@ final class OrchestratorTests: XCTestCase {
         let running = try orchestrator.runningProcesses(workspaceID: workspace.id)
         XCTAssertTrue(running.isEmpty)
         XCTAssertEqual(try store.workspace(id: workspace.id)?.isRunning, true)
+    }
+
+    func testUpdateWorkspaceSettingsRemovingBrowserSessionsClosesTabsWithoutClosingChromeWindow() throws {
+        let (orchestrator, store, _, workspace, root) = try makeOrchestratorWithWorkspace()
+        let closeLog = root.appendingPathComponent("browser-settings-yabai-close.log")
+        let chromeCloseLog = root.appendingPathComponent("browser-settings-chrome-close.log")
+        try store.updateWorkspaceRunning(id: workspace.id, isRunning: true, launchedAt: "now")
+        try store.setWorkspaceBrowserSessions(
+            workspaceID: workspace.id,
+            sessions: [BrowserSession(url: "http://localhost:3001")]
+        )
+        try store.upsert(
+            window: WindowRecord(
+                id: UUID().uuidString,
+                workspaceID: workspace.id,
+                app: "Google Chrome",
+                title: "localhost",
+                targetURL: "http://localhost:3001",
+                windowID: 202,
+                role: "browser",
+                orderIndex: 0,
+                lastSeenAt: "now"
+            )
+        )
+
+        // Mocked dependencies: running-workspace browser reconciliation.
+        // Why: ensure clearing browser sessions removes tracked tabs but never closes full Chrome windows.
+        // Remaining risk: stale rows with no target URL are dropped from DB but cannot map to a safe tab close.
+        try withMockCommands(
+            [
+                "yabai": Self.orchestratorYabaiMockScript,
+                "osascript": Self.orchestratorOsaScriptMock,
+            ]
+        ) {
+            try withEnv(name: "YABAI_CLOSE_LOG_FILE", value: closeLog.path) {
+                try withEnv(name: "MOCK_CHROME_CLOSE_LOG_FILE", value: chromeCloseLog.path) {
+                    try orchestrator.updateWorkspaceSettings(workspaceID: workspace.id) { settings in
+                        settings.browserSessions = []
+                    }
+                }
+            }
+        }
+
+        let closedWindowIDs = (try? String(contentsOf: closeLog).split(separator: "\n").map(String.init)) ?? []
+        XCTAssertFalse(closedWindowIDs.contains("202"))
+        let closedTabs = try String(contentsOf: chromeCloseLog)
+        XCTAssertTrue(closedTabs.contains("http://localhost:3001"))
+        XCTAssertTrue(try store.windows(workspaceID: workspace.id).filter { $0.role == "browser" }.isEmpty)
     }
 
     func testLaunchWorkspaceRejectsArchivedWorkspace() throws {
@@ -1806,7 +1963,16 @@ final class OrchestratorTests: XCTestCase {
           exit 0
         fi
 
-        if [[ "$args" == *"window --close"* || "$args" == *"window --minimize"* ]]; then
+        if [[ "$args" == *"window --close"* ]]; then
+          id="${@: -1}"
+          if [[ -n "${YABAI_CLOSE_LOG_FILE:-}" ]]; then
+            echo "$id" >> "$YABAI_CLOSE_LOG_FILE"
+          fi
+          echo "ok"
+          exit 0
+        fi
+
+        if [[ "$args" == *"window --minimize"* ]]; then
           echo "ok"
           exit 0
         fi
@@ -1864,6 +2030,23 @@ final class OrchestratorTests: XCTestCase {
           else
             echo ""
           fi
+          exit 0
+        fi
+
+        if [[ "$script" == *'set tabCount to count of tabs of w'* && "$script" == *'close tab i of w'* ]]; then
+          if [[ "${MOCK_CHROME_CLOSE_REQUIRE_PREFIX:-}" == "1" && "$script" != *'u starts with \"'* ]]; then
+            echo "0"
+            exit 0
+          fi
+          close_url="$(printf '%s\n' "$script" | awk -F'u is \"' 'NF>1 { sub(/\".*/, "", $2); print $2; exit }')"
+          if [[ -z "$close_url" ]]; then
+            close_url="$(printf '%s\n' "$script" | awk -F'u starts with \"' 'NF>1 { sub(/\".*/, "", $2); print $2; exit }')"
+          fi
+          close_window_id="$(printf '%s\n' "$script" | grep -Eo 'if id of w is [0-9]+ then' | awk '{print $6}' | head -n1)"
+          if [[ -n "${MOCK_CHROME_CLOSE_LOG_FILE:-}" ]]; then
+            echo "${close_window_id:-*}\t${close_url}" >> "$MOCK_CHROME_CLOSE_LOG_FILE"
+          fi
+          echo "${MOCK_CHROME_CLOSE_RESULT:-1}"
           exit 0
         fi
 

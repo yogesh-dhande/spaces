@@ -203,6 +203,7 @@
         - open browser window/tabs for browser sessions defined in the workspace
             - browser tracking should preserve target session URL so focus actions can activate the matching tab (not just the window)
             - browser session mapping/focus must rely on URL matching, not window-title matching
+            - browser cleanup must close matching tabs only; never close an entire browser window
             - if matching tabs already exist, reuse them and include all URL-prefix matches in workspace window cycling instead of opening duplicates
             - when multiple workspaces track tabs in the same Chrome window, global next/previous shortcuts must resolve the workspace by window id plus active tab URL match (not window id alone)
             - workspace window listing/navigation should rescan all Chrome tabs on each request and include tabs where tab URL starts with any browser session URL

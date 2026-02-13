@@ -14,6 +14,7 @@
 - Workspace launch/restart reuses existing matching Chrome tabs and tracks all matches for workspace window cycling.
 - Workspace window lists/cycling now rescan all Chrome windows/tabs on each request and include every tab whose URL starts with any configured browser-session URL; overlapping session prefixes are deduplicated by `(window_id, tab URL)`.
 - Browser tab rows are emitted in deterministic order (browser-session prefix order, then URL) so displayed `cmd+<n>` hints map to stable targets.
+- Stop/restart/settings reconciliation now close tracked Chrome tabs by URL prefix and do not close full Chrome windows.
 - Window cycling order is now grouped as browser tabs, then terminals, then other roles; once cycling starts, navigation uses the remembered index for deterministic forward/backward traversal.
 - `AGENTMUX_DEBUG_BROWSER_SCAN=1` enables stderr timing logs for each Chrome tab scan (tab count, match count, elapsed ms).
 - Window cycling keeps a workspace-local navigation pointer but resolves Chrome entries using the currently active frontmost tab URL when multiple tracked tabs share one window.

@@ -217,6 +217,7 @@ Stop or archive:
 - Stop: close tracked windows, stop processes, clear runtime process state.
 - Archive: stop, run `cleanup_script` (if set), remove worktree for git projects, release ports.
 - Archive never deletes the project directory for non-git projects.
+- Browser safety invariant: stop/restart/settings reconciliation closes tracked Chrome tabs by URL prefix, never full Chrome windows.
 
 Run/recovery semantics:
 - `launchWorkspace` is only for stopped workspaces. If `is_running` is set or runtime indicators already exist (`running_processes`/`windows` rows), launch fails with "use restart".
