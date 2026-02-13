@@ -769,10 +769,11 @@ a {
   grid-template-columns: auto 1fr;
   gap: 0.35rem;
   align-items: center;
+  border: 1px solid color-mix(in oklab, var(--line) 84%, transparent);
+  border-radius: 0.36rem;
 }
 
 .app-window-kind {
-  border-radius: 0.36rem;
   padding: 0.08rem 0.32rem;
   font-family: var(--font-mono), monospace;
   font-size: 0.54rem;
@@ -782,20 +783,20 @@ a {
 
 .app-window-kind-browser {
   color: #1f73b8;
-  border: 1px solid color-mix(in oklab, #1f73b8 42%, var(--line));
-  background: color-mix(in oklab, #1f73b8 13%, transparent);
+  /* border: 1px solid color-mix(in oklab, #1f73b8 42%, var(--line)); */
+  /* background: color-mix(in oklab, #1f73b8 13%, transparent); */
 }
 
 .app-window-kind-editor {
   color: #7354d8;
-  border: 1px solid color-mix(in oklab, #7354d8 42%, var(--line));
-  background: color-mix(in oklab, #7354d8 13%, transparent);
+  /* border: 1px solid color-mix(in oklab, #7354d8 42%, var(--line)); */
+  /* background: color-mix(in oklab, #7354d8 13%, transparent); */
 }
 
 .app-window-kind-terminal {
   color: #19825a;
-  border: 1px solid color-mix(in oklab, #19825a 42%, var(--line));
-  background: color-mix(in oklab, #19825a 13%, transparent);
+  /* border: 1px solid color-mix(in oklab, #19825a 42%, var(--line)); */
+  /* background: color-mix(in oklab, #19825a 13%, transparent); */
 }
 
 .app-window-label {

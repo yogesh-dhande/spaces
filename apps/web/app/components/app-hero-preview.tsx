@@ -197,7 +197,7 @@ function WorkspaceState({ workspace, windows }: WorkspaceStateProps) {
       </div>
 
       <div className="app-state-window-list">
-        {windows.map((item) => (
+        {windows.map((item, i) => (
           <div key={`${workspace.id}-${item.label}`} className="app-window-row">
             <span className={`app-window-kind app-window-kind-${item.kind}`}>
               {item.kind === "browser" && (
@@ -222,7 +222,10 @@ function WorkspaceState({ workspace, windows }: WorkspaceStateProps) {
                 </svg>
               )}
             </span>
-            <p className="app-window-label">{item.label}</p>
+            <div className="flex justify-between items-center">
+              <p className="app-window-label">{item.label}</p>
+              <p className="text-[0.4rem] font-mono text-foreground-soft/90 px-2">CMD+{i + 1}</p>
+            </div>
           </div>
         ))}
       </div>
