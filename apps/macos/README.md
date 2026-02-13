@@ -32,7 +32,7 @@ port_range:
 projects:
   - dir: /path/to/repo
     setup_script: cp /shared/.env .env
-    cleanup_script: rm -f .env
+    stop_script: docker compose down --remove-orphans
     processes:
       - name: server
         command: PORT=$PORT0 npm run dev
@@ -49,6 +49,7 @@ projects:
 
 Workspaces snapshot project processes, status checks, and browser sessions at creation time into the runtime DB.
 Updates to workspace settings apply immediately when the workspace is running (new processes start, changed commands restart, and new browser sessions open).
+`setup_script` runs when a workspace is created or revived. `stop_script` runs on stop/restart/archive after automatic process termination.
 
 ## GUI
 - Two panes: projects/workspaces on the left, details on the right.
@@ -104,7 +105,7 @@ agentmux config show
 agentmux project list
 agentmux project add --dir /path/to/repo
 agentmux project add --git-url https://github.com/org/repo.git
-agentmux project update --dir /path/to/repo --setup-script "cp ~/.env .env"
+agentmux project update --dir /path/to/repo --setup-script "cp ~/.env .env" --stop-script "docker compose down --remove-orphans"
 agentmux project remove --dir /path/to/repo
 
 agentmux workspace list --project-dir /path/to/repo --all

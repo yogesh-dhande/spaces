@@ -1,4 +1,5 @@
 import Foundation
+import Darwin
 import appctl
 
 public final class AgentmuxOrchestrator {
@@ -141,6 +142,7 @@ public final class AgentmuxOrchestrator {
         }
         let previous = existing
         update(&existing)
+        try store.setWorkspaceStopScript(workspaceID: workspace.id, stopScript: existing.stopScript)
         try store.setWorkspaceProcesses(workspaceID: workspace.id, processes: existing.processes)
         try store.setWorkspaceStatusChecks(workspaceID: workspace.id, checks: existing.statusChecks)
         try store.setWorkspaceBrowserSessions(workspaceID: workspace.id, sessions: existing.browserSessions)
@@ -512,8 +514,29 @@ public final class AgentmuxOrchestrator {
     }
 
     private func stopWorkspaceUnlocked(workspaceID: String) throws {
-        let (_, workspace) = try resolveWorkspace(id: workspaceID)
+        let (project, workspace) = try resolveWorkspace(id: workspaceID)
         let windows = try trackedWindows(workspaceID: workspace.id)
+        let ports = try store.workspacePorts(workspaceID: workspace.id)
+        let env = buildWorkspaceEnv(project: project, workspace: workspace, ports: ports)
+        let settings = try loadWorkspaceSettings(
+            project: project,
+            workspace: workspace,
+            config: try projectConfig(projectID: project.id)
+        )
+        let processes = try store.runningProcesses(workspaceID: workspace.id)
+        for process in processes {
+            if let pid = resolvedRuntimePID(for: process) {
+                terminateProcessGroup(pid: pid)
+            }
+        }
+        if let script = settings?.stopScript?.trimmingCharacters(in: .whitespacesAndNewlines), !script.isEmpty {
+            try runScript(applyEnvVars(script, env: env), cwd: workspace.dir)
+        }
+        for process in processes {
+            if let windowID = process.windowID, process.terminalApp == "iTerm2" {
+                _ = try? iterm.closeWindow(id: windowID)
+            }
+        }
         var closedWindowIDs = Set<Int>()
         for window in windows {
             if window.role == "browser" {
@@ -523,12 +546,6 @@ public final class AgentmuxOrchestrator {
             if let id = window.windowID, !closedWindowIDs.contains(id) {
                 closedWindowIDs.insert(id)
                 _ = try? yabai.closeWindow(id: id)
-            }
-        }
-        let processes = try store.runningProcesses(workspaceID: workspace.id)
-        for process in processes {
-            if let windowID = process.windowID, process.terminalApp == "iTerm2" {
-                _ = try? iterm.closeWindow(id: windowID)
             }
         }
         try store.deleteRunningProcesses(workspaceID: workspace.id)
@@ -549,9 +566,6 @@ public final class AgentmuxOrchestrator {
             throw AgentmuxError.invalidArgument(message: "Default workspace cannot be archived.")
         }
         try stopWorkspaceUnlocked(workspaceID: workspaceID)
-        if let config = try projectConfig(projectID: project.id), let script = config.cleanupScript, !script.isEmpty {
-            try runScript(script, cwd: workspace.dir)
-        }
         if project.isGitRepo {
             do {
                 try git.removeWorktree(path: project.dir, worktreePath: workspace.dir)
@@ -1174,10 +1188,12 @@ public final class AgentmuxOrchestrator {
 
     private func seedWorkspaceSettings(project _: ProjectRecord, workspace: WorkspaceRecord, config: ProjectConfig?) throws {
         let snapshot = WorkspaceSettings(
+            stopScript: config?.stopScript,
             processes: config?.processes ?? [],
             statusChecks: config?.statusChecks ?? [],
             browserSessions: config?.browserSessions ?? []
         )
+        try store.setWorkspaceStopScript(workspaceID: workspace.id, stopScript: snapshot.stopScript)
         try store.setWorkspaceProcesses(workspaceID: workspace.id, processes: snapshot.processes)
         try store.setWorkspaceStatusChecks(workspaceID: workspace.id, checks: snapshot.statusChecks)
         try store.setWorkspaceBrowserSessions(workspaceID: workspace.id, sessions: snapshot.browserSessions)
@@ -1193,10 +1209,16 @@ public final class AgentmuxOrchestrator {
         if !hasSettings {
             try seedWorkspaceSettings(project: project, workspace: workspace, config: config)
         }
+        let stopScript = try store.workspaceStopScript(workspaceID: workspace.id)
         let processes = try store.workspaceProcesses(workspaceID: workspace.id)
         let statusChecks = try store.workspaceStatusChecks(workspaceID: workspace.id)
         let browserSessions = try store.workspaceBrowserSessions(workspaceID: workspace.id)
-        return WorkspaceSettings(processes: processes, statusChecks: statusChecks, browserSessions: browserSessions)
+        return WorkspaceSettings(
+            stopScript: stopScript,
+            processes: processes,
+            statusChecks: statusChecks,
+            browserSessions: browserSessions
+        )
     }
 
     private func runScript(_ script: String, cwd: String) throws {
@@ -1303,11 +1325,11 @@ public final class AgentmuxOrchestrator {
         }
 
         for process in toStop {
+            if let pid = resolvedRuntimePID(for: process) {
+                terminateProcessGroup(pid: pid)
+            }
             if let windowID = process.windowID, process.terminalApp == "iTerm2" {
                 _ = try? iterm.closeWindow(id: windowID)
-            }
-            if let pid = process.pid {
-                _ = try? Shell.run(["kill", "-TERM", "\(pid)"])
             }
             try store.deleteRunningProcess(id: process.id)
         }
@@ -1346,8 +1368,8 @@ public final class AgentmuxOrchestrator {
                 pidFile: pidFile
             )
             if let windowID = process.windowID {
-                if let pid = process.pid {
-                    _ = try? Shell.run(["kill", "-TERM", "\(pid)"])
+                if let pid = resolvedRuntimePID(for: process) {
+                    terminateProcessGroup(pid: pid)
                 }
                 try iterm.runInWindow(id: windowID, command: command)
                 let pid = try? Int(String(contentsOfFile: pidFile).trimmingCharacters(in: .whitespacesAndNewlines))
@@ -1854,7 +1876,7 @@ public final class AgentmuxOrchestrator {
         process.standardOutput = out
         process.standardError = out
 
-        var environment = ProcessInfo.processInfo.environment
+        var environment = currentProcessEnvironment()
         for (key, value) in env {
             environment[key] = value
         }
@@ -1873,6 +1895,78 @@ public final class AgentmuxOrchestrator {
         let data = out.fileHandleForReading.readDataToEndOfFile()
         let output = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         return CommandOutcome(exitCode: process.terminationStatus, output: output)
+    }
+
+    private func currentProcessEnvironment() -> [String: String] {
+        var environment: [String: String] = [:]
+        var cursor = environ
+        while let entry = cursor.pointee {
+            let line = String(cString: entry)
+            if let separator = line.firstIndex(of: "=") {
+                let key = String(line[..<separator])
+                let value = String(line[line.index(after: separator)...])
+                environment[key] = value
+            }
+            cursor = cursor.advanced(by: 1)
+        }
+        return environment
+    }
+
+    private func terminateProcessGroup(pid: Int) {
+        guard pid > 0 else { return }
+        let groupTarget = processGroupID(for: pid) ?? pid
+        let processGroupID = "-\(groupTarget)"
+        // Send interrupt first so interactive commands like `docker compose up` shut down cleanly.
+        _ = try? Shell.run(["kill", "-INT", "--", processGroupID])
+        waitForProcessExit(pid: pid, timeout: 2.0)
+        guard isProcessAlive(pid: pid) else { return }
+        // Follow with TERM only if interrupt did not stop the process.
+        _ = try? Shell.run(["kill", "-TERM", "--", processGroupID])
+        waitForProcessExit(pid: pid, timeout: 2.0)
+        guard isProcessAlive(pid: pid) else { return }
+        // Fallback: target the tracked shell process directly.
+        _ = try? Shell.run(["kill", "-TERM", "\(pid)"])
+    }
+
+    private func processGroupID(for pid: Int) -> Int? {
+        guard pid > 0 else { return nil }
+        guard let output = try? Shell.runAndCapture(["ps", "-o", "pgid=", "-p", "\(pid)"]) else { return nil }
+        let trimmed = output.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let groupID = Int(trimmed), groupID > 0 else { return nil }
+        return groupID
+    }
+
+    private func resolvedRuntimePID(for process: RunningProcessRecord) -> Int? {
+        if let pid = process.pid, pid > 0 {
+            return pid
+        }
+        guard process.terminalApp == "iTerm2" else { return nil }
+        guard
+            let pidFile = try? processRuntimePaths(workspaceID: process.workspaceID, name: process.templateName).pidFile
+        else { return nil }
+        return runtimePID(fromFile: pidFile)
+    }
+
+    private func runtimePID(fromFile path: String) -> Int? {
+        guard let contents = try? String(contentsOfFile: path) else { return nil }
+        let trimmed = contents.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let pid = Int(trimmed), pid > 0 else { return nil }
+        return pid
+    }
+
+    private func isProcessAlive(pid: Int) -> Bool {
+        guard pid > 0 else { return false }
+        if Darwin.kill(pid_t(pid), 0) == 0 {
+            return true
+        }
+        return errno == EPERM
+    }
+
+    private func waitForProcessExit(pid: Int, timeout: TimeInterval) {
+        let deadline = Date().addingTimeInterval(timeout)
+        while isProcessAlive(pid: pid), Date() < deadline {
+            Thread.sleep(forTimeInterval: 0.05)
+        }
     }
 
     private func nowISO8601() -> String {

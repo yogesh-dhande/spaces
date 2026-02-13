@@ -59,13 +59,16 @@ Config file:
 - Path: `~/.agentmux/config.yaml`.
 - Top-level fields: `editor`, `port_range`, `projects`.
 - The GUI Settings view writes `editor` from installed VS Code, Cursor, or Windsurf.
-- Project fields: `dir`, `setup_script`, `cleanup_script`, `processes`, `status_checks`, `browser_sessions`.
+- Project fields: `dir`, `setup_script`, `stop_script`, `processes`, `status_checks`, `browser_sessions`.
+- Script timing:
+  - `setup_script` runs when a workspace is created or revived.
+  - `stop_script` runs on stop/restart/archive stop phase after automatic process termination.
 - New projects can be created from an existing directory or by cloning a repository into `/Users/<username>/agentmux/projects/<project_name>`.
 - Removing a project clears agentmux state. For git projects, related workspace directories under `/Users/<username>/agentmux/workspaces` are deleted.
 - The project directory is deleted only for git projects located under `/Users/<username>/agentmux/projects` (app-managed clones).
 
 Workspace settings:
-- Each workspace snapshots project `processes`, `status_checks`, and `browser_sessions` at creation.
+- Each workspace snapshots project `stop_script`, `processes`, `status_checks`, and `browser_sessions` at creation.
 - Snapshots are stored in the runtime DB alongside other workspace data.
 - Edits are stored in SQLite only; YAML remains unchanged.
 - Edits to a running workspace reconcile processes and browser sessions immediately.
@@ -116,6 +119,7 @@ erDiagram
   workspace_settings {
     TEXT workspace_id PK
     TEXT updated_at
+    TEXT stop_script
   }
 
   workspace_processes {
@@ -214,8 +218,8 @@ flowchart TD
 ```
 
 Stop or archive:
-- Stop: close tracked windows, stop processes, clear runtime process state.
-- Archive: stop, run `cleanup_script` (if set), remove worktree for git projects, release ports.
+- Stop: signal each tracked process group (`SIGINT` then `SIGTERM`), then run workspace `stop_script` (if set), then close tracked windows and clear runtime process state.
+- Archive: reuse stop flow, remove worktree for git projects, release ports.
 - Archive never deletes the project directory for non-git projects.
 - Browser safety invariant: stop/restart/settings reconciliation closes tracked Chrome tabs by URL prefix, never full Chrome windows.
 

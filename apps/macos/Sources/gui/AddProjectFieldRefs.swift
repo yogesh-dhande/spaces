@@ -8,7 +8,7 @@ struct AddProjectFieldRefs {
     let repoURLField: NSTextField
     let browseButton: NSButton
     let setupView: NSTextView
-    let cleanupView: NSTextView
+    let stopView: NSTextView
     let processEditor: ProcessEditor
     let browserView: NSTextView
     let statusEditor: StatusCheckEditor

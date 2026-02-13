@@ -60,6 +60,11 @@ final class StoreTests: XCTestCase {
         XCTAssertFalse(try store.workspaceSettingsExists(workspaceID: workspace.id))
         try store.touchWorkspaceSettings(workspaceID: workspace.id, updatedAt: "now")
         XCTAssertTrue(try store.workspaceSettingsExists(workspaceID: workspace.id))
+        XCTAssertNil(try store.workspaceStopScript(workspaceID: workspace.id))
+        try store.setWorkspaceStopScript(workspaceID: workspace.id, stopScript: "echo stop")
+        XCTAssertEqual(try store.workspaceStopScript(workspaceID: workspace.id), "echo stop")
+        try store.setWorkspaceStopScript(workspaceID: workspace.id, stopScript: nil)
+        XCTAssertNil(try store.workspaceStopScript(workspaceID: workspace.id))
 
         try store.releaseWorkspacePorts(workspaceID: workspace.id)
         XCTAssertTrue(try store.workspacePorts(workspaceID: workspace.id).isEmpty)

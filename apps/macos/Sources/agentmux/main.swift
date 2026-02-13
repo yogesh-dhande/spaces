@@ -97,7 +97,7 @@ struct CLI {
         case "update":
             let dir = try value(for: "--dir")
             let setupScript = optionalValue(for: "--setup-script")
-            let cleanupScript = optionalValue(for: "--cleanup-script")
+            let stopScript = optionalValue(for: "--stop-script")
             guard var config = try orchestrator.projectConfig(projectID: normalizePath(dir)) else {
                 throw NSError(
                     domain: "agentmux.cli", code: 2,
@@ -106,8 +106,8 @@ struct CLI {
             if let setupScript {
                 config.setupScript = setupScript
             }
-            if let cleanupScript {
-                config.cleanupScript = cleanupScript
+            if let stopScript {
+                config.stopScript = stopScript
             }
             try orchestrator.updateProjectConfig(config)
             print("Updated project \(dir)")
@@ -426,7 +426,7 @@ struct CLI {
               agentmux project list
               agentmux project add --dir <path>
               agentmux project add --git-url <url>
-              agentmux project update --dir <path> [--setup-script <script>] [--cleanup-script <script>]
+              agentmux project update --dir <path> [--setup-script <script>] [--stop-script <script>]
               agentmux project remove --dir <path>
 
               agentmux workspace list --project-dir <path> [--all]
@@ -444,6 +444,8 @@ struct CLI {
               - Removing a git project deletes related workspace directories under ~/agentmux/workspaces.
               - Removing a project deletes only agentmux state unless it is an agentmux-cloned git repo under ~/agentmux/projects; those managed project directories are deleted.
               - Workspaces snapshot project processes, status checks, and browser sessions into the runtime DB on creation.
+              - Project `setup_script` runs when a workspace is created/revived.
+              - Project/workspace `stop_script` runs whenever a workspace is stopped (including restart/archive stop phase), after automatic process termination attempts.
               - For git projects, `workspace create` requires `--branch`; `--target-branch` defaults to main/master if available.
               - Archiving a non-git workspace never deletes the project directory.
               - Workspaces reserve PORT0-PORT9 from the configured port range.

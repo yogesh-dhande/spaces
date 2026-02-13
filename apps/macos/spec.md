@@ -42,7 +42,7 @@
             - dir: str, path of the project folder, name can be inferred from it for display in the UI
             - setup_script: str, shell script to run once when a new workspace is created for a project
                 - use cases: copy .env file from a shared location to the desired path in the git worktree folder
-            - cleanup_script: str, shell script to run once when a workspace is archived
+            - stop_script: str, shell script to run whenever a workspace is stopped (including restart/archive stop phase), after automatic process termination
         - behavior
             - stored in yaml config
             - Project ID is derived from the absolute path (normalized, realpath). Renaming the folder creates a new project unless explicitly migrated.
@@ -110,7 +110,7 @@
                 - create a git worktree and use its path as workspace directory. all commands will be run from this path
                 - worktrees should be stored in /users/<username>/agentmux/workspaces/<projectname>/<dirname>
                 - run the setup script defined by the project once
-                - snapshot project processes, status checks, and browser sessions into workspace settings in the db
+                - snapshot project stop script, processes, status checks, and browser sessions into workspace settings in the db
                 - each workspace gets 10 open ports reserved so any processes run as part of the workspace can use them
                     - Ports remain reserved for a workspace until it is stopped.
                     - Ports are allocated from a configurable base range (e.g. 20000–30000), tracked in db
@@ -126,9 +126,11 @@
                 - open newly added browser sessions immediately
             - when stopped
                 - stop any processes running in this workspace
+                    - signal the tracked process group first (ctrl-c equivalent before term) so child services (e.g. docker compose) shut down cleanly and do not become orphaned
+                    - if automatic process termination is not sufficient for a command stack, run the workspace stop script
                 - close any windows or tabs open for this workspace (terminals, browsers, editor)
             - when archived
-                - run the cleanup script defined by the project once
+                - run the same stop flow used by stop/restart (including workspace stop script if set)
                 - keep git branches but remove worktree and workspace dir
                 - for non-git projects, archiving a workspace must not delete the project directory
                 - release reserved ports

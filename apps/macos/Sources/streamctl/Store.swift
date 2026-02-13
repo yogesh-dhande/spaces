@@ -3,7 +3,7 @@ import SQLite3
 
 public final class SQLiteStore {
     private let db: OpaquePointer
-    private let schemaVersion = 5
+    private let schemaVersion = 6
 
     public init(path: String) throws {
         var handle: OpaquePointer?
@@ -327,6 +327,26 @@ public final class SQLiteStore {
         return !rows.isEmpty
     }
 
+    public func workspaceStopScript(workspaceID: String) throws -> String? {
+        let rows = try queryRows(
+            sql: "SELECT stop_script FROM workspace_settings WHERE workspace_id = ?",
+            bindings: [workspaceID]
+        )
+        guard let raw = rows.first?.first else { return nil }
+        return raw.isEmpty ? nil : raw
+    }
+
+    public func setWorkspaceStopScript(workspaceID: String, stopScript: String?) throws {
+        try execute(
+            sql: """
+                INSERT INTO workspace_settings(workspace_id, updated_at, stop_script)
+                VALUES (?, '', ?)
+                ON CONFLICT(workspace_id) DO UPDATE SET stop_script = excluded.stop_script
+                """,
+            bindings: [workspaceID, stopScript ?? ""]
+        )
+    }
+
     public func touchWorkspaceSettings(workspaceID: String, updatedAt: String) throws {
         try execute(
             sql: """
@@ -602,7 +622,8 @@ public final class SQLiteStore {
 
             CREATE TABLE IF NOT EXISTS workspace_settings (
               workspace_id TEXT PRIMARY KEY,
-              updated_at TEXT NOT NULL
+              updated_at TEXT NOT NULL,
+              stop_script TEXT
             );
 
             CREATE TABLE IF NOT EXISTS workspace_processes (

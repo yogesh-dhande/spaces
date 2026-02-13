@@ -6,7 +6,7 @@
 - Projects are normalized by real path; a default workspace is ensured per project with reserved ports.
 - Project creation supports either existing directories or git clone; cloned repositories are stored at `/Users/<username>/agentmux/projects/<project_name>`.
 - Project removal clears agentmux state, deletes related git workspace directories under `/Users/<username>/agentmux/workspaces`, and deletes the project directory only for git repositories under `/Users/<username>/agentmux/projects` (managed clones).
-- Workspaces create git worktrees for git projects, run setup/cleanup scripts, and reserve 10 ports per workspace.
+- Workspaces create git worktrees for git projects, run setup/stop scripts, and reserve 10 ports per workspace.
 - Archiving non-git workspaces does not delete the project directory.
 - Workspace launch starts processes in iTerm2 with env vars and logs under `~/.agentmux/runtime/<workspace-id>`, opens Chrome browser sessions, optionally opens the editor, and captures window IDs via yabai in browser/editor/terminal order.
 - Browser window tracking includes target session URL so workspace focus actions can activate the matching Chrome tab (not just focus the window).
@@ -46,7 +46,7 @@
 - Replaced stream-based model with project/workspace/process design.
 - Added YAML config loader/saver with default config generation and port-range validation.
 - New runtime schema for projects, workspaces, ports, processes, windows, status results, and settings.
-- Implemented git worktree create/remove, port allocation, and setup/cleanup scripts.
+- Implemented git worktree create/remove, port allocation, and setup/stop scripts.
 - Added iTerm2 process launch with env injection, PID/log capture, and runtime tracking.
 - Implemented Chrome browser session opening and yabai-based window capture.
 - Built the AppKit GUI with two-pane layout, project/workspace editing, and window shortcut hints.
@@ -74,7 +74,7 @@
 
 
 ### V2 features
-- UX: Show autocomplete for ENV variables when editing a process command, or setup script or cleanup script
+- UX: Show autocomplete for ENV variables when editing a process command, or setup script or stop script
 - Functionality: Integrate with GitHub for creating pull requests on behalf of users
 - UX: AI agents to enhance user workflow (e.g. autogenerate summaries)
     - "run a small haiku bot looking at what I'm doing in any given instance and give me 200 characters on what I seem to be trying to do in a small div above my input box"

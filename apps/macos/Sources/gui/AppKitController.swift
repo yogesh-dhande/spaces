@@ -364,7 +364,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let dirLabel = labeledValue(title: "Directory", value: project.dir)
 
         let setupView = makeEditableTextView()
-        let cleanupView = makeEditableTextView()
+        let stopView = makeEditableTextView()
 
         let processEditor = ProcessEditor()
         let browserView = makeEditableTextView()
@@ -375,7 +375,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
         if let config = configCache?.projects.first(where: { normalizePath($0.dir) == project.dir }) {
             setupView.string = config.setupScript ?? ""
-            cleanupView.string = config.cleanupScript ?? ""
+            stopView.string = config.stopScript ?? ""
             processEditor.setProcesses(config.processes)
             browserView.string = config.browserSessions.compactMap { $0.url }.joined(separator: "\n")
             statusEditor.setChecks(config.statusChecks)
@@ -393,6 +393,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         stack.addArrangedSubview(headerRow)
         stack.addArrangedSubview(dirLabel)
         stack.addArrangedSubview(label(text: "Setup script"))
+        stack.addArrangedSubview(
+            helpTextLabel("Runs when this workspace is created or revived from archive.")
+        )
         let setupScroll = scrollableTextView(setupView, height: 90)
         stack.addArrangedSubview(setupScroll)
         stack.addArrangedSubview(label(text: "Processes"))
@@ -401,9 +404,12 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         stack.addArrangedSubview(browserScroll)
         stack.addArrangedSubview(label(text: "Status checks (per process)"))
         stack.addArrangedSubview(statusEditor.container)
-        stack.addArrangedSubview(label(text: "Cleanup script"))
-        let cleanupScroll = scrollableTextView(cleanupView, height: 90)
-        stack.addArrangedSubview(cleanupScroll)
+        stack.addArrangedSubview(label(text: "Stop script"))
+        stack.addArrangedSubview(
+            helpTextLabel("Runs on stop/restart/archive after automatic process termination.")
+        )
+        let stopScroll = scrollableTextView(stopView, height: 90)
+        stack.addArrangedSubview(stopScroll)
 
         let buttonRow = NSStackView()
         buttonRow.orientation = .horizontal
@@ -416,7 +422,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         constrainFormFieldToFillWidth(processEditor.container, in: stack)
         constrainFormFieldToFillWidth(browserScroll, in: stack)
         constrainFormFieldToFillWidth(statusEditor.container, in: stack)
-        constrainFormFieldToFillWidth(cleanupScroll, in: stack)
+        constrainFormFieldToFillWidth(stopScroll, in: stack)
         constrainFormFieldToFillWidth(buttonRow, in: stack)
 
         showScrollableDetailStack(stack)
@@ -424,14 +430,14 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         saveButton.tag = storeProjectFields(
             projectID: project.id,
             setupView: setupView,
-            cleanupView: cleanupView,
+            stopView: stopView,
             processEditor: processEditor,
             browserView: browserView,
             statusEditor: statusEditor
         )
         registerDirtyTracking(
             setupView: setupView,
-            cleanupView: cleanupView,
+            stopView: stopView,
             processEditor: processEditor,
             browserView: browserView,
             statusEditor: statusEditor
@@ -472,7 +478,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         repoURLField.placeholderString = "https://github.com/org/repo.git"
 
         let setupView = makeEditableTextView()
-        let cleanupView = makeEditableTextView()
+        let stopView = makeEditableTextView()
 
         let processEditor = ProcessEditor()
 
@@ -542,6 +548,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         stack.addArrangedSubview(localSourceSection)
         stack.addArrangedSubview(cloneSourceSection)
         stack.addArrangedSubview(label(text: "Setup script"))
+        stack.addArrangedSubview(
+            helpTextLabel("Runs when each new workspace is created or revived from archive.")
+        )
         let setupScroll = scrollableTextView(setupView, height: 90)
         stack.addArrangedSubview(setupScroll)
         stack.addArrangedSubview(label(text: "Processes"))
@@ -550,9 +559,12 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         stack.addArrangedSubview(browserScroll)
         stack.addArrangedSubview(label(text: "Status checks (per process)"))
         stack.addArrangedSubview(statusEditor.container)
-        stack.addArrangedSubview(label(text: "Cleanup script"))
-        let cleanupScroll = scrollableTextView(cleanupView, height: 90)
-        stack.addArrangedSubview(cleanupScroll)
+        stack.addArrangedSubview(label(text: "Stop script"))
+        stack.addArrangedSubview(
+            helpTextLabel("Seeded into workspaces and run on stop/restart/archive after process termination.")
+        )
+        let stopScroll = scrollableTextView(stopView, height: 90)
+        stack.addArrangedSubview(stopScroll)
 
         let buttonRow = NSStackView()
         buttonRow.orientation = .horizontal
@@ -570,7 +582,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         constrainFormFieldToFillWidth(processEditor.container, in: stack)
         constrainFormFieldToFillWidth(browserScroll, in: stack)
         constrainFormFieldToFillWidth(statusEditor.container, in: stack)
-        constrainFormFieldToFillWidth(cleanupScroll, in: stack)
+        constrainFormFieldToFillWidth(stopScroll, in: stack)
         constrainFormFieldToFillWidth(buttonRow, in: stack)
 
         showScrollableDetailStack(stack)
@@ -582,7 +594,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             dirField: dirField,
             repoURLField: repoURLField,
             setupView: setupView,
-            cleanupView: cleanupView,
+            stopView: stopView,
             processEditor: processEditor,
             browserView: browserView,
             statusEditor: statusEditor,
@@ -761,7 +773,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             stack.leadingAnchor.constraint(equalTo: detailContainer.leadingAnchor, constant: 20),
             stack.trailingAnchor.constraint(equalTo: detailContainer.trailingAnchor, constant: -20),
             stack.topAnchor.constraint(equalTo: detailContainer.topAnchor, constant: 20),
-            tabs.heightAnchor.constraint(equalToConstant: 320),
+            tabs.heightAnchor.constraint(equalToConstant: 460),
             tabs.widthAnchor.constraint(equalTo: stack.widthAnchor),
         ])
         detailContainer.layoutSubtreeIfNeeded()
@@ -892,6 +904,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         contentStack.translatesAutoresizingMaskIntoConstraints = false
 
         let processEditor = ProcessEditor()
+        let stopView = makeEditableTextView()
+        let stopScroll = scrollableTextView(stopView, height: 90)
         let browserView = makeEditableTextView()
         let browserScroll = scrollableTextView(browserView, height: 80)
 
@@ -899,10 +913,12 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         statusEditor.setChecks([])
 
         if let config = try? orchestrator.workspaceSettings(workspaceID: workspace.id) {
+            stopView.string = config.stopScript ?? ""
             processEditor.setProcesses(config.processes)
             browserView.string = config.browserSessions.compactMap { $0.url }.joined(separator: "\n")
             statusEditor.setChecks(config.statusChecks)
         } else if let config = configCache?.projects.first(where: { normalizePath($0.dir) == project.dir }) {
+            stopView.string = config.stopScript ?? ""
             processEditor.setProcesses(config.processes)
             browserView.string = config.browserSessions.compactMap { $0.url }.joined(separator: "\n")
             statusEditor.setChecks(config.statusChecks)
@@ -918,6 +934,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
         contentStack.addArrangedSubview(label(text: "Processes"))
         contentStack.addArrangedSubview(processEditor.container)
+        contentStack.addArrangedSubview(label(text: "Stop script"))
+        contentStack.addArrangedSubview(
+            helpTextLabel("Workspace override. Runs on stop/restart/archive after process termination.")
+        )
+        contentStack.addArrangedSubview(stopScroll)
         contentStack.addArrangedSubview(label(text: "Browser sessions (URL per line)"))
         contentStack.addArrangedSubview(browserScroll)
         contentStack.addArrangedSubview(label(text: "Status checks (per process)"))
@@ -929,16 +950,26 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         scroll.autohidesScrollers = true
         scroll.borderType = .noBorder
         scroll.drawsBackground = false
-        scroll.documentView = contentStack
         scroll.translatesAutoresizingMaskIntoConstraints = false
-        scroll.heightAnchor.constraint(equalToConstant: 230).isActive = true
+        scroll.heightAnchor.constraint(equalToConstant: 360).isActive = true
         scroll.contentView.drawsBackground = false
+
+        let scrollContent = NSView()
+        scrollContent.translatesAutoresizingMaskIntoConstraints = false
+        scroll.documentView = scrollContent
+        scrollContent.addSubview(contentStack)
+
         NSLayoutConstraint.activate([
-            contentStack.leadingAnchor.constraint(equalTo: scroll.contentView.leadingAnchor),
-            contentStack.trailingAnchor.constraint(equalTo: scroll.contentView.trailingAnchor),
-            contentStack.topAnchor.constraint(equalTo: scroll.contentView.topAnchor),
-            contentStack.widthAnchor.constraint(equalTo: scroll.contentView.widthAnchor),
-            contentStack.bottomAnchor.constraint(equalTo: scroll.contentView.bottomAnchor),
+            scrollContent.leadingAnchor.constraint(equalTo: scroll.contentView.leadingAnchor),
+            scrollContent.trailingAnchor.constraint(equalTo: scroll.contentView.trailingAnchor),
+            scrollContent.topAnchor.constraint(equalTo: scroll.contentView.topAnchor),
+            scrollContent.widthAnchor.constraint(equalTo: scroll.contentView.widthAnchor),
+            scrollContent.bottomAnchor.constraint(greaterThanOrEqualTo: scroll.contentView.bottomAnchor),
+
+            contentStack.leadingAnchor.constraint(equalTo: scrollContent.leadingAnchor),
+            contentStack.trailingAnchor.constraint(equalTo: scrollContent.trailingAnchor),
+            contentStack.topAnchor.constraint(equalTo: scrollContent.topAnchor),
+            contentStack.bottomAnchor.constraint(equalTo: scrollContent.bottomAnchor),
         ])
 
         let buttonRow = NSStackView()
@@ -951,16 +982,19 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         constrainFormFieldToFillWidth(scroll, in: container)
         constrainFormFieldToFillWidth(buttonRow, in: container)
         constrainFormFieldToFillWidth(processEditor.container, in: contentStack)
+        constrainFormFieldToFillWidth(stopScroll, in: contentStack)
         constrainFormFieldToFillWidth(browserScroll, in: contentStack)
         constrainFormFieldToFillWidth(statusEditor.container, in: contentStack)
 
         saveButton.tag = storeWorkspaceFields(
             workspaceID: workspace.id,
+            stopView: stopView,
             processEditor: processEditor,
             browserView: browserView,
             statusEditor: statusEditor
         )
         registerWorkspaceDirtyTracking(
+            stopView: stopView,
             processEditor: processEditor,
             browserView: browserView,
             statusEditor: statusEditor
@@ -973,6 +1007,15 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let label = NSTextField(labelWithString: text)
         label.font = .systemFont(ofSize: 12, weight: .semibold)
         label.textColor = .secondaryLabelColor
+        return label
+    }
+
+    private func helpTextLabel(_ text: String) -> NSTextField {
+        let label = NSTextField(labelWithString: text)
+        label.font = .systemFont(ofSize: 11)
+        label.textColor = .tertiaryLabelColor
+        label.lineBreakMode = .byWordWrapping
+        label.maximumNumberOfLines = 0
         return label
     }
 
@@ -1423,7 +1466,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     private func storeProjectFields(
         projectID: String,
         setupView: NSTextView,
-        cleanupView: NSTextView,
+        stopView: NSTextView,
         processEditor: ProcessEditor,
         browserView: NSTextView,
         statusEditor: StatusCheckEditor
@@ -1432,7 +1475,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         ProjectFieldCache.shared.cache[id] = ProjectFieldRefs(
             projectID: projectID,
             setupView: setupView,
-            cleanupView: cleanupView,
+            stopView: stopView,
             processEditor: processEditor,
             browserView: browserView,
             statusEditor: statusEditor
@@ -1442,6 +1485,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
     private func storeWorkspaceFields(
         workspaceID: String,
+        stopView: NSTextView,
         processEditor: ProcessEditor,
         browserView: NSTextView,
         statusEditor: StatusCheckEditor
@@ -1449,6 +1493,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let id = workspaceID.hashValue
         WorkspaceFieldCache.shared.cache[id] = WorkspaceFieldRefs(
             workspaceID: workspaceID,
+            stopView: stopView,
             processEditor: processEditor,
             browserView: browserView,
             statusEditor: statusEditor
@@ -1463,7 +1508,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         dirField: NSTextField,
         repoURLField: NSTextField,
         setupView: NSTextView,
-        cleanupView: NSTextView,
+        stopView: NSTextView,
         processEditor: ProcessEditor,
         browserView: NSTextView,
         statusEditor: StatusCheckEditor,
@@ -1478,7 +1523,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             repoURLField: repoURLField,
             browseButton: browseButton,
             setupView: setupView,
-            cleanupView: cleanupView,
+            stopView: stopView,
             processEditor: processEditor,
             browserView: browserView,
             statusEditor: statusEditor
@@ -1601,7 +1646,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         do {
             try orchestrator.updateProjectConfig(projectID: refs.projectID) { config in
                 config.setupScript = refs.setupView.string.isEmpty ? nil : refs.setupView.string
-                config.cleanupScript = refs.cleanupView.string.isEmpty ? nil : refs.cleanupView.string
+                config.stopScript = refs.stopView.string.isEmpty ? nil : refs.stopView.string
                 config.processes = refs.processEditor.currentProcesses()
                 config.browserSessions = parseBrowserSessions(refs.browserView.string)
                 config.statusChecks = refs.statusEditor.currentChecks()
@@ -1647,6 +1692,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         guard let refs = WorkspaceFieldCache.shared.cache[sender.tag] else { return }
         do {
             try orchestrator.updateWorkspaceSettings(workspaceID: refs.workspaceID) { config in
+                config.stopScript = refs.stopView.string.isEmpty ? nil : refs.stopView.string
                 config.processes = refs.processEditor.currentProcesses()
                 config.browserSessions = parseBrowserSessions(refs.browserView.string)
                 config.statusChecks = refs.statusEditor.currentChecks()
@@ -1675,7 +1721,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             }
             var config = ProjectConfig(dir: record.dir)
             config.setupScript = refs.setupView.string.isEmpty ? nil : refs.setupView.string
-            config.cleanupScript = refs.cleanupView.string.isEmpty ? nil : refs.cleanupView.string
+            config.stopScript = refs.stopView.string.isEmpty ? nil : refs.stopView.string
             config.processes = refs.processEditor.currentProcesses()
             config.browserSessions = parseBrowserSessions(refs.browserView.string)
             config.statusChecks = refs.statusEditor.currentChecks()
@@ -2634,7 +2680,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
     private func registerDirtyTracking(
         setupView: NSTextView,
-        cleanupView: NSTextView,
+        stopView: NSTextView,
         processEditor: ProcessEditor,
         browserView: NSTextView,
         statusEditor: StatusCheckEditor
@@ -2646,7 +2692,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 self?.projectHasUnsavedChanges = true
             }
         }
-        NotificationCenter.default.addObserver(forName: NSText.didChangeNotification, object: cleanupView, queue: .main)
+        NotificationCenter.default.addObserver(forName: NSText.didChangeNotification, object: stopView, queue: .main)
         { [weak self] _ in
             Task { @MainActor in
                 self?.projectHasUnsavedChanges = true
@@ -2672,11 +2718,18 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     }
 
     private func registerWorkspaceDirtyTracking(
+        stopView: NSTextView,
         processEditor: ProcessEditor,
         browserView: NSTextView,
         statusEditor: StatusCheckEditor
     ) {
         workspaceHasUnsavedChanges = false
+        NotificationCenter.default.addObserver(forName: NSText.didChangeNotification, object: stopView, queue: .main)
+        { [weak self] _ in
+            Task { @MainActor in
+                self?.workspaceHasUnsavedChanges = true
+            }
+        }
         NotificationCenter.default.addObserver(forName: NSText.didChangeNotification, object: browserView, queue: .main)
         { [weak self] _ in
             Task { @MainActor in
@@ -2727,6 +2780,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         guard let refs = WorkspaceFieldCache.shared.cache[tag] else { return true }
         do {
             try orchestrator.updateWorkspaceSettings(workspaceID: refs.workspaceID) { config in
+                config.stopScript = refs.stopView.string.isEmpty ? nil : refs.stopView.string
                 config.processes = refs.processEditor.currentProcesses()
                 config.browserSessions = parseBrowserSessions(refs.browserView.string)
                 config.statusChecks = refs.statusEditor.currentChecks()
@@ -2748,7 +2802,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         do {
             try orchestrator.updateProjectConfig(projectID: refs.projectID) { config in
                 config.setupScript = refs.setupView.string.isEmpty ? nil : refs.setupView.string
-                config.cleanupScript = refs.cleanupView.string.isEmpty ? nil : refs.cleanupView.string
+                config.stopScript = refs.stopView.string.isEmpty ? nil : refs.stopView.string
                 config.processes = refs.processEditor.currentProcesses()
                 config.browserSessions = parseBrowserSessions(refs.browserView.string)
                 config.statusChecks = refs.statusEditor.currentChecks()
