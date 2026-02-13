@@ -70,7 +70,9 @@ Updates to workspace settings apply immediately when the workspace is running (n
   - Browser session entries track target URLs and focus the matching Chrome tab during window navigation
   - Launch/Restart reuses existing matching Chrome tabs and tracks all matches instead of opening duplicate tabs when matches already exist
   - Stop/Restart/browser-session updates close tracked Chrome tabs only and never close full Chrome windows
-  - Workspace window list/navigation rescans Chrome tabs each time and includes tabs whose URLs start with configured browser session URLs (deduped by window+tab URL)
+  - Workspace window list/navigation rebuilds browser rows from Chrome tabs with a 10-second debounce (per workspace/prefix set) and includes tabs whose URLs start with configured browser session URLs (deduped by window+tab URL)
+  - Browser focus targets cached tab index first, validates the active tab URL against workspace prefixes, refreshes once on mismatch, and falls back to URL matching if tab positions changed
+  - Window-scoped Chrome tab focus/close uses string-based window-id checks in AppleScript for reliable matching
   - Browser tab rows are sorted by configured browser-session order and then URL so shortcut indices remain stable
   - Window cycling order is browser tabs first, then terminals, then other windows; once cycling starts, next/previous uses remembered cycle position
   - Global next/previous window navigation disambiguates reused Chrome windows by active tab URL, so shortcuts stay on the correct workspace
@@ -84,7 +86,7 @@ Updates to workspace settings apply immediately when the workspace is running (n
 
 Hotkeys:
 - Global focus: `cmd+shift+=`
-  - When this hotkey brings spaceship to front, the selected workspace detail is refreshed so the windows list shows current Chrome tab matches
+  - When this hotkey brings spaceship to front, the selected workspace detail is refreshed so the windows list shows Chrome tab matches from the most recent scan (up to 10 seconds old)
 - Next running workspace: `cmd+shift+]`
 - Previous running workspace: `cmd+shift+[`
 - Activate selected workspace: `cmd+shift+return`
@@ -95,7 +97,7 @@ Hotkeys:
 
 When text input is focused in the GUI, standard editing shortcuts (including `cmd+v`) are handled normally.
 
-Set `SPACESHIP_DEBUG_BROWSER_SCAN=1` when launching spaceship to log Chrome scan timing (`tabs`, `matches`, `elapsed_ms`) to stderr.
+Set `DEBUG=1` when launching spaceship to log browser scan timing and browser-focus path/timing (indexed verify, refresh, cache hits/misses, and URL fallback decisions) to stderr.
 
 ## CLI
 ```bash

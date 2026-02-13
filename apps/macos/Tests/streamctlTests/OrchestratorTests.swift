@@ -940,6 +940,130 @@ final class OrchestratorTests: XCTestCase {
         }
     }
 
+    func testWindowsLiveScanDebouncesRefreshForTenSeconds() throws {
+        let clock = TestClock(now: Date(timeIntervalSince1970: 1_700_000_000))
+        let (orchestrator, store, _, workspace, root) = try makeOrchestratorWithWorkspace(
+            browserWindowScanDebounceInterval: 10,
+            currentDate: { clock.now() }
+        )
+        let scanLog = root.appendingPathComponent("chrome-scan.log")
+        try store.setWorkspaceBrowserSessions(
+            workspaceID: workspace.id,
+            sessions: [BrowserSession(url: "http://localhost:3001")]
+        )
+        let chromeMatches =
+            "202\tGoogle Chrome — localhost 3001\thttp://localhost:3001\n"
+
+        // Mocked dependency: Chrome tab scan script entrypoint.
+        // Why: assert repeated windows reads within 10 seconds reuse cached browser rows and skip re-scanning Chrome.
+        // Remaining risk: real-world tab churn during the debounce window intentionally appears up to 10 seconds stale.
+        try withMockCommands(["osascript": Self.orchestratorOsaScriptMock]) {
+            try withEnv(name: "MOCK_CHROME_WINDOW_MATCHES", value: chromeMatches) {
+                try withEnv(name: "MOCK_CHROME_SCAN_LOG_FILE", value: scanLog.path) {
+                    let first = try orchestrator.windows(workspaceID: workspace.id)
+                    XCTAssertEqual(first.filter { $0.role == "browser" }.count, 1)
+
+                    try store.upsert(
+                        window: WindowRecord(
+                            id: UUID().uuidString,
+                            workspaceID: workspace.id,
+                            app: "iTerm2",
+                            title: "shell",
+                            windowID: 101,
+                            role: "terminal",
+                            orderIndex: 200,
+                            lastSeenAt: "now"
+                        )
+                    )
+
+                    let second = try orchestrator.windows(workspaceID: workspace.id)
+                    XCTAssertEqual(second.filter { $0.role == "browser" }.count, 1)
+                    XCTAssertEqual(second.filter { $0.role == "terminal" }.count, 1)
+
+                    clock.advance(seconds: 11)
+                    let third = try orchestrator.windows(workspaceID: workspace.id)
+                    XCTAssertEqual(third.filter { $0.role == "browser" }.count, 1)
+                }
+            }
+        }
+
+        let scanCount =
+            (try? String(contentsOf: scanLog).split(separator: "\n").count) ?? 0
+        XCTAssertEqual(scanCount, 2)
+    }
+
+    func testFocusWorkspaceWindowUsesTabIndexFastPathWhenLiveScanIsPresent() throws {
+        let (orchestrator, store, _, workspace, root) = try makeOrchestratorWithWorkspace()
+        let tabIndexLog = root.appendingPathComponent("browser-tab-index-focus.log")
+        let activeURL = root.appendingPathComponent("browser-tab-index-active-url.log")
+        try store.setWorkspaceBrowserSessions(
+            workspaceID: workspace.id,
+            sessions: [BrowserSession(url: "http://localhost:3001")]
+        )
+        let chromeMatches =
+            "202\tGoogle Chrome — localhost 3001 a\thttp://localhost:3001/a\n202\tGoogle Chrome — localhost 3001 b\thttp://localhost:3001/b\n"
+
+        // Mocked dependency: Chrome tab scan + tab-index focus script path.
+        // Why: ensure navigation uses direct tab index focus after live scan to avoid URL search loops across tabs.
+        // Remaining risk: stale tab indices can still fall back to URL matching in real Chrome when tabs reorder between scan and focus.
+        try withMockCommands(["osascript": Self.orchestratorOsaScriptMock]) {
+            try withEnv(name: "MOCK_CHROME_WINDOW_MATCHES", value: chromeMatches) {
+                try withEnv(name: "MOCK_CHROME_TAB_INDEX_LOG_FILE", value: tabIndexLog.path) {
+                    try withEnv(name: "MOCK_CHROME_ACTIVE_URL_FILE", value: activeURL.path) {
+                        try orchestrator.focusWorkspaceWindow(workspaceID: workspace.id, index: 2)
+                    }
+                }
+            }
+        }
+
+        let focusedTabs = try String(contentsOf: tabIndexLog).split(separator: "\n").map(String.init)
+        XCTAssertEqual(focusedTabs, ["202\t2"])
+    }
+
+    func testFocusWorkspaceWindowAutoCorrectsWhenFocusedIndexedTabDoesNotMatchWorkspace() throws {
+        let (orchestrator, store, _, workspace, root) = try makeOrchestratorWithWorkspace()
+        let scanLog = root.appendingPathComponent("browser-tab-index-refresh.log")
+        let focusLog = root.appendingPathComponent("browser-tab-index-fallback.log")
+        let tabIndexLog = root.appendingPathComponent("browser-tab-index-fallback-index.log")
+        try store.setWorkspaceBrowserSessions(
+            workspaceID: workspace.id,
+            sessions: [BrowserSession(url: "http://localhost:3001")]
+        )
+        let chromeMatches =
+            "202\tGoogle Chrome — localhost 3001 a\thttp://localhost:3001/a\n"
+
+        // Mocked dependency: Chrome tab scan + tab-index focus + active-tab verification + URL focus fallback path.
+        // Why: ensure fast indexed focus auto-corrects when the focused tab is outside workspace URLs.
+        // Remaining risk: if Chrome mutates tabs continuously, one refresh may still miss a stable index and rely on URL fallback.
+        try withMockCommands(["osascript": Self.orchestratorOsaScriptMock]) {
+            try withEnv(name: "MOCK_CHROME_WINDOW_MATCHES", value: chromeMatches) {
+                try withEnv(name: "MOCK_CHROME_TAB_INDEX_ACTIVE_URL", value: "https://calendar.google.com/") {
+                    try withEnv(name: "MOCK_CHROME_SCAN_LOG_FILE", value: scanLog.path) {
+                        try withEnv(name: "MOCK_CHROME_FOCUS_LOG_FILE", value: focusLog.path) {
+                            try withEnv(name: "MOCK_CHROME_TAB_INDEX_LOG_FILE", value: tabIndexLog.path) {
+                                try orchestrator.focusWorkspaceWindow(workspaceID: workspace.id, index: 1)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        let scanCount = (try? String(contentsOf: scanLog).split(separator: "\n").count) ?? 0
+        XCTAssertEqual(scanCount, 2)
+        let focusedURLs = try String(contentsOf: focusLog).split(separator: "\n").map(String.init)
+        XCTAssertEqual(
+            focusedURLs,
+            [
+                "https://calendar.google.com/",
+                "https://calendar.google.com/",
+                "http://localhost:3001/a",
+            ]
+        )
+        let focusedByIndex = try String(contentsOf: tabIndexLog).split(separator: "\n").map(String.init)
+        XCTAssertEqual(focusedByIndex, ["202\t1", "202\t1"])
+    }
+
     func testFocusWorkspaceWindowUsesDistinctLiveTabURLsForOverlappingSessionPrefixes() throws {
         let (orchestrator, store, _, workspace, root) = try makeOrchestratorWithWorkspace()
         let chromeLog = root.appendingPathComponent("browser-overlap-focus.log")
@@ -2085,7 +2209,27 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertEqual(try orchestrator.runningProcesses(workspaceID: workspace.id).count, 1)
     }
 
-    private func makeOrchestratorWithWorkspace(editor: EditorPreference? = nil) throws
+    private final class TestClock {
+        private var current: Date
+
+        init(now: Date) {
+            current = now
+        }
+
+        func now() -> Date {
+            current
+        }
+
+        func advance(seconds: TimeInterval) {
+            current = current.addingTimeInterval(seconds)
+        }
+    }
+
+    private func makeOrchestratorWithWorkspace(
+        editor: EditorPreference? = nil,
+        browserWindowScanDebounceInterval: TimeInterval = 10,
+        currentDate: @escaping () -> Date = Date.init
+    ) throws
         -> (SpaceshipOrchestrator, SQLiteStore, ProjectRecord, WorkspaceRecord, URL)
     {
         let root = try makeTempDirectory()
@@ -2094,7 +2238,12 @@ final class OrchestratorTests: XCTestCase {
 
         let configStore = ConfigStore(path: root.appendingPathComponent("config.yaml").path)
         let store = try makeTemporaryStore()
-        let orchestrator = SpaceshipOrchestrator(store: store, configStore: configStore)
+        let orchestrator = SpaceshipOrchestrator(
+            store: store,
+            configStore: configStore,
+            browserWindowScanDebounceInterval: browserWindowScanDebounceInterval,
+            currentDate: currentDate
+        )
         if let editor {
             _ = try orchestrator.updateEditorPreference(editor)
         }
@@ -2219,6 +2368,20 @@ final class OrchestratorTests: XCTestCase {
         # - Chrome availability/session stubs
         # Residual risk: no validation of true AppleScript syntax/runtime against installed applications.
         script="${*: -1}"
+        chrome_active_url_file="${MOCK_CHROME_ACTIVE_URL_FILE:-}"
+        if [[ -z "$chrome_active_url_file" && -n "${MOCK_CHROME_FOCUS_LOG_FILE:-}" ]]; then
+          chrome_active_url_file="${MOCK_CHROME_FOCUS_LOG_FILE}.active"
+        fi
+        extract_window_id() {
+          local source="$1"
+          local extracted
+          extracted="$(printf '%s\n' "$source" | awk -F'set requestedWindowID to \"' 'NF>1 { sub(/\".*/, "", $2); print $2; exit }')"
+          if [[ -n "$extracted" ]]; then
+            echo "$extracted"
+            return
+          fi
+          printf '%s\n' "$source" | grep -Eo 'if id of w is [0-9]+ then' | awk '{print $6}' | head -n1
+        }
 
         if [[ "$script" == *'tell application "iTerm2" to version'* ]]; then
           if [[ "${MOCK_ITERM_UNAVAILABLE:-}" == "1" ]]; then
@@ -2255,11 +2418,55 @@ final class OrchestratorTests: XCTestCase {
         fi
 
         if [[ "$script" == *'set output to ""'* ]]; then
+          if [[ -n "${MOCK_CHROME_SCAN_LOG_FILE:-}" ]]; then
+            echo "scan" >> "$MOCK_CHROME_SCAN_LOG_FILE"
+          fi
           if [[ -n "${MOCK_CHROME_WINDOW_MATCHES:-}" ]]; then
             printf "%b" "$MOCK_CHROME_WINDOW_MATCHES"
           else
             echo ""
           fi
+          exit 0
+        fi
+
+        if [[ "$script" == *'set u to URL of tab requestedTabIndex of w'* ]]; then
+          requested_tab_index="$(printf '%s\n' "$script" | grep -Eo 'set requestedTabIndex to [0-9]+' | awk '{print $4}' | head -n1)"
+          focused_window_id="$(extract_window_id "$script")"
+          if [[ -n "${MOCK_CHROME_TAB_INDEX_URL:-}" ]]; then
+            echo "$MOCK_CHROME_TAB_INDEX_URL"
+            exit 0
+          fi
+          indexed_url=""
+          if [[ -n "${MOCK_CHROME_WINDOW_MATCHES:-}" && -n "$focused_window_id" && -n "$requested_tab_index" ]]; then
+            indexed_url="$(printf "%b" "$MOCK_CHROME_WINDOW_MATCHES" | awk -F $'\t' -v wid="$focused_window_id" -v target="$requested_tab_index" '($1 == wid) { count += 1; if (count == target) { print $NF; exit } }')"
+          fi
+          echo "$indexed_url"
+          exit 0
+        fi
+
+        if [[ "$script" == *'set requestedTabIndex to'* ]]; then
+          requested_tab_index="$(printf '%s\n' "$script" | grep -Eo 'set requestedTabIndex to [0-9]+' | awk '{print $4}' | head -n1)"
+          focused_window_id="$(extract_window_id "$script")"
+          if [[ -n "${MOCK_CHROME_TAB_INDEX_LOG_FILE:-}" ]]; then
+            echo "${focused_window_id:-*}\t${requested_tab_index:-0}" >> "$MOCK_CHROME_TAB_INDEX_LOG_FILE"
+          fi
+          focused_url=""
+          if [[ -n "${MOCK_CHROME_WINDOW_MATCHES:-}" && -n "$focused_window_id" && -n "$requested_tab_index" ]]; then
+            focused_url="$(printf "%b" "$MOCK_CHROME_WINDOW_MATCHES" | awk -F $'\t' -v wid="$focused_window_id" -v target="$requested_tab_index" '($1 == wid) { count += 1; if (count == target) { print $NF; exit } }')"
+          fi
+          focused_active_url="$focused_url"
+          if [[ -n "${MOCK_CHROME_TAB_INDEX_ACTIVE_URL:-}" ]]; then
+            focused_active_url="$MOCK_CHROME_TAB_INDEX_ACTIVE_URL"
+          fi
+          if [[ -n "$focused_active_url" ]]; then
+            if [[ -n "${MOCK_CHROME_FOCUS_LOG_FILE:-}" ]]; then
+              echo "$focused_active_url" >> "$MOCK_CHROME_FOCUS_LOG_FILE"
+            fi
+            if [[ -n "$chrome_active_url_file" ]]; then
+              echo "$focused_active_url" > "$chrome_active_url_file"
+            fi
+          fi
+          echo "${MOCK_CHROME_TAB_INDEX_FOCUS_RESULT:-1}"
           exit 0
         fi
 
@@ -2272,7 +2479,7 @@ final class OrchestratorTests: XCTestCase {
           if [[ -z "$close_url" ]]; then
             close_url="$(printf '%s\n' "$script" | awk -F'u starts with \"' 'NF>1 { sub(/\".*/, "", $2); print $2; exit }')"
           fi
-          close_window_id="$(printf '%s\n' "$script" | grep -Eo 'if id of w is [0-9]+ then' | awk '{print $6}' | head -n1)"
+          close_window_id="$(extract_window_id "$script")"
           if [[ -n "${MOCK_CHROME_CLOSE_LOG_FILE:-}" ]]; then
             echo "${close_window_id:-*}\t${close_url}" >> "$MOCK_CHROME_CLOSE_LOG_FILE"
           fi
@@ -2285,7 +2492,7 @@ final class OrchestratorTests: XCTestCase {
           if [[ -z "$focused_url" ]]; then
             focused_url="$(printf '%s\n' "$script" | awk -F'u is \"' 'NF>1 { sub(/\".*/, "", $2); print $2; exit }')"
           fi
-          focused_window_id="$(printf '%s\n' "$script" | grep -Eo 'if id of w is [0-9]+ then' | awk '{print $6}' | head -n1)"
+          focused_window_id="$(extract_window_id "$script")"
           if [[ -n "$focused_window_id" && -n "${MOCK_CHROME_FOCUS_WINDOW_LOG_FILE:-}" ]]; then
             echo "$focused_window_id" >> "$MOCK_CHROME_FOCUS_WINDOW_LOG_FILE"
           fi
@@ -2293,8 +2500,8 @@ final class OrchestratorTests: XCTestCase {
             if [[ -n "${MOCK_CHROME_FOCUS_LOG_FILE:-}" ]]; then
               echo "$focused_url" >> "$MOCK_CHROME_FOCUS_LOG_FILE"
             fi
-            if [[ -n "${MOCK_CHROME_ACTIVE_URL_FILE:-}" ]]; then
-              echo "$focused_url" > "$MOCK_CHROME_ACTIVE_URL_FILE"
+            if [[ -n "$chrome_active_url_file" ]]; then
+              echo "$focused_url" > "$chrome_active_url_file"
             fi
           fi
           echo "${MOCK_CHROME_FOCUS_RESULT:-1}"
@@ -2302,8 +2509,8 @@ final class OrchestratorTests: XCTestCase {
         fi
 
         if [[ "$script" == *'URL of active tab of front window'* ]]; then
-          if [[ -n "${MOCK_CHROME_ACTIVE_URL_FILE:-}" && -f "${MOCK_CHROME_ACTIVE_URL_FILE}" ]]; then
-            cat "${MOCK_CHROME_ACTIVE_URL_FILE}"
+          if [[ -n "$chrome_active_url_file" && -f "$chrome_active_url_file" ]]; then
+            cat "$chrome_active_url_file"
           else
             echo "${MOCK_CHROME_ACTIVE_URL:-}"
           fi

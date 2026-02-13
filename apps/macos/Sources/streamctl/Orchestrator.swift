@@ -3,18 +3,38 @@ import Darwin
 import appctl
 
 public final class SpaceshipOrchestrator {
+    private struct BrowserWindowScanResult {
+        let windows: [WindowRecord]
+        let tabIndexByWindowAndURL: [String: Int]
+    }
+
+    private struct CachedScannedBrowserTabTarget {
+        let tabIndex: Int
+        let browserPrefixes: [String]
+    }
+
+    private struct BrowserWindowScanCacheEntry {
+        let browserPrefixes: [String]
+        let refreshedAt: Date
+        let scanResult: BrowserWindowScanResult
+    }
+
     private let store: SQLiteStore
     private let configStore: ConfigStore
     private let git: GitClient
     private let yabai: YabaiAdapter
     private let iterm: Iterm2Adapter
     private let chrome: ChromeAdapter
+    private let browserWindowScanDebounceInterval: TimeInterval
+    private let currentDate: () -> Date
     private let projectsRootDirectoryURL: URL?
     private let workspacesRootDirectoryURL: URL?
     private let workspaceLifecycleLock = NSLock()
     private var workspaceLifecycleInFlight: Set<String> = []
     private let windowNavigationLock = NSLock()
     private var windowNavigationIndexByWorkspace: [String: Int] = [:]
+    private let browserScanCacheLock = NSLock()
+    private var browserWindowScanCacheByWorkspace: [String: BrowserWindowScanCacheEntry] = [:]
 
     public init(
         store: SQLiteStore,
@@ -24,7 +44,9 @@ public final class SpaceshipOrchestrator {
         git: GitClient = .init(),
         yabai: YabaiAdapter = .init(),
         iterm: Iterm2Adapter = .init(),
-        chrome: ChromeAdapter = .init()
+        chrome: ChromeAdapter = .init(),
+        browserWindowScanDebounceInterval: TimeInterval = 10,
+        currentDate: @escaping () -> Date = Date.init
     ) {
         self.store = store
         self.configStore = configStore
@@ -34,6 +56,11 @@ public final class SpaceshipOrchestrator {
         self.iterm = iterm
         self.chrome = chrome
         self.workspacesRootDirectoryURL = workspacesRootDirectory
+        self.browserWindowScanDebounceInterval = browserWindowScanDebounceInterval
+        self.currentDate = currentDate
+        if ProcessInfo.processInfo.environment["DEBUG"] == "1" {
+            fputs("spaceship: DEBUG=1 enabled (browser scan/focus profiling active)\n", stderr)
+        }
     }
 
     @discardableResult
@@ -699,7 +726,7 @@ public final class SpaceshipOrchestrator {
         let windows = try trackedWindows(workspaceID: workspaceID)
         var focused = false
         for (idx, window) in windows.enumerated() {
-            let ok = focusTrackedWindow(window)
+            let ok = focusTrackedWindow(window, workspaceID: workspaceID)
             if ok {
                 focused = true
                 setWindowNavigationIndex(idx, workspaceID: workspaceID)
@@ -716,7 +743,7 @@ public final class SpaceshipOrchestrator {
         let windows = try trackedWindows(workspaceID: workspaceID)
         guard index <= windows.count else { return }
         let targetIndex = index - 1
-        let ok = focusTrackedWindow(windows[targetIndex])
+        let ok = focusTrackedWindow(windows[targetIndex], workspaceID: workspaceID)
         if ok {
             setWindowNavigationIndex(targetIndex, workspaceID: workspaceID)
             try setActiveWorkspace(id: workspaceID)
@@ -795,7 +822,7 @@ public final class SpaceshipOrchestrator {
         } else {
             targetIndex = windows.count - 1
         }
-        let ok = focusTrackedWindow(windows[targetIndex])
+        let ok = focusTrackedWindow(windows[targetIndex], workspaceID: workspaceID)
         if ok {
             setWindowNavigationIndex(targetIndex, workspaceID: workspaceID)
             try setActiveWorkspace(id: workspaceID)
@@ -867,31 +894,69 @@ public final class SpaceshipOrchestrator {
         windowNavigationLock.unlock()
     }
 
-    private func focusTrackedWindow(_ window: WindowRecord) -> Bool {
+    private func focusTrackedWindow(_ window: WindowRecord, workspaceID: String) -> Bool {
+        let focusStartedAt = currentDate()
+        var focusPath = "yabai"
         if window.role == "browser", let targetURL = window.targetURL, chrome.isAvailable() {
             if let trackedWindowID = window.windowID {
+                let focusedIndexedTrackedWindowTab =
+                    (try? focusScannedBrowserTab(
+                        workspaceID: workspaceID,
+                        windowID: trackedWindowID,
+                        targetURL: targetURL
+                )) ?? false
+                if focusedIndexedTrackedWindowTab {
+                    focusPath = "indexed"
+                    logBrowserFocus(
+                        "workspace=\(workspaceID) path=\(focusPath) window=\(trackedWindowID) target=\(targetURL) elapsed_ms=\(elapsedMS(since: focusStartedAt))"
+                    )
+                    return true
+                }
                 let focusedExactTrackedWindowTab =
                     (try? chrome.focusTab(forExactURL: targetURL, windowID: trackedWindowID)) ?? false
                 if focusedExactTrackedWindowTab {
+                    focusPath = "tracked_exact"
+                    logBrowserFocus(
+                        "workspace=\(workspaceID) path=\(focusPath) window=\(trackedWindowID) target=\(targetURL) elapsed_ms=\(elapsedMS(since: focusStartedAt))"
+                    )
                     return true
                 }
                 let focusedTrackedWindowTab =
                     (try? chrome.focusTab(forURLPrefix: targetURL, windowID: trackedWindowID)) ?? false
                 if focusedTrackedWindowTab {
+                    focusPath = "tracked_prefix"
+                    logBrowserFocus(
+                        "workspace=\(workspaceID) path=\(focusPath) window=\(trackedWindowID) target=\(targetURL) elapsed_ms=\(elapsedMS(since: focusStartedAt))"
+                    )
                     return true
                 }
             }
             let focusedExactBrowserTab = (try? chrome.focusTab(forExactURL: targetURL)) ?? false
             if focusedExactBrowserTab {
+                focusPath = "global_exact"
+                logBrowserFocus(
+                    "workspace=\(workspaceID) path=\(focusPath) target=\(targetURL) elapsed_ms=\(elapsedMS(since: focusStartedAt))"
+                )
                 return true
             }
             let focusedBrowserTab = (try? chrome.focusTab(forURLPrefix: targetURL)) ?? false
             if focusedBrowserTab {
+                focusPath = "global_prefix"
+                logBrowserFocus(
+                    "workspace=\(workspaceID) path=\(focusPath) target=\(targetURL) elapsed_ms=\(elapsedMS(since: focusStartedAt))"
+                )
                 return true
             }
+            logBrowserFocus(
+                "workspace=\(workspaceID) path=browser_fallback_failed target=\(targetURL) elapsed_ms=\(elapsedMS(since: focusStartedAt))"
+            )
         }
         guard let id = window.windowID else { return false }
-        return (try? yabai.focusWindow(id: id)) ?? false
+        let focused = (try? yabai.focusWindow(id: id)) ?? false
+        logBrowserFocus(
+            "workspace=\(workspaceID) path=yabai window=\(id) success=\(focused ? "1" : "0") elapsed_ms=\(elapsedMS(since: focusStartedAt))"
+        )
+        return focused
     }
 
     private func trackedWindows(workspaceID: String) throws -> [WindowRecord] {
@@ -934,8 +999,168 @@ public final class SpaceshipOrchestrator {
         return prefixes
     }
 
-    private func liveBrowserWindows(workspaceID: String, browserPrefixes: [String]) throws -> [WindowRecord] {
+    private func liveBrowserWindows(
+        workspaceID: String,
+        browserPrefixes: [String],
+        forceRefresh: Bool = false
+    ) throws -> [WindowRecord] {
         guard !browserPrefixes.isEmpty else { return [] }
+        let refreshedAt = currentDate()
+        if !forceRefresh {
+            if let cached = cachedBrowserWindows(
+                workspaceID: workspaceID,
+                browserPrefixes: browserPrefixes,
+                now: refreshedAt
+            ) {
+                let cacheAgeMS = Int(refreshedAt.timeIntervalSince(cached.refreshedAt) * 1000)
+                logBrowserFocus(
+                    "workspace=\(workspaceID) scan_cache_hit age_ms=\(cacheAgeMS) rows=\(cached.scanResult.windows.count)"
+                )
+                return cached.scanResult.windows
+            }
+        }
+        logBrowserFocus(
+            "workspace=\(workspaceID) scan_cache_miss force_refresh=\(forceRefresh ? "1" : "0")"
+        )
+        let scanResult = try scannedBrowserWindows(workspaceID: workspaceID, browserPrefixes: browserPrefixes)
+        cacheBrowserWindows(
+            workspaceID: workspaceID,
+            browserPrefixes: browserPrefixes,
+            refreshedAt: refreshedAt,
+            scanResult: scanResult
+        )
+        return scanResult.windows
+    }
+
+    private func cachedBrowserWindows(
+        workspaceID: String,
+        browserPrefixes: [String],
+        now: Date
+    ) -> BrowserWindowScanCacheEntry? {
+        browserScanCacheLock.lock()
+        defer { browserScanCacheLock.unlock() }
+        guard let entry = browserWindowScanCacheByWorkspace[workspaceID] else { return nil }
+        guard entry.browserPrefixes == browserPrefixes else { return nil }
+        let elapsed = now.timeIntervalSince(entry.refreshedAt)
+        guard elapsed >= 0, elapsed < browserWindowScanDebounceInterval else { return nil }
+        return entry
+    }
+
+    private func cacheBrowserWindows(
+        workspaceID: String,
+        browserPrefixes: [String],
+        refreshedAt: Date,
+        scanResult: BrowserWindowScanResult
+    ) {
+        browserScanCacheLock.lock()
+        browserWindowScanCacheByWorkspace[workspaceID] = BrowserWindowScanCacheEntry(
+            browserPrefixes: browserPrefixes,
+            refreshedAt: refreshedAt,
+            scanResult: scanResult
+        )
+        browserScanCacheLock.unlock()
+    }
+
+    private func focusScannedBrowserTab(workspaceID: String, windowID: Int, targetURL: String) throws -> Bool {
+        let focusStartedAt = currentDate()
+        var refreshed = false
+        var attempt = 0
+        while attempt < 2 {
+            attempt += 1
+            guard let cachedTarget = cachedScannedBrowserTabTarget(
+                workspaceID: workspaceID,
+                windowID: windowID,
+                targetURL: targetURL
+            ) else {
+                logBrowserFocus(
+                    "workspace=\(workspaceID) indexed_miss window=\(windowID) target=\(targetURL) attempt=\(attempt)"
+                )
+                return false
+            }
+
+            let focusByIndexStartedAt = currentDate()
+            let focused = try chrome.focusTab(windowID: windowID, tabIndex: cachedTarget.tabIndex)
+            logBrowserFocus(
+                "workspace=\(workspaceID) indexed_focus window=\(windowID) tab_index=\(cachedTarget.tabIndex) attempt=\(attempt) success=\(focused ? "1" : "0") focus_ms=\(elapsedMS(since: focusByIndexStartedAt))"
+            )
+
+            if focused {
+                let verifyStartedAt = currentDate()
+                let activeURL = try chrome.frontmostActiveTabURL()
+                let matchesWorkspace = {
+                    guard let activeURL else { return false }
+                    return browserURLMatchesWorkspace(activeURL, browserPrefixes: cachedTarget.browserPrefixes)
+                }()
+                logBrowserFocus(
+                    "workspace=\(workspaceID) indexed_verify window=\(windowID) tab_index=\(cachedTarget.tabIndex) attempt=\(attempt) matches=\(matchesWorkspace ? "1" : "0") verify_ms=\(elapsedMS(since: verifyStartedAt)) url=\(activeURL ?? "")"
+                )
+                if matchesWorkspace {
+                    logBrowserFocus(
+                        "workspace=\(workspaceID) indexed_done window=\(windowID) target=\(targetURL) refreshed=\(refreshed ? "1" : "0") elapsed_ms=\(elapsedMS(since: focusStartedAt))"
+                    )
+                    return true
+                }
+            }
+            guard attempt == 1 else { break }
+            guard try refreshCachedBrowserWindows(workspaceID: workspaceID, browserPrefixes: cachedTarget.browserPrefixes) else {
+                break
+            }
+            refreshed = true
+        }
+        logBrowserFocus(
+            "workspace=\(workspaceID) indexed_failed window=\(windowID) target=\(targetURL) refreshed=\(refreshed ? "1" : "0") elapsed_ms=\(elapsedMS(since: focusStartedAt))"
+        )
+        return false
+    }
+
+    private func cachedScannedBrowserTabTarget(
+        workspaceID: String,
+        windowID: Int,
+        targetURL: String
+    ) -> CachedScannedBrowserTabTarget? {
+        browserScanCacheLock.lock()
+        defer { browserScanCacheLock.unlock() }
+        guard let entry = browserWindowScanCacheByWorkspace[workspaceID] else { return nil }
+        let key = "\(windowID):\(targetURL)"
+        guard let tabIndex = entry.scanResult.tabIndexByWindowAndURL[key] else { return nil }
+        return CachedScannedBrowserTabTarget(tabIndex: tabIndex, browserPrefixes: entry.browserPrefixes)
+    }
+
+    private func refreshCachedBrowserWindows(workspaceID: String, browserPrefixes: [String]) throws -> Bool {
+        guard !browserPrefixes.isEmpty else { return false }
+        let refreshStartedAt = currentDate()
+        _ = try liveBrowserWindows(
+            workspaceID: workspaceID,
+            browserPrefixes: browserPrefixes,
+            forceRefresh: true
+        )
+        logBrowserFocus(
+            "workspace=\(workspaceID) indexed_refresh success=1 elapsed_ms=\(elapsedMS(since: refreshStartedAt))"
+        )
+        return true
+    }
+
+    private func browserURLMatchesWorkspace(_ url: String, browserPrefixes: [String]) -> Bool {
+        browserPrefixes.contains(where: { url.hasPrefix($0) })
+    }
+
+    private func elapsedMS(since startedAt: Date) -> Int {
+        Int(currentDate().timeIntervalSince(startedAt) * 1000)
+    }
+
+    private func logBrowserFocus(_ message: String) {
+        guard debugLoggingEnabled() else { return }
+        fputs("spaceship: browser focus \(message)\n", stderr)
+    }
+
+    private func debugLoggingEnabled() -> Bool {
+        ProcessInfo.processInfo.environment["DEBUG"] == "1"
+    }
+
+    private func scannedBrowserWindows(workspaceID: String, browserPrefixes: [String]) throws -> BrowserWindowScanResult {
+        guard !browserPrefixes.isEmpty else {
+            return BrowserWindowScanResult(windows: [], tabIndexByWindowAndURL: [:])
+        }
         let scanStartedAt = Date()
         let tabs = try chrome.allTabs()
         struct MatchedTab {
@@ -964,7 +1189,9 @@ public final class SpaceshipOrchestrator {
             return lhs.tab.title < rhs.tab.title
         }
         var browserWindows: [WindowRecord] = []
+        var tabIndexByWindowAndURL: [String: Int] = [:]
         for (index, match) in matchedTabs.enumerated() {
+            tabIndexByWindowAndURL["\(match.tab.windowID):\(match.tab.url)"] = match.tab.tabIndex
             browserWindows.append(
                 WindowRecord(
                     id: UUID().uuidString,
@@ -979,14 +1206,14 @@ public final class SpaceshipOrchestrator {
                 )
             )
         }
-        if ProcessInfo.processInfo.environment["SPACESHIP_DEBUG_BROWSER_SCAN"] == "1" {
+        if debugLoggingEnabled() {
             let elapsedMS = Int(Date().timeIntervalSince(scanStartedAt) * 1000)
             fputs(
                 "spaceship: browser scan workspace=\(workspaceID) tabs=\(tabs.count) matches=\(browserWindows.count) elapsed_ms=\(elapsedMS)\n",
                 stderr
             )
         }
-        return browserWindows
+        return BrowserWindowScanResult(windows: browserWindows, tabIndexByWindowAndURL: tabIndexByWindowAndURL)
     }
 
     private func normalizedBrowserWindowRows(_ windows: [WindowRecord]) -> [WindowRecord] {

@@ -208,9 +208,11 @@
             - browser cleanup must close matching tabs only; never close an entire browser window
             - if matching tabs already exist, reuse them and include all URL-prefix matches in workspace window cycling instead of opening duplicates
             - when multiple workspaces track tabs in the same Chrome window, global next/previous shortcuts must resolve the workspace by window id plus active tab URL match (not window id alone)
-            - workspace window listing/navigation should rescan all Chrome tabs on each request and include tabs where tab URL starts with any browser session URL
+            - workspace window listing/navigation should rebuild browser rows from Chrome tabs with a 10-second debounce per workspace/prefix set, and include tabs where tab URL starts with any browser session URL
             - if a tab matches multiple browser session URLs, include it once in the cycle/list (dedupe by window + tab URL)
             - browser tab ordering in the list/cycle should be deterministic: browser session definition order first, then tab URL
+            - when browser rows come from a live scan, tab focus should target cached tab index first, then verify the focused active tab URL belongs to the workspace; refresh the live scan once if it does not, then fall back to URL matching if still stale
+            - window-scoped Chrome focus/close AppleScript checks should compare window id as string for reliable matching against Chrome's window-id type
         - spaceship keeps track of all windows belonging to each workspace so users can easily loop through them (focus them one by one by using keyboard shortcuts)
             - window cycling order should be browser session tabs first, then terminal windows, then other windows
             - after cycling begins, next/previous should continue from remembered cycle position for deterministic traversal
@@ -241,7 +243,7 @@
         - User can override default keybindings
         - Global hotkey (default: cmd+shift+=) focuses the app
             - If not visible in the currently focused display and space, make it visible in that display and space (that could mean unhiding it, or simply moving it from another display and space)
-            - when focused this way, refresh selected workspace detail so the displayed windows list reflects the latest Chrome tab scan
+            - when focused this way, refresh selected workspace detail so the displayed windows list reflects the most recent Chrome tab scan (up to 10 seconds old)
         - Open editor: `cmd+shift+e`, open terminal: `cmd+shift+t`, open Finder: `cmd+shift+f`
         - When spaceship in open and in focus
             - Loop through running workspaces (skips any workspaces that are not launched yet)

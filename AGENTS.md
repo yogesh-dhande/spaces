@@ -25,10 +25,10 @@
 - Use labeled input fields for configuration; do not require users to enter app-specific text formats.
 
 ## Working Rules
-- Build with `scripts/swiftpm.sh build` before finishing changes (workspace-local SwiftPM cache).
-- Always run `scripts/swiftpm.sh build` after making changes.
+- Build with `scripts/dev-build-and-launch.sh` before finishing changes (build + relaunch app).
+- Always run `scripts/dev-build-and-launch.sh` after making changes.
 - Always run `scripts/coverage.sh` after making changes.
-- Exception: when changes are limited to `apps/web` only, skip `scripts/swiftpm.sh build` and `scripts/coverage.sh`.
+- Exception: when changes are limited to `apps/web` only, skip `scripts/dev-build-and-launch.sh` and `scripts/coverage.sh`.
 - Whenever `scripts/coverage.sh` is run, always report the overall coverage percentage in the response.
 - When running `git commit` via Codex, allow at least a 10-minute command timeout so pre-commit lint/coverage checks are not interrupted; this is a safety ceiling, not an expected runtime.
 - Always consider adding or expanding tests to increase coverage before finalizing changes.

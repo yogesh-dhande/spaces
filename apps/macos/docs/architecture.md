@@ -236,15 +236,17 @@ Degraded runtime edge cases and handling:
 - On launch/restart, spaceship reuses existing Chrome tabs whose URLs match configured browser-session prefixes and tracks all matching tabs for workspace cycling.
 - Browser windows store an optional `target_url`; when focusing browser entries, spaceship uses AppleScript to activate the matching tab (including when multiple tracked targets share one Chrome window) before falling back to raw window focus.
 - If a Chrome window is tracked both as targeted browser tabs and as an untargeted browser row, untargeted rows are filtered from workspace window navigation/listing to keep forward/backward traversal deterministic.
-- Workspace window navigation/listing rebuilds browser rows from a live Chrome tab scan each time, including every tab whose URL starts with any configured browser-session URL (deduplicated by `window_id + tab URL`); tabs with missing URLs are skipped.
+- Workspace window navigation/listing rebuilds browser rows from live Chrome tab scans with a 10-second debounce per `(workspace_id, resolved browser-session prefixes)` key, including every tab whose URL starts with any configured browser-session URL (deduplicated by `window_id + tab URL`); tabs with missing URLs are skipped.
+- Browser focus for live-scanned rows targets cached `(window_id + tab_index)` first, then verifies the focused active tab URL against workspace prefixes, refreshes the live scan once on mismatch, and falls back to URL matching if needed.
+- Window-scoped Chrome AppleScript operations compare `window_id` as string for reliable tab focus/close matching.
 - Live browser rows are ordered deterministically by browser-session prefix order and then tab URL so `cmd+<n>` shortcut indices stay aligned with the on-screen list even as Chrome window z-order changes.
 - Window cycling tracks a workspace-local navigation pointer, and Chrome row resolution uses the frontmost active tab URL with prefix checks to keep next/previous stable.
 - Window cycling order is role-grouped for consistency: all browser tabs first, then terminal windows, then other window roles. Relative navigation prefers the remembered workspace-local index once cycling begins.
 - Global next/previous shortcut routing resolves focused Chrome windows by `(window_id + active tab URL prefix)` so one reused Chrome window can be safely tracked by multiple workspaces without selecting the wrong workspace.
-- Optional diagnostics: when `SPACESHIP_DEBUG_BROWSER_SCAN=1`, each live scan logs tab count, match count, and elapsed milliseconds to stderr.
+- Optional diagnostics: `DEBUG=1` logs browser tab scan count/match/elapsed and browser focus-path timing, including indexed verification, cache hit/miss, refresh, and fallback decisions.
 - Terminal capture uses both yabai snapshot-diff and running-process window IDs to avoid dropping terminals when window discovery lags.
 - Window IDs can become stale across app/desktop changes; stale rows are pruned during reconciliation paths.
-- When the GUI is brought to front via the global toggle hotkey, the selected workspace detail view is refreshed so the on-screen windows list reflects the latest live scan.
+- When the GUI is brought to front via the global toggle hotkey, the selected workspace detail view is refreshed so the on-screen windows list reflects the most recent live scan (up to 10 seconds old).
 
 ## Window Capture and Focus
 ```mermaid
