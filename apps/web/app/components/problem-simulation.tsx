@@ -31,7 +31,7 @@ export function ProblemSimulation() {
           tone="after"
           title="With Spaceship Workspaces"
           steps={afterSteps}
-          outcome="Result: one context, faster fix loop."
+          outcome="Result: stay within context, faster development loop."
         />
       </div>
   );

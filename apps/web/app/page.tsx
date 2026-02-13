@@ -1,12 +1,13 @@
 import Link from "next/link";
+import { ParallelStackIllustration } from "./components/parallel-stack-illustration";
 import { AppHeroPreview } from "./components/app-hero-preview";
+
 import { ProblemSimulation } from "./components/problem-simulation";
-import { ScreenshotFrame } from "./components/screenshot-frame";
 import { SiteHeader } from "./components/site-header";
 
 const painSignals = [
   "One feature is split across terminal tabs, editor windows, and browser tabs with no shared grouping.",
-  "Desktop/app switching reduces clutter, but still sends you to the wrong window when context changes quickly.",
+  "Desktop/app switching lands you on the wrong window when context changes quickly.",
   "UI bugs force a reverse lookup: from page issue to repo tab to the exact terminal or agent session.",
   "Default port collisions keep resurfacing, which causes local route and auth redirect drift.",
 ];
@@ -32,17 +33,17 @@ export default function HomePage() {
               Parallel Development, Managed
             </p>
             <h1 className="max-w-2xl text-4xl font-semibold leading-tight tracking-tight md:text-6xl">
-              Parallel work should not feel like chaos.
+              Parallel work should not feel like{" "}
+              <span className="text-[#ba436f]">chaos</span>.
             </h1>
             <p className="max-w-2xl text-base leading-7 text-foreground-soft md:text-lg">
-              Spaceship gives each stream of work a clear home so switching
-              between projects does not mean rebuilding your context from
-              scratch every hour.
+              Spaceship gives each stream of work a clear home in a virtual workspace so switching
+              between workspaces does not mean rebuilding your context from scratch every minute.
             </p>
             <div className="flex flex-wrap gap-3">
               <a
                 href="#solution"
-                className="rounded-full bg-accent px-5 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-accent-strong"
+                className="btn-primary rounded-full px-5 py-2.5 text-sm font-semibold transition-colors"
               >
                 See How It Works
               </a>
@@ -54,7 +55,7 @@ export default function HomePage() {
               </Link>
             </div>
           </div>
-          
+          <ParallelStackIllustration />
         </section>
 
         <section
@@ -79,7 +80,7 @@ export default function HomePage() {
             </ul>
           </div>
           <p className="mt-4 max-w-4xl text-base leading-7 text-foreground-soft">
-            The comparison below shows where time goes when windows and ports are fragmented, and how Spaceship's workspace-first model removes that overhead.
+            The comparison below shows where time goes when windows and ports are fragmented, and how Spaceship&apos;s workspace-first model removes that overhead.
           </p>
 
           <div className="mt-6">
@@ -109,7 +110,7 @@ export default function HomePage() {
               </p>
               <p className="mt-2 text-sm leading-6 text-foreground-soft">
                 Choose the workspace tied to the feature or branch you need to
-                work on.
+                check in on.
               </p>
             </article>
             <article className="rounded-2xl border border-line bg-surface/75 p-4">
@@ -118,7 +119,7 @@ export default function HomePage() {
               </p>
               <p className="mt-2 text-sm leading-6 text-foreground-soft">
                 Open the right browser, editor, or terminal window for that
-                workspace instantly.
+                workspace instantly with a keyboard shortcut.
               </p>
             </article>
             <article className="rounded-2xl border border-line bg-surface/75 p-4">
@@ -126,7 +127,7 @@ export default function HomePage() {
                 03 Continue
               </p>
               <p className="mt-2 text-sm leading-6 text-foreground-soft">
-                Quickly switch between windows of a workspace with keyboard shortcuts.
+                Quickly switch between only the windows of that workspace with keyboard shortcuts.
               </p>
             </article>
           </div>
@@ -154,7 +155,7 @@ export default function HomePage() {
           <div className="mt-6 flex flex-wrap justify-center gap-3">
             <Link
               href="/docs"
-              className="rounded-full bg-accent px-5 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-accent-strong"
+              className="btn-primary rounded-full px-5 py-2.5 text-sm font-semibold transition-colors"
             >
               Open Documentation
             </Link>

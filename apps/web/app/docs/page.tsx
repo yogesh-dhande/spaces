@@ -64,7 +64,7 @@ export default function DocsPage() {
           <div className="mt-6 flex flex-wrap gap-3">
             <Link
               href="/"
-              className="rounded-full bg-accent px-5 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-accent-strong"
+              className="btn-primary rounded-full px-5 py-2.5 text-sm font-semibold transition-colors"
             >
               Back to Home
             </Link>
