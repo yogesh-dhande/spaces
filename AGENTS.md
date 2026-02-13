@@ -4,6 +4,7 @@
 - `spaceship` is a macOS Swift app for stream-based workspace orchestration.
 - Streams map to **captured window sets** managed via yabai.
 - The macOS app source lives under `apps/macos`.
+- The marketing/docs website source lives under `apps/web`.
 
 ## Contributor Contract
 - Use yabai as the single source of truth for window IDs.
@@ -27,13 +28,21 @@
 - Build with `scripts/swiftpm.sh build` before finishing changes (workspace-local SwiftPM cache).
 - Always run `scripts/swiftpm.sh build` after making changes.
 - Always run `scripts/coverage.sh` after making changes.
+- Exception: when changes are limited to `apps/web` only, skip `scripts/swiftpm.sh build` and `scripts/coverage.sh`.
 - Whenever `scripts/coverage.sh` is run, always report the overall coverage percentage in the response.
 - When running `git commit` via Codex, allow at least a 10-minute command timeout so pre-commit lint/coverage checks are not interrupted; this is a safety ceiling, not an expected runtime.
-- When creating commits via Codex, exclude `future.md` unless the user explicitly asks to include it.
 - Always consider adding or expanding tests to increase coverage before finalizing changes.
-- Before committing changes, always ensure `apps/macos/spec.md`, `apps/macos/docs/architecture.md`, `apps/macos/docs/checkpoint.md`, and `apps/macos/README.md` are also updated as appropriate.
+- Whenever changes are made to the macOS app, keep `apps/macos/spec.md`, `apps/macos/docs/architecture.md`, `apps/macos/docs/checkpoint.md`, and `apps/macos/README.md` up to date in the same change.
 - Keep changes local-first and deterministic.
 - When adding behavior, update CLI help and architecture docs in the same change.
+
+## Web instructions
+- `apps/web` must stay a fully static prerendered site (`next build` with export output).
+- Use Next.js App Router with TypeScript and Tailwind CSS.
+- Keep marketing content in `apps/web/app/page.tsx` and docs content under `apps/web/app/docs`.
+- Prefer static/server-rendered content; avoid adding runtime API dependencies unless explicitly requested.
+- When changing `apps/web`, run `npm run build` from `apps/web` to verify output.
+- When changes are limited to `apps/web`, macOS Swift build/coverage checks are not required.
 
 
 ## Swift instructions

@@ -1,3 +1,6 @@
 .build
 .worktrees/
 default.profraw
+node_modules/
+apps/web/.next/
+apps/web/out/

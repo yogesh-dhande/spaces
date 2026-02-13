@@ -18,9 +18,14 @@ if [ -z "${profdata_path:-}" ]; then
     exit 1
 fi
 
-test_binary=$(find "$root/.build" -type f -path "*PackageTests.xctest/Contents/MacOS/*" | sort | head -n 1)
+package_name=$(sed -n 's/^[[:space:]]*name:[[:space:]]*"\([^"]*\)".*/\1/p' "$root/Package.swift" | head -n 1)
+expected_test_binary="${package_name}PackageTests"
+test_binary=""
+if [ -n "${package_name:-}" ]; then
+    test_binary=$(find "$root/.build" -type f -path "*${expected_test_binary}.xctest/Contents/MacOS/${expected_test_binary}" | sort | tail -n 1)
+fi
 if [ -z "${test_binary:-}" ]; then
-    test_binary=$(find "$root/.build" -type f -name "*PackageTests*" | grep -v "\.dSYM" | sort | head -n 1)
+    test_binary=$(find "$root/.build" -type f -path "*PackageTests.xctest/Contents/MacOS/*PackageTests" | grep -v "\.dSYM" | sort | tail -n 1)
 fi
 if [ -z "${test_binary:-}" ]; then
     echo "Test binary not found under .build." >&2
