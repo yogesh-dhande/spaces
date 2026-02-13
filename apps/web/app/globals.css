@@ -801,7 +801,7 @@ a {
 .app-window-label {
   margin: 0;
   border-radius: 0.43rem;
-  border: 1px solid var(--line);
+  /* border: 1px solid var(--line); */
   background: color-mix(in oklab, var(--surface) 95%, transparent);
   padding: 0.2rem 0.34rem;
   font-size: 0.62rem;
