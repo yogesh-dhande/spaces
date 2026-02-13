@@ -191,6 +191,8 @@
             - rationale: avoid mutating user branches during workspace creation
             - tradeoff: local branch may be behind remote until user syncs manually
     - When launching a workspace
+        - launching is only valid for a stopped workspace
+            - if runtime indicators or running flag already exist, launch should fail with guidance to restart instead
         - identify and reserve 10 open ports for the workspace. pass those as env variables to each process that is started
         - each process also receives the following env vars
             - $PORT0  through $PORT9
@@ -199,7 +201,16 @@
             - $agentmux_<PROJECT_NAME>_<WORKSPACE_NAME>_WORKSPACE_DIR - these can be used to start and run related services that may be defined in other projects e.g. if backend and frontend are  in a separate repos
         - run processes in terminal windows based on process templates defined in the workspace
         - open browser window/tabs for browser sessions defined in the workspace
+            - browser tracking should preserve target session URL so focus actions can activate the matching tab (not just the window)
+            - browser session mapping/focus must rely on URL matching, not window-title matching
+            - if matching tabs already exist, reuse them and include all URL-prefix matches in workspace window cycling instead of opening duplicates
+            - when multiple workspaces track tabs in the same Chrome window, global next/previous shortcuts must resolve the workspace by window id plus active tab URL match (not window id alone)
+            - workspace window listing/navigation should rescan all Chrome tabs on each request and include tabs where tab URL starts with any browser session URL
+            - if a tab matches multiple browser session URLs, include it once in the cycle/list (dedupe by window + tab URL)
+            - browser tab ordering in the list/cycle should be deterministic: browser session definition order first, then tab URL
         - agentmux keeps track of all windows belonging to each workspace so users can easily loop through them (focus them one by one by using keyboard shortcuts)
+            - window cycling order should be browser session tabs first, then terminal windows, then other windows
+            - after cycling begins, next/previous should continue from remembered cycle position for deterministic traversal
 - GUI
     - Layout
         - Two panes
@@ -211,7 +222,7 @@
                 - when a workspace is selected - show details about the workspace, allow editing, deleting etc
                     - 3 tabs
                         - first (default visible) tab for running details
-                            - buttons to launch, stop, archive
+                            - buttons to launch (when stopped), restart (when running), stop, archive
                             - buttons to open the workspace in the preferred editor, a terminal window, or Finder
                             - Show running processes and status (based on status checks)
                             - Show list of windows associated with the workspace
@@ -227,6 +238,7 @@
         - User can override default keybindings
         - Global hotkey (default: cmd+shift+=) focuses the app
             - If not visible in the currently focused display and space, make it visible in that display and space (that could mean unhiding it, or simply moving it from another display and space)
+            - when focused this way, refresh selected workspace detail so the displayed windows list reflects the latest Chrome tab scan
         - Open editor: `cmd+shift+e`, open terminal: `cmd+shift+t`, open Finder: `cmd+shift+f`
         - When agentmux in open and in focus
             - Loop through running workspaces (skips any workspaces that are not launched yet)

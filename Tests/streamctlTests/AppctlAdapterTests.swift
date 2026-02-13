@@ -79,6 +79,17 @@ final class AppctlAdapterTests: XCTestCase {
             XCTAssertEqual(matches[0].windowID, 11)
             XCTAssertEqual(matches[0].title, "Docs")
             XCTAssertEqual(matches[1].url, "https://docs.example.com/page")
+            let allTabs = try chrome.allTabs()
+            XCTAssertEqual(allTabs.count, 2)
+            XCTAssertTrue(try chrome.focusTab(forExactURL: "https://docs.example.com"))
+            XCTAssertTrue(try chrome.focusTab(forExactURL: "https://docs.example.com", windowID: 11))
+            XCTAssertFalse(try chrome.focusTab(forExactURL: "https://missing.example.com"))
+            XCTAssertFalse(try chrome.focusTab(forExactURL: "https://missing.example.com", windowID: 11))
+            XCTAssertTrue(try chrome.focusTab(forURLPrefix: "https://docs.example.com"))
+            XCTAssertTrue(try chrome.focusTab(forURLPrefix: "https://docs.example.com", windowID: 11))
+            XCTAssertFalse(try chrome.focusTab(forURLPrefix: "https://missing.example.com"))
+            XCTAssertFalse(try chrome.focusTab(forURLPrefix: "https://missing.example.com", windowID: 11))
+            XCTAssertEqual(try chrome.frontmostActiveTabURL(), "https://docs.example.com")
 
             let iterm = Iterm2Adapter()
             XCTAssertTrue(iterm.isAvailable())
@@ -208,6 +219,20 @@ final class AppctlAdapterTests: XCTestCase {
 
         if [[ "$script" == *'set output to ""'* ]]; then
           printf '11\\tDocs\\thttps://docs.example.com\\n12\\tDocs 2\\thttps://docs.example.com/page\\n'
+          exit 0
+        fi
+
+        if [[ "$script" == *'set tabCount to count of tabs of w'* ]]; then
+          if [[ "$script" == *'https://missing.example.com'* ]]; then
+            echo "0"
+          else
+            echo "1"
+          fi
+          exit 0
+        fi
+
+        if [[ "$script" == *'URL of active tab of front window'* ]]; then
+          echo "https://docs.example.com"
           exit 0
         fi
 

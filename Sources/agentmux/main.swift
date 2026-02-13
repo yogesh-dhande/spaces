@@ -128,7 +128,7 @@ struct CLI {
                 domain: "agentmux.cli", code: 2,
                 userInfo: [
                     NSLocalizedDescriptionKey:
-                        "Missing workspace action. Use: workspace list|create|launch|stop|archive|activate"
+                        "Missing workspace action. Use: workspace list|create|launch|restart|stop|archive|activate"
                 ])
         }
         switch args[2] {
@@ -162,6 +162,10 @@ struct CLI {
             let id = try workspaceID(orchestrator: orchestrator)
             try orchestrator.launchWorkspace(workspaceID: id)
             print("Launched workspace \(id)")
+        case "restart":
+            let id = try workspaceID(orchestrator: orchestrator)
+            try orchestrator.restartWorkspace(workspaceID: id)
+            print("Restarted workspace \(id)")
         case "stop":
             let id = try workspaceID(orchestrator: orchestrator)
             try orchestrator.stopWorkspace(workspaceID: id)
@@ -428,6 +432,7 @@ struct CLI {
               agentmux workspace list --project-dir <path> [--all]
               agentmux workspace create --project-dir <path> --name <name> [--branch <branch>] [--target-branch <branch>]
               agentmux workspace launch --project-dir <path> --name <name>
+              agentmux workspace restart --project-dir <path> --name <name>
               agentmux workspace stop --project-dir <path> --name <name>
               agentmux workspace archive --project-dir <path> --name <name>
               agentmux workspace activate --project-dir <path> --name <name>

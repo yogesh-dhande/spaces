@@ -696,10 +696,25 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let dirLabel = labeledValue(title: "Directory", value: workspace.dir)
         let statusLabel = statusRow(isRunning: workspace.isRunning)
 
-        let launchButton = actionButton(
-            title: "Launch (⌘L)", symbol: "play.circle", tooltip: "Launch", action: #selector(launchWorkspace(_:)),
-            primary: false)
-        launchButton.identifier = NSUserInterfaceItemIdentifier(workspace.id)
+        let launchOrRestartButton: NSButton
+        if workspace.isRunning {
+            launchOrRestartButton = actionButton(
+                title: "Restart (⌘L)",
+                symbol: "arrow.clockwise.circle",
+                tooltip: "Restart",
+                action: #selector(restartWorkspace(_:)),
+                primary: false
+            )
+        } else {
+            launchOrRestartButton = actionButton(
+                title: "Launch (⌘L)",
+                symbol: "play.circle",
+                tooltip: "Launch",
+                action: #selector(launchWorkspace(_:)),
+                primary: false
+            )
+        }
+        launchOrRestartButton.identifier = NSUserInterfaceItemIdentifier(workspace.id)
         let stopButton = actionButton(
             title: "Stop (⌘.)", symbol: "stop.circle", tooltip: "Stop", action: #selector(stopWorkspace(_:)),
             primary: false)
@@ -713,7 +728,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let buttonRow = NSStackView()
         buttonRow.orientation = .horizontal
         buttonRow.spacing = 8
-        buttonRow.addArrangedSubview(launchButton)
+        buttonRow.addArrangedSubview(launchOrRestartButton)
         buttonRow.addArrangedSubview(stopButton)
         buttonRow.addArrangedSubview(archiveButton)
         buttonRow.addArrangedSubview(NSView())
@@ -820,7 +835,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         windowsList.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
         let windows = (try? orchestrator.windows(workspaceID: workspace.id)) ?? []
         windowsList.string = windows.enumerated().map { idx, win in
-            let title = win.title ?? win.app
+            let title = win.targetURL ?? win.title ?? win.app
             return "cmd+\(idx + 1)  \(win.app) — \(title)"
         }.joined(separator: "\n")
         let windowsScroll = scrollableTextView(windowsList, height: 120)
@@ -1765,6 +1780,16 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         }
     }
 
+    @objc private func restartWorkspace(_ sender: NSButton) {
+        guard let id = sender.identifier?.rawValue else { return }
+        do {
+            try orchestrator.restartWorkspace(workspaceID: id)
+            reloadData()
+        } catch {
+            showError(error)
+        }
+    }
+
     @objc private func stopWorkspace(_ sender: NSButton) {
         guard let id = sender.identifier?.rawValue else { return }
         do {
@@ -2383,6 +2408,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         }
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
+        if selectedWorkspaceID != nil {
+            refreshSelection()
+        }
     }
 
     public func outlineView(_ outlineView: NSOutlineView, numberOfChildrenOfItem item: Any?) -> Int {

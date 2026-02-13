@@ -9,6 +9,18 @@
 - Workspaces create git worktrees for git projects, run setup/cleanup scripts, and reserve 10 ports per workspace.
 - Archiving non-git workspaces does not delete the project directory.
 - Workspace launch starts processes in iTerm2 with env vars and logs under `~/.agentmux/runtime/<workspace-id>`, opens Chrome browser sessions, optionally opens the editor, and captures window IDs via yabai in browser/editor/terminal order.
+- Browser window tracking includes target session URL so workspace focus actions can activate the matching Chrome tab (not just focus the window).
+- Browser session mapping is URL-based; title-based fallback matching is removed to avoid binding sessions to unrelated active tabs in shared Chrome windows.
+- Workspace launch/restart reuses existing matching Chrome tabs and tracks all matches for workspace window cycling.
+- Workspace window lists/cycling now rescan all Chrome windows/tabs on each request and include every tab whose URL starts with any configured browser-session URL; overlapping session prefixes are deduplicated by `(window_id, tab URL)`.
+- Browser tab rows are emitted in deterministic order (browser-session prefix order, then URL) so displayed `cmd+<n>` hints map to stable targets.
+- Window cycling order is now grouped as browser tabs, then terminals, then other roles; once cycling starts, navigation uses the remembered index for deterministic forward/backward traversal.
+- `AGENTMUX_DEBUG_BROWSER_SCAN=1` enables stderr timing logs for each Chrome tab scan (tab count, match count, elapsed ms).
+- Window cycling keeps a workspace-local navigation pointer but resolves Chrome entries using the currently active frontmost tab URL when multiple tracked tabs share one window.
+- Focused Chrome windows now map to workspaces using both `window_id` and active tab URL prefix so global next/previous shortcuts choose the correct workspace even when Chrome windows are reused across workspaces.
+- Workspace window listing/navigation filters untargeted browser rows when a targeted browser row already exists for the same Chrome `window_id`.
+- Terminal window tracking now backfills from running-process window IDs and persists all newly captured terminal windows during process reconciliation.
+- Launch is now reserved for stopped workspaces; running workspaces use explicit restart semantics (stop then launch) via GUI/CLI.
 - Workspace settings snapshot project templates on creation into the runtime DB and are editable per workspace; updates to running workspaces reconcile processes and browser sessions immediately.
 - AppKit GUI is two-pane with in-place forms and editors for processes, browser sessions, and status checks; workspace detail includes run/stop/archive, windows list with shortcut hints, an env/ports tab, and workspace settings.
 - Right-pane forms are scrollable, use left-aligned full-width fields, and use text-labeled actions for create/cancel flows.
@@ -24,6 +36,7 @@
 - Settings view in the GUI lets users pick a preferred editor from installed VS Code, Cursor, or Windsurf; the choice is stored in the YAML config.
 - Settings view in the GUI also allows overriding default shortcuts for global toggle, workspace navigation/activation, and open editor/terminal/Finder; these values are stored in the runtime DB.
 - Window focus shortcuts are `cmd+1` through `cmd+9` while the GUI is focused.
+- Bringing agentmux to front with the global toggle hotkey refreshes the selected workspace detail view so the displayed window list reflects the latest Chrome tab scan.
 - The local key monitor defers to focused text inputs so standard edit shortcuts like `cmd+v` work in forms.
 - CLI supports config path/show, project list/add/update/remove (including `project add --git-url ...`), workspace list/create/launch/stop/archive/activate, and settings get/set/reset for GUI shortcuts.
 - Workspace run view includes Open Editor/Terminal/Finder actions; editor/terminal windows opened this way are captured and included in window cycling.

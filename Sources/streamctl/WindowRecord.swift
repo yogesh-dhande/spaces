@@ -5,6 +5,7 @@ public struct WindowRecord: Sendable {
     public let workspaceID: String
     public let app: String
     public let title: String?
+    public let targetURL: String?
     public let windowID: Int?
     public let role: String
     public let orderIndex: Int
@@ -15,6 +16,7 @@ public struct WindowRecord: Sendable {
         workspaceID: String,
         app: String,
         title: String?,
+        targetURL: String? = nil,
         windowID: Int?,
         role: String,
         orderIndex: Int,
@@ -24,6 +26,7 @@ public struct WindowRecord: Sendable {
         self.workspaceID = workspaceID
         self.app = app
         self.title = title
+        self.targetURL = targetURL
         self.windowID = windowID
         self.role = role
         self.orderIndex = orderIndex

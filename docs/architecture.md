@@ -173,6 +173,7 @@ erDiagram
     TEXT workspace_id
     TEXT app
     TEXT title
+    TEXT target_url
     INTEGER window_id
     TEXT role
     INTEGER order_index
@@ -217,6 +218,29 @@ Stop or archive:
 - Archive: stop, run `cleanup_script` (if set), remove worktree for git projects, release ports.
 - Archive never deletes the project directory for non-git projects.
 
+Run/recovery semantics:
+- `launchWorkspace` is only for stopped workspaces. If `is_running` is set or runtime indicators already exist (`running_processes`/`windows` rows), launch fails with "use restart".
+- `restartWorkspace` is the explicit recovery path and always performs stop then launch for the same workspace.
+- Workspace lifecycle actions are guarded by a per-workspace in-flight lock so overlapping launch/stop/restart/archive actions cannot run concurrently for the same workspace.
+- GUI run controls are state-aware: show `Launch` when stopped and `Restart` when running.
+
+Degraded runtime edge cases and handling:
+- `is_running` can drift from real OS state because users can close windows/processes manually.
+- Restart is the user-visible "bring everything back" action for partial or stale runtime state.
+- Chrome session discovery and focus are URL-prefix based end-to-end; title-based fallback matching is intentionally avoided to prevent binding sessions to the wrong tab.
+- On launch/restart, agentmux reuses existing Chrome tabs whose URLs match configured browser-session prefixes and tracks all matching tabs for workspace cycling.
+- Browser windows store an optional `target_url`; when focusing browser entries, agentmux uses AppleScript to activate the matching tab (including when multiple tracked targets share one Chrome window) before falling back to raw window focus.
+- If a Chrome window is tracked both as targeted browser tabs and as an untargeted browser row, untargeted rows are filtered from workspace window navigation/listing to keep forward/backward traversal deterministic.
+- Workspace window navigation/listing rebuilds browser rows from a live Chrome tab scan each time, including every tab whose URL starts with any configured browser-session URL (deduplicated by `window_id + tab URL`); tabs with missing URLs are skipped.
+- Live browser rows are ordered deterministically by browser-session prefix order and then tab URL so `cmd+<n>` shortcut indices stay aligned with the on-screen list even as Chrome window z-order changes.
+- Window cycling tracks a workspace-local navigation pointer, and Chrome row resolution uses the frontmost active tab URL with prefix checks to keep next/previous stable.
+- Window cycling order is role-grouped for consistency: all browser tabs first, then terminal windows, then other window roles. Relative navigation prefers the remembered workspace-local index once cycling begins.
+- Global next/previous shortcut routing resolves focused Chrome windows by `(window_id + active tab URL prefix)` so one reused Chrome window can be safely tracked by multiple workspaces without selecting the wrong workspace.
+- Optional diagnostics: when `AGENTMUX_DEBUG_BROWSER_SCAN=1`, each live scan logs tab count, match count, and elapsed milliseconds to stderr.
+- Terminal capture uses both yabai snapshot-diff and running-process window IDs to avoid dropping terminals when window discovery lags.
+- Window IDs can become stale across app/desktop changes; stale rows are pruned during reconciliation paths.
+- When the GUI is brought to front via the global toggle hotkey, the selected workspace detail view is refreshed so the on-screen windows list reflects the latest live scan.
+
 ## Window Capture and Focus
 ```mermaid
 sequenceDiagram
@@ -237,7 +261,8 @@ sequenceDiagram
 
   User->>GUI: Focus window (hotkey)
   GUI->>Orchestrator: focusWorkspaceWindow(...)
-  Orchestrator->>Yabai: focusWindow(id)
+  Orchestrator->>Chrome: focus tab by target_url (browser entries)
+  Orchestrator->>Yabai: focusWindow(id) fallback
 ```
 
 Editor and terminal windows opened from the GUI (Open Editor/Open Terminal) are captured via yabai and stored in the

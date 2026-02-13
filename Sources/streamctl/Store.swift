@@ -3,7 +3,7 @@ import SQLite3
 
 public final class SQLiteStore {
     private let db: OpaquePointer
-    private let schemaVersion = 4
+    private let schemaVersion = 5
 
     public init(path: String) throws {
         var handle: OpaquePointer?
@@ -451,11 +451,12 @@ public final class SQLiteStore {
     public func upsert(window: WindowRecord) throws {
         try execute(
             sql: """
-                INSERT INTO windows(id, workspace_id, app, title, window_id, role, order_index, last_seen_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO windows(id, workspace_id, app, title, target_url, window_id, role, order_index, last_seen_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(id) DO UPDATE SET
                   app = excluded.app,
                   title = excluded.title,
+                  target_url = excluded.target_url,
                   window_id = excluded.window_id,
                   role = excluded.role,
                   order_index = excluded.order_index,
@@ -466,6 +467,7 @@ public final class SQLiteStore {
                 window.workspaceID,
                 window.app,
                 window.title ?? "",
+                window.targetURL ?? "",
                 window.windowID.map(String.init) ?? "",
                 window.role,
                 String(window.orderIndex),
@@ -477,7 +479,7 @@ public final class SQLiteStore {
     public func windows(workspaceID: String) throws -> [WindowRecord] {
         let rows = try queryRows(
             sql: """
-                SELECT id, workspace_id, app, title, window_id, role, order_index, last_seen_at
+                SELECT id, workspace_id, app, title, target_url, window_id, role, order_index, last_seen_at
                 FROM windows WHERE workspace_id = ?
                 ORDER BY order_index
                 """,
@@ -486,9 +488,22 @@ public final class SQLiteStore {
         return rows.compactMap { decodeWindow(row: $0) }
     }
 
+    public func windows(windowID: Int) throws -> [WindowRecord] {
+        let rows = try queryRows(
+            sql: """
+                SELECT id, workspace_id, app, title, target_url, window_id, role, order_index, last_seen_at
+                FROM windows
+                WHERE window_id = ?
+                ORDER BY last_seen_at DESC, order_index
+                """,
+            bindings: [String(windowID)]
+        )
+        return rows.compactMap { decodeWindow(row: $0) }
+    }
+
     public func workspaceID(windowID: Int) throws -> String? {
         let row = try queryRow(
-            sql: "SELECT workspace_id FROM windows WHERE window_id = ? LIMIT 1",
+            sql: "SELECT workspace_id FROM windows WHERE window_id = ? ORDER BY last_seen_at DESC LIMIT 1",
             bindings: [String(windowID)]
         )
         return row?.first
@@ -646,6 +661,7 @@ public final class SQLiteStore {
               workspace_id TEXT NOT NULL,
               app TEXT NOT NULL,
               title TEXT,
+              target_url TEXT,
               window_id INTEGER,
               role TEXT NOT NULL,
               order_index INTEGER,
@@ -710,16 +726,17 @@ public final class SQLiteStore {
     }
 
     private func decodeWindow(row: [String]) -> WindowRecord? {
-        guard row.count >= 8 else { return nil }
+        guard row.count >= 9 else { return nil }
         return WindowRecord(
             id: row[0],
             workspaceID: row[1],
             app: row[2],
             title: row[3].isEmpty ? nil : row[3],
-            windowID: Int(row[4]),
-            role: row[5],
-            orderIndex: Int(row[6]) ?? 0,
-            lastSeenAt: row[7]
+            targetURL: row[4].isEmpty ? nil : row[4],
+            windowID: Int(row[5]),
+            role: row[6],
+            orderIndex: Int(row[7]) ?? 0,
+            lastSeenAt: row[8]
         )
     }
 

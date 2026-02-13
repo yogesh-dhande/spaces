@@ -688,8 +688,599 @@ final class OrchestratorTests: XCTestCase {
         }
 
         let focusedIDs = try String(contentsOf: focusLog).split(separator: "\n").map(String.init)
-        XCTAssertEqual(focusedIDs, ["303", "303", "202"])
+        XCTAssertEqual(focusedIDs, ["303", "202", "202"])
         XCTAssertEqual(try orchestrator.activeWorkspaceID(), workspace.id)
+    }
+
+    func testFocusWorkspaceWindowUsesBrowserTargetURLWhenPresent() throws {
+        let (orchestrator, store, _, workspace, root) = try makeOrchestratorWithWorkspace()
+        let focusLog = root.appendingPathComponent("browser-focus.log")
+
+        try store.upsert(
+            window: WindowRecord(
+                id: UUID().uuidString,
+                workspaceID: workspace.id,
+                app: "Google Chrome",
+                title: "Google Calendar",
+                targetURL: "http://localhost:3001",
+                windowID: 202,
+                role: "browser",
+                orderIndex: 0,
+                lastSeenAt: "now"
+            )
+        )
+
+        // Mocked dependencies: Chrome tab activation and yabai fallback focus.
+        // Why: ensure browser windows tracked with target URLs activate matching tabs instead of only focusing the window.
+        // Remaining risk: real Chrome scripting latency and tab/window races are not represented.
+        try withMockCommands(
+            [
+                "yabai": Self.orchestratorYabaiMockScript,
+                "osascript": Self.orchestratorOsaScriptMock,
+            ]
+        ) {
+            try withEnv(name: "YABAI_FOCUS_LOG_FILE", value: focusLog.path) {
+                try orchestrator.focusWorkspaceWindow(workspaceID: workspace.id, index: 1)
+            }
+        }
+
+        XCTAssertEqual(try orchestrator.activeWorkspaceID(), workspace.id)
+        let focusLogExists = FileManager.default.fileExists(atPath: focusLog.path)
+        if focusLogExists {
+            let focusedIDs = try String(contentsOf: focusLog).trimmingCharacters(in: .whitespacesAndNewlines)
+            XCTAssertTrue(focusedIDs.isEmpty)
+        }
+    }
+
+    func testFocusWindowNavigationWrapsAcrossBrowserTargetsInSameChromeWindow() throws {
+        let (orchestrator, store, _, workspace, root) = try makeOrchestratorWithWorkspace()
+        let focusLog = root.appendingPathComponent("browser-nav-focus.log")
+        let chromeLog = root.appendingPathComponent("browser-nav-chrome.log")
+        let chromeActiveURL = root.appendingPathComponent("browser-nav-active-url.log")
+        try "http://localhost:3001".write(to: chromeActiveURL, atomically: true, encoding: .utf8)
+
+        try store.upsert(
+            window: WindowRecord(
+                id: UUID().uuidString,
+                workspaceID: workspace.id,
+                app: "iTerm2",
+                title: "shell",
+                windowID: 101,
+                role: "terminal",
+                orderIndex: 0,
+                lastSeenAt: "now"
+            )
+        )
+        try store.upsert(
+            window: WindowRecord(
+                id: UUID().uuidString,
+                workspaceID: workspace.id,
+                app: "Google Chrome",
+                title: "localhost-3001",
+                targetURL: "http://localhost:3001",
+                windowID: 202,
+                role: "browser",
+                orderIndex: 1,
+                lastSeenAt: "now"
+            )
+        )
+        try store.upsert(
+            window: WindowRecord(
+                id: UUID().uuidString,
+                workspaceID: workspace.id,
+                app: "Google Chrome",
+                title: "localhost-8000",
+                targetURL: "http://localhost:8000/admin",
+                windowID: 202,
+                role: "browser",
+                orderIndex: 2,
+                lastSeenAt: "now"
+            )
+        )
+
+        // Mocked dependencies: Chrome active-tab focus/read + yabai fallback focus.
+        // Why: verify deterministic next-window traversal when multiple tracked browser targets share one Chrome window.
+        // Remaining risk: real-world browser/window races are not represented by this mock.
+        try withMockCommands(
+            [
+                "yabai": Self.orchestratorYabaiMockScript,
+                "osascript": Self.orchestratorOsaScriptMock,
+            ]
+        ) {
+            try withEnv(name: "YABAI_FOCUS_LOG_FILE", value: focusLog.path) {
+                try withEnv(name: "MOCK_CHROME_FOCUS_LOG_FILE", value: chromeLog.path) {
+                    try withEnv(name: "MOCK_CHROME_ACTIVE_URL_FILE", value: chromeActiveURL.path) {
+                        try withEnv(name: "YABAI_FOCUSED_ID", value: "202") {
+                            try orchestrator.focusNextWindow(workspaceID: workspace.id)
+                            try orchestrator.focusNextWindow(workspaceID: workspace.id)
+                        }
+                        try withEnv(name: "YABAI_FOCUSED_ID", value: "101") {
+                            try orchestrator.focusNextWindow(workspaceID: workspace.id)
+                        }
+                    }
+                }
+            }
+        }
+
+        let chromeURLs = try String(contentsOf: chromeLog).split(separator: "\n").map(String.init)
+        XCTAssertEqual(chromeURLs, ["http://localhost:8000/admin", "http://localhost:3001"])
+        if FileManager.default.fileExists(atPath: focusLog.path) {
+            let focusedIDs = try String(contentsOf: focusLog).split(separator: "\n").map(String.init)
+            XCTAssertEqual(focusedIDs, ["101"])
+        }
+    }
+
+    func testFocusWorkspaceWindowUsesTrackedChromeWindowIDWhenTargetURLIsShared() throws {
+        let (orchestrator, store, _, workspace, root) = try makeOrchestratorWithWorkspace()
+        let focusLog = root.appendingPathComponent("browser-shared-url-focus.log")
+        let chromeWindowLog = root.appendingPathComponent("browser-shared-url-window.log")
+
+        try store.upsert(
+            window: WindowRecord(
+                id: UUID().uuidString,
+                workspaceID: workspace.id,
+                app: "Google Chrome",
+                title: "target-one",
+                targetURL: "http://localhost:3001",
+                windowID: 202,
+                role: "browser",
+                orderIndex: 0,
+                lastSeenAt: "now"
+            )
+        )
+        try store.upsert(
+            window: WindowRecord(
+                id: UUID().uuidString,
+                workspaceID: workspace.id,
+                app: "Google Chrome",
+                title: "target-two",
+                targetURL: "http://localhost:3001",
+                windowID: 303,
+                role: "browser",
+                orderIndex: 1,
+                lastSeenAt: "now"
+            )
+        )
+
+        // Mocked dependencies: Chrome tab activation and yabai fallback focus.
+        // Why: ensure browser focus respects tracked window ID when multiple windows share a URL prefix.
+        // Remaining risk: real Chrome may reorder windows/tabs asynchronously under heavy activity.
+        try withMockCommands(
+            [
+                "yabai": Self.orchestratorYabaiMockScript,
+                "osascript": Self.orchestratorOsaScriptMock,
+            ]
+        ) {
+            try withEnv(name: "YABAI_FOCUS_LOG_FILE", value: focusLog.path) {
+                try withEnv(name: "MOCK_CHROME_FOCUS_WINDOW_LOG_FILE", value: chromeWindowLog.path) {
+                    try orchestrator.focusWorkspaceWindow(workspaceID: workspace.id, index: 2)
+                }
+            }
+        }
+
+        let focusedWindowIDs = try String(contentsOf: chromeWindowLog).split(separator: "\n").map(String.init)
+        XCTAssertEqual(focusedWindowIDs, ["303"])
+        if FileManager.default.fileExists(atPath: focusLog.path) {
+            let focusedIDs = try String(contentsOf: focusLog).trimmingCharacters(in: .whitespacesAndNewlines)
+            XCTAssertTrue(focusedIDs.isEmpty)
+        }
+    }
+
+    func testWindowsLiveScanUsesSessionPrefixesAndDeduplicatesOverlappingMatches() throws {
+        let (orchestrator, store, _, workspace, _) = try makeOrchestratorWithWorkspace()
+        try store.setWorkspaceBrowserSessions(
+            workspaceID: workspace.id,
+            sessions: [
+                BrowserSession(url: "http://localhost:3001"),
+                BrowserSession(url: "http://localhost:3001/admin"),
+            ]
+        )
+        try store.upsert(
+            window: WindowRecord(
+                id: UUID().uuidString,
+                workspaceID: workspace.id,
+                app: "iTerm2",
+                title: "shell",
+                windowID: 101,
+                role: "terminal",
+                orderIndex: 10,
+                lastSeenAt: "now"
+            )
+        )
+        let chromeMatches =
+            "202\tGoogle Chrome — localhost 3001\thttp://localhost:3001\n202\tGoogle Chrome — localhost 3001 admin\thttp://localhost:3001/admin\n202\tGoogle Chrome — localhost 3001 admin users\thttp://localhost:3001/admin/users\n303\tGoogle Chrome — calendar\thttps://calendar.google.com/\n"
+
+        // Mocked dependencies: Chrome tab scan for live browser-row reconstruction.
+        // Why: ensure windows list includes every tab whose URL starts with any session URL, without duplicate rows from overlapping prefixes.
+        // Remaining risk: live Chrome tab ordering can vary across real profiles/extensions.
+        try withMockCommands(["osascript": Self.orchestratorOsaScriptMock]) {
+            try withEnv(name: "MOCK_CHROME_WINDOW_MATCHES", value: chromeMatches) {
+                let windows = try orchestrator.windows(workspaceID: workspace.id)
+                let browserURLs = windows.filter { $0.role == "browser" }.compactMap(\.targetURL)
+                XCTAssertEqual(
+                    browserURLs,
+                    [
+                        "http://localhost:3001",
+                        "http://localhost:3001/admin",
+                        "http://localhost:3001/admin/users",
+                    ]
+                )
+                XCTAssertEqual(Set(browserURLs).count, 3)
+                XCTAssertEqual(windows.last?.role, "terminal")
+            }
+        }
+    }
+
+    func testFocusWorkspaceWindowUsesDistinctLiveTabURLsForOverlappingSessionPrefixes() throws {
+        let (orchestrator, store, _, workspace, root) = try makeOrchestratorWithWorkspace()
+        let chromeLog = root.appendingPathComponent("browser-overlap-focus.log")
+        try store.setWorkspaceBrowserSessions(
+            workspaceID: workspace.id,
+            sessions: [
+                BrowserSession(url: "http://localhost:3001"),
+                BrowserSession(url: "http://localhost:3001/admin"),
+            ]
+        )
+        let chromeMatches =
+            "202\tGoogle Chrome — localhost 3001\thttp://localhost:3001\n202\tGoogle Chrome — localhost 3001 admin\thttp://localhost:3001/admin\n202\tGoogle Chrome — localhost 3001 admin users\thttp://localhost:3001/admin/users\n"
+
+        // Mocked dependencies: Chrome tab scan + focus calls.
+        // Why: verify cmd+number focus routes to different tabs when session prefixes overlap.
+        // Remaining risk: real Chrome can reorder tabs while shortcuts are pressed rapidly.
+        try withMockCommands(["osascript": Self.orchestratorOsaScriptMock]) {
+            try withEnv(name: "MOCK_CHROME_WINDOW_MATCHES", value: chromeMatches) {
+                try withEnv(name: "MOCK_CHROME_FOCUS_LOG_FILE", value: chromeLog.path) {
+                    try orchestrator.focusWorkspaceWindow(workspaceID: workspace.id, index: 1)
+                    try orchestrator.focusWorkspaceWindow(workspaceID: workspace.id, index: 2)
+                    try orchestrator.focusWorkspaceWindow(workspaceID: workspace.id, index: 3)
+                }
+            }
+        }
+
+        let focusedURLs = try String(contentsOf: chromeLog).split(separator: "\n").map(String.init)
+        XCTAssertEqual(
+            focusedURLs,
+            [
+                "http://localhost:3001",
+                "http://localhost:3001/admin",
+                "http://localhost:3001/admin/users",
+            ]
+        )
+    }
+
+    func testFocusWindowNavigationPrefersRememberedIndexAcrossBrowserRowsSharingWindowID() throws {
+        let (orchestrator, store, _, workspace, root) = try makeOrchestratorWithWorkspace()
+        let chromeLog = root.appendingPathComponent("browser-nav-remembered.log")
+        try store.setWorkspaceBrowserSessions(
+            workspaceID: workspace.id,
+            sessions: [
+                BrowserSession(url: "http://localhost:3001"),
+                BrowserSession(url: "http://localhost:8000/admin"),
+            ]
+        )
+        try store.upsert(
+            window: WindowRecord(
+                id: UUID().uuidString,
+                workspaceID: workspace.id,
+                app: "iTerm2",
+                title: "shell",
+                windowID: 101,
+                role: "terminal",
+                orderIndex: 200,
+                lastSeenAt: "now"
+            )
+        )
+        try store.upsert(
+            window: WindowRecord(
+                id: UUID().uuidString,
+                workspaceID: workspace.id,
+                app: "iTerm2",
+                title: "build",
+                windowID: 102,
+                role: "terminal",
+                orderIndex: 201,
+                lastSeenAt: "now"
+            )
+        )
+        let chromeMatches =
+            "202\tGoogle Chrome — localhost 3001\thttp://localhost:3001\n202\tGoogle Chrome — localhost 8000\thttp://localhost:8000/admin\n"
+
+        // Mocked dependencies: Chrome tab scan + focus calls and yabai focused-window query.
+        // Why: ensure forward navigation continues from remembered cycle index instead of oscillating between browser rows that share one window ID.
+        // Remaining risk: host-level focus races can still diverge under heavy desktop activity.
+        try withMockCommands(
+            [
+                "yabai": Self.orchestratorYabaiMockScript,
+                "osascript": Self.orchestratorOsaScriptMock,
+            ]
+        ) {
+            try withEnv(name: "MOCK_CHROME_WINDOW_MATCHES", value: chromeMatches) {
+                try withEnv(name: "MOCK_CHROME_FOCUS_LOG_FILE", value: chromeLog.path) {
+                    try withEnv(name: "YABAI_FOCUSED_ID", value: "101") {
+                        try withEnv(name: "YABAI_FOCUSED_APP", value: "iTerm2") {
+                            try orchestrator.focusNextWindow(workspaceID: workspace.id)  // terminal 102
+                            try orchestrator.focusNextWindow(workspaceID: workspace.id)  // browser 3001
+                            try orchestrator.focusNextWindow(workspaceID: workspace.id)  // browser 8000
+                        }
+                    }
+                }
+            }
+        }
+
+        let focusedURLs = try String(contentsOf: chromeLog).split(separator: "\n").map(String.init)
+        XCTAssertEqual(focusedURLs, ["http://localhost:3001", "http://localhost:8000/admin"])
+    }
+
+    func testTrackedWindowsOrdersBrowserThenTerminalThenOtherRoles() throws {
+        let (orchestrator, store, _, workspace, _) = try makeOrchestratorWithWorkspace()
+        try store.setWorkspaceBrowserSessions(
+            workspaceID: workspace.id,
+            sessions: [BrowserSession(url: "http://localhost:3001")]
+        )
+        try store.upsert(
+            window: WindowRecord(
+                id: UUID().uuidString,
+                workspaceID: workspace.id,
+                app: "Finder",
+                title: "finder",
+                windowID: 301,
+                role: "finder",
+                orderIndex: 0,
+                lastSeenAt: "now"
+            )
+        )
+        try store.upsert(
+            window: WindowRecord(
+                id: UUID().uuidString,
+                workspaceID: workspace.id,
+                app: "iTerm2",
+                title: "shell",
+                windowID: 101,
+                role: "terminal",
+                orderIndex: 200,
+                lastSeenAt: "now"
+            )
+        )
+        let chromeMatches = "202\tGoogle Chrome — localhost 3001\thttp://localhost:3001\n"
+
+        // Mocked dependency: Chrome tab scan for role-ordering behavior.
+        // Why: enforce browser-first, terminal-second, then remaining roles for window cycling.
+        // Remaining risk: none beyond scan ordering assumptions already covered elsewhere.
+        try withMockCommands(["osascript": Self.orchestratorOsaScriptMock]) {
+            try withEnv(name: "MOCK_CHROME_WINDOW_MATCHES", value: chromeMatches) {
+                let windows = try orchestrator.windows(workspaceID: workspace.id)
+                XCTAssertEqual(windows.map(\.role), ["browser", "terminal", "finder"])
+            }
+        }
+    }
+
+    func testWindowsLiveScanOrdersBrowserRowsBySessionPrefixThenURL() throws {
+        let (orchestrator, store, _, workspace, _) = try makeOrchestratorWithWorkspace()
+        try store.setWorkspaceBrowserSessions(
+            workspaceID: workspace.id,
+            sessions: [
+                BrowserSession(url: "http://localhost:3001"),
+                BrowserSession(url: "http://localhost:8000/admin"),
+            ]
+        )
+
+        let chromeMatches =
+            "303\tGoogle Chrome — localhost 8000 users\thttp://localhost:8000/admin/users\n202\tGoogle Chrome — localhost 3001 z\thttp://localhost:3001/z\n202\tGoogle Chrome — localhost 3001 a\thttp://localhost:3001/a\n404\tGoogle Chrome — localhost 8000 admin\thttp://localhost:8000/admin\n"
+
+        // Mocked dependency: Chrome tab scan for deterministic browser-row ordering.
+        // Why: ensure keyboard index shortcuts stay aligned with the rendered window list even when Chrome window order changes.
+        // Remaining risk: none beyond deterministic URL sorting assumptions enforced here.
+        try withMockCommands(["osascript": Self.orchestratorOsaScriptMock]) {
+            try withEnv(name: "MOCK_CHROME_WINDOW_MATCHES", value: chromeMatches) {
+                let windows = try orchestrator.windows(workspaceID: workspace.id)
+                let browserURLs = windows.filter { $0.role == "browser" }.compactMap(\.targetURL)
+                XCTAssertEqual(
+                    browserURLs,
+                    [
+                        "http://localhost:3001/a",
+                        "http://localhost:3001/z",
+                        "http://localhost:8000/admin",
+                        "http://localhost:8000/admin/users",
+                    ]
+                )
+            }
+        }
+    }
+
+    func testWindowsOmitsUntargetedBrowserRowsWhenTargetedRowSharesWindowID() throws {
+        let (orchestrator, store, _, workspace, _) = try makeOrchestratorWithWorkspace()
+
+        try store.upsert(
+            window: WindowRecord(
+                id: UUID().uuidString,
+                workspaceID: workspace.id,
+                app: "Google Chrome",
+                title: "localhost",
+                targetURL: "http://localhost:3001",
+                windowID: 202,
+                role: "browser",
+                orderIndex: 1,
+                lastSeenAt: "now"
+            )
+        )
+        try store.upsert(
+            window: WindowRecord(
+                id: UUID().uuidString,
+                workspaceID: workspace.id,
+                app: "Google Chrome",
+                title: "Unrelated Tab",
+                windowID: 202,
+                role: "browser",
+                orderIndex: 2,
+                lastSeenAt: "now"
+            )
+        )
+
+        let windows = try orchestrator.windows(workspaceID: workspace.id)
+        XCTAssertEqual(windows.filter { $0.role == "browser" }.count, 1)
+        XCTAssertEqual(windows.first(where: { $0.role == "browser" })?.targetURL, "http://localhost:3001")
+    }
+
+    func testFocusWindowNavigationUsesActiveBrowserTabWhenRememberedIndexIsStale() throws {
+        let (orchestrator, store, _, workspace, root) = try makeOrchestratorWithWorkspace()
+        let focusLog = root.appendingPathComponent("browser-nav-stale-focus.log")
+        let chromeLog = root.appendingPathComponent("browser-nav-stale-chrome.log")
+        let chromeActiveURL = root.appendingPathComponent("browser-nav-stale-active-url.log")
+        try "http://localhost:3001".write(to: chromeActiveURL, atomically: true, encoding: .utf8)
+
+        let terminalRowID = UUID().uuidString
+        try store.upsert(
+            window: WindowRecord(
+                id: terminalRowID,
+                workspaceID: workspace.id,
+                app: "iTerm2",
+                title: "shell",
+                windowID: 101,
+                role: "terminal",
+                orderIndex: 0,
+                lastSeenAt: "now"
+            )
+        )
+        try store.upsert(
+            window: WindowRecord(
+                id: UUID().uuidString,
+                workspaceID: workspace.id,
+                app: "Google Chrome",
+                title: "localhost-3001",
+                targetURL: "http://localhost:3001",
+                windowID: 202,
+                role: "browser",
+                orderIndex: 1,
+                lastSeenAt: "now"
+            )
+        )
+        try store.upsert(
+            window: WindowRecord(
+                id: UUID().uuidString,
+                workspaceID: workspace.id,
+                app: "Google Chrome",
+                title: "localhost-8000",
+                targetURL: "http://localhost:8000/admin",
+                windowID: 202,
+                role: "browser",
+                orderIndex: 2,
+                lastSeenAt: "now"
+            )
+        )
+
+        // Mocked dependencies: Chrome active-tab focus/read + yabai focused-window query.
+        // Why: ensure next-window navigation uses the actual active tab URL when multiple tracked tabs share one window.
+        // Remaining risk: live Chrome/yabai timing races can still diverge from this deterministic harness.
+        try withMockCommands(
+            [
+                "yabai": Self.orchestratorYabaiMockScript,
+                "osascript": Self.orchestratorOsaScriptMock,
+            ]
+        ) {
+            try withEnv(name: "YABAI_FOCUS_LOG_FILE", value: focusLog.path) {
+                try withEnv(name: "MOCK_CHROME_FOCUS_LOG_FILE", value: chromeLog.path) {
+                    try withEnv(name: "MOCK_CHROME_ACTIVE_URL_FILE", value: chromeActiveURL.path) {
+                        try orchestrator.focusWorkspaceWindow(workspaceID: workspace.id, index: 3)
+                        try store.deleteWindow(id: terminalRowID)
+                        try "http://localhost:3001".write(to: chromeActiveURL, atomically: true, encoding: .utf8)
+                        try withEnv(name: "YABAI_FOCUSED_ID", value: "202") {
+                            try withEnv(name: "YABAI_FOCUSED_APP", value: "Google Chrome") {
+                                try orchestrator.focusNextWindow(workspaceID: workspace.id)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        let chromeURLs = try String(contentsOf: chromeLog).split(separator: "\n").map(String.init)
+        XCTAssertEqual(chromeURLs, ["http://localhost:8000/admin", "http://localhost:8000/admin"])
+        if FileManager.default.fileExists(atPath: focusLog.path) {
+            let focusedIDs = try String(contentsOf: focusLog).split(separator: "\n").map(String.init)
+            XCTAssertTrue(focusedIDs.isEmpty)
+        }
+    }
+
+    func testLaunchWorkspaceTracksAllTerminalWindowsFromRunningProcesses() throws {
+        let (orchestrator, store, _, workspace, root) = try makeOrchestratorWithWorkspace()
+        let itermWindowIDsFile = root.appendingPathComponent("iterm-window-ids.txt")
+        let runtimeDir = root.appendingPathComponent("runtime", isDirectory: true)
+        try "701,702".write(to: itermWindowIDsFile, atomically: true, encoding: .utf8)
+
+        try store.setWorkspaceProcesses(
+            workspaceID: workspace.id,
+            processes: [
+                ProcessTemplate(name: "one", command: "echo one"),
+                ProcessTemplate(name: "two", command: "echo two"),
+            ]
+        )
+
+        let windowsJSON =
+            "[{\"id\":701,\"pid\":71,\"app\":\"iTerm2\",\"title\":\"one\",\"space\":1,\"display\":1,\"is-sticky\":false,\"is-hidden\":false,\"is-visible\":true,\"is-native-fullscreen\":false},{\"id\":702,\"pid\":72,\"app\":\"iTerm2\",\"title\":\"two\",\"space\":1,\"display\":1,\"is-sticky\":false,\"is-hidden\":false,\"is-visible\":true,\"is-native-fullscreen\":false}]"
+
+        // Mocked dependencies: iTerm window creation IDs and yabai window snapshots.
+        // Why: ensure launch records all terminal windows even when snapshot-diff capture misses them.
+        // Remaining risk: real timing differences between iTerm and yabai updates may still need tuning.
+        try withMockCommands(
+            [
+                "yabai": Self.orchestratorYabaiMockScript,
+                "osascript": Self.orchestratorOsaScriptMock,
+            ]
+        ) {
+            try withEnv(name: "AGENTMUX_RUNTIME_DIR", value: runtimeDir.path) {
+                try withEnv(name: "MOCK_ITERM_WINDOW_IDS_FILE", value: itermWindowIDsFile.path) {
+                    try withEnv(name: "YABAI_WINDOWS_JSON", value: windowsJSON) {
+                        try orchestrator.launchWorkspace(workspaceID: workspace.id)
+                    }
+                }
+            }
+        }
+
+        let terminalWindows = try orchestrator.windows(workspaceID: workspace.id).filter { $0.role == "terminal" }
+        XCTAssertEqual(terminalWindows.count, 2)
+        XCTAssertEqual(Set(terminalWindows.compactMap(\.windowID)), Set([701, 702]))
+    }
+
+    func testLaunchWorkspaceReusesExistingBrowserMatchesAndTracksAllMatchingTabs() throws {
+        let (orchestrator, store, _, workspace, root) = try makeOrchestratorWithWorkspace()
+        let chromeOpenLog = root.appendingPathComponent("chrome-open.log")
+
+        try store.setWorkspaceBrowserSessions(
+            workspaceID: workspace.id,
+            sessions: [
+                BrowserSession(url: "http://localhost:3001")
+            ]
+        )
+
+        let chromeMatches =
+            "202\tGoogle Chrome — localhost 3001\thttp://localhost:3001\n202\tGoogle Chrome — localhost 8000\thttp://localhost:8000/admin\n303\tGoogle Chrome — localhost 3001 docs\thttp://localhost:3001/docs\n"
+
+        // Mocked dependencies: Chrome match discovery + launch path window capture.
+        // Why: assert launch reuses existing matching tabs and tracks every match for cycling.
+        // Remaining risk: real-world Chrome/yabai timing can differ from deterministic mock ordering.
+        try withMockCommands(
+            [
+                "yabai": Self.orchestratorYabaiMockScript,
+                "osascript": Self.orchestratorOsaScriptMock,
+            ]
+        ) {
+            try withEnv(name: "MOCK_CHROME_WINDOW_MATCHES", value: chromeMatches) {
+                try withEnv(name: "MOCK_CHROME_OPEN_LOG_FILE", value: chromeOpenLog.path) {
+                    try orchestrator.launchWorkspace(workspaceID: workspace.id)
+                }
+            }
+        }
+
+        let browserWindows = try store.windows(workspaceID: workspace.id).filter { $0.role == "browser" }
+        XCTAssertEqual(browserWindows.count, 3)
+        XCTAssertEqual(
+            Set(browserWindows.compactMap(\.targetURL)),
+            Set(["http://localhost:3001", "http://localhost:8000/admin", "http://localhost:3001/docs"])
+        )
+        if FileManager.default.fileExists(atPath: chromeOpenLog.path) {
+            let openLog = try String(contentsOf: chromeOpenLog).trimmingCharacters(in: .whitespacesAndNewlines)
+            XCTAssertTrue(openLog.isEmpty)
+        }
     }
 
     func testWorkspaceIDForFocusedWindowMapsFromYabai() throws {
@@ -717,6 +1308,58 @@ final class OrchestratorTests: XCTestCase {
 
             try withEnv(name: "YABAI_FOCUSED_NONE", value: "1") {
                 XCTAssertNil(try orchestrator.workspaceIDForFocusedWindow())
+            }
+        }
+    }
+
+    func testWorkspaceIDForFocusedChromeWindowUsesActiveTabURLMatch() throws {
+        let (orchestrator, store, project, workspace, root) = try makeOrchestratorWithWorkspace()
+        let otherWorkspace = try orchestrator.createWorkspace(projectID: project.id, name: "other")
+        let chromeActiveURL = root.appendingPathComponent("workspace-focus-chrome-url.log")
+        try "http://localhost:3001/docs".write(to: chromeActiveURL, atomically: true, encoding: .utf8)
+
+        try store.upsert(
+            window: WindowRecord(
+                id: UUID().uuidString,
+                workspaceID: otherWorkspace.id,
+                app: "Google Chrome",
+                title: "other",
+                targetURL: "http://localhost:5000",
+                windowID: 202,
+                role: "browser",
+                orderIndex: 0,
+                lastSeenAt: "2026-02-12T00:00:00Z"
+            )
+        )
+        try store.upsert(
+            window: WindowRecord(
+                id: UUID().uuidString,
+                workspaceID: workspace.id,
+                app: "Google Chrome",
+                title: "feature",
+                targetURL: "http://localhost:3001",
+                windowID: 202,
+                role: "browser",
+                orderIndex: 0,
+                lastSeenAt: "2026-02-12T00:00:01Z"
+            )
+        )
+
+        // Mocked dependencies: focused-window query from `yabai` and active-tab URL from Chrome AppleScript.
+        // Why: ensure global next/previous resolves the correct workspace when one Chrome window is tracked by multiple workspaces.
+        // Remaining risk: runtime races between yabai and Chrome focus events are not represented in this deterministic harness.
+        try withMockCommands(
+            [
+                "yabai": Self.orchestratorYabaiMockScript,
+                "osascript": Self.orchestratorOsaScriptMock,
+            ]
+        ) {
+            try withEnv(name: "YABAI_FOCUSED_ID", value: "202") {
+                try withEnv(name: "YABAI_FOCUSED_APP", value: "Google Chrome") {
+                    try withEnv(name: "MOCK_CHROME_ACTIVE_URL_FILE", value: chromeActiveURL.path) {
+                        XCTAssertEqual(try orchestrator.workspaceIDForFocusedWindow(), workspace.id)
+                    }
+                }
             }
         }
     }
@@ -919,6 +1562,85 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertTrue(try orchestrator.runningProcesses(workspaceID: workspace.id).isEmpty)
     }
 
+    func testLaunchWorkspaceThrowsWhenRuntimeIndicatorsExist() throws {
+        let (orchestrator, store, _, workspace, _) = try makeOrchestratorWithWorkspace()
+        try store.upsert(
+            runningProcess: RunningProcessRecord(
+                id: UUID().uuidString,
+                workspaceID: workspace.id,
+                templateName: "api",
+                command: "npm run api",
+                terminalApp: "iTerm2",
+                windowID: 701,
+                pid: nil,
+                status: .running,
+                logPath: nil,
+                lastOutputAt: nil,
+                startedAt: "now",
+                exitedAt: nil
+            )
+        )
+
+        XCTAssertThrowsError(try orchestrator.launchWorkspace(workspaceID: workspace.id))
+    }
+
+    func testLaunchWorkspaceWithoutProcessesDoesNotRequireITerm() throws {
+        let (orchestrator, store, _, workspace, _) = try makeOrchestratorWithWorkspace()
+
+        try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) {
+            try orchestrator.launchWorkspace(workspaceID: workspace.id)
+        }
+
+        XCTAssertTrue(try orchestrator.runningProcesses(workspaceID: workspace.id).isEmpty)
+        XCTAssertEqual(try store.workspace(id: workspace.id)?.isRunning, true)
+    }
+
+    func testRestartWorkspaceStopsThenLaunches() throws {
+        let (orchestrator, store, _, workspace, _) = try makeOrchestratorWithWorkspace()
+        try store.updateWorkspaceRunning(id: workspace.id, isRunning: true, launchedAt: "now")
+        try store.upsert(
+            window: WindowRecord(
+                id: UUID().uuidString,
+                workspaceID: workspace.id,
+                app: "iTerm2",
+                title: "shell",
+                windowID: 501,
+                role: "terminal",
+                orderIndex: 0,
+                lastSeenAt: "now"
+            )
+        )
+        try store.upsert(
+            runningProcess: RunningProcessRecord(
+                id: UUID().uuidString,
+                workspaceID: workspace.id,
+                templateName: "old",
+                command: "echo old",
+                terminalApp: "iTerm2",
+                windowID: 501,
+                pid: nil,
+                status: .running,
+                logPath: nil,
+                lastOutputAt: nil,
+                startedAt: "now",
+                exitedAt: nil
+            )
+        )
+
+        try withMockCommands(
+            [
+                "yabai": Self.orchestratorYabaiMockScript,
+                "osascript": Self.orchestratorOsaScriptMock,
+            ]
+        ) {
+            try orchestrator.restartWorkspace(workspaceID: workspace.id)
+        }
+
+        let running = try orchestrator.runningProcesses(workspaceID: workspace.id)
+        XCTAssertTrue(running.isEmpty)
+        XCTAssertEqual(try store.workspace(id: workspace.id)?.isRunning, true)
+    }
+
     func testLaunchWorkspaceRejectsArchivedWorkspace() throws {
         let (orchestrator, _, _, workspace, _) = try makeOrchestratorWithWorkspace()
         try orchestrator.archiveWorkspace(workspaceID: workspace.id)
@@ -1112,6 +1834,21 @@ final class OrchestratorTests: XCTestCase {
         fi
 
         if [[ "$script" == *'create window with default profile'* ]]; then
+          if [[ -n "${MOCK_ITERM_WINDOW_IDS_FILE:-}" ]]; then
+            ids="$(cat "$MOCK_ITERM_WINDOW_IDS_FILE" 2>/dev/null)"
+            if [[ -z "$ids" ]]; then
+              ids="${MOCK_ITERM_WINDOW_ID:-701}"
+            fi
+            first="${ids%%,*}"
+            if [[ "$ids" == *","* ]]; then
+              rest="${ids#*,}"
+            else
+              rest="$first"
+            fi
+            echo "$rest" > "$MOCK_ITERM_WINDOW_IDS_FILE"
+            echo "$first"
+            exit 0
+          fi
           echo "${MOCK_ITERM_WINDOW_ID:-701}"
           exit 0
         fi
@@ -1122,11 +1859,48 @@ final class OrchestratorTests: XCTestCase {
         fi
 
         if [[ "$script" == *'set output to ""'* ]]; then
-          echo ""
+          if [[ -n "${MOCK_CHROME_WINDOW_MATCHES:-}" ]]; then
+            printf "%b" "$MOCK_CHROME_WINDOW_MATCHES"
+          else
+            echo ""
+          fi
+          exit 0
+        fi
+
+        if [[ "$script" == *'set tabCount to count of tabs of w'* ]]; then
+          focused_url="$(printf '%s\n' "$script" | awk -F'starts with \"' 'NF>1 { sub(/\".*/, "", $2); print $2; exit }')"
+          if [[ -z "$focused_url" ]]; then
+            focused_url="$(printf '%s\n' "$script" | awk -F'u is \"' 'NF>1 { sub(/\".*/, "", $2); print $2; exit }')"
+          fi
+          focused_window_id="$(printf '%s\n' "$script" | grep -Eo 'if id of w is [0-9]+ then' | awk '{print $6}' | head -n1)"
+          if [[ -n "$focused_window_id" && -n "${MOCK_CHROME_FOCUS_WINDOW_LOG_FILE:-}" ]]; then
+            echo "$focused_window_id" >> "$MOCK_CHROME_FOCUS_WINDOW_LOG_FILE"
+          fi
+          if [[ -n "$focused_url" ]]; then
+            if [[ -n "${MOCK_CHROME_FOCUS_LOG_FILE:-}" ]]; then
+              echo "$focused_url" >> "$MOCK_CHROME_FOCUS_LOG_FILE"
+            fi
+            if [[ -n "${MOCK_CHROME_ACTIVE_URL_FILE:-}" ]]; then
+              echo "$focused_url" > "$MOCK_CHROME_ACTIVE_URL_FILE"
+            fi
+          fi
+          echo "${MOCK_CHROME_FOCUS_RESULT:-1}"
+          exit 0
+        fi
+
+        if [[ "$script" == *'URL of active tab of front window'* ]]; then
+          if [[ -n "${MOCK_CHROME_ACTIVE_URL_FILE:-}" && -f "${MOCK_CHROME_ACTIVE_URL_FILE}" ]]; then
+            cat "${MOCK_CHROME_ACTIVE_URL_FILE}"
+          else
+            echo "${MOCK_CHROME_ACTIVE_URL:-}"
+          fi
           exit 0
         fi
 
         if [[ "$script" == *'set URL of active tab of newWindow'* ]]; then
+          if [[ -n "${MOCK_CHROME_OPEN_LOG_FILE:-}" ]]; then
+            echo "$script" >> "$MOCK_CHROME_OPEN_LOG_FILE"
+          fi
           echo "88"
           exit 0
         fi

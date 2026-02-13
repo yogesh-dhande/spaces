@@ -64,8 +64,14 @@ Updates to workspace settings apply immediately when the workspace is running (n
 - If the branch exists locally, agentmux uses the local branch as-is (no implicit pull/rebase/merge during workspace creation).
 - Workspace rows in the left pane show workspace name and a second-line branch label with a branch icon.
 - Workspace view includes:
-  - Launch/Stop/Archive buttons
+  - Launch/Restart/Stop/Archive buttons
   - Open Editor/Terminal/Finder buttons (editor/terminal windows are tracked for cycling)
+  - Browser session entries track target URLs and focus the matching Chrome tab during window navigation
+  - Launch/Restart reuses existing matching Chrome tabs and tracks all matches instead of opening duplicate tabs when matches already exist
+  - Workspace window list/navigation rescans Chrome tabs each time and includes tabs whose URLs start with configured browser session URLs (deduped by window+tab URL)
+  - Browser tab rows are sorted by configured browser-session order and then URL so shortcut indices remain stable
+  - Window cycling order is browser tabs first, then terminals, then other windows; once cycling starts, next/previous uses remembered cycle position
+  - Global next/previous window navigation disambiguates reused Chrome windows by active tab URL, so shortcuts stay on the correct workspace
   - Processes and status
   - Windows list with shortcut hints
   - Env vars/ports tab
@@ -76,6 +82,7 @@ Updates to workspace settings apply immediately when the workspace is running (n
 
 Hotkeys:
 - Global focus: `cmd+shift+=`
+  - When this hotkey brings agentmux to front, the selected workspace detail is refreshed so the windows list shows current Chrome tab matches
 - Next running workspace: `cmd+shift+]`
 - Previous running workspace: `cmd+shift+[`
 - Activate selected workspace: `cmd+shift+return`
@@ -85,6 +92,8 @@ Hotkeys:
 - Focus workspace window 1-9: `cmd+1` through `cmd+9`
 
 When text input is focused in the GUI, standard editing shortcuts (including `cmd+v`) are handled normally.
+
+Set `AGENTMUX_DEBUG_BROWSER_SCAN=1` when launching agentmux to log Chrome scan timing (`tabs`, `matches`, `elapsed_ms`) to stderr.
 
 ## CLI
 ```bash
@@ -100,6 +109,7 @@ agentmux project remove --dir /path/to/repo
 agentmux workspace list --project-dir /path/to/repo --all
 agentmux workspace create --project-dir /path/to/repo --name feature-x [--branch feature-branch] [--target-branch main]
 agentmux workspace launch --project-dir /path/to/repo --name feature-x
+agentmux workspace restart --project-dir /path/to/repo --name feature-x
 agentmux workspace stop --project-dir /path/to/repo --name feature-x
 agentmux workspace archive --project-dir /path/to/repo --name feature-x
 agentmux workspace activate --project-dir /path/to/repo --name feature-x
