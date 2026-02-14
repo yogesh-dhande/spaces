@@ -1,9 +1,7 @@
 import Foundation
 
 public enum DatabaseLocator {
-    public static func defaultPath() throws -> String {
-        return try defaultPath(homeDirectoryURL: FileManager.default.homeDirectoryForCurrentUser)
-    }
+    public static func defaultPath() throws -> String { return try defaultPath(homeDirectoryURL: FileManager.default.homeDirectoryForCurrentUser) }
 
     static func defaultPath(homeDirectoryURL: URL) throws -> String {
         let dir = homeDirectoryURL.appendingPathComponent(".spaceship", isDirectory: true)

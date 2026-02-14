@@ -3,9 +3,7 @@ import Foundation
 public final class ChromeAdapter {
     public init() {}
 
-    public func isAvailable() -> Bool {
-        (try? AppleScript.run("tell application \"Google Chrome\" to version")) != nil
-    }
+    public func isAvailable() -> Bool { (try? AppleScript.run("tell application \"Google Chrome\" to version")) != nil }
 
     public func openWindow(url: String) throws -> Int {
         let escaped = url.replacingOccurrences(of: "\"", with: "\\\"")
@@ -21,13 +19,9 @@ public final class ChromeAdapter {
         return Int(output.trimmingCharacters(in: .whitespacesAndNewlines)) ?? -1
     }
 
-    public func windowMatches(forURLPrefix prefix: String) throws -> [ChromeWindowMatch] {
-        try queryTabs(urlPrefix: prefix)
-    }
+    public func windowMatches(forURLPrefix prefix: String) throws -> [ChromeWindowMatch] { try queryTabs(urlPrefix: prefix) }
 
-    public func allTabs() throws -> [ChromeWindowMatch] {
-        try queryTabs(urlPrefix: nil)
-    }
+    public func allTabs() throws -> [ChromeWindowMatch] { try queryTabs(urlPrefix: nil) }
 
     public func focusTab(forURLPrefix prefix: String) throws -> Bool {
         let escaped = prefix.replacingOccurrences(of: "\"", with: "\\\"")
@@ -321,10 +315,7 @@ public final class ChromeAdapter {
         var syntheticTabIndexByWindow: [Int: Int] = [:]
         for line in output.split(separator: "\n") {
             let parts = line.split(separator: "\t", maxSplits: 3).map(String.init)
-            if parts.count == 4,
-                let windowID = Int(parts[0]),
-                let tabIndex = Int(parts[1])
-            {
+            if parts.count == 4, let windowID = Int(parts[0]), let tabIndex = Int(parts[1]) {
                 parsed.append(ChromeWindowMatch(windowID: windowID, tabIndex: tabIndex, title: parts[2], url: parts[3]))
                 continue
             }

@@ -15,18 +15,8 @@ public struct RunningProcessRecord: Codable, Sendable {
     public let exitedAt: String?
 
     public init(
-        id: String,
-        workspaceID: String,
-        templateName: String,
-        command: String,
-        terminalApp: String?,
-        windowID: Int?,
-        pid: Int?,
-        status: RunningProcessState,
-        logPath: String?,
-        lastOutputAt: String?,
-        startedAt: String?,
-        exitedAt: String?
+        id: String, workspaceID: String, templateName: String, command: String, terminalApp: String?, windowID: Int?, pid: Int?,
+        status: RunningProcessState, logPath: String?, lastOutputAt: String?, startedAt: String?, exitedAt: String?
     ) {
         self.id = id
         self.workspaceID = workspaceID

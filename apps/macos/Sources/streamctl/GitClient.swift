@@ -4,18 +4,12 @@ import appctl
 public final class GitClient {
     public init() {}
 
-    public func isRepo(path: String) -> Bool {
-        (try? runGitAndCapture(["-C", path, "rev-parse", "--is-inside-work-tree"])) != nil
-    }
+    public func isRepo(path: String) -> Bool { (try? runGitAndCapture(["-C", path, "rev-parse", "--is-inside-work-tree"])) != nil }
 
     public func defaultBranch(path: String) -> String? {
-        if let output = try? runGitAndCapture([
-            "-C", path, "symbolic-ref", "--short", "refs/remotes/origin/HEAD",
-        ]) {
+        if let output = try? runGitAndCapture(["-C", path, "symbolic-ref", "--short", "refs/remotes/origin/HEAD"]) {
             let trimmed = output.trimmingCharacters(in: .whitespacesAndNewlines)
-            if let slash = trimmed.split(separator: "/").last {
-                return String(slash)
-            }
+            if let slash = trimmed.split(separator: "/").last { return String(slash) }
         }
         if branchExists(path: path, branch: "main") { return "main" }
         if branchExists(path: path, branch: "master") { return "master" }
@@ -38,14 +32,11 @@ public final class GitClient {
             let values = local.split(separator: "\n").map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
             branches.formUnion(values.filter { !$0.isEmpty })
         }
-        if let remote = try? runGitAndCapture(["-C", path, "for-each-ref", "--format=%(refname:short)", "refs/remotes/origin"])
-        {
+        if let remote = try? runGitAndCapture(["-C", path, "for-each-ref", "--format=%(refname:short)", "refs/remotes/origin"]) {
             for raw in remote.split(separator: "\n") {
                 let trimmed = String(raw).trimmingCharacters(in: .whitespacesAndNewlines)
                 guard !trimmed.isEmpty, trimmed != "origin/HEAD" else { continue }
-                if let stripped = trimmed.replacingPrefix("origin/"), !stripped.isEmpty {
-                    branches.insert(stripped)
-                }
+                if let stripped = trimmed.replacingPrefix("origin/"), !stripped.isEmpty { branches.insert(stripped) }
             }
         }
         // Include live remote heads so newly created remote branches appear even before local fetch.
@@ -54,37 +45,24 @@ public final class GitClient {
                 let columns = raw.split(separator: "\t", omittingEmptySubsequences: true)
                 guard columns.count == 2 else { continue }
                 let ref = String(columns[1]).trimmingCharacters(in: .whitespacesAndNewlines)
-                if let branch = ref.replacingPrefix("refs/heads/"), !branch.isEmpty {
-                    branches.insert(branch)
-                }
+                if let branch = ref.replacingPrefix("refs/heads/"), !branch.isEmpty { branches.insert(branch) }
             }
         }
-        if let defaultBranch = defaultBranch(path: path), !defaultBranch.isEmpty {
-            branches.insert(defaultBranch)
-        }
-        return branches.sorted { lhs, rhs in
-            lhs.localizedStandardCompare(rhs) == .orderedAscending
-        }
+        if let defaultBranch = defaultBranch(path: path), !defaultBranch.isEmpty { branches.insert(defaultBranch) }
+        return branches.sorted { lhs, rhs in lhs.localizedStandardCompare(rhs) == .orderedAscending }
     }
 
     public func trackedFileActivity(path: String) -> GitTrackedFileActivity {
-        guard isRepo(path: path) else {
-            return GitTrackedFileActivity(latestTrackedFileModificationDate: nil, modifiedTrackedFileCount: 0)
-        }
+        guard isRepo(path: path) else { return GitTrackedFileActivity(latestTrackedFileModificationDate: nil, modifiedTrackedFileCount: 0) }
 
         let trackedPaths = trackedFilePaths(path: path)
         let latestModificationDate = latestTrackedFileModificationDate(path: path, trackedPaths: trackedPaths)
         let modifiedTrackedFileCount = modifiedTrackedFileCount(path: path)
 
-        return GitTrackedFileActivity(
-            latestTrackedFileModificationDate: latestModificationDate,
-            modifiedTrackedFileCount: modifiedTrackedFileCount
-        )
+        return GitTrackedFileActivity(latestTrackedFileModificationDate: latestModificationDate, modifiedTrackedFileCount: modifiedTrackedFileCount)
     }
 
-    public func createWorktree(path repoPath: String, worktreePath: String, branch: String, targetBranch: String? = nil)
-        throws
-    {
+    public func createWorktree(path repoPath: String, worktreePath: String, branch: String, targetBranch: String? = nil) throws {
         if branchExists(path: repoPath, branch: branch) {
             try runGitOrThrow(["-C", repoPath, "worktree", "add", worktreePath, branch])
             return
@@ -105,13 +83,9 @@ public final class GitClient {
         try runGitOrThrow(["-C", repoPath, "worktree", "remove", "--force", worktreePath])
     }
 
-    public func clone(url: String, destination: String) throws {
-        try runGitOrThrow(["clone", url, destination])
-    }
+    public func clone(url: String, destination: String) throws { try runGitOrThrow(["clone", url, destination]) }
 
-    public func deleteBranch(path repoPath: String, branch: String) {
-        _ = try? runGit(["-C", repoPath, "branch", "-D", branch])
-    }
+    public func deleteBranch(path repoPath: String, branch: String) { _ = try? runGit(["-C", repoPath, "branch", "-D", branch]) }
 
     private func runGit(_ arguments: [String]) throws -> Int32 {
         let process = makeGitProcess(arguments)
@@ -131,8 +105,7 @@ public final class GitClient {
         let outputData = out.fileHandleForReading.readDataToEndOfFile()
         if process.terminationStatus != 0 {
             let errData = err.fileHandleForReading.readDataToEndOfFile()
-            let message =
-                String(data: errData, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "unknown"
+            let message = String(data: errData, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "unknown"
             throw SpaceshipError.gitCommandFailed(message: message)
         }
         return String(data: outputData, encoding: .utf8) ?? ""
@@ -151,36 +124,27 @@ public final class GitClient {
 
         if process.terminationStatus != 0 {
             let errData = err.fileHandleForReading.readDataToEndOfFile()
-            let message =
-                String(data: errData, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "unknown"
+            let message = String(data: errData, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "unknown"
             throw SpaceshipError.gitCommandFailed(message: message)
         }
     }
 
     private func resolveStartPoint(path: String, targetBranch: String?) throws -> String? {
-        guard let targetBranch = targetBranch?.trimmingCharacters(in: .whitespacesAndNewlines), !targetBranch.isEmpty else {
-            return nil
-        }
+        guard let targetBranch = targetBranch?.trimmingCharacters(in: .whitespacesAndNewlines), !targetBranch.isEmpty else { return nil }
         if remoteBranchExists(path: path, branch: targetBranch) {
             try fetchRemoteBranch(path: path, branch: targetBranch)
             return "origin/\(targetBranch)"
         }
-        if branchExists(path: path, branch: targetBranch) {
-            return targetBranch
-        }
+        if branchExists(path: path, branch: targetBranch) { return targetBranch }
         throw SpaceshipError.invalidArgument(message: "Target branch not found: \(targetBranch)")
     }
 
     private func fetchRemoteBranch(path: String, branch: String) throws {
-        try runGitOrThrow([
-            "-C", path, "fetch", "origin", "refs/heads/\(branch):refs/remotes/origin/\(branch)",
-        ])
+        try runGitOrThrow(["-C", path, "fetch", "origin", "refs/heads/\(branch):refs/remotes/origin/\(branch)"])
     }
 
     private func trackedFilePaths(path: String) -> [String] {
-        guard let output = try? runGitAndCapture(["-C", path, "ls-files", "-z"]) else {
-            return []
-        }
+        guard let output = try? runGitAndCapture(["-C", path, "ls-files", "-z"]) else { return [] }
         return parseNullSeparatedOutput(output)
     }
 
@@ -194,13 +158,9 @@ public final class GitClient {
             let fileURL = rootURL.appending(path: trackedPath)
             guard let attributes = try? fileManager.attributesOfItem(atPath: fileURL.path),
                 let modificationDate = attributes[.modificationDate] as? Date
-            else {
-                continue
-            }
+            else { continue }
             if let existingLatestDate = latestDate {
-                if modificationDate > existingLatestDate {
-                    latestDate = modificationDate
-                }
+                if modificationDate > existingLatestDate { latestDate = modificationDate }
             } else {
                 latestDate = modificationDate
             }
@@ -217,19 +177,13 @@ public final class GitClient {
 
     private func trackedDiffPaths(path: String, includeStaged: Bool) -> Set<String> {
         var arguments = ["-C", path, "diff", "--name-only", "-z"]
-        if includeStaged {
-            arguments.insert("--cached", at: 3)
-        }
-        guard let output = try? runGitAndCapture(arguments) else {
-            return []
-        }
+        if includeStaged { arguments.insert("--cached", at: 3) }
+        guard let output = try? runGitAndCapture(arguments) else { return [] }
         return Set(parseNullSeparatedOutput(output))
     }
 
     private func parseNullSeparatedOutput(_ output: String) -> [String] {
-        output
-            .split(separator: "\u{0}", omittingEmptySubsequences: true)
-            .map { String($0) }
+        output.split(separator: "\u{0}", omittingEmptySubsequences: true).map { String($0) }
     }
 
     private func makeGitProcess(_ arguments: [String]) -> Process {
@@ -249,8 +203,8 @@ public final class GitClient {
     }
 }
 
-private extension String {
-    func replacingPrefix(_ prefix: String) -> String? {
+extension String {
+    fileprivate func replacingPrefix(_ prefix: String) -> String? {
         guard hasPrefix(prefix) else { return nil }
         return String(dropFirst(prefix.count))
     }

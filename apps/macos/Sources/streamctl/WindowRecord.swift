@@ -12,14 +12,7 @@ public struct WindowRecord: Sendable {
     public let lastSeenAt: String
 
     public init(
-        id: String,
-        workspaceID: String,
-        app: String,
-        title: String?,
-        targetURL: String? = nil,
-        windowID: Int?,
-        role: String,
-        orderIndex: Int,
+        id: String, workspaceID: String, app: String, title: String?, targetURL: String? = nil, windowID: Int?, role: String, orderIndex: Int,
         lastSeenAt: String
     ) {
         self.id = id

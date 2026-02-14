@@ -7,9 +7,7 @@ public struct WorkspaceSettings: Sendable {
     public var browserSessions: [BrowserSession]
 
     public init(
-        stopScript: String? = nil,
-        processes: [ProcessTemplate] = [],
-        statusChecks: [StatusCheckDefinition] = [],
+        stopScript: String? = nil, processes: [ProcessTemplate] = [], statusChecks: [StatusCheckDefinition] = [],
         browserSessions: [BrowserSession] = []
     ) {
         self.stopScript = stopScript

@@ -2,8 +2,7 @@ import Foundation
 import streamctl
 
 func makeTempDirectory() throws -> URL {
-    let base = FileManager.default.temporaryDirectory
-        .appendingPathComponent(UUID().uuidString, isDirectory: true)
+    let base = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
     try FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
     return base
 }
@@ -18,19 +17,8 @@ func makeProjectRecord(id: String = UUID().uuidString, dir: String) -> ProjectRe
     ProjectRecord(id: id, name: "Project", dir: dir, isGitRepo: false, defaultBranch: nil)
 }
 
-func makeWorkspaceRecord(id: String = UUID().uuidString, projectID: String, name: String, dir: String)
-    -> WorkspaceRecord
-{
+func makeWorkspaceRecord(id: String = UUID().uuidString, projectID: String, name: String, dir: String) -> WorkspaceRecord {
     WorkspaceRecord(
-        id: id,
-        projectID: projectID,
-        name: name,
-        dir: dir,
-        dirname: nil,
-        branch: nil,
-        isDefault: false,
-        isArchived: false,
-        isRunning: false,
-        lastLaunchedAt: nil
-    )
+        id: id, projectID: projectID, name: name, dir: dir, dirname: nil, branch: nil, isDefault: false, isArchived: false, isRunning: false,
+        lastLaunchedAt: nil)
 }

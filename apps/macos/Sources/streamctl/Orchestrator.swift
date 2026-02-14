@@ -1,5 +1,5 @@
-import Foundation
 import Darwin
+import Foundation
 import appctl
 
 public final class SpaceshipOrchestrator {
@@ -37,16 +37,9 @@ public final class SpaceshipOrchestrator {
     private var browserWindowScanCacheByWorkspace: [String: BrowserWindowScanCacheEntry] = [:]
 
     public init(
-        store: SQLiteStore,
-        configStore: ConfigStore,
-        projectsRootDirectory: URL? = nil,
-        workspacesRootDirectory: URL? = nil,
-        git: GitClient = .init(),
-        yabai: YabaiAdapter = .init(),
-        iterm: Iterm2Adapter = .init(),
-        chrome: ChromeAdapter = .init(),
-        browserWindowScanDebounceInterval: TimeInterval = 10,
-        currentDate: @escaping () -> Date = Date.init
+        store: SQLiteStore, configStore: ConfigStore, projectsRootDirectory: URL? = nil, workspacesRootDirectory: URL? = nil,
+        git: GitClient = .init(), yabai: YabaiAdapter = .init(), iterm: Iterm2Adapter = .init(), chrome: ChromeAdapter = .init(),
+        browserWindowScanDebounceInterval: TimeInterval = 10, currentDate: @escaping () -> Date = Date.init
     ) {
         self.store = store
         self.configStore = configStore
@@ -58,13 +51,10 @@ public final class SpaceshipOrchestrator {
         self.workspacesRootDirectoryURL = workspacesRootDirectory
         self.browserWindowScanDebounceInterval = browserWindowScanDebounceInterval
         self.currentDate = currentDate
-        if ProcessInfo.processInfo.environment["DEBUG"] == "1" {
-            fputs("spaceship: DEBUG=1 enabled (browser scan/focus profiling active)\n", stderr)
-        }
+        if ProcessInfo.processInfo.environment["DEBUG"] == "1" { fputs("spaceship: DEBUG=1 enabled (browser scan/focus profiling active)\n", stderr) }
     }
 
-    @discardableResult
-    public func syncConfig() throws -> AppConfig {
+    @discardableResult public func syncConfig() throws -> AppConfig {
         var config = try configStore.load()
         var normalizedProjects: [NormalizedProject] = []
         var normalizedConfigs: [ProjectConfig] = []
@@ -75,9 +65,7 @@ public final class SpaceshipOrchestrator {
                 let normalized = try normalize(project: project)
                 normalizedProjects.append(normalized)
                 normalizedConfigs.append(normalized.config)
-                if normalizePath(project.dir) != normalized.config.dir {
-                    updatedPaths = true
-                }
+                if normalizePath(project.dir) != normalized.config.dir { updatedPaths = true }
             } catch {
                 fputs("spaceship: skipped project due to error: \(error.localizedDescription)\n", stderr)
                 removedInvalid = true
@@ -86,29 +74,23 @@ public final class SpaceshipOrchestrator {
         config.projects = normalizedConfigs
         let keepIDs = Set(normalizedProjects.map(\.id))
         let existing = try store.projects()
-        for project in existing where !keepIDs.contains(project.id) {
-            try store.deleteProject(id: project.id)
-        }
+        for project in existing where !keepIDs.contains(project.id) { try store.deleteProject(id: project.id) }
         for project in normalizedProjects {
             try store.upsert(project: project.record)
             try ensureDefaultWorkspace(for: project.record)
             try ensureWorkspaceSettings(for: project.record, config: project.config)
         }
-        if removedInvalid || updatedPaths {
-            try configStore.save(config)
-        }
+        if removedInvalid || updatedPaths { try configStore.save(config) }
         return config
     }
 
     public func listProjects() throws -> [ProjectSummary] {
         return try store.projects().map {
-            ProjectSummary(
-                id: $0.id, name: $0.name, dir: $0.dir, isGitRepo: $0.isGitRepo, defaultBranch: $0.defaultBranch)
+            ProjectSummary(id: $0.id, name: $0.name, dir: $0.dir, isGitRepo: $0.isGitRepo, defaultBranch: $0.defaultBranch)
         }
     }
 
-    @discardableResult
-    public func updateEditorPreference(_ editor: EditorPreference?) throws -> AppConfig {
+    @discardableResult public func updateEditorPreference(_ editor: EditorPreference?) throws -> AppConfig {
         var config = try configStore.load()
         config.editor = editor
         try configStore.save(config)
@@ -119,32 +101,19 @@ public final class SpaceshipOrchestrator {
         let records = try store.workspaces(projectID: projectID, includeArchived: includeArchived)
         return records.map {
             WorkspaceSummary(
-                id: $0.id,
-                name: $0.name,
-                branch: $0.branch,
-                dir: $0.dir,
-                isRunning: $0.isRunning,
-                isArchived: $0.isArchived,
-                isDefault: $0.isDefault)
+                id: $0.id, name: $0.name, branch: $0.branch, dir: $0.dir, isRunning: $0.isRunning, isArchived: $0.isArchived, isDefault: $0.isDefault)
         }
     }
 
     public func suggestedWorkspaceName(projectID: String) throws -> String {
-        guard let project = try store.project(id: projectID) else {
-            throw SpaceshipError.missingProject(dir: projectID)
-        }
+        guard let project = try store.project(id: projectID) else { throw SpaceshipError.missingProject(dir: projectID) }
         let existingNames = Set(try store.workspaces(projectID: project.id, includeArchived: true).map(\.name))
-        for candidate in SpaceshipOrchestrator.workspaceFoodNames where !existingNames.contains(candidate) {
-            return candidate
-        }
-        throw SpaceshipError.invalidArgument(
-            message: "No available workspace names remain for project \(project.name).")
+        for candidate in SpaceshipOrchestrator.workspaceFoodNames where !existingNames.contains(candidate) { return candidate }
+        throw SpaceshipError.invalidArgument(message: "No available workspace names remain for project \(project.name).")
     }
 
     public func gitBranchOptions(projectID: String) throws -> [String] {
-        guard let project = try store.project(id: projectID) else {
-            throw SpaceshipError.missingProject(dir: projectID)
-        }
+        guard let project = try store.project(id: projectID) else { throw SpaceshipError.missingProject(dir: projectID) }
         guard project.isGitRepo else { return [] }
         return git.branchOptions(path: project.dir)
     }
@@ -188,8 +157,7 @@ public final class SpaceshipOrchestrator {
             try store.updateWorkspaceRunning(id: workspace.id, isRunning: true, launchedAt: launchedAt)
         }
         if workspace.isRunning || hasRuntimeIndicators {
-            try applyWorkspaceSettingsUpdate(
-                project: project, workspace: workspace, previous: previous, updated: existing)
+            try applyWorkspaceSettingsUpdate(project: project, workspace: workspace, previous: previous, updated: existing)
         }
     }
 
@@ -213,9 +181,7 @@ public final class SpaceshipOrchestrator {
 
     public func addProject(gitURL: String) throws -> ProjectRecord {
         let trimmedURL = gitURL.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmedURL.isEmpty else {
-            throw SpaceshipError.invalidArgument(message: "Git repository URL is required.")
-        }
+        guard !trimmedURL.isEmpty else { throw SpaceshipError.invalidArgument(message: "Git repository URL is required.") }
         let inferredName = inferredProjectName(from: trimmedURL)
         let projectDirname = sanitizeDirname(inferredName, fallback: "project")
         let destination = projectsRootDirectory().appending(path: projectDirname, directoryHint: .isDirectory)
@@ -228,10 +194,7 @@ public final class SpaceshipOrchestrator {
         if FileManager.default.fileExists(atPath: destination.path) {
             throw SpaceshipError.invalidArgument(message: "Project directory already exists: \(normalizedDestination)")
         }
-        try FileManager.default.createDirectory(
-            at: destination.deletingLastPathComponent(),
-            withIntermediateDirectories: true
-        )
+        try FileManager.default.createDirectory(at: destination.deletingLastPathComponent(), withIntermediateDirectories: true)
         try git.clone(url: trimmedURL, destination: destination.path)
         return try addProject(dir: destination.path)
     }
@@ -249,11 +212,7 @@ public final class SpaceshipOrchestrator {
         let normalized = try normalize(project: normalizedUpdated)
         try store.upsert(project: normalized.record)
         try ensureDefaultWorkspace(for: normalized.record)
-        try syncDefaultWorkspaceSettingsIfTemplateBased(
-            project: normalized.record,
-            previousConfig: previous,
-            updatedConfig: normalized.config
-        )
+        try syncDefaultWorkspaceSettingsIfTemplateBased(project: normalized.record, previousConfig: previous, updatedConfig: normalized.config)
     }
 
     public func updateProjectConfig(projectID: String, update: (inout ProjectConfig) -> Void) throws {
@@ -270,11 +229,7 @@ public final class SpaceshipOrchestrator {
         let normalized = try normalize(project: updated)
         try store.upsert(project: normalized.record)
         try ensureDefaultWorkspace(for: normalized.record)
-        try syncDefaultWorkspaceSettingsIfTemplateBased(
-            project: normalized.record,
-            previousConfig: previous,
-            updatedConfig: normalized.config
-        )
+        try syncDefaultWorkspaceSettingsIfTemplateBased(project: normalized.record, previousConfig: previous, updatedConfig: normalized.config)
     }
 
     public func removeProject(dir: String) throws {
@@ -291,20 +246,12 @@ public final class SpaceshipOrchestrator {
         }
     }
 
-    public func createWorkspace(
-        projectID: String,
-        name: String,
-        branch: String? = nil,
-        targetBranch: String? = nil,
-        directoryName: String? = nil
-    ) throws -> WorkspaceRecord {
-        guard let project = try store.project(id: projectID) else {
-            throw SpaceshipError.missingProject(dir: projectID)
-        }
+    public func createWorkspace(projectID: String, name: String, branch: String? = nil, targetBranch: String? = nil, directoryName: String? = nil)
+        throws -> WorkspaceRecord
+    {
+        guard let project = try store.project(id: projectID) else { throw SpaceshipError.missingProject(dir: projectID) }
         let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmedName.isEmpty else {
-            throw SpaceshipError.invalidArgument(message: "Workspace name is required.")
-        }
+        guard !trimmedName.isEmpty else { throw SpaceshipError.invalidArgument(message: "Workspace name is required.") }
         let trimmedDirectoryName = directoryName?.trimmingCharacters(in: .whitespacesAndNewlines)
         let trimmedBranch = branch?.trimmingCharacters(in: .whitespacesAndNewlines)
         let resolvedBranch: String?
@@ -317,16 +264,13 @@ public final class SpaceshipOrchestrator {
             resolvedTargetBranch = try resolveWorkspaceTargetBranch(project: project, targetBranch: targetBranch)
         } else {
             if let trimmedDirectoryName, !trimmedDirectoryName.isEmpty {
-                throw SpaceshipError.invalidArgument(
-                    message: "Directory name override is only supported for git projects.")
+                throw SpaceshipError.invalidArgument(message: "Directory name override is only supported for git projects.")
             }
             resolvedBranch = nil
             resolvedTargetBranch = nil
         }
         if let existing = try store.workspace(projectID: projectID, name: trimmedName) {
-            if !existing.isArchived {
-                throw SpaceshipError.workspaceAlreadyExists(project: project.name, workspace: trimmedName)
-            }
+            if !existing.isArchived { throw SpaceshipError.workspaceAlreadyExists(project: project.name, workspace: trimmedName) }
             let revivedDir: String
             let revivedDirname: String?
             let revivedBranch: String?
@@ -334,22 +278,13 @@ public final class SpaceshipOrchestrator {
                 guard let branchName = resolvedBranch else {
                     throw SpaceshipError.invalidArgument(message: "Branch name is required for git projects.")
                 }
-                let dirname = try makeWorkspaceDirname(
-                    project: project,
-                    existingDirname: existing.dirname,
-                    requestedDirname: trimmedDirectoryName
-                )
+                let dirname = try makeWorkspaceDirname(project: project, existingDirname: existing.dirname, requestedDirname: trimmedDirectoryName)
                 revivedDirname = dirname
                 let worktreeRoot = try worktreeRoot(project: project)
                 try FileManager.default.createDirectory(at: worktreeRoot, withIntermediateDirectories: true)
                 revivedDir = worktreeRoot.appendingPathComponent(dirname, isDirectory: true).path
                 if !FileManager.default.fileExists(atPath: revivedDir) {
-                    try git.createWorktree(
-                        path: project.dir,
-                        worktreePath: revivedDir,
-                        branch: branchName,
-                        targetBranch: resolvedTargetBranch
-                    )
+                    try git.createWorktree(path: project.dir, worktreePath: revivedDir, branch: branchName, targetBranch: resolvedTargetBranch)
                 }
                 revivedBranch = branchName
             } else {
@@ -358,17 +293,8 @@ public final class SpaceshipOrchestrator {
                 revivedBranch = nil
             }
             let revived = WorkspaceRecord(
-                id: existing.id,
-                projectID: project.id,
-                name: trimmedName,
-                dir: revivedDir,
-                dirname: revivedDirname,
-                branch: revivedBranch,
-                isDefault: false,
-                isArchived: false,
-                isRunning: false,
-                lastLaunchedAt: nil
-            )
+                id: existing.id, projectID: project.id, name: trimmedName, dir: revivedDir, dirname: revivedDirname, branch: revivedBranch,
+                isDefault: false, isArchived: false, isRunning: false, lastLaunchedAt: nil)
             try store.upsert(workspace: revived)
             try seedWorkspaceSettings(project: project, workspace: revived)
             if let config = try projectConfig(projectID: projectID), let script = config.setupScript, !script.isEmpty {
@@ -382,24 +308,13 @@ public final class SpaceshipOrchestrator {
         let workspaceDirname: String?
         let workspaceBranch: String?
         if project.isGitRepo {
-            guard let branchName = resolvedBranch else {
-                throw SpaceshipError.invalidArgument(message: "Branch name is required for git projects.")
-            }
-            let dirname = try makeWorkspaceDirname(
-                project: project,
-                existingDirname: nil,
-                requestedDirname: trimmedDirectoryName
-            )
+            guard let branchName = resolvedBranch else { throw SpaceshipError.invalidArgument(message: "Branch name is required for git projects.") }
+            let dirname = try makeWorkspaceDirname(project: project, existingDirname: nil, requestedDirname: trimmedDirectoryName)
             workspaceDirname = dirname
             let worktreeRoot = try worktreeRoot(project: project)
             try FileManager.default.createDirectory(at: worktreeRoot, withIntermediateDirectories: true)
             workspaceDir = worktreeRoot.appendingPathComponent(dirname, isDirectory: true).path
-            try git.createWorktree(
-                path: project.dir,
-                worktreePath: workspaceDir,
-                branch: branchName,
-                targetBranch: resolvedTargetBranch
-            )
+            try git.createWorktree(path: project.dir, worktreePath: workspaceDir, branch: branchName, targetBranch: resolvedTargetBranch)
             workspaceBranch = branchName
         } else {
             workspaceDir = project.dir
@@ -407,17 +322,8 @@ public final class SpaceshipOrchestrator {
             workspaceBranch = nil
         }
         let workspace = WorkspaceRecord(
-            id: UUID().uuidString,
-            projectID: project.id,
-            name: trimmedName,
-            dir: workspaceDir,
-            dirname: workspaceDirname,
-            branch: workspaceBranch,
-            isDefault: false,
-            isArchived: false,
-            isRunning: false,
-            lastLaunchedAt: nil
-        )
+            id: UUID().uuidString, projectID: project.id, name: trimmedName, dir: workspaceDir, dirname: workspaceDirname, branch: workspaceBranch,
+            isDefault: false, isArchived: false, isRunning: false, lastLaunchedAt: nil)
         try store.upsert(workspace: workspace)
         try seedWorkspaceSettings(project: project, workspace: workspace)
 
@@ -432,28 +338,15 @@ public final class SpaceshipOrchestrator {
     }
 
     private func resolveWorkspaceTargetBranch(project: ProjectRecord, targetBranch: String?) throws -> String {
-        if let targetBranch = targetBranch?.trimmingCharacters(in: .whitespacesAndNewlines), !targetBranch.isEmpty {
-            return targetBranch
-        }
-        if let configured = project.defaultBranch, !configured.isEmpty {
-            return configured
-        }
-        if git.branchExists(path: project.dir, branch: "main") || git.remoteBranchExists(path: project.dir, branch: "main")
-        {
-            return "main"
-        }
-        if git.branchExists(path: project.dir, branch: "master")
-            || git.remoteBranchExists(path: project.dir, branch: "master")
-        {
-            return "master"
-        }
+        if let targetBranch = targetBranch?.trimmingCharacters(in: .whitespacesAndNewlines), !targetBranch.isEmpty { return targetBranch }
+        if let configured = project.defaultBranch, !configured.isEmpty { return configured }
+        if git.branchExists(path: project.dir, branch: "main") || git.remoteBranchExists(path: project.dir, branch: "main") { return "main" }
+        if git.branchExists(path: project.dir, branch: "master") || git.remoteBranchExists(path: project.dir, branch: "master") { return "master" }
         throw SpaceshipError.invalidArgument(message: "Target branch is required for git projects.")
     }
 
     public func launchWorkspace(workspaceID: String) throws {
-        try withWorkspaceLifecycleLock(workspaceID: workspaceID) {
-            try launchWorkspaceUnlocked(workspaceID: workspaceID)
-        }
+        try withWorkspaceLifecycleLock(workspaceID: workspaceID) { try launchWorkspaceUnlocked(workspaceID: workspaceID) }
     }
 
     public func restartWorkspace(workspaceID: String) throws {
@@ -465,9 +358,7 @@ public final class SpaceshipOrchestrator {
 
     private func launchWorkspaceUnlocked(workspaceID: String) throws {
         let (project, workspace) = try resolveWorkspace(id: workspaceID)
-        guard !workspace.isArchived else {
-            throw SpaceshipError.invalidArgument(message: "Workspace is archived.")
-        }
+        guard !workspace.isArchived else { throw SpaceshipError.invalidArgument(message: "Workspace is archived.") }
         let hasTrackedRuntime = try hasTrackedRuntimeIndicators(workspaceID: workspace.id)
         guard !(workspace.isRunning || hasTrackedRuntime) else {
             throw SpaceshipError.invalidArgument(message: "Workspace is already running. Use restart.")
@@ -479,8 +370,7 @@ public final class SpaceshipOrchestrator {
             _ = try PortAllocator(store: store).allocatePorts(workspaceID: workspace.id, count: 10, range: portRange)
         }
 
-        let env = buildWorkspaceEnv(
-            project: project, workspace: workspace, ports: try store.workspacePorts(workspaceID: workspace.id))
+        let env = buildWorkspaceEnv(project: project, workspace: workspace, ports: try store.workspacePorts(workspaceID: workspace.id))
 
         var newWindows: [WindowRecord] = []
         var windowSnapshot = try yabai.listWindows()
@@ -488,27 +378,17 @@ public final class SpaceshipOrchestrator {
         if let config {
             try launchProcesses(workspace: workspace, templates: config.processes, env: env)
             let capturedTerminals = try captureNewWindows(
-                snapshot: windowSnapshot,
-                role: "terminal",
-                appName: "iTerm2",
-                workspaceID: workspace.id,
-                orderOffset: 200
-            )
+                snapshot: windowSnapshot, role: "terminal", appName: "iTerm2", workspaceID: workspace.id, orderOffset: 200)
             newWindows.append(contentsOf: capturedTerminals)
-            let ensuredTerminals = try terminalWindowsFromRunningProcesses(
-                workspace: workspace,
-                existingWindows: newWindows
-            )
+            let ensuredTerminals = try terminalWindowsFromRunningProcesses(workspace: workspace, existingWindows: newWindows)
             newWindows.append(contentsOf: ensuredTerminals)
             windowSnapshot = try yabai.listWindows()
 
-            let browserMatches = try ensureBrowserSessions(
-                project: project, workspace: workspace, sessions: config.browserSessions, env: env)
+            let browserMatches = try ensureBrowserSessions(project: project, workspace: workspace, sessions: config.browserSessions, env: env)
             newWindows.append(contentsOf: browserMatches)
             newWindows.append(
                 contentsOf: try captureNewWindows(
-                    snapshot: windowSnapshot, role: "browser", appName: "Google Chrome", workspaceID: workspace.id,
-                    orderOffset: 0))
+                    snapshot: windowSnapshot, role: "browser", appName: "Google Chrome", workspaceID: workspace.id, orderOffset: 0))
             windowSnapshot = try yabai.listWindows()
         }
 
@@ -516,8 +396,7 @@ public final class SpaceshipOrchestrator {
             try EditorLauncher.open(editor: editor, directory: workspace.dir)
             newWindows.append(
                 contentsOf: try captureNewWindows(
-                    snapshot: windowSnapshot, role: "editor", appName: editorAppName(editor), workspaceID: workspace.id,
-                    orderOffset: 100))
+                    snapshot: windowSnapshot, role: "editor", appName: editorAppName(editor), workspaceID: workspace.id, orderOffset: 100))
         }
 
         try store.deleteWindows(workspaceID: workspace.id)
@@ -526,36 +405,19 @@ public final class SpaceshipOrchestrator {
             newWindows.compactMap { window -> Int? in
                 guard window.role == "browser", window.targetURL != nil else { return nil }
                 return window.windowID
-            }
-        )
+            })
         var seenKeys = Set<String>()
         let uniqueWindows = newWindows.filter { window in
-            if window.role == "browser",
-                window.targetURL == nil,
-                let id = window.windowID,
-                browserWindowIDsWithTarget.contains(id)
-            {
-                return false
-            }
+            if window.role == "browser", window.targetURL == nil, let id = window.windowID, browserWindowIDsWithTarget.contains(id) { return false }
             let key = windowTrackingKey(window)
-            if seenKeys.contains(key) {
-                return false
-            }
+            if seenKeys.contains(key) { return false }
             seenKeys.insert(key)
             return true
         }
         for window in uniqueWindows {
             let stored = WindowRecord(
-                id: window.id,
-                workspaceID: window.workspaceID,
-                app: window.app,
-                title: window.title,
-                targetURL: window.targetURL,
-                windowID: window.windowID,
-                role: window.role,
-                orderIndex: index,
-                lastSeenAt: window.lastSeenAt
-            )
+                id: window.id, workspaceID: window.workspaceID, app: window.app, title: window.title, targetURL: window.targetURL,
+                windowID: window.windowID, role: window.role, orderIndex: index, lastSeenAt: window.lastSeenAt)
             index += 1
             try store.upsert(window: stored)
         }
@@ -565,9 +427,7 @@ public final class SpaceshipOrchestrator {
     }
 
     public func stopWorkspace(workspaceID: String) throws {
-        try withWorkspaceLifecycleLock(workspaceID: workspaceID) {
-            try stopWorkspaceUnlocked(workspaceID: workspaceID)
-        }
+        try withWorkspaceLifecycleLock(workspaceID: workspaceID) { try stopWorkspaceUnlocked(workspaceID: workspaceID) }
     }
 
     private func stopWorkspaceUnlocked(workspaceID: String) throws {
@@ -575,25 +435,13 @@ public final class SpaceshipOrchestrator {
         let windows = try trackedWindows(workspaceID: workspace.id)
         let ports = try store.workspacePorts(workspaceID: workspace.id)
         let env = buildWorkspaceEnv(project: project, workspace: workspace, ports: ports)
-        let settings = try loadWorkspaceSettings(
-            project: project,
-            workspace: workspace,
-            config: try projectConfig(projectID: project.id)
-        )
+        let settings = try loadWorkspaceSettings(project: project, workspace: workspace, config: try projectConfig(projectID: project.id))
         let processes = try store.runningProcesses(workspaceID: workspace.id)
-        for process in processes {
-            if let pid = resolvedRuntimePID(for: process) {
-                terminateProcessGroup(pid: pid)
-            }
-        }
+        for process in processes { if let pid = resolvedRuntimePID(for: process) { terminateProcessGroup(pid: pid) } }
         if let script = settings?.stopScript?.trimmingCharacters(in: .whitespacesAndNewlines), !script.isEmpty {
             try runScript(applyEnvVars(script, env: env), cwd: workspace.dir)
         }
-        for process in processes {
-            if let windowID = process.windowID, process.terminalApp == "iTerm2" {
-                _ = try? iterm.closeWindow(id: windowID)
-            }
-        }
+        for process in processes { if let windowID = process.windowID, process.terminalApp == "iTerm2" { _ = try? iterm.closeWindow(id: windowID) } }
         var closedWindowIDs = Set<Int>()
         for window in windows {
             if window.role == "browser" {
@@ -612,25 +460,15 @@ public final class SpaceshipOrchestrator {
     }
 
     public func archiveWorkspace(workspaceID: String) throws {
-        try withWorkspaceLifecycleLock(workspaceID: workspaceID) {
-            try archiveWorkspaceUnlocked(workspaceID: workspaceID)
-        }
+        try withWorkspaceLifecycleLock(workspaceID: workspaceID) { try archiveWorkspaceUnlocked(workspaceID: workspaceID) }
     }
 
     private func archiveWorkspaceUnlocked(workspaceID: String) throws {
         let (project, workspace) = try resolveWorkspace(id: workspaceID)
-        guard !workspace.isDefault else {
-            throw SpaceshipError.invalidArgument(message: "Default workspace cannot be archived.")
-        }
+        guard !workspace.isDefault else { throw SpaceshipError.invalidArgument(message: "Default workspace cannot be archived.") }
         try stopWorkspaceUnlocked(workspaceID: workspaceID)
         if project.isGitRepo {
-            do {
-                try git.removeWorktree(path: project.dir, worktreePath: workspace.dir)
-            } catch {
-                if !isMissingWorktreeError(error) {
-                    throw error
-                }
-            }
+            do { try git.removeWorktree(path: project.dir, worktreePath: workspace.dir) } catch { if !isMissingWorktreeError(error) { throw error } }
         }
         try PortAllocator(store: store).releasePorts(workspaceID: workspace.id)
         try store.updateWorkspaceArchived(id: workspace.id, isArchived: true)
@@ -659,13 +497,13 @@ public final class SpaceshipOrchestrator {
         return try operation()
     }
 
-    public func runningProcesses(workspaceID: String) throws -> [RunningProcessRecord] {
-        try store.runningProcesses(workspaceID: workspaceID)
-    }
+    public func runningProcesses(workspaceID: String) throws -> [RunningProcessRecord] { try store.runningProcesses(workspaceID: workspaceID) }
 
     public func runStatusChecks(workspaceID: String) throws -> [StatusResult] {
         let (project, workspace) = try resolveWorkspace(id: workspaceID)
-        guard let config = try loadWorkspaceSettings(project: project, workspace: workspace, config: try projectConfig(projectID: project.id)) else { return [] }
+        guard let config = try loadWorkspaceSettings(project: project, workspace: workspace, config: try projectConfig(projectID: project.id)) else {
+            return []
+        }
         let processes = try store.runningProcesses(workspaceID: workspaceID)
         let ports = try store.workspacePorts(workspaceID: workspaceID)
         let env = buildWorkspaceEnv(project: project, workspace: workspace, ports: ports)
@@ -673,71 +511,42 @@ public final class SpaceshipOrchestrator {
         for check in config.statusChecks {
             guard let process = processes.first(where: { $0.templateName == check.process }) else { continue }
             let resolvedCommand = applyEnvVars(check.command, env: env)
-            let outcome = try runCommandWithTimeout(
-                command: resolvedCommand, cwd: workspace.dir, timeout: check.timeout, env: env)
+            let outcome = try runCommandWithTimeout(command: resolvedCommand, cwd: workspace.dir, timeout: check.timeout, env: env)
             let status = outcome.exitCode == 0 ? "green" : "red"
             let result = StatusResult(
-                processID: process.id,
-                checkName: check.name ?? check.process,
-                status: status,
-                message: outcome.output.isEmpty ? nil : outcome.output,
-                lastRunAt: nowISO8601()
-            )
+                processID: process.id, checkName: check.name ?? check.process, status: status, message: outcome.output.isEmpty ? nil : outcome.output,
+                lastRunAt: nowISO8601())
             try store.upsert(statusResult: result)
             results.append(result)
         }
         return results
     }
 
-    public func statusResults(processID: String) throws -> [StatusResult] {
-        try store.statusResults(processID: processID)
-    }
+    public func statusResults(processID: String) throws -> [StatusResult] { try store.statusResults(processID: processID) }
 
-    public func windows(workspaceID: String) throws -> [WindowRecord] {
-        try trackedWindows(workspaceID: workspaceID)
-    }
+    public func windows(workspaceID: String) throws -> [WindowRecord] { try trackedWindows(workspaceID: workspaceID) }
 
-    public func workspacePorts(workspaceID: String) throws -> [Int] {
-        try store.workspacePorts(workspaceID: workspaceID)
-    }
+    public func workspacePorts(workspaceID: String) throws -> [Int] { try store.workspacePorts(workspaceID: workspaceID) }
 
     public func openWorkspaceEditor(workspaceID: String) throws {
         let (_, workspace) = try resolveWorkspace(id: workspaceID)
-        guard !workspace.isArchived else {
-            throw SpaceshipError.invalidArgument(message: "Workspace is archived.")
-        }
+        guard !workspace.isArchived else { throw SpaceshipError.invalidArgument(message: "Workspace is archived.") }
         guard let editor = try configStore.load().editor, editor != .none else {
             throw SpaceshipError.configError(message: "Preferred editor is not configured.")
         }
         let snapshot = try yabai.listWindows()
         try EditorLauncher.open(editor: editor, directory: workspace.dir)
-        try attachNewWindows(
-            snapshot: snapshot,
-            workspaceID: workspace.id,
-            role: "editor",
-            appName: editorAppName(editor),
-            orderOffset: 100
-        )
+        try attachNewWindows(snapshot: snapshot, workspaceID: workspace.id, role: "editor", appName: editorAppName(editor), orderOffset: 100)
     }
 
     public func openWorkspaceTerminal(workspaceID: String) throws {
         let (_, workspace) = try resolveWorkspace(id: workspaceID)
-        guard !workspace.isArchived else {
-            throw SpaceshipError.invalidArgument(message: "Workspace is archived.")
-        }
-        guard iterm.isAvailable() else {
-            throw SpaceshipError.dependencyMissing(message: "iTerm2 is required to open terminal windows.")
-        }
+        guard !workspace.isArchived else { throw SpaceshipError.invalidArgument(message: "Workspace is archived.") }
+        guard iterm.isAvailable() else { throw SpaceshipError.dependencyMissing(message: "iTerm2 is required to open terminal windows.") }
         let snapshot = try yabai.listWindows()
         let escapedDir = workspace.dir.replacingOccurrences(of: "\"", with: "\\\"")
         _ = try iterm.openWindowAndRun(command: "cd \"\(escapedDir)\"")
-        try attachNewWindows(
-            snapshot: snapshot,
-            workspaceID: workspace.id,
-            role: "terminal",
-            appName: "iTerm2",
-            orderOffset: 200
-        )
+        try attachNewWindows(snapshot: snapshot, workspaceID: workspace.id, role: "terminal", appName: "iTerm2", orderOffset: 200)
     }
 
     public func focusWorkspace(workspaceID: String) throws {
@@ -751,9 +560,7 @@ public final class SpaceshipOrchestrator {
                 break
             }
         }
-        if focused {
-            try setActiveWorkspace(id: workspaceID)
-        }
+        if focused { try setActiveWorkspace(id: workspaceID) }
     }
 
     public func focusWorkspaceWindow(workspaceID: String, index: Int) throws {
@@ -768,21 +575,13 @@ public final class SpaceshipOrchestrator {
         }
     }
 
-    public func focusNextWindow(workspaceID: String) throws {
-        try focusWindowRelative(workspaceID: workspaceID, delta: 1)
-    }
+    public func focusNextWindow(workspaceID: String) throws { try focusWindowRelative(workspaceID: workspaceID, delta: 1) }
 
-    public func focusPreviousWindow(workspaceID: String) throws {
-        try focusWindowRelative(workspaceID: workspaceID, delta: -1)
-    }
+    public func focusPreviousWindow(workspaceID: String) throws { try focusWindowRelative(workspaceID: workspaceID, delta: -1) }
 
     public func workspaceIDForFocusedWindow() throws -> String? {
         guard let focused = try yabai.focusedWindow() else { return nil }
-        if focused.app == "Google Chrome",
-            let workspaceID = try focusedChromeWorkspaceID(windowID: focused.id)
-        {
-            return workspaceID
-        }
+        if focused.app == "Google Chrome", let workspaceID = try focusedChromeWorkspaceID(windowID: focused.id) { return workspaceID }
         return try store.workspaceID(windowID: focused.id)
     }
 
@@ -793,32 +592,18 @@ public final class SpaceshipOrchestrator {
                 let workspaces = try store.workspaces(projectID: project.id, includeArchived: true)
                 for workspace in workspaces where workspace.isRunning && !workspace.isArchived {
                     let prefixes = try resolvedBrowserSessionPrefixes(project: project, workspace: workspace)
-                    if prefixes.contains(where: { activeURL.hasPrefix($0) }) {
-                        matchingWorkspaceIDs.append(workspace.id)
-                    }
+                    if prefixes.contains(where: { activeURL.hasPrefix($0) }) { matchingWorkspaceIDs.append(workspace.id) }
                 }
             }
-            if let activeWorkspaceID = try activeWorkspaceID(),
-                matchingWorkspaceIDs.contains(activeWorkspaceID)
-            {
-                return activeWorkspaceID
-            }
-            if let firstMatch = matchingWorkspaceIDs.first {
-                return firstMatch
-            }
+            if let activeWorkspaceID = try activeWorkspaceID(), matchingWorkspaceIDs.contains(activeWorkspaceID) { return activeWorkspaceID }
+            if let firstMatch = matchingWorkspaceIDs.first { return firstMatch }
         }
 
         let candidates = try store.windows(windowID: windowID).filter { $0.role == "browser" }
         guard !candidates.isEmpty else { return nil }
         let candidateWorkspaceIDs = Array(Set(candidates.map(\.workspaceID)))
-        if candidateWorkspaceIDs.count == 1 {
-            return candidateWorkspaceIDs[0]
-        }
-        if let activeWorkspaceID = try activeWorkspaceID(),
-            candidateWorkspaceIDs.contains(activeWorkspaceID)
-        {
-            return activeWorkspaceID
-        }
+        if candidateWorkspaceIDs.count == 1 { return candidateWorkspaceIDs[0] }
+        if let activeWorkspaceID = try activeWorkspaceID(), candidateWorkspaceIDs.contains(activeWorkspaceID) { return activeWorkspaceID }
         return candidates.max(by: { lhs, rhs in lhs.lastSeenAt < rhs.lastSeenAt })?.workspaceID
     }
 
@@ -851,33 +636,22 @@ public final class SpaceshipOrchestrator {
         if let focused = try yabai.focusedWindow() {
             let candidates = windows.enumerated().filter { $0.element.windowID == focused.id }
             if !candidates.isEmpty {
-                if candidates.count == 1 {
-                    return candidates[0].offset
-                }
-                if focused.app == "Google Chrome", chrome.isAvailable(),
-                    let activeURL = (try? chrome.frontmostActiveTabURL()) ?? nil
-                {
+                if candidates.count == 1 { return candidates[0].offset }
+                if focused.app == "Google Chrome", chrome.isAvailable(), let activeURL = (try? chrome.frontmostActiveTabURL()) ?? nil {
                     if let tabMatch = candidates.max(by: { lhs, rhs in
                         browserTabMatchPriority(activeURL: activeURL, targetURL: lhs.element.targetURL)
                             < browserTabMatchPriority(activeURL: activeURL, targetURL: rhs.element.targetURL)
-                    }),
-                        browserTabMatchPriority(activeURL: activeURL, targetURL: tabMatch.element.targetURL) > 0
-                    {
+                    }), browserTabMatchPriority(activeURL: activeURL, targetURL: tabMatch.element.targetURL) > 0 {
                         return tabMatch.offset
                     }
                 }
                 return candidates[0].offset
             }
-            if focused.app == "Google Chrome", chrome.isAvailable(),
-                let activeURL = (try? chrome.frontmostActiveTabURL()) ?? nil
-            {
+            if focused.app == "Google Chrome", chrome.isAvailable(), let activeURL = (try? chrome.frontmostActiveTabURL()) ?? nil {
                 if let tabMatch = windows.enumerated().max(by: { lhs, rhs in
                     browserTabMatchPriority(activeURL: activeURL, targetURL: lhs.element.targetURL)
                         < browserTabMatchPriority(activeURL: activeURL, targetURL: rhs.element.targetURL)
-                }),
-                    tabMatch.element.role == "browser",
-                    browserTabMatchPriority(activeURL: activeURL, targetURL: tabMatch.element.targetURL) > 0
-                {
+                }), tabMatch.element.role == "browser", browserTabMatchPriority(activeURL: activeURL, targetURL: tabMatch.element.targetURL) > 0 {
                     return tabMatch.offset
                 }
             }
@@ -887,12 +661,8 @@ public final class SpaceshipOrchestrator {
 
     private func browserTabMatchPriority(activeURL: String, targetURL: String?) -> Int {
         guard let targetURL else { return 0 }
-        if activeURL == targetURL {
-            return 2
-        }
-        if activeURL.hasPrefix(targetURL) {
-            return 1
-        }
+        if activeURL == targetURL { return 2 }
+        if activeURL.hasPrefix(targetURL) { return 1 }
         return 0
     }
 
@@ -918,11 +688,7 @@ public final class SpaceshipOrchestrator {
         if window.role == "browser", let targetURL = window.targetURL, chrome.isAvailable() {
             if let trackedWindowID = window.windowID {
                 let focusedIndexedTrackedWindowTab =
-                    (try? focusScannedBrowserTab(
-                        workspaceID: workspaceID,
-                        windowID: trackedWindowID,
-                        targetURL: targetURL
-                )) ?? false
+                    (try? focusScannedBrowserTab(workspaceID: workspaceID, windowID: trackedWindowID, targetURL: targetURL)) ?? false
                 if focusedIndexedTrackedWindowTab {
                     focusPath = "indexed"
                     logBrowserFocus(
@@ -930,8 +696,7 @@ public final class SpaceshipOrchestrator {
                     )
                     return true
                 }
-                let focusedExactTrackedWindowTab =
-                    (try? chrome.focusTab(forExactURL: targetURL, windowID: trackedWindowID)) ?? false
+                let focusedExactTrackedWindowTab = (try? chrome.focusTab(forExactURL: targetURL, windowID: trackedWindowID)) ?? false
                 if focusedExactTrackedWindowTab {
                     focusPath = "tracked_exact"
                     logBrowserFocus(
@@ -939,8 +704,7 @@ public final class SpaceshipOrchestrator {
                     )
                     return true
                 }
-                let focusedTrackedWindowTab =
-                    (try? chrome.focusTab(forURLPrefix: targetURL, windowID: trackedWindowID)) ?? false
+                let focusedTrackedWindowTab = (try? chrome.focusTab(forURLPrefix: targetURL, windowID: trackedWindowID)) ?? false
                 if focusedTrackedWindowTab {
                     focusPath = "tracked_prefix"
                     logBrowserFocus(
@@ -952,47 +716,32 @@ public final class SpaceshipOrchestrator {
             let focusedExactBrowserTab = (try? chrome.focusTab(forExactURL: targetURL)) ?? false
             if focusedExactBrowserTab {
                 focusPath = "global_exact"
-                logBrowserFocus(
-                    "workspace=\(workspaceID) path=\(focusPath) target=\(targetURL) elapsed_ms=\(elapsedMS(since: focusStartedAt))"
-                )
+                logBrowserFocus("workspace=\(workspaceID) path=\(focusPath) target=\(targetURL) elapsed_ms=\(elapsedMS(since: focusStartedAt))")
                 return true
             }
             let focusedBrowserTab = (try? chrome.focusTab(forURLPrefix: targetURL)) ?? false
             if focusedBrowserTab {
                 focusPath = "global_prefix"
-                logBrowserFocus(
-                    "workspace=\(workspaceID) path=\(focusPath) target=\(targetURL) elapsed_ms=\(elapsedMS(since: focusStartedAt))"
-                )
+                logBrowserFocus("workspace=\(workspaceID) path=\(focusPath) target=\(targetURL) elapsed_ms=\(elapsedMS(since: focusStartedAt))")
                 return true
             }
             logBrowserFocus(
-                "workspace=\(workspaceID) path=browser_fallback_failed target=\(targetURL) elapsed_ms=\(elapsedMS(since: focusStartedAt))"
-            )
+                "workspace=\(workspaceID) path=browser_fallback_failed target=\(targetURL) elapsed_ms=\(elapsedMS(since: focusStartedAt))")
         }
         guard let id = window.windowID else { return false }
         let focused = (try? yabai.focusWindow(id: id)) ?? false
         logBrowserFocus(
-            "workspace=\(workspaceID) path=yabai window=\(id) success=\(focused ? "1" : "0") elapsed_ms=\(elapsedMS(since: focusStartedAt))"
-        )
+            "workspace=\(workspaceID) path=yabai window=\(id) success=\(focused ? "1" : "0") elapsed_ms=\(elapsedMS(since: focusStartedAt))")
         return focused
     }
 
     private func trackedWindows(workspaceID: String) throws -> [WindowRecord] {
         let windows = try store.windows(workspaceID: workspaceID).sorted { $0.orderIndex < $1.orderIndex }
         let normalized = normalizedBrowserWindowRows(windows)
-        guard chrome.isAvailable(), let (project, workspace) = try? resolveWorkspace(id: workspaceID) else {
-            return normalized
-        }
+        guard chrome.isAvailable(), let (project, workspace) = try? resolveWorkspace(id: workspaceID) else { return normalized }
         let prefixes = try resolvedBrowserSessionPrefixes(project: project, workspace: workspace)
         guard !prefixes.isEmpty else { return normalized }
-        guard
-            let scannedBrowserWindows = try? liveBrowserWindows(
-                workspaceID: workspaceID,
-                browserPrefixes: prefixes
-            )
-        else {
-            return normalized
-        }
+        guard let scannedBrowserWindows = try? liveBrowserWindows(workspaceID: workspaceID, browserPrefixes: prefixes) else { return normalized }
         let terminalWindows = normalized.filter { $0.role == "terminal" }
         let otherNonBrowserWindows = normalized.filter { $0.role != "browser" && $0.role != "terminal" }
         return scannedBrowserWindows + terminalWindows + otherNonBrowserWindows
@@ -1006,9 +755,7 @@ public final class SpaceshipOrchestrator {
         var prefixes: [String] = []
         var seen = Set<String>()
         for session in sessions {
-            guard let rawURL = session.url?.trimmingCharacters(in: .whitespacesAndNewlines), !rawURL.isEmpty else {
-                continue
-            }
+            guard let rawURL = session.url?.trimmingCharacters(in: .whitespacesAndNewlines), !rawURL.isEmpty else { continue }
             let resolved = applyEnvVars(rawURL, env: env)
             guard !resolved.isEmpty, !seen.contains(resolved) else { continue }
             seen.insert(resolved)
@@ -1017,44 +764,23 @@ public final class SpaceshipOrchestrator {
         return prefixes
     }
 
-    private func liveBrowserWindows(
-        workspaceID: String,
-        browserPrefixes: [String],
-        forceRefresh: Bool = false
-    ) throws -> [WindowRecord] {
+    private func liveBrowserWindows(workspaceID: String, browserPrefixes: [String], forceRefresh: Bool = false) throws -> [WindowRecord] {
         guard !browserPrefixes.isEmpty else { return [] }
         let refreshedAt = currentDate()
         if !forceRefresh {
-            if let cached = cachedBrowserWindows(
-                workspaceID: workspaceID,
-                browserPrefixes: browserPrefixes,
-                now: refreshedAt
-            ) {
+            if let cached = cachedBrowserWindows(workspaceID: workspaceID, browserPrefixes: browserPrefixes, now: refreshedAt) {
                 let cacheAgeMS = Int(refreshedAt.timeIntervalSince(cached.refreshedAt) * 1000)
-                logBrowserFocus(
-                    "workspace=\(workspaceID) scan_cache_hit age_ms=\(cacheAgeMS) rows=\(cached.scanResult.windows.count)"
-                )
+                logBrowserFocus("workspace=\(workspaceID) scan_cache_hit age_ms=\(cacheAgeMS) rows=\(cached.scanResult.windows.count)")
                 return cached.scanResult.windows
             }
         }
-        logBrowserFocus(
-            "workspace=\(workspaceID) scan_cache_miss force_refresh=\(forceRefresh ? "1" : "0")"
-        )
+        logBrowserFocus("workspace=\(workspaceID) scan_cache_miss force_refresh=\(forceRefresh ? "1" : "0")")
         let scanResult = try scannedBrowserWindows(workspaceID: workspaceID, browserPrefixes: browserPrefixes)
-        cacheBrowserWindows(
-            workspaceID: workspaceID,
-            browserPrefixes: browserPrefixes,
-            refreshedAt: refreshedAt,
-            scanResult: scanResult
-        )
+        cacheBrowserWindows(workspaceID: workspaceID, browserPrefixes: browserPrefixes, refreshedAt: refreshedAt, scanResult: scanResult)
         return scanResult.windows
     }
 
-    private func cachedBrowserWindows(
-        workspaceID: String,
-        browserPrefixes: [String],
-        now: Date
-    ) -> BrowserWindowScanCacheEntry? {
+    private func cachedBrowserWindows(workspaceID: String, browserPrefixes: [String], now: Date) -> BrowserWindowScanCacheEntry? {
         browserScanCacheLock.lock()
         defer { browserScanCacheLock.unlock() }
         guard let entry = browserWindowScanCacheByWorkspace[workspaceID] else { return nil }
@@ -1064,18 +790,10 @@ public final class SpaceshipOrchestrator {
         return entry
     }
 
-    private func cacheBrowserWindows(
-        workspaceID: String,
-        browserPrefixes: [String],
-        refreshedAt: Date,
-        scanResult: BrowserWindowScanResult
-    ) {
+    private func cacheBrowserWindows(workspaceID: String, browserPrefixes: [String], refreshedAt: Date, scanResult: BrowserWindowScanResult) {
         browserScanCacheLock.lock()
         browserWindowScanCacheByWorkspace[workspaceID] = BrowserWindowScanCacheEntry(
-            browserPrefixes: browserPrefixes,
-            refreshedAt: refreshedAt,
-            scanResult: scanResult
-        )
+            browserPrefixes: browserPrefixes, refreshedAt: refreshedAt, scanResult: scanResult)
         browserScanCacheLock.unlock()
     }
 
@@ -1085,14 +803,8 @@ public final class SpaceshipOrchestrator {
         var attempt = 0
         while attempt < 2 {
             attempt += 1
-            guard let cachedTarget = cachedScannedBrowserTabTarget(
-                workspaceID: workspaceID,
-                windowID: windowID,
-                targetURL: targetURL
-            ) else {
-                logBrowserFocus(
-                    "workspace=\(workspaceID) indexed_miss window=\(windowID) target=\(targetURL) attempt=\(attempt)"
-                )
+            guard let cachedTarget = cachedScannedBrowserTabTarget(workspaceID: workspaceID, windowID: windowID, targetURL: targetURL) else {
+                logBrowserFocus("workspace=\(workspaceID) indexed_miss window=\(windowID) target=\(targetURL) attempt=\(attempt)")
                 return false
             }
 
@@ -1120,9 +832,7 @@ public final class SpaceshipOrchestrator {
                 }
             }
             guard attempt == 1 else { break }
-            guard try refreshCachedBrowserWindows(workspaceID: workspaceID, browserPrefixes: cachedTarget.browserPrefixes) else {
-                break
-            }
+            guard try refreshCachedBrowserWindows(workspaceID: workspaceID, browserPrefixes: cachedTarget.browserPrefixes) else { break }
             refreshed = true
         }
         logBrowserFocus(
@@ -1131,11 +841,7 @@ public final class SpaceshipOrchestrator {
         return false
     }
 
-    private func cachedScannedBrowserTabTarget(
-        workspaceID: String,
-        windowID: Int,
-        targetURL: String
-    ) -> CachedScannedBrowserTabTarget? {
+    private func cachedScannedBrowserTabTarget(workspaceID: String, windowID: Int, targetURL: String) -> CachedScannedBrowserTabTarget? {
         browserScanCacheLock.lock()
         defer { browserScanCacheLock.unlock() }
         guard let entry = browserWindowScanCacheByWorkspace[workspaceID] else { return nil }
@@ -1147,14 +853,8 @@ public final class SpaceshipOrchestrator {
     private func refreshCachedBrowserWindows(workspaceID: String, browserPrefixes: [String]) throws -> Bool {
         guard !browserPrefixes.isEmpty else { return false }
         let refreshStartedAt = currentDate()
-        _ = try liveBrowserWindows(
-            workspaceID: workspaceID,
-            browserPrefixes: browserPrefixes,
-            forceRefresh: true
-        )
-        logBrowserFocus(
-            "workspace=\(workspaceID) indexed_refresh success=1 elapsed_ms=\(elapsedMS(since: refreshStartedAt))"
-        )
+        _ = try liveBrowserWindows(workspaceID: workspaceID, browserPrefixes: browserPrefixes, forceRefresh: true)
+        logBrowserFocus("workspace=\(workspaceID) indexed_refresh success=1 elapsed_ms=\(elapsedMS(since: refreshStartedAt))")
         return true
     }
 
@@ -1162,23 +862,17 @@ public final class SpaceshipOrchestrator {
         browserPrefixes.contains(where: { url.hasPrefix($0) })
     }
 
-    private func elapsedMS(since startedAt: Date) -> Int {
-        Int(currentDate().timeIntervalSince(startedAt) * 1000)
-    }
+    private func elapsedMS(since startedAt: Date) -> Int { Int(currentDate().timeIntervalSince(startedAt) * 1000) }
 
     private func logBrowserFocus(_ message: String) {
         guard debugLoggingEnabled() else { return }
         fputs("spaceship: browser focus \(message)\n", stderr)
     }
 
-    private func debugLoggingEnabled() -> Bool {
-        ProcessInfo.processInfo.environment["DEBUG"] == "1"
-    }
+    private func debugLoggingEnabled() -> Bool { ProcessInfo.processInfo.environment["DEBUG"] == "1" }
 
     private func scannedBrowserWindows(workspaceID: String, browserPrefixes: [String]) throws -> BrowserWindowScanResult {
-        guard !browserPrefixes.isEmpty else {
-            return BrowserWindowScanResult(windows: [], tabIndexByWindowAndURL: [:])
-        }
+        guard !browserPrefixes.isEmpty else { return BrowserWindowScanResult(windows: [], tabIndexByWindowAndURL: [:]) }
         let scanStartedAt = Date()
         let tabs = try chrome.allTabs()
         struct MatchedTab {
@@ -1195,15 +889,9 @@ public final class SpaceshipOrchestrator {
             matchedTabs.append(MatchedTab(tab: tab, prefixIndex: prefixIndex))
         }
         matchedTabs.sort { lhs, rhs in
-            if lhs.prefixIndex != rhs.prefixIndex {
-                return lhs.prefixIndex < rhs.prefixIndex
-            }
-            if lhs.tab.url != rhs.tab.url {
-                return lhs.tab.url < rhs.tab.url
-            }
-            if lhs.tab.windowID != rhs.tab.windowID {
-                return lhs.tab.windowID < rhs.tab.windowID
-            }
+            if lhs.prefixIndex != rhs.prefixIndex { return lhs.prefixIndex < rhs.prefixIndex }
+            if lhs.tab.url != rhs.tab.url { return lhs.tab.url < rhs.tab.url }
+            if lhs.tab.windowID != rhs.tab.windowID { return lhs.tab.windowID < rhs.tab.windowID }
             return lhs.tab.title < rhs.tab.title
         }
         var browserWindows: [WindowRecord] = []
@@ -1212,24 +900,14 @@ public final class SpaceshipOrchestrator {
             tabIndexByWindowAndURL["\(match.tab.windowID):\(match.tab.url)"] = match.tab.tabIndex
             browserWindows.append(
                 WindowRecord(
-                    id: UUID().uuidString,
-                    workspaceID: workspaceID,
-                    app: "Google Chrome",
-                    title: match.tab.title,
-                    targetURL: match.tab.url,
-                    windowID: match.tab.windowID,
-                    role: "browser",
-                    orderIndex: index,
-                    lastSeenAt: nowISO8601()
-                )
-            )
+                    id: UUID().uuidString, workspaceID: workspaceID, app: "Google Chrome", title: match.tab.title, targetURL: match.tab.url,
+                    windowID: match.tab.windowID, role: "browser", orderIndex: index, lastSeenAt: nowISO8601()))
         }
         if debugLoggingEnabled() {
             let elapsedMS = Int(Date().timeIntervalSince(scanStartedAt) * 1000)
             fputs(
                 "spaceship: browser scan workspace=\(workspaceID) tabs=\(tabs.count) matches=\(browserWindows.count) elapsed_ms=\(elapsedMS)\n",
-                stderr
-            )
+                stderr)
         }
         return BrowserWindowScanResult(windows: browserWindows, tabIndexByWindowAndURL: tabIndexByWindowAndURL)
     }
@@ -1237,132 +915,84 @@ public final class SpaceshipOrchestrator {
     private func normalizedBrowserWindowRows(_ windows: [WindowRecord]) -> [WindowRecord] {
         let browserWindowIDsWithTarget = Set(
             windows.compactMap { window -> Int? in
-                guard window.role == "browser",
-                    let windowID = window.windowID,
-                    window.targetURL != nil
-                else {
-                    return nil
-                }
+                guard window.role == "browser", let windowID = window.windowID, window.targetURL != nil else { return nil }
                 return windowID
-            }
-        )
+            })
         return windows.filter { window in
-            guard window.role == "browser",
-                window.targetURL == nil,
-                let windowID = window.windowID
-            else {
-                return true
-            }
+            guard window.role == "browser", window.targetURL == nil, let windowID = window.windowID else { return true }
             return !browserWindowIDsWithTarget.contains(windowID)
         }
     }
 
     public func listSpaceOptions() throws -> [SpaceOption] {
         let spaces = try yabai.listSpaces()
-        return spaces.map { SpaceOption(displayIndex: $0.display, spaceIndex: $0.index) }
-            .sorted { lhs, rhs in
-                if lhs.displayIndex == rhs.displayIndex {
-                    return lhs.spaceIndex < rhs.spaceIndex
-                }
-                return lhs.displayIndex < rhs.displayIndex
-            }
+        return spaces.map { SpaceOption(displayIndex: $0.display, spaceIndex: $0.index) }.sorted { lhs, rhs in
+            if lhs.displayIndex == rhs.displayIndex { return lhs.spaceIndex < rhs.spaceIndex }
+            return lhs.displayIndex < rhs.displayIndex
+        }
     }
 
-    public func guiHotkey() throws -> String {
-        try store.setting(key: SettingsKey.guiHotkey) ?? SettingsKey.defaultGUIHotkey
-    }
+    public func guiHotkey() throws -> String { try store.setting(key: SettingsKey.guiHotkey) ?? SettingsKey.defaultGUIHotkey }
 
-    public func setGUIHotkey(_ raw: String?) throws {
-        try store.setSetting(key: SettingsKey.guiHotkey, value: raw)
-    }
+    public func setGUIHotkey(_ raw: String?) throws { try store.setSetting(key: SettingsKey.guiHotkey, value: raw) }
 
-    public func guiNextShortcut() throws -> String {
-        try store.setting(key: SettingsKey.guiNextShortcut) ?? SettingsKey.defaultGUINextShortcut
-    }
+    public func guiNextShortcut() throws -> String { try store.setting(key: SettingsKey.guiNextShortcut) ?? SettingsKey.defaultGUINextShortcut }
 
-    public func setGUINextShortcut(_ raw: String?) throws {
-        try store.setSetting(key: SettingsKey.guiNextShortcut, value: raw)
-    }
+    public func setGUINextShortcut(_ raw: String?) throws { try store.setSetting(key: SettingsKey.guiNextShortcut, value: raw) }
 
     public func guiPreviousShortcut() throws -> String {
         try store.setting(key: SettingsKey.guiPreviousShortcut) ?? SettingsKey.defaultGUIPreviousShortcut
     }
 
-    public func setGUIPreviousShortcut(_ raw: String?) throws {
-        try store.setSetting(key: SettingsKey.guiPreviousShortcut, value: raw)
-    }
+    public func setGUIPreviousShortcut(_ raw: String?) throws { try store.setSetting(key: SettingsKey.guiPreviousShortcut, value: raw) }
 
-    public func guiShowShortcut() throws -> String {
-        try store.setting(key: SettingsKey.guiShowShortcut) ?? SettingsKey.defaultGUIShowShortcut
-    }
+    public func guiShowShortcut() throws -> String { try store.setting(key: SettingsKey.guiShowShortcut) ?? SettingsKey.defaultGUIShowShortcut }
 
-    public func setGUIShowShortcut(_ raw: String?) throws {
-        try store.setSetting(key: SettingsKey.guiShowShortcut, value: raw)
-    }
+    public func setGUIShowShortcut(_ raw: String?) throws { try store.setSetting(key: SettingsKey.guiShowShortcut, value: raw) }
 
     public func guiAddProjectShortcut() throws -> String {
         try store.setting(key: SettingsKey.guiAddProjectShortcut) ?? SettingsKey.defaultGUIAddProjectShortcut
     }
 
-    public func setGUIAddProjectShortcut(_ raw: String?) throws {
-        try store.setSetting(key: SettingsKey.guiAddProjectShortcut, value: raw)
-    }
+    public func setGUIAddProjectShortcut(_ raw: String?) throws { try store.setSetting(key: SettingsKey.guiAddProjectShortcut, value: raw) }
 
     public func guiAddWorkspaceShortcut() throws -> String {
         try store.setting(key: SettingsKey.guiAddWorkspaceShortcut) ?? SettingsKey.defaultGUIAddWorkspaceShortcut
     }
 
-    public func setGUIAddWorkspaceShortcut(_ raw: String?) throws {
-        try store.setSetting(key: SettingsKey.guiAddWorkspaceShortcut, value: raw)
-    }
+    public func setGUIAddWorkspaceShortcut(_ raw: String?) throws { try store.setSetting(key: SettingsKey.guiAddWorkspaceShortcut, value: raw) }
 
-    public func guiReloadShortcut() throws -> String {
-        try store.setting(key: SettingsKey.guiReloadShortcut) ?? SettingsKey.defaultGUIReloadShortcut
-    }
+    public func guiReloadShortcut() throws -> String { try store.setting(key: SettingsKey.guiReloadShortcut) ?? SettingsKey.defaultGUIReloadShortcut }
 
-    public func setGUIReloadShortcut(_ raw: String?) throws {
-        try store.setSetting(key: SettingsKey.guiReloadShortcut, value: raw)
-    }
+    public func setGUIReloadShortcut(_ raw: String?) throws { try store.setSetting(key: SettingsKey.guiReloadShortcut, value: raw) }
 
     public func guiOpenEditorShortcut() throws -> String {
         try store.setting(key: SettingsKey.guiOpenEditorShortcut) ?? SettingsKey.defaultGUIOpenEditorShortcut
     }
 
-    public func setGUIOpenEditorShortcut(_ raw: String?) throws {
-        try store.setSetting(key: SettingsKey.guiOpenEditorShortcut, value: raw)
-    }
+    public func setGUIOpenEditorShortcut(_ raw: String?) throws { try store.setSetting(key: SettingsKey.guiOpenEditorShortcut, value: raw) }
 
     public func guiOpenTerminalShortcut() throws -> String {
         try store.setting(key: SettingsKey.guiOpenTerminalShortcut) ?? SettingsKey.defaultGUIOpenTerminalShortcut
     }
 
-    public func setGUIOpenTerminalShortcut(_ raw: String?) throws {
-        try store.setSetting(key: SettingsKey.guiOpenTerminalShortcut, value: raw)
-    }
+    public func setGUIOpenTerminalShortcut(_ raw: String?) throws { try store.setSetting(key: SettingsKey.guiOpenTerminalShortcut, value: raw) }
 
     public func guiOpenFinderShortcut() throws -> String {
         try store.setting(key: SettingsKey.guiOpenFinderShortcut) ?? SettingsKey.defaultGUIOpenFinderShortcut
     }
 
-    public func setGUIOpenFinderShortcut(_ raw: String?) throws {
-        try store.setSetting(key: SettingsKey.guiOpenFinderShortcut, value: raw)
-    }
+    public func setGUIOpenFinderShortcut(_ raw: String?) throws { try store.setSetting(key: SettingsKey.guiOpenFinderShortcut, value: raw) }
 
     public func guiOpenSettingsShortcut() throws -> String {
         try store.setting(key: SettingsKey.guiOpenSettingsShortcut) ?? SettingsKey.defaultGUIOpenSettingsShortcut
     }
 
-    public func setGUIOpenSettingsShortcut(_ raw: String?) throws {
-        try store.setSetting(key: SettingsKey.guiOpenSettingsShortcut, value: raw)
-    }
+    public func setGUIOpenSettingsShortcut(_ raw: String?) throws { try store.setSetting(key: SettingsKey.guiOpenSettingsShortcut, value: raw) }
 
-    public func activeWorkspaceID() throws -> String? {
-        try store.setting(key: "active_workspace_id")
-    }
+    public func activeWorkspaceID() throws -> String? { try store.setting(key: "active_workspace_id") }
 
-    public func setActiveWorkspace(id: String?) throws {
-        try store.setSetting(key: "active_workspace_id", value: id)
-    }
+    public func setActiveWorkspace(id: String?) throws { try store.setSetting(key: "active_workspace_id", value: id) }
 
     private func normalize(project: ProjectConfig) throws -> NormalizedProject {
         let dir = normalizePath(project.dir)
@@ -1377,43 +1007,23 @@ public final class SpaceshipOrchestrator {
         var updatedConfig = project
         updatedConfig.dir = dir
         return NormalizedProject(
-            id: id,
-            record: ProjectRecord(id: id, name: name, dir: dir, isGitRepo: isGit, defaultBranch: branch),
-            config: updatedConfig
-        )
+            id: id, record: ProjectRecord(id: id, name: name, dir: dir, isGitRepo: isGit, defaultBranch: branch), config: updatedConfig)
     }
 
     private func ensureDefaultWorkspace(for project: ProjectRecord) throws {
         if let existing = try store.workspace(projectID: project.id, name: "default") {
             if existing.isArchived {
                 let revived = WorkspaceRecord(
-                    id: existing.id,
-                    projectID: project.id,
-                    name: existing.name,
-                    dir: existing.dir,
-                    dirname: existing.dirname,
-                    branch: existing.branch,
-                    isDefault: true,
-                    isArchived: false,
-                    isRunning: existing.isRunning,
-                    lastLaunchedAt: existing.lastLaunchedAt
-                )
+                    id: existing.id, projectID: project.id, name: existing.name, dir: existing.dir, dirname: existing.dirname,
+                    branch: existing.branch, isDefault: true, isArchived: false, isRunning: existing.isRunning,
+                    lastLaunchedAt: existing.lastLaunchedAt)
                 try store.upsert(workspace: revived)
             }
             return
         }
         let workspace = WorkspaceRecord(
-            id: UUID().uuidString,
-            projectID: project.id,
-            name: "default",
-            dir: project.dir,
-            dirname: nil,
-            branch: project.defaultBranch,
-            isDefault: true,
-            isArchived: false,
-            isRunning: false,
-            lastLaunchedAt: nil
-        )
+            id: UUID().uuidString, projectID: project.id, name: "default", dir: project.dir, dirname: nil, branch: project.defaultBranch,
+            isDefault: true, isArchived: false, isRunning: false, lastLaunchedAt: nil)
         try store.upsert(workspace: workspace)
         try seedWorkspaceSettings(project: project, workspace: workspace)
         let portRange = try configStore.load().portRange
@@ -1421,12 +1031,8 @@ public final class SpaceshipOrchestrator {
     }
 
     private func resolveWorkspace(id: String) throws -> (ProjectRecord, WorkspaceRecord) {
-        guard let workspace = try store.workspace(id: id) else {
-            throw SpaceshipError.invalidArgument(message: "Workspace not found.")
-        }
-        guard let project = try store.project(id: workspace.projectID) else {
-            throw SpaceshipError.missingProject(dir: workspace.projectID)
-        }
+        guard let workspace = try store.workspace(id: id) else { throw SpaceshipError.invalidArgument(message: "Workspace not found.") }
+        guard let project = try store.project(id: workspace.projectID) else { throw SpaceshipError.missingProject(dir: workspace.projectID) }
         return (project, workspace)
     }
 
@@ -1434,20 +1040,14 @@ public final class SpaceshipOrchestrator {
         let workspaces = try store.workspaces(projectID: project.id, includeArchived: true)
         for workspace in workspaces {
             let hasSettings = try store.workspaceSettingsExists(workspaceID: workspace.id)
-            if !hasSettings {
-                try seedWorkspaceSettings(project: project, workspace: workspace, config: config)
-            }
+            if !hasSettings { try seedWorkspaceSettings(project: project, workspace: workspace, config: config) }
         }
     }
 
-    private func syncDefaultWorkspaceSettingsIfTemplateBased(
-        project: ProjectRecord,
-        previousConfig: ProjectConfig,
-        updatedConfig: ProjectConfig
-    ) throws {
-        guard let defaultWorkspace = try store.workspace(projectID: project.id, name: "default") else {
-            return
-        }
+    private func syncDefaultWorkspaceSettingsIfTemplateBased(project: ProjectRecord, previousConfig: ProjectConfig, updatedConfig: ProjectConfig)
+        throws
+    {
+        guard let defaultWorkspace = try store.workspace(projectID: project.id, name: "default") else { return }
 
         let hasSettings = try store.workspaceSettingsExists(workspaceID: defaultWorkspace.id)
         if !hasSettings {
@@ -1459,19 +1059,13 @@ public final class SpaceshipOrchestrator {
             stopScript: try store.workspaceStopScript(workspaceID: defaultWorkspace.id),
             processes: try store.workspaceProcesses(workspaceID: defaultWorkspace.id),
             statusChecks: try store.workspaceStatusChecks(workspaceID: defaultWorkspace.id),
-            browserSessions: try store.workspaceBrowserSessions(workspaceID: defaultWorkspace.id)
-        )
+            browserSessions: try store.workspaceBrowserSessions(workspaceID: defaultWorkspace.id))
 
         let previousTemplate = WorkspaceSettings(
-            stopScript: previousConfig.stopScript,
-            processes: previousConfig.processes,
-            statusChecks: previousConfig.statusChecks,
-            browserSessions: previousConfig.browserSessions
-        )
+            stopScript: previousConfig.stopScript, processes: previousConfig.processes, statusChecks: previousConfig.statusChecks,
+            browserSessions: previousConfig.browserSessions)
 
-        guard workspaceSettingsMatch(currentSettings, previousTemplate) else {
-            return
-        }
+        guard workspaceSettingsMatch(currentSettings, previousTemplate) else { return }
 
         try seedWorkspaceSettings(project: project, workspace: defaultWorkspace, config: updatedConfig)
     }
@@ -1486,23 +1080,15 @@ public final class SpaceshipOrchestrator {
 
     private func processTemplatesMatch(_ lhs: [ProcessTemplate], _ rhs: [ProcessTemplate]) -> Bool {
         guard lhs.count == rhs.count else { return false }
-        for (left, right) in zip(lhs, rhs) {
-            if left.name != right.name || left.command != right.command || left.kind != right.kind {
-                return false
-            }
-        }
+        for (left, right) in zip(lhs, rhs) { if left.name != right.name || left.command != right.command || left.kind != right.kind { return false } }
         return true
     }
 
     private func statusChecksMatch(_ lhs: [StatusCheckDefinition], _ rhs: [StatusCheckDefinition]) -> Bool {
         guard lhs.count == rhs.count else { return false }
         for (left, right) in zip(lhs, rhs) {
-            if left.name != right.name
-                || left.process != right.process
-                || left.command != right.command
-                || left.interval != right.interval
-                || left.timeout != right.timeout
-                || left.onExit != right.onExit
+            if left.name != right.name || left.process != right.process || left.command != right.command || left.interval != right.interval
+                || left.timeout != right.timeout || left.onExit != right.onExit
             {
                 return false
             }
@@ -1512,9 +1098,7 @@ public final class SpaceshipOrchestrator {
 
     private func browserSessionsMatch(_ lhs: [BrowserSession], _ rhs: [BrowserSession]) -> Bool {
         guard lhs.count == rhs.count else { return false }
-        for (left, right) in zip(lhs, rhs) where left.url != right.url {
-            return false
-        }
+        for (left, right) in zip(lhs, rhs) where left.url != right.url { return false }
         return true
     }
 
@@ -1525,11 +1109,8 @@ public final class SpaceshipOrchestrator {
 
     private func seedWorkspaceSettings(project _: ProjectRecord, workspace: WorkspaceRecord, config: ProjectConfig?) throws {
         let snapshot = WorkspaceSettings(
-            stopScript: config?.stopScript,
-            processes: config?.processes ?? [],
-            statusChecks: config?.statusChecks ?? [],
-            browserSessions: config?.browserSessions ?? []
-        )
+            stopScript: config?.stopScript, processes: config?.processes ?? [], statusChecks: config?.statusChecks ?? [],
+            browserSessions: config?.browserSessions ?? [])
         try store.setWorkspaceStopScript(workspaceID: workspace.id, stopScript: snapshot.stopScript)
         try store.setWorkspaceProcesses(workspaceID: workspace.id, processes: snapshot.processes)
         try store.setWorkspaceStatusChecks(workspaceID: workspace.id, checks: snapshot.statusChecks)
@@ -1537,37 +1118,21 @@ public final class SpaceshipOrchestrator {
         try store.touchWorkspaceSettings(workspaceID: workspace.id, updatedAt: nowISO8601())
     }
 
-    private func loadWorkspaceSettings(
-        project: ProjectRecord,
-        workspace: WorkspaceRecord,
-        config: ProjectConfig?
-    ) throws -> WorkspaceSettings? {
+    private func loadWorkspaceSettings(project: ProjectRecord, workspace: WorkspaceRecord, config: ProjectConfig?) throws -> WorkspaceSettings? {
         let hasSettings = try store.workspaceSettingsExists(workspaceID: workspace.id)
-        if !hasSettings {
-            try seedWorkspaceSettings(project: project, workspace: workspace, config: config)
-        }
+        if !hasSettings { try seedWorkspaceSettings(project: project, workspace: workspace, config: config) }
         let stopScript = try store.workspaceStopScript(workspaceID: workspace.id)
         let processes = try store.workspaceProcesses(workspaceID: workspace.id)
         let statusChecks = try store.workspaceStatusChecks(workspaceID: workspace.id)
         let browserSessions = try store.workspaceBrowserSessions(workspaceID: workspace.id)
-        return WorkspaceSettings(
-            stopScript: stopScript,
-            processes: processes,
-            statusChecks: statusChecks,
-            browserSessions: browserSessions
-        )
+        return WorkspaceSettings(stopScript: stopScript, processes: processes, statusChecks: statusChecks, browserSessions: browserSessions)
     }
 
-    private func runScript(_ script: String, cwd: String) throws {
-        _ = try Shell.run(["/bin/bash", "-lc", script], cwd: cwd)
-    }
+    private func runScript(_ script: String, cwd: String) throws { _ = try Shell.run(["/bin/bash", "-lc", script], cwd: cwd) }
 
-    private func buildWorkspaceEnv(project: ProjectRecord, workspace: WorkspaceRecord, ports: [Int]) -> [String: String]
-    {
+    private func buildWorkspaceEnv(project: ProjectRecord, workspace: WorkspaceRecord, ports: [Int]) -> [String: String] {
         var env: [String: String] = [:]
-        for (idx, port) in ports.enumerated() {
-            env["PORT\(idx)"] = String(port)
-        }
+        for (idx, port) in ports.enumerated() { env["PORT\(idx)"] = String(port) }
         env["spaceship_WORKSPACE_DIR"] = workspace.dir
         let scopedKey = "spaceship_\(sanitizeEnvKey(project.name))_\(sanitizeEnvKey(workspace.name))_WORKSPACE_DIR"
         env[scopedKey] = workspace.dir
@@ -1575,19 +1140,11 @@ public final class SpaceshipOrchestrator {
     }
 
     private func applyWorkspaceSettingsUpdate(
-        project: ProjectRecord,
-        workspace: WorkspaceRecord,
-        previous: WorkspaceSettings,
-        updated: WorkspaceSettings
+        project: ProjectRecord, workspace: WorkspaceRecord, previous: WorkspaceSettings, updated: WorkspaceSettings
     ) throws {
         let ports = try store.workspacePorts(workspaceID: workspace.id)
         let env = buildWorkspaceEnv(project: project, workspace: workspace, ports: ports)
-        try reconcileProcesses(
-            workspace: workspace,
-            previous: previous.processes,
-            updated: updated.processes,
-            env: env
-        )
+        try reconcileProcesses(workspace: workspace, previous: previous.processes, updated: updated.processes, env: env)
         try reconcileBrowserSessions(project: project, workspace: workspace, sessions: updated.browserSessions, env: env)
         try pruneMissingWindows(workspaceID: workspace.id)
     }
@@ -1608,12 +1165,8 @@ public final class SpaceshipOrchestrator {
         return (logFile, pidFile)
     }
 
-    private func reconcileProcesses(
-        workspace: WorkspaceRecord,
-        previous: [ProcessTemplate],
-        updated: [ProcessTemplate],
-        env: [String: String]
-    ) throws {
+    private func reconcileProcesses(workspace: WorkspaceRecord, previous: [ProcessTemplate], updated: [ProcessTemplate], env: [String: String]) throws
+    {
         struct DesiredProcess {
             let matchKey: String
             let desiredKey: String
@@ -1630,16 +1183,10 @@ public final class SpaceshipOrchestrator {
             var matchKey = desiredKey
             if !hasName, idx < previous.count {
                 let previousKey = processKey(for: previous[idx])
-                if desiredKey == template.command && !previousKey.isEmpty {
-                    matchKey = previousKey
-                }
+                if desiredKey == template.command && !previousKey.isEmpty { matchKey = previousKey }
             }
             if desiredByMatch[matchKey] == nil {
-                desiredByMatch[matchKey] = DesiredProcess(
-                    matchKey: matchKey,
-                    desiredKey: desiredKey,
-                    template: template
-                )
+                desiredByMatch[matchKey] = DesiredProcess(matchKey: matchKey, desiredKey: desiredKey, template: template)
             }
         }
 
@@ -1657,167 +1204,82 @@ public final class SpaceshipOrchestrator {
             }
         }
 
-        if (!toStart.isEmpty || !toRestart.isEmpty), !iterm.isAvailable() {
+        if !toStart.isEmpty || !toRestart.isEmpty, !iterm.isAvailable() {
             throw SpaceshipError.dependencyMissing(message: "iTerm2 is required to launch processes.")
         }
 
         for process in toStop {
-            if let pid = resolvedRuntimePID(for: process) {
-                terminateProcessGroup(pid: pid)
-            }
-            if let windowID = process.windowID, process.terminalApp == "iTerm2" {
-                _ = try? iterm.closeWindow(id: windowID)
-            }
+            if let pid = resolvedRuntimePID(for: process) { terminateProcessGroup(pid: pid) }
+            if let windowID = process.windowID, process.terminalApp == "iTerm2" { _ = try? iterm.closeWindow(id: windowID) }
             try store.deleteRunningProcess(id: process.id)
         }
 
         for (desired, process) in toRelabel {
             let updated = RunningProcessRecord(
-                id: process.id,
-                workspaceID: workspace.id,
-                templateName: desired.desiredKey,
-                command: process.command,
-                terminalApp: process.terminalApp,
-                windowID: process.windowID,
-                pid: process.pid,
-                status: process.status,
-                logPath: process.logPath,
-                lastOutputAt: process.lastOutputAt,
-                startedAt: process.startedAt,
-                exitedAt: process.exitedAt
-            )
+                id: process.id, workspaceID: workspace.id, templateName: desired.desiredKey, command: process.command,
+                terminalApp: process.terminalApp, windowID: process.windowID, pid: process.pid, status: process.status, logPath: process.logPath,
+                lastOutputAt: process.lastOutputAt, startedAt: process.startedAt, exitedAt: process.exitedAt)
             try store.upsert(runningProcess: updated)
         }
 
-        var existingWindowIDs = Set<Int>(
-            (try store.windows(workspaceID: workspace.id)).compactMap { $0.windowID }
-        )
+        var existingWindowIDs = Set<Int>((try store.windows(workspaceID: workspace.id)).compactMap { $0.windowID })
         var terminalCount = (try? store.windows(workspaceID: workspace.id).filter { $0.role == "terminal" }.count) ?? 0
 
         for (desired, process) in toRestart {
             let name = desired.desiredKey
             let (logFile, pidFile) = try processRuntimePaths(workspaceID: workspace.id, name: name)
-            let command = shellCommand(
-                base: desired.template.command,
-                cwd: workspace.dir,
-                env: env,
-                logFile: logFile,
-                pidFile: pidFile
-            )
+            let command = shellCommand(base: desired.template.command, cwd: workspace.dir, env: env, logFile: logFile, pidFile: pidFile)
             if let windowID = process.windowID {
-                if let pid = resolvedRuntimePID(for: process) {
-                    terminateProcessGroup(pid: pid)
-                }
+                if let pid = resolvedRuntimePID(for: process) { terminateProcessGroup(pid: pid) }
                 try iterm.runInWindow(id: windowID, command: command)
                 let pid = try? Int(String(contentsOfFile: pidFile).trimmingCharacters(in: .whitespacesAndNewlines))
                 let updated = RunningProcessRecord(
-                    id: process.id,
-                    workspaceID: workspace.id,
-                    templateName: desired.desiredKey,
-                    command: desired.template.command,
-                    terminalApp: "iTerm2",
-                    windowID: windowID,
-                    pid: pid,
-                    status: .running,
-                    logPath: logFile,
-                    lastOutputAt: nil,
-                    startedAt: nowISO8601(),
-                    exitedAt: nil
-                )
+                    id: process.id, workspaceID: workspace.id, templateName: desired.desiredKey, command: desired.template.command,
+                    terminalApp: "iTerm2", windowID: windowID, pid: pid, status: .running, logPath: logFile, lastOutputAt: nil,
+                    startedAt: nowISO8601(), exitedAt: nil)
                 try store.upsert(runningProcess: updated)
             } else {
                 let snapshot = try yabai.listWindows()
                 let window = try iterm.openWindowAndRun(command: command)
                 let captured = try captureNewWindows(
-                    snapshot: snapshot,
-                    role: "terminal",
-                    appName: "iTerm2",
-                    workspaceID: workspace.id,
-                    orderOffset: 200 + terminalCount
-                )
+                    snapshot: snapshot, role: "terminal", appName: "iTerm2", workspaceID: workspace.id, orderOffset: 200 + terminalCount)
                 let resolvedWindowID = window.id >= 0 ? window.id : captured.first?.windowID
                 let pid = try? Int(String(contentsOfFile: pidFile).trimmingCharacters(in: .whitespacesAndNewlines))
                 let updated = RunningProcessRecord(
-                    id: process.id,
-                    workspaceID: workspace.id,
-                    templateName: desired.desiredKey,
-                    command: desired.template.command,
-                    terminalApp: "iTerm2",
-                    windowID: resolvedWindowID,
-                    pid: pid,
-                    status: .running,
-                    logPath: logFile,
-                    lastOutputAt: nil,
-                    startedAt: nowISO8601(),
-                    exitedAt: nil
-                )
+                    id: process.id, workspaceID: workspace.id, templateName: desired.desiredKey, command: desired.template.command,
+                    terminalApp: "iTerm2", windowID: resolvedWindowID, pid: pid, status: .running, logPath: logFile, lastOutputAt: nil,
+                    startedAt: nowISO8601(), exitedAt: nil)
                 try store.upsert(runningProcess: updated)
-                try upsertCapturedTerminalWindows(
-                    captured,
-                    existingWindowIDs: &existingWindowIDs,
-                    terminalCount: &terminalCount
-                )
+                try upsertCapturedTerminalWindows(captured, existingWindowIDs: &existingWindowIDs, terminalCount: &terminalCount)
             }
         }
 
         for (_, desired) in toStart {
             let name = desired.desiredKey
             let (logFile, pidFile) = try processRuntimePaths(workspaceID: workspace.id, name: name)
-            let command = shellCommand(
-                base: desired.template.command,
-                cwd: workspace.dir,
-                env: env,
-                logFile: logFile,
-                pidFile: pidFile
-            )
+            let command = shellCommand(base: desired.template.command, cwd: workspace.dir, env: env, logFile: logFile, pidFile: pidFile)
             let snapshot = try yabai.listWindows()
             let window = try iterm.openWindowAndRun(command: command)
             let captured = try captureNewWindows(
-                snapshot: snapshot,
-                role: "terminal",
-                appName: "iTerm2",
-                workspaceID: workspace.id,
-                orderOffset: 200 + terminalCount
-            )
+                snapshot: snapshot, role: "terminal", appName: "iTerm2", workspaceID: workspace.id, orderOffset: 200 + terminalCount)
             let resolvedWindowID = window.id >= 0 ? window.id : captured.first?.windowID
             let pid = try? Int(String(contentsOfFile: pidFile).trimmingCharacters(in: .whitespacesAndNewlines))
             let record = RunningProcessRecord(
-                id: UUID().uuidString,
-                workspaceID: workspace.id,
-                templateName: desired.desiredKey,
-                command: desired.template.command,
-                terminalApp: "iTerm2",
-                windowID: resolvedWindowID,
-                pid: pid,
-                status: .running,
-                logPath: logFile,
-                lastOutputAt: nil,
-                startedAt: nowISO8601(),
-                exitedAt: nil
-            )
+                id: UUID().uuidString, workspaceID: workspace.id, templateName: desired.desiredKey, command: desired.template.command,
+                terminalApp: "iTerm2", windowID: resolvedWindowID, pid: pid, status: .running, logPath: logFile, lastOutputAt: nil,
+                startedAt: nowISO8601(), exitedAt: nil)
             try store.upsert(runningProcess: record)
-            try upsertCapturedTerminalWindows(
-                captured,
-                existingWindowIDs: &existingWindowIDs,
-                terminalCount: &terminalCount
-            )
+            try upsertCapturedTerminalWindows(captured, existingWindowIDs: &existingWindowIDs, terminalCount: &terminalCount)
         }
 
         let ensuredTerminals = try terminalWindowsFromRunningProcesses(
-            workspace: workspace,
-            existingWindows: try store.windows(workspaceID: workspace.id)
-        )
-        for window in ensuredTerminals {
-            try store.upsert(window: window)
-        }
+            workspace: workspace, existingWindows: try store.windows(workspaceID: workspace.id))
+        for window in ensuredTerminals { try store.upsert(window: window) }
     }
 
-    private func reconcileBrowserSessions(
-        project: ProjectRecord,
-        workspace: WorkspaceRecord,
-        sessions: [BrowserSession],
-        env: [String: String]
-    ) throws {
+    private func reconcileBrowserSessions(project: ProjectRecord, workspace: WorkspaceRecord, sessions: [BrowserSession], env: [String: String])
+        throws
+    {
         let tracked = try store.windows(workspaceID: workspace.id).filter { $0.role == "browser" }
         if sessions.isEmpty {
             for window in tracked {
@@ -1826,19 +1288,12 @@ public final class SpaceshipOrchestrator {
             }
             return
         }
-        guard chrome.isAvailable() else {
-            throw SpaceshipError.dependencyMissing(message: "Google Chrome is required for browser sessions.")
-        }
+        guard chrome.isAvailable() else { throw SpaceshipError.dependencyMissing(message: "Google Chrome is required for browser sessions.") }
         let snapshot = try yabai.listWindows()
         let attached = try ensureBrowserSessions(project: project, workspace: workspace, sessions: sessions, env: env)
         let attachedIDs = Set(attached.compactMap { $0.windowID })
         let capturedRaw = try captureNewWindows(
-            snapshot: snapshot,
-            role: "browser",
-            appName: "Google Chrome",
-            workspaceID: workspace.id,
-            orderOffset: 0
-        )
+            snapshot: snapshot, role: "browser", appName: "Google Chrome", workspaceID: workspace.id, orderOffset: 0)
         let captured = capturedRaw.filter { window in
             guard let id = window.windowID else { return true }
             return !attachedIDs.contains(id)
@@ -1853,18 +1308,14 @@ public final class SpaceshipOrchestrator {
             }
             let key = windowTrackingKey(window)
             if !desiredKeys.contains(key) {
-                if !desiredIDs.contains(id) {
-                    closeTrackedBrowserTab(window)
-                }
+                if !desiredIDs.contains(id) { closeTrackedBrowserTab(window) }
                 try store.deleteWindow(id: window.id)
             }
         }
         var existingKeys = Set<String>()
         for window in desiredWindows {
             let key = windowTrackingKey(window)
-            if existingKeys.contains(key) {
-                continue
-            }
+            if existingKeys.contains(key) { continue }
             existingKeys.insert(key)
             try store.upsert(window: window)
         }
@@ -1878,81 +1329,50 @@ public final class SpaceshipOrchestrator {
                 try store.deleteWindow(id: window.id)
                 continue
             }
-            if !existingIDs.contains(id) {
-                try store.deleteWindow(id: window.id)
-            }
+            if !existingIDs.contains(id) { try store.deleteWindow(id: window.id) }
         }
     }
 
     private func windowTrackingKey(_ window: WindowRecord) -> String {
         let idPart = window.windowID.map(String.init) ?? "none"
-        if window.role == "browser" {
-            return "browser:\(idPart):\(window.targetURL ?? "")"
-        }
+        if window.role == "browser" { return "browser:\(idPart):\(window.targetURL ?? "")" }
         return "\(window.role):\(idPart)"
     }
 
     private func closeTrackedBrowserTab(_ window: WindowRecord) {
-        guard window.role == "browser", let targetURL = window.targetURL, chrome.isAvailable() else {
-            return
-        }
+        guard window.role == "browser", let targetURL = window.targetURL, chrome.isAvailable() else { return }
         if let trackedWindowID = window.windowID {
             let closedTrackedWindowTabs = (try? chrome.closeTabs(forURLPrefix: targetURL, windowID: trackedWindowID)) ?? false
-            if closedTrackedWindowTabs {
-                return
-            }
+            if closedTrackedWindowTabs { return }
         }
         _ = try? chrome.closeTabs(forURLPrefix: targetURL)
     }
 
-    private func upsertCapturedTerminalWindows(
-        _ captured: [WindowRecord],
-        existingWindowIDs: inout Set<Int>,
-        terminalCount: inout Int
-    ) throws {
+    private func upsertCapturedTerminalWindows(_ captured: [WindowRecord], existingWindowIDs: inout Set<Int>, terminalCount: inout Int) throws {
         for windowRecord in captured {
-            guard let id = windowRecord.windowID, !existingWindowIDs.contains(id) else {
-                continue
-            }
+            guard let id = windowRecord.windowID, !existingWindowIDs.contains(id) else { continue }
             existingWindowIDs.insert(id)
             terminalCount += 1
             try store.upsert(window: windowRecord)
         }
     }
 
-    private func terminalWindowsFromRunningProcesses(
-        workspace: WorkspaceRecord,
-        existingWindows: [WindowRecord]
-    ) throws -> [WindowRecord] {
+    private func terminalWindowsFromRunningProcesses(workspace: WorkspaceRecord, existingWindows: [WindowRecord]) throws -> [WindowRecord] {
         let processRecords = try store.runningProcesses(workspaceID: workspace.id)
-        let terminalProcessWindowIDs = processRecords
-            .filter { $0.terminalApp == "iTerm2" }
-            .compactMap(\.windowID)
+        let terminalProcessWindowIDs = processRecords.filter { $0.terminalApp == "iTerm2" }.compactMap(\.windowID)
         guard !terminalProcessWindowIDs.isEmpty else { return [] }
         let yabaiWindowsByID = Dictionary(uniqueKeysWithValues: try yabai.listWindows().map { ($0.id, $0) })
         var seenWindowIDs = Set(existingWindows.compactMap(\.windowID))
         var nextIndex = Self.nextWindowOrderIndex(existing: existingWindows, role: "terminal", orderOffset: 200)
         var synthesized: [WindowRecord] = []
         for windowID in terminalProcessWindowIDs {
-            if seenWindowIDs.contains(windowID) {
-                continue
-            }
-            guard let yabaiWindow = yabaiWindowsByID[windowID] else {
-                continue
-            }
+            if seenWindowIDs.contains(windowID) { continue }
+            guard let yabaiWindow = yabaiWindowsByID[windowID] else { continue }
             seenWindowIDs.insert(windowID)
             synthesized.append(
                 WindowRecord(
-                    id: UUID().uuidString,
-                    workspaceID: workspace.id,
-                    app: yabaiWindow.app,
-                    title: yabaiWindow.title,
-                    windowID: windowID,
-                    role: "terminal",
-                    orderIndex: nextIndex,
-                    lastSeenAt: nowISO8601()
-                )
-            )
+                    id: UUID().uuidString, workspaceID: workspace.id, app: yabaiWindow.app, title: yabaiWindow.title, windowID: windowID,
+                    role: "terminal", orderIndex: nextIndex, lastSeenAt: nowISO8601()))
             nextIndex += 1
         }
         return synthesized
@@ -1963,32 +1383,13 @@ public final class SpaceshipOrchestrator {
         return max(maxIndex + 1, orderOffset)
     }
 
-    private func attachNewWindows(
-        snapshot: [YabaiWindow],
-        workspaceID: String,
-        role: String,
-        appName: String,
-        orderOffset: Int
-    ) throws {
-        var captured = try captureNewWindows(
-            snapshot: snapshot,
-            role: role,
-            appName: appName,
-            workspaceID: workspaceID,
-            orderOffset: orderOffset
-        )
+    private func attachNewWindows(snapshot: [YabaiWindow], workspaceID: String, role: String, appName: String, orderOffset: Int) throws {
+        var captured = try captureNewWindows(snapshot: snapshot, role: role, appName: appName, workspaceID: workspaceID, orderOffset: orderOffset)
         if captured.isEmpty, let focused = try yabai.focusedWindow(), focused.app == appName {
             captured = [
                 WindowRecord(
-                    id: UUID().uuidString,
-                    workspaceID: workspaceID,
-                    app: focused.app,
-                    title: focused.title,
-                    windowID: focused.id,
-                    role: role,
-                    orderIndex: orderOffset,
-                    lastSeenAt: nowISO8601()
-                )
+                    id: UUID().uuidString, workspaceID: workspaceID, app: focused.app, title: focused.title, windowID: focused.id, role: role,
+                    orderIndex: orderOffset, lastSeenAt: nowISO8601())
             ]
         }
         guard !captured.isEmpty else { return }
@@ -2000,30 +1401,19 @@ public final class SpaceshipOrchestrator {
             if existingIDs.contains(id) { continue }
             existingIDs.insert(id)
             let stored = WindowRecord(
-                id: window.id,
-                workspaceID: workspaceID,
-                app: window.app,
-                title: window.title,
-                windowID: id,
-                role: role,
-                orderIndex: nextIndex,
-                lastSeenAt: nowISO8601()
-            )
+                id: window.id, workspaceID: workspaceID, app: window.app, title: window.title, windowID: id, role: role, orderIndex: nextIndex,
+                lastSeenAt: nowISO8601())
             nextIndex += 1
             try store.upsert(window: stored)
         }
     }
 
-    private func launchProcesses(workspace: WorkspaceRecord, templates: [ProcessTemplate], env: [String: String])
-        throws
-    {
+    private func launchProcesses(workspace: WorkspaceRecord, templates: [ProcessTemplate], env: [String: String]) throws {
         guard !templates.isEmpty else {
             try store.deleteRunningProcesses(workspaceID: workspace.id)
             return
         }
-        guard iterm.isAvailable() else {
-            throw SpaceshipError.dependencyMissing(message: "iTerm2 is required to launch processes.")
-        }
+        guard iterm.isAvailable() else { throw SpaceshipError.dependencyMissing(message: "iTerm2 is required to launch processes.") }
         let runtimeRoot = try runtimeDirectory()
         let workspaceRuntime = URL(fileURLWithPath: runtimeRoot).appendingPathComponent(workspace.id, isDirectory: true)
         try FileManager.default.createDirectory(at: workspaceRuntime, withIntermediateDirectories: true)
@@ -2034,53 +1424,29 @@ public final class SpaceshipOrchestrator {
             let name = template.name ?? template.command
             let logFile = workspaceRuntime.appendingPathComponent("\(safeFilename(name)).log").path
             let pidFile = workspaceRuntime.appendingPathComponent("\(safeFilename(name)).pid").path
-            let command = shellCommand(
-                base: template.command,
-                cwd: workspace.dir,
-                env: env,
-                logFile: logFile,
-                pidFile: pidFile
-            )
+            let command = shellCommand(base: template.command, cwd: workspace.dir, env: env, logFile: logFile, pidFile: pidFile)
             let snapshot = try yabai.listWindows()
             let window = try iterm.openWindowAndRun(command: command)
-            let fallbackWindowID =
-                try captureNewWindows(
-                    snapshot: snapshot,
-                    role: "terminal",
-                    appName: "iTerm2",
-                    workspaceID: workspace.id,
-                    orderOffset: 200
-                )
-                .first?.windowID
+            let fallbackWindowID = try captureNewWindows(
+                snapshot: snapshot, role: "terminal", appName: "iTerm2", workspaceID: workspace.id, orderOffset: 200
+            ).first?.windowID
 
             let pid = try? Int(String(contentsOfFile: pidFile).trimmingCharacters(in: .whitespacesAndNewlines))
             let running = RunningProcessRecord(
-                id: UUID().uuidString,
-                workspaceID: workspace.id,
-                templateName: name,
-                command: template.command,
-                terminalApp: "iTerm2",
-                windowID: window.id >= 0 ? window.id : fallbackWindowID,
-                pid: pid,
-                status: .running,
-                logPath: logFile,
-                lastOutputAt: nil,
-                startedAt: nowISO8601(),
-                exitedAt: nil
-            )
+                id: UUID().uuidString, workspaceID: workspace.id, templateName: name, command: template.command, terminalApp: "iTerm2",
+                windowID: window.id >= 0 ? window.id : fallbackWindowID, pid: pid, status: .running, logPath: logFile, lastOutputAt: nil,
+                startedAt: nowISO8601(), exitedAt: nil)
             try store.upsert(runningProcess: running)
         }
 
     }
 
-    private func ensureBrowserSessions(
-        project: ProjectRecord, workspace: WorkspaceRecord, sessions: [BrowserSession], env: [String: String]
-    ) throws -> [WindowRecord] {
+    private func ensureBrowserSessions(project: ProjectRecord, workspace: WorkspaceRecord, sessions: [BrowserSession], env: [String: String]) throws
+        -> [WindowRecord]
+    {
         _ = project
         guard !sessions.isEmpty else { return [] }
-        guard chrome.isAvailable() else {
-            throw SpaceshipError.dependencyMissing(message: "Google Chrome is required for browser sessions.")
-        }
+        guard chrome.isAvailable() else { throw SpaceshipError.dependencyMissing(message: "Google Chrome is required for browser sessions.") }
         var attached: [WindowRecord] = []
         var seenKeys = Set<String>()
         for session in sessions {
@@ -2093,71 +1459,37 @@ public final class SpaceshipOrchestrator {
             }
             for match in matches {
                 let key = "browser:\(match.windowID):\(match.url)"
-                if seenKeys.contains(key) {
-                    continue
-                }
+                if seenKeys.contains(key) { continue }
                 seenKeys.insert(key)
                 attached.append(
                     WindowRecord(
-                        id: UUID().uuidString,
-                        workspaceID: workspace.id,
-                        app: "Google Chrome",
-                        title: match.title,
-                        targetURL: match.url,
-                        windowID: match.windowID,
-                        role: "browser",
-                        orderIndex: attached.count,
-                        lastSeenAt: nowISO8601()
-                    )
-                )
+                        id: UUID().uuidString, workspaceID: workspace.id, app: "Google Chrome", title: match.title, targetURL: match.url,
+                        windowID: match.windowID, role: "browser", orderIndex: attached.count, lastSeenAt: nowISO8601()))
             }
-            if !matches.isEmpty {
-                continue
-            }
-            if (try? chrome.focusTab(forURLPrefix: resolved)) ?? false,
-                let focused = try? yabai.focusedWindow(),
-                focused.app == "Google Chrome"
-            {
+            if !matches.isEmpty { continue }
+            if (try? chrome.focusTab(forURLPrefix: resolved)) ?? false, let focused = try? yabai.focusedWindow(), focused.app == "Google Chrome" {
                 let key = "browser:\(focused.id):\(resolved)"
-                if seenKeys.contains(key) {
-                    continue
-                }
+                if seenKeys.contains(key) { continue }
                 seenKeys.insert(key)
                 attached.append(
                     WindowRecord(
-                        id: UUID().uuidString,
-                        workspaceID: workspace.id,
-                        app: focused.app,
-                        title: focused.title,
-                        targetURL: resolved,
-                        windowID: focused.id,
-                        role: "browser",
-                        orderIndex: attached.count,
-                        lastSeenAt: nowISO8601()
-                    )
-                )
+                        id: UUID().uuidString, workspaceID: workspace.id, app: focused.app, title: focused.title, targetURL: resolved,
+                        windowID: focused.id, role: "browser", orderIndex: attached.count, lastSeenAt: nowISO8601()))
             }
         }
         return attached
     }
 
-    private func captureNewWindows(
-        snapshot: [YabaiWindow], role: String, appName: String, workspaceID: String, orderOffset: Int
-    ) throws -> [WindowRecord] {
+    private func captureNewWindows(snapshot: [YabaiWindow], role: String, appName: String, workspaceID: String, orderOffset: Int) throws
+        -> [WindowRecord]
+    {
         let after = try yabai.listWindows()
         let snapshotIDs = Set(snapshot.map(\.id))
         let created = after.filter { !snapshotIDs.contains($0.id) && $0.app == appName }
         return created.enumerated().map { idx, win in
             WindowRecord(
-                id: UUID().uuidString,
-                workspaceID: workspaceID,
-                app: win.app,
-                title: win.title,
-                windowID: win.id,
-                role: role,
-                orderIndex: orderOffset + idx,
-                lastSeenAt: nowISO8601()
-            )
+                id: UUID().uuidString, workspaceID: workspaceID, app: win.app, title: win.title, windowID: win.id, role: role,
+                orderIndex: orderOffset + idx, lastSeenAt: nowISO8601())
         }
     }
 
@@ -2167,27 +1499,19 @@ public final class SpaceshipOrchestrator {
             dir = URL(fileURLWithPath: override, isDirectory: true)
         } else {
             let home = FileManager.default.homeDirectoryForCurrentUser
-            dir = home.appendingPathComponent(".spaceship", isDirectory: true).appendingPathComponent(
-                "runtime", isDirectory: true)
+            dir = home.appendingPathComponent(".spaceship", isDirectory: true).appendingPathComponent("runtime", isDirectory: true)
         }
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         return dir.path
     }
 
-    private func shellCommand(base: String, cwd: String, env: [String: String], logFile: String, pidFile: String)
-        -> String
-    {
-        let envExports = env.map { key, value in
-            return "export \(key)=\"\(value)\""
-        }.sorted().joined(separator: "; ")
+    private func shellCommand(base: String, cwd: String, env: [String: String], logFile: String, pidFile: String) -> String {
+        let envExports = env.map { key, value in return "export \(key)=\"\(value)\"" }.sorted().joined(separator: "; ")
         let safeCwd = cwd
         let safeLog = logFile
         let safePid = pidFile
         let commands = [
-            "cd \"\(safeCwd)\"",
-            envExports.isEmpty ? nil : envExports,
-            "echo $$ > \"\(safePid)\"",
-            "\(base) 2>&1 | tee -a \"\(safeLog)\"",
+            "cd \"\(safeCwd)\"", envExports.isEmpty ? nil : envExports, "echo $$ > \"\(safePid)\"", "\(base) 2>&1 | tee -a \"\(safeLog)\"",
         ].compactMap { $0 }
         let script = commands.joined(separator: "; ")
         let singleQuoted = script.replacing("'", with: "'\\''")
@@ -2196,15 +1520,11 @@ public final class SpaceshipOrchestrator {
 
     private func applyEnvVars(_ input: String, env: [String: String]) -> String {
         var output = input
-        for (key, value) in env {
-            output = output.replacingOccurrences(of: "$\(key)", with: value)
-        }
+        for (key, value) in env { output = output.replacingOccurrences(of: "$\(key)", with: value) }
         return output
     }
 
-    private func runCommandWithTimeout(command: String, cwd: String, timeout: Int, env: [String: String]) throws
-        -> CommandOutcome
-    {
+    private func runCommandWithTimeout(command: String, cwd: String, timeout: Int, env: [String: String]) throws -> CommandOutcome {
         let process = Process()
         let out = Pipe()
         process.executableURL = URL(fileURLWithPath: "/bin/bash")
@@ -2214,20 +1534,14 @@ public final class SpaceshipOrchestrator {
         process.standardError = out
 
         var environment = currentProcessEnvironment()
-        for (key, value) in env {
-            environment[key] = value
-        }
+        for (key, value) in env { environment[key] = value }
         process.environment = environment
 
         try process.run()
 
         let deadline = Date().addingTimeInterval(TimeInterval(timeout))
-        while process.isRunning && Date() < deadline {
-            Thread.sleep(forTimeInterval: 0.1)
-        }
-        if process.isRunning {
-            process.terminate()
-        }
+        while process.isRunning && Date() < deadline { Thread.sleep(forTimeInterval: 0.1) }
+        if process.isRunning { process.terminate() }
         process.waitUntilExit()
         let data = out.fileHandleForReading.readDataToEndOfFile()
         let output = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
@@ -2274,13 +1588,9 @@ public final class SpaceshipOrchestrator {
     }
 
     private func resolvedRuntimePID(for process: RunningProcessRecord) -> Int? {
-        if let pid = process.pid, pid > 0 {
-            return pid
-        }
+        if let pid = process.pid, pid > 0 { return pid }
         guard process.terminalApp == "iTerm2" else { return nil }
-        guard
-            let pidFile = try? processRuntimePaths(workspaceID: process.workspaceID, name: process.templateName).pidFile
-        else { return nil }
+        guard let pidFile = try? processRuntimePaths(workspaceID: process.workspaceID, name: process.templateName).pidFile else { return nil }
         return runtimePID(fromFile: pidFile)
     }
 
@@ -2293,22 +1603,16 @@ public final class SpaceshipOrchestrator {
 
     private func isProcessAlive(pid: Int) -> Bool {
         guard pid > 0 else { return false }
-        if Darwin.kill(pid_t(pid), 0) == 0 {
-            return true
-        }
+        if Darwin.kill(pid_t(pid), 0) == 0 { return true }
         return errno == EPERM
     }
 
     private func waitForProcessExit(pid: Int, timeout: TimeInterval) {
         let deadline = Date().addingTimeInterval(timeout)
-        while isProcessAlive(pid: pid), Date() < deadline {
-            Thread.sleep(forTimeInterval: 0.05)
-        }
+        while isProcessAlive(pid: pid), Date() < deadline { Thread.sleep(forTimeInterval: 0.05) }
     }
 
-    private func nowISO8601() -> String {
-        ISO8601DateFormatter().string(from: Date())
-    }
+    private func nowISO8601() -> String { ISO8601DateFormatter().string(from: Date()) }
 
     private func normalizePath(_ path: String) -> String {
         let expanded = expandTilde(path)
@@ -2318,9 +1622,7 @@ public final class SpaceshipOrchestrator {
     private func expandTilde(_ path: String) -> String {
         guard path.hasPrefix("~") else { return path }
         let home = FileManager.default.homeDirectoryForCurrentUser.path
-        if path == "~" {
-            return home
-        }
+        if path == "~" { return home }
         if path.hasPrefix("~/") {
             let suffix = path.dropFirst(2)
             return URL(fileURLWithPath: home).appendingPathComponent(String(suffix)).path
@@ -2329,90 +1631,62 @@ public final class SpaceshipOrchestrator {
     }
 
     private static let workspaceFoodNames: [String] = [
-        "almond", "anchovy", "apple", "apricot", "avocado", "bagel", "bacon", "banana", "basil", "bean",
-        "beef", "beet", "berry", "biscuit", "bread", "broccoli", "brownie", "burger", "burrito", "butter",
-        "cabbage", "cacao", "candy", "cantaloupe", "caramel", "carrot", "cashew", "celery", "cereal", "cherry",
-        "cheddar", "cheesecake", "chili", "chips", "chive", "chocolate", "chutney", "cider", "cinnamon", "clove",
-        "cocoa", "coconut", "coffee", "coleslaw", "cookie", "corn", "couscous", "cracker", "cream", "crouton",
-        "cucumber", "cupcake", "curry", "custard", "danish", "dill", "donut", "dumpling", "eclair", "edamame",
-        "egg", "empanada", "endive", "fajita", "falafel", "fig", "flan", "fries", "garlic", "ginger",
-        "gnocchi", "granola", "grape", "gravy", "grits", "guava", "ham", "hazelnut", "honey", "hummus",
-        "icecream", "jam", "jalapeno", "jelly", "kale", "kebab", "ketchup", "kiwi", "kohlrabi", "lasagna",
-        "leek", "lemon", "lentil", "lettuce", "lime", "lobster", "lychee", "macaroni", "macaron", "mango",
-        "maple", "marshmallow", "mascarpone", "mayo", "meatball", "melon", "mint", "mocha", "molasses", "muffin",
-        "mushroom", "mustard", "nacho", "noodle", "nutmeg", "oat", "omelet", "olive", "onion", "orange",
-        "oreo", "pancake", "papaya", "paprika", "parsnip", "pastry", "peach", "peanut", "pear", "peas",
-        "pecan", "pepper", "pesto", "pho", "pickle", "pie", "pineapple", "pita", "pizza", "plum",
-        "poppy", "popcorn", "pork", "potato", "poutine", "pretzel", "prune", "pudding", "pumpkin", "quiche",
-        "quinoa", "radish", "raisin", "ramen", "relish", "rice", "risotto", "roast", "roll", "saffron",
-        "sage", "salad", "salami", "salsa", "salt", "sardine", "sausage", "scone", "seaweed", "sesame",
-        "shallot", "shrimp", "soup", "sorbet", "soy", "spice", "spinach", "squash", "steak", "stew",
-        "sugar", "sushi", "syrup", "taco", "tamarind", "tapioca", "tea", "toffee", "toast", "tofu",
-        "tomato", "tortilla", "tuna", "turkey", "turnip", "vanilla", "vinegar", "waffle", "walnut", "watermelon",
-        "yams", "yogurt", "ziti", "zucchini",
+        "almond", "anchovy", "apple", "apricot", "avocado", "bagel", "bacon", "banana", "basil", "bean", "beef", "beet", "berry", "biscuit", "bread",
+        "broccoli", "brownie", "burger", "burrito", "butter", "cabbage", "cacao", "candy", "cantaloupe", "caramel", "carrot", "cashew", "celery",
+        "cereal", "cherry", "cheddar", "cheesecake", "chili", "chips", "chive", "chocolate", "chutney", "cider", "cinnamon", "clove", "cocoa",
+        "coconut", "coffee", "coleslaw", "cookie", "corn", "couscous", "cracker", "cream", "crouton", "cucumber", "cupcake", "curry", "custard",
+        "danish", "dill", "donut", "dumpling", "eclair", "edamame", "egg", "empanada", "endive", "fajita", "falafel", "fig", "flan", "fries",
+        "garlic", "ginger", "gnocchi", "granola", "grape", "gravy", "grits", "guava", "ham", "hazelnut", "honey", "hummus", "icecream", "jam",
+        "jalapeno", "jelly", "kale", "kebab", "ketchup", "kiwi", "kohlrabi", "lasagna", "leek", "lemon", "lentil", "lettuce", "lime", "lobster",
+        "lychee", "macaroni", "macaron", "mango", "maple", "marshmallow", "mascarpone", "mayo", "meatball", "melon", "mint", "mocha", "molasses",
+        "muffin", "mushroom", "mustard", "nacho", "noodle", "nutmeg", "oat", "omelet", "olive", "onion", "orange", "oreo", "pancake", "papaya",
+        "paprika", "parsnip", "pastry", "peach", "peanut", "pear", "peas", "pecan", "pepper", "pesto", "pho", "pickle", "pie", "pineapple", "pita",
+        "pizza", "plum", "poppy", "popcorn", "pork", "potato", "poutine", "pretzel", "prune", "pudding", "pumpkin", "quiche", "quinoa", "radish",
+        "raisin", "ramen", "relish", "rice", "risotto", "roast", "roll", "saffron", "sage", "salad", "salami", "salsa", "salt", "sardine", "sausage",
+        "scone", "seaweed", "sesame", "shallot", "shrimp", "soup", "sorbet", "soy", "spice", "spinach", "squash", "steak", "stew", "sugar", "sushi",
+        "syrup", "taco", "tamarind", "tapioca", "tea", "toffee", "toast", "tofu", "tomato", "tortilla", "tuna", "turkey", "turnip", "vanilla",
+        "vinegar", "waffle", "walnut", "watermelon", "yams", "yogurt", "ziti", "zucchini",
     ]
 
     private func worktreeRoot(project: ProjectRecord) throws -> URL {
         let projectDirname = sanitizeDirname(project.name, fallback: "project")
-        return
-            workspaceRootDirectory()
-            .appending(path: projectDirname, directoryHint: .isDirectory)
+        return workspaceRootDirectory().appending(path: projectDirname, directoryHint: .isDirectory)
     }
 
-    private func makeWorkspaceDirname(
-        project: ProjectRecord,
-        existingDirname: String?,
-        requestedDirname: String?
-    ) throws -> String {
+    private func makeWorkspaceDirname(project: ProjectRecord, existingDirname: String?, requestedDirname: String?) throws -> String {
         if let requestedDirname, !requestedDirname.isEmpty {
             try validateWorkspaceDirname(requestedDirname)
             let used = try usedWorkspaceDirnames(project: project, excludingDirname: existingDirname)
             guard !used.contains(requestedDirname) else {
-                throw SpaceshipError.invalidArgument(
-                    message: "Workspace directory name is already in use: \(requestedDirname)")
+                throw SpaceshipError.invalidArgument(message: "Workspace directory name is already in use: \(requestedDirname)")
             }
             return requestedDirname
         }
-        if let existingDirname, !existingDirname.isEmpty {
-            return existingDirname
-        }
+        if let existingDirname, !existingDirname.isEmpty { return existingDirname }
         let used = try usedWorkspaceDirnames(project: project, excludingDirname: nil)
-        if let available = SpaceshipOrchestrator.workspaceFoodNames.first(where: { !used.contains($0) }) {
-            return available
-        }
-        throw SpaceshipError.invalidArgument(
-            message: "No available workspace dirnames remain for project \(project.name).")
+        if let available = SpaceshipOrchestrator.workspaceFoodNames.first(where: { !used.contains($0) }) { return available }
+        throw SpaceshipError.invalidArgument(message: "No available workspace dirnames remain for project \(project.name).")
     }
 
     private func usedWorkspaceDirnames(project: ProjectRecord, excludingDirname: String?) throws -> Set<String> {
         let records = try store.workspaces(projectID: project.id, includeArchived: true)
         var used = Set<String>()
-        for record in records {
-            if let dirname = record.dirname, !dirname.isEmpty, dirname != excludingDirname {
-                used.insert(dirname)
-            }
-        }
+        for record in records { if let dirname = record.dirname, !dirname.isEmpty, dirname != excludingDirname { used.insert(dirname) } }
         let root = try worktreeRoot(project: project)
         if let entries = try? FileManager.default.contentsOfDirectory(atPath: root.path) {
-            for entry in entries where entry != excludingDirname {
-                used.insert(entry)
-            }
+            for entry in entries where entry != excludingDirname { used.insert(entry) }
         }
         return used
     }
 
     private func validateWorkspaceDirname(_ dirname: String) throws {
-        guard !dirname.isEmpty else {
-            throw SpaceshipError.invalidArgument(message: "Workspace directory name cannot be empty.")
-        }
+        guard !dirname.isEmpty else { throw SpaceshipError.invalidArgument(message: "Workspace directory name cannot be empty.") }
         if dirname.rangeOfCharacter(from: .whitespacesAndNewlines) != nil {
-            throw SpaceshipError.invalidArgument(
-                message: "Workspace directory name cannot contain spaces.")
+            throw SpaceshipError.invalidArgument(message: "Workspace directory name cannot contain spaces.")
         }
         for scalar in dirname.unicodeScalars {
             guard scalar.isASCII else {
-                throw SpaceshipError.invalidArgument(
-                    message: "Workspace directory name can only use letters, numbers, '-', and '_'.")
+                throw SpaceshipError.invalidArgument(message: "Workspace directory name can only use letters, numbers, '-', and '_'.")
             }
             let value = scalar.value
             let isUppercaseLetter = value >= 65 && value <= 90
@@ -2421,20 +1695,15 @@ public final class SpaceshipOrchestrator {
             let isHyphen = value == 45
             let isUnderscore = value == 95
             guard isUppercaseLetter || isLowercaseLetter || isDigit || isHyphen || isUnderscore else {
-                throw SpaceshipError.invalidArgument(
-                    message: "Workspace directory name can only use letters, numbers, '-', and '_'.")
+                throw SpaceshipError.invalidArgument(message: "Workspace directory name can only use letters, numbers, '-', and '_'.")
             }
         }
     }
 
     private func isMissingWorktreeError(_ error: Error) -> Bool {
-        guard case let SpaceshipError.gitCommandFailed(message) = error else {
-            return false
-        }
+        guard case SpaceshipError.gitCommandFailed(let message) = error else { return false }
         let lowered = message.lowercased()
-        return lowered.contains("not a working tree")
-            || lowered.contains("does not exist")
-            || lowered.contains("no such file or directory")
+        return lowered.contains("not a working tree") || lowered.contains("does not exist") || lowered.contains("no such file or directory")
     }
 
     private func sanitizeDirname(_ raw: String, fallback: String) -> String {
@@ -2448,40 +1717,24 @@ public final class SpaceshipOrchestrator {
     }
 
     private func projectsRootDirectory() -> URL {
-        if let projectsRootDirectoryURL {
-            return projectsRootDirectoryURL
-        }
+        if let projectsRootDirectoryURL { return projectsRootDirectoryURL }
         let home = FileManager.default.homeDirectoryForCurrentUser
-        return home.appending(path: "spaceship", directoryHint: .isDirectory).appending(
-            path: "projects",
-            directoryHint: .isDirectory
-        )
+        return home.appending(path: "spaceship", directoryHint: .isDirectory).appending(path: "projects", directoryHint: .isDirectory)
     }
 
     private func workspaceRootDirectory() -> URL {
-        if let workspacesRootDirectoryURL {
-            return workspacesRootDirectoryURL
-        }
+        if let workspacesRootDirectoryURL { return workspacesRootDirectoryURL }
         let home = FileManager.default.homeDirectoryForCurrentUser
-        return home.appending(path: "spaceship", directoryHint: .isDirectory).appending(
-            path: "workspaces",
-            directoryHint: .isDirectory
-        )
+        return home.appending(path: "spaceship", directoryHint: .isDirectory).appending(path: "workspaces", directoryHint: .isDirectory)
     }
 
     private func removeManagedGitWorkspaceDirectoriesIfNeeded(project: ProjectRecord) throws {
         guard project.isGitRepo else { return }
         let root = try worktreeRoot(project: project)
         let normalizedRoot = normalizePath(root.path)
-        guard isManagedWorkspacesDirectory(path: normalizedRoot, allowEqual: true) else {
-            return
-        }
+        guard isManagedWorkspacesDirectory(path: normalizedRoot, allowEqual: true) else { return }
         var isDirectory: ObjCBool = false
-        guard
-            FileManager.default.fileExists(atPath: normalizedRoot, isDirectory: &isDirectory), isDirectory.boolValue
-        else {
-            return
-        }
+        guard FileManager.default.fileExists(atPath: normalizedRoot, isDirectory: &isDirectory), isDirectory.boolValue else { return }
         try FileManager.default.removeItem(atPath: normalizedRoot)
     }
 
@@ -2490,78 +1743,48 @@ public final class SpaceshipOrchestrator {
         var processedPaths = Set<String>()
         for workspace in workspaces {
             let normalizedWorkspacePath = normalizePath(workspace.dir)
-            guard normalizedWorkspacePath != project.dir else {
-                continue
-            }
-            guard isManagedWorkspacesDirectory(path: normalizedWorkspacePath) else {
-                continue
-            }
-            guard !processedPaths.contains(normalizedWorkspacePath) else {
-                continue
-            }
+            guard normalizedWorkspacePath != project.dir else { continue }
+            guard isManagedWorkspacesDirectory(path: normalizedWorkspacePath) else { continue }
+            guard !processedPaths.contains(normalizedWorkspacePath) else { continue }
             processedPaths.insert(normalizedWorkspacePath)
-            do {
-                try git.removeWorktree(path: project.dir, worktreePath: workspace.dir)
-            } catch {
-                if !isMissingWorktreeError(error) {
-                    throw error
-                }
-            }
+            do { try git.removeWorktree(path: project.dir, worktreePath: workspace.dir) } catch { if !isMissingWorktreeError(error) { throw error } }
         }
     }
 
     private func removeManagedProjectDirectoryIfNeeded(project: ProjectRecord) throws {
-        guard project.isGitRepo, isManagedProjectsDirectory(path: project.dir) else {
-            return
-        }
+        guard project.isGitRepo, isManagedProjectsDirectory(path: project.dir) else { return }
         var isDirectory: ObjCBool = false
-        guard FileManager.default.fileExists(atPath: project.dir, isDirectory: &isDirectory), isDirectory.boolValue else {
-            return
-        }
+        guard FileManager.default.fileExists(atPath: project.dir, isDirectory: &isDirectory), isDirectory.boolValue else { return }
         try FileManager.default.removeItem(atPath: project.dir)
     }
 
-    private func isManagedProjectsDirectory(path: String) -> Bool {
-        isPath(path, inside: projectsRootDirectory().path)
-    }
+    private func isManagedProjectsDirectory(path: String) -> Bool { isPath(path, inside: projectsRootDirectory().path) }
 
     private func isManagedWorkspacesDirectory(path: String, allowEqual: Bool = false) -> Bool {
         isPath(path, inside: workspaceRootDirectory().path, allowEqual: allowEqual)
     }
 
     private func isPath(_ path: String, inside rootPath: String, allowEqual: Bool = false) -> Bool {
-        let root = URL(fileURLWithPath: rootPath, isDirectory: true)
-            .resolvingSymlinksInPath()
-            .standardizedFileURL
-        let candidate = URL(fileURLWithPath: path, isDirectory: true)
-            .resolvingSymlinksInPath()
-            .standardizedFileURL
+        let root = URL(fileURLWithPath: rootPath, isDirectory: true).resolvingSymlinksInPath().standardizedFileURL
+        let candidate = URL(fileURLWithPath: path, isDirectory: true).resolvingSymlinksInPath().standardizedFileURL
         let rootComponents = root.pathComponents
         let candidateComponents = candidate.pathComponents
         if allowEqual {
-            guard candidateComponents.count >= rootComponents.count else {
-                return false
-            }
+            guard candidateComponents.count >= rootComponents.count else { return false }
         } else {
-            guard candidateComponents.count > rootComponents.count else {
-                return false
-            }
+            guard candidateComponents.count > rootComponents.count else { return false }
         }
         return candidateComponents.starts(with: rootComponents)
     }
 
     private func inferredProjectName(from gitURL: String) -> String {
         var raw = gitURL.trimmingCharacters(in: .whitespacesAndNewlines)
-        while raw.hasSuffix("/") {
-            raw.removeLast()
-        }
+        while raw.hasSuffix("/") { raw.removeLast() }
         if !raw.contains("://"), let colon = raw.lastIndex(of: ":"), let slash = raw.lastIndex(of: "/"), colon > slash {
             raw = String(raw[raw.index(after: colon)...])
         }
         let lastSegment = raw.split(separator: "/").last.map(String.init) ?? raw
-        if lastSegment.hasSuffix(".git") {
-            return String(lastSegment.dropLast(4))
-        }
+        if lastSegment.hasSuffix(".git") { return String(lastSegment.dropLast(4)) }
         return lastSegment
     }
 

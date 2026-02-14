@@ -1,8 +1,7 @@
 import AppKit
 import streamctl
 
-@MainActor
-final class StatusCheckEditor {
+@MainActor final class StatusCheckEditor {
     let container = NSStackView()
     private let rowsStack = NSStackView()
     private let addButton: NSButton
@@ -52,23 +51,15 @@ final class StatusCheckEditor {
     }
 
     func setChecks(_ checks: [StatusCheckDefinition]) {
-        for row in rows {
-            row.remove()
-        }
+        for row in rows { row.remove() }
         rows = []
-        for check in checks {
-            addRow(with: check)
-        }
-        if checks.isEmpty {
-            addRow(with: nil)
-        }
+        for check in checks { addRow(with: check) }
+        if checks.isEmpty { addRow(with: nil) }
     }
 
     func refreshProcessOptions() {
         let names = processNamesProvider()
-        for row in rows {
-            row.refreshProcessOptions(names: names)
-        }
+        for row in rows { row.refreshProcessOptions(names: names) }
     }
 
     func currentChecks() -> [StatusCheckDefinition] {
@@ -81,13 +72,7 @@ final class StatusCheckEditor {
             let onExit = StatusCheckOnExit(rawValue: row.onExitPopup.titleOfSelectedItem ?? "") ?? .none
             guard !process.isEmpty, !command.isEmpty else { return nil }
             return StatusCheckDefinition(
-                name: name.isEmpty ? nil : name,
-                process: process,
-                command: command,
-                interval: interval,
-                timeout: timeout,
-                onExit: onExit
-            )
+                name: name.isEmpty ? nil : name, process: process, command: command, interval: interval, timeout: timeout, onExit: onExit)
         }
     }
 
@@ -101,36 +86,27 @@ final class StatusCheckEditor {
             row.intervalField.stringValue = String(check.interval)
             row.timeoutField.stringValue = String(check.timeout)
             row.onExitPopup.selectItem(withTitle: check.onExit.rawValue)
-            if row.processPopup.item(withTitle: check.process) == nil {
-                row.processPopup.addItem(withTitle: check.process)
-            }
+            if row.processPopup.item(withTitle: check.process) == nil { row.processPopup.addItem(withTitle: check.process) }
             row.processPopup.selectItem(withTitle: check.process)
         }
-        row.onChange = { [weak self] in
-            self?.onDirty?()
-        }
+        row.onChange = { [weak self] in self?.onDirty?() }
         row.onRemove = { [weak self, weak row] in
             guard let self, let row else { return }
-            if let idx = self.rows.firstIndex(where: { $0 === row }) {
-                self.rows.remove(at: idx)
-            }
+            if let idx = self.rows.firstIndex(where: { $0 === row }) { self.rows.remove(at: idx) }
             row.remove()
             self.onDirty?()
         }
         onDirty?()
     }
 
-    @objc private func addRowFromButton() {
-        addRow(with: nil)
-    }
+    @objc private func addRowFromButton() { addRow(with: nil) }
 
     private func processNames() -> [String] {
         let names = processNamesProvider()
         return names.isEmpty ? ["process"] : names
     }
 
-    @MainActor
-    private final class StatusCheckRowRefs {
+    @MainActor private final class StatusCheckRowRefs {
         let container = NSStackView()
         let nameField = NSTextField(string: "")
         let processPopup = NSPopUpButton()
@@ -176,14 +152,8 @@ final class StatusCheckEditor {
             commandField.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
 
             for field in [nameField, commandField, intervalField, timeoutField] {
-                NotificationCenter.default.addObserver(
-                    forName: NSText.didChangeNotification,
-                    object: field,
-                    queue: .main
-                ) { [weak self] _ in
-                    Task { @MainActor in
-                        self?.onChange?()
-                    }
+                NotificationCenter.default.addObserver(forName: NSText.didChangeNotification, object: field, queue: .main) { [weak self] _ in
+                    Task { @MainActor in self?.onChange?() }
                 }
             }
             processPopup.target = self
@@ -196,21 +166,13 @@ final class StatusCheckEditor {
             let current = processPopup.titleOfSelectedItem
             processPopup.removeAllItems()
             processPopup.addItems(withTitles: names.isEmpty ? ["process"] : names)
-            if let current, processPopup.item(withTitle: current) != nil {
-                processPopup.selectItem(withTitle: current)
-            }
+            if let current, processPopup.item(withTitle: current) != nil { processPopup.selectItem(withTitle: current) }
         }
 
-        func remove() {
-            container.removeFromSuperview()
-        }
+        func remove() { container.removeFromSuperview() }
 
-        @objc private func removeRow() {
-            onRemove?()
-        }
+        @objc private func removeRow() { onRemove?() }
 
-        @objc private func changedPopup() {
-            onChange?()
-        }
+        @objc private func changedPopup() { onChange?() }
     }
 }

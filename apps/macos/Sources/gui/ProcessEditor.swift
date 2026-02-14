@@ -1,8 +1,7 @@
 import AppKit
 import streamctl
 
-@MainActor
-final class ProcessEditor {
+@MainActor final class ProcessEditor {
     let container = NSStackView()
     private let rowsStack = NSStackView()
     private let addButton: NSButton
@@ -39,16 +38,10 @@ final class ProcessEditor {
     }
 
     func setProcesses(_ processes: [ProcessTemplate]) {
-        for row in rows {
-            row.remove()
-        }
+        for row in rows { row.remove() }
         rows = []
-        for process in processes {
-            addRow(with: process)
-        }
-        if processes.isEmpty {
-            addRow(with: nil)
-        }
+        for process in processes { addRow(with: process) }
+        if processes.isEmpty { addRow(with: nil) }
     }
 
     func currentProcesses() -> [ProcessTemplate] {
@@ -76,26 +69,19 @@ final class ProcessEditor {
             row.nameField.stringValue = process.name ?? ""
             row.commandField.stringValue = process.command
         }
-        row.onChange = { [weak self] in
-            self?.onDirty?()
-        }
+        row.onChange = { [weak self] in self?.onDirty?() }
         row.onRemove = { [weak self, weak row] in
             guard let self, let row else { return }
-            if let idx = self.rows.firstIndex(where: { $0 === row }) {
-                self.rows.remove(at: idx)
-            }
+            if let idx = self.rows.firstIndex(where: { $0 === row }) { self.rows.remove(at: idx) }
             row.remove()
             self.onDirty?()
         }
         onDirty?()
     }
 
-    @objc private func addRowFromButton() {
-        addRow(with: nil)
-    }
+    @objc private func addRowFromButton() { addRow(with: nil) }
 
-    @MainActor
-    private final class ProcessRowRefs {
+    @MainActor private final class ProcessRowRefs {
         let container = NSStackView()
         let nameField = NSTextField(string: "")
         let commandField = NSTextField(string: "")
@@ -124,24 +110,14 @@ final class ProcessEditor {
             commandField.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
 
             for field in [nameField, commandField] {
-                NotificationCenter.default.addObserver(
-                    forName: NSText.didChangeNotification,
-                    object: field,
-                    queue: .main
-                ) { [weak self] _ in
-                    Task { @MainActor in
-                        self?.onChange?()
-                    }
+                NotificationCenter.default.addObserver(forName: NSText.didChangeNotification, object: field, queue: .main) { [weak self] _ in
+                    Task { @MainActor in self?.onChange?() }
                 }
             }
         }
 
-        func remove() {
-            container.removeFromSuperview()
-        }
+        func remove() { container.removeFromSuperview() }
 
-        @objc private func removeRow() {
-            onRemove?()
-        }
+        @objc private func removeRow() { onRemove?() }
     }
 }

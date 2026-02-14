@@ -1,14 +1,11 @@
 import Foundation
 
 public enum Shell {
-    @discardableResult
-    public static func run(_ command: [String], cwd: String? = nil) throws -> Int32 {
+    @discardableResult public static func run(_ command: [String], cwd: String? = nil) throws -> Int32 {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
         process.arguments = command
-        if let cwd {
-            process.currentDirectoryURL = URL(fileURLWithPath: cwd)
-        }
+        if let cwd { process.currentDirectoryURL = URL(fileURLWithPath: cwd) }
         try process.run()
         process.waitUntilExit()
         return process.terminationStatus
@@ -22,9 +19,7 @@ public enum Shell {
         process.arguments = command
         process.standardOutput = out
         process.standardError = err
-        if let cwd {
-            process.currentDirectoryURL = URL(fileURLWithPath: cwd)
-        }
+        if let cwd { process.currentDirectoryURL = URL(fileURLWithPath: cwd) }
         try process.run()
         process.waitUntilExit()
 
@@ -32,9 +27,7 @@ public enum Shell {
         if process.terminationStatus != 0 {
             let errData = err.fileHandleForReading.readDataToEndOfFile()
             let text = String(data: errData, encoding: .utf8) ?? ""
-            throw NSError(
-                domain: "spaceship.shell", code: Int(process.terminationStatus),
-                userInfo: [NSLocalizedDescriptionKey: text])
+            throw NSError(domain: "spaceship.shell", code: Int(process.terminationStatus), userInfo: [NSLocalizedDescriptionKey: text])
         }
 
         return String(data: data, encoding: .utf8) ?? ""

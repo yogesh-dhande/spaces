@@ -14,26 +14,16 @@ public enum SpaceshipError: LocalizedError {
 
     public var errorDescription: String? {
         switch self {
-        case .missingProject(let dir):
-            return "Project not found: \(dir)"
-        case .projectAlreadyExists(let dir):
-            return "Project already exists: \(dir)"
-        case .missingWorkspace(let project, let workspace):
-            return "Workspace not found for project \(project): \(workspace)"
-        case .workspaceAlreadyExists(let project, let workspace):
-            return "Workspace already exists for project \(project): \(workspace)"
-        case .invalidWorkspace(let path):
-            return "Workspace path does not exist: \(path)"
-        case .gitCommandFailed(let message):
-            return "Git command failed: \(message)"
-        case .invalidArgument(let message):
-            return "Invalid argument: \(message)"
-        case .yabaiUnavailable(let message):
-            return "yabai not available: \(message)"
-        case .dependencyMissing(let message):
-            return "Missing dependency: \(message)"
-        case .configError(let message):
-            return "Configuration error: \(message)"
+        case .missingProject(let dir): return "Project not found: \(dir)"
+        case .projectAlreadyExists(let dir): return "Project already exists: \(dir)"
+        case .missingWorkspace(let project, let workspace): return "Workspace not found for project \(project): \(workspace)"
+        case .workspaceAlreadyExists(let project, let workspace): return "Workspace already exists for project \(project): \(workspace)"
+        case .invalidWorkspace(let path): return "Workspace path does not exist: \(path)"
+        case .gitCommandFailed(let message): return "Git command failed: \(message)"
+        case .invalidArgument(let message): return "Invalid argument: \(message)"
+        case .yabaiUnavailable(let message): return "yabai not available: \(message)"
+        case .dependencyMissing(let message): return "Missing dependency: \(message)"
+        case .configError(let message): return "Configuration error: \(message)"
         }
     }
 }

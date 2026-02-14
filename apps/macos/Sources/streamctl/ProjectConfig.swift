@@ -9,12 +9,8 @@ public struct ProjectConfig: Codable, Sendable {
     public var browserSessions: [BrowserSession]
 
     public init(
-        dir: String,
-        setupScript: String? = nil,
-        stopScript: String? = nil,
-        processes: [ProcessTemplate] = [],
-        statusChecks: [StatusCheckDefinition] = [],
-        browserSessions: [BrowserSession] = []
+        dir: String, setupScript: String? = nil, stopScript: String? = nil, processes: [ProcessTemplate] = [],
+        statusChecks: [StatusCheckDefinition] = [], browserSessions: [BrowserSession] = []
     ) {
         self.dir = dir
         self.setupScript = setupScript

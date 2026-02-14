@@ -9,15 +9,7 @@ public struct WorkspaceSummary: Sendable {
     public let isArchived: Bool
     public let isDefault: Bool
 
-    public init(
-        id: String,
-        name: String,
-        branch: String?,
-        dir: String,
-        isRunning: Bool,
-        isArchived: Bool,
-        isDefault: Bool
-    ) {
+    public init(id: String, name: String, branch: String?, dir: String, isRunning: Bool, isArchived: Bool, isDefault: Bool) {
         self.id = id
         self.name = name
         self.branch = branch

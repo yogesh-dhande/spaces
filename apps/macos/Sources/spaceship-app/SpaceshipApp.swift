@@ -1,8 +1,7 @@
 import AppKit
 import gui
 
-@main
-struct SpaceshipApp {
+@main struct SpaceshipApp {
     static func main() {
         let app = NSApplication.shared
         let delegate = AppKitController()

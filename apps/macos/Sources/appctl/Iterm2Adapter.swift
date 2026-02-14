@@ -3,9 +3,7 @@ import Foundation
 public final class Iterm2Adapter {
     public init() {}
 
-    public func isAvailable() -> Bool {
-        (try? AppleScript.run("tell application \"iTerm2\" to version")) != nil
-    }
+    public func isAvailable() -> Bool { (try? AppleScript.run("tell application \"iTerm2\" to version")) != nil }
 
     public func openWindowAndRun(command: String) throws -> ItermWindowInfo {
         let escaped = command.replacingOccurrences(of: "\"", with: "\\\"")

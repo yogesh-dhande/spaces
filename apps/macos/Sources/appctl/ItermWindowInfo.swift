@@ -1,5 +1,3 @@
 import Foundation
 
-public struct ItermWindowInfo: Sendable {
-    public let id: Int
-}
+public struct ItermWindowInfo: Sendable { public let id: Int }

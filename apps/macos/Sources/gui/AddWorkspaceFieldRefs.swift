@@ -1,7 +1,6 @@
 import AppKit
 
-@MainActor
-final class AddWorkspaceAutoNameState {
+@MainActor final class AddWorkspaceAutoNameState {
     var lastAutoWorkspaceName: String = ""
     var lastAutoDirName: String = ""
 }
