@@ -2030,6 +2030,15 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
     @objc private func archiveWorkspace(_ sender: NSButton) {
         guard let id = sender.identifier?.rawValue else { return }
+        let workspace = workspacesByProject.values.flatMap({ $0 }).first(where: { $0.id == id })
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "Archive workspace?"
+        alert.informativeText = "Are you sure you want to archive \"\(workspace?.name ?? id)\"? This will remove its git worktree and stop all running processes."
+        alert.addButton(withTitle: "Archive")
+        alert.addButton(withTitle: "Cancel")
+        let response = alert.runModal()
+        guard response == .alertFirstButtonReturn else { return }
         do {
             try orchestrator.archiveWorkspace(workspaceID: id)
             reloadData()
