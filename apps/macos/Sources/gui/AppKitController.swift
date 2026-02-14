@@ -729,16 +729,69 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         stack.spacing = 12
         stack.translatesAutoresizingMaskIntoConstraints = false
 
-        let header = NSTextField(labelWithString: "\(project.name) / \(workspace.name)")
-        header.font = .systemFont(ofSize: 20, weight: .semibold)
+        let headerRow = NSStackView()
+        headerRow.orientation = .horizontal
+        headerRow.alignment = .centerY
+        headerRow.spacing = 8
+        let statusDot = NSImageView()
+        statusDot.image = NSImage(
+            systemSymbolName: workspace.isRunning ? "circle.fill" : "circle",
+            accessibilityDescription: workspace.isRunning ? "Running" : "Stopped"
+        )
+        statusDot.contentTintColor = workspace.isRunning ? .systemGreen : .tertiaryLabelColor
+        statusDot.setContentHuggingPriority(.required, for: .horizontal)
+        let headerText = NSTextField(labelWithString: "\(project.name) / \(workspace.name)")
+        headerText.font = .systemFont(ofSize: 20, weight: .semibold)
+        headerRow.addArrangedSubview(statusDot)
+        headerRow.addArrangedSubview(headerText)
 
-        let dirLabel = labeledValue(title: "Directory", value: workspace.dir)
-        let statusLabel = statusRow(isRunning: workspace.isRunning)
+        var metadataRows: [NSView] = []
+        if let branch = workspace.branch {
+            let branchRow = NSStackView()
+            branchRow.orientation = .horizontal
+            branchRow.alignment = .centerY
+            branchRow.spacing = 4
+            let branchIcon = NSImageView()
+            branchIcon.image = NSImage(
+                systemSymbolName: "arrow.triangle.branch",
+                accessibilityDescription: "Branch"
+            )
+            branchIcon.contentTintColor = .secondaryLabelColor
+            branchIcon.setContentHuggingPriority(.required, for: .horizontal)
+            let branchLabel = NSTextField(labelWithString: branch)
+            branchLabel.font = .systemFont(ofSize: 12)
+            branchLabel.textColor = .secondaryLabelColor
+            branchRow.addArrangedSubview(branchIcon)
+            branchRow.addArrangedSubview(branchLabel)
+            metadataRows.append(branchRow)
+        }
+
+        let dirRow = NSStackView()
+        dirRow.orientation = .horizontal
+        dirRow.alignment = .centerY
+        dirRow.spacing = 4
+        let folderIcon = NSImageView()
+        folderIcon.image = NSImage(systemSymbolName: "folder", accessibilityDescription: "Directory")
+        folderIcon.contentTintColor = .secondaryLabelColor
+        folderIcon.setContentHuggingPriority(.required, for: .horizontal)
+        let dirField = NSTextField(labelWithString: workspace.dir)
+        dirField.font = .systemFont(ofSize: 12)
+        dirField.textColor = .secondaryLabelColor
+        dirField.lineBreakMode = .byTruncatingMiddle
+        let copyDirButton = NSButton(image: NSImage(systemSymbolName: "doc.on.doc", accessibilityDescription: "Copy path")!, target: self, action: #selector(copyDirectoryPath(_:)))
+        copyDirButton.bezelStyle = .inline
+        copyDirButton.isBordered = false
+        copyDirButton.toolTip = "Copy directory path"
+        copyDirButton.identifier = NSUserInterfaceItemIdentifier(workspace.dir)
+        dirRow.addArrangedSubview(folderIcon)
+        dirRow.addArrangedSubview(dirField)
+        dirRow.addArrangedSubview(copyDirButton)
+        metadataRows.append(dirRow)
 
         let launchOrRestartButton: NSButton
         if workspace.isRunning {
             launchOrRestartButton = actionButton(
-                title: "Restart (⌘L)",
+                title: "Restart",
                 symbol: "arrow.clockwise.circle",
                 tooltip: "Restart",
                 action: #selector(restartWorkspace(_:)),
@@ -746,7 +799,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             )
         } else {
             launchOrRestartButton = actionButton(
-                title: "Launch (⌘L)",
+                title: "Launch",
                 symbol: "play.circle",
                 tooltip: "Launch",
                 action: #selector(launchWorkspace(_:)),
@@ -755,7 +808,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         }
         launchOrRestartButton.identifier = NSUserInterfaceItemIdentifier(workspace.id)
         let stopButton = actionButton(
-            title: "Stop (⌘.)", symbol: "stop.circle", tooltip: "Stop", action: #selector(stopWorkspace(_:)),
+            title: "Stop", symbol: "stop.circle", tooltip: "Stop", action: #selector(stopWorkspace(_:)),
             primary: false)
         stopButton.identifier = NSUserInterfaceItemIdentifier(workspace.id)
         let archiveButton = actionButton(
@@ -788,9 +841,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         tabs.addTabViewItem(envTab)
         tabs.addTabViewItem(settingsTab)
 
-        stack.addArrangedSubview(header)
-        stack.addArrangedSubview(dirLabel)
-        stack.addArrangedSubview(statusLabel)
+        stack.addArrangedSubview(headerRow)
+        for row in metadataRows {
+            stack.addArrangedSubview(row)
+        }
         stack.addArrangedSubview(buttonRow)
         stack.addArrangedSubview(tabs)
         constrainFormFieldToFillWidth(buttonRow, in: stack)
@@ -873,9 +927,30 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         windowsList.isEditable = false
         windowsList.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
         let windows = (try? orchestrator.windows(workspaceID: workspace.id)) ?? []
+        let processByWindowID: [Int: RunningProcessRecord] = {
+            var map: [Int: RunningProcessRecord] = [:]
+            for process in processes {
+                if let wid = process.windowID {
+                    map[wid] = process
+                }
+            }
+            return map
+        }()
         windowsList.string = windows.enumerated().map { idx, win in
-            let title = win.targetURL ?? win.title ?? win.app
-            return "cmd+\(idx + 1)  \(win.app) — \(title)"
+            let windowLabel: String
+            switch win.role {
+            case "browser":
+                windowLabel = win.targetURL ?? win.title ?? win.app
+            case "terminal":
+                if let wid = win.windowID, let process = processByWindowID[wid] {
+                    windowLabel = process.command
+                } else {
+                    windowLabel = win.title ?? win.app
+                }
+            default:
+                windowLabel = win.title ?? win.app
+            }
+            return "cmd+\(idx + 1)  \(windowLabel)"
         }.joined(separator: "\n")
         let windowsScroll = scrollableTextView(windowsList, height: 120)
 
@@ -1891,6 +1966,12 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         } catch {
             showError(error)
         }
+    }
+
+    @objc private func copyDirectoryPath(_ sender: NSButton) {
+        guard let path = sender.identifier?.rawValue else { return }
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(path, forType: .string)
     }
 
     private func parseProcesses(_ raw: String) -> [ProcessTemplate] {

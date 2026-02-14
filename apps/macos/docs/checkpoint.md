@@ -28,6 +28,9 @@
 - Launch is now reserved for stopped workspaces; running workspaces use explicit restart semantics (stop then launch) via GUI/CLI.
 - Workspace settings snapshot project templates on creation into the runtime DB and are editable per workspace; updates to running workspaces reconcile processes and browser sessions immediately.
 - AppKit GUI is two-pane with in-place forms and editors for processes, browser sessions, and status checks; workspace detail includes run/stop/archive, windows list with shortcut hints, an env/ports tab, and workspace settings.
+- Workspace detail header shows a colored status dot (green = running, gray = stopped) to the left of the title, git branch with icon below, and directory path with folder icon and a copy-to-clipboard button.
+- Launch/Stop/Restart buttons show icon-only labels without keyboard shortcut text (shortcuts don't function from those buttons).
+- Window list shows URLs for browser sessions and process commands for terminal windows instead of raw window titles.
 - Right-pane forms are scrollable, use left-aligned full-width fields, and use text-labeled actions for create/cancel flows.
 - New workspace `+` actions in project UI are shown only for git projects.
 - New workspace forms now have separate target-branch, branch-name, and workspace-name inputs for git projects.
