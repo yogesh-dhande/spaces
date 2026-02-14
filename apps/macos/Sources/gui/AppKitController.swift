@@ -212,7 +212,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             workspacesByProject = [:]
             gitActivityByWorkspaceID = [:]
             for project in projects {
-                let workspaces = try orchestrator.listWorkspaces(projectID: project.id, includeArchived: true)
+                let workspaces = try orchestrator.listWorkspaces(projectID: project.id, includeArchived: false)
                 workspacesByProject[project.id] = workspaces
                 guard project.isGitRepo else { continue }
                 for workspace in workspaces {
@@ -816,13 +816,22 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             primary: false)
         archiveButton.identifier = NSUserInterfaceItemIdentifier(workspace.id)
         archiveButton.isEnabled = !workspace.isDefault
+        let muted = NSColor.systemRed.withAlphaComponent(0.6)
+        let redTitle = NSMutableAttributedString(string: "Archive", attributes: [
+            .foregroundColor: muted,
+            .font: archiveButton.font ?? NSFont.systemFont(ofSize: 13),
+        ])
+        archiveButton.attributedTitle = redTitle
+        if let baseImage = NSImage(systemSymbolName: "archivebox", accessibilityDescription: "Archive") {
+            let config = NSImage.SymbolConfiguration(paletteColors: [muted])
+            archiveButton.image = baseImage.withSymbolConfiguration(config)
+        }
 
         let buttonRow = NSStackView()
         buttonRow.orientation = .horizontal
         buttonRow.spacing = 8
         buttonRow.addArrangedSubview(launchOrRestartButton)
         buttonRow.addArrangedSubview(stopButton)
-        buttonRow.addArrangedSubview(archiveButton)
         buttonRow.addArrangedSubview(NSView())
 
         let tabs = NSTabView()
@@ -847,6 +856,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         }
         stack.addArrangedSubview(buttonRow)
         stack.addArrangedSubview(tabs)
+        stack.addArrangedSubview(archiveButton)
         constrainFormFieldToFillWidth(buttonRow, in: stack)
 
         detailContainer.addSubview(stack)
@@ -908,24 +918,38 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let processesLabel = label(text: "Running processes")
         let windowsLabel = label(text: "Windows (cmd+<n>)")
 
-        let processList = NSTextView()
-        processList.isEditable = false
-        processList.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
         let processes = (try? orchestrator.runningProcesses(workspaceID: workspace.id)) ?? []
         let results = (try? orchestrator.runStatusChecks(workspaceID: workspace.id)) ?? []
-        processList.string = processes.map { process in
-            let checks = results.filter { $0.processID == process.id }
-            if checks.isEmpty {
-                return "\(process.templateName) [\(process.status.rawValue)]"
+        let processesStack = NSStackView()
+        processesStack.orientation = .vertical
+        processesStack.spacing = 4
+        for process in processes {
+            let statusIcon: String
+            let statusColor: NSColor
+            switch process.status {
+            case .running:
+                statusIcon = "circle.fill"
+                statusColor = .systemGreen
+            case .exited:
+                statusIcon = "circle"
+                statusColor = .systemRed
+            case .idle:
+                statusIcon = "circle"
+                statusColor = .tertiaryLabelColor
             }
-            let checkInfo = checks.map { "\($0.checkName)=\($0.status)" }.joined(separator: ", ")
-            return "\(process.templateName) [\(process.status.rawValue)] { \(checkInfo) }"
-        }.joined(separator: "\n")
-        let processScroll = scrollableTextView(processList, height: 120)
+            let checks = results.filter { $0.processID == process.id }
+            let badge: String
+            if checks.isEmpty {
+                badge = process.status.rawValue
+            } else {
+                let checkInfo = checks.map { "\($0.checkName)=\($0.status)" }.joined(separator: ", ")
+                badge = "\(process.status.rawValue) { \(checkInfo) }"
+            }
+            let row = windowRow(icon: statusIcon, iconColor: statusColor, label: process.command, shortcut: badge)
+            processesStack.addArrangedSubview(row)
+            constrainFormFieldToFillWidth(row, in: processesStack)
+        }
 
-        let windowsList = NSTextView()
-        windowsList.isEditable = false
-        windowsList.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
         let windows = (try? orchestrator.windows(workspaceID: workspace.id)) ?? []
         let processByWindowID: [Int: RunningProcessRecord] = {
             var map: [Int: RunningProcessRecord] = [:]
@@ -936,32 +960,44 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             }
             return map
         }()
-        windowsList.string = windows.enumerated().map { idx, win in
+        let windowsStack = NSStackView()
+        windowsStack.orientation = .vertical
+        windowsStack.spacing = 4
+        for (idx, win) in windows.enumerated() {
             let windowLabel: String
+            let iconName: String
+            let iconColor: NSColor
             switch win.role {
             case "browser":
                 windowLabel = win.targetURL ?? win.title ?? win.app
+                iconName = "globe"
+                iconColor = .systemBlue
             case "terminal":
                 if let wid = win.windowID, let process = processByWindowID[wid] {
                     windowLabel = process.command
                 } else {
                     windowLabel = win.title ?? win.app
                 }
+                iconName = "terminal"
+                iconColor = .systemGreen
             default:
                 windowLabel = win.title ?? win.app
+                iconName = "chevron.left.forwardslash.chevron.right"
+                iconColor = .systemPurple
             }
-            return "cmd+\(idx + 1)  \(windowLabel)"
-        }.joined(separator: "\n")
-        let windowsScroll = scrollableTextView(windowsList, height: 120)
+            let row = windowRow(icon: iconName, iconColor: iconColor, label: windowLabel, shortcut: "CMD+\(idx + 1)")
+            windowsStack.addArrangedSubview(row)
+            constrainFormFieldToFillWidth(row, in: windowsStack)
+        }
 
         container.addArrangedSubview(openRow)
-        container.addArrangedSubview(processesLabel)
-        container.addArrangedSubview(processScroll)
         container.addArrangedSubview(windowsLabel)
-        container.addArrangedSubview(windowsScroll)
+        container.addArrangedSubview(windowsStack)
+        container.addArrangedSubview(processesLabel)
+        container.addArrangedSubview(processesStack)
         constrainFormFieldToFillWidth(openRow, in: container)
-        constrainFormFieldToFillWidth(processScroll, in: container)
-        constrainFormFieldToFillWidth(windowsScroll, in: container)
+        constrainFormFieldToFillWidth(processesStack, in: container)
+        constrainFormFieldToFillWidth(windowsStack, in: container)
         return insetContainerView(container)
     }
 
@@ -1119,6 +1155,40 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         label.lineBreakMode = .byWordWrapping
         label.maximumNumberOfLines = 0
         return label
+    }
+
+    private func windowRow(icon: String, iconColor: NSColor, label: String, shortcut: String) -> NSView {
+        let row = NSStackView()
+        row.orientation = .horizontal
+        row.alignment = .centerY
+        row.spacing = 8
+        row.wantsLayer = true
+        row.layer?.cornerRadius = 6
+        row.layer?.backgroundColor = NSColor.quaternaryLabelColor.cgColor
+        row.edgeInsets = NSEdgeInsets(top: 6, left: 8, bottom: 6, right: 8)
+
+        let iconView = NSImageView()
+        iconView.image = NSImage(systemSymbolName: icon, accessibilityDescription: nil)
+        iconView.contentTintColor = iconColor
+        iconView.setContentHuggingPriority(.required, for: .horizontal)
+        iconView.setContentCompressionResistancePriority(.required, for: .horizontal)
+
+        let labelField = NSTextField(labelWithString: label)
+        labelField.font = .systemFont(ofSize: 12)
+        labelField.textColor = .labelColor
+        labelField.lineBreakMode = .byTruncatingTail
+        labelField.setContentHuggingPriority(.defaultLow, for: .horizontal)
+
+        let badge = NSTextField(labelWithString: shortcut)
+        badge.font = .monospacedSystemFont(ofSize: 10, weight: .medium)
+        badge.textColor = .secondaryLabelColor
+        badge.setContentHuggingPriority(.required, for: .horizontal)
+        badge.setContentCompressionResistancePriority(.required, for: .horizontal)
+
+        row.addArrangedSubview(badge)
+        row.addArrangedSubview(iconView)
+        row.addArrangedSubview(labelField)
+        return row
     }
 
     private func labeledValue(title: String, value: String) -> NSView {
