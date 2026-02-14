@@ -221,6 +221,13 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                     }
                 }
             }
+            for (projectID, workspaces) in workspacesByProject {
+                workspacesByProject[projectID] = workspaces.sorted { a, b in
+                    let aDate = gitActivityByWorkspaceID[a.id]?.latestTrackedFileModificationDate ?? .distantPast
+                    let bDate = gitActivityByWorkspaceID[b.id]?.latestTrackedFileModificationDate ?? .distantPast
+                    return aDate > bDate
+                }
+            }
             outlineView.reloadData()
             outlineView.expandItem(nil, expandChildren: true)
             refreshSelection()
@@ -2414,9 +2421,17 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         case .toggle:
             toggleWindowFromHotkey()
         case .next:
-            focusGlobalWindowNavigation(direction: 1)
+            if NSApp.isActive {
+                selectNextRunningWorkspace()
+            } else {
+                focusGlobalWindowNavigation(direction: 1)
+            }
         case .previous:
-            focusGlobalWindowNavigation(direction: -1)
+            if NSApp.isActive {
+                selectPreviousRunningWorkspace()
+            } else {
+                focusGlobalWindowNavigation(direction: -1)
+            }
         }
     }
 
