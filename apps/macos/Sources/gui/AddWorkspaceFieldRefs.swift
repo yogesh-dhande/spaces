@@ -3,6 +3,7 @@ import AppKit
 @MainActor
 final class AddWorkspaceAutoNameState {
     var lastAutoWorkspaceName: String = ""
+    var lastAutoDirName: String = ""
 }
 
 struct AddWorkspaceFieldRefs {

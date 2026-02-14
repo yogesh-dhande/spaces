@@ -31,6 +31,7 @@
 - Workspace detail header shows a colored status dot (green = running, gray = stopped) to the left of the title, git branch with icon below, and directory path with folder icon and a copy-to-clipboard button.
 - Launch/Stop/Restart buttons show icon-only labels without keyboard shortcut text (shortcuts don't function from those buttons).
 - Window list shows URLs for browser sessions and process commands for terminal windows instead of raw window titles.
+- New project form uses themed card sections (rounded borders, sidebar colors) for Source, Setup script, Processes, Browser sessions, Status checks, and Stop script; source popup and directory picker are on the same row.
 - Right-pane forms are scrollable, use left-aligned full-width fields, and use text-labeled actions for create/cancel flows.
 - New workspace `+` actions in project UI are shown only for git projects.
 - New workspace forms now have separate target-branch, branch-name, and workspace-name inputs for git projects.

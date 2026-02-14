@@ -192,6 +192,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
     private func makeRightPane() -> NSView {
         detailContainer.translatesAutoresizingMaskIntoConstraints = false
+        detailContainer.wantsLayer = true
+        detailContainer.layer?.backgroundColor = sidebarPanelBackgroundColor().cgColor
         let placeholder = NSTextField(labelWithString: "Select a project or workspace.")
         placeholder.font = .systemFont(ofSize: 14)
         placeholder.textColor = .secondaryLabelColor
@@ -360,18 +362,33 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         for view in detailContainer.subviews {
             view.removeFromSuperview()
         }
+        detailContainer.wantsLayer = true
+        detailContainer.layer?.backgroundColor = sidebarPanelBackgroundColor().cgColor
+
         let stack = NSStackView()
         stack.orientation = .vertical
         stack.alignment = .leading
-        stack.spacing = 12
+        stack.spacing = 16
         stack.translatesAutoresizingMaskIntoConstraints = false
 
-        let headerRow = NSStackView()
-        headerRow.orientation = .horizontal
-        headerRow.alignment = .centerY
-        headerRow.spacing = 8
-        let header = NSTextField(labelWithString: project.name)
-        header.font = .systemFont(ofSize: 20, weight: .semibold)
+        // --- Header ---
+        let accentColor = sidebarThemeColor(light: (13, 95, 93), dark: (61, 198, 184))
+        let headerIcon = NSImageView()
+        if let img = NSImage(systemSymbolName: "folder.fill", accessibilityDescription: project.name) {
+            let config = NSImage.SymbolConfiguration(paletteColors: [accentColor])
+                .applying(NSImage.SymbolConfiguration(pointSize: 22, weight: .medium))
+            headerIcon.image = img.withSymbolConfiguration(config)
+        }
+        headerIcon.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            headerIcon.widthAnchor.constraint(equalToConstant: 28),
+            headerIcon.heightAnchor.constraint(equalToConstant: 28),
+        ])
+
+        let headerTitle = NSTextField(labelWithString: project.name)
+        headerTitle.font = .systemFont(ofSize: 20, weight: .semibold)
+        headerTitle.textColor = sidebarPrimaryTextColor(isSelected: false, isArchived: false)
+
         let addWorkspaceButton = actionButton(
             title: "New Workspace",
             symbol: "plus.rectangle.on.rectangle",
@@ -380,21 +397,33 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             primary: false
         )
         addWorkspaceButton.identifier = NSUserInterfaceItemIdentifier(project.id)
-        headerRow.addArrangedSubview(header)
+
+        let headerRow = NSStackView()
+        headerRow.orientation = .horizontal
+        headerRow.alignment = .centerY
+        headerRow.spacing = 10
+        headerRow.addArrangedSubview(headerIcon)
+        headerRow.addArrangedSubview(headerTitle)
         headerRow.addArrangedSubview(NSView())
         if project.isGitRepo {
             headerRow.addArrangedSubview(addWorkspaceButton)
         }
 
-        let dirLabel = labeledValue(title: "Directory", value: project.dir)
+        let headerSubtitle = NSTextField(labelWithString: project.dir)
+        headerSubtitle.font = .systemFont(ofSize: 12)
+        headerSubtitle.textColor = .secondaryLabelColor
+        headerSubtitle.lineBreakMode = .byTruncatingMiddle
 
+        stack.addArrangedSubview(headerRow)
+        stack.addArrangedSubview(headerSubtitle)
+        constrainFormFieldToFillWidth(headerRow, in: stack)
+
+        // --- Fields ---
         let setupView = makeEditableTextView()
         let stopView = makeEditableTextView()
-
         let processEditor = ProcessEditor()
         let browserView = makeEditableTextView()
         let browserScroll = scrollableTextView(browserView, height: 80)
-
         let statusEditor = StatusCheckEditor(processNamesProvider: { processEditor.processNames() })
         statusEditor.setChecks([])
 
@@ -406,35 +435,85 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             statusEditor.setChecks(config.statusChecks)
         }
 
+        // --- Setup script card ---
+        let setupScroll = scrollableTextView(setupView, height: 90)
+        let setupCard = formSectionCard(
+            icon: "terminal",
+            title: "Setup script",
+            subtitle: "Runs when each new workspace is created or revived from archive.",
+            contentViews: [setupScroll]
+        )
+        stack.addArrangedSubview(setupCard)
+        constrainFormFieldToFillWidth(setupCard, in: stack)
+
+        // --- Processes card ---
+        let processCard = formSectionCard(
+            icon: "terminal.fill",
+            title: "Processes",
+            subtitle: "Define the commands that run inside your workspace.",
+            contentViews: [processEditor.container]
+        )
+        stack.addArrangedSubview(processCard)
+        constrainFormFieldToFillWidth(processCard, in: stack)
+
+        // --- Browser sessions card ---
+        let browserCard = formSectionCard(
+            icon: "globe",
+            title: "Browser sessions",
+            subtitle: "URLs to open automatically, one per line.",
+            contentViews: [browserScroll]
+        )
+        stack.addArrangedSubview(browserCard)
+        constrainFormFieldToFillWidth(browserCard, in: stack)
+
+        // --- Status checks card ---
+        let statusCard = formSectionCard(
+            icon: "checkmark.shield",
+            title: "Status checks",
+            subtitle: "Health checks that run per process.",
+            contentViews: [statusEditor.container]
+        )
+        stack.addArrangedSubview(statusCard)
+        constrainFormFieldToFillWidth(statusCard, in: stack)
+
+        // --- Stop script card ---
+        let stopScroll = scrollableTextView(stopView, height: 90)
+        let stopCard = formSectionCard(
+            icon: "stop.circle",
+            title: "Stop script",
+            subtitle: "Runs on stop/restart/archive after process termination.",
+            contentViews: [stopScroll]
+        )
+        stack.addArrangedSubview(stopCard)
+        constrainFormFieldToFillWidth(stopCard, in: stack)
+
+        // --- Buttons ---
         let saveButton = actionButton(
             title: "Save Project", symbol: "square.and.arrow.down", tooltip: "Save project (⌘S)",
             action: #selector(saveProject(_:)), primary: true)
         saveButton.identifier = NSUserInterfaceItemIdentifier(project.id)
         saveButton.keyEquivalent = "\r"
+        saveButton.bezelStyle = .texturedRounded
+        saveButton.wantsLayer = true
+        saveButton.layer?.backgroundColor = accentColor.cgColor
+        saveButton.layer?.cornerRadius = 6
+        let buttonTextColor = NSColor.white
+        saveButton.attributedTitle = NSAttributedString(
+            string: "Save Project",
+            attributes: [
+                .foregroundColor: buttonTextColor,
+                .font: NSFont.systemFont(ofSize: 13, weight: .semibold),
+            ]
+        )
+        if let saveImg = NSImage(systemSymbolName: "square.and.arrow.down", accessibilityDescription: "Save") {
+            let imgConfig = NSImage.SymbolConfiguration(paletteColors: [buttonTextColor])
+            saveButton.image = saveImg.withSymbolConfiguration(imgConfig)
+        }
+
         let deleteButton = iconButton(symbol: "trash", tooltip: "Delete project", action: #selector(deleteProject(_:)))
         deleteButton.identifier = NSUserInterfaceItemIdentifier(project.id)
-        deleteButton.contentTintColor = .systemRed
-
-        stack.addArrangedSubview(headerRow)
-        stack.addArrangedSubview(dirLabel)
-        stack.addArrangedSubview(label(text: "Setup script"))
-        stack.addArrangedSubview(
-            helpTextLabel("Runs when this workspace is created or revived from archive.")
-        )
-        let setupScroll = scrollableTextView(setupView, height: 90)
-        stack.addArrangedSubview(setupScroll)
-        stack.addArrangedSubview(label(text: "Processes"))
-        stack.addArrangedSubview(processEditor.container)
-        stack.addArrangedSubview(label(text: "Browser sessions (URL per line)"))
-        stack.addArrangedSubview(browserScroll)
-        stack.addArrangedSubview(label(text: "Status checks (per process)"))
-        stack.addArrangedSubview(statusEditor.container)
-        stack.addArrangedSubview(label(text: "Stop script"))
-        stack.addArrangedSubview(
-            helpTextLabel("Runs on stop/restart/archive after automatic process termination.")
-        )
-        let stopScroll = scrollableTextView(stopView, height: 90)
-        stack.addArrangedSubview(stopScroll)
+        let muted = NSColor.systemRed.withAlphaComponent(0.6)
+        deleteButton.contentTintColor = muted
 
         let buttonRow = NSStackView()
         buttonRow.orientation = .horizontal
@@ -443,11 +522,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         buttonRow.addArrangedSubview(NSView())
         buttonRow.addArrangedSubview(saveButton)
         stack.addArrangedSubview(buttonRow)
-        constrainFormFieldToFillWidth(setupScroll, in: stack)
-        constrainFormFieldToFillWidth(processEditor.container, in: stack)
-        constrainFormFieldToFillWidth(browserScroll, in: stack)
-        constrainFormFieldToFillWidth(statusEditor.container, in: stack)
-        constrainFormFieldToFillWidth(stopScroll, in: stack)
         constrainFormFieldToFillWidth(buttonRow, in: stack)
 
         showScrollableDetailStack(stack)
@@ -469,50 +543,278 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         )
     }
 
+    private func formSectionCard(
+        icon: String,
+        title: String,
+        subtitle: String,
+        trailingView: NSView? = nil,
+        contentViews: [NSView]
+    ) -> NSView {
+        let card = NSView()
+        card.wantsLayer = true
+        card.layer?.cornerRadius = 10
+        card.layer?.borderWidth = 1
+        card.layer?.borderColor = sidebarCardBorderColor(isSelected: false).cgColor
+        card.layer?.backgroundColor = sidebarCardBackgroundColor(isArchived: false).cgColor
+        card.translatesAutoresizingMaskIntoConstraints = false
+        card.setContentHuggingPriority(.required, for: .vertical)
+
+        let accentColor = sidebarThemeColor(light: (13, 95, 93), dark: (61, 198, 184))
+
+        // Header row: icon + title/subtitle + optional trailing view
+        let iconView = NSImageView()
+        if let img = NSImage(systemSymbolName: icon, accessibilityDescription: title) {
+            let config = NSImage.SymbolConfiguration(paletteColors: [accentColor])
+            iconView.image = img.withSymbolConfiguration(config)
+        }
+        iconView.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            iconView.widthAnchor.constraint(equalToConstant: 20),
+            iconView.heightAnchor.constraint(equalToConstant: 20),
+        ])
+
+        let titleLabel = NSTextField(labelWithString: title)
+        titleLabel.font = .systemFont(ofSize: 13, weight: .semibold)
+        titleLabel.textColor = .labelColor
+
+        let subtitleLabel = NSTextField(labelWithString: subtitle)
+        subtitleLabel.font = .systemFont(ofSize: 11)
+        subtitleLabel.textColor = .secondaryLabelColor
+        subtitleLabel.lineBreakMode = .byWordWrapping
+        subtitleLabel.maximumNumberOfLines = 2
+        subtitleLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+
+        let titleStack = NSStackView()
+        titleStack.orientation = .vertical
+        titleStack.alignment = .leading
+        titleStack.spacing = 2
+        titleStack.addArrangedSubview(titleLabel)
+        titleStack.addArrangedSubview(subtitleLabel)
+        titleStack.setContentHuggingPriority(.defaultLow, for: .horizontal)
+
+        let headerRow = NSStackView()
+        headerRow.orientation = .horizontal
+        headerRow.alignment = .top
+        headerRow.spacing = 10
+        headerRow.addArrangedSubview(iconView)
+        headerRow.addArrangedSubview(titleStack)
+        if let trailing = trailingView {
+            trailing.setContentHuggingPriority(.required, for: .horizontal)
+            headerRow.addArrangedSubview(trailing)
+        }
+
+        let innerStack = NSStackView()
+        innerStack.orientation = .vertical
+        innerStack.alignment = .leading
+        innerStack.spacing = 10
+        innerStack.translatesAutoresizingMaskIntoConstraints = false
+        innerStack.addArrangedSubview(headerRow)
+        for view in contentViews {
+            innerStack.addArrangedSubview(view)
+        }
+
+        card.addSubview(innerStack)
+        NSLayoutConstraint.activate([
+            innerStack.leadingAnchor.constraint(equalTo: card.leadingAnchor, constant: 16),
+            innerStack.trailingAnchor.constraint(equalTo: card.trailingAnchor, constant: -16),
+            innerStack.topAnchor.constraint(equalTo: card.topAnchor, constant: 14),
+            innerStack.bottomAnchor.constraint(equalTo: card.bottomAnchor, constant: -14),
+        ])
+        headerRow.translatesAutoresizingMaskIntoConstraints = false
+        headerRow.widthAnchor.constraint(equalTo: innerStack.widthAnchor).isActive = true
+        for view in contentViews {
+            view.translatesAutoresizingMaskIntoConstraints = false
+            view.widthAnchor.constraint(equalTo: innerStack.widthAnchor).isActive = true
+        }
+
+        return card
+    }
+
     private func showAddProjectForm() {
         showingSettings = false
         for view in detailContainer.subviews {
             view.removeFromSuperview()
         }
+        detailContainer.wantsLayer = true
+        detailContainer.layer?.backgroundColor = sidebarPanelBackgroundColor().cgColor
+
         let stack = NSStackView()
         stack.orientation = .vertical
         stack.alignment = .leading
-        stack.spacing = 12
+        stack.spacing = 16
         stack.detachesHiddenViews = true
         stack.translatesAutoresizingMaskIntoConstraints = false
 
-        let header = NSTextField(labelWithString: "New Project")
-        header.font = .systemFont(ofSize: 20, weight: .semibold)
+        // --- Header ---
+        let accentColor = sidebarThemeColor(light: (13, 95, 93), dark: (61, 198, 184))
+        let headerIcon = NSImageView()
+        if let img = NSImage(systemSymbolName: "square.and.pencil", accessibilityDescription: "New Project") {
+            let config = NSImage.SymbolConfiguration(paletteColors: [accentColor])
+                .applying(NSImage.SymbolConfiguration(pointSize: 22, weight: .medium))
+            headerIcon.image = img.withSymbolConfiguration(config)
+        }
+        headerIcon.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            headerIcon.widthAnchor.constraint(equalToConstant: 28),
+            headerIcon.heightAnchor.constraint(equalToConstant: 28),
+        ])
 
+        let headerTitle = NSTextField(labelWithString: "New Project")
+        headerTitle.font = .systemFont(ofSize: 20, weight: .semibold)
+        headerTitle.textColor = sidebarPrimaryTextColor(isSelected: false, isArchived: false)
+
+        let headerRow = NSStackView()
+        headerRow.orientation = .horizontal
+        headerRow.alignment = .centerY
+        headerRow.spacing = 10
+        headerRow.addArrangedSubview(headerIcon)
+        headerRow.addArrangedSubview(headerTitle)
+
+        let headerSubtitle = NSTextField(labelWithString: "Configure your workspace, processes, and lifecycle scripts.")
+        headerSubtitle.font = .systemFont(ofSize: 12)
+        headerSubtitle.textColor = .secondaryLabelColor
+
+        stack.addArrangedSubview(headerRow)
+        stack.addArrangedSubview(headerSubtitle)
+
+        // --- Fields ---
         let sourcePopup = NSPopUpButton()
         sourcePopup.addItems(withTitles: ["Existing directory", "Clone repository"])
         sourcePopup.selectItem(at: 0)
         sourcePopup.target = self
         sourcePopup.action = #selector(projectSourceChanged(_:))
 
-        let dirField = NSTextField(labelWithString: "Choose a project directory")
+        let dirField = NSTextField(labelWithString: "")
         dirField.toolTip = nil
         dirField.textColor = .secondaryLabelColor
         dirField.lineBreakMode = .byTruncatingMiddle
-        let browseButton = NSButton(title: "", target: self, action: #selector(browseProjectDir(_:)))
+        dirField.isHidden = true
+        let browseButton = NSButton(title: "Choose a project directory", target: self, action: #selector(browseProjectDir(_:)))
         browseButton.bezelStyle = .texturedRounded
-        browseButton.controlSize = .small
+        browseButton.controlSize = .regular
         browseButton.image = NSImage(systemSymbolName: "folder", accessibilityDescription: "Choose directory")
+        browseButton.imagePosition = .imageLeading
         browseButton.toolTip = "Choose directory"
         let repoURLField = NSTextField(string: "")
         repoURLField.placeholderString = "https://github.com/org/repo.git"
 
         let setupView = makeEditableTextView()
         let stopView = makeEditableTextView()
-
         let processEditor = ProcessEditor()
-
         let browserView = makeEditableTextView()
         let browserScroll = scrollableTextView(browserView, height: 80)
-
         let statusEditor = StatusCheckEditor(processNamesProvider: { processEditor.processNames() })
         statusEditor.setChecks([])
 
+        // --- Source row: popup + dir/URL input on same line ---
+        let localSourceSection = NSStackView()
+        localSourceSection.orientation = .horizontal
+        localSourceSection.alignment = .centerY
+        localSourceSection.spacing = 8
+        localSourceSection.detachesHiddenViews = true
+
+        browseButton.translatesAutoresizingMaskIntoConstraints = false
+        browseButton.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        browseButton.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        NSLayoutConstraint.activate([
+            browseButton.heightAnchor.constraint(equalToConstant: 28),
+        ])
+
+        dirField.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        dirField.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+
+        localSourceSection.addArrangedSubview(browseButton)
+        localSourceSection.addArrangedSubview(dirField)
+
+        let cloneSourceSection = NSStackView()
+        cloneSourceSection.orientation = .horizontal
+        cloneSourceSection.alignment = .centerY
+        cloneSourceSection.spacing = 8
+        cloneSourceSection.detachesHiddenViews = true
+
+        repoURLField.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        repoURLField.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+
+        cloneSourceSection.addArrangedSubview(repoURLField)
+
+        // --- Source section (combined): popup on top, then dir/url row ---
+        let sourceInputRow = NSStackView()
+        sourceInputRow.orientation = .horizontal
+        sourceInputRow.alignment = .centerY
+        sourceInputRow.spacing = 8
+        sourceInputRow.detachesHiddenViews = true
+
+        sourcePopup.setContentHuggingPriority(.defaultHigh, for: .horizontal)
+        sourcePopup.setContentCompressionResistancePriority(.required, for: .horizontal)
+
+        sourceInputRow.addArrangedSubview(sourcePopup)
+        sourceInputRow.addArrangedSubview(localSourceSection)
+        sourceInputRow.addArrangedSubview(cloneSourceSection)
+
+        let sourceContentStack = NSStackView()
+        sourceContentStack.orientation = .vertical
+        sourceContentStack.alignment = .leading
+        sourceContentStack.spacing = 8
+        sourceContentStack.detachesHiddenViews = true
+        sourceContentStack.addArrangedSubview(sourceInputRow)
+        constrainFormFieldToFillWidth(sourceInputRow, in: sourceContentStack)
+
+        let sourceCard = formSectionCard(
+            icon: "folder.badge.plus",
+            title: "Source",
+            subtitle: "Where does your project live?",
+            contentViews: [sourceContentStack]
+        )
+        stack.addArrangedSubview(sourceCard)
+
+        // --- Setup script card ---
+        let setupScroll = scrollableTextView(setupView, height: 90)
+        let setupCard = formSectionCard(
+            icon: "terminal",
+            title: "Setup script",
+            subtitle: "Runs when each new workspace is created or revived from archive.",
+            contentViews: [setupScroll]
+        )
+        stack.addArrangedSubview(setupCard)
+
+        // --- Processes card ---
+        let processCard = formSectionCard(
+            icon: "terminal.fill",
+            title: "Processes",
+            subtitle: "Define the commands that run inside your workspace.",
+            contentViews: [processEditor.container]
+        )
+        stack.addArrangedSubview(processCard)
+
+        // --- Browser sessions card ---
+        let browserCard = formSectionCard(
+            icon: "globe",
+            title: "Browser sessions",
+            subtitle: "URLs to open automatically, one per line.",
+            contentViews: [browserScroll]
+        )
+        stack.addArrangedSubview(browserCard)
+
+        // --- Status checks card ---
+        let statusCard = formSectionCard(
+            icon: "checkmark.shield",
+            title: "Status checks",
+            subtitle: "Health checks that run per process.",
+            contentViews: [statusEditor.container]
+        )
+        stack.addArrangedSubview(statusCard)
+
+        // --- Stop script card ---
+        let stopScroll = scrollableTextView(stopView, height: 90)
+        let stopCard = formSectionCard(
+            icon: "stop.circle",
+            title: "Stop script",
+            subtitle: "Seeded into workspaces and run on stop/restart/archive",
+            contentViews: [stopScroll]
+        )
+        stack.addArrangedSubview(stopCard)
+
+        // --- Buttons ---
         let createButton = actionButton(
             title: "Create Project",
             symbol: nil,
@@ -521,6 +823,18 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             primary: true
         )
         createButton.keyEquivalent = "\r"
+        createButton.bezelStyle = .texturedRounded
+        createButton.wantsLayer = true
+        createButton.layer?.backgroundColor = accentColor.cgColor
+        createButton.layer?.cornerRadius = 6
+        let buttonTextColor = NSColor.white
+        createButton.attributedTitle = NSAttributedString(
+            string: "Create Project",
+            attributes: [
+                .foregroundColor: buttonTextColor,
+                .font: NSFont.systemFont(ofSize: 13, weight: .semibold),
+            ]
+        )
         let cancelButton = actionButton(
             title: "Cancel",
             symbol: nil,
@@ -529,68 +843,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             primary: false
         )
 
-        let localSourceSection = NSStackView()
-        localSourceSection.orientation = .vertical
-        localSourceSection.alignment = .leading
-        localSourceSection.spacing = 8
-        localSourceSection.detachesHiddenViews = true
-        localSourceSection.addArrangedSubview(label(text: "Project directory"))
-        let dirRow = NSView()
-        dirRow.translatesAutoresizingMaskIntoConstraints = false
-        browseButton.translatesAutoresizingMaskIntoConstraints = false
-        dirField.translatesAutoresizingMaskIntoConstraints = false
-        dirField.setContentHuggingPriority(.defaultLow, for: .horizontal)
-        dirField.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        dirRow.addSubview(browseButton)
-        dirRow.addSubview(dirField)
-        NSLayoutConstraint.activate([
-            browseButton.leadingAnchor.constraint(equalTo: dirRow.leadingAnchor),
-            browseButton.centerYAnchor.constraint(equalTo: dirRow.centerYAnchor),
-            browseButton.widthAnchor.constraint(equalToConstant: 36),
-            browseButton.heightAnchor.constraint(equalToConstant: 28),
-
-            dirField.leadingAnchor.constraint(equalTo: browseButton.trailingAnchor, constant: 8),
-            dirField.trailingAnchor.constraint(equalTo: dirRow.trailingAnchor),
-            dirField.centerYAnchor.constraint(equalTo: browseButton.centerYAnchor),
-            dirField.topAnchor.constraint(equalTo: dirRow.topAnchor),
-            dirField.bottomAnchor.constraint(equalTo: dirRow.bottomAnchor),
-
-            dirRow.heightAnchor.constraint(greaterThanOrEqualTo: browseButton.heightAnchor),
-        ])
-        localSourceSection.addArrangedSubview(dirRow)
-
-        let cloneSourceSection = NSStackView()
-        cloneSourceSection.orientation = .vertical
-        cloneSourceSection.alignment = .leading
-        cloneSourceSection.spacing = 8
-        cloneSourceSection.detachesHiddenViews = true
-        cloneSourceSection.addArrangedSubview(label(text: "Git repository URL"))
-        cloneSourceSection.addArrangedSubview(repoURLField)
-
-        stack.addArrangedSubview(header)
-        stack.addArrangedSubview(label(text: "Project source"))
-        stack.addArrangedSubview(sourcePopup)
-        stack.addArrangedSubview(localSourceSection)
-        stack.addArrangedSubview(cloneSourceSection)
-        stack.addArrangedSubview(label(text: "Setup script"))
-        stack.addArrangedSubview(
-            helpTextLabel("Runs when each new workspace is created or revived from archive.")
-        )
-        let setupScroll = scrollableTextView(setupView, height: 90)
-        stack.addArrangedSubview(setupScroll)
-        stack.addArrangedSubview(label(text: "Processes"))
-        stack.addArrangedSubview(processEditor.container)
-        stack.addArrangedSubview(label(text: "Browser sessions (URL per line)"))
-        stack.addArrangedSubview(browserScroll)
-        stack.addArrangedSubview(label(text: "Status checks (per process)"))
-        stack.addArrangedSubview(statusEditor.container)
-        stack.addArrangedSubview(label(text: "Stop script"))
-        stack.addArrangedSubview(
-            helpTextLabel("Seeded into workspaces and run on stop/restart/archive after process termination.")
-        )
-        let stopScroll = scrollableTextView(stopView, height: 90)
-        stack.addArrangedSubview(stopScroll)
-
         let buttonRow = NSStackView()
         buttonRow.orientation = .horizontal
         buttonRow.spacing = 8
@@ -598,16 +850,14 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         buttonRow.addArrangedSubview(NSView())
         buttonRow.addArrangedSubview(createButton)
         stack.addArrangedSubview(buttonRow)
-        constrainFormFieldToFillWidth(sourcePopup, in: stack)
-        constrainFormFieldToFillWidth(localSourceSection, in: stack)
-        constrainFormFieldToFillWidth(dirRow, in: localSourceSection)
-        constrainFormFieldToFillWidth(cloneSourceSection, in: stack)
-        constrainFormFieldToFillWidth(repoURLField, in: cloneSourceSection)
-        constrainFormFieldToFillWidth(setupScroll, in: stack)
-        constrainFormFieldToFillWidth(processEditor.container, in: stack)
-        constrainFormFieldToFillWidth(browserScroll, in: stack)
-        constrainFormFieldToFillWidth(statusEditor.container, in: stack)
-        constrainFormFieldToFillWidth(stopScroll, in: stack)
+
+        // --- Width constraints ---
+        constrainFormFieldToFillWidth(sourceCard, in: stack)
+        constrainFormFieldToFillWidth(setupCard, in: stack)
+        constrainFormFieldToFillWidth(processCard, in: stack)
+        constrainFormFieldToFillWidth(browserCard, in: stack)
+        constrainFormFieldToFillWidth(statusCard, in: stack)
+        constrainFormFieldToFillWidth(stopCard, in: stack)
         constrainFormFieldToFillWidth(buttonRow, in: stack)
 
         showScrollableDetailStack(stack)
@@ -635,14 +885,48 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         for view in detailContainer.subviews {
             view.removeFromSuperview()
         }
+        detailContainer.wantsLayer = true
+        detailContainer.layer?.backgroundColor = sidebarPanelBackgroundColor().cgColor
+
         let stack = NSStackView()
         stack.orientation = .vertical
         stack.alignment = .leading
-        stack.spacing = 12
+        stack.spacing = 16
         stack.translatesAutoresizingMaskIntoConstraints = false
 
-        let header = NSTextField(labelWithString: "New Workspace for \(project.name)")
-        header.font = .systemFont(ofSize: 20, weight: .semibold)
+        // --- Header ---
+        let accentColor = sidebarThemeColor(light: (13, 95, 93), dark: (61, 198, 184))
+        let headerIcon = NSImageView()
+        if let img = NSImage(systemSymbolName: "plus.rectangle.on.folder", accessibilityDescription: "New Workspace") {
+            let config = NSImage.SymbolConfiguration(paletteColors: [accentColor])
+                .applying(NSImage.SymbolConfiguration(pointSize: 22, weight: .medium))
+            headerIcon.image = img.withSymbolConfiguration(config)
+        }
+        headerIcon.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            headerIcon.widthAnchor.constraint(equalToConstant: 28),
+            headerIcon.heightAnchor.constraint(equalToConstant: 28),
+        ])
+
+        let headerTitle = NSTextField(labelWithString: "New Workspace")
+        headerTitle.font = .systemFont(ofSize: 20, weight: .semibold)
+        headerTitle.textColor = sidebarPrimaryTextColor(isSelected: false, isArchived: false)
+
+        let headerRow = NSStackView()
+        headerRow.orientation = .horizontal
+        headerRow.alignment = .centerY
+        headerRow.spacing = 10
+        headerRow.addArrangedSubview(headerIcon)
+        headerRow.addArrangedSubview(headerTitle)
+
+        let headerSubtitle = NSTextField(labelWithString: "Create a new workspace for \(project.name).")
+        headerSubtitle.font = .systemFont(ofSize: 12)
+        headerSubtitle.textColor = .secondaryLabelColor
+
+        stack.addArrangedSubview(headerRow)
+        stack.addArrangedSubview(headerSubtitle)
+
+        // --- Fields ---
         let suggestedName = (try? orchestrator.suggestedWorkspaceName(projectID: project.id)) ?? ""
         let nameField = NSTextField(string: project.isGitRepo ? "" : suggestedName)
         nameField.placeholderString = "workspace name"
@@ -662,6 +946,55 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         directoryNameField.placeholderString = "optional: letters, numbers, -, _"
         let autoNameState = project.isGitRepo ? AddWorkspaceAutoNameState() : nil
 
+        // --- Single card with all inputs ---
+        let contentStack = NSStackView()
+        contentStack.orientation = .vertical
+        contentStack.alignment = .leading
+        contentStack.spacing = 8
+
+        if project.isGitRepo {
+            contentStack.addArrangedSubview(label(text: "Target branch"))
+            contentStack.addArrangedSubview(
+                helpTextLabel("The existing branch your new branch will be based on.")
+            )
+            contentStack.addArrangedSubview(targetBranchField)
+            contentStack.addArrangedSubview(label(text: "Branch name"))
+            contentStack.addArrangedSubview(
+                helpTextLabel("Enter an existing branch or a new branch name to create.")
+            )
+            contentStack.addArrangedSubview(branchField)
+            constrainFormFieldToFillWidth(targetBranchField, in: contentStack)
+            constrainFormFieldToFillWidth(branchField, in: contentStack)
+        }
+
+        contentStack.addArrangedSubview(label(text: "Workspace name"))
+        contentStack.addArrangedSubview(
+            helpTextLabel("Display name for this workspace in the sidebar.")
+        )
+        contentStack.addArrangedSubview(nameField)
+        constrainFormFieldToFillWidth(nameField, in: contentStack)
+
+        if project.isGitRepo {
+            contentStack.addArrangedSubview(label(text: "Directory name"))
+            contentStack.addArrangedSubview(
+                helpTextLabel("Auto-filled from branch name. Only letters, numbers, -, _ allowed.")
+            )
+            contentStack.addArrangedSubview(directoryNameField)
+            constrainFormFieldToFillWidth(directoryNameField, in: contentStack)
+        }
+
+        let card = formSectionCard(
+            icon: "plus.rectangle.on.folder",
+            title: "Workspace",
+            subtitle: project.isGitRepo
+                ? "Configure branch, name, and directory for your new workspace."
+                : "Name your new workspace.",
+            contentViews: [contentStack]
+        )
+        stack.addArrangedSubview(card)
+        constrainFormFieldToFillWidth(card, in: stack)
+
+        // --- Buttons ---
         let createButton = actionButton(
             title: "Create Workspace",
             symbol: nil,
@@ -670,6 +1003,18 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             primary: true
         )
         createButton.keyEquivalent = "\r"
+        createButton.bezelStyle = .texturedRounded
+        createButton.wantsLayer = true
+        createButton.layer?.backgroundColor = accentColor.cgColor
+        createButton.layer?.cornerRadius = 6
+        let buttonTextColor = NSColor.white
+        createButton.attributedTitle = NSAttributedString(
+            string: "Create Workspace",
+            attributes: [
+                .foregroundColor: buttonTextColor,
+                .font: NSFont.systemFont(ofSize: 13, weight: .semibold),
+            ]
+        )
         let cancelButton = actionButton(
             title: "Cancel",
             symbol: nil,
@@ -678,24 +1023,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             primary: false
         )
 
-        stack.addArrangedSubview(header)
-        if project.isGitRepo {
-            stack.addArrangedSubview(label(text: "Target branch"))
-            stack.addArrangedSubview(targetBranchField)
-            stack.addArrangedSubview(label(text: "Branch name"))
-            stack.addArrangedSubview(branchField)
-            stack.addArrangedSubview(label(text: "Workspace name"))
-            stack.addArrangedSubview(nameField)
-            stack.addArrangedSubview(label(text: "Directory name (optional)"))
-            stack.addArrangedSubview(
-                helpTextLabel("Overrides auto-generated worktree folder name. No spaces. Allowed: letters, numbers, -, _.")
-            )
-            stack.addArrangedSubview(directoryNameField)
-        } else {
-            stack.addArrangedSubview(label(text: "Workspace name"))
-            stack.addArrangedSubview(nameField)
-        }
-
         let buttonRow = NSStackView()
         buttonRow.orientation = .horizontal
         buttonRow.spacing = 8
@@ -703,12 +1030,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         buttonRow.addArrangedSubview(NSView())
         buttonRow.addArrangedSubview(createButton)
         stack.addArrangedSubview(buttonRow)
-        constrainFormFieldToFillWidth(nameField, in: stack)
-        if project.isGitRepo {
-            constrainFormFieldToFillWidth(targetBranchField, in: stack)
-            constrainFormFieldToFillWidth(branchField, in: stack)
-            constrainFormFieldToFillWidth(directoryNameField, in: stack)
-        }
         constrainFormFieldToFillWidth(buttonRow, in: stack)
 
         showScrollableDetailStack(stack)
@@ -730,28 +1051,35 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         for view in detailContainer.subviews {
             view.removeFromSuperview()
         }
+        detailContainer.wantsLayer = true
+        detailContainer.layer?.backgroundColor = sidebarPanelBackgroundColor().cgColor
+
         let stack = NSStackView()
         stack.orientation = .vertical
         stack.alignment = .leading
         stack.spacing = 12
         stack.translatesAutoresizingMaskIntoConstraints = false
 
-        let headerRow = NSStackView()
-        headerRow.orientation = .horizontal
-        headerRow.alignment = .centerY
-        headerRow.spacing = 8
+        // --- Header with status dot ---
+        let accentColor = sidebarThemeColor(light: (13, 95, 93), dark: (61, 198, 184))
         let statusDot = NSImageView()
         statusDot.image = NSImage(
             systemSymbolName: workspace.isRunning ? "circle.fill" : "circle",
             accessibilityDescription: workspace.isRunning ? "Running" : "Stopped"
         )
-        statusDot.contentTintColor = workspace.isRunning ? .systemGreen : .tertiaryLabelColor
+        statusDot.contentTintColor = workspace.isRunning ? accentColor : .tertiaryLabelColor
         statusDot.setContentHuggingPriority(.required, for: .horizontal)
         let headerText = NSTextField(labelWithString: "\(project.name) / \(workspace.name)")
         headerText.font = .systemFont(ofSize: 20, weight: .semibold)
+        headerText.textColor = sidebarPrimaryTextColor(isSelected: false, isArchived: false)
+        let headerRow = NSStackView()
+        headerRow.orientation = .horizontal
+        headerRow.alignment = .centerY
+        headerRow.spacing = 8
         headerRow.addArrangedSubview(statusDot)
         headerRow.addArrangedSubview(headerText)
 
+        // --- Metadata rows ---
         var metadataRows: [NSView] = []
         if let branch = workspace.branch {
             let branchRow = NSStackView()
@@ -795,6 +1123,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         dirRow.addArrangedSubview(copyDirButton)
         metadataRows.append(dirRow)
 
+        // --- Action buttons ---
         let launchOrRestartButton: NSButton
         if workspace.isRunning {
             launchOrRestartButton = actionButton(
@@ -841,6 +1170,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         buttonRow.addArrangedSubview(stopButton)
         buttonRow.addArrangedSubview(NSView())
 
+        // --- Tabs ---
         let tabs = NSTabView()
         tabs.translatesAutoresizingMaskIntoConstraints = false
         tabs.tabViewType = .topTabsBezelBorder
@@ -881,12 +1211,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let container = NSStackView()
         container.orientation = .vertical
         container.alignment = .leading
-        container.spacing = 10
+        container.spacing = 14
         container.translatesAutoresizingMaskIntoConstraints = false
 
-        let openRow = NSStackView()
-        openRow.orientation = .horizontal
-        openRow.spacing = 8
+        // --- Quick actions ---
         let openEditorButton = actionButton(
             title: actionTitle(base: "Open Editor", setting: .guiOpenEditorShortcut),
             symbol: nil,
@@ -917,46 +1245,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             openEditorButton.isEnabled = false
             openEditorButton.toolTip = "Preferred editor not configured"
         }
-        openRow.addArrangedSubview(openEditorButton)
-        openRow.addArrangedSubview(openTerminalButton)
-        openRow.addArrangedSubview(openFinderButton)
-        openRow.addArrangedSubview(NSView())
+        // buttons added to centeredOpenRow below
 
-        let processesLabel = label(text: "Running processes")
-        let windowsLabel = label(text: "Windows (cmd+<n>)")
-
+        // --- Windows card ---
         let processes = (try? orchestrator.runningProcesses(workspaceID: workspace.id)) ?? []
-        let results = (try? orchestrator.runStatusChecks(workspaceID: workspace.id)) ?? []
-        let processesStack = NSStackView()
-        processesStack.orientation = .vertical
-        processesStack.spacing = 4
-        for process in processes {
-            let statusIcon: String
-            let statusColor: NSColor
-            switch process.status {
-            case .running:
-                statusIcon = "circle.fill"
-                statusColor = .systemGreen
-            case .exited:
-                statusIcon = "circle"
-                statusColor = .systemRed
-            case .idle:
-                statusIcon = "circle"
-                statusColor = .tertiaryLabelColor
-            }
-            let checks = results.filter { $0.processID == process.id }
-            let badge: String
-            if checks.isEmpty {
-                badge = process.status.rawValue
-            } else {
-                let checkInfo = checks.map { "\($0.checkName)=\($0.status)" }.joined(separator: ", ")
-                badge = "\(process.status.rawValue) { \(checkInfo) }"
-            }
-            let row = windowRow(icon: statusIcon, iconColor: statusColor, label: process.command, shortcut: badge)
-            processesStack.addArrangedSubview(row)
-            constrainFormFieldToFillWidth(row, in: processesStack)
-        }
-
         let windows = (try? orchestrator.windows(workspaceID: workspace.id)) ?? []
         let processByWindowID: [Int: RunningProcessRecord] = {
             var map: [Int: RunningProcessRecord] = [:]
@@ -996,15 +1288,68 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             windowsStack.addArrangedSubview(row)
             constrainFormFieldToFillWidth(row, in: windowsStack)
         }
+        let windowsCard = formSectionCard(
+            icon: "macwindow.on.rectangle",
+            title: "Windows",
+            subtitle: "Focus windows with cmd+<n> shortcuts.",
+            contentViews: [windowsStack]
+        )
+        container.addArrangedSubview(windowsCard)
+        constrainFormFieldToFillWidth(windowsCard, in: container)
 
-        container.addArrangedSubview(openRow)
-        container.addArrangedSubview(windowsLabel)
-        container.addArrangedSubview(windowsStack)
-        container.addArrangedSubview(processesLabel)
-        container.addArrangedSubview(processesStack)
-        constrainFormFieldToFillWidth(openRow, in: container)
-        constrainFormFieldToFillWidth(processesStack, in: container)
-        constrainFormFieldToFillWidth(windowsStack, in: container)
+        // --- Processes card ---
+        let results = (try? orchestrator.runStatusChecks(workspaceID: workspace.id)) ?? []
+        let processesStack = NSStackView()
+        processesStack.orientation = .vertical
+        processesStack.spacing = 4
+        for process in processes {
+            let statusIcon: String
+            let statusColor: NSColor
+            switch process.status {
+            case .running:
+                statusIcon = "circle.fill"
+                statusColor = .systemGreen
+            case .exited:
+                statusIcon = "circle"
+                statusColor = .systemRed
+            case .idle:
+                statusIcon = "circle"
+                statusColor = .tertiaryLabelColor
+            }
+            let checks = results.filter { $0.processID == process.id }
+            let badge: String
+            if checks.isEmpty {
+                badge = process.status.rawValue
+            } else {
+                let checkInfo = checks.map { "\($0.checkName)=\($0.status)" }.joined(separator: ", ")
+                badge = "\(process.status.rawValue) { \(checkInfo) }"
+            }
+            let row = windowRow(icon: statusIcon, iconColor: statusColor, label: process.command, shortcut: badge)
+            processesStack.addArrangedSubview(row)
+            constrainFormFieldToFillWidth(row, in: processesStack)
+        }
+        let processesCard = formSectionCard(
+            icon: "terminal.fill",
+            title: "Running processes",
+            subtitle: "Active commands and their status.",
+            contentViews: [processesStack]
+        )
+        container.addArrangedSubview(processesCard)
+        constrainFormFieldToFillWidth(processesCard, in: container)
+
+        // --- Quick actions (centered) ---
+        let centeredOpenRow = NSStackView()
+        centeredOpenRow.orientation = .horizontal
+        centeredOpenRow.alignment = .centerY
+        centeredOpenRow.spacing = 8
+        centeredOpenRow.addArrangedSubview(NSView())
+        centeredOpenRow.addArrangedSubview(openEditorButton)
+        centeredOpenRow.addArrangedSubview(openTerminalButton)
+        centeredOpenRow.addArrangedSubview(openFinderButton)
+        centeredOpenRow.addArrangedSubview(NSView())
+        container.addArrangedSubview(centeredOpenRow)
+        constrainFormFieldToFillWidth(centeredOpenRow, in: container)
+
         return insetContainerView(container)
     }
 
@@ -1012,7 +1357,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let container = NSStackView()
         container.orientation = .vertical
         container.alignment = .leading
-        container.spacing = 10
+        container.spacing = 14
         container.translatesAutoresizingMaskIntoConstraints = false
         let envView = NSTextView()
         envView.isEditable = false
@@ -1030,22 +1375,30 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             layout.ensureLayout(for: container)
         }
         let scroll = scrollableTextView(envView, height: 240)
-        container.addArrangedSubview(scroll)
-        constrainFormFieldToFillWidth(scroll, in: container)
+        let envCard = formSectionCard(
+            icon: "list.bullet.rectangle",
+            title: "Environment variables",
+            subtitle: "Injected into workspace processes at launch.",
+            contentViews: [scroll]
+        )
+        container.addArrangedSubview(envCard)
+        constrainFormFieldToFillWidth(envCard, in: container)
         return insetContainerView(container)
     }
 
     private func workspaceSettingsView(project: ProjectSummary, workspace: WorkspaceSummary) -> NSView {
+        let accentColor = sidebarThemeColor(light: (13, 95, 93), dark: (61, 198, 184))
+
         let container = NSStackView()
         container.orientation = .vertical
         container.alignment = .leading
-        container.spacing = 10
+        container.spacing = 14
         container.translatesAutoresizingMaskIntoConstraints = false
 
         let contentStack = NSStackView()
         contentStack.orientation = .vertical
         contentStack.alignment = .leading
-        contentStack.spacing = 10
+        contentStack.spacing = 14
         contentStack.translatesAutoresizingMaskIntoConstraints = false
 
         let processEditor = ProcessEditor()
@@ -1076,18 +1429,62 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             action: #selector(saveWorkspace(_:)),
             primary: true
         )
-
-        contentStack.addArrangedSubview(label(text: "Processes"))
-        contentStack.addArrangedSubview(processEditor.container)
-        contentStack.addArrangedSubview(label(text: "Stop script"))
-        contentStack.addArrangedSubview(
-            helpTextLabel("Workspace override. Runs on stop/restart/archive after process termination.")
+        saveButton.bezelStyle = .texturedRounded
+        saveButton.wantsLayer = true
+        saveButton.layer?.backgroundColor = accentColor.cgColor
+        saveButton.layer?.cornerRadius = 6
+        let buttonTextColor = NSColor.white
+        saveButton.attributedTitle = NSAttributedString(
+            string: "Save Workspace",
+            attributes: [
+                .foregroundColor: buttonTextColor,
+                .font: NSFont.systemFont(ofSize: 13, weight: .semibold),
+            ]
         )
-        contentStack.addArrangedSubview(stopScroll)
-        contentStack.addArrangedSubview(label(text: "Browser sessions (URL per line)"))
-        contentStack.addArrangedSubview(browserScroll)
-        contentStack.addArrangedSubview(label(text: "Status checks (per process)"))
-        contentStack.addArrangedSubview(statusEditor.container)
+        if let saveImg = NSImage(systemSymbolName: "square.and.arrow.down", accessibilityDescription: "Save") {
+            let imgConfig = NSImage.SymbolConfiguration(paletteColors: [buttonTextColor])
+            saveButton.image = saveImg.withSymbolConfiguration(imgConfig)
+        }
+
+        // --- Processes card ---
+        let processCard = formSectionCard(
+            icon: "terminal.fill",
+            title: "Processes",
+            subtitle: "Commands that run inside this workspace.",
+            contentViews: [processEditor.container]
+        )
+        contentStack.addArrangedSubview(processCard)
+        constrainFormFieldToFillWidth(processCard, in: contentStack)
+
+        // --- Stop script card ---
+        let stopCard = formSectionCard(
+            icon: "stop.circle",
+            title: "Stop script",
+            subtitle: "Workspace override. Runs on stop/restart/archive after process termination.",
+            contentViews: [stopScroll]
+        )
+        contentStack.addArrangedSubview(stopCard)
+        constrainFormFieldToFillWidth(stopCard, in: contentStack)
+
+        // --- Browser sessions card ---
+        let browserCard = formSectionCard(
+            icon: "globe",
+            title: "Browser sessions",
+            subtitle: "URLs to open automatically, one per line.",
+            contentViews: [browserScroll]
+        )
+        contentStack.addArrangedSubview(browserCard)
+        constrainFormFieldToFillWidth(browserCard, in: contentStack)
+
+        // --- Status checks card ---
+        let statusCard = formSectionCard(
+            icon: "checkmark.shield",
+            title: "Status checks",
+            subtitle: "Health checks that run per process.",
+            contentViews: [statusEditor.container]
+        )
+        contentStack.addArrangedSubview(statusCard)
+        constrainFormFieldToFillWidth(statusCard, in: contentStack)
 
         let scroll = NSScrollView()
         scroll.hasVerticalScroller = true
@@ -1114,7 +1511,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             contentStack.leadingAnchor.constraint(equalTo: scrollContent.leadingAnchor),
             contentStack.trailingAnchor.constraint(equalTo: scrollContent.trailingAnchor),
             contentStack.topAnchor.constraint(equalTo: scrollContent.topAnchor),
-            contentStack.bottomAnchor.constraint(equalTo: scrollContent.bottomAnchor),
+            contentStack.bottomAnchor.constraint(lessThanOrEqualTo: scrollContent.bottomAnchor),
         ])
 
         let buttonRow = NSStackView()
@@ -1126,10 +1523,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         container.addArrangedSubview(buttonRow)
         constrainFormFieldToFillWidth(scroll, in: container)
         constrainFormFieldToFillWidth(buttonRow, in: container)
-        constrainFormFieldToFillWidth(processEditor.container, in: contentStack)
-        constrainFormFieldToFillWidth(stopScroll, in: contentStack)
-        constrainFormFieldToFillWidth(browserScroll, in: contentStack)
-        constrainFormFieldToFillWidth(statusEditor.container, in: contentStack)
 
         saveButton.tag = storeWorkspaceFields(
             workspaceID: workspace.id,
@@ -1583,7 +1976,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             stack.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 20),
             stack.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -20),
             stack.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 20),
-            stack.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -20),
+            stack.bottomAnchor.constraint(lessThanOrEqualTo: contentView.bottomAnchor, constant: -20),
         ])
     }
 
@@ -1592,13 +1985,18 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         scroll.hasVerticalScroller = true
         scroll.hasHorizontalScroller = false
         scroll.autohidesScrollers = true
-        scroll.borderType = .lineBorder
+        scroll.borderType = .noBorder
+        let inputBg = sidebarThemeColor(light: (235, 233, 225), dark: (10, 15, 17))
         scroll.drawsBackground = true
-        scroll.backgroundColor = .textBackgroundColor
+        scroll.backgroundColor = inputBg
         scroll.contentView.drawsBackground = true
-        scroll.contentView.backgroundColor = .textBackgroundColor
+        scroll.contentView.backgroundColor = inputBg
+        scroll.wantsLayer = true
+        scroll.layer?.cornerRadius = 6
+        scroll.layer?.borderWidth = 1
+        scroll.layer?.borderColor = sidebarCardBorderColor(isSelected: false).cgColor
         textView.drawsBackground = true
-        textView.backgroundColor = .textBackgroundColor
+        textView.backgroundColor = inputBg
         textView.textColor = .textColor
         textView.textContainerInset = NSSize(width: 6, height: 6)
         textView.minSize = NSSize(width: 0, height: height)
@@ -1622,7 +2020,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             content.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: inset),
             content.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -inset),
             content.topAnchor.constraint(equalTo: container.topAnchor, constant: inset),
-            content.bottomAnchor.constraint(equalTo: container.bottomAnchor, constant: -inset),
+            content.bottomAnchor.constraint(lessThanOrEqualTo: container.bottomAnchor, constant: -inset),
         ])
         return container
     }
@@ -1929,6 +2327,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 refs.dirField.stringValue = url.path
                 refs.dirField.toolTip = url.path
                 refs.dirField.textColor = .labelColor
+                refs.dirField.isHidden = false
+                refs.browseButton.title = url.lastPathComponent
             }
         }
     }
@@ -1996,6 +2396,17 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             if currentName.isEmpty || currentName == autoNameState.lastAutoWorkspaceName {
                 refs.nameField.stringValue = branchValue
                 autoNameState.lastAutoWorkspaceName = branchValue
+            }
+            if let dirField = refs.directoryNameField {
+                let currentDir = dirField.stringValue
+                let sanitized = branchValue
+                    .replacing(/[^A-Za-z0-9\-_]/, with: "-")
+                    .replacing(/\-{2,}/, with: "-")
+                    .trimmingCharacters(in: CharacterSet(charactersIn: "-"))
+                if currentDir.isEmpty || currentDir == autoNameState.lastAutoDirName {
+                    dirField.stringValue = sanitized
+                    autoNameState.lastAutoDirName = sanitized
+                }
             }
             return
         }
