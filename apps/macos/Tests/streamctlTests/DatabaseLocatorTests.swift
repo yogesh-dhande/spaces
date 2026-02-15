@@ -12,9 +12,7 @@ final class DatabaseLocatorTests: XCTestCase {
     }
 
     override func tearDownWithError() throws {
-        if let tempHomeURL, FileManager.default.fileExists(atPath: tempHomeURL.path) {
-            try FileManager.default.removeItem(at: tempHomeURL)
-        }
+        if let tempHomeURL, FileManager.default.fileExists(atPath: tempHomeURL.path) { try FileManager.default.removeItem(at: tempHomeURL) }
         tempHomeURL = nil
     }
 

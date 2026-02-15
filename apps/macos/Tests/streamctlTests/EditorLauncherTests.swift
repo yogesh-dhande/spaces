@@ -4,9 +4,7 @@ import XCTest
 @testable import streamctl
 
 final class EditorLauncherTests: XCTestCase {
-    func testOpenReturnsWhenEditorIsNil() throws {
-        XCTAssertNoThrow(try EditorLauncher.open(editor: nil, directory: "/path/that/does/not/exist"))
-    }
+    func testOpenReturnsWhenEditorIsNil() throws { XCTAssertNoThrow(try EditorLauncher.open(editor: nil, directory: "/path/that/does/not/exist")) }
 
     func testOpenReturnsWhenEditorIsNone() throws {
         XCTAssertNoThrow(try EditorLauncher.open(editor: EditorPreference.none, directory: "/path/that/does/not/exist"))
@@ -42,9 +40,7 @@ final class EditorLauncherTests: XCTestCase {
         // Why: document and assert current behavior (Shell.run status is ignored by EditorLauncher).
         // Remaining risk: callers may assume launch success because failures are intentionally non-throwing today.
         try withMockOpen {
-            try withEnv(name: "OPEN_FAIL", value: "1") {
-                XCTAssertNoThrow(try EditorLauncher.open(editor: .cursor, directory: "/tmp/workspace"))
-            }
+            try withEnv(name: "OPEN_FAIL", value: "1") { XCTAssertNoThrow(try EditorLauncher.open(editor: .cursor, directory: "/tmp/workspace")) }
         }
     }
 
@@ -70,13 +66,7 @@ final class EditorLauncherTests: XCTestCase {
     private func withEnv(name: String, value: String, run: () throws -> Void) throws {
         let original = ProcessInfo.processInfo.environment[name]
         setenv(name, value, 1)
-        defer {
-            if let original {
-                setenv(name, original, 1)
-            } else {
-                unsetenv(name)
-            }
-        }
+        defer { if let original { setenv(name, original, 1) } else { unsetenv(name) } }
         try run()
     }
 

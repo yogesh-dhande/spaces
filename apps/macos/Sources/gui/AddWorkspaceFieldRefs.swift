@@ -1,8 +1,8 @@
 import AppKit
 
-@MainActor
-final class AddWorkspaceAutoNameState {
+@MainActor final class AddWorkspaceAutoNameState {
     var lastAutoWorkspaceName: String = ""
+    var lastAutoDirName: String = ""
 }
 
 struct AddWorkspaceFieldRefs {
@@ -10,6 +10,7 @@ struct AddWorkspaceFieldRefs {
     let isGitRepo: Bool
     let targetBranchField: NSComboBox?
     let nameField: NSTextField
+    let directoryNameField: NSTextField?
     let branchField: NSTextField?
     let autoNameState: AddWorkspaceAutoNameState?
 }

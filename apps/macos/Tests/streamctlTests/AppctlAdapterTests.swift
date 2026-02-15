@@ -7,11 +7,7 @@ final class AppctlAdapterTests: XCTestCase {
         // Mocked dependency: `yabai` CLI.
         // Why: exercise JSON parsing and adapter control-flow deterministically without requiring a running window manager.
         // Remaining risk: does not validate real-world yabai output variants, timing, permissions, or window lifecycle races.
-        try withMockCommands(
-            [
-                "yabai": Self.yabaiMockScript,
-            ]
-        ) {
+        try withMockCommands(["yabai": Self.yabaiMockScript]) {
             let adapter = YabaiAdapter()
             XCTAssertTrue(adapter.isAvailable())
 
@@ -49,11 +45,7 @@ final class AppctlAdapterTests: XCTestCase {
         // Mocked dependency: focused-window query failure path from `yabai`.
         // Why: guarantee the adapter's "return nil on failure" behavior without forcing a real focus-state failure.
         // Remaining risk: real error messages and transient failures from yabai are broader than this single simulated case.
-        try withMockCommands(
-            [
-                "yabai": Self.yabaiMockScript,
-            ]
-        ) {
+        try withMockCommands(["yabai": Self.yabaiMockScript]) {
             try withEnv(name: "YABAI_FAIL_FOCUSED", value: "1") {
                 let adapter = YabaiAdapter()
                 XCTAssertNil(try adapter.focusedWindow())
@@ -65,11 +57,7 @@ final class AppctlAdapterTests: XCTestCase {
         // Mocked dependency: `osascript` command output for Chrome/iTerm automation.
         // Why: verify script parsing and adapter logic in a hermetic environment.
         // Remaining risk: does not execute against actual app scripting dictionaries or app availability/version differences.
-        try withMockCommands(
-            [
-                "osascript": Self.osaScriptSuccessMock,
-            ]
-        ) {
+        try withMockCommands(["osascript": Self.osaScriptSuccessMock]) {
             let chrome = ChromeAdapter()
             XCTAssertTrue(chrome.isAvailable())
             XCTAssertEqual(try chrome.openWindow(url: "https://docs.example.com"), 31)
@@ -77,24 +65,36 @@ final class AppctlAdapterTests: XCTestCase {
             let matches = try chrome.windowMatches(forURLPrefix: "https://docs.example.com")
             XCTAssertEqual(matches.count, 2)
             XCTAssertEqual(matches[0].windowID, 11)
+            XCTAssertEqual(matches[0].tabIndex, 1)
             XCTAssertEqual(matches[0].title, "Docs")
             XCTAssertEqual(matches[1].url, "https://docs.example.com/page")
             let allTabs = try chrome.allTabs()
             XCTAssertEqual(allTabs.count, 2)
+            XCTAssertEqual(allTabs[1].tabIndex, 2)
+            XCTAssertEqual(try chrome.tabURL(windowID: 11, tabIndex: 1), "https://docs.example.com")
+            XCTAssertNil(try chrome.tabURL(windowID: 12, tabIndex: 1))
+            XCTAssertNil(try chrome.tabURL(windowID: 11, tabIndex: 99))
+            XCTAssertTrue(try chrome.focusTab(windowID: 11, tabIndex: 1))
+            XCTAssertFalse(try chrome.focusTab(windowID: 12, tabIndex: 1))
+            XCTAssertFalse(try chrome.focusTab(windowID: 11, tabIndex: 99))
             XCTAssertTrue(try chrome.focusTab(forExactURL: "https://docs.example.com"))
             XCTAssertTrue(try chrome.focusTab(forExactURL: "https://docs.example.com", windowID: 11))
+            XCTAssertFalse(try chrome.focusTab(forExactURL: "https://docs.example.com", windowID: 12))
             XCTAssertFalse(try chrome.focusTab(forExactURL: "https://missing.example.com"))
             XCTAssertFalse(try chrome.focusTab(forExactURL: "https://missing.example.com", windowID: 11))
             XCTAssertTrue(try chrome.focusTab(forURLPrefix: "https://docs.example.com"))
             XCTAssertTrue(try chrome.focusTab(forURLPrefix: "https://docs.example.com", windowID: 11))
+            XCTAssertFalse(try chrome.focusTab(forURLPrefix: "https://docs.example.com", windowID: 12))
             XCTAssertFalse(try chrome.focusTab(forURLPrefix: "https://missing.example.com"))
             XCTAssertFalse(try chrome.focusTab(forURLPrefix: "https://missing.example.com", windowID: 11))
             XCTAssertTrue(try chrome.closeTabs(forExactURL: "https://docs.example.com"))
             XCTAssertTrue(try chrome.closeTabs(forExactURL: "https://docs.example.com", windowID: 11))
+            XCTAssertFalse(try chrome.closeTabs(forExactURL: "https://docs.example.com", windowID: 12))
             XCTAssertFalse(try chrome.closeTabs(forExactURL: "https://missing.example.com"))
             XCTAssertFalse(try chrome.closeTabs(forExactURL: "https://missing.example.com", windowID: 11))
             XCTAssertTrue(try chrome.closeTabs(forURLPrefix: "https://docs.example.com"))
             XCTAssertTrue(try chrome.closeTabs(forURLPrefix: "https://docs.example.com", windowID: 11))
+            XCTAssertFalse(try chrome.closeTabs(forURLPrefix: "https://docs.example.com", windowID: 12))
             XCTAssertFalse(try chrome.closeTabs(forURLPrefix: "https://missing.example.com"))
             XCTAssertFalse(try chrome.closeTabs(forURLPrefix: "https://missing.example.com", windowID: 11))
             XCTAssertEqual(try chrome.frontmostActiveTabURL(), "https://docs.example.com")
@@ -112,13 +112,7 @@ final class AppctlAdapterTests: XCTestCase {
         // Mocked dependency: failing `osascript`.
         // Why: force deterministic AppleScript error propagation.
         // Remaining risk: only one failure shape is covered; localized/structured osascript errors remain untested.
-        try withMockCommands(
-            [
-                "osascript": Self.osaScriptFailureMock,
-            ]
-        ) {
-            XCTAssertThrowsError(try AppleScript.run("FAIL_APPLESCRIPT"))
-        }
+        try withMockCommands(["osascript": Self.osaScriptFailureMock]) { XCTAssertThrowsError(try AppleScript.run("FAIL_APPLESCRIPT")) }
     }
 
     private func withMockCommands(_ commands: [String: String], run: () throws -> Void) throws {
@@ -145,13 +139,7 @@ final class AppctlAdapterTests: XCTestCase {
     private func withEnv(name: String, value: String, run: () throws -> Void) throws {
         let original = ProcessInfo.processInfo.environment[name]
         setenv(name, value, 1)
-        defer {
-            if let original {
-                setenv(name, original, 1)
-            } else {
-                unsetenv(name)
-            }
-        }
+        defer { if let original { setenv(name, original, 1) } else { unsetenv(name) } }
         try run()
     }
 
@@ -226,11 +214,48 @@ final class AppctlAdapterTests: XCTestCase {
         fi
 
         if [[ "$script" == *'set output to ""'* ]]; then
-          printf '11\\tDocs\\thttps://docs.example.com\\n12\\tDocs 2\\thttps://docs.example.com/page\\n'
+          printf '11\\t1\\tDocs\\thttps://docs.example.com\\n12\\t2\\tDocs 2\\thttps://docs.example.com/page\\n'
+          exit 0
+        fi
+
+        if [[ "$script" == *'set u to URL of tab requestedTabIndex of w'* ]]; then
+          requested_window_id="$(printf '%s\n' "$script" | awk -F'set requestedWindowID to \"' 'NF>1 { sub(/\".*/, "", $2); print $2; exit }')"
+          if [[ -z "$requested_window_id" || "$requested_window_id" != "11" ]]; then
+            echo ""
+            exit 0
+          fi
+          if [[ "$script" == *'set requestedTabIndex to 1'* ]]; then
+            echo "https://docs.example.com"
+          else
+            echo ""
+          fi
+          exit 0
+        fi
+
+        if [[ "$script" == *'set requestedTabIndex to'* ]]; then
+          requested_window_id="$(printf '%s\n' "$script" | awk -F'set requestedWindowID to \"' 'NF>1 { sub(/\".*/, "", $2); print $2; exit }')"
+          if [[ -z "$requested_window_id" || "$requested_window_id" != "11" ]]; then
+            echo "0"
+            exit 0
+          fi
+          if [[ "$script" == *'set requestedTabIndex to 99'* ]]; then
+            echo "0"
+          else
+            echo "1"
+          fi
           exit 0
         fi
 
         if [[ "$script" == *'set tabCount to count of tabs of w'* ]]; then
+          requested_window_id="$(printf '%s\n' "$script" | awk -F'set requestedWindowID to \"' 'NF>1 { sub(/\".*/, "", $2); print $2; exit }')"
+          if [[ -n "$requested_window_id" && "$requested_window_id" != "11" ]]; then
+            echo "0"
+            exit 0
+          fi
+          if [[ "$script" == *'if id of w is '* ]]; then
+            echo "0"
+            exit 0
+          fi
           if [[ "$script" == *'close tab i of w'* ]]; then
             if [[ "$script" == *'https://missing.example.com'* ]]; then
               echo "0"

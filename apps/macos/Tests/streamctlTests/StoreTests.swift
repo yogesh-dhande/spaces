@@ -10,15 +10,18 @@ final class StoreTests: XCTestCase {
         try store.upsert(project: project)
         try store.upsert(workspace: workspace)
 
-        try store.setWorkspacePorts(workspaceID: workspace.id, ports: [3000, 3001])
+        try store.setWorkspacePorts(workspaceID: workspace.id, ports: [3000, 3001], names: ["API_PORT", "WEB_PORT"])
         XCTAssertEqual(try store.workspacePorts(workspaceID: workspace.id), [3000, 3001])
+        let named = try store.workspacePortsNamed(workspaceID: workspace.id)
+        XCTAssertEqual(named.count, 2)
+        XCTAssertEqual(named[0].name, "API_PORT")
+        XCTAssertEqual(named[1].name, "WEB_PORT")
         try store.setWorkspacePorts(workspaceID: workspace.id, ports: [4000])
         XCTAssertEqual(try store.workspacePorts(workspaceID: workspace.id), [4000])
+        let namedAfter = try store.workspacePortsNamed(workspaceID: workspace.id)
+        XCTAssertEqual(namedAfter[0].name, "")
 
-        let processes = [
-            ProcessTemplate(name: "api", command: "npm run api"),
-            ProcessTemplate(command: "npm run worker"),
-        ]
+        let processes = [ProcessTemplate(name: "api", command: "npm run api"), ProcessTemplate(command: "npm run worker")]
         try store.setWorkspaceProcesses(workspaceID: workspace.id, processes: processes)
         let storedProcesses = try store.workspaceProcesses(workspaceID: workspace.id)
         XCTAssertEqual(storedProcesses.count, 2)
@@ -27,20 +30,8 @@ final class StoreTests: XCTestCase {
 
         let checks = [
             StatusCheckDefinition(
-                name: "api health",
-                process: "api",
-                command: "curl -f http://localhost:$PORT0/health",
-                interval: 10,
-                timeout: 3,
-                onExit: .notify
-            ),
-            StatusCheckDefinition(
-                process: "worker",
-                command: "echo ok",
-                interval: 60,
-                timeout: 5,
-                onExit: .restart
-            ),
+                name: "api health", process: "api", command: "curl -f http://localhost:$PORT0/health", interval: 10, timeout: 3, onExit: .notify),
+            StatusCheckDefinition(process: "worker", command: "echo ok", interval: 60, timeout: 5, onExit: .restart),
         ]
         try store.setWorkspaceStatusChecks(workspaceID: workspace.id, checks: checks)
         let storedChecks = try store.workspaceStatusChecks(workspaceID: workspace.id)
@@ -50,11 +41,18 @@ final class StoreTests: XCTestCase {
 
         try store.setWorkspaceBrowserSessions(
             workspaceID: workspace.id,
-            sessions: [BrowserSession(url: "https://example.com"), BrowserSession()]
-        )
+            sessions: [
+                BrowserSession(
+                    url: "https://example.com",
+                    extractedWindow: ExtractedBrowserWindowMapping(targetURL: "https://example.com", windowID: 303, isValid: true)),
+                BrowserSession(),
+            ])
         let sessions = try store.workspaceBrowserSessions(workspaceID: workspace.id)
         XCTAssertEqual(sessions.count, 2)
         XCTAssertEqual(sessions[0].url, "https://example.com")
+        XCTAssertEqual(sessions[0].extractedWindow?.targetURL, "https://example.com")
+        XCTAssertEqual(sessions[0].extractedWindow?.windowID, 303)
+        XCTAssertEqual(sessions[0].extractedWindow?.isValid, true)
         XCTAssertNil(sessions[1].url)
 
         XCTAssertFalse(try store.workspaceSettingsExists(workspaceID: workspace.id))
@@ -68,6 +66,17 @@ final class StoreTests: XCTestCase {
 
         try store.releaseWorkspacePorts(workspaceID: workspace.id)
         XCTAssertTrue(try store.workspacePorts(workspaceID: workspace.id).isEmpty)
+
+        let definitions = [PortDefinition(name: "FRONTEND_PORT"), PortDefinition(name: "API_PORT")]
+        try store.setWorkspacePortDefinitions(workspaceID: workspace.id, definitions: definitions)
+        let storedDefs = try store.workspacePortDefinitions(workspaceID: workspace.id)
+        XCTAssertEqual(storedDefs.count, 2)
+        XCTAssertEqual(storedDefs[0].name, "FRONTEND_PORT")
+        XCTAssertEqual(storedDefs[1].name, "API_PORT")
+
+        try store.setWorkspacePortDefinitions(workspaceID: workspace.id, definitions: [PortDefinition(name: "DB_PORT")])
+        XCTAssertEqual(try store.workspacePortDefinitions(workspaceID: workspace.id).count, 1)
+        XCTAssertEqual(try store.workspacePortDefinitions(workspaceID: workspace.id)[0].name, "DB_PORT")
     }
 
     func testRunningProcessesStatusResultsAndWindowsRoundTrip() throws {
@@ -80,20 +89,9 @@ final class StoreTests: XCTestCase {
         let processID = UUID().uuidString
         try store.upsert(
             runningProcess: RunningProcessRecord(
-                id: processID,
-                workspaceID: workspace.id,
-                templateName: "api",
-                command: "npm run api",
-                terminalApp: "iTerm2",
-                windowID: 9001,
-                pid: 1234,
-                status: .running,
-                logPath: "/tmp/api.log",
-                lastOutputAt: "2026-01-01T00:00:00Z",
-                startedAt: "2026-01-01T00:00:00Z",
-                exitedAt: nil
-            )
-        )
+                id: processID, workspaceID: workspace.id, templateName: "api", command: "npm run api", terminalApp: "iTerm2", windowID: 9001,
+                pid: 1234, status: .running, logPath: "/tmp/api.log", lastOutputAt: "2026-01-01T00:00:00Z", startedAt: "2026-01-01T00:00:00Z",
+                exitedAt: nil))
 
         var processes = try store.runningProcesses(workspaceID: workspace.id)
         XCTAssertEqual(processes.count, 1)
@@ -102,41 +100,16 @@ final class StoreTests: XCTestCase {
 
         try store.upsert(
             runningProcess: RunningProcessRecord(
-                id: processID,
-                workspaceID: workspace.id,
-                templateName: "api",
-                command: "npm run api",
-                terminalApp: nil,
-                windowID: nil,
-                pid: nil,
-                status: .exited,
-                logPath: nil,
-                lastOutputAt: nil,
-                startedAt: "2026-01-01T00:00:00Z",
-                exitedAt: "2026-01-01T00:01:00Z"
-            )
-        )
+                id: processID, workspaceID: workspace.id, templateName: "api", command: "npm run api", terminalApp: nil, windowID: nil, pid: nil,
+                status: .exited, logPath: nil, lastOutputAt: nil, startedAt: "2026-01-01T00:00:00Z", exitedAt: "2026-01-01T00:01:00Z"))
         processes = try store.runningProcesses(workspaceID: workspace.id)
         XCTAssertEqual(processes[0].status, .exited)
         XCTAssertNil(processes[0].windowID)
 
         try store.upsert(
-            statusResult: StatusResult(
-                processID: processID,
-                checkName: "health",
-                status: "green",
-                message: "ok",
-                lastRunAt: "2026-01-01T00:00:00Z"
-            )
-        )
+            statusResult: StatusResult(processID: processID, checkName: "health", status: "green", message: "ok", lastRunAt: "2026-01-01T00:00:00Z"))
         try store.upsert(
-            statusResult: StatusResult(
-                processID: processID,
-                checkName: "health",
-                status: "red",
-                message: "failed",
-                lastRunAt: "2026-01-01T00:02:00Z"
-            )
+            statusResult: StatusResult(processID: processID, checkName: "health", status: "red", message: "failed", lastRunAt: "2026-01-01T00:02:00Z")
         )
         let results = try store.statusResults(processID: processID)
         XCTAssertEqual(results.count, 1)
@@ -144,25 +117,11 @@ final class StoreTests: XCTestCase {
         XCTAssertEqual(results[0].message, "failed")
 
         let firstWindow = WindowRecord(
-            id: UUID().uuidString,
-            workspaceID: workspace.id,
-            app: "Google Chrome",
-            title: "Browser",
-            windowID: 42,
-            role: "browser",
-            orderIndex: 0,
-            lastSeenAt: "now"
-        )
+            id: UUID().uuidString, workspaceID: workspace.id, app: "Google Chrome", title: "Browser", windowID: 42, role: "browser", orderIndex: 0,
+            lastSeenAt: "now")
         let secondWindow = WindowRecord(
-            id: UUID().uuidString,
-            workspaceID: workspace.id,
-            app: "iTerm2",
-            title: "Terminal",
-            windowID: 43,
-            role: "terminal",
-            orderIndex: 1,
-            lastSeenAt: "now"
-        )
+            id: UUID().uuidString, workspaceID: workspace.id, app: "iTerm2", title: "Terminal", windowID: 43, role: "terminal", orderIndex: 1,
+            lastSeenAt: "now")
         try store.upsert(window: firstWindow)
         try store.upsert(window: secondWindow)
 
@@ -184,54 +143,26 @@ final class StoreTests: XCTestCase {
         let processID = UUID().uuidString
         try store.touchWorkspaceSettings(workspaceID: workspace.id, updatedAt: "now")
         try store.setWorkspacePorts(workspaceID: workspace.id, ports: [3000])
+        try store.setWorkspacePortDefinitions(workspaceID: workspace.id, definitions: [PortDefinition(name: "API_PORT")])
         try store.setWorkspaceProcesses(workspaceID: workspace.id, processes: [ProcessTemplate(command: "echo one")])
         try store.setWorkspaceStatusChecks(
-            workspaceID: workspace.id,
-            checks: [StatusCheckDefinition(process: "one", command: "echo ok", interval: 10, timeout: 2)]
-        )
+            workspaceID: workspace.id, checks: [StatusCheckDefinition(process: "one", command: "echo ok", interval: 10, timeout: 2)])
         try store.setWorkspaceBrowserSessions(workspaceID: workspace.id, sessions: [BrowserSession(url: "https://example.com")])
         try store.upsert(
             runningProcess: RunningProcessRecord(
-                id: processID,
-                workspaceID: workspace.id,
-                templateName: "one",
-                command: "echo one",
-                terminalApp: nil,
-                windowID: nil,
-                pid: nil,
-                status: .running,
-                logPath: nil,
-                lastOutputAt: nil,
-                startedAt: "now",
-                exitedAt: nil
-            )
-        )
-        try store.upsert(
-            statusResult: StatusResult(
-                processID: processID,
-                checkName: "health",
-                status: "green",
-                message: nil,
-                lastRunAt: "now"
-            )
-        )
+                id: processID, workspaceID: workspace.id, templateName: "one", command: "echo one", terminalApp: nil, windowID: nil, pid: nil,
+                status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil))
+        try store.upsert(statusResult: StatusResult(processID: processID, checkName: "health", status: "green", message: nil, lastRunAt: "now"))
         try store.upsert(
             window: WindowRecord(
-                id: UUID().uuidString,
-                workspaceID: workspace.id,
-                app: "iTerm2",
-                title: "term",
-                windowID: 77,
-                role: "terminal",
-                orderIndex: 0,
-                lastSeenAt: "now"
-            )
-        )
+                id: UUID().uuidString, workspaceID: workspace.id, app: "iTerm2", title: "term", windowID: 77, role: "terminal", orderIndex: 0,
+                lastSeenAt: "now"))
 
         try store.deleteWorkspace(id: workspace.id)
 
         XCTAssertNil(try store.workspace(id: workspace.id))
         XCTAssertTrue(try store.workspacePorts(workspaceID: workspace.id).isEmpty)
+        XCTAssertTrue(try store.workspacePortDefinitions(workspaceID: workspace.id).isEmpty)
         XCTAssertTrue(try store.workspaceProcesses(workspaceID: workspace.id).isEmpty)
         XCTAssertTrue(try store.workspaceStatusChecks(workspaceID: workspace.id).isEmpty)
         XCTAssertTrue(try store.workspaceBrowserSessions(workspaceID: workspace.id).isEmpty)
@@ -249,16 +180,8 @@ final class StoreTests: XCTestCase {
         try store.setWorkspacePorts(workspaceID: workspace.id, ports: [3000])
         try store.upsert(
             window: WindowRecord(
-                id: UUID().uuidString,
-                workspaceID: workspace.id,
-                app: "Google Chrome",
-                title: nil,
-                windowID: 91,
-                role: "browser",
-                orderIndex: 0,
-                lastSeenAt: "now"
-            )
-        )
+                id: UUID().uuidString, workspaceID: workspace.id, app: "Google Chrome", title: nil, windowID: 91, role: "browser", orderIndex: 0,
+                lastSeenAt: "now"))
 
         try store.deleteProject(id: project.id)
 
@@ -303,29 +226,11 @@ final class StoreTests: XCTestCase {
         XCTAssertEqual(try store.projects().map(\.name), ["A Project", "Z Project"])
 
         let defaultWorkspace = WorkspaceRecord(
-            id: "default",
-            projectID: aProject.id,
-            name: "default",
-            dir: aDir,
-            dirname: nil,
-            branch: nil,
-            isDefault: true,
-            isArchived: false,
-            isRunning: false,
-            lastLaunchedAt: nil
-        )
+            id: "default", projectID: aProject.id, name: "default", dir: aDir, dirname: nil, branch: nil, isDefault: true, isArchived: false,
+            isRunning: false, lastLaunchedAt: nil)
         let archivedWorkspace = WorkspaceRecord(
-            id: "archived",
-            projectID: aProject.id,
-            name: "feature",
-            dir: aDir,
-            dirname: nil,
-            branch: nil,
-            isDefault: false,
-            isArchived: true,
-            isRunning: false,
-            lastLaunchedAt: nil
-        )
+            id: "archived", projectID: aProject.id, name: "feature", dir: aDir, dirname: nil, branch: nil, isDefault: false, isArchived: true,
+            isRunning: false, lastLaunchedAt: nil)
         try store.upsert(workspace: archivedWorkspace)
         try store.upsert(workspace: defaultWorkspace)
 
@@ -345,45 +250,13 @@ final class StoreTests: XCTestCase {
         let secondID = UUID().uuidString
         try store.upsert(
             runningProcess: RunningProcessRecord(
-                id: firstID,
-                workspaceID: workspace.id,
-                templateName: "first",
-                command: "echo first",
-                terminalApp: nil,
-                windowID: nil,
-                pid: nil,
-                status: .running,
-                logPath: nil,
-                lastOutputAt: nil,
-                startedAt: "now",
-                exitedAt: nil
-            )
-        )
+                id: firstID, workspaceID: workspace.id, templateName: "first", command: "echo first", terminalApp: nil, windowID: nil, pid: nil,
+                status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil))
         try store.upsert(
             runningProcess: RunningProcessRecord(
-                id: secondID,
-                workspaceID: workspace.id,
-                templateName: "second",
-                command: "echo second",
-                terminalApp: nil,
-                windowID: nil,
-                pid: nil,
-                status: .running,
-                logPath: nil,
-                lastOutputAt: nil,
-                startedAt: "now",
-                exitedAt: nil
-            )
-        )
-        try store.upsert(
-            statusResult: StatusResult(
-                processID: firstID,
-                checkName: "first",
-                status: "green",
-                message: nil,
-                lastRunAt: nil
-            )
-        )
+                id: secondID, workspaceID: workspace.id, templateName: "second", command: "echo second", terminalApp: nil, windowID: nil, pid: nil,
+                status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil))
+        try store.upsert(statusResult: StatusResult(processID: firstID, checkName: "first", status: "green", message: nil, lastRunAt: nil))
 
         try store.deleteRunningProcess(id: firstID)
         XCTAssertTrue(try store.statusResults(processID: firstID).isEmpty)

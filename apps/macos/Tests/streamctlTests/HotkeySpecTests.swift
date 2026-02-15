@@ -25,9 +25,7 @@ final class HotkeySpecTests: XCTestCase {
     }
 
     func testParseRejectsMissingKey() {
-        XCTAssertThrowsError(try HotkeySpec.parse("cmd+shift")) { error in
-            XCTAssertEqual(error.localizedDescription, "Hotkey is missing a key")
-        }
+        XCTAssertThrowsError(try HotkeySpec.parse("cmd+shift")) { error in XCTAssertEqual(error.localizedDescription, "Hotkey is missing a key") }
     }
 
     func testParseRejectsMultipleKeys() {
@@ -37,9 +35,7 @@ final class HotkeySpecTests: XCTestCase {
     }
 
     func testParseRejectsEmptyValue() {
-        XCTAssertThrowsError(try HotkeySpec.parse("  \n")) { error in
-            XCTAssertEqual(error.localizedDescription, "Hotkey cannot be empty")
-        }
+        XCTAssertThrowsError(try HotkeySpec.parse("  \n")) { error in XCTAssertEqual(error.localizedDescription, "Hotkey cannot be empty") }
     }
 
     func testParseSupportsModifierAliasesAndNamedKeys() throws {
@@ -56,8 +52,7 @@ final class HotkeySpecTests: XCTestCase {
     }
 
     func testParseRejectsUnsupportedKey() {
-        XCTAssertThrowsError(try HotkeySpec.parse("cmd+volumeup")) { error in
-            XCTAssertEqual(error.localizedDescription, "Unsupported key: volumeup")
+        XCTAssertThrowsError(try HotkeySpec.parse("cmd+volumeup")) { error in XCTAssertEqual(error.localizedDescription, "Unsupported key: volumeup")
         }
     }
 

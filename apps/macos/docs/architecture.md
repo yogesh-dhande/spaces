@@ -32,7 +32,7 @@ flowchart LR
 
 Module responsibilities:
 - `appctl`: Shell + AppleScript adapters for yabai, iTerm2, and Chrome.
-- `streamctl`: Orchestration, config normalization, port allocation, workspace lifecycle, and persistence.
+- `streamctl`: Orchestration, config normalization, named port allocation (via `PortAllocator` and `PortReserver`), workspace lifecycle, and persistence.
 - `gui`: AppKit UI library that calls into `streamctl`.
 - `spaceship`: CLI entrypoint that calls into `streamctl`.
 - `spaceship-app`: GUI executable entrypoint that wires `NSApplication` to the `gui` library.
@@ -46,12 +46,19 @@ GUI interaction notes:
 - Target branch is first and uses a searchable branch list.
 - Target branch defaults to `main`/`master` when available.
 - Workspace name auto-fills from branch while untouched, and can then be edited independently.
+- New workspace forms also include an optional git-only worktree directory-name override.
+- Directory-name overrides are validated to filesystem-safe ASCII (`A-Z`, `a-z`, `0-9`, `-`, `_`) and cannot contain spaces.
 - For git projects, branch is required when creating a workspace.
 - Newly created branches are based on the latest commit of the selected target branch.
 - If the requested branch exists only on remote, the orchestrator fetches it into `refs/remotes/origin/*` before creating the worktree from `origin/<branch>`.
 - If the requested branch exists locally, the local branch is used as-is (no implicit pull/rebase/merge in workspace creation).
-- Workspace rows render name on the first line and branch on the second line with a branch icon.
+- Workspace rows use compact card styling with status + workspace name on top.
+- Workspace metadata rows show folder and branch labels with icons only when those values differ from workspace name.
+- Git workspace rows include relative last-modified time (from latest tracked-file mtime) and tracked modified-file count.
 - Window focus shortcuts in the GUI use `cmd+1` through `cmd+9`.
+- Port definitions are editable via `PortEditor` in the project detail view, the add-project form, and workspace settings.
+- Status checks are configured inline under each process in the `ProcessEditor` rather than in a separate form section; the process name is implicit from the parent row.
+- The run tab displays status check results as indented sub-rows under each process with colored dots (green/red) instead of inline badge text.
 - Keyboard shortcut overrides for GUI actions are persisted in SQLite settings and editable in the GUI Settings view and CLI settings commands.
 
 ## Data Model
@@ -59,16 +66,16 @@ Config file:
 - Path: `~/.spaceship/config.yaml`.
 - Top-level fields: `editor`, `port_range`, `projects`.
 - The GUI Settings view writes `editor` from installed VS Code, Cursor, or Windsurf.
-- Project fields: `dir`, `setup_script`, `stop_script`, `processes`, `status_checks`, `browser_sessions`.
+- Project fields: `dir`, `setup_script`, `stop_script`, `ports` (named port definitions), `processes`, `status_checks`, `browser_sessions`.
 - Script timing:
   - `setup_script` runs when a workspace is created or revived.
   - `stop_script` runs on stop/restart/archive stop phase after automatic process termination.
 - New projects can be created from an existing directory or by cloning a repository into `/Users/<username>/spaceship/projects/<project_name>`.
-- Removing a project clears spaceship state. For git projects, related workspace directories under `/Users/<username>/spaceship/workspaces` are deleted.
+- Removing a project clears spaceship state. For git projects, spaceship first removes managed worktrees with `git worktree remove --force`, then deletes related workspace directories under `/Users/<username>/spaceship/workspaces`.
 - The project directory is deleted only for git projects located under `/Users/<username>/spaceship/projects` (app-managed clones).
 
 Workspace settings:
-- Each workspace snapshots project `stop_script`, `processes`, `status_checks`, and `browser_sessions` at creation.
+- Each workspace snapshots project `stop_script`, `ports` (named port definitions), `processes`, `status_checks`, and `browser_sessions` at creation.
 - Snapshots are stored in the runtime DB alongside other workspace data.
 - Edits are stored in SQLite only; YAML remains unchanged.
 - Edits to a running workspace reconcile processes and browser sessions immediately.
@@ -80,6 +87,7 @@ Runtime database:
 ```mermaid
 erDiagram
   projects ||--o{ workspaces : has
+  workspaces ||--o{ workspace_port_definitions : defines
   workspaces ||--o{ workspace_ports : allocates
   workspaces ||--o{ workspace_settings : config
   workspaces ||--o{ workspace_processes : overrides
@@ -110,9 +118,17 @@ erDiagram
     TEXT last_launched_at
   }
 
+  workspace_port_definitions {
+    TEXT id PK
+    TEXT workspace_id
+    TEXT name
+    INTEGER order_index
+  }
+
   workspace_ports {
     TEXT workspace_id PK
     INTEGER port_index PK
+    TEXT port_name
     INTEGER port_number
   }
 
@@ -146,6 +162,9 @@ erDiagram
     TEXT id PK
     TEXT workspace_id
     TEXT url
+    TEXT extracted_target_url
+    INTEGER extracted_window_id
+    INTEGER extracted_window_valid
     INTEGER order_index
   }
 
@@ -199,13 +218,24 @@ Create and prepare a workspace:
 ```mermaid
 flowchart TD
   start["Create workspace"] --> git{"Project is git repo?"}
-  git -->|"yes"| worktree["Create or reuse worktree"]
+  git -->|"yes"| dirname["Resolve dirname (override or auto-generated)"]
+  dirname --> worktree["Create or reuse worktree"]
   git -->|"no"| dir["Use project dir"]
-  worktree --> setup["Run setup_script (if set)"]
-  dir --> setup
-  setup --> ports["Allocate PORT0-PORT9"]
-  ports --> persist["Persist workspace + ports"]
+  worktree --> ports["Allocate named ports (PortReserver)"]
+  dir --> ports
+  ports --> setup["Run setup_script (if set, with named port env vars)"]
+  setup --> persist["Persist workspace + port definitions + ports"]
 ```
+
+Port allocation details:
+- `PortAllocator.allocatePorts` accepts `definitions: [PortDefinition]` (named port definitions from the project or workspace) instead of a fixed count.
+- Ports are allocated at workspace creation and persisted in the `workspace_ports` table; they are available immediately (including during the setup script).
+- `PortReserver` (singleton) re-reserves allocated ports via OS sockets on app launch so they cannot be claimed by other processes between allocation and use.
+- Ports are released when a workspace is archived.
+- Port definitions are configured at the project level in YAML (under a `ports` list) and inherited by workspaces; workspaces can override definitions.
+- Named ports appear as env vars in setup scripts, stop scripts, process commands, and status check commands (e.g. `$FRONTEND_PORT`, `$API_PORT`).
+- `buildWorkspaceEnv` uses named port keys from definitions instead of anonymous `PORT0`, `PORT1`, etc.
+- `buildWorkspaceEnv` sets `SPACESHIP_WORKSPACE_DIR` (workspace directory) and `SPACESHIP_PROJECT_DIR` (project directory) for every workspace process.
 
 Launch and capture windows:
 ```mermaid
@@ -219,7 +249,7 @@ flowchart TD
 
 Stop or archive:
 - Stop: signal each tracked process group (`SIGINT` then `SIGTERM`), then run workspace `stop_script` (if set), then close tracked windows and clear runtime process state.
-- Archive: reuse stop flow, remove worktree for git projects, release ports.
+- Archive: reuse stop flow, run `git worktree remove --force` for git projects, release ports.
 - Archive never deletes the project directory for non-git projects.
 - Browser safety invariant: stop/restart/settings reconciliation closes tracked Chrome tabs by URL prefix, never full Chrome windows.
 
@@ -228,23 +258,33 @@ Run/recovery semantics:
 - `restartWorkspace` is the explicit recovery path and always performs stop then launch for the same workspace.
 - Workspace lifecycle actions are guarded by a per-workspace in-flight lock so overlapping launch/stop/restart/archive actions cannot run concurrently for the same workspace.
 - GUI run controls are state-aware: show `Launch` when stopped and `Restart` when running.
+- AppKit launch/restart/stop/archive button handlers dispatch lifecycle work in detached background tasks (fresh orchestrator/store instances) so long-running automation does not block the UI event loop.
 
 Degraded runtime edge cases and handling:
 - `is_running` can drift from real OS state because users can close windows/processes manually.
 - Restart is the user-visible "bring everything back" action for partial or stale runtime state.
 - Chrome session discovery and focus are URL-prefix based end-to-end; title-based fallback matching is intentionally avoided to prevent binding sessions to the wrong tab.
 - On launch/restart, spaceship reuses existing Chrome tabs whose URLs match configured browser-session prefixes and tracks all matching tabs for workspace cycling.
+- On launch/restart, spaceship may extract one matching tab per browser session into a dedicated Chrome window and persist that extracted mapping (`extracted_target_url`, `extracted_window_id`, `extracted_window_valid`).
 - Browser windows store an optional `target_url`; when focusing browser entries, spaceship uses AppleScript to activate the matching tab (including when multiple tracked targets share one Chrome window) before falling back to raw window focus.
+- Browser focus first attempts extracted-window `yabai` focus when a valid extracted mapping exists; if the window is missing or active-tab verification fails, the mapping is marked stale (`extracted_window_valid=0`) and focus falls back to indexed-tab/URL-prefix paths without automatic re-extraction.
 - If a Chrome window is tracked both as targeted browser tabs and as an untargeted browser row, untargeted rows are filtered from workspace window navigation/listing to keep forward/backward traversal deterministic.
-- Workspace window navigation/listing rebuilds browser rows from a live Chrome tab scan each time, including every tab whose URL starts with any configured browser-session URL (deduplicated by `window_id + tab URL`); tabs with missing URLs are skipped.
+- Workspace window navigation/listing rebuilds browser rows from live Chrome tab scans with a configurable debounce interval (default: 10 seconds, see `PollingConstants.browserWindowScanDebounceInterval`) per `(workspace_id, resolved browser-session prefixes)` key, including every tab whose URL starts with any configured browser-session URL (deduplicated by `window_id + tab URL`); tabs with missing URLs are skipped.
+- Browser focus for live-scanned rows targets cached `(window_id + tab_index)` first, then verifies the focused active tab URL against workspace prefixes, refreshes the live scan once on mismatch, and falls back to URL matching if needed.
+- Window-scoped Chrome AppleScript operations compare `window_id` as string for reliable tab focus/close matching.
 - Live browser rows are ordered deterministically by browser-session prefix order and then tab URL so `cmd+<n>` shortcut indices stay aligned with the on-screen list even as Chrome window z-order changes.
 - Window cycling tracks a workspace-local navigation pointer, and Chrome row resolution uses the frontmost active tab URL with prefix checks to keep next/previous stable.
 - Window cycling order is role-grouped for consistency: all browser tabs first, then terminal windows, then other window roles. Relative navigation prefers the remembered workspace-local index once cycling begins.
 - Global next/previous shortcut routing resolves focused Chrome windows by `(window_id + active tab URL prefix)` so one reused Chrome window can be safely tracked by multiple workspaces without selecting the wrong workspace.
-- Optional diagnostics: when `SPACESHIP_DEBUG_BROWSER_SCAN=1`, each live scan logs tab count, match count, and elapsed milliseconds to stderr.
+- Optional diagnostics: `DEBUG=1` logs browser tab scan count/match/elapsed and browser focus-path timing, including indexed verification, cache hit/miss, refresh, and fallback decisions.
+- Performance benchmarking: `OrchestratorTests.testBenchmarkChromeIndexedTabFocusVsYabaiWindowFocusForExtractedTabs` uses calibrated delays (~52ms tab-index focus + ~38ms active-tab verify vs ~42ms extracted-window yabai focus) and currently reports break-even at about 15 switches after extraction setup.
 - Terminal capture uses both yabai snapshot-diff and running-process window IDs to avoid dropping terminals when window discovery lags.
+- Editor capture during launch uses yabai snapshot-diff first, then falls back to the currently focused editor window when launch reuses an existing editor window so it still participates in workspace cycling.
+- Editor capture/matching supports known editor app-name aliases from yabai (for example VS Code may appear as `Code`) so editor rows remain eligible for next/previous cycling.
 - Window IDs can become stale across app/desktop changes; stale rows are pruned during reconciliation paths.
-- When the GUI is brought to front via the global toggle hotkey, the selected workspace detail view is refreshed so the on-screen windows list reflects the latest live scan.
+- The GUI starts a periodic detached utility-priority refresh loop (`refreshAllWorkspaceWindows`) so non-archived workspace window rows are reconciled in the background on a fixed interval (`PollingConstants.workspaceWindowRefreshInterval`).
+- Each background refresh pass uses a fresh orchestrator/store instance for thread-safe off-main reconciliation and keeps AppKit interaction responsive while refresh is in-flight.
+- UI data is reloaded after successful periodic refresh passes only when the user is not actively editing text fields (to avoid interrupting unsaved form edits).
 
 ## Window Capture and Focus
 ```mermaid
@@ -272,6 +312,23 @@ sequenceDiagram
 
 Editor and terminal windows opened from the GUI (Open Editor/Open Terminal) are captured via yabai and stored in the
 windows table so they participate in workspace window cycling.
+
+## Polling Constants
+All periodic polling intervals are centralized in `PollingConstants.swift` for easy configuration:
+
+- **Browser window scan debounce**: `browserWindowScanDebounceInterval` = 10 seconds
+  - Controls how frequently Chrome tab scans are performed per workspace/browser-session-prefix combination
+  - Used to debounce expensive Chrome AppleScript queries during window navigation and focus operations
+
+- **Status check default interval**: `statusCheckDefaultInterval` = 60 seconds
+  - Default interval between status check executions for process health monitoring
+  - User-configurable per status check in the GUI
+
+- **Status check default timeout**: `statusCheckDefaultTimeout` = 5 seconds
+  - Default timeout for status check command execution
+  - User-configurable per status check in the GUI
+
+These constants are referenced throughout the codebase to ensure consistent polling behavior.
 
 ## External Dependencies
 - macOS 14+

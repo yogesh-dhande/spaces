@@ -11,8 +11,7 @@ final class ShellTests: XCTestCase {
     func testRunUsesWorkingDirectory() throws {
         let directory = try makeTempDirectory()
         let output = try Shell.runAndCapture(["pwd"], cwd: directory.path)
-        let reported = URL(fileURLWithPath: output.trimmingCharacters(in: .whitespacesAndNewlines))
-            .resolvingSymlinksInPath().path
+        let reported = URL(fileURLWithPath: output.trimmingCharacters(in: .whitespacesAndNewlines)).resolvingSymlinksInPath().path
         let expected = directory.resolvingSymlinksInPath().path
         XCTAssertEqual(reported, expected)
     }

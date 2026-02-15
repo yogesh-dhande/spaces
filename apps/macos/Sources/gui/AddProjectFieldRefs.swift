@@ -9,7 +9,7 @@ struct AddProjectFieldRefs {
     let browseButton: NSButton
     let setupView: NSTextView
     let stopView: NSTextView
+    let portEditor: PortEditor
     let processEditor: ProcessEditor
     let browserView: NSTextView
-    let statusEditor: StatusCheckEditor
 }

@@ -41,8 +41,7 @@ final class GitClientTests: XCTestCase {
         try client.createWorktree(path: repo.path, worktreePath: worktree.path, branch: "feature")
 
         XCTAssertTrue(FileManager.default.fileExists(atPath: worktree.path))
-        let branch = try runGit(["rev-parse", "--abbrev-ref", "HEAD"], cwd: worktree.path).trimmingCharacters(
-            in: .whitespacesAndNewlines)
+        let branch = try runGit(["rev-parse", "--abbrev-ref", "HEAD"], cwd: worktree.path).trimmingCharacters(in: .whitespacesAndNewlines)
         XCTAssertEqual(branch, "feature")
     }
 
@@ -57,30 +56,21 @@ final class GitClientTests: XCTestCase {
 
         XCTAssertTrue(FileManager.default.fileExists(atPath: worktree.path))
         XCTAssertTrue(client.branchExists(path: fixture.clone.path, branch: "remote-feature"))
-        let branch = try runGit(["rev-parse", "--abbrev-ref", "HEAD"], cwd: worktree.path).trimmingCharacters(
-            in: .whitespacesAndNewlines)
+        let branch = try runGit(["rev-parse", "--abbrev-ref", "HEAD"], cwd: worktree.path).trimmingCharacters(in: .whitespacesAndNewlines)
         XCTAssertEqual(branch, "remote-feature")
     }
 
     func testCreateWorktreeWhenBranchExistsOnlyOnRemoteWithoutLocalTrackingRef() throws {
         let fixture = try makeRemoteFixture()
         try runGit(["checkout", "-b", "new-remote-only"], cwd: fixture.source.path)
-        try "new remote".write(
-            to: fixture.source.appending(path: "NEW_REMOTE_FOR_WORKTREE.md"),
-            atomically: true,
-            encoding: .utf8
-        )
+        try "new remote".write(to: fixture.source.appending(path: "NEW_REMOTE_FOR_WORKTREE.md"), atomically: true, encoding: .utf8)
         try runGit(["add", "NEW_REMOTE_FOR_WORKTREE.md"], cwd: fixture.source.path)
         try runGit(
-            ["-c", "user.name=spaceship-test", "-c", "user.email=test@example.com", "commit", "-m", "new remote worktree"],
-            cwd: fixture.source.path
-        )
+            ["-c", "user.name=spaceship-test", "-c", "user.email=test@example.com", "commit", "-m", "new remote worktree"], cwd: fixture.source.path)
         try runGit(["push", fixture.remote.path, "new-remote-only"], cwd: fixture.source.path)
 
-        let trackedBefore = try runGit(
-            ["for-each-ref", "--format=%(refname:short)", "refs/remotes/origin/new-remote-only"],
-            cwd: fixture.clone.path
-        ).trimmingCharacters(in: .whitespacesAndNewlines)
+        let trackedBefore = try runGit(["for-each-ref", "--format=%(refname:short)", "refs/remotes/origin/new-remote-only"], cwd: fixture.clone.path)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
         XCTAssertTrue(trackedBefore.isEmpty)
 
         let client = GitClient()
@@ -90,16 +80,12 @@ final class GitClientTests: XCTestCase {
         let worktree = fixture.root.appendingPathComponent("new-remote-only-worktree", isDirectory: true)
         try client.createWorktree(path: fixture.clone.path, worktreePath: worktree.path, branch: "new-remote-only")
 
-        let trackedAfter = try runGit(
-            ["for-each-ref", "--format=%(refname:short)", "refs/remotes/origin/new-remote-only"],
-            cwd: fixture.clone.path
-        ).trimmingCharacters(in: .whitespacesAndNewlines)
+        let trackedAfter = try runGit(["for-each-ref", "--format=%(refname:short)", "refs/remotes/origin/new-remote-only"], cwd: fixture.clone.path)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
         XCTAssertEqual(trackedAfter, "origin/new-remote-only")
         XCTAssertTrue(FileManager.default.fileExists(atPath: worktree.path))
         XCTAssertTrue(client.branchExists(path: fixture.clone.path, branch: "new-remote-only"))
-        let branch = try runGit(["rev-parse", "--abbrev-ref", "HEAD"], cwd: worktree.path).trimmingCharacters(
-            in: .whitespacesAndNewlines
-        )
+        let branch = try runGit(["rev-parse", "--abbrev-ref", "HEAD"], cwd: worktree.path).trimmingCharacters(in: .whitespacesAndNewlines)
         XCTAssertEqual(branch, "new-remote-only")
     }
 
@@ -127,70 +113,42 @@ final class GitClientTests: XCTestCase {
         try runGit(["checkout", "-b", "develop"], cwd: repo.path)
         try "target".write(to: repo.appendingPathComponent("TARGET.txt"), atomically: true, encoding: .utf8)
         try runGit(["add", "TARGET.txt"], cwd: repo.path)
-        try runGit(
-            ["-c", "user.name=spaceship-test", "-c", "user.email=test@example.com", "commit", "-m", "target"],
-            cwd: repo.path
-        )
-        let expectedHead = try runGit(["rev-parse", "develop"], cwd: repo.path).trimmingCharacters(
-            in: .whitespacesAndNewlines
-        )
+        try runGit(["-c", "user.name=spaceship-test", "-c", "user.email=test@example.com", "commit", "-m", "target"], cwd: repo.path)
+        let expectedHead = try runGit(["rev-parse", "develop"], cwd: repo.path).trimmingCharacters(in: .whitespacesAndNewlines)
         try runGit(["checkout", "main"], cwd: repo.path)
 
         let worktree = root.appendingPathComponent("feature-worktree", isDirectory: true)
         let client = GitClient()
-        try client.createWorktree(
-            path: repo.path,
-            worktreePath: worktree.path,
-            branch: "feature",
-            targetBranch: "develop"
-        )
+        try client.createWorktree(path: repo.path, worktreePath: worktree.path, branch: "feature", targetBranch: "develop")
 
-        let featureHead = try runGit(["rev-parse", "HEAD"], cwd: worktree.path).trimmingCharacters(
-            in: .whitespacesAndNewlines
-        )
+        let featureHead = try runGit(["rev-parse", "HEAD"], cwd: worktree.path).trimmingCharacters(in: .whitespacesAndNewlines)
         XCTAssertEqual(featureHead, expectedHead)
     }
 
     func testCreateWorktreeForNewBranchUsesRemoteTargetBranchWithoutLocalTrackingRef() throws {
         let fixture = try makeRemoteFixture()
         try runGit(["checkout", "-b", "new-remote-target"], cwd: fixture.source.path)
-        try "target".write(
-            to: fixture.source.appending(path: "NEW_REMOTE_TARGET.md"),
-            atomically: true,
-            encoding: .utf8
-        )
+        try "target".write(to: fixture.source.appending(path: "NEW_REMOTE_TARGET.md"), atomically: true, encoding: .utf8)
         try runGit(["add", "NEW_REMOTE_TARGET.md"], cwd: fixture.source.path)
         try runGit(
-            ["-c", "user.name=spaceship-test", "-c", "user.email=test@example.com", "commit", "-m", "remote target"],
-            cwd: fixture.source.path
-        )
+            ["-c", "user.name=spaceship-test", "-c", "user.email=test@example.com", "commit", "-m", "remote target"], cwd: fixture.source.path)
         try runGit(["push", fixture.remote.path, "new-remote-target"], cwd: fixture.source.path)
 
-        let expectedHead = try runGit(["rev-parse", "new-remote-target"], cwd: fixture.source.path).trimmingCharacters(
-            in: .whitespacesAndNewlines
-        )
+        let expectedHead = try runGit(["rev-parse", "new-remote-target"], cwd: fixture.source.path).trimmingCharacters(in: .whitespacesAndNewlines)
         let trackedBefore = try runGit(
-            ["for-each-ref", "--format=%(refname:short)", "refs/remotes/origin/new-remote-target"],
-            cwd: fixture.clone.path
+            ["for-each-ref", "--format=%(refname:short)", "refs/remotes/origin/new-remote-target"], cwd: fixture.clone.path
         ).trimmingCharacters(in: .whitespacesAndNewlines)
         XCTAssertTrue(trackedBefore.isEmpty)
 
         let worktree = fixture.root.appendingPathComponent("remote-target-worktree", isDirectory: true)
         try GitClient().createWorktree(
-            path: fixture.clone.path,
-            worktreePath: worktree.path,
-            branch: "new-feature-from-remote-target",
-            targetBranch: "new-remote-target"
-        )
+            path: fixture.clone.path, worktreePath: worktree.path, branch: "new-feature-from-remote-target", targetBranch: "new-remote-target")
 
         let trackedAfter = try runGit(
-            ["for-each-ref", "--format=%(refname:short)", "refs/remotes/origin/new-remote-target"],
-            cwd: fixture.clone.path
+            ["for-each-ref", "--format=%(refname:short)", "refs/remotes/origin/new-remote-target"], cwd: fixture.clone.path
         ).trimmingCharacters(in: .whitespacesAndNewlines)
         XCTAssertEqual(trackedAfter, "origin/new-remote-target")
-        let featureHead = try runGit(["rev-parse", "HEAD"], cwd: worktree.path).trimmingCharacters(
-            in: .whitespacesAndNewlines
-        )
+        let featureHead = try runGit(["rev-parse", "HEAD"], cwd: worktree.path).trimmingCharacters(in: .whitespacesAndNewlines)
         XCTAssertEqual(featureHead, expectedHead)
     }
 
@@ -210,25 +168,56 @@ final class GitClientTests: XCTestCase {
     func testBranchOptionsIncludeLiveRemoteHeadsWithoutFetch() throws {
         let fixture = try makeRemoteFixture()
         try runGit(["checkout", "-b", "new-remote-only"], cwd: fixture.source.path)
-        try "new remote".write(
-            to: fixture.source.appending(path: "NEW_REMOTE.md"),
-            atomically: true,
-            encoding: .utf8
-        )
+        try "new remote".write(to: fixture.source.appending(path: "NEW_REMOTE.md"), atomically: true, encoding: .utf8)
         try runGit(["add", "NEW_REMOTE.md"], cwd: fixture.source.path)
-        try runGit(
-            ["-c", "user.name=spaceship-test", "-c", "user.email=test@example.com", "commit", "-m", "new remote"],
-            cwd: fixture.source.path
-        )
+        try runGit(["-c", "user.name=spaceship-test", "-c", "user.email=test@example.com", "commit", "-m", "new remote"], cwd: fixture.source.path)
         try runGit(["push", fixture.remote.path, "new-remote-only"], cwd: fixture.source.path)
-        XCTAssertFalse(
-            GitClient().branchExists(path: fixture.clone.path, branch: "new-remote-only"),
-            "Local branch should not exist before fetch."
-        )
+        XCTAssertFalse(GitClient().branchExists(path: fixture.clone.path, branch: "new-remote-only"), "Local branch should not exist before fetch.")
 
         let options = GitClient().branchOptions(path: fixture.clone.path)
 
         XCTAssertTrue(options.contains("new-remote-only"))
+    }
+
+    func testTrackedFileActivityUsesTrackedFilesForLatestTimestampAndCount() throws {
+        let root = try makeTempDirectory()
+        let repo = root.appending(path: "repo", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: repo, withIntermediateDirectories: true)
+        try initializeGitRepository(at: repo, initialBranch: "main")
+
+        let trackedFile = repo.appending(path: "TRACKED.md")
+        try "tracked".write(to: trackedFile, atomically: true, encoding: .utf8)
+        try runGit(["add", "TRACKED.md"], cwd: repo.path)
+        try runGit(["-c", "user.name=spaceship-test", "-c", "user.email=test@example.com", "commit", "-m", "add tracked"], cwd: repo.path)
+
+        let readmeFile = repo.appending(path: "README.md")
+        let oldDate = Date(timeIntervalSinceNow: -600)
+        let newerTrackedDate = Date(timeIntervalSinceNow: -300)
+        try setModificationDate(oldDate, for: readmeFile)
+        try setModificationDate(newerTrackedDate, for: trackedFile)
+
+        let untrackedFile = repo.appending(path: "UNTRACKED.md")
+        try "scratch".write(to: untrackedFile, atomically: true, encoding: .utf8)
+        try setModificationDate(Date(), for: untrackedFile)
+
+        let client = GitClient()
+        let initialActivity = client.trackedFileActivity(path: repo.path)
+        XCTAssertEqual(initialActivity.modifiedTrackedFileCount, 0)
+        assertEqualDate(initialActivity.latestTrackedFileModificationDate, newerTrackedDate)
+
+        try "updated readme".write(to: readmeFile, atomically: true, encoding: .utf8)
+        let expectedLatestDate = try modificationDate(for: readmeFile)
+        let updatedActivity = client.trackedFileActivity(path: repo.path)
+
+        XCTAssertEqual(updatedActivity.modifiedTrackedFileCount, 1)
+        assertEqualDate(updatedActivity.latestTrackedFileModificationDate, expectedLatestDate)
+    }
+
+    func testTrackedFileActivityReturnsEmptySnapshotForNonRepository() throws {
+        let directory = try makeTempDirectory()
+        let activity = GitClient().trackedFileActivity(path: directory.path)
+        XCTAssertNil(activity.latestTrackedFileModificationDate)
+        XCTAssertEqual(activity.modifiedTrackedFileCount, 0)
     }
 
     func testCloneAndDeleteBranch() throws {
@@ -254,10 +243,7 @@ final class GitClientTests: XCTestCase {
         let readme = directory.appendingPathComponent("README.md")
         try "hello".write(to: readme, atomically: true, encoding: .utf8)
         try runGit(["add", "README.md"], cwd: directory.path)
-        try runGit(
-            ["-c", "user.name=spaceship-test", "-c", "user.email=test@example.com", "commit", "-m", "init"],
-            cwd: directory.path
-        )
+        try runGit(["-c", "user.name=spaceship-test", "-c", "user.email=test@example.com", "commit", "-m", "init"], cwd: directory.path)
     }
 
     private func makeRemoteFixture() throws -> (root: URL, source: URL, remote: URL, clone: URL) {
@@ -267,16 +253,9 @@ final class GitClientTests: XCTestCase {
         try initializeGitRepository(at: source, initialBranch: "main")
 
         try runGit(["checkout", "-b", "remote-feature"], cwd: source.path)
-        try "feature".write(
-            to: source.appendingPathComponent("FEATURE.md"),
-            atomically: true,
-            encoding: .utf8
-        )
+        try "feature".write(to: source.appendingPathComponent("FEATURE.md"), atomically: true, encoding: .utf8)
         try runGit(["add", "FEATURE.md"], cwd: source.path)
-        try runGit(
-            ["-c", "user.name=spaceship-test", "-c", "user.email=test@example.com", "commit", "-m", "feature"],
-            cwd: source.path
-        )
+        try runGit(["-c", "user.name=spaceship-test", "-c", "user.email=test@example.com", "commit", "-m", "feature"], cwd: source.path)
         try runGit(["checkout", "main"], cwd: source.path)
 
         let remote = root.appendingPathComponent("remote.git", isDirectory: true)
@@ -287,8 +266,7 @@ final class GitClientTests: XCTestCase {
         return (root, source, remote, clone)
     }
 
-    @discardableResult
-    private func runGit(_ arguments: [String], cwd: String) throws -> String {
+    @discardableResult private func runGit(_ arguments: [String], cwd: String) throws -> String {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
         process.arguments = ["git"] + arguments
@@ -314,12 +292,28 @@ final class GitClientTests: XCTestCase {
         let outputText = String(data: output.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
         if process.terminationStatus != 0 {
             let errorText = String(data: error.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-            throw NSError(
-                domain: "spaceship.tests",
-                code: Int(process.terminationStatus),
-                userInfo: [NSLocalizedDescriptionKey: errorText]
-            )
+            throw NSError(domain: "spaceship.tests", code: Int(process.terminationStatus), userInfo: [NSLocalizedDescriptionKey: errorText])
         }
         return outputText
+    }
+
+    private func setModificationDate(_ date: Date, for fileURL: URL) throws {
+        try FileManager.default.setAttributes([.modificationDate: date], ofItemAtPath: fileURL.path)
+    }
+
+    private func modificationDate(for fileURL: URL) throws -> Date {
+        let attributes = try FileManager.default.attributesOfItem(atPath: fileURL.path)
+        guard let date = attributes[.modificationDate] as? Date else {
+            throw NSError(domain: "spaceship.tests", code: 1, userInfo: [NSLocalizedDescriptionKey: "Missing modification date for \(fileURL.path)"])
+        }
+        return date
+    }
+
+    private func assertEqualDate(_ lhs: Date?, _ rhs: Date, tolerance: TimeInterval = 1, file: StaticString = #filePath, line: UInt = #line) {
+        guard let lhs else {
+            XCTFail("Expected date value.", file: file, line: line)
+            return
+        }
+        XCTAssertLessThanOrEqual(abs(lhs.timeIntervalSince(rhs)), tolerance, file: file, line: line)
     }
 }

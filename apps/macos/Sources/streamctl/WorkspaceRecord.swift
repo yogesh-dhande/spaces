@@ -13,16 +13,8 @@ public struct WorkspaceRecord: Codable, Sendable {
     public let lastLaunchedAt: String?
 
     public init(
-        id: String,
-        projectID: String,
-        name: String,
-        dir: String,
-        dirname: String?,
-        branch: String?,
-        isDefault: Bool,
-        isArchived: Bool,
-        isRunning: Bool,
-        lastLaunchedAt: String?
+        id: String, projectID: String, name: String, dir: String, dirname: String?, branch: String?, isDefault: Bool, isArchived: Bool,
+        isRunning: Bool, lastLaunchedAt: String?
     ) {
         self.id = id
         self.projectID = projectID

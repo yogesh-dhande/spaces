@@ -20,54 +20,41 @@ struct CLI {
         _ = try orchestrator.syncConfig()
 
         switch command {
-        case "config":
-            try runConfigSubcommand(orchestrator: orchestrator, path: configPath)
-        case "settings":
-            try runSettingsSubcommand(orchestrator: orchestrator)
-        case "project":
-            try runProjectSubcommand(orchestrator: orchestrator)
-        case "workspace":
-            try runWorkspaceSubcommand(orchestrator: orchestrator)
-        default:
-            printHelp()
+        case "config": try runConfigSubcommand(orchestrator: orchestrator, path: configPath)
+        case "settings": try runSettingsSubcommand(orchestrator: orchestrator)
+        case "project": try runProjectSubcommand(orchestrator: orchestrator)
+        case "workspace": try runWorkspaceSubcommand(orchestrator: orchestrator)
+        default: printHelp()
         }
     }
 
     private func runConfigSubcommand(orchestrator: SpaceshipOrchestrator, path: String) throws {
         guard args.count >= 3 else {
-            throw NSError(
-                domain: "spaceship.cli", code: 2,
-                userInfo: [NSLocalizedDescriptionKey: "Missing config action. Use: config path|show"])
+            throw NSError(domain: "spaceship.cli", code: 2, userInfo: [NSLocalizedDescriptionKey: "Missing config action. Use: config path|show"])
         }
         switch args[2] {
-        case "path":
-            print(path)
+        case "path": print(path)
         case "show":
             let config = try ConfigStore(path: path).load()
             print(
                 "editor=\(config.editor?.rawValue ?? "none") port_range=\(config.portRange.start)-\(config.portRange.end) projects=\(config.projects.count)"
             )
-        default:
-            throw NSError(
-                domain: "spaceship.cli", code: 2,
-                userInfo: [NSLocalizedDescriptionKey: "Unknown config action: \(args[2])"])
+        default: throw NSError(domain: "spaceship.cli", code: 2, userInfo: [NSLocalizedDescriptionKey: "Unknown config action: \(args[2])"])
         }
     }
 
     private func runProjectSubcommand(orchestrator: SpaceshipOrchestrator) throws {
         guard args.count >= 3 else {
             throw NSError(
-                domain: "spaceship.cli", code: 2,
-                userInfo: [NSLocalizedDescriptionKey: "Missing project action. Use: project list|add|update|remove"])
+                domain: "spaceship.cli", code: 2, userInfo: [NSLocalizedDescriptionKey: "Missing project action. Use: project list|add|update|remove"]
+            )
         }
 
         switch args[2] {
         case "list":
             let projects = try orchestrator.listProjects()
             for project in projects {
-                print(
-                    "\(project.name)\t\(project.dir)\tgit=\(project.isGitRepo ? "yes" : "no")\tdefault_branch=\(project.defaultBranch ?? "-")"
-                )
+                print("\(project.name)\t\(project.dir)\tgit=\(project.isGitRepo ? "yes" : "no")\tdefault_branch=\(project.defaultBranch ?? "-")")
             }
         case "add":
             let dir = optionalValue(for: "--dir")
@@ -75,10 +62,7 @@ struct CLI {
             if dir != nil, gitURL != nil {
                 throw NSError(
                     domain: "spaceship.cli", code: 2,
-                    userInfo: [
-                        NSLocalizedDescriptionKey:
-                            "Use either --dir <path> or --git-url <url>, but not both."
-                    ])
+                    userInfo: [NSLocalizedDescriptionKey: "Use either --dir <path> or --git-url <url>, but not both."])
             }
             let record: ProjectRecord
             if let gitURL {
@@ -88,10 +72,7 @@ struct CLI {
             } else {
                 throw NSError(
                     domain: "spaceship.cli", code: 2,
-                    userInfo: [
-                        NSLocalizedDescriptionKey:
-                            "Missing required flags. Use: project add --dir <path> or project add --git-url <url>"
-                    ])
+                    userInfo: [NSLocalizedDescriptionKey: "Missing required flags. Use: project add --dir <path> or project add --git-url <url>"])
             }
             print("Added project \(record.name)\t\(record.dir)")
         case "update":
@@ -99,26 +80,17 @@ struct CLI {
             let setupScript = optionalValue(for: "--setup-script")
             let stopScript = optionalValue(for: "--stop-script")
             guard var config = try orchestrator.projectConfig(projectID: normalizePath(dir)) else {
-                throw NSError(
-                    domain: "spaceship.cli", code: 2,
-                    userInfo: [NSLocalizedDescriptionKey: "Project not found for dir \(dir)"])
+                throw NSError(domain: "spaceship.cli", code: 2, userInfo: [NSLocalizedDescriptionKey: "Project not found for dir \(dir)"])
             }
-            if let setupScript {
-                config.setupScript = setupScript
-            }
-            if let stopScript {
-                config.stopScript = stopScript
-            }
+            if let setupScript { config.setupScript = setupScript }
+            if let stopScript { config.stopScript = stopScript }
             try orchestrator.updateProjectConfig(config)
             print("Updated project \(dir)")
         case "remove":
             let dir = try value(for: "--dir")
             try orchestrator.removeProject(dir: dir)
             print("Removed project \(dir)")
-        default:
-            throw NSError(
-                domain: "spaceship.cli", code: 2,
-                userInfo: [NSLocalizedDescriptionKey: "Unknown project action: \(args[2])"])
+        default: throw NSError(domain: "spaceship.cli", code: 2, userInfo: [NSLocalizedDescriptionKey: "Unknown project action: \(args[2])"])
         }
     }
 
@@ -126,23 +98,16 @@ struct CLI {
         guard args.count >= 3 else {
             throw NSError(
                 domain: "spaceship.cli", code: 2,
-                userInfo: [
-                    NSLocalizedDescriptionKey:
-                        "Missing workspace action. Use: workspace list|create|launch|restart|stop|archive|activate"
-                ])
+                userInfo: [NSLocalizedDescriptionKey: "Missing workspace action. Use: workspace list|create|launch|restart|stop|archive|activate"])
         }
         switch args[2] {
         case "list":
             let projectDir = try value(for: "--project-dir")
             let projectID = normalizePath(projectDir)
-            let workspaces = try orchestrator.listWorkspaces(
-                projectID: projectID, includeArchived: args.contains("--all"))
+            let workspaces = try orchestrator.listWorkspaces(projectID: projectID, includeArchived: args.contains("--all"))
             for ws in workspaces {
-                let flags = [
-                    ws.isDefault ? "default" : nil,
-                    ws.isRunning ? "running" : nil,
-                    ws.isArchived ? "archived" : nil,
-                ].compactMap { $0 }.joined(separator: ",")
+                let flags = [ws.isDefault ? "default" : nil, ws.isRunning ? "running" : nil, ws.isArchived ? "archived" : nil].compactMap { $0 }
+                    .joined(separator: ",")
                 print("\(ws.name)\t\(ws.dir)\t\(flags)")
             }
         case "create":
@@ -150,13 +115,17 @@ struct CLI {
             let name = try value(for: "--name")
             let branch = optionalValue(for: "--branch")
             let targetBranch = optionalValue(for: "--target-branch")
+            let directoryNameFlag = optionalValue(for: "--directory-name")
+            let dirnameFlag = optionalValue(for: "--dirname")
+            if directoryNameFlag != nil, dirnameFlag != nil {
+                throw NSError(
+                    domain: "spaceship.cli", code: 2,
+                    userInfo: [NSLocalizedDescriptionKey: "Use either --directory-name <name> or --dirname <name>, but not both."])
+            }
+            let directoryName = directoryNameFlag ?? dirnameFlag
             let projectID = normalizePath(projectDir)
             let workspace = try orchestrator.createWorkspace(
-                projectID: projectID,
-                name: name,
-                branch: branch,
-                targetBranch: targetBranch
-            )
+                projectID: projectID, name: name, branch: branch, targetBranch: targetBranch, directoryName: directoryName)
             print("Created workspace \(workspace.name)\t\(workspace.dir)")
         case "launch":
             let id = try workspaceID(orchestrator: orchestrator)
@@ -178,10 +147,7 @@ struct CLI {
             let id = try workspaceID(orchestrator: orchestrator)
             try orchestrator.setActiveWorkspace(id: id)
             print("Activated workspace \(id)")
-        default:
-            throw NSError(
-                domain: "spaceship.cli", code: 2,
-                userInfo: [NSLocalizedDescriptionKey: "Unknown workspace action: \(args[2])"])
+        default: throw NSError(domain: "spaceship.cli", code: 2, userInfo: [NSLocalizedDescriptionKey: "Unknown workspace action: \(args[2])"])
         }
     }
 
@@ -189,13 +155,8 @@ struct CLI {
         let projectDir = try value(for: "--project-dir")
         let name = try value(for: "--name")
         let projectID = normalizePath(projectDir)
-        guard
-            let workspace = try orchestrator.listWorkspaces(projectID: projectID, includeArchived: true).first(where: {
-                $0.name == name
-            })
-        else {
-            throw NSError(
-                domain: "spaceship.cli", code: 2, userInfo: [NSLocalizedDescriptionKey: "Workspace not found: \(name)"])
+        guard let workspace = try orchestrator.listWorkspaces(projectID: projectID, includeArchived: true).first(where: { $0.name == name }) else {
+            throw NSError(domain: "spaceship.cli", code: 2, userInfo: [NSLocalizedDescriptionKey: "Workspace not found: \(name)"])
         }
         return workspace.id
     }
@@ -203,8 +164,7 @@ struct CLI {
     private func runSettingsSubcommand(orchestrator: SpaceshipOrchestrator) throws {
         guard args.count >= 3 else {
             throw NSError(
-                domain: "spaceship.cli", code: 2,
-                userInfo: [NSLocalizedDescriptionKey: "Missing settings action. Use: settings get|set|reset"])
+                domain: "spaceship.cli", code: 2, userInfo: [NSLocalizedDescriptionKey: "Missing settings action. Use: settings get|set|reset"])
         }
 
         switch args[2] {
@@ -244,13 +204,11 @@ struct CLI {
                 print("gui-open-settings-shortcut\t\(current)")
             } else {
                 throw NSError(
-                    domain: "spaceship.cli",
-                    code: 2,
+                    domain: "spaceship.cli", code: 2,
                     userInfo: [
                         NSLocalizedDescriptionKey:
                             "Missing setting flag. Use: settings get --gui-hotkey|--gui-next-shortcut|--gui-prev-shortcut|--gui-show-shortcut|--gui-add-project-shortcut|--gui-add-workspace-shortcut|--gui-reload-shortcut|--gui-open-editor-shortcut|--gui-open-terminal-shortcut|--gui-open-finder-shortcut|--gui-open-settings-shortcut"
-                    ]
-                )
+                    ])
             }
 
         case "set":
@@ -300,13 +258,11 @@ struct CLI {
                 print("Updated gui-open-settings-shortcut\t\(spec.normalized)")
             } else {
                 throw NSError(
-                    domain: "spaceship.cli",
-                    code: 2,
+                    domain: "spaceship.cli", code: 2,
                     userInfo: [
                         NSLocalizedDescriptionKey:
                             "Missing setting flag/value. Use: settings set --gui-hotkey|--gui-next-shortcut|--gui-prev-shortcut|--gui-show-shortcut|--gui-add-project-shortcut|--gui-add-workspace-shortcut|--gui-reload-shortcut|--gui-open-editor-shortcut|--gui-open-terminal-shortcut|--gui-open-finder-shortcut|--gui-open-settings-shortcut <spec>"
-                    ]
-                )
+                    ])
             }
 
         case "reset":
@@ -345,40 +301,30 @@ struct CLI {
                 print("Reset gui-open-settings-shortcut\t\(SettingsKey.defaultGUIOpenSettingsShortcut)")
             } else {
                 throw NSError(
-                    domain: "spaceship.cli",
-                    code: 2,
+                    domain: "spaceship.cli", code: 2,
                     userInfo: [
                         NSLocalizedDescriptionKey:
                             "Missing setting flag. Use: settings reset --gui-hotkey|--gui-next-shortcut|--gui-prev-shortcut|--gui-show-shortcut|--gui-add-project-shortcut|--gui-add-workspace-shortcut|--gui-reload-shortcut|--gui-open-editor-shortcut|--gui-open-terminal-shortcut|--gui-open-finder-shortcut|--gui-open-settings-shortcut"
-                    ]
-                )
+                    ])
             }
 
-        default:
-            throw NSError(
-                domain: "spaceship.cli", code: 2,
-                userInfo: [NSLocalizedDescriptionKey: "Unknown settings action: \(args[2])"])
+        default: throw NSError(domain: "spaceship.cli", code: 2, userInfo: [NSLocalizedDescriptionKey: "Unknown settings action: \(args[2])"])
         }
     }
 
     private func value(for flag: String) throws -> String {
         guard let idx = args.firstIndex(of: flag), idx + 1 < args.count else {
-            throw NSError(
-                domain: "spaceship.cli", code: 2, userInfo: [NSLocalizedDescriptionKey: "Missing required flag \(flag)"])
+            throw NSError(domain: "spaceship.cli", code: 2, userInfo: [NSLocalizedDescriptionKey: "Missing required flag \(flag)"])
         }
         return args[idx + 1]
     }
 
     private func optionalValue(for flag: String) -> String? {
-        guard let idx = args.firstIndex(of: flag), idx + 1 < args.count else {
-            return nil
-        }
+        guard let idx = args.firstIndex(of: flag), idx + 1 < args.count else { return nil }
         return args[idx + 1]
     }
 
-    private func normalizePath(_ path: String) -> String {
-        URL(fileURLWithPath: path).resolvingSymlinksInPath().standardizedFileURL.path
-    }
+    private func normalizePath(_ path: String) -> String { URL(fileURLWithPath: path).resolvingSymlinksInPath().standardizedFileURL.path }
 
     private func printHelp() {
         print(
@@ -430,7 +376,7 @@ struct CLI {
               spaceship project remove --dir <path>
 
               spaceship workspace list --project-dir <path> [--all]
-              spaceship workspace create --project-dir <path> --name <name> [--branch <branch>] [--target-branch <branch>]
+              spaceship workspace create --project-dir <path> --name <name> [--branch <branch>] [--target-branch <branch>] [--directory-name <name>]
               spaceship workspace launch --project-dir <path> --name <name>
               spaceship workspace restart --project-dir <path> --name <name>
               spaceship workspace stop --project-dir <path> --name <name>
@@ -441,24 +387,26 @@ struct CLI {
               - Configuration is stored in ~/.spaceship/config.yaml (YAML is source of truth).
               - GUI settings (⌘,) let you pick a preferred editor (VS Code, Cursor, Windsurf).
               - Runtime state is stored in ~/.spaceship/spaceship.db and rebuilt if schema changes.
-              - Removing a git project deletes related workspace directories under ~/spaceship/workspaces.
+              - Removing a git project first removes managed worktrees via `git worktree remove --force`, then deletes related workspace directories under ~/spaceship/workspaces.
               - Removing a project deletes only spaceship state unless it is an spaceship-cloned git repo under ~/spaceship/projects; those managed project directories are deleted.
               - Workspaces snapshot project processes, status checks, and browser sessions into the runtime DB on creation.
               - Project `setup_script` runs when a workspace is created/revived.
               - Project/workspace `stop_script` runs whenever a workspace is stopped (including restart/archive stop phase), after automatic process termination attempts.
               - For git projects, `workspace create` requires `--branch`; `--target-branch` defaults to main/master if available.
+              - `workspace create --directory-name` (or `--dirname`) overrides the auto-generated git worktree directory name; allowed characters are letters, numbers, '-', and '_', with no spaces.
               - Archiving a non-git workspace never deletes the project directory.
               - Workspaces reserve PORT0-PORT9 from the configured port range.
               - GUI window focus shortcuts: cmd+1 through cmd+9 (when GUI is focused).
               - GUI window cycle shortcuts: cmd+shift+[ and cmd+shift+] (global, when GUI is not focused).
+              - Chrome tab scans used for workspace window list/cycle are debounced to at most once every \(Int(PollingConstants.browserWindowScanDebounceInterval)) seconds per workspace browser-session config.
+              - Browser window focus targets cached tab index first, validates focused active-tab URL, auto-corrects with one refresh, then falls back to URL matching when needed.
+              - Diagnostics: DEBUG=1 logs browser scan timing and browser focus-path timing (including cache hit/miss and fallback decisions).
               - GUI action shortcuts can be overridden in Settings or via `spaceship settings set ...`.
             """)
     }
 }
 
-do {
-    try CLI(args: CommandLine.arguments).run()
-} catch {
+do { try CLI(args: CommandLine.arguments).run() } catch {
     fputs("Error: \(error.localizedDescription)\n", stderr)
     exit(1)
 }

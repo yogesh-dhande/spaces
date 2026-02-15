@@ -5,9 +5,7 @@ public final class ConfigStore {
     public static let defaultFilename = "config.yaml"
     private let path: String
 
-    public init(path: String) {
-        self.path = path
-    }
+    public init(path: String) { self.path = path }
 
     public func load() throws -> AppConfig {
         let url = URL(fileURLWithPath: path)
