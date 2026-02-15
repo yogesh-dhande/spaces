@@ -11,6 +11,7 @@
 - Stream capture is required before show.
 - Avoid window-level automation outside yabai.
 - Do not add backward compatibility layers unless explicitly requested.
+- Any project setting related to workspace creation and used during workspace launch must be overridable per workspace after creation.
 
 ## Data & Paths
 - DB path: `~/.spaceship/spaceship.db` (managed automatically).
