@@ -234,9 +234,8 @@
         - port allocation happens before setup script so named port env vars are available in setup scripts, stop scripts, process commands, and status check commands
         - each process also receives the following env vars
             - Named port env vars from the workspace's port definitions (e.g. `$FRONTEND_PORT`, `$API_PORT`)
-            - $spaceship_PROJECT_DIR
-            - $spaceship_WORKSPACE_DIR
-            - $spaceship_<PROJECT_NAME>_<WORKSPACE_NAME>_WORKSPACE_DIR - these can be used to start and run related services that may be defined in other projects e.g. if backend and frontend are  in a separate repos
+            - $SPACESHIP_PROJECT_DIR – the project directory
+            - $SPACESHIP_WORKSPACE_DIR – the workspace directory
         - run processes in terminal windows based on process templates defined in the workspace
         - open browser window/tabs for browser sessions defined in the workspace
             - browser tracking should preserve target session URL so focus actions can activate the matching tab (not just the window)

@@ -2344,4 +2344,51 @@ final class OrchestratorTests: XCTestCase {
     }
 
     private func normalizeTestPath(_ path: String) -> String { URL(fileURLWithPath: path).resolvingSymlinksInPath().standardizedFileURL.path }
+
+    // MARK: - buildWorkspaceEnv
+
+    func testBuildWorkspaceEnvSetsSpaceshipWorkspaceDir() throws {
+        let store = try makeTemporaryStore()
+        let configStore = ConfigStore(path: try makeTempDirectory().appendingPathComponent("config.yaml").path)
+        let orchestrator = SpaceshipOrchestrator(store: store, configStore: configStore)
+        let project = makeProjectRecord(dir: "/tmp/project")
+        let workspace = makeWorkspaceRecord(projectID: project.id, name: "dev", dir: "/tmp/project/ws")
+        let env = orchestrator.buildWorkspaceEnv(project: project, workspace: workspace, namedPorts: [])
+        XCTAssertEqual(env["SPACESHIP_WORKSPACE_DIR"], "/tmp/project/ws")
+    }
+
+    func testBuildWorkspaceEnvSetsSpaceshipProjectDir() throws {
+        let store = try makeTemporaryStore()
+        let configStore = ConfigStore(path: try makeTempDirectory().appendingPathComponent("config.yaml").path)
+        let orchestrator = SpaceshipOrchestrator(store: store, configStore: configStore)
+        let project = makeProjectRecord(dir: "/tmp/project")
+        let workspace = makeWorkspaceRecord(projectID: project.id, name: "dev", dir: "/tmp/project/ws")
+        let env = orchestrator.buildWorkspaceEnv(project: project, workspace: workspace, namedPorts: [])
+        XCTAssertEqual(env["SPACESHIP_PROJECT_DIR"], "/tmp/project")
+    }
+
+    func testBuildWorkspaceEnvDoesNotContainScopedKey() throws {
+        let store = try makeTemporaryStore()
+        let configStore = ConfigStore(path: try makeTempDirectory().appendingPathComponent("config.yaml").path)
+        let orchestrator = SpaceshipOrchestrator(store: store, configStore: configStore)
+        let project = makeProjectRecord(dir: "/tmp/project")
+        let workspace = makeWorkspaceRecord(projectID: project.id, name: "dev", dir: "/tmp/project/ws")
+        let env = orchestrator.buildWorkspaceEnv(project: project, workspace: workspace, namedPorts: [])
+        let scopedKeys = env.keys.filter { $0.hasPrefix("spaceship_") || $0.hasPrefix("SPACESHIP_PROJECT_") && $0.hasSuffix("_WORKSPACE_DIR") }
+        XCTAssertTrue(scopedKeys.isEmpty, "Expected no scoped cross-project keys, found: \(scopedKeys)")
+    }
+
+    func testBuildWorkspaceEnvIncludesNamedPorts() throws {
+        let store = try makeTemporaryStore()
+        let configStore = ConfigStore(path: try makeTempDirectory().appendingPathComponent("config.yaml").path)
+        let orchestrator = SpaceshipOrchestrator(store: store, configStore: configStore)
+        let project = makeProjectRecord(dir: "/tmp/project")
+        let workspace = makeWorkspaceRecord(projectID: project.id, name: "dev", dir: "/tmp/project/ws")
+        let ports: [(port: Int, name: String)] = [(port: 3000, name: "FRONTEND_PORT"), (port: 8080, name: "API_PORT")]
+        let env = orchestrator.buildWorkspaceEnv(project: project, workspace: workspace, namedPorts: ports)
+        XCTAssertEqual(env["FRONTEND_PORT"], "3000")
+        XCTAssertEqual(env["API_PORT"], "8080")
+        XCTAssertEqual(env["SPACESHIP_WORKSPACE_DIR"], "/tmp/project/ws")
+        XCTAssertEqual(env["SPACESHIP_PROJECT_DIR"], "/tmp/project")
+    }
 }

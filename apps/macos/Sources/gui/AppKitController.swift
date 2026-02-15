@@ -1233,9 +1233,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             let key = namedPort.name.isEmpty ? "PORT\(lines.count)" : namedPort.name
             lines.append("\(key)=\(namedPort.port)")
         }
-        lines.append("spaceship_WORKSPACE_DIR=\(workspace.dir)")
-        let scopedKey = "spaceship_\(sanitizeEnvKey(project.name))_\(sanitizeEnvKey(workspace.name))_WORKSPACE_DIR"
-        lines.append("\(scopedKey)=\(workspace.dir)")
+        lines.append("SPACESHIP_WORKSPACE_DIR=\(workspace.dir)")
+        lines.append("SPACESHIP_PROJECT_DIR=\(project.dir)")
         envView.string = lines.joined(separator: "\n")
         if let container = envView.textContainer, let layout = envView.layoutManager { layout.ensureLayout(for: container) }
         let scroll = scrollableTextView(envView, height: 240)
@@ -2259,13 +2258,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     }
 
     private func normalizePath(_ path: String) -> String { URL(fileURLWithPath: path).resolvingSymlinksInPath().standardizedFileURL.path }
-
-    private func sanitizeEnvKey(_ raw: String) -> String {
-        raw.uppercased().map { char in
-            if char.isLetter || char.isNumber { return char }
-            return "_"
-        }.reduce("") { $0 + String($1) }
-    }
 
     private func setupGlobalHotkey() {
         guard let toggleShortcutSpec else {

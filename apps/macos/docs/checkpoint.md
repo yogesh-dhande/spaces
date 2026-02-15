@@ -78,6 +78,7 @@
 - Built the AppKit GUI with two-pane layout, project/workspace editing, and window shortcut hints.
 - Added CLI subcommands for projects/workspaces plus settings for hotkey customization.
 - Implemented named port definitions with `PortDefinition` model, `PortReserver` (socket-based reservation), `PortEditor` GUI, schema v7 migration, and updated `PortAllocator`/`buildWorkspaceEnv` to use named ports.
+- Simplified workspace env vars: `SPACESHIP_WORKSPACE_DIR` and `SPACESHIP_PROJECT_DIR` replace the old lowercase-prefixed and scoped cross-project keys.
 - Nested status check configuration under each process in `ProcessEditor` (removed standalone `StatusCheckEditor`); run tab shows check results as indented sub-rows with colored dots.
 
 ## Remaining

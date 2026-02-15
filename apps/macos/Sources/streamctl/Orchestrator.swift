@@ -1339,15 +1339,14 @@ public final class SpaceshipOrchestrator {
 
     private func runScript(_ script: String, cwd: String) throws { _ = try Shell.run(["/bin/bash", "-lc", script], cwd: cwd) }
 
-    private func buildWorkspaceEnv(project: ProjectRecord, workspace: WorkspaceRecord, namedPorts: [(port: Int, name: String)]) -> [String: String] {
+    func buildWorkspaceEnv(project: ProjectRecord, workspace: WorkspaceRecord, namedPorts: [(port: Int, name: String)]) -> [String: String] {
         var env: [String: String] = [:]
         for namedPort in namedPorts {
             let key = namedPort.name.isEmpty ? "PORT\(env.count)" : namedPort.name
             env[key] = String(namedPort.port)
         }
-        env["spaceship_WORKSPACE_DIR"] = workspace.dir
-        let scopedKey = "spaceship_\(sanitizeEnvKey(project.name))_\(sanitizeEnvKey(workspace.name))_WORKSPACE_DIR"
-        env[scopedKey] = workspace.dir
+        env["SPACESHIP_WORKSPACE_DIR"] = workspace.dir
+        env["SPACESHIP_PROJECT_DIR"] = project.dir
         return env
     }
 
@@ -2022,13 +2021,6 @@ public final class SpaceshipOrchestrator {
         let lastSegment = raw.split(separator: "/").last.map(String.init) ?? raw
         if lastSegment.hasSuffix(".git") { return String(lastSegment.dropLast(4)) }
         return lastSegment
-    }
-
-    private func sanitizeEnvKey(_ raw: String) -> String {
-        raw.uppercased().map { char in
-            if char.isLetter || char.isNumber { return char }
-            return "_"
-        }.reduce("") { $0 + String($1) }
     }
 
     private func safeFilename(_ raw: String) -> String {

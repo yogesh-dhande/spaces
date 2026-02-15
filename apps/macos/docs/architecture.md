@@ -235,6 +235,7 @@ Port allocation details:
 - Port definitions are configured at the project level in YAML (under a `ports` list) and inherited by workspaces; workspaces can override definitions.
 - Named ports appear as env vars in setup scripts, stop scripts, process commands, and status check commands (e.g. `$FRONTEND_PORT`, `$API_PORT`).
 - `buildWorkspaceEnv` uses named port keys from definitions instead of anonymous `PORT0`, `PORT1`, etc.
+- `buildWorkspaceEnv` sets `SPACESHIP_WORKSPACE_DIR` (workspace directory) and `SPACESHIP_PROJECT_DIR` (project directory) for every workspace process.
 
 Launch and capture windows:
 ```mermaid
