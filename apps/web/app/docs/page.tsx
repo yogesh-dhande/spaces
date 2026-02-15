@@ -1,7 +1,7 @@
 import type { Metadata } from "next";
 import Link from "next/link";
-import { ScreenshotFrame } from "../components/screenshot-frame";
 import { SiteHeader } from "../components/site-header";
+import { docsPageLinks } from "./content";
 
 export const metadata: Metadata = {
   title: "Docs",
@@ -31,19 +31,6 @@ const terms = [
   },
 ];
 
-const quickStart = [
-  "Add or connect a project.",
-  "Create a workspace for the branch or task you are starting.",
-  "Launch the workspace and continue where you left off.",
-  "Switch to another workspace without rebuilding your context.",
-];
-
-const boundaries = [
-  "Spaceship manages workspace context and switching.",
-  "Your existing tools still handle editing, tiling, and coding.",
-  "Workspaces can run in parallel while you stay focused on one.",
-];
-
 export default function DocsPage() {
   return (
     <div className="relative min-h-screen overflow-x-clip">
@@ -66,13 +53,13 @@ export default function DocsPage() {
               href="/"
               className="btn-primary rounded-full px-5 py-2.5 text-sm font-semibold transition-colors"
             >
-              Back to Home
+              Getting Started
             </Link>
             <a
-              href="#quickstart"
+              href="#docs-map"
               className="rounded-full border border-line px-5 py-2.5 text-sm font-semibold transition-colors hover:border-accent hover:text-accent"
             >
-              Jump to Quick Start
+              Jump to Overview
             </a>
           </div>
         </section>
@@ -94,39 +81,39 @@ export default function DocsPage() {
         </section>
 
         <section
-          id="quickstart"
-          className="grid gap-6 rounded-3xl border border-line bg-surface/86 p-7 backdrop-blur-sm md:grid-cols-[1fr_1fr] md:p-8"
+          id="docs-map"
+          className="rounded-3xl border border-line bg-surface/86 p-7 backdrop-blur-sm md:p-8"
         >
-          <div>
-            <h2 className="text-2xl font-semibold tracking-tight">Quick Start</h2>
-            <ol className="mt-4 space-y-2 text-sm leading-7 text-foreground-soft">
-              {quickStart.map((step, index) => (
-                <li key={step}>
-                  <span className="mr-2 font-mono text-xs text-foreground">
-                    {index + 1}.
-                  </span>
-                  {step}
-                </li>
-              ))}
-            </ol>
-            <h3 className="mt-6 text-lg font-semibold tracking-tight">
-              Product boundary
-            </h3>
-            <ul className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
-              {boundaries.map((item) => (
-                <li key={item}>• {item}</li>
-              ))}
-            </ul>
-          </div>
-          <div className="space-y-4">
-            <ScreenshotFrame
-              title="Project + Workspace List"
-              caption="Placeholder for left-pane navigation with projects and nested workspaces."
-            />
-            <ScreenshotFrame
-              title="Workspace Actions"
-              caption="Placeholder for launch, restart, stop, and archive controls in context."
-            />
+          <h2 className="text-2xl font-semibold tracking-tight">
+            Docs Overview
+          </h2>
+          <p className="mt-3 max-w-4xl text-sm leading-7 text-foreground-soft">
+            These pages cover the most common user questions and operational
+            workflows from setup through troubleshooting.
+          </p>
+          <div className="mt-5 grid gap-4 md:grid-cols-2">
+            {docsPageLinks.map((page) => (
+              <article
+                key={page.href}
+                className="rounded-2xl border border-line bg-surface/75 p-4"
+              >
+                <h3 className="text-lg font-semibold tracking-tight">
+                  {page.title}
+                </h3>
+                <p className="mt-2 text-sm leading-7 text-foreground-soft">
+                  {page.summary}
+                </p>
+                <p className="mt-3 text-sm leading-7 text-foreground-soft">
+                  Best for: {page.audience}
+                </p>
+                <Link
+                  href={page.href}
+                  className="mt-3 inline-flex rounded-full border border-line px-4 py-2 text-xs font-semibold transition-colors hover:border-accent hover:text-accent"
+                >
+                  Read Page
+                </Link>
+              </article>
+            ))}
           </div>
         </section>
       </main>
