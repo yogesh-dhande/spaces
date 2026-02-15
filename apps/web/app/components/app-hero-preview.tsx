@@ -1,3 +1,5 @@
+import { WorkspaceWindowMock } from "./workspace-window-mock";
+
 type WorkspaceItem = {
   id: string;
   name: string;
@@ -250,59 +252,23 @@ function DetachedWindowSwitcher({ workspace, windows }: WorkspaceStateProps) {
         <p className="app-window-player-copy">{workspace.branch}</p>
       </div>
       <div className="app-window-canvas app-window-canvas-detached">
-        <article className="app-window-pane app-window-pane-browser app-window-pane-focus-1">
-          <div className="app-pane-browser-top">
-            <span className="app-pane-dot app-pane-dot-red" />
-            <span className="app-pane-dot app-pane-dot-yellow" />
-            <span className="app-pane-dot app-pane-dot-green" />
-            <p className="app-pane-address">
-              {browserWindow?.label.replace("Browser: ", "") ?? "localhost:3000"}
-            </p>
-          </div>
-          <div className="app-pane-browser-body">
-            <div className="app-pane-browser-banner" />
-            <div className="app-pane-browser-row">
-              <div className="app-pane-browser-card app-pane-browser-card-tall" />
-              <div className="app-pane-browser-card" />
-            </div>
-            <div className="app-pane-browser-line" />
-            <div className="app-pane-browser-line app-pane-browser-line-short" />
-          </div>
-        </article>
+        <WorkspaceWindowMock
+          className="app-window-pane app-window-pane-browser app-window-pane-focus-1"
+          kind="browser"
+          label={browserWindow?.label.replace("Browser: ", "") ?? "localhost:3000"}
+        />
 
-        <article className="app-window-pane app-window-pane-editor app-window-pane-focus-2">
-          <div className="app-pane-editor-top">
-            <p>{editorWindow?.label.replace("Editor: ", "") ?? "app/feature/view.tsx"}</p>
-          </div>
-          <div className="app-pane-editor-body">
-            <div className="app-pane-editor-gutter">
-              <span>18</span>
-              <span>19</span>
-              <span>20</span>
-              <span>21</span>
-              <span>22</span>
-            </div>
-            <div className="app-pane-editor-code">
-              <div className="app-pane-editor-line app-pane-editor-line-1" />
-              <div className="app-pane-editor-line app-pane-editor-line-2" />
-              <div className="app-pane-editor-line app-pane-editor-line-3" />
-              <div className="app-pane-editor-line app-pane-editor-line-4" />
-              <div className="app-pane-editor-line app-pane-editor-line-5" />
-            </div>
-          </div>
-        </article>
+        <WorkspaceWindowMock
+          className="app-window-pane app-window-pane-editor app-window-pane-focus-2"
+          kind="editor"
+          label={editorWindow?.label.replace("Editor: ", "") ?? "app/feature/view.tsx"}
+        />
 
-        <article className="app-window-pane app-window-pane-terminal app-window-pane-focus-3">
-          <div className="app-pane-terminal-top">
-            <p>{terminalWindow?.label.replace("Terminal: ", "") ?? "pnpm dev"}</p>
-          </div>
-          <div className="app-pane-terminal-body">
-            <p>$ pnpm dev --filter {workspace.name}</p>
-            <p>ready on :3001</p>
-            <p>watching changes...</p>
-            <p className="app-pane-terminal-cursor">_</p>
-          </div>
-        </article>
+        <WorkspaceWindowMock
+          className="app-window-pane app-window-pane-terminal app-window-pane-focus-3"
+          kind="terminal"
+          label={terminalWindow?.label.replace("Terminal: ", "") ?? `pnpm dev --filter ${workspace.name}`}
+        />
       </div>
     </div>
   );
