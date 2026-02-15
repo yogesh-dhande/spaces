@@ -1084,10 +1084,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             windowsStack.addArrangedSubview(row)
             constrainFormFieldToFillWidth(row, in: windowsStack)
         }
-        let windowsCard = formSectionCard(
-            icon: "macwindow.on.rectangle", title: "Windows", subtitle: "Focus windows with cmd+<n> shortcuts.", contentViews: [windowsStack])
-        container.addArrangedSubview(windowsCard)
-        constrainFormFieldToFillWidth(windowsCard, in: container)
+        let windowsHeader = sectionHeader(icon: "macwindow.on.rectangle", title: "Windows")
+        container.addArrangedSubview(windowsHeader)
+        constrainFormFieldToFillWidth(windowsHeader, in: container)
+        container.addArrangedSubview(windowsStack)
+        constrainFormFieldToFillWidth(windowsStack, in: container)
 
         // --- Processes card ---
         let results = (try? orchestrator.runStatusChecks(workspaceID: workspace.id)) ?? []
@@ -1120,10 +1121,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             processesStack.addArrangedSubview(row)
             constrainFormFieldToFillWidth(row, in: processesStack)
         }
-        let processesCard = formSectionCard(
-            icon: "terminal.fill", title: "Running processes", subtitle: "Active commands and their status.", contentViews: [processesStack])
-        container.addArrangedSubview(processesCard)
-        constrainFormFieldToFillWidth(processesCard, in: container)
+        let processesHeader = sectionHeader(icon: "terminal.fill", title: "Processes")
+        container.addArrangedSubview(processesHeader)
+        constrainFormFieldToFillWidth(processesHeader, in: container)
+        container.addArrangedSubview(processesStack)
+        constrainFormFieldToFillWidth(processesStack, in: container)
 
         // --- Quick actions (centered) ---
         let centeredOpenRow = NSStackView()
@@ -1351,6 +1353,30 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         row.addArrangedSubview(badge)
         row.addArrangedSubview(iconView)
         row.addArrangedSubview(labelField)
+        return row
+    }
+
+    private func sectionHeader(icon: String, title: String) -> NSView {
+        let row = NSStackView()
+        row.orientation = .horizontal
+        row.alignment = .centerY
+        row.spacing = 6
+
+        let accentColor = sidebarThemeColor(light: (13, 95, 93), dark: (61, 198, 184))
+        let iconView = NSImageView()
+        if let img = NSImage(systemSymbolName: icon, accessibilityDescription: title) {
+            let config = NSImage.SymbolConfiguration(paletteColors: [accentColor])
+            iconView.image = img.withSymbolConfiguration(config)
+        }
+        iconView.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([iconView.widthAnchor.constraint(equalToConstant: 16), iconView.heightAnchor.constraint(equalToConstant: 16)])
+
+        let label = NSTextField(labelWithString: title)
+        label.font = .systemFont(ofSize: 12, weight: .semibold)
+        label.textColor = .secondaryLabelColor
+
+        row.addArrangedSubview(iconView)
+        row.addArrangedSubview(label)
         return row
     }
 
@@ -2520,12 +2546,12 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let cardView = NSView()
         cardView.translatesAutoresizingMaskIntoConstraints = false
         cardView.wantsLayer = true
-        cardView.layer?.cornerRadius = 10
-        cardView.layer?.borderWidth = 1
-        cardView.layer?.borderColor = sidebarCardBorderColor(isSelected: isSelected).cgColor
-        let cardBackgroundColor =
-            if isSelected { sidebarSelectedCardBackgroundColor() } else { sidebarCardBackgroundColor(isArchived: workspace.isArchived) }
-        cardView.layer?.backgroundColor = cardBackgroundColor.cgColor
+        if isSelected {
+            cardView.layer?.cornerRadius = 10
+            cardView.layer?.borderWidth = 1
+            cardView.layer?.borderColor = sidebarCardBorderColor(isSelected: true).cgColor
+            cardView.layer?.backgroundColor = sidebarSelectedCardBackgroundColor().cgColor
+        }
 
         let contentStack = NSStackView()
         contentStack.orientation = .vertical
@@ -2659,11 +2685,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     private func sidebarPanelBackgroundColor() -> NSColor { sidebarThemeColor(light: (248, 247, 241), dark: (15, 21, 23)) }
 
     private func sidebarCardBackgroundColor(isArchived: Bool) -> NSColor {
-        let alpha: CGFloat = isArchived ? 0.52 : 0.82
-        return sidebarThemeColor(light: (255, 255, 255), dark: (29, 42, 45), alpha: alpha)
+        let alpha: CGFloat = isArchived ? 0.42 : 0.55
+        return sidebarThemeColor(light: (240, 238, 230), dark: (24, 36, 39), alpha: alpha)
     }
 
-    private func sidebarSelectedCardBackgroundColor() -> NSColor { sidebarThemeColor(light: (207, 222, 213), dark: (39, 77, 76), alpha: 0.95) }
+    private func sidebarSelectedCardBackgroundColor() -> NSColor { sidebarCardBackgroundColor(isArchived: false) }
 
     private func sidebarCardBorderColor(isSelected: Bool) -> NSColor {
         if isSelected { return sidebarThemeColor(light: (13, 95, 93), dark: (61, 198, 184), alpha: 0.50) }
