@@ -83,6 +83,8 @@ Updates to workspace settings apply immediately when the workspace is running (n
   - Launch/Restart can extract one matching tab per browser session into a dedicated Chrome window and persist extracted-window mappings for faster focus
   - Browser focus tries extracted-window `yabai` focus first; stale mappings are invalidated and fallback continues via indexed tab focus + URL matching (without automatic re-extraction)
   - Launch/Restart reuses existing matching Chrome tabs and tracks all matches instead of opening duplicate tabs when matches already exist
+  - If opening the preferred editor reuses an already-open editor window, launch captures the currently focused editor window so it is included in workspace window cycling
+  - Editor tracking handles known yabai app-name aliases (for example VS Code can be reported as `Code`) so editor windows continue to appear in next/previous window loops
   - Stop/Restart/browser-session updates close tracked Chrome tabs only and never close full Chrome windows
   - Workspace window list/navigation rebuilds browser rows from Chrome tabs with a 10-second debounce (per workspace/prefix set) and includes tabs whose URLs start with configured browser session URLs (deduped by window+tab URL)
   - Browser focus targets cached tab index first, validates the active tab URL against workspace prefixes, refreshes once on mismatch, and falls back to URL matching if tab positions changed

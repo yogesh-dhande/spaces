@@ -147,6 +147,8 @@
                 - start processes defined by the workspace in their own terminal windows. keep track of these windows so they can be focused later when lopping this this workspace’s windows
                 - ensure that browser tabs for the browser sessions defined for the workspace are open, and if not, open them. keep track of them so they can be focused later when lopping this this workspace’s windows
                 - open the workspace dir in user’s preferred editor
+                - if opening the editor reuses an already-open editor window, capture the currently focused editor window and include it in tracked workspace windows for cycling
+                - editor-window tracking should match known editor app-name aliases reported by yabai (for example VS Code may be reported as `Code`)
             - user can open the workspace in the preferred editor, a terminal window, or Finder from the GUI; editor and terminal windows are captured and tracked for window cycling
             - when updated while running
                 - start newly added processes in new terminals

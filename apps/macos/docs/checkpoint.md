@@ -29,6 +29,8 @@
 - Focused Chrome windows now map to workspaces using both `window_id` and active tab URL prefix so global next/previous shortcuts choose the correct workspace even when Chrome windows are reused across workspaces.
 - Workspace window listing/navigation filters untargeted browser rows when a targeted browser row already exists for the same Chrome `window_id`.
 - Terminal window tracking now backfills from running-process window IDs and persists all newly captured terminal windows during process reconciliation.
+- Launch-time editor tracking now falls back to the currently focused editor window when snapshot-diff capture sees no new editor windows, so editor windows are still included in workspace cycling.
+- Editor capture now recognizes known yabai app-name aliases (for example VS Code reported as `Code`) so editor windows are not dropped from workspace looping.
 - Launch is now reserved for stopped workspaces; running workspaces use explicit restart semantics (stop then launch) via GUI/CLI.
 - Workspace settings snapshot project templates on creation into the runtime DB and are editable per workspace; updates to running workspaces reconcile processes and browser sessions immediately.
 - AppKit GUI is two-pane with in-place forms and editors for processes (with nested inline status checks), browser sessions; workspace detail includes run/stop/archive, windows list with shortcut hints, an env/ports tab, and workspace settings.

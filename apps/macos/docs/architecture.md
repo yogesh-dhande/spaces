@@ -278,6 +278,8 @@ Degraded runtime edge cases and handling:
 - Optional diagnostics: `DEBUG=1` logs browser tab scan count/match/elapsed and browser focus-path timing, including indexed verification, cache hit/miss, refresh, and fallback decisions.
 - Performance benchmarking: `OrchestratorTests.testBenchmarkChromeIndexedTabFocusVsYabaiWindowFocusForExtractedTabs` uses calibrated delays (~52ms tab-index focus + ~38ms active-tab verify vs ~42ms extracted-window yabai focus) and currently reports break-even at about 15 switches after extraction setup.
 - Terminal capture uses both yabai snapshot-diff and running-process window IDs to avoid dropping terminals when window discovery lags.
+- Editor capture during launch uses yabai snapshot-diff first, then falls back to the currently focused editor window when launch reuses an existing editor window so it still participates in workspace cycling.
+- Editor capture/matching supports known editor app-name aliases from yabai (for example VS Code may appear as `Code`) so editor rows remain eligible for next/previous cycling.
 - Window IDs can become stale across app/desktop changes; stale rows are pruned during reconciliation paths.
 - The GUI starts a periodic detached utility-priority refresh loop (`refreshAllWorkspaceWindows`) so non-archived workspace window rows are reconciled in the background on a fixed interval (`PollingConstants.workspaceWindowRefreshInterval`).
 - Each background refresh pass uses a fresh orchestrator/store instance for thread-safe off-main reconciliation and keeps AppKit interaction responsive while refresh is in-flight.

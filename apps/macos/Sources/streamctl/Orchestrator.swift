@@ -417,10 +417,18 @@ public final class SpaceshipOrchestrator {
         }
 
         if let editor = try configStore.load().editor {
+            let editorApps = editorAppNames(editor)
             try EditorLauncher.open(editor: editor, directory: workspace.dir)
-            newWindows.append(
-                contentsOf: try captureNewWindows(
-                    snapshot: windowSnapshot, role: "editor", appName: editorAppName(editor), workspaceID: workspace.id, orderOffset: 100))
+            var editorWindows = try captureNewWindows(
+                snapshot: windowSnapshot, role: "editor", appNames: editorApps, workspaceID: workspace.id, orderOffset: 100)
+            if editorWindows.isEmpty, let focused = try yabai.focusedWindow(), editorApps.contains(focused.app) {
+                editorWindows = [
+                    WindowRecord(
+                        id: UUID().uuidString, workspaceID: workspace.id, app: focused.app, title: focused.title, windowID: focused.id, role: "editor",
+                        orderIndex: 100, lastSeenAt: nowISO8601())
+                ]
+            }
+            newWindows.append(contentsOf: editorWindows)
         }
 
         try store.deleteWindows(workspaceID: workspace.id)
@@ -663,7 +671,7 @@ public final class SpaceshipOrchestrator {
         }
         let snapshot = try yabai.listWindows()
         try EditorLauncher.open(editor: editor, directory: workspace.dir)
-        try attachNewWindows(snapshot: snapshot, workspaceID: workspace.id, role: "editor", appName: editorAppName(editor), orderOffset: 100)
+        try attachNewWindows(snapshot: snapshot, workspaceID: workspace.id, role: "editor", appNames: editorAppNames(editor), orderOffset: 100)
     }
 
     public func openWorkspaceTerminal(workspaceID: String) throws {
@@ -1591,8 +1599,12 @@ public final class SpaceshipOrchestrator {
     }
 
     private func attachNewWindows(snapshot: [YabaiWindow], workspaceID: String, role: String, appName: String, orderOffset: Int) throws {
-        var captured = try captureNewWindows(snapshot: snapshot, role: role, appName: appName, workspaceID: workspaceID, orderOffset: orderOffset)
-        if captured.isEmpty, let focused = try yabai.focusedWindow(), focused.app == appName {
+        try attachNewWindows(snapshot: snapshot, workspaceID: workspaceID, role: role, appNames: [appName], orderOffset: orderOffset)
+    }
+
+    private func attachNewWindows(snapshot: [YabaiWindow], workspaceID: String, role: String, appNames: Set<String>, orderOffset: Int) throws {
+        var captured = try captureNewWindows(snapshot: snapshot, role: role, appNames: appNames, workspaceID: workspaceID, orderOffset: orderOffset)
+        if captured.isEmpty, let focused = try yabai.focusedWindow(), appNames.contains(focused.app) {
             captured = [
                 WindowRecord(
                     id: UUID().uuidString, workspaceID: workspaceID, app: focused.app, title: focused.title, windowID: focused.id, role: role,
@@ -1701,9 +1713,15 @@ public final class SpaceshipOrchestrator {
     private func captureNewWindows(snapshot: [YabaiWindow], role: String, appName: String, workspaceID: String, orderOffset: Int) throws
         -> [WindowRecord]
     {
+        try captureNewWindows(snapshot: snapshot, role: role, appNames: [appName], workspaceID: workspaceID, orderOffset: orderOffset)
+    }
+
+    private func captureNewWindows(snapshot: [YabaiWindow], role: String, appNames: Set<String>, workspaceID: String, orderOffset: Int) throws
+        -> [WindowRecord]
+    {
         let after = try yabai.listWindows()
         let snapshotIDs = Set(snapshot.map(\.id))
-        let created = after.filter { !snapshotIDs.contains($0.id) && $0.app == appName }
+        let created = after.filter { !snapshotIDs.contains($0.id) && appNames.contains($0.app) }
         return created.enumerated().map { idx, win in
             WindowRecord(
                 id: UUID().uuidString, workspaceID: workspaceID, app: win.app, title: win.title, windowID: win.id, role: role,
@@ -2027,6 +2045,16 @@ public final class SpaceshipOrchestrator {
         case .windsurf: return "Windsurf"
         case .vim: return "Terminal"
         case .none: return "Terminal"
+        }
+    }
+
+    private func editorAppNames(_ editor: EditorPreference) -> Set<String> {
+        switch editor {
+        case .vscode: return ["Visual Studio Code", "Code"]
+        case .cursor: return ["Cursor"]
+        case .windsurf: return ["Windsurf"]
+        case .vim: return ["Terminal"]
+        case .none: return ["Terminal"]
         }
     }
 }
