@@ -13,6 +13,7 @@ import streamctl
         container.spacing = 8
         rowsStack.orientation = .vertical
         rowsStack.spacing = 6
+        rowsStack.translatesAutoresizingMaskIntoConstraints = false
         addButton = NSButton(title: "", target: nil, action: nil)
         addButton.bezelStyle = .texturedRounded
         addButton.image = NSImage(systemSymbolName: "plus", accessibilityDescription: "Add Process")
@@ -34,14 +35,23 @@ import streamctl
         commandHeader.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         container.addArrangedSubview(header)
         container.addArrangedSubview(rowsStack)
-        addRow(with: nil)
+        rowsStack.widthAnchor.constraint(equalTo: container.widthAnchor).isActive = true
+        addRow(with: nil, checks: [])
     }
 
     func setProcesses(_ processes: [ProcessTemplate]) {
+        setProcessesWithChecks(processes, statusChecks: [])
+    }
+
+    func setProcessesWithChecks(_ processes: [ProcessTemplate], statusChecks: [StatusCheckDefinition]) {
         for row in rows { row.remove() }
         rows = []
-        for process in processes { addRow(with: process) }
-        if processes.isEmpty { addRow(with: nil) }
+        for process in processes {
+            let processName = process.name ?? ""
+            let checks = statusChecks.filter { $0.process == processName }
+            addRow(with: process, checks: checks)
+        }
+        if processes.isEmpty { addRow(with: nil, checks: []) }
     }
 
     func currentProcesses() -> [ProcessTemplate] {
@@ -53,6 +63,14 @@ import streamctl
         }
     }
 
+    func currentStatusChecks() -> [StatusCheckDefinition] {
+        rows.flatMap { row in
+            let processName = row.nameField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !processName.isEmpty else { return [StatusCheckDefinition]() }
+            return row.currentChecks(processName: processName)
+        }
+    }
+
     func processNames() -> [String] {
         let names = rows.compactMap { row -> String? in
             let name = row.nameField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -61,14 +79,18 @@ import streamctl
         return Array(Set(names)).sorted()
     }
 
-    private func addRow(with process: ProcessTemplate?) {
-        let row = ProcessRowRefs()
+    private func addRow(with process: ProcessTemplate?, checks: [StatusCheckDefinition]) {
+        let row = ProcessRowRefs(rowsStack: rowsStack)
         rows.append(row)
-        rowsStack.addArrangedSubview(row.container)
+        rowsStack.addArrangedSubview(row.processRow)
+        rowsStack.addArrangedSubview(row.checksSection)
+        row.checksSection.translatesAutoresizingMaskIntoConstraints = false
+        row.checksSection.widthAnchor.constraint(equalTo: rowsStack.widthAnchor).isActive = true
         if let process {
             row.nameField.stringValue = process.name ?? ""
             row.commandField.stringValue = process.command
         }
+        row.setChecks(checks)
         row.onChange = { [weak self] in self?.onDirty?() }
         row.onRemove = { [weak self, weak row] in
             guard let self, let row else { return }
@@ -79,19 +101,25 @@ import streamctl
         onDirty?()
     }
 
-    @objc private func addRowFromButton() { addRow(with: nil) }
+    @objc private func addRowFromButton() { addRow(with: nil, checks: []) }
 
     @MainActor private final class ProcessRowRefs {
-        let container = NSStackView()
+        let processRow = NSStackView()
+        let checksSection = NSStackView()
         let nameField = NSTextField(string: "")
         let commandField = NSTextField(string: "")
+        private let checksStack = NSStackView()
+        private var checkRows: [StatusCheckRowRefs] = []
+        private weak var rowsStack: NSStackView?
         var onRemove: (() -> Void)?
         var onChange: (() -> Void)?
 
-        init() {
-            container.orientation = .horizontal
-            container.spacing = 6
-            container.alignment = .centerY
+        init(rowsStack: NSStackView) {
+            self.rowsStack = rowsStack
+
+            processRow.orientation = .horizontal
+            processRow.spacing = 6
+            processRow.alignment = .centerY
 
             nameField.placeholderString = "name"
             commandField.placeholderString = "command"
@@ -101,9 +129,9 @@ import streamctl
             removeButton.image = NSImage(systemSymbolName: "minus", accessibilityDescription: "Remove Process")
             removeButton.toolTip = "Remove process"
 
-            container.addArrangedSubview(nameField)
-            container.addArrangedSubview(commandField)
-            container.addArrangedSubview(removeButton)
+            processRow.addArrangedSubview(nameField)
+            processRow.addArrangedSubview(commandField)
+            processRow.addArrangedSubview(removeButton)
 
             nameField.widthAnchor.constraint(equalToConstant: 160).isActive = true
             commandField.setContentHuggingPriority(.defaultLow, for: .horizontal)
@@ -114,10 +142,164 @@ import streamctl
                     Task { @MainActor in self?.onChange?() }
                 }
             }
+
+            // Status checks sub-section
+            checksStack.orientation = .vertical
+            checksStack.spacing = 4
+
+            let checksHeader = NSStackView()
+            checksHeader.orientation = .horizontal
+            checksHeader.spacing = 4
+            checksHeader.alignment = .centerY
+
+            let arrow = NSTextField(labelWithString: "↳")
+            arrow.font = .systemFont(ofSize: 11)
+            arrow.textColor = .tertiaryLabelColor
+            let checksLabel = NSTextField(labelWithString: "Status checks:")
+            checksLabel.font = .systemFont(ofSize: 11, weight: .medium)
+            checksLabel.textColor = .secondaryLabelColor
+            let addCheckButton = NSButton(title: "", target: self, action: #selector(addCheckRow))
+            addCheckButton.bezelStyle = .texturedRounded
+            addCheckButton.image = NSImage(systemSymbolName: "plus", accessibilityDescription: "Add Status Check")
+            addCheckButton.controlSize = .small
+            addCheckButton.toolTip = "Add status check"
+
+            checksHeader.addArrangedSubview(arrow)
+            checksHeader.addArrangedSubview(checksLabel)
+            checksHeader.addArrangedSubview(addCheckButton)
+
+            checksSection.orientation = .horizontal
+            checksSection.spacing = 0
+            checksSection.alignment = .top
+            checksSection.distribution = .fill
+            let indent = NSView()
+            indent.translatesAutoresizingMaskIntoConstraints = false
+            indent.widthAnchor.constraint(equalToConstant: 20).isActive = true
+            indent.setContentHuggingPriority(.required, for: .horizontal)
+            let innerStack = NSStackView()
+            innerStack.orientation = .vertical
+            innerStack.spacing = 4
+            innerStack.alignment = .leading
+            innerStack.setContentHuggingPriority(.defaultLow, for: .horizontal)
+            innerStack.addArrangedSubview(checksHeader)
+            innerStack.addArrangedSubview(checksStack)
+            checksSection.addArrangedSubview(indent)
+            checksSection.addArrangedSubview(innerStack)
+        }
+
+        func setChecks(_ checks: [StatusCheckDefinition]) {
+            for row in checkRows { row.remove() }
+            checkRows = []
+            for check in checks { addCheck(with: check) }
+        }
+
+        func currentChecks(processName: String) -> [StatusCheckDefinition] {
+            checkRows.compactMap { row in
+                let name = row.nameField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+                let command = row.commandField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+                let interval = Int(row.intervalField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)) ?? 60
+                let timeout = Int(row.timeoutField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)) ?? 5
+                let onExit = StatusCheckOnExit(rawValue: row.onExitPopup.titleOfSelectedItem ?? "") ?? .none
+                guard !command.isEmpty else { return nil }
+                return StatusCheckDefinition(
+                    name: name.isEmpty ? nil : name, process: processName, command: command, interval: interval, timeout: timeout, onExit: onExit)
+            }
+        }
+
+        func remove() {
+            processRow.removeFromSuperview()
+            checksSection.removeFromSuperview()
+        }
+
+        @objc private func removeRow() { onRemove?() }
+
+        @objc private func addCheckRow() { addCheck(with: nil); onChange?() }
+
+        private func addCheck(with check: StatusCheckDefinition?) {
+            let row = StatusCheckRowRefs()
+            checkRows.append(row)
+            checksStack.addArrangedSubview(row.container)
+            row.container.translatesAutoresizingMaskIntoConstraints = false
+            row.container.widthAnchor.constraint(equalTo: checksStack.widthAnchor).isActive = true
+            if let check {
+                row.nameField.stringValue = check.name ?? ""
+                row.commandField.stringValue = check.command
+                row.intervalField.stringValue = String(check.interval)
+                row.timeoutField.stringValue = String(check.timeout)
+                row.onExitPopup.selectItem(withTitle: check.onExit.rawValue)
+            }
+            row.onChange = { [weak self] in self?.onChange?() }
+            row.onRemove = { [weak self, weak row] in
+                guard let self, let row else { return }
+                if let idx = self.checkRows.firstIndex(where: { $0 === row }) { self.checkRows.remove(at: idx) }
+                row.remove()
+                self.onChange?()
+            }
+        }
+    }
+
+    @MainActor private final class StatusCheckRowRefs {
+        let container = NSStackView()
+        let nameField = NSTextField(string: "")
+        let commandField = NSTextField(string: "")
+        let intervalField = NSTextField(string: "60")
+        let timeoutField = NSTextField(string: "5")
+        let onExitPopup = NSPopUpButton()
+        var onRemove: (() -> Void)?
+        var onChange: (() -> Void)?
+
+        init() {
+            container.orientation = .horizontal
+            container.spacing = 4
+            container.alignment = .centerY
+
+            nameField.placeholderString = "name"
+            nameField.font = .systemFont(ofSize: 11)
+            commandField.placeholderString = "command"
+            commandField.font = .systemFont(ofSize: 11)
+            intervalField.placeholderString = "sec"
+            intervalField.font = .systemFont(ofSize: 11)
+            timeoutField.placeholderString = "sec"
+            timeoutField.font = .systemFont(ofSize: 11)
+
+            onExitPopup.addItems(withTitles: StatusCheckOnExit.allCases.map { $0.rawValue })
+            onExitPopup.controlSize = .small
+            onExitPopup.font = .systemFont(ofSize: 11)
+
+            let removeButton = NSButton(title: "", target: self, action: #selector(removeRow))
+            removeButton.bezelStyle = .texturedRounded
+            removeButton.image = NSImage(systemSymbolName: "minus", accessibilityDescription: "Remove Status Check")
+            removeButton.controlSize = .small
+            removeButton.toolTip = "Remove status check"
+
+            container.addArrangedSubview(nameField)
+            container.addArrangedSubview(commandField)
+            container.addArrangedSubview(intervalField)
+            container.addArrangedSubview(timeoutField)
+            container.addArrangedSubview(onExitPopup)
+            container.addArrangedSubview(removeButton)
+
+            nameField.widthAnchor.constraint(equalToConstant: 80).isActive = true
+            intervalField.widthAnchor.constraint(equalToConstant: 50).isActive = true
+            timeoutField.widthAnchor.constraint(equalToConstant: 50).isActive = true
+            onExitPopup.widthAnchor.constraint(equalToConstant: 80).isActive = true
+            commandField.widthAnchor.constraint(greaterThanOrEqualToConstant: 100).isActive = true
+            commandField.setContentHuggingPriority(.defaultLow, for: .horizontal)
+            commandField.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+
+            for field in [nameField, commandField, intervalField, timeoutField] {
+                NotificationCenter.default.addObserver(forName: NSText.didChangeNotification, object: field, queue: .main) { [weak self] _ in
+                    Task { @MainActor in self?.onChange?() }
+                }
+            }
+            onExitPopup.target = self
+            onExitPopup.action = #selector(changedPopup)
         }
 
         func remove() { container.removeFromSuperview() }
 
         @objc private func removeRow() { onRemove?() }
+
+        @objc private func changedPopup() { onChange?() }
     }
 }

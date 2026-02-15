@@ -57,6 +57,8 @@ GUI interaction notes:
 - Git workspace rows include relative last-modified time (from latest tracked-file mtime) and tracked modified-file count.
 - Window focus shortcuts in the GUI use `cmd+1` through `cmd+9`.
 - Port definitions are editable via `PortEditor` in the project detail view, the add-project form, and workspace settings.
+- Status checks are configured inline under each process in the `ProcessEditor` rather than in a separate form section; the process name is implicit from the parent row.
+- The run tab displays status check results as indented sub-rows under each process with colored dots (green/red) instead of inline badge text.
 - Keyboard shortcut overrides for GUI actions are persisted in SQLite settings and editable in the GUI Settings view and CLI settings commands.
 
 ## Data Model

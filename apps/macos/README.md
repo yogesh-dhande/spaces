@@ -87,7 +87,7 @@ Updates to workspace settings apply immediately when the workspace is running (n
   - Browser tab rows are sorted by configured browser-session order and then URL so shortcut indices remain stable
   - Window cycling order is browser tabs first, then terminals, then other windows; once cycling starts, next/previous uses remembered cycle position
   - Global next/previous window navigation disambiguates reused Chrome windows by active tab URL, so shortcuts stay on the correct workspace
-  - Processes and status
+  - Processes with status check results shown as indented sub-rows (colored dots)
   - Windows list with shortcut hints
   - Env vars/ports tab
   - Workspace settings tab

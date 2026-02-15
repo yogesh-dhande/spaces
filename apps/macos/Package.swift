@@ -29,6 +29,7 @@ let package = Package(
         .target(name: "gui", dependencies: ["streamctl"]),
         .executableTarget(name: "spaceship", dependencies: ["streamctl", "appctl"]),
         .executableTarget(name: "spaceship-app", dependencies: ["gui"]),
-        .testTarget(name: "streamctlTests", dependencies: ["streamctl", "appctl"])
+        .testTarget(name: "streamctlTests", dependencies: ["streamctl", "appctl"]),
+        .testTarget(name: "guiTests", dependencies: ["gui"])
     ]
 )
