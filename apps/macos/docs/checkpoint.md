@@ -6,7 +6,7 @@
 - Projects are normalized by real path; a default workspace is ensured per project with reserved ports.
 - Project creation supports either existing directories or git clone; cloned repositories are stored at `/Users/<username>/spaceship/projects/<project_name>`.
 - Project removal clears spaceship state, removes related managed git worktrees via `git worktree remove --force`, deletes related git workspace directories under `/Users/<username>/spaceship/workspaces`, and deletes the project directory only for git repositories under `/Users/<username>/spaceship/projects` (managed clones).
-- Workspaces create git worktrees for git projects, run setup/stop scripts, and reserve 10 ports per workspace.
+- Workspaces create git worktrees for git projects, run setup/stop scripts, and allocate named ports (from port definitions) at creation time; ports are released at archive.
 - Git workspace creation supports an optional directory-name override for the worktree folder; overrides must use only `A-Z`, `a-z`, `0-9`, `-`, `_` and cannot contain spaces.
 - Archiving non-git workspaces does not delete the project directory.
 - Archiving git workspaces removes the worktree via `git worktree remove --force` (and then archives workspace metadata/ports).
