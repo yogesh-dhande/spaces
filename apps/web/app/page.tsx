@@ -32,6 +32,11 @@ const keyFeatures = [
       "Cycle through the current workspace windows with deterministic shortcuts, instead of hunting across apps.",
   },
   {
+    title: "Start and stop workspaces quickly",
+    description:
+      "No need to keep those tabs open or processes running just because it is a pain to set all of it up again. Spaceship manages starting and stopping for you automatically.",
+  },
+  {
     title: "Bring your own tools",
     description:
       "Spaceship works with your preferred stack, whether it is Claude Code or Codex, Cursor or Windsurf. You do not need to learn a new tool or settle for a weaker coding agent just for UX.",
