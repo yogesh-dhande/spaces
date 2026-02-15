@@ -371,6 +371,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         // --- Fields ---
         let setupView = makeEditableTextView()
         let stopView = makeEditableTextView()
+        let portEditor = PortEditor()
         let processEditor = ProcessEditor()
         let browserView = makeEditableTextView()
         let browserScroll = scrollableTextView(browserView, height: 80)
@@ -380,6 +381,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         if let config = configCache?.projects.first(where: { normalizePath($0.dir) == project.dir }) {
             setupView.string = config.setupScript ?? ""
             stopView.string = config.stopScript ?? ""
+            portEditor.setDefinitions(config.ports)
             processEditor.setProcesses(config.processes)
             browserView.string = config.browserSessions.compactMap { $0.url }.joined(separator: "\n")
             statusEditor.setChecks(config.statusChecks)
@@ -392,6 +394,14 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             contentViews: [setupScroll])
         stack.addArrangedSubview(setupCard)
         constrainFormFieldToFillWidth(setupCard, in: stack)
+
+        // --- Port definitions card ---
+        let portCard = formSectionCard(
+            icon: "network", title: "Port definitions",
+            subtitle: "Named ports allocated per workspace. Available as env vars in scripts and commands.",
+            contentViews: [portEditor.container])
+        stack.addArrangedSubview(portCard)
+        constrainFormFieldToFillWidth(portCard, in: stack)
 
         // --- Processes card ---
         let processCard = formSectionCard(
@@ -454,10 +464,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         showScrollableDetailStack(stack)
 
         saveButton.tag = storeProjectFields(
-            projectID: project.id, setupView: setupView, stopView: stopView, processEditor: processEditor, browserView: browserView,
-            statusEditor: statusEditor)
+            projectID: project.id, setupView: setupView, stopView: stopView, portEditor: portEditor, processEditor: processEditor,
+            browserView: browserView, statusEditor: statusEditor)
         registerDirtyTracking(
-            setupView: setupView, stopView: stopView, processEditor: processEditor, browserView: browserView, statusEditor: statusEditor)
+            setupView: setupView, stopView: stopView, portEditor: portEditor, processEditor: processEditor, browserView: browserView,
+            statusEditor: statusEditor)
     }
 
     private func formSectionCard(icon: String, title: String, subtitle: String, trailingView: NSView? = nil, contentViews: [NSView]) -> NSView {
@@ -601,6 +612,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
         let setupView = makeEditableTextView()
         let stopView = makeEditableTextView()
+        let portEditor = PortEditor()
         let processEditor = ProcessEditor()
         let browserView = makeEditableTextView()
         let browserScroll = scrollableTextView(browserView, height: 80)
@@ -669,6 +681,13 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             contentViews: [setupScroll])
         stack.addArrangedSubview(setupCard)
 
+        // --- Port definitions card ---
+        let addPortCard = formSectionCard(
+            icon: "network", title: "Port definitions",
+            subtitle: "Named ports allocated per workspace. Available as env vars in scripts and commands.",
+            contentViews: [portEditor.container])
+        stack.addArrangedSubview(addPortCard)
+
         // --- Processes card ---
         let processCard = formSectionCard(
             icon: "terminal.fill", title: "Processes", subtitle: "Define the commands that run inside your workspace.",
@@ -715,6 +734,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         // --- Width constraints ---
         constrainFormFieldToFillWidth(sourceCard, in: stack)
         constrainFormFieldToFillWidth(setupCard, in: stack)
+        constrainFormFieldToFillWidth(addPortCard, in: stack)
         constrainFormFieldToFillWidth(processCard, in: stack)
         constrainFormFieldToFillWidth(browserCard, in: stack)
         constrainFormFieldToFillWidth(statusCard, in: stack)
@@ -725,8 +745,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
         createButton.tag = storeAddProjectFields(
             sourcePopup: sourcePopup, localSourceSection: localSourceSection, cloneSourceSection: cloneSourceSection, dirField: dirField,
-            repoURLField: repoURLField, setupView: setupView, stopView: stopView, processEditor: processEditor, browserView: browserView,
-            statusEditor: statusEditor, browseButton: browseButton)
+            repoURLField: repoURLField, setupView: setupView, stopView: stopView, portEditor: portEditor, processEditor: processEditor,
+            browserView: browserView, statusEditor: statusEditor, browseButton: browseButton)
         if let refs = AddProjectFieldCache.shared.cache[createButton.tag] { updateAddProjectSourceUI(refs) }
     }
 
@@ -1130,9 +1150,12 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let envView = NSTextView()
         envView.isEditable = false
         envView.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
-        let reservedPorts = (try? orchestrator.workspacePorts(workspaceID: workspace.id)) ?? []
+        let namedPorts = (try? orchestrator.workspacePortsNamed(workspaceID: workspace.id)) ?? []
         var lines: [String] = []
-        for (idx, port) in reservedPorts.enumerated() { lines.append("PORT\(idx)=\(port)") }
+        for namedPort in namedPorts {
+            let key = namedPort.name.isEmpty ? "PORT\(lines.count)" : namedPort.name
+            lines.append("\(key)=\(namedPort.port)")
+        }
         lines.append("spaceship_WORKSPACE_DIR=\(workspace.dir)")
         let scopedKey = "spaceship_\(sanitizeEnvKey(project.name))_\(sanitizeEnvKey(workspace.name))_WORKSPACE_DIR"
         lines.append("\(scopedKey)=\(workspace.dir)")
@@ -1162,6 +1185,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         contentStack.spacing = 14
         contentStack.translatesAutoresizingMaskIntoConstraints = false
 
+        let portEditor = PortEditor()
         let processEditor = ProcessEditor()
         let stopView = makeEditableTextView()
         let stopScroll = scrollableTextView(stopView, height: 90)
@@ -1173,11 +1197,13 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
         if let config = try? orchestrator.workspaceSettings(workspaceID: workspace.id) {
             stopView.string = config.stopScript ?? ""
+            portEditor.setDefinitions(config.ports)
             processEditor.setProcesses(config.processes)
             browserView.string = config.browserSessions.compactMap { $0.url }.joined(separator: "\n")
             statusEditor.setChecks(config.statusChecks)
         } else if let config = configCache?.projects.first(where: { normalizePath($0.dir) == project.dir }) {
             stopView.string = config.stopScript ?? ""
+            portEditor.setDefinitions(config.ports)
             processEditor.setProcesses(config.processes)
             browserView.string = config.browserSessions.compactMap { $0.url }.joined(separator: "\n")
             statusEditor.setChecks(config.statusChecks)
@@ -1197,6 +1223,14 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             let imgConfig = NSImage.SymbolConfiguration(paletteColors: [buttonTextColor])
             saveButton.image = saveImg.withSymbolConfiguration(imgConfig)
         }
+
+        // --- Port definitions card ---
+        let wsPortCard = formSectionCard(
+            icon: "network", title: "Port definitions",
+            subtitle: "Named ports for this workspace. Override project defaults.",
+            contentViews: [portEditor.container])
+        contentStack.addArrangedSubview(wsPortCard)
+        constrainFormFieldToFillWidth(wsPortCard, in: contentStack)
 
         // --- Processes card ---
         let processCard = formSectionCard(
@@ -1262,8 +1296,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         constrainFormFieldToFillWidth(buttonRow, in: container)
 
         saveButton.tag = storeWorkspaceFields(
-            workspaceID: workspace.id, stopView: stopView, processEditor: processEditor, browserView: browserView, statusEditor: statusEditor)
-        registerWorkspaceDirtyTracking(stopView: stopView, processEditor: processEditor, browserView: browserView, statusEditor: statusEditor)
+            workspaceID: workspace.id, stopView: stopView, portEditor: portEditor, processEditor: processEditor, browserView: browserView,
+            statusEditor: statusEditor)
+        registerWorkspaceDirtyTracking(
+            stopView: stopView, portEditor: portEditor, processEditor: processEditor, browserView: browserView, statusEditor: statusEditor)
 
         return insetContainerView(container)
     }
@@ -1687,35 +1723,37 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     }
 
     private func storeProjectFields(
-        projectID: String, setupView: NSTextView, stopView: NSTextView, processEditor: ProcessEditor, browserView: NSTextView,
-        statusEditor: StatusCheckEditor
+        projectID: String, setupView: NSTextView, stopView: NSTextView, portEditor: PortEditor, processEditor: ProcessEditor,
+        browserView: NSTextView, statusEditor: StatusCheckEditor
     ) -> Int {
         let id = projectID.hashValue
         ProjectFieldCache.shared.cache[id] = ProjectFieldRefs(
-            projectID: projectID, setupView: setupView, stopView: stopView, processEditor: processEditor, browserView: browserView,
-            statusEditor: statusEditor)
+            projectID: projectID, setupView: setupView, stopView: stopView, portEditor: portEditor, processEditor: processEditor,
+            browserView: browserView, statusEditor: statusEditor)
         return id
     }
 
     private func storeWorkspaceFields(
-        workspaceID: String, stopView: NSTextView, processEditor: ProcessEditor, browserView: NSTextView, statusEditor: StatusCheckEditor
+        workspaceID: String, stopView: NSTextView, portEditor: PortEditor, processEditor: ProcessEditor, browserView: NSTextView,
+        statusEditor: StatusCheckEditor
     ) -> Int {
         let id = workspaceID.hashValue
         WorkspaceFieldCache.shared.cache[id] = WorkspaceFieldRefs(
-            workspaceID: workspaceID, stopView: stopView, processEditor: processEditor, browserView: browserView, statusEditor: statusEditor)
+            workspaceID: workspaceID, stopView: stopView, portEditor: portEditor, processEditor: processEditor, browserView: browserView,
+            statusEditor: statusEditor)
         return id
     }
 
     private func storeAddProjectFields(
         sourcePopup: NSPopUpButton, localSourceSection: NSStackView, cloneSourceSection: NSStackView, dirField: NSTextField,
-        repoURLField: NSTextField, setupView: NSTextView, stopView: NSTextView, processEditor: ProcessEditor, browserView: NSTextView,
-        statusEditor: StatusCheckEditor, browseButton: NSButton
+        repoURLField: NSTextField, setupView: NSTextView, stopView: NSTextView, portEditor: PortEditor, processEditor: ProcessEditor,
+        browserView: NSTextView, statusEditor: StatusCheckEditor, browseButton: NSButton
     ) -> Int {
         let id = UUID().uuidString.hashValue
         AddProjectFieldCache.shared.cache[id] = AddProjectFieldRefs(
             sourcePopup: sourcePopup, localSourceSection: localSourceSection, cloneSourceSection: cloneSourceSection, dirField: dirField,
-            repoURLField: repoURLField, browseButton: browseButton, setupView: setupView, stopView: stopView, processEditor: processEditor,
-            browserView: browserView, statusEditor: statusEditor)
+            repoURLField: repoURLField, browseButton: browseButton, setupView: setupView, stopView: stopView, portEditor: portEditor,
+            processEditor: processEditor, browserView: browserView, statusEditor: statusEditor)
         sourcePopup.tag = id
         browseButton.tag = id
         return id
@@ -1808,6 +1846,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             try orchestrator.updateProjectConfig(projectID: refs.projectID) { config in
                 config.setupScript = refs.setupView.string.isEmpty ? nil : refs.setupView.string
                 config.stopScript = refs.stopView.string.isEmpty ? nil : refs.stopView.string
+                config.ports = refs.portEditor.currentDefinitions()
                 config.processes = refs.processEditor.currentProcesses()
                 config.browserSessions = parseBrowserSessions(refs.browserView.string)
                 config.statusChecks = refs.statusEditor.currentChecks()
@@ -1847,6 +1886,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         do {
             try orchestrator.updateWorkspaceSettings(workspaceID: refs.workspaceID) { config in
                 config.stopScript = refs.stopView.string.isEmpty ? nil : refs.stopView.string
+                config.ports = refs.portEditor.currentDefinitions()
                 config.processes = refs.processEditor.currentProcesses()
                 config.browserSessions = parseBrowserSessions(refs.browserView.string)
                 config.statusChecks = refs.statusEditor.currentChecks()
@@ -1872,6 +1912,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             var config = ProjectConfig(dir: record.dir)
             config.setupScript = refs.setupView.string.isEmpty ? nil : refs.setupView.string
             config.stopScript = refs.stopView.string.isEmpty ? nil : refs.stopView.string
+            config.ports = refs.portEditor.currentDefinitions()
             config.processes = refs.processEditor.currentProcesses()
             config.browserSessions = parseBrowserSessions(refs.browserView.string)
             config.statusChecks = refs.statusEditor.currentChecks()
@@ -2728,7 +2769,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     }
 
     private func registerDirtyTracking(
-        setupView: NSTextView, stopView: NSTextView, processEditor: ProcessEditor, browserView: NSTextView, statusEditor: StatusCheckEditor
+        setupView: NSTextView, stopView: NSTextView, portEditor: PortEditor, processEditor: ProcessEditor, browserView: NSTextView,
+        statusEditor: StatusCheckEditor
     ) {
         projectHasUnsavedChanges = false
         NotificationCenter.default.addObserver(forName: NSText.didChangeNotification, object: setupView, queue: .main) { [weak self] _ in
@@ -2740,6 +2782,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         NotificationCenter.default.addObserver(forName: NSText.didChangeNotification, object: browserView, queue: .main) { [weak self] _ in
             Task { @MainActor in self?.projectHasUnsavedChanges = true }
         }
+        portEditor.onDirty = { [weak self] in Task { @MainActor in self?.projectHasUnsavedChanges = true } }
         processEditor.onDirty = { [weak self] in
             Task { @MainActor in
                 self?.projectHasUnsavedChanges = true
@@ -2750,7 +2793,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     }
 
     private func registerWorkspaceDirtyTracking(
-        stopView: NSTextView, processEditor: ProcessEditor, browserView: NSTextView, statusEditor: StatusCheckEditor
+        stopView: NSTextView, portEditor: PortEditor, processEditor: ProcessEditor, browserView: NSTextView, statusEditor: StatusCheckEditor
     ) {
         workspaceHasUnsavedChanges = false
         NotificationCenter.default.addObserver(forName: NSText.didChangeNotification, object: stopView, queue: .main) { [weak self] _ in
@@ -2759,6 +2802,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         NotificationCenter.default.addObserver(forName: NSText.didChangeNotification, object: browserView, queue: .main) { [weak self] _ in
             Task { @MainActor in self?.workspaceHasUnsavedChanges = true }
         }
+        portEditor.onDirty = { [weak self] in Task { @MainActor in self?.workspaceHasUnsavedChanges = true } }
         processEditor.onDirty = { [weak self] in
             Task { @MainActor in
                 self?.workspaceHasUnsavedChanges = true
@@ -2798,6 +2842,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         do {
             try orchestrator.updateWorkspaceSettings(workspaceID: refs.workspaceID) { config in
                 config.stopScript = refs.stopView.string.isEmpty ? nil : refs.stopView.string
+                config.ports = refs.portEditor.currentDefinitions()
                 config.processes = refs.processEditor.currentProcesses()
                 config.browserSessions = parseBrowserSessions(refs.browserView.string)
                 config.statusChecks = refs.statusEditor.currentChecks()
@@ -2820,6 +2865,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             try orchestrator.updateProjectConfig(projectID: refs.projectID) { config in
                 config.setupScript = refs.setupView.string.isEmpty ? nil : refs.setupView.string
                 config.stopScript = refs.stopView.string.isEmpty ? nil : refs.stopView.string
+                config.ports = refs.portEditor.currentDefinitions()
                 config.processes = refs.processEditor.currentProcesses()
                 config.browserSessions = parseBrowserSessions(refs.browserView.string)
                 config.statusChecks = refs.statusEditor.currentChecks()

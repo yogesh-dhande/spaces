@@ -52,6 +52,13 @@
 - The local key monitor defers to focused text inputs so standard edit shortcuts like `cmd+v` work in forms.
 - CLI supports config path/show, project list/add/update/remove (including `project add --git-url ...`), workspace list/create/launch/stop/archive/activate, and settings get/set/reset for GUI shortcuts.
 - Workspace run view includes Open Editor/Terminal/Finder actions; editor/terminal windows opened this way are captured and included in window cycling.
+- Projects can define named ports (e.g. `FRONTEND_PORT`, `API_PORT`) instead of anonymous `PORT0`-`PORT9`; port definitions are configured at the project level in YAML and inherited/overridable at the workspace level.
+- Named ports are OS-reserved via sockets (`PortReserver` singleton) so no other process can claim them between allocation and use.
+- Named port env vars are available in setup scripts, stop scripts, process commands, and status check commands.
+- Port allocation now happens before the setup script so env vars are available during setup.
+- `PortAllocator.allocatePorts` accepts `definitions: [PortDefinition]` instead of a fixed count; `buildWorkspaceEnv` uses named port keys.
+- Schema v7: `workspace_ports` table gains `port_name` column; new `workspace_port_definitions` table stores per-workspace port definitions.
+- GUI: `PortEditor` provides an inline editor for port definitions in project detail, add-project form, and workspace settings.
 
 ## Accomplished
 - Replaced stream-based model with project/workspace/process design.
@@ -62,6 +69,7 @@
 - Implemented Chrome browser session opening and yabai-based window capture.
 - Built the AppKit GUI with two-pane layout, project/workspace editing, and window shortcut hints.
 - Added CLI subcommands for projects/workspaces plus settings for hotkey customization.
+- Implemented named port definitions with `PortDefinition` model, `PortReserver` (socket-based reservation), `PortEditor` GUI, schema v7 migration, and updated `PortAllocator`/`buildWorkspaceEnv` to use named ports.
 
 ## Remaining
 - Dependency/permission onboarding (detect missing `yabai` or macOS accessibility permissions and guide the user).

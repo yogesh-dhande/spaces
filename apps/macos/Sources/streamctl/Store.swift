@@ -3,7 +3,7 @@ import SQLite3
 
 public final class SQLiteStore {
     private let db: OpaquePointer
-    private let schemaVersion = 6
+    private let schemaVersion = 7
 
     public init(path: String) throws {
         var handle: OpaquePointer?
@@ -62,6 +62,8 @@ public final class SQLiteStore {
             bindings: [id])
         try execute(sql: "DELETE FROM running_processes WHERE workspace_id IN (SELECT id FROM workspaces WHERE project_id = ?)", bindings: [id])
         try execute(sql: "DELETE FROM workspace_ports WHERE workspace_id IN (SELECT id FROM workspaces WHERE project_id = ?)", bindings: [id])
+        try execute(
+            sql: "DELETE FROM workspace_port_definitions WHERE workspace_id IN (SELECT id FROM workspaces WHERE project_id = ?)", bindings: [id])
         try execute(sql: "DELETE FROM workspaces WHERE project_id = ?", bindings: [id])
         try execute(sql: "DELETE FROM projects WHERE id = ?", bindings: [id])
     }
@@ -129,6 +131,7 @@ public final class SQLiteStore {
         try execute(sql: "DELETE FROM status_results WHERE process_id IN (SELECT id FROM running_processes WHERE workspace_id = ?)", bindings: [id])
         try execute(sql: "DELETE FROM running_processes WHERE workspace_id = ?", bindings: [id])
         try execute(sql: "DELETE FROM workspace_ports WHERE workspace_id = ?", bindings: [id])
+        try execute(sql: "DELETE FROM workspace_port_definitions WHERE workspace_id = ?", bindings: [id])
         try execute(sql: "DELETE FROM workspaces WHERE id = ?", bindings: [id])
     }
 
@@ -145,18 +148,43 @@ public final class SQLiteStore {
         try execute(sql: "UPDATE workspaces SET is_archived = ? WHERE id = ?", bindings: [isArchived ? "1" : "0", id])
     }
 
-    public func setWorkspacePorts(workspaceID: String, ports: [Int]) throws {
+    public func setWorkspacePorts(workspaceID: String, ports: [Int], names: [String] = []) throws {
         try execute(sql: "DELETE FROM workspace_ports WHERE workspace_id = ?", bindings: [workspaceID])
         for (index, port) in ports.enumerated() {
+            let name = index < names.count ? names[index] : ""
             try execute(
-                sql: "INSERT INTO workspace_ports(workspace_id, port_index, port_number) VALUES (?, ?, ?)",
-                bindings: [workspaceID, String(index), String(port)])
+                sql: "INSERT INTO workspace_ports(workspace_id, port_index, port_number, port_name) VALUES (?, ?, ?, ?)",
+                bindings: [workspaceID, String(index), String(port), name])
         }
     }
 
     public func workspacePorts(workspaceID: String) throws -> [Int] {
         let rows = try queryRows(sql: "SELECT port_number FROM workspace_ports WHERE workspace_id = ? ORDER BY port_index", bindings: [workspaceID])
         return rows.compactMap { Int($0.first ?? "") }
+    }
+
+    public func workspacePortsNamed(workspaceID: String) throws -> [(port: Int, name: String)] {
+        let rows = try queryRows(
+            sql: "SELECT port_number, port_name FROM workspace_ports WHERE workspace_id = ? ORDER BY port_index", bindings: [workspaceID])
+        return rows.compactMap { row in
+            guard let port = Int(row[0]) else { return nil }
+            return (port: port, name: row[1])
+        }
+    }
+
+    public func setWorkspacePortDefinitions(workspaceID: String, definitions: [PortDefinition]) throws {
+        try execute(sql: "DELETE FROM workspace_port_definitions WHERE workspace_id = ?", bindings: [workspaceID])
+        for (index, definition) in definitions.enumerated() {
+            try execute(
+                sql: "INSERT INTO workspace_port_definitions(workspace_id, name, order_index) VALUES (?, ?, ?)",
+                bindings: [workspaceID, definition.name, String(index)])
+        }
+    }
+
+    public func workspacePortDefinitions(workspaceID: String) throws -> [PortDefinition] {
+        let rows = try queryRows(
+            sql: "SELECT name FROM workspace_port_definitions WHERE workspace_id = ? ORDER BY order_index", bindings: [workspaceID])
+        return rows.map { PortDefinition(name: $0[0]) }
     }
 
     public func setWorkspaceProcesses(workspaceID: String, processes: [ProcessTemplate]) throws {
@@ -412,6 +440,7 @@ public final class SQLiteStore {
                 DROP TABLE IF EXISTS workspace_status_checks;
                 DROP TABLE IF EXISTS workspace_processes;
                 DROP TABLE IF EXISTS workspace_settings;
+                DROP TABLE IF EXISTS workspace_port_definitions;
                 DROP TABLE IF EXISTS workspace_ports;
                 DROP TABLE IF EXISTS windows;
                 DROP TABLE IF EXISTS workspaces;
@@ -459,7 +488,15 @@ public final class SQLiteStore {
               workspace_id TEXT NOT NULL,
               port_index INTEGER NOT NULL,
               port_number INTEGER NOT NULL,
+              port_name TEXT NOT NULL DEFAULT '',
               PRIMARY KEY (workspace_id, port_index)
+            );
+
+            CREATE TABLE IF NOT EXISTS workspace_port_definitions (
+              workspace_id TEXT NOT NULL,
+              name TEXT NOT NULL,
+              order_index INTEGER NOT NULL,
+              PRIMARY KEY (workspace_id, order_index)
             );
 
             CREATE TABLE IF NOT EXISTS workspace_settings (

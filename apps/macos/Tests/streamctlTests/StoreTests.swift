@@ -10,10 +10,16 @@ final class StoreTests: XCTestCase {
         try store.upsert(project: project)
         try store.upsert(workspace: workspace)
 
-        try store.setWorkspacePorts(workspaceID: workspace.id, ports: [3000, 3001])
+        try store.setWorkspacePorts(workspaceID: workspace.id, ports: [3000, 3001], names: ["API_PORT", "WEB_PORT"])
         XCTAssertEqual(try store.workspacePorts(workspaceID: workspace.id), [3000, 3001])
+        let named = try store.workspacePortsNamed(workspaceID: workspace.id)
+        XCTAssertEqual(named.count, 2)
+        XCTAssertEqual(named[0].name, "API_PORT")
+        XCTAssertEqual(named[1].name, "WEB_PORT")
         try store.setWorkspacePorts(workspaceID: workspace.id, ports: [4000])
         XCTAssertEqual(try store.workspacePorts(workspaceID: workspace.id), [4000])
+        let namedAfter = try store.workspacePortsNamed(workspaceID: workspace.id)
+        XCTAssertEqual(namedAfter[0].name, "")
 
         let processes = [ProcessTemplate(name: "api", command: "npm run api"), ProcessTemplate(command: "npm run worker")]
         try store.setWorkspaceProcesses(workspaceID: workspace.id, processes: processes)
@@ -50,6 +56,17 @@ final class StoreTests: XCTestCase {
 
         try store.releaseWorkspacePorts(workspaceID: workspace.id)
         XCTAssertTrue(try store.workspacePorts(workspaceID: workspace.id).isEmpty)
+
+        let definitions = [PortDefinition(name: "FRONTEND_PORT"), PortDefinition(name: "API_PORT")]
+        try store.setWorkspacePortDefinitions(workspaceID: workspace.id, definitions: definitions)
+        let storedDefs = try store.workspacePortDefinitions(workspaceID: workspace.id)
+        XCTAssertEqual(storedDefs.count, 2)
+        XCTAssertEqual(storedDefs[0].name, "FRONTEND_PORT")
+        XCTAssertEqual(storedDefs[1].name, "API_PORT")
+
+        try store.setWorkspacePortDefinitions(workspaceID: workspace.id, definitions: [PortDefinition(name: "DB_PORT")])
+        XCTAssertEqual(try store.workspacePortDefinitions(workspaceID: workspace.id).count, 1)
+        XCTAssertEqual(try store.workspacePortDefinitions(workspaceID: workspace.id)[0].name, "DB_PORT")
     }
 
     func testRunningProcessesStatusResultsAndWindowsRoundTrip() throws {
@@ -116,6 +133,7 @@ final class StoreTests: XCTestCase {
         let processID = UUID().uuidString
         try store.touchWorkspaceSettings(workspaceID: workspace.id, updatedAt: "now")
         try store.setWorkspacePorts(workspaceID: workspace.id, ports: [3000])
+        try store.setWorkspacePortDefinitions(workspaceID: workspace.id, definitions: [PortDefinition(name: "API_PORT")])
         try store.setWorkspaceProcesses(workspaceID: workspace.id, processes: [ProcessTemplate(command: "echo one")])
         try store.setWorkspaceStatusChecks(
             workspaceID: workspace.id, checks: [StatusCheckDefinition(process: "one", command: "echo ok", interval: 10, timeout: 2)])
@@ -134,6 +152,7 @@ final class StoreTests: XCTestCase {
 
         XCTAssertNil(try store.workspace(id: workspace.id))
         XCTAssertTrue(try store.workspacePorts(workspaceID: workspace.id).isEmpty)
+        XCTAssertTrue(try store.workspacePortDefinitions(workspaceID: workspace.id).isEmpty)
         XCTAssertTrue(try store.workspaceProcesses(workspaceID: workspace.id).isEmpty)
         XCTAssertTrue(try store.workspaceStatusChecks(workspaceID: workspace.id).isEmpty)
         XCTAssertTrue(try store.workspaceBrowserSessions(workspaceID: workspace.id).isEmpty)

@@ -32,7 +32,7 @@ flowchart LR
 
 Module responsibilities:
 - `appctl`: Shell + AppleScript adapters for yabai, iTerm2, and Chrome.
-- `streamctl`: Orchestration, config normalization, port allocation, workspace lifecycle, and persistence.
+- `streamctl`: Orchestration, config normalization, named port allocation (via `PortAllocator` and `PortReserver`), workspace lifecycle, and persistence.
 - `gui`: AppKit UI library that calls into `streamctl`.
 - `spaceship`: CLI entrypoint that calls into `streamctl`.
 - `spaceship-app`: GUI executable entrypoint that wires `NSApplication` to the `gui` library.
@@ -56,6 +56,7 @@ GUI interaction notes:
 - Workspace metadata rows show folder and branch labels with icons only when those values differ from workspace name.
 - Git workspace rows include relative last-modified time (from latest tracked-file mtime) and tracked modified-file count.
 - Window focus shortcuts in the GUI use `cmd+1` through `cmd+9`.
+- Port definitions are editable via `PortEditor` in the project detail view, the add-project form, and workspace settings.
 - Keyboard shortcut overrides for GUI actions are persisted in SQLite settings and editable in the GUI Settings view and CLI settings commands.
 
 ## Data Model
@@ -63,7 +64,7 @@ Config file:
 - Path: `~/.spaceship/config.yaml`.
 - Top-level fields: `editor`, `port_range`, `projects`.
 - The GUI Settings view writes `editor` from installed VS Code, Cursor, or Windsurf.
-- Project fields: `dir`, `setup_script`, `stop_script`, `processes`, `status_checks`, `browser_sessions`.
+- Project fields: `dir`, `setup_script`, `stop_script`, `ports` (named port definitions), `processes`, `status_checks`, `browser_sessions`.
 - Script timing:
   - `setup_script` runs when a workspace is created or revived.
   - `stop_script` runs on stop/restart/archive stop phase after automatic process termination.
@@ -72,7 +73,7 @@ Config file:
 - The project directory is deleted only for git projects located under `/Users/<username>/spaceship/projects` (app-managed clones).
 
 Workspace settings:
-- Each workspace snapshots project `stop_script`, `processes`, `status_checks`, and `browser_sessions` at creation.
+- Each workspace snapshots project `stop_script`, `ports` (named port definitions), `processes`, `status_checks`, and `browser_sessions` at creation.
 - Snapshots are stored in the runtime DB alongside other workspace data.
 - Edits are stored in SQLite only; YAML remains unchanged.
 - Edits to a running workspace reconcile processes and browser sessions immediately.
@@ -84,6 +85,7 @@ Runtime database:
 ```mermaid
 erDiagram
   projects ||--o{ workspaces : has
+  workspaces ||--o{ workspace_port_definitions : defines
   workspaces ||--o{ workspace_ports : allocates
   workspaces ||--o{ workspace_settings : config
   workspaces ||--o{ workspace_processes : overrides
@@ -114,9 +116,17 @@ erDiagram
     TEXT last_launched_at
   }
 
+  workspace_port_definitions {
+    TEXT id PK
+    TEXT workspace_id
+    TEXT name
+    INTEGER order_index
+  }
+
   workspace_ports {
     TEXT workspace_id PK
     INTEGER port_index PK
+    TEXT port_name
     INTEGER port_number
   }
 
@@ -206,11 +216,18 @@ flowchart TD
   git -->|"yes"| dirname["Resolve dirname (override or auto-generated)"]
   dirname --> worktree["Create or reuse worktree"]
   git -->|"no"| dir["Use project dir"]
-  worktree --> setup["Run setup_script (if set)"]
-  dir --> setup
-  setup --> ports["Allocate PORT0-PORT9"]
-  ports --> persist["Persist workspace + ports"]
+  worktree --> ports["Allocate named ports (PortReserver)"]
+  dir --> ports
+  ports --> setup["Run setup_script (if set, with named port env vars)"]
+  setup --> persist["Persist workspace + port definitions + ports"]
 ```
+
+Port allocation details:
+- `PortAllocator.allocatePorts` accepts `definitions: [PortDefinition]` (named port definitions from the project or workspace) instead of a fixed count.
+- `PortReserver` (singleton) reserves ports via OS sockets so they cannot be claimed by other processes between allocation and use.
+- Port definitions are configured at the project level in YAML (under a `ports` list) and inherited by workspaces; workspaces can override definitions.
+- Named ports appear as env vars in setup scripts, stop scripts, process commands, and status check commands (e.g. `$FRONTEND_PORT`, `$API_PORT`).
+- `buildWorkspaceEnv` uses named port keys from definitions instead of anonymous `PORT0`, `PORT1`, etc.
 
 Launch and capture windows:
 ```mermaid

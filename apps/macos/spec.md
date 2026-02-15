@@ -54,7 +54,7 @@
     - Process
         - fields
             - project: Project
-            - command: terminal command to run. can use service port identifiers to set port env vars
+            - command: terminal command to run. can use named port identifiers (e.g. `$FRONTEND_PORT`) to set port env vars
         - behavior
             - Project templates stored in yaml config
             - Workspace copies stored in db and editable per workspace
@@ -92,8 +92,18 @@
         - behavior
             - Project templates stored in yaml config
             - Workspace copies stored in db and editable per workspace
-            - the url should be specified using port vars made available to the workspace e.g. $PORT0 through $PORT10. at runtime, it is decoded based on the actual values of these variables
+            - the url should be specified using named port vars made available to the workspace e.g. `$FRONTEND_PORT`. at runtime, it is decoded based on the actual values of these variables
             - user can add multiple browser sessions to each project, each will be opened a new window when the workspace is launched e.g. localhost:3000, localhost:3000/blog
+    - PortDefinition
+        - fields
+            - name: str, the env var name for this port (e.g. `FRONTEND_PORT`, `API_PORT`). Must be a valid shell identifier.
+        - behavior
+            - Defined at the project level in YAML under a `ports` list
+            - Inherited by workspaces at creation; workspaces can add, remove, or rename port definitions
+            - Each definition results in a reserved port number exposed as an env var with the definition's name
+            - `PortReserver` (singleton) reserves ports via OS sockets so they cannot be claimed by other processes between allocation and use
+            - `PortAllocator.allocatePorts` accepts `definitions: [PortDefinition]` instead of a fixed count
+            - GUI: `PortEditor` provides an inline editor for port definitions in project detail, add project form, and workspace settings
     - Workspace
         - fields
             - project: Project
@@ -113,10 +123,12 @@
                 - worktrees should be stored in /users/<username>/spaceship/workspaces/<projectname>/<dirname>
                 - run the setup script defined by the project once
                 - snapshot project stop script, processes, status checks, and browser sessions into workspace settings in the db
-                - each workspace gets 10 open ports reserved so any processes run as part of the workspace can use them
-                    - Ports remain reserved for a workspace until it is stopped.
+                - each workspace gets ports reserved based on named port definitions from the project (e.g. `FRONTEND_PORT`, `API_PORT`)
+                    - Port definitions are configured at the project level in YAML and inherited by workspaces; workspaces can override definitions
+                    - Ports are OS-reserved via sockets (PortReserver) so no other process can claim them
                     - Ports are allocated from a configurable base range (e.g. 20000–30000), tracked in db
                     - Ports remain reserved for a workspace until it is archived
+                    - Port allocation happens before setup script so named port env vars are available in setup scripts
             - when launched
                 - start processes defined by the workspace in their own terminal windows. keep track of these windows so they can be focused later when lopping this this workspace’s windows
                 - ensure that browser tabs for the browser sessions defined for the workspace are open, and if not, open them. keep track of them so they can be focused later when lopping this this workspace’s windows
@@ -144,7 +156,7 @@
         - behavior:
             - stored in db
             - when started, each process receives the following env vars
-                - PORT0-PORT9, the 10 ports reserved for the workspace so they can used when starting a sever e.g. `PORT=$PORT0 npm run dev`
+                - Named port env vars from the workspace's port definitions (e.g. `FRONTEND_PORT=20001`, `API_PORT=20002`) so they can be used when starting a server e.g. `PORT=$FRONTEND_PORT npm run dev`
             - can be restarted from spaceship GUI (e.g. if .env files are changed). restarts in the existing terminal window
     - Window
         - fields
@@ -199,9 +211,10 @@
     - When launching a workspace
         - launching is only valid for a stopped workspace
             - if runtime indicators or running flag already exist, launch should fail with guidance to restart instead
-        - identify and reserve 10 open ports for the workspace. pass those as env variables to each process that is started
+        - allocate and reserve ports for the workspace based on named port definitions. pass those as env variables to each process that is started
+        - port allocation happens before setup script so named port env vars are available in setup scripts, stop scripts, process commands, and status check commands
         - each process also receives the following env vars
-            - $PORT0  through $PORT9
+            - Named port env vars from the workspace's port definitions (e.g. `$FRONTEND_PORT`, `$API_PORT`)
             - $spaceship_PROJECT_DIR
             - $spaceship_WORKSPACE_DIR
             - $spaceship_<PROJECT_NAME>_<WORKSPACE_NAME>_WORKSPACE_DIR - these can be used to start and run related services that may be defined in other projects e.g. if backend and frontend are  in a separate repos

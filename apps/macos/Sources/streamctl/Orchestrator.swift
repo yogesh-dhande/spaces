@@ -145,6 +145,7 @@ public final class SpaceshipOrchestrator {
         let previous = existing
         update(&existing)
         try store.setWorkspaceStopScript(workspaceID: workspace.id, stopScript: existing.stopScript)
+        try store.setWorkspacePortDefinitions(workspaceID: workspace.id, definitions: existing.ports)
         try store.setWorkspaceProcesses(workspaceID: workspace.id, processes: existing.processes)
         try store.setWorkspaceStatusChecks(workspaceID: workspace.id, checks: existing.statusChecks)
         try store.setWorkspaceBrowserSessions(workspaceID: workspace.id, sessions: existing.browserSessions)
@@ -297,11 +298,14 @@ public final class SpaceshipOrchestrator {
                 isDefault: false, isArchived: false, isRunning: false, lastLaunchedAt: nil)
             try store.upsert(workspace: revived)
             try seedWorkspaceSettings(project: project, workspace: revived)
-            if let config = try projectConfig(projectID: projectID), let script = config.setupScript, !script.isEmpty {
-                try runScript(script, cwd: revived.dir)
+            let config = try configStore.load()
+            let portDefinitions = try store.workspacePortDefinitions(workspaceID: revived.id)
+            _ = try PortAllocator(store: store).allocatePorts(workspaceID: revived.id, definitions: portDefinitions, range: config.portRange)
+            if let projectConfig = try projectConfig(projectID: projectID), let script = projectConfig.setupScript, !script.isEmpty {
+                let namedPorts = try store.workspacePortsNamed(workspaceID: revived.id)
+                let env = buildWorkspaceEnv(project: project, workspace: revived, namedPorts: namedPorts)
+                try runScript(applyEnvVars(script, env: env), cwd: revived.dir)
             }
-            let portRange = try configStore.load().portRange
-            _ = try PortAllocator(store: store).allocatePorts(workspaceID: revived.id, count: 10, range: portRange)
             return revived
         }
         let workspaceDir: String
@@ -327,12 +331,15 @@ public final class SpaceshipOrchestrator {
         try store.upsert(workspace: workspace)
         try seedWorkspaceSettings(project: project, workspace: workspace)
 
-        if let config = try projectConfig(projectID: projectID), let script = config.setupScript, !script.isEmpty {
-            try runScript(script, cwd: workspaceDir)
-        }
+        let appConfig = try configStore.load()
+        let portDefinitions = try store.workspacePortDefinitions(workspaceID: workspace.id)
+        _ = try PortAllocator(store: store).allocatePorts(workspaceID: workspace.id, definitions: portDefinitions, range: appConfig.portRange)
 
-        let portRange = try configStore.load().portRange
-        _ = try PortAllocator(store: store).allocatePorts(workspaceID: workspace.id, count: 10, range: portRange)
+        if let config = try projectConfig(projectID: projectID), let script = config.setupScript, !script.isEmpty {
+            let namedPorts = try store.workspacePortsNamed(workspaceID: workspace.id)
+            let env = buildWorkspaceEnv(project: project, workspace: workspace, namedPorts: namedPorts)
+            try runScript(applyEnvVars(script, env: env), cwd: workspaceDir)
+        }
 
         return workspace
     }
@@ -364,13 +371,16 @@ public final class SpaceshipOrchestrator {
             throw SpaceshipError.invalidArgument(message: "Workspace is already running. Use restart.")
         }
         let config = try loadWorkspaceSettings(project: project, workspace: workspace, config: try projectConfig(projectID: project.id))
+        let portDefinitions = try store.workspacePortDefinitions(workspaceID: workspace.id)
         let ports = try store.workspacePorts(workspaceID: workspace.id)
-        if ports.count != 10 {
+        if ports.count != portDefinitions.count {
             let portRange = try configStore.load().portRange
-            _ = try PortAllocator(store: store).allocatePorts(workspaceID: workspace.id, count: 10, range: portRange)
+            _ = try PortAllocator(store: store).allocatePorts(workspaceID: workspace.id, definitions: portDefinitions, range: portRange)
+        } else {
+            try PortAllocator(store: store).reserveExistingPorts(workspaceID: workspace.id)
         }
 
-        let env = buildWorkspaceEnv(project: project, workspace: workspace, ports: try store.workspacePorts(workspaceID: workspace.id))
+        let env = buildWorkspaceEnv(project: project, workspace: workspace, namedPorts: try store.workspacePortsNamed(workspaceID: workspace.id))
 
         var newWindows: [WindowRecord] = []
         var windowSnapshot = try yabai.listWindows()
@@ -433,8 +443,8 @@ public final class SpaceshipOrchestrator {
     private func stopWorkspaceUnlocked(workspaceID: String) throws {
         let (project, workspace) = try resolveWorkspace(id: workspaceID)
         let windows = try trackedWindows(workspaceID: workspace.id)
-        let ports = try store.workspacePorts(workspaceID: workspace.id)
-        let env = buildWorkspaceEnv(project: project, workspace: workspace, ports: ports)
+        let namedPorts = try store.workspacePortsNamed(workspaceID: workspace.id)
+        let env = buildWorkspaceEnv(project: project, workspace: workspace, namedPorts: namedPorts)
         let settings = try loadWorkspaceSettings(project: project, workspace: workspace, config: try projectConfig(projectID: project.id))
         let processes = try store.runningProcesses(workspaceID: workspace.id)
         for process in processes { if let pid = resolvedRuntimePID(for: process) { terminateProcessGroup(pid: pid) } }
@@ -505,8 +515,8 @@ public final class SpaceshipOrchestrator {
             return []
         }
         let processes = try store.runningProcesses(workspaceID: workspaceID)
-        let ports = try store.workspacePorts(workspaceID: workspaceID)
-        let env = buildWorkspaceEnv(project: project, workspace: workspace, ports: ports)
+        let namedPorts = try store.workspacePortsNamed(workspaceID: workspaceID)
+        let env = buildWorkspaceEnv(project: project, workspace: workspace, namedPorts: namedPorts)
         var results: [StatusResult] = []
         for check in config.statusChecks {
             guard let process = processes.first(where: { $0.templateName == check.process }) else { continue }
@@ -527,6 +537,10 @@ public final class SpaceshipOrchestrator {
     public func windows(workspaceID: String) throws -> [WindowRecord] { try trackedWindows(workspaceID: workspaceID) }
 
     public func workspacePorts(workspaceID: String) throws -> [Int] { try store.workspacePorts(workspaceID: workspaceID) }
+
+    public func workspacePortsNamed(workspaceID: String) throws -> [(port: Int, name: String)] {
+        try store.workspacePortsNamed(workspaceID: workspaceID)
+    }
 
     public func openWorkspaceEditor(workspaceID: String) throws {
         let (_, workspace) = try resolveWorkspace(id: workspaceID)
@@ -750,8 +764,8 @@ public final class SpaceshipOrchestrator {
     private func resolvedBrowserSessionPrefixes(project: ProjectRecord, workspace: WorkspaceRecord) throws -> [String] {
         let sessions = try store.workspaceBrowserSessions(workspaceID: workspace.id)
         guard !sessions.isEmpty else { return [] }
-        let ports = try store.workspacePorts(workspaceID: workspace.id)
-        let env = buildWorkspaceEnv(project: project, workspace: workspace, ports: ports)
+        let namedPorts = try store.workspacePortsNamed(workspaceID: workspace.id)
+        let env = buildWorkspaceEnv(project: project, workspace: workspace, namedPorts: namedPorts)
         var prefixes: [String] = []
         var seen = Set<String>()
         for session in sessions {
@@ -1026,8 +1040,9 @@ public final class SpaceshipOrchestrator {
             isDefault: true, isArchived: false, isRunning: false, lastLaunchedAt: nil)
         try store.upsert(workspace: workspace)
         try seedWorkspaceSettings(project: project, workspace: workspace)
-        let portRange = try configStore.load().portRange
-        _ = try PortAllocator(store: store).allocatePorts(workspaceID: workspace.id, count: 10, range: portRange)
+        let appConfig = try configStore.load()
+        let portDefinitions = try store.workspacePortDefinitions(workspaceID: workspace.id)
+        _ = try PortAllocator(store: store).allocatePorts(workspaceID: workspace.id, definitions: portDefinitions, range: appConfig.portRange)
     }
 
     private func resolveWorkspace(id: String) throws -> (ProjectRecord, WorkspaceRecord) {
@@ -1057,13 +1072,14 @@ public final class SpaceshipOrchestrator {
 
         let currentSettings = WorkspaceSettings(
             stopScript: try store.workspaceStopScript(workspaceID: defaultWorkspace.id),
+            ports: try store.workspacePortDefinitions(workspaceID: defaultWorkspace.id),
             processes: try store.workspaceProcesses(workspaceID: defaultWorkspace.id),
             statusChecks: try store.workspaceStatusChecks(workspaceID: defaultWorkspace.id),
             browserSessions: try store.workspaceBrowserSessions(workspaceID: defaultWorkspace.id))
 
         let previousTemplate = WorkspaceSettings(
-            stopScript: previousConfig.stopScript, processes: previousConfig.processes, statusChecks: previousConfig.statusChecks,
-            browserSessions: previousConfig.browserSessions)
+            stopScript: previousConfig.stopScript, ports: previousConfig.ports, processes: previousConfig.processes,
+            statusChecks: previousConfig.statusChecks, browserSessions: previousConfig.browserSessions)
 
         guard workspaceSettingsMatch(currentSettings, previousTemplate) else { return }
 
@@ -1072,6 +1088,7 @@ public final class SpaceshipOrchestrator {
 
     private func workspaceSettingsMatch(_ lhs: WorkspaceSettings, _ rhs: WorkspaceSettings) -> Bool {
         guard lhs.stopScript == rhs.stopScript else { return false }
+        guard lhs.ports == rhs.ports else { return false }
         guard processTemplatesMatch(lhs.processes, rhs.processes) else { return false }
         guard statusChecksMatch(lhs.statusChecks, rhs.statusChecks) else { return false }
         guard browserSessionsMatch(lhs.browserSessions, rhs.browserSessions) else { return false }
@@ -1109,9 +1126,10 @@ public final class SpaceshipOrchestrator {
 
     private func seedWorkspaceSettings(project _: ProjectRecord, workspace: WorkspaceRecord, config: ProjectConfig?) throws {
         let snapshot = WorkspaceSettings(
-            stopScript: config?.stopScript, processes: config?.processes ?? [], statusChecks: config?.statusChecks ?? [],
-            browserSessions: config?.browserSessions ?? [])
+            stopScript: config?.stopScript, ports: config?.ports ?? [], processes: config?.processes ?? [],
+            statusChecks: config?.statusChecks ?? [], browserSessions: config?.browserSessions ?? [])
         try store.setWorkspaceStopScript(workspaceID: workspace.id, stopScript: snapshot.stopScript)
+        try store.setWorkspacePortDefinitions(workspaceID: workspace.id, definitions: snapshot.ports)
         try store.setWorkspaceProcesses(workspaceID: workspace.id, processes: snapshot.processes)
         try store.setWorkspaceStatusChecks(workspaceID: workspace.id, checks: snapshot.statusChecks)
         try store.setWorkspaceBrowserSessions(workspaceID: workspace.id, sessions: snapshot.browserSessions)
@@ -1122,17 +1140,22 @@ public final class SpaceshipOrchestrator {
         let hasSettings = try store.workspaceSettingsExists(workspaceID: workspace.id)
         if !hasSettings { try seedWorkspaceSettings(project: project, workspace: workspace, config: config) }
         let stopScript = try store.workspaceStopScript(workspaceID: workspace.id)
+        let ports = try store.workspacePortDefinitions(workspaceID: workspace.id)
         let processes = try store.workspaceProcesses(workspaceID: workspace.id)
         let statusChecks = try store.workspaceStatusChecks(workspaceID: workspace.id)
         let browserSessions = try store.workspaceBrowserSessions(workspaceID: workspace.id)
-        return WorkspaceSettings(stopScript: stopScript, processes: processes, statusChecks: statusChecks, browserSessions: browserSessions)
+        return WorkspaceSettings(
+            stopScript: stopScript, ports: ports, processes: processes, statusChecks: statusChecks, browserSessions: browserSessions)
     }
 
     private func runScript(_ script: String, cwd: String) throws { _ = try Shell.run(["/bin/bash", "-lc", script], cwd: cwd) }
 
-    private func buildWorkspaceEnv(project: ProjectRecord, workspace: WorkspaceRecord, ports: [Int]) -> [String: String] {
+    private func buildWorkspaceEnv(project: ProjectRecord, workspace: WorkspaceRecord, namedPorts: [(port: Int, name: String)]) -> [String: String] {
         var env: [String: String] = [:]
-        for (idx, port) in ports.enumerated() { env["PORT\(idx)"] = String(port) }
+        for namedPort in namedPorts {
+            let key = namedPort.name.isEmpty ? "PORT\(env.count)" : namedPort.name
+            env[key] = String(namedPort.port)
+        }
         env["spaceship_WORKSPACE_DIR"] = workspace.dir
         let scopedKey = "spaceship_\(sanitizeEnvKey(project.name))_\(sanitizeEnvKey(workspace.name))_WORKSPACE_DIR"
         env[scopedKey] = workspace.dir
@@ -1142,8 +1165,8 @@ public final class SpaceshipOrchestrator {
     private func applyWorkspaceSettingsUpdate(
         project: ProjectRecord, workspace: WorkspaceRecord, previous: WorkspaceSettings, updated: WorkspaceSettings
     ) throws {
-        let ports = try store.workspacePorts(workspaceID: workspace.id)
-        let env = buildWorkspaceEnv(project: project, workspace: workspace, ports: ports)
+        let namedPorts = try store.workspacePortsNamed(workspaceID: workspace.id)
+        let env = buildWorkspaceEnv(project: project, workspace: workspace, namedPorts: namedPorts)
         try reconcileProcesses(workspace: workspace, previous: previous.processes, updated: updated.processes, env: env)
         try reconcileBrowserSessions(project: project, workspace: workspace, sessions: updated.browserSessions, env: env)
         try pruneMissingWindows(workspaceID: workspace.id)

@@ -182,7 +182,7 @@ final class OrchestratorTests: XCTestCase {
 
         XCTAssertEqual(workspace.dir, projectDir.path)
         XCTAssertFalse(workspace.isArchived)
-        XCTAssertEqual(try orchestrator.workspacePorts(workspaceID: workspace.id).count, 10)
+        XCTAssertEqual(try orchestrator.workspacePorts(workspaceID: workspace.id).count, 0)
     }
 
     func testCreateWorkspaceRejectsDirectoryNameOverrideForNonGitProject() throws {
@@ -359,7 +359,7 @@ final class OrchestratorTests: XCTestCase {
 
         XCTAssertEqual(revived.id, created.id)
         XCTAssertEqual(persisted?.isArchived, false)
-        XCTAssertEqual(try orchestrator.workspacePorts(workspaceID: revived.id).count, 10)
+        XCTAssertEqual(try orchestrator.workspacePorts(workspaceID: revived.id).count, 0)
     }
 
     func testListWorkspacesHonorsIncludeArchivedFlag() throws {

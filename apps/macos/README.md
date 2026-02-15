@@ -33,21 +33,28 @@ projects:
   - dir: /path/to/repo
     setup_script: cp /shared/.env .env
     stop_script: docker compose down --remove-orphans
+    ports:
+      - name: FRONTEND_PORT
+      - name: API_PORT
     processes:
       - name: server
-        command: PORT=$PORT0 npm run dev
+        command: PORT=$FRONTEND_PORT npm run dev
+      - name: api
+        command: PORT=$API_PORT npm run api
     status_checks:
       - name: web
         process: server
-        command: curl -fsS http://localhost:$PORT0/health
+        command: curl -fsS http://localhost:$FRONTEND_PORT/health
         interval: 10
         timeout: 2
         onExit: notify
     browser_sessions:
-      - url: http://localhost:$PORT0
+      - url: http://localhost:$FRONTEND_PORT
 ```
 
-Workspaces snapshot project processes, status checks, and browser sessions at creation time into the runtime DB.
+Port definitions (`ports`) are configured at the project level and inherited by workspaces. Each named port (e.g. `FRONTEND_PORT`) is allocated a real port number from the configured `port_range`, reserved via OS sockets so no other process can claim it. Named port env vars are available in setup scripts, stop scripts, process commands, and status check commands. Workspaces can override port definitions in their settings.
+
+Workspaces snapshot project port definitions, processes, status checks, and browser sessions at creation time into the runtime DB.
 Updates to workspace settings apply immediately when the workspace is running (new processes start, changed commands restart, and new browser sessions open).
 `setup_script` runs when a workspace is created or revived. `stop_script` runs on stop/restart/archive after automatic process termination.
 
