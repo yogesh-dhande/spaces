@@ -262,7 +262,7 @@ Degraded runtime edge cases and handling:
 - On launch/restart, spaceship reuses existing Chrome tabs whose URLs match configured browser-session prefixes and tracks all matching tabs for workspace cycling.
 - Browser windows store an optional `target_url`; when focusing browser entries, spaceship uses AppleScript to activate the matching tab (including when multiple tracked targets share one Chrome window) before falling back to raw window focus.
 - If a Chrome window is tracked both as targeted browser tabs and as an untargeted browser row, untargeted rows are filtered from workspace window navigation/listing to keep forward/backward traversal deterministic.
-- Workspace window navigation/listing rebuilds browser rows from live Chrome tab scans with a 10-second debounce per `(workspace_id, resolved browser-session prefixes)` key, including every tab whose URL starts with any configured browser-session URL (deduplicated by `window_id + tab URL`); tabs with missing URLs are skipped.
+- Workspace window navigation/listing rebuilds browser rows from live Chrome tab scans with a configurable debounce interval (default: 10 seconds, see `PollingConstants.browserWindowScanDebounceInterval`) per `(workspace_id, resolved browser-session prefixes)` key, including every tab whose URL starts with any configured browser-session URL (deduplicated by `window_id + tab URL`); tabs with missing URLs are skipped.
 - Browser focus for live-scanned rows targets cached `(window_id + tab_index)` first, then verifies the focused active tab URL against workspace prefixes, refreshes the live scan once on mismatch, and falls back to URL matching if needed.
 - Window-scoped Chrome AppleScript operations compare `window_id` as string for reliable tab focus/close matching.
 - Live browser rows are ordered deterministically by browser-session prefix order and then tab URL so `cmd+<n>` shortcut indices stay aligned with the on-screen list even as Chrome window z-order changes.
@@ -272,7 +272,7 @@ Degraded runtime edge cases and handling:
 - Optional diagnostics: `DEBUG=1` logs browser tab scan count/match/elapsed and browser focus-path timing, including indexed verification, cache hit/miss, refresh, and fallback decisions.
 - Terminal capture uses both yabai snapshot-diff and running-process window IDs to avoid dropping terminals when window discovery lags.
 - Window IDs can become stale across app/desktop changes; stale rows are pruned during reconciliation paths.
-- When the GUI is brought to front via the global toggle hotkey, the selected workspace detail view is refreshed so the on-screen windows list reflects the most recent live scan (up to 10 seconds old).
+- When the GUI is brought to front via the global toggle hotkey, the selected workspace detail view is refreshed so the on-screen windows list reflects the most recent live scan (up to `PollingConstants.browserWindowScanDebounceInterval` seconds old).
 
 ## Window Capture and Focus
 ```mermaid
@@ -300,6 +300,23 @@ sequenceDiagram
 
 Editor and terminal windows opened from the GUI (Open Editor/Open Terminal) are captured via yabai and stored in the
 windows table so they participate in workspace window cycling.
+
+## Polling Constants
+All periodic polling intervals are centralized in `PollingConstants.swift` for easy configuration:
+
+- **Browser window scan debounce**: `browserWindowScanDebounceInterval` = 10 seconds
+  - Controls how frequently Chrome tab scans are performed per workspace/browser-session-prefix combination
+  - Used to debounce expensive Chrome AppleScript queries during window navigation and focus operations
+
+- **Status check default interval**: `statusCheckDefaultInterval` = 60 seconds
+  - Default interval between status check executions for process health monitoring
+  - User-configurable per status check in the GUI
+
+- **Status check default timeout**: `statusCheckDefaultTimeout` = 5 seconds
+  - Default timeout for status check command execution
+  - User-configurable per status check in the GUI
+
+These constants are referenced throughout the codebase to ensure consistent polling behavior.
 
 ## External Dependencies
 - macOS 14+

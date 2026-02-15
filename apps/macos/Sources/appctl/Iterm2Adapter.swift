@@ -1,11 +1,11 @@
 import Foundation
 
-public final class Iterm2Adapter {
+open class Iterm2Adapter {
     public init() {}
 
-    public func isAvailable() -> Bool { (try? AppleScript.run("tell application \"iTerm2\" to version")) != nil }
+    open func isAvailable() -> Bool { (try? AppleScript.run("tell application \"iTerm2\" to version")) != nil }
 
-    public func openWindowAndRun(command: String) throws -> ItermWindowInfo {
+    open func openWindowAndRun(command: String) throws -> ItermWindowInfo {
         let escaped = command.replacingOccurrences(of: "\"", with: "\\\"")
         let script = """
             tell application "iTerm2"
@@ -21,7 +21,7 @@ public final class Iterm2Adapter {
         return ItermWindowInfo(id: Int(output.trimmingCharacters(in: .whitespacesAndNewlines)) ?? -1)
     }
 
-    public func runInWindow(id: Int, command: String) throws {
+    open func runInWindow(id: Int, command: String) throws {
         let escaped = command.replacingOccurrences(of: "\"", with: "\\\"")
         let script = """
             tell application "iTerm2"
@@ -37,7 +37,7 @@ public final class Iterm2Adapter {
         _ = try AppleScript.run(script)
     }
 
-    public func closeWindow(id: Int) throws {
+    open func closeWindow(id: Int) throws {
         let script = """
             tell application "iTerm2"
               repeat with w in windows

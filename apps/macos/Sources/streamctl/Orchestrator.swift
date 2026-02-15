@@ -39,7 +39,7 @@ public final class SpaceshipOrchestrator {
     public init(
         store: SQLiteStore, configStore: ConfigStore, projectsRootDirectory: URL? = nil, workspacesRootDirectory: URL? = nil,
         git: GitClient = .init(), yabai: YabaiAdapter = .init(), iterm: Iterm2Adapter = .init(), chrome: ChromeAdapter = .init(),
-        browserWindowScanDebounceInterval: TimeInterval = 10, currentDate: @escaping () -> Date = Date.init
+        browserWindowScanDebounceInterval: TimeInterval = PollingConstants.browserWindowScanDebounceInterval, currentDate: @escaping () -> Date = Date.init
     ) {
         self.store = store
         self.configStore = configStore
@@ -528,8 +528,89 @@ public final class SpaceshipOrchestrator {
                 lastRunAt: nowISO8601())
             try store.upsert(statusResult: result)
             results.append(result)
+            
+            // Handle onExit behavior for failed status checks
+            if outcome.exitCode != 0 {
+                try handleStatusCheckFailure(workspaceID: workspaceID, process: process, check: check, result: result)
+            }
         }
         return results
+    }
+    
+    private func handleStatusCheckFailure(workspaceID: String, process: RunningProcessRecord, check: StatusCheckDefinition, result: StatusResult) throws {
+        switch check.onExit {
+        case .none:
+            // Do nothing - just log the failure
+            break
+            
+        case .notify:
+            // Show notification to the user
+            let notification = NSUserNotification()
+            notification.title = "Status Check Failed"
+            notification.informativeText = "Process '\(process.templateName)' check '\(result.checkName)' failed"
+            if let message = result.message {
+                notification.subtitle = message
+            }
+            NSUserNotificationCenter.default.deliver(notification)
+            
+        case .restart:
+            // Restart the process
+            try restartFailedProcess(workspaceID: workspaceID, process: process, check: check, result: result)
+        }
+    }
+    
+    private func restartFailedProcess(workspaceID: String, process: RunningProcessRecord, check: StatusCheckDefinition, result: StatusResult) throws {
+        // Log the restart attempt
+        fputs("spaceship: Restarting process '\(process.templateName)' due to failed status check '\(result.checkName)'\n", stderr)
+        
+        // Show notification about restart
+        let notification = NSUserNotification()
+        notification.title = "Process Restarting"
+        notification.informativeText = "Process '\(process.templateName)' is being restarted due to failed status check"
+        if let message = result.message {
+            notification.subtitle = "Reason: \(message)"
+        }
+        NSUserNotificationCenter.default.deliver(notification)
+        
+        // Terminate the existing process group if PID exists
+        if let pid = process.pid {
+            terminateProcessGroup(pid: pid)
+        }
+        
+        // Mark the process as exited in the database
+        let updatedProcess = RunningProcessRecord(
+            id: process.id, workspaceID: process.workspaceID, templateName: process.templateName,
+            command: process.command, terminalApp: process.terminalApp, windowID: process.windowID,
+            pid: process.pid, status: .exited, logPath: process.logPath,
+            lastOutputAt: process.lastOutputAt, startedAt: process.startedAt,
+            exitedAt: nowISO8601()
+        )
+        try store.upsert(runningProcess: updatedProcess)
+        
+        // Restart the process in a new terminal
+        try restartProcessInTerminal(workspaceID: workspaceID, process: process)
+    }
+    
+    private func restartProcessInTerminal(workspaceID: String, process: RunningProcessRecord) throws {
+        let (_, workspace) = try resolveWorkspace(id: workspaceID)
+        let _ = try store.workspacePortsNamed(workspaceID: workspaceID)
+        
+        // Open new terminal and run the command
+        let escapedCommand = process.command.replacingOccurrences(of: "\"", with: "\\\"")
+        let escapedDir = workspace.dir.replacingOccurrences(of: "\"", with: "\\\"")
+        let fullCommand = "cd \"\(escapedDir)\" && \(escapedCommand)"
+        
+        let windowInfo = try iterm.openWindowAndRun(command: fullCommand)
+        let windowID = windowInfo.id
+        
+        // Update the process record with new window ID and running status
+        let restartedProcess = RunningProcessRecord(
+            id: process.id, workspaceID: process.workspaceID, templateName: process.templateName,
+            command: process.command, terminalApp: "iTerm2", windowID: windowID,
+            pid: nil, status: .running, logPath: process.logPath,
+            lastOutputAt: nil, startedAt: nowISO8601(), exitedAt: nil
+        )
+        try store.upsert(runningProcess: restartedProcess)
     }
 
     public func statusResults(processID: String) throws -> [StatusResult] { try store.statusResults(processID: processID) }

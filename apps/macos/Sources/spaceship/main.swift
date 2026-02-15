@@ -398,7 +398,7 @@ struct CLI {
               - Workspaces reserve PORT0-PORT9 from the configured port range.
               - GUI window focus shortcuts: cmd+1 through cmd+9 (when GUI is focused).
               - GUI window cycle shortcuts: cmd+shift+[ and cmd+shift+] (global, when GUI is not focused).
-              - Chrome tab scans used for workspace window list/cycle are debounced to at most once every 10 seconds per workspace browser-session config.
+              - Chrome tab scans used for workspace window list/cycle are debounced to at most once every \(Int(PollingConstants.browserWindowScanDebounceInterval)) seconds per workspace browser-session config.
               - Browser window focus targets cached tab index first, validates focused active-tab URL, auto-corrects with one refresh, then falls back to URL matching when needed.
               - Diagnostics: DEBUG=1 logs browser scan timing and browser focus-path timing (including cache hit/miss and fallback decisions).
               - GUI action shortcuts can be overridden in Settings or via `spaceship settings set ...`.

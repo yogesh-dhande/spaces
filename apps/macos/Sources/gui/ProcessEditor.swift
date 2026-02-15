@@ -197,8 +197,8 @@ import streamctl
             checkRows.compactMap { row in
                 let name = row.nameField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
                 let command = row.commandField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-                let interval = Int(row.intervalField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)) ?? 60
-                let timeout = Int(row.timeoutField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)) ?? 5
+                let interval = Int(row.intervalField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)) ?? PollingConstants.statusCheckDefaultInterval
+                let timeout = Int(row.timeoutField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)) ?? PollingConstants.statusCheckDefaultTimeout
                 let onExit = StatusCheckOnExit(rawValue: row.onExitPopup.titleOfSelectedItem ?? "") ?? .none
                 guard !command.isEmpty else { return nil }
                 return StatusCheckDefinition(
@@ -242,8 +242,8 @@ import streamctl
         let container = NSStackView()
         let nameField = NSTextField(string: "")
         let commandField = NSTextField(string: "")
-        let intervalField = NSTextField(string: "60")
-        let timeoutField = NSTextField(string: "5")
+        let intervalField = NSTextField(string: String(PollingConstants.statusCheckDefaultInterval))
+        let timeoutField = NSTextField(string: String(PollingConstants.statusCheckDefaultTimeout))
         let onExitPopup = NSPopUpButton()
         var onRemove: (() -> Void)?
         var onChange: (() -> Void)?

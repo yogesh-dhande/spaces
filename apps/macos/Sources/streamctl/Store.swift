@@ -237,7 +237,7 @@ public final class SQLiteStore {
                 """, bindings: [workspaceID])
         return rows.map { row in
             StatusCheckDefinition(
-                name: row[0].isEmpty ? nil : row[0], process: row[1], command: row[2], interval: Int(row[3]) ?? 60, timeout: Int(row[4]) ?? 5,
+                name: row[0].isEmpty ? nil : row[0], process: row[1], command: row[2], interval: Int(row[3]) ?? PollingConstants.statusCheckDefaultInterval, timeout: Int(row[4]) ?? PollingConstants.statusCheckDefaultTimeout,
                 onExit: StatusCheckOnExit(rawValue: row[5]) ?? .none)
         }
     }

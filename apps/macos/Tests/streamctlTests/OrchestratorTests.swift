@@ -488,6 +488,162 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertEqual(persisted.count, 2)
     }
 
+    func testStatusCheckOnExitNoneDoesNothing() throws {
+        let root = try makeTempDirectory()
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+
+        let configStore = ConfigStore(path: root.appendingPathComponent("config.yaml").path)
+        let store = try makeTemporaryStore()
+        let orchestrator = SpaceshipOrchestrator(store: store, configStore: configStore)
+
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
+        try store.touchWorkspaceSettings(workspaceID: workspace.id, updatedAt: "now")
+        try store.setWorkspaceStatusChecks(
+            workspaceID: workspace.id,
+            checks: [
+                StatusCheckDefinition(process: "api", command: "echo failed && exit 1", interval: 10, timeout: 2, onExit: .none),
+            ])
+        let runningProcess = RunningProcessRecord(
+            id: UUID().uuidString, workspaceID: workspace.id, templateName: "api", command: "echo api", terminalApp: nil, windowID: nil, pid: 9000,
+            status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil)
+        try store.upsert(runningProcess: runningProcess)
+
+        let results = try orchestrator.runStatusChecks(workspaceID: workspace.id)
+
+        XCTAssertEqual(results.count, 1)
+        XCTAssertEqual(results.first?.status, "red")
+        
+        // Process should still be running (no restart)
+        let currentProcess = try store.runningProcesses(workspaceID: workspace.id).first!
+        XCTAssertEqual(currentProcess.status, .running)
+        XCTAssertEqual(currentProcess.pid, 9000)
+    }
+
+    func testStatusCheckOnExitNotifyShowsNotification() throws {
+        let root = try makeTempDirectory()
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+
+        let configStore = ConfigStore(path: root.appendingPathComponent("config.yaml").path)
+        let store = try makeTemporaryStore()
+        let orchestrator = SpaceshipOrchestrator(store: store, configStore: configStore)
+
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
+        try store.touchWorkspaceSettings(workspaceID: workspace.id, updatedAt: "now")
+        try store.setWorkspaceStatusChecks(
+            workspaceID: workspace.id,
+            checks: [
+                StatusCheckDefinition(name: "health", process: "api", command: "echo unhealthy && exit 1", interval: 10, timeout: 2, onExit: .notify),
+            ])
+        let runningProcess = RunningProcessRecord(
+            id: UUID().uuidString, workspaceID: workspace.id, templateName: "api", command: "echo api", terminalApp: nil, windowID: nil, pid: 9000,
+            status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil)
+        try store.upsert(runningProcess: runningProcess)
+
+        let results = try orchestrator.runStatusChecks(workspaceID: workspace.id)
+
+        XCTAssertEqual(results.count, 1)
+        XCTAssertEqual(results.first?.status, "red")
+        
+        // Process should still be running (no restart)
+        let currentProcess = try store.runningProcesses(workspaceID: workspace.id).first!
+        XCTAssertEqual(currentProcess.status, .running)
+        XCTAssertEqual(currentProcess.pid, 9000)
+        
+        // Note: We can't easily test the actual notification delivery without complex mocking
+        // but we can verify the process wasn't restarted, which is the key behavior
+    }
+
+    func testStatusCheckOnExitRestartRestartsProcess() throws {
+        let root = try makeTempDirectory()
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+
+        let configStore = ConfigStore(path: root.appendingPathComponent("config.yaml").path)
+        let store = try makeTemporaryStore()
+        
+        // Use mock iTerm2 adapter to prevent actual terminal windows from opening
+        let mockIterm = MockIterm2Adapter()
+        let orchestrator = SpaceshipOrchestrator(store: store, configStore: configStore, iterm: mockIterm)
+
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
+        try store.touchWorkspaceSettings(workspaceID: workspace.id, updatedAt: "now")
+        try store.setWorkspaceStatusChecks(
+            workspaceID: workspace.id,
+            checks: [
+                StatusCheckDefinition(name: "health", process: "api", command: "echo crashed && exit 1", interval: 10, timeout: 2, onExit: .restart),
+            ])
+        let runningProcess = RunningProcessRecord(
+            id: UUID().uuidString, workspaceID: workspace.id, templateName: "api", command: "npm start", terminalApp: "iTerm2", windowID: 123, pid: 9000,
+            status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil)
+        try store.upsert(runningProcess: runningProcess)
+
+        let results = try orchestrator.runStatusChecks(workspaceID: workspace.id)
+
+        XCTAssertEqual(results.count, 1)
+        XCTAssertEqual(results.first?.status, "red")
+        
+        // Verify iTerm2 was called to open new window (but didn't actually open one)
+        XCTAssertEqual(mockIterm.openWindowAndRunCallCount, 1)
+        XCTAssertTrue(mockIterm.lastCommand!.contains("cd \"\(workspace.dir)\""))
+        XCTAssertTrue(mockIterm.lastCommand!.contains("npm start"))
+        
+        // Verify process was marked as exited and then restarted
+        let currentProcesses = try store.runningProcesses(workspaceID: workspace.id)
+        XCTAssertEqual(currentProcesses.count, 1)
+        let currentProcess = currentProcesses.first!
+        XCTAssertEqual(currentProcess.status, .running)
+        XCTAssertNotEqual(currentProcess.windowID, 123) // Should have new window ID
+        XCTAssertNil(currentProcess.pid) // PID should be cleared until process starts
+    }
+
+    func testStatusCheckOnExitRestartWithMissingPidDoesNotCrash() throws {
+        let root = try makeTempDirectory()
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+
+        let configStore = ConfigStore(path: root.appendingPathComponent("config.yaml").path)
+        let store = try makeTemporaryStore()
+        
+        // Use mock iTerm2 adapter to prevent actual terminal windows from opening
+        let mockIterm = MockIterm2Adapter()
+        let orchestrator = SpaceshipOrchestrator(store: store, configStore: configStore, iterm: mockIterm)
+
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
+        try store.touchWorkspaceSettings(workspaceID: workspace.id, updatedAt: "now")
+        try store.setWorkspaceStatusChecks(
+            workspaceID: workspace.id,
+            checks: [
+                StatusCheckDefinition(process: "api", command: "echo failed && exit 1", interval: 10, timeout: 2, onExit: .restart),
+            ])
+        let runningProcess = RunningProcessRecord(
+            id: UUID().uuidString, workspaceID: workspace.id, templateName: "api", command: "npm start", terminalApp: "iTerm2", windowID: 123, pid: nil,
+            status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil)
+        try store.upsert(runningProcess: runningProcess)
+
+        // Should not crash even with missing PID
+        XCTAssertNoThrow(try orchestrator.runStatusChecks(workspaceID: workspace.id))
+        
+        // Should still attempt to restart - verify iTerm2 was called
+        XCTAssertEqual(mockIterm.openWindowAndRunCallCount, 1)
+        XCTAssertTrue(mockIterm.lastCommand!.contains("cd \"\(workspace.dir)\""))
+        XCTAssertTrue(mockIterm.lastCommand!.contains("npm start"))
+        
+        // When PID is missing, the restart logic should still attempt to restart
+        // The process should have a new window ID since restartProcessInTerminal is called
+        let currentProcesses = try store.runningProcesses(workspaceID: workspace.id)
+        XCTAssertEqual(currentProcesses.count, 1)
+        let currentProcess = currentProcesses.first!
+        XCTAssertEqual(currentProcess.status, .running)
+        // Should have new window ID because restartProcessInTerminal was called
+        XCTAssertNotEqual(currentProcess.windowID, 123)
+    }
+
     func testCreateWorkspaceThrowsForUnknownProject() throws {
         let root = try makeTempDirectory()
         let configStore = ConfigStore(path: root.appendingPathComponent("config.yaml").path)
