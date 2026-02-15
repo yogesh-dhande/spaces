@@ -3,6 +3,18 @@ import Foundation
 import appctl
 
 public final class SpaceshipOrchestrator {
+    private enum ExtractedBrowserFocusOutcome {
+        case focused
+        case staleMapping
+        case notMapped
+    }
+
+    private struct ResolvedBrowserSession {
+        let index: Int
+        let prefix: String
+        let session: BrowserSession
+    }
+
     private struct BrowserWindowScanResult {
         let windows: [WindowRecord]
         let tabIndexByWindowAndURL: [String: Int]
@@ -394,8 +406,10 @@ public final class SpaceshipOrchestrator {
             newWindows.append(contentsOf: ensuredTerminals)
             windowSnapshot = try yabai.listWindows()
 
-            let browserMatches = try ensureBrowserSessions(project: project, workspace: workspace, sessions: config.browserSessions, env: env)
-            newWindows.append(contentsOf: browserMatches)
+            let browserSessionResult = try ensureBrowserSessions(
+                project: project, workspace: workspace, sessions: config.browserSessions, env: env, extractOnAttach: true)
+            try store.setWorkspaceBrowserSessions(workspaceID: workspace.id, sessions: browserSessionResult.sessions)
+            newWindows.append(contentsOf: browserSessionResult.windows)
             newWindows.append(
                 contentsOf: try captureNewWindows(
                     snapshot: windowSnapshot, role: "browser", appName: "Google Chrome", workspaceID: workspace.id, orderOffset: 0))
@@ -799,6 +813,13 @@ public final class SpaceshipOrchestrator {
         let focusStartedAt = currentDate()
         var focusPath = "yabai"
         if window.role == "browser", let targetURL = window.targetURL, chrome.isAvailable() {
+            let extractedOutcome = (try? focusExtractedBrowserWindow(workspaceID: workspaceID, targetURL: targetURL)) ?? .notMapped
+            if extractedOutcome == .focused {
+                focusPath = "extracted"
+                logBrowserFocus(
+                    "workspace=\(workspaceID) path=\(focusPath) target=\(targetURL) elapsed_ms=\(elapsedMS(since: focusStartedAt))")
+                return true
+            }
             if let trackedWindowID = window.windowID {
                 let focusedIndexedTrackedWindowTab =
                     (try? focusScannedBrowserTab(workspaceID: workspaceID, windowID: trackedWindowID, targetURL: targetURL)) ?? false
@@ -865,16 +886,77 @@ public final class SpaceshipOrchestrator {
         guard !sessions.isEmpty else { return [] }
         let namedPorts = try store.workspacePortsNamed(workspaceID: workspace.id)
         let env = buildWorkspaceEnv(project: project, workspace: workspace, namedPorts: namedPorts)
-        var prefixes: [String] = []
+        return resolveBrowserSessions(sessions, env: env).map(\.prefix)
+    }
+
+    private func resolveBrowserSessions(_ sessions: [BrowserSession], env: [String: String]) -> [ResolvedBrowserSession] {
+        var resolved: [ResolvedBrowserSession] = []
         var seen = Set<String>()
-        for session in sessions {
+        for (index, session) in sessions.enumerated() {
             guard let rawURL = session.url?.trimmingCharacters(in: .whitespacesAndNewlines), !rawURL.isEmpty else { continue }
-            let resolved = applyEnvVars(rawURL, env: env)
-            guard !resolved.isEmpty, !seen.contains(resolved) else { continue }
-            seen.insert(resolved)
-            prefixes.append(resolved)
+            let prefix = applyEnvVars(rawURL, env: env)
+            guard !prefix.isEmpty, !seen.contains(prefix) else { continue }
+            seen.insert(prefix)
+            resolved.append(ResolvedBrowserSession(index: index, prefix: prefix, session: session))
         }
-        return prefixes
+        return resolved
+    }
+
+    private func extractSessionWindowIfNeeded(
+        session: ResolvedBrowserSession, matches: [ChromeWindowMatch], refreshedSessions: inout [BrowserSession]
+    ) throws -> Int? {
+        if let extractedWindow = session.session.extractedWindow,
+            extractedWindow.isValid,
+            matches.contains(where: { $0.windowID == extractedWindow.windowID })
+        {
+            refreshedSessions[session.index].extractedWindow = ExtractedBrowserWindowMapping(
+                targetURL: session.prefix, windowID: extractedWindow.windowID, isValid: true)
+            return extractedWindow.windowID
+        }
+        guard let firstMatch = matches.first else { return nil }
+        guard let extractedWindowID = try chrome.extractTabToWindow(windowID: firstMatch.windowID, tabIndex: firstMatch.tabIndex) else { return nil }
+        refreshedSessions[session.index].extractedWindow = ExtractedBrowserWindowMapping(
+            targetURL: session.prefix, windowID: extractedWindowID, isValid: true)
+        return extractedWindowID
+    }
+
+    private func focusExtractedBrowserWindow(workspaceID: String, targetURL: String) throws -> ExtractedBrowserFocusOutcome {
+        let (project, workspace) = try resolveWorkspace(id: workspaceID)
+        let sessions = try store.workspaceBrowserSessions(workspaceID: workspace.id)
+        guard !sessions.isEmpty else { return .notMapped }
+        let env = buildWorkspaceEnv(project: project, workspace: workspace, namedPorts: try store.workspacePortsNamed(workspaceID: workspace.id))
+        let resolvedSessions = resolveBrowserSessions(sessions, env: env)
+        guard !resolvedSessions.isEmpty else { return .notMapped }
+
+        guard
+            let matchedSession = resolvedSessions
+                .filter({ targetURL.hasPrefix($0.prefix) })
+                .max(by: { $0.prefix.count < $1.prefix.count }),
+            let extractedWindow = sessions[matchedSession.index].extractedWindow,
+            extractedWindow.isValid
+        else { return .notMapped }
+
+        let focused = try yabai.focusWindow(id: extractedWindow.windowID)
+        guard focused else {
+            try markExtractedWindowInvalid(workspaceID: workspace.id, sessions: sessions, index: matchedSession.index)
+            return .staleMapping
+        }
+
+        let activeURL = try chrome.frontmostActiveTabURL()
+        guard let activeURL, browserURLMatchesWorkspace(activeURL, browserPrefixes: resolvedSessions.map(\.prefix)) else {
+            try markExtractedWindowInvalid(workspaceID: workspace.id, sessions: sessions, index: matchedSession.index)
+            return .staleMapping
+        }
+        return .focused
+    }
+
+    private func markExtractedWindowInvalid(workspaceID: String, sessions: [BrowserSession], index: Int) throws {
+        guard sessions.indices.contains(index), let extractedWindow = sessions[index].extractedWindow else { return }
+        guard extractedWindow.isValid else { return }
+        var updatedSessions = sessions
+        updatedSessions[index].extractedWindow = ExtractedBrowserWindowMapping(
+            targetURL: extractedWindow.targetURL, windowID: extractedWindow.windowID, isValid: false)
+        try store.setWorkspaceBrowserSessions(workspaceID: workspaceID, sessions: updatedSessions)
     }
 
     private func liveBrowserWindows(workspaceID: String, browserPrefixes: [String], forceRefresh: Bool = false) throws -> [WindowRecord] {
@@ -1412,7 +1494,10 @@ public final class SpaceshipOrchestrator {
         }
         guard chrome.isAvailable() else { throw SpaceshipError.dependencyMissing(message: "Google Chrome is required for browser sessions.") }
         let snapshot = try yabai.listWindows()
-        let attached = try ensureBrowserSessions(project: project, workspace: workspace, sessions: sessions, env: env)
+        let browserSessionResult = try ensureBrowserSessions(
+            project: project, workspace: workspace, sessions: sessions, env: env, extractOnAttach: false)
+        try store.setWorkspaceBrowserSessions(workspaceID: workspace.id, sessions: browserSessionResult.sessions)
+        let attached = browserSessionResult.windows
         let attachedIDs = Set(attached.compactMap { $0.windowID })
         let capturedRaw = try captureNewWindows(
             snapshot: snapshot, role: "browser", appName: "Google Chrome", workspaceID: workspace.id, orderOffset: 0)
@@ -1563,21 +1648,31 @@ public final class SpaceshipOrchestrator {
 
     }
 
-    private func ensureBrowserSessions(project: ProjectRecord, workspace: WorkspaceRecord, sessions: [BrowserSession], env: [String: String]) throws
-        -> [WindowRecord]
+    private func ensureBrowserSessions(
+        project: ProjectRecord, workspace: WorkspaceRecord, sessions: [BrowserSession], env: [String: String], extractOnAttach: Bool
+    ) throws -> (windows: [WindowRecord], sessions: [BrowserSession])
     {
         _ = project
-        guard !sessions.isEmpty else { return [] }
+        guard !sessions.isEmpty else { return ([], []) }
         guard chrome.isAvailable() else { throw SpaceshipError.dependencyMissing(message: "Google Chrome is required for browser sessions.") }
+        let resolvedSessions = resolveBrowserSessions(sessions, env: env)
         var attached: [WindowRecord] = []
+        var refreshedSessions = sessions
         var seenKeys = Set<String>()
-        for session in sessions {
-            guard let rawURL = session.url, !rawURL.isEmpty else { continue }
-            let resolved = applyEnvVars(rawURL, env: env)
-            var matches = try chrome.windowMatches(forURLPrefix: resolved)
+        for resolvedSession in resolvedSessions {
+            var matches = try chrome.windowMatches(forURLPrefix: resolvedSession.prefix)
             if matches.isEmpty {
-                _ = try chrome.openWindow(url: resolved)
-                matches = try chrome.windowMatches(forURLPrefix: resolved)
+                _ = try chrome.openWindow(url: resolvedSession.prefix)
+                matches = try chrome.windowMatches(forURLPrefix: resolvedSession.prefix)
+            }
+            if extractOnAttach,
+                let extractedWindowID = try extractSessionWindowIfNeeded(
+                    session: resolvedSession, matches: matches, refreshedSessions: &refreshedSessions)
+            {
+                let extractedMatches = try chrome.windowMatches(forURLPrefix: resolvedSession.prefix).filter { $0.windowID == extractedWindowID }
+                if !extractedMatches.isEmpty {
+                    matches = extractedMatches
+                }
             }
             for match in matches {
                 let key = "browser:\(match.windowID):\(match.url)"
@@ -1589,17 +1684,18 @@ public final class SpaceshipOrchestrator {
                         windowID: match.windowID, role: "browser", orderIndex: attached.count, lastSeenAt: nowISO8601()))
             }
             if !matches.isEmpty { continue }
-            if (try? chrome.focusTab(forURLPrefix: resolved)) ?? false, let focused = try? yabai.focusedWindow(), focused.app == "Google Chrome" {
-                let key = "browser:\(focused.id):\(resolved)"
+            if (try? chrome.focusTab(forURLPrefix: resolvedSession.prefix)) ?? false, let focused = try? yabai.focusedWindow(), focused.app == "Google Chrome" {
+                let key = "browser:\(focused.id):\(resolvedSession.prefix)"
                 if seenKeys.contains(key) { continue }
                 seenKeys.insert(key)
                 attached.append(
                     WindowRecord(
-                        id: UUID().uuidString, workspaceID: workspace.id, app: focused.app, title: focused.title, targetURL: resolved,
+                        id: UUID().uuidString, workspaceID: workspace.id, app: focused.app, title: focused.title,
+                        targetURL: resolvedSession.prefix,
                         windowID: focused.id, role: "browser", orderIndex: attached.count, lastSeenAt: nowISO8601()))
             }
         }
-        return attached
+        return (attached, refreshedSessions)
     }
 
     private func captureNewWindows(snapshot: [YabaiWindow], role: String, appName: String, workspaceID: String, orderOffset: Int) throws

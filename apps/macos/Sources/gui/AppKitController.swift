@@ -113,6 +113,13 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         !projectHasUnsavedChanges && !workspaceHasUnsavedChanges && !isTextInputFocused()
     }
 
+    private enum WorkspaceLifecycleAction {
+        case launch
+        case restart
+        case stop
+        case archive
+    }
+
     nonisolated private static func refreshWorkspaceWindowsSnapshot() async -> Result<Void, Error> {
         await Task.detached(priority: .utility) {
             do {
@@ -122,6 +129,31 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 let configStore = ConfigStore(path: configPath)
                 let orchestrator = SpaceshipOrchestrator(store: store, configStore: configStore)
                 try orchestrator.refreshAllWorkspaceWindows()
+                return .success(())
+            } catch {
+                return .failure(error)
+            }
+        }.value
+    }
+
+    nonisolated private static func runWorkspaceLifecycleAction(_ action: WorkspaceLifecycleAction, workspaceID: String) async -> Result<Void, Error> {
+        await Task.detached(priority: .userInitiated) {
+            do {
+                let db = try DatabaseLocator.defaultPath()
+                let configPath = try ConfigStore.defaultPath()
+                let store = try SQLiteStore(path: db)
+                let configStore = ConfigStore(path: configPath)
+                let orchestrator = SpaceshipOrchestrator(store: store, configStore: configStore)
+                switch action {
+                case .launch:
+                    try orchestrator.launchWorkspace(workspaceID: workspaceID)
+                case .restart:
+                    try orchestrator.restartWorkspace(workspaceID: workspaceID)
+                case .stop:
+                    try orchestrator.stopWorkspace(workspaceID: workspaceID)
+                case .archive:
+                    try orchestrator.archiveWorkspace(workspaceID: workspaceID)
+                }
                 return .success(())
             } catch {
                 return .failure(error)
@@ -2097,26 +2129,50 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
     @objc private func launchWorkspace(_ sender: NSButton) {
         guard let id = sender.identifier?.rawValue else { return }
-        do {
-            try orchestrator.launchWorkspace(workspaceID: id)
-            reloadData()
-        } catch { showError(error) }
+        sender.isEnabled = false
+        Task { @MainActor [weak self, weak sender] in
+            guard let self else { return }
+            let result = await Self.runWorkspaceLifecycleAction(.launch, workspaceID: id)
+            sender?.isEnabled = true
+            switch result {
+            case .success:
+                reloadData()
+            case .failure(let error):
+                showError(error)
+            }
+        }
     }
 
     @objc private func restartWorkspace(_ sender: NSButton) {
         guard let id = sender.identifier?.rawValue else { return }
-        do {
-            try orchestrator.restartWorkspace(workspaceID: id)
-            reloadData()
-        } catch { showError(error) }
+        sender.isEnabled = false
+        Task { @MainActor [weak self, weak sender] in
+            guard let self else { return }
+            let result = await Self.runWorkspaceLifecycleAction(.restart, workspaceID: id)
+            sender?.isEnabled = true
+            switch result {
+            case .success:
+                reloadData()
+            case .failure(let error):
+                showError(error)
+            }
+        }
     }
 
     @objc private func stopWorkspace(_ sender: NSButton) {
         guard let id = sender.identifier?.rawValue else { return }
-        do {
-            try orchestrator.stopWorkspace(workspaceID: id)
-            reloadData()
-        } catch { showError(error) }
+        sender.isEnabled = false
+        Task { @MainActor [weak self, weak sender] in
+            guard let self else { return }
+            let result = await Self.runWorkspaceLifecycleAction(.stop, workspaceID: id)
+            sender?.isEnabled = true
+            switch result {
+            case .success:
+                reloadData()
+            case .failure(let error):
+                showError(error)
+            }
+        }
     }
 
     @objc private func archiveWorkspace(_ sender: NSButton) {
@@ -2131,10 +2187,18 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         alert.addButton(withTitle: "Cancel")
         let response = alert.runModal()
         guard response == .alertFirstButtonReturn else { return }
-        do {
-            try orchestrator.archiveWorkspace(workspaceID: id)
-            reloadData()
-        } catch { showError(error) }
+        sender.isEnabled = false
+        Task { @MainActor [weak self, weak sender] in
+            guard let self else { return }
+            let result = await Self.runWorkspaceLifecycleAction(.archive, workspaceID: id)
+            sender?.isEnabled = true
+            switch result {
+            case .success:
+                reloadData()
+            case .failure(let error):
+                showError(error)
+            }
+        }
     }
 
     @objc private func copyDirectoryPath(_ sender: NSButton) {

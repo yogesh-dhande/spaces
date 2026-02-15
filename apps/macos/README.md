@@ -77,9 +77,11 @@ Updates to workspace settings apply immediately when the workspace is running (n
 - Git workspace rows also show relative last-modified time (latest tracked-file mtime) and tracked modified-file count.
 - Workspace view includes:
   - Launch/Restart/Stop/Archive buttons
+  - Launch/Restart/Stop/Archive actions run in background tasks so the UI stays responsive during long-running workspace automation
   - Open Editor/Terminal/Finder buttons (editor/terminal windows are tracked for cycling)
   - Workspace window records are refreshed periodically in a background pass so stale closed windows are pruned without blocking interaction
-  - Browser session entries track target URLs and focus the matching Chrome tab during window navigation
+  - Launch/Restart can extract one matching tab per browser session into a dedicated Chrome window and persist extracted-window mappings for faster focus
+  - Browser focus tries extracted-window `yabai` focus first; stale mappings are invalidated and fallback continues via indexed tab focus + URL matching (without automatic re-extraction)
   - Launch/Restart reuses existing matching Chrome tabs and tracks all matches instead of opening duplicate tabs when matches already exist
   - Stop/Restart/browser-session updates close tracked Chrome tabs only and never close full Chrome windows
   - Workspace window list/navigation rebuilds browser rows from Chrome tabs with a 10-second debounce (per workspace/prefix set) and includes tabs whose URLs start with configured browser session URLs (deduped by window+tab URL)
@@ -110,6 +112,11 @@ Hotkeys:
 When text input is focused in the GUI, standard editing shortcuts (including `cmd+v`) are handled normally.
 
 Set `DEBUG=1` when launching spaceship to log browser scan timing and browser-focus path/timing (indexed verify, refresh, cache hits/misses, and URL fallback decisions) to stderr.
+
+Browser switching benchmark:
+- `OrchestratorTests.testBenchmarkChromeIndexedTabFocusVsYabaiWindowFocusForExtractedTabs` compares calibrated indexed-tab switching (~52ms tab-index focus + ~38ms active-tab verification) against extracted-window focus (~42ms `yabai`), and prints average switch timings plus estimated break-even switch count (currently ~15 switches).
+- Run it with:
+  - `scripts/swiftpm.sh test --filter OrchestratorTests/testBenchmarkChromeIndexedTabFocusVsYabaiWindowFocusForExtractedTabs`
 
 ## CLI
 ```bash

@@ -39,10 +39,20 @@ final class StoreTests: XCTestCase {
         XCTAssertEqual(storedChecks[0].onExit, .notify)
         XCTAssertEqual(storedChecks[1].onExit, .restart)
 
-        try store.setWorkspaceBrowserSessions(workspaceID: workspace.id, sessions: [BrowserSession(url: "https://example.com"), BrowserSession()])
+        try store.setWorkspaceBrowserSessions(
+            workspaceID: workspace.id,
+            sessions: [
+                BrowserSession(
+                    url: "https://example.com",
+                    extractedWindow: ExtractedBrowserWindowMapping(targetURL: "https://example.com", windowID: 303, isValid: true)),
+                BrowserSession(),
+            ])
         let sessions = try store.workspaceBrowserSessions(workspaceID: workspace.id)
         XCTAssertEqual(sessions.count, 2)
         XCTAssertEqual(sessions[0].url, "https://example.com")
+        XCTAssertEqual(sessions[0].extractedWindow?.targetURL, "https://example.com")
+        XCTAssertEqual(sessions[0].extractedWindow?.windowID, 303)
+        XCTAssertEqual(sessions[0].extractedWindow?.isValid, true)
         XCTAssertNil(sessions[1].url)
 
         XCTAssertFalse(try store.workspaceSettingsExists(workspaceID: workspace.id))

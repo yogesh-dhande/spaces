@@ -170,6 +170,36 @@ public final class ChromeAdapter {
         return output.isEmpty ? nil : output
     }
 
+    public func extractTabToWindow(windowID: Int, tabIndex: Int) throws -> Int? {
+        let script = """
+            tell application "Google Chrome"
+              set requestedWindowID to "\(windowID)"
+              set requestedTabIndex to \(tabIndex)
+              repeat with w in windows
+                if (id of w as string) is requestedWindowID then
+                  set tabCount to count of tabs of w
+                  if requestedTabIndex < 1 or requestedTabIndex > tabCount then
+                    return ""
+                  end if
+                  set targetTab to tab requestedTabIndex of w
+                  set sourceURL to URL of targetTab
+                  if sourceURL is missing value or sourceURL is "" then
+                    return ""
+                  end if
+                  set newWindow to make new window
+                  set URL of active tab of newWindow to sourceURL
+                  close targetTab
+                  return id of newWindow
+                end if
+              end repeat
+            end tell
+            return ""
+            """
+        let output = try AppleScript.run(script).trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let extractedWindowID = Int(output), extractedWindowID > 0 else { return nil }
+        return extractedWindowID
+    }
+
     public func frontmostActiveTabURL() throws -> String? {
         let script = """
             tell application "Google Chrome"

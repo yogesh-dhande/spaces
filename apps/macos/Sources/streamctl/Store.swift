@@ -3,7 +3,7 @@ import SQLite3
 
 public final class SQLiteStore {
     private let db: OpaquePointer
-    private let schemaVersion = 7
+    private let schemaVersion = 8
 
     public init(path: String) throws {
         var handle: OpaquePointer?
@@ -245,11 +245,17 @@ public final class SQLiteStore {
     public func setWorkspaceBrowserSessions(workspaceID: String, sessions: [BrowserSession]) throws {
         try execute(sql: "DELETE FROM workspace_browser_sessions WHERE workspace_id = ?", bindings: [workspaceID])
         for (index, session) in sessions.enumerated() {
+            let extractedWindowID = session.extractedWindow.map { String($0.windowID) } ?? ""
+            let extractedWindowValid = (session.extractedWindow?.isValid ?? false) ? "1" : "0"
+            let extractedTargetURL = session.extractedWindow?.targetURL ?? ""
             try execute(
                 sql: """
-                    INSERT INTO workspace_browser_sessions(id, workspace_id, url, order_index)
-                    VALUES (?, ?, ?, ?)
-                    """, bindings: [UUID().uuidString, workspaceID, session.url ?? "", String(index)])
+                    INSERT INTO workspace_browser_sessions(id, workspace_id, url, extracted_target_url, extracted_window_id, extracted_window_valid, order_index)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """, bindings: [
+                        UUID().uuidString, workspaceID, session.url ?? "", extractedTargetURL, extractedWindowID, extractedWindowValid,
+                        String(index),
+                    ])
         }
     }
 
@@ -285,12 +291,25 @@ public final class SQLiteStore {
     public func workspaceBrowserSessions(workspaceID: String) throws -> [BrowserSession] {
         let rows = try queryRows(
             sql: """
-                SELECT url
+                SELECT url, extracted_target_url, extracted_window_id, extracted_window_valid
                 FROM workspace_browser_sessions
                 WHERE workspace_id = ?
                 ORDER BY order_index
                 """, bindings: [workspaceID])
-        return rows.map { row in BrowserSession(url: row[0].isEmpty ? nil : row[0]) }
+        return rows.map { row in
+            let url = row[0].isEmpty ? nil : row[0]
+            let extractedTargetURL = row[1]
+            let extractedWindowID = Int(row[2])
+            let extractedWindowValid = row[3] == "1"
+            let extractedWindow: ExtractedBrowserWindowMapping?
+            if let extractedWindowID, !extractedTargetURL.isEmpty {
+                extractedWindow = ExtractedBrowserWindowMapping(
+                    targetURL: extractedTargetURL, windowID: extractedWindowID, isValid: extractedWindowValid)
+            } else {
+                extractedWindow = nil
+            }
+            return BrowserSession(url: url, extractedWindow: extractedWindow)
+        }
     }
 
     public func releaseWorkspacePorts(workspaceID: String) throws {
@@ -529,6 +548,9 @@ public final class SQLiteStore {
               id TEXT PRIMARY KEY,
               workspace_id TEXT NOT NULL,
               url TEXT,
+              extracted_target_url TEXT,
+              extracted_window_id INTEGER,
+              extracted_window_valid INTEGER NOT NULL DEFAULT 0,
               order_index INTEGER NOT NULL
             );
 

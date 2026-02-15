@@ -1248,6 +1248,57 @@ final class OrchestratorTests: XCTestCase {
         }
     }
 
+    func testLaunchWorkspaceExtractsBrowserSessionIntoDedicatedWindowAndPersistsMapping() throws {
+        let (orchestrator, store, _, workspace, root) = try makeOrchestratorWithWorkspace()
+        let extractLog = root.appendingPathComponent("chrome-extract.log")
+        try store.setWorkspaceBrowserSessions(workspaceID: workspace.id, sessions: [BrowserSession(url: "http://localhost:3001")])
+        let chromeMatches = "888\tGoogle Chrome — localhost 3001\thttp://localhost:3001\n"
+
+        try withMockCommands(["yabai": Self.orchestratorYabaiMockScript, "osascript": Self.orchestratorOsaScriptMock]) {
+            try withEnv(name: "MOCK_CHROME_WINDOW_MATCHES", value: chromeMatches) {
+                try withEnv(name: "MOCK_CHROME_EXTRACT_WINDOW_ID", value: "888") {
+                    try withEnv(name: "MOCK_CHROME_EXTRACT_LOG_FILE", value: extractLog.path) {
+                        try orchestrator.launchWorkspace(workspaceID: workspace.id)
+                    }
+                }
+            }
+        }
+
+        let sessions = try store.workspaceBrowserSessions(workspaceID: workspace.id)
+        XCTAssertEqual(sessions.first?.extractedWindow?.windowID, 888)
+        XCTAssertEqual(sessions.first?.extractedWindow?.isValid, true)
+        let extractedEvents = try String(contentsOf: extractLog).split(separator: "\n").map(String.init)
+        XCTAssertEqual(extractedEvents, ["888\t1"])
+    }
+
+    func testFocusWorkspaceWindowMarksStaleExtractedMappingInvalidAndFallsBackToIndexedTabFocus() throws {
+        let (orchestrator, store, _, workspace, root) = try makeOrchestratorWithWorkspace()
+        let chromeFocusLog = root.appendingPathComponent("chrome-stale-fallback.log")
+        try store.setWorkspaceBrowserSessions(
+            workspaceID: workspace.id,
+            sessions: [
+                BrowserSession(
+                    url: "http://localhost:3001",
+                    extractedWindow: ExtractedBrowserWindowMapping(targetURL: "http://localhost:3001", windowID: 999, isValid: true)),
+            ])
+        let chromeMatches = "202\tGoogle Chrome — localhost 3001\thttp://localhost:3001\n"
+
+        try withMockCommands(["yabai": Self.orchestratorYabaiMockScript, "osascript": Self.orchestratorOsaScriptMock]) {
+            try withEnv(name: "MOCK_CHROME_WINDOW_MATCHES", value: chromeMatches) {
+                try withEnv(name: "MOCK_CHROME_FOCUS_LOG_FILE", value: chromeFocusLog.path) {
+                    try withEnv(name: "MOCK_CHROME_TAB_INDEX_ACTIVE_URL", value: "http://localhost:3001") {
+                        try orchestrator.focusWorkspaceWindow(workspaceID: workspace.id, index: 1)
+                    }
+                }
+            }
+        }
+
+        let refreshedSessions = try store.workspaceBrowserSessions(workspaceID: workspace.id)
+        XCTAssertEqual(refreshedSessions.first?.extractedWindow?.isValid, false)
+        let focusURLs = try String(contentsOf: chromeFocusLog).split(separator: "\n").map(String.init)
+        XCTAssertEqual(focusURLs.last, "http://localhost:3001")
+    }
+
     func testWorkspaceIDForFocusedWindowMapsFromYabai() throws {
         let (orchestrator, store, _, workspace, _) = try makeOrchestratorWithWorkspace()
         try store.upsert(
@@ -1865,6 +1916,14 @@ final class OrchestratorTests: XCTestCase {
         # Residual risk: real yabai output and timing can differ significantly under live desktops.
         args="$*"
 
+        sleep_ms() {
+          local value="$1"
+          if [[ -z "$value" || "$value" == "0" ]]; then
+            return
+          fi
+          perl -e "select(undef, undef, undef, $value / 1000);"
+        }
+
         focused_id="${YABAI_FOCUSED_ID:-101}"
         focused_app="${YABAI_FOCUSED_APP:-iTerm2}"
         focused_title="${YABAI_FOCUSED_TITLE:-focused}"
@@ -1904,6 +1963,7 @@ final class OrchestratorTests: XCTestCase {
             echo "focus failed" >&2
             exit 1
           fi
+          sleep_ms "${MOCK_YABAI_FOCUS_DELAY_MS:-0}"
           if [[ -n "${YABAI_FOCUS_LOG_FILE:-}" ]]; then
             echo "$id" >> "$YABAI_FOCUS_LOG_FILE"
           fi
@@ -1952,6 +2012,14 @@ final class OrchestratorTests: XCTestCase {
           printf '%s\n' "$source" | grep -Eo 'if id of w is [0-9]+ then' | awk '{print $6}' | head -n1
         }
 
+        sleep_ms() {
+          local value="$1"
+          if [[ -z "$value" || "$value" == "0" ]]; then
+            return
+          fi
+          perl -e "select(undef, undef, undef, $value / 1000);"
+        }
+
         if [[ "$script" == *'tell application "iTerm2" to version'* ]]; then
           if [[ "${MOCK_ITERM_UNAVAILABLE:-}" == "1" ]]; then
             echo "iTerm2 unavailable" >&2
@@ -1987,6 +2055,7 @@ final class OrchestratorTests: XCTestCase {
         fi
 
         if [[ "$script" == *'set output to ""'* ]]; then
+          sleep_ms "${MOCK_CHROME_SCAN_DELAY_MS:-0}"
           if [[ -n "${MOCK_CHROME_SCAN_LOG_FILE:-}" ]]; then
             echo "scan" >> "$MOCK_CHROME_SCAN_LOG_FILE"
           fi
@@ -2013,7 +2082,19 @@ final class OrchestratorTests: XCTestCase {
           exit 0
         fi
 
+        if [[ "$script" == *'set targetTab to tab requestedTabIndex of w'* ]]; then
+          sleep_ms "${MOCK_CHROME_EXTRACT_DELAY_MS:-0}"
+          requested_tab_index="$(printf '%s\n' "$script" | grep -Eo 'set requestedTabIndex to [0-9]+' | awk '{print $4}' | head -n1)"
+          focused_window_id="$(extract_window_id "$script")"
+          if [[ -n "${MOCK_CHROME_EXTRACT_LOG_FILE:-}" ]]; then
+            echo "${focused_window_id:-*}\t${requested_tab_index:-0}" >> "$MOCK_CHROME_EXTRACT_LOG_FILE"
+          fi
+          echo "${MOCK_CHROME_EXTRACT_WINDOW_ID:-888}"
+          exit 0
+        fi
+
         if [[ "$script" == *'set requestedTabIndex to'* ]]; then
+          sleep_ms "${MOCK_CHROME_TAB_INDEX_DELAY_MS:-0}"
           requested_tab_index="$(printf '%s\n' "$script" | grep -Eo 'set requestedTabIndex to [0-9]+' | awk '{print $4}' | head -n1)"
           focused_window_id="$(extract_window_id "$script")"
           if [[ -n "${MOCK_CHROME_TAB_INDEX_LOG_FILE:-}" ]]; then
@@ -2078,6 +2159,7 @@ final class OrchestratorTests: XCTestCase {
         fi
 
         if [[ "$script" == *'URL of active tab of front window'* ]]; then
+          sleep_ms "${MOCK_CHROME_ACTIVE_URL_DELAY_MS:-0}"
           if [[ -n "$chrome_active_url_file" && -f "$chrome_active_url_file" ]]; then
             cat "$chrome_active_url_file"
           else

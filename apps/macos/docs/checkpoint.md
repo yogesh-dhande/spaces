@@ -18,7 +18,11 @@
 - Live browser row focus now targets cached `(window_id, tab_index)` first, validates focused active-tab URL against workspace prefixes, refreshes the scan once on mismatch, and then falls back to URL matching if needed.
 - Window-scoped Chrome AppleScript operations now compare window IDs as strings to keep tab focus/close matching reliable.
 - Browser tab rows are emitted in deterministic order (browser-session prefix order, then URL) so displayed `cmd+<n>` hints map to stable targets.
-- Stop/restart/settings reconciliation now close tracked Chrome tabs by URL prefix and do not close full Chrome windows.
+- Browser sessions now persist an optional extracted-window mapping (`extracted_target_url`, `extracted_window_id`, `extracted_window_valid`) used for fast extracted-window focus.
+- Workspace launch/restart now supports one-time browser tab extraction into dedicated Chrome windows and persists extracted window mappings in workspace settings.
+- Browser focus now attempts extracted-window `yabai` focus first; when extracted windows are missing or active-tab verification fails, mappings are marked stale (`is_valid=false`) and focus falls back to indexed tab + URL matching without automatic re-extraction.
+- Added a benchmark harness (`OrchestratorTests.testBenchmarkChromeIndexedTabFocusVsYabaiWindowFocusForExtractedTabs`) with calibrated delays (indexed path ~52ms tab-index + ~38ms verify, extracted path ~42ms yabai focus); current benchmark profile reports an estimated break-even near 15 switches.
+- GUI launch/restart/stop/archive actions now run lifecycle orchestration in detached background tasks so the AppKit interface remains responsive during long-running workspace automation.
 - Window cycling order is now grouped as browser tabs, then terminals, then other roles; once cycling starts, navigation uses the remembered index for deterministic forward/backward traversal.
 - `DEBUG=1` enables stderr timing logs for both Chrome tab scans (tab count, match count, elapsed ms) and indexed focus verification/cache/refresh/fallback behavior.
 - Window cycling keeps a workspace-local navigation pointer but resolves Chrome entries using the currently active frontmost tab URL when multiple tracked tabs share one window.
@@ -59,7 +63,7 @@
 - Named port env vars are available in setup scripts, stop scripts, process commands, and status check commands.
 - Port allocation now happens before the setup script so env vars are available during setup.
 - `PortAllocator.allocatePorts` accepts `definitions: [PortDefinition]` instead of a fixed count; `buildWorkspaceEnv` uses named port keys.
-- Schema v7: `workspace_ports` table gains `port_name` column; new `workspace_port_definitions` table stores per-workspace port definitions.
+- Schema v8: `workspace_browser_sessions` gains extracted-window mapping columns (`extracted_target_url`, `extracted_window_id`, `extracted_window_valid`).
 - GUI: `PortEditor` provides an inline editor for port definitions in project detail, add-project form, and workspace settings.
 
 ## Accomplished

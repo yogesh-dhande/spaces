@@ -89,6 +89,10 @@
         - fields
             - project: Project
             - url: optional[str], if specified, used to open a browser at workspace launch
+            - extracted_window: optional[object], persisted runtime mapping with fields:
+                - target_url: str, resolved browser-session URL prefix used for extraction
+                - window_id: int, extracted dedicated Chrome window ID
+                - is_valid: bool, false when stale mapping is detected and disabled
         - behavior
             - Project templates stored in yaml config
             - Workspace copies stored in db and editable per workspace
@@ -117,18 +121,28 @@
         - behavior
             - A workspace may be backed by a git worktree, but workspace is a higher-level spaceship concept
             - stored in db
-            - a workspace can be created, launched, closed, deleted
-            - when created
-                - create a git worktree and use its path as workspace directory. all commands will be run from this path
-                - worktrees should be stored in /users/<username>/spaceship/workspaces/<projectname>/<dirname>
-                - run the setup script defined by the project once
-                - snapshot project stop script, processes, status checks, and browser sessions into workspace settings in the db
-                - each workspace gets ports reserved based on named port definitions from the project (e.g. `FRONTEND_PORT`, `API_PORT`)
-                    - Port definitions are configured at the project level in YAML and inherited by workspaces; workspaces can override definitions
-                    - Ports are OS-reserved via sockets (PortReserver) so no other process can claim them
-                    - Ports are allocated from a configurable base range (e.g. 20000–30000), tracked in db
-                    - Ports remain reserved for a workspace until it is archived
-                    - Port allocation happens before setup script so named port env vars are available in setup scripts
+            - Workspace detail includes actions
+                - Launch/Restart/Stop/Archive
+                - Open Editor/Terminal/Finder
+                - lifecycle actions (launch/restart/stop/archive) run off the main UI thread; disable the clicked action until completion so the GUI stays responsive during long-running automation
+            - Forms
+                - In-place editors for project and workspace data
+        - when created
+            - create a git worktree using this precedence for the supplied branch name:
+                - if the branch exists locally, create the worktree from the local branch as-is (no implicit pull/rebase/merge)
+                - else if the branch exists on origin, fetch that branch tip into a local remote-tracking ref and create the worktree from `origin/<branch>`
+                - else create a new branch with that name from the selected target branch tip
+            - target branch resolution for creating a new branch:
+                - if target exists on origin, fetch that target branch and use `origin/<target>`
+                - else if target exists locally, use local target branch
+                - else fail with a clear "target branch not found" error
+            - when a branch exists both locally and on origin, local branch is the source of truth for workspace creation by default
+                - rationale: avoid mutating user branches during workspace creation
+                - tradeoff: local branch may be behind remote until user syncs manually
+            - each workspace gets ports reserved based on named port definitions from the project (e.g. `FRONTEND_PORT`, `API_PORT`)
+                - Ports are allocated from a configurable base range (e.g. 20000–30000), tracked in db
+                - Ports remain reserved for a workspace until it is archived
+                - Port allocation happens before setup script so named port env vars are available in setup scripts
             - when launched
                 - start processes defined by the workspace in their own terminal windows. keep track of these windows so they can be focused later when lopping this this workspace’s windows
                 - ensure that browser tabs for the browser sessions defined for the workspace are open, and if not, open them. keep track of them so they can be focused later when lopping this this workspace’s windows
@@ -227,13 +241,15 @@
             - browser session mapping/focus must rely on URL matching, not window-title matching
             - browser cleanup must close matching tabs only; never close an entire browser window
             - if matching tabs already exist, reuse them and include all URL-prefix matches in workspace window cycling instead of opening duplicates
+            - during launch/restart only, extract one matching tab per browser session into a dedicated Chrome window and persist the extracted `window_id`
+            - during focus, try extracted-window `yabai` focus first; if focus fails or active tab URL verification fails, mark mapping stale (`is_valid=false`) and fall back to indexed tab focus and URL-based focus (no automatic re-extraction during fallback)
             - when multiple workspaces track tabs in the same Chrome window, global next/previous shortcuts must resolve the workspace by window id plus active tab URL match (not window id alone)
             - workspace window listing/navigation should rebuild browser rows from Chrome tabs with a configurable debounce interval (default: 10 seconds, see `PollingConstants.browserWindowScanDebounceInterval`) per workspace/prefix set, and include tabs where tab URL starts with any browser session URL
             - if a tab matches multiple browser session URLs, include it once in the cycle/list (dedupe by window + tab URL)
             - browser tab ordering in the list/cycle should be deterministic: browser session definition order first, then tab URL
             - when browser rows come from a live scan, tab focus should target cached tab index first, then verify the focused active tab URL belongs to the workspace; refresh the live scan once if it does not, then fall back to URL matching if still stale
             - window-scoped Chrome focus/close AppleScript checks should compare window id as string for reliable matching against Chrome's window-id type
-        - spaceship keeps track of all windows belonging to each workspace so users can easily loop through them (focus them one by one by using keyboard shortcuts)
+            - benchmark target for real-world parity: indexed tab focus path includes ~52ms tab-index focus + ~38ms active-tab verification delays, while extracted-window focus path models ~42ms `yabai` focus delay
             - window cycling order should be browser session tabs first, then terminal windows, then other windows
             - after cycling begins, next/previous should continue from remembered cycle position for deterministic traversal
 - GUI
