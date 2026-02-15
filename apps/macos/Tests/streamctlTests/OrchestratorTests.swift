@@ -3,6 +3,10 @@ import XCTest
 @testable import streamctl
 
 final class OrchestratorTests: XCTestCase {
+    func testWorkspaceWindowRefreshIntervalIsPositive() {
+        XCTAssertGreaterThan(PollingConstants.workspaceWindowRefreshInterval, 0)
+    }
+
     func testUpdateEditorPreferencePersistsToConfig() throws {
         let dir = try makeTempDirectory()
         let path = dir.appendingPathComponent("config.yaml").path
@@ -1288,6 +1292,65 @@ final class OrchestratorTests: XCTestCase {
                 }
             }
         }
+    }
+
+    func testRefreshWorkspaceWindowsPrunesStaleRowsAndClearsRunningWhenNoRuntimeIndicatorsRemain() throws {
+        let (orchestrator, store, _, workspace, _) = try makeOrchestratorWithWorkspace()
+        try store.updateWorkspaceRunning(id: workspace.id, isRunning: true, launchedAt: "now")
+        try store.upsert(
+            window: WindowRecord(
+                id: UUID().uuidString, workspaceID: workspace.id, app: "iTerm2", title: "stale", windowID: 909, role: "terminal", orderIndex: 0,
+                lastSeenAt: "now"))
+
+        // Mocked dependency: live yabai window inventory.
+        // Why: verify refresh prunes missing/stale tracked windows and recomputes running state from runtime indicators.
+        // Remaining risk: rapid concurrent open/close events can still race with a single refresh snapshot.
+        try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) {
+            try withEnv(name: "YABAI_WINDOWS_JSON", value: "[]") { try orchestrator.refreshWorkspaceWindows(workspaceID: workspace.id) }
+        }
+
+        XCTAssertTrue(try store.windows(workspaceID: workspace.id).isEmpty)
+        XCTAssertEqual(try store.workspace(id: workspace.id)?.isRunning, false)
+    }
+
+    func testRefreshAllWorkspaceWindowsSkipsArchivedWorkspaces() throws {
+        let root = try makeTempDirectory()
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let configStore = ConfigStore(path: root.appendingPathComponent("config.yaml").path)
+        let store = try makeTemporaryStore()
+        let orchestrator = SpaceshipOrchestrator(store: store, configStore: configStore)
+
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        let defaultWorkspace = try XCTUnwrap(
+            try orchestrator.listWorkspaces(projectID: project.id, includeArchived: false).first(where: { $0.isDefault }))
+        let activeWorkspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
+        let archivedWorkspace = try orchestrator.createWorkspace(projectID: project.id, name: "archived")
+        try orchestrator.archiveWorkspace(workspaceID: archivedWorkspace.id)
+
+        try store.upsert(
+            window: WindowRecord(
+                id: UUID().uuidString, workspaceID: defaultWorkspace.id, app: "iTerm2", title: "default-stale", windowID: 910, role: "terminal",
+                orderIndex: 0, lastSeenAt: "now"))
+        try store.upsert(
+            window: WindowRecord(
+                id: UUID().uuidString, workspaceID: activeWorkspace.id, app: "iTerm2", title: "active-stale", windowID: 911, role: "terminal",
+                orderIndex: 0, lastSeenAt: "now"))
+        try store.upsert(
+            window: WindowRecord(
+                id: UUID().uuidString, workspaceID: archivedWorkspace.id, app: "iTerm2", title: "archived-stale", windowID: 912,
+                role: "terminal", orderIndex: 0, lastSeenAt: "now"))
+
+        // Mocked dependency: live yabai window inventory.
+        // Why: confirm bulk refresh reconciles active workspaces only and leaves archived workspace rows unchanged.
+        // Remaining risk: archived rows are intentionally left untouched until explicit archive/cleanup paths run.
+        try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) {
+            try withEnv(name: "YABAI_WINDOWS_JSON", value: "[]") { try orchestrator.refreshAllWorkspaceWindows() }
+        }
+
+        XCTAssertTrue(try store.windows(workspaceID: defaultWorkspace.id).isEmpty)
+        XCTAssertTrue(try store.windows(workspaceID: activeWorkspace.id).isEmpty)
+        XCTAssertEqual(try store.windows(workspaceID: archivedWorkspace.id).count, 1)
     }
 
     func testListSpaceOptionsSortsByDisplayThenSpace() throws {

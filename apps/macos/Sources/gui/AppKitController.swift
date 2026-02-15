@@ -36,6 +36,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     private var openFinderShortcutSpec: HotkeySpec?
     private var shortcutButtonsBySetting: [String: NSButton] = [:]
     private var activeShortcutCaptureSetting: ShortcutSetting?
+    private var periodicWorkspaceRefreshTask: Task<Void, Never>?
 
     private var configCache: AppConfig?
     private let defaultSplitViewWidth: CGFloat = 360
@@ -77,11 +78,55 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         reloadData()
         setupGlobalHotkey()
         setupShortcutMonitor()
+        startPeriodicWorkspaceWindowRefresh()
     }
 
     public func applicationWillTerminate(_ notification: Notification) {
+        periodicWorkspaceRefreshTask?.cancel()
         teardownGlobalHotkey()
         if let shortcutMonitor { NSEvent.removeMonitor(shortcutMonitor) }
+    }
+
+    private func startPeriodicWorkspaceWindowRefresh() {
+        periodicWorkspaceRefreshTask?.cancel()
+        periodicWorkspaceRefreshTask = Task { [weak self] in
+            guard let self else { return }
+            while !Task.isCancelled {
+                let result = await Self.refreshWorkspaceWindowsSnapshot()
+                if Task.isCancelled { break }
+                switch result {
+                case .success:
+                    if self.canReloadAfterBackgroundWorkspaceRefresh() { self.reloadData() }
+                case .failure(let error):
+                    self.showError(error)
+                }
+                do {
+                    try await Task.sleep(for: .seconds(PollingConstants.workspaceWindowRefreshInterval))
+                } catch {
+                    break
+                }
+            }
+        }
+    }
+
+    private func canReloadAfterBackgroundWorkspaceRefresh() -> Bool {
+        !projectHasUnsavedChanges && !workspaceHasUnsavedChanges && !isTextInputFocused()
+    }
+
+    nonisolated private static func refreshWorkspaceWindowsSnapshot() async -> Result<Void, Error> {
+        await Task.detached(priority: .utility) {
+            do {
+                let db = try DatabaseLocator.defaultPath()
+                let configPath = try ConfigStore.defaultPath()
+                let store = try SQLiteStore(path: db)
+                let configStore = ConfigStore(path: configPath)
+                let orchestrator = SpaceshipOrchestrator(store: store, configStore: configStore)
+                try orchestrator.refreshAllWorkspaceWindows()
+                return .success(())
+            } catch {
+                return .failure(error)
+            }
+        }.value
     }
 
     private func buildWindow() {

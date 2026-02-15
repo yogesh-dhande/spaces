@@ -617,6 +617,24 @@ public final class SpaceshipOrchestrator {
 
     public func windows(workspaceID: String) throws -> [WindowRecord] { try trackedWindows(workspaceID: workspaceID) }
 
+    public func refreshWorkspaceWindows(workspaceID: String) throws {
+        _ = try trackedWindows(workspaceID: workspaceID)
+        try pruneMissingWindows(workspaceID: workspaceID)
+        guard let workspace = try store.workspace(id: workspaceID), workspace.isRunning else { return }
+        let hasRuntimeIndicators = try hasTrackedRuntimeIndicators(workspaceID: workspaceID)
+        if !hasRuntimeIndicators {
+            try store.updateWorkspaceRunning(id: workspaceID, isRunning: false, launchedAt: workspace.lastLaunchedAt)
+            setWindowNavigationIndex(nil, workspaceID: workspaceID)
+        }
+    }
+
+    public func refreshAllWorkspaceWindows() throws {
+        for project in try store.projects() {
+            let workspaces = try store.workspaces(projectID: project.id, includeArchived: false)
+            for workspace in workspaces { try refreshWorkspaceWindows(workspaceID: workspace.id) }
+        }
+    }
+
     public func workspacePorts(workspaceID: String) throws -> [Int] { try store.workspacePorts(workspaceID: workspaceID) }
 
     public func workspacePortsNamed(workspaceID: String) throws -> [(port: Int, name: String)] {

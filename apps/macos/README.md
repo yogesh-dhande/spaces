@@ -78,6 +78,7 @@ Updates to workspace settings apply immediately when the workspace is running (n
 - Workspace view includes:
   - Launch/Restart/Stop/Archive buttons
   - Open Editor/Terminal/Finder buttons (editor/terminal windows are tracked for cycling)
+  - Workspace window records are refreshed periodically in a background pass so stale closed windows are pruned without blocking interaction
   - Browser session entries track target URLs and focus the matching Chrome tab during window navigation
   - Launch/Restart reuses existing matching Chrome tabs and tracks all matches instead of opening duplicate tabs when matches already exist
   - Stop/Restart/browser-session updates close tracked Chrome tabs only and never close full Chrome windows
@@ -97,7 +98,7 @@ Updates to workspace settings apply immediately when the workspace is running (n
 
 Hotkeys:
 - Global focus: `cmd+shift+=`
-  - When this hotkey brings spaceship to front, the selected workspace detail is refreshed so the windows list shows Chrome tab matches from the most recent scan (up to 10 seconds old)
+  - Brings spaceship to front and keeps current window-selection shortcuts active; workspace-window reconciliation runs on the periodic background interval
 - Next running workspace: `cmd+shift+]`
 - Previous running workspace: `cmd+shift+[`
 - Activate selected workspace: `cmd+shift+return`

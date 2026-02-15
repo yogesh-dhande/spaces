@@ -47,7 +47,9 @@
 - Git workspace rows show relative last-modified time (from latest tracked-file mtime) plus tracked modified-file count.
 - Settings view in the GUI lets users pick a preferred editor from installed VS Code, Cursor, or Windsurf; the choice is stored in the YAML config.
 - Settings view in the GUI also allows overriding default shortcuts for global toggle, workspace navigation/activation, and open editor/terminal/Finder; these values are stored in the runtime DB.
-- Window focus shortcuts are `cmd+1` through `cmd+9` while the GUI is focused.
+- Window IDs can become stale across app/desktop changes; stale rows are pruned during reconciliation paths.
+- GUI now runs a periodic detached background refresh loop for all non-archived workspace window records using `PollingConstants.workspaceWindowRefreshInterval`.
+- New orchestrator APIs `refreshWorkspaceWindows` and `refreshAllWorkspaceWindows` reconcile stale window rows via yabai and clear `is_running` when no runtime indicators remain.
 - Bringing spaceship to front with the global toggle hotkey refreshes the selected workspace detail view so the displayed window list reflects the most recent Chrome tab scan (up to 10 seconds old).
 - The local key monitor defers to focused text inputs so standard edit shortcuts like `cmd+v` work in forms.
 - CLI supports config path/show, project list/add/update/remove (including `project add --git-url ...`), workspace list/create/launch/stop/archive/activate, and settings get/set/reset for GUI shortcuts.
@@ -76,7 +78,7 @@
 - Dependency/permission onboarding (detect missing `yabai` or macOS accessibility permissions and guide the user).
 - Periodic status check runner (honor interval/timeout) plus on-exit actions, with GUI status updates.
 - Coding agent detection with idle/busy state tracking and notifications for idle/exited events.
-- Window reconciliation on app restart and possibly also when starting to loop through windows of a workspace (re-scan existing windows, match browser sessions, and map them to workspaces).
+- Window reconciliation on app restart (re-scan existing windows, match browser sessions, and map them to workspaces) for cases where the app has not been focused yet.
 
 ## Polish
 - Auto-update system (Sparkle) with signed releases and staged rollouts.

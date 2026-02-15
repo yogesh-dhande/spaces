@@ -175,6 +175,9 @@
     - Check for required dependencies e.g. yabai. If missing, ask user to install and provide instructions or links to instructions
     - Check for required permissions e.g. accessibility. If missing, ask user to provide using deep links to settings whenever possible. Provide instructions.
     - Once the app is configured appropriately, prompt the user to create their first project
+    - Run a periodic background reconciliation pass for all non-archived workspace windows
+        - this pass should prune stale window records for windows that were manually closed outside spaceship
+        - this pass should not block UI interaction; refresh UI once reconciliation completes
     - User creates a project by either pointing to a local dir or providing a git repository URL
         - if git URL is provided, spaceship clones it to `/Users/<username>/spaceship/projects/<project_name>` where `<project_name>` is derived from the repository name
         - when removing a git project, remove related managed worktrees via `git worktree remove --force`, then delete related workspace directories under `/Users/<username>/spaceship/workspaces`
@@ -261,7 +264,7 @@
         - User can override default keybindings
         - Global hotkey (default: cmd+shift+=) focuses the app
             - If not visible in the currently focused display and space, make it visible in that display and space (that could mean unhiding it, or simply moving it from another display and space)
-            - when focused this way, refresh selected workspace detail so the displayed windows list reflects the most recent Chrome tab scan (up to `PollingConstants.browserWindowScanDebounceInterval` seconds old)
+            - background workspace-window reconciliation runs periodically while the app is active; focus does not synchronously block on refresh
         - Open editor: `cmd+shift+e`, open terminal: `cmd+shift+t`, open Finder: `cmd+shift+f`
         - When spaceship in open and in focus
             - Loop through running workspaces (skips any workspaces that are not launched yet)
