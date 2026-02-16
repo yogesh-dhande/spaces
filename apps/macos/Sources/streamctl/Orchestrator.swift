@@ -639,22 +639,38 @@ public final class SpaceshipOrchestrator {
 
     public func windows(workspaceID: String) throws -> [WindowRecord] { try trackedWindows(workspaceID: workspaceID) }
 
-    public func refreshWorkspaceWindows(workspaceID: String) throws {
+    public struct RefreshResult: Sendable {
+        public let didMutateDB: Bool
+        public let trackedWindowCounts: [String: Int]
+    }
+
+    @discardableResult
+    public func refreshWorkspaceWindows(workspaceID: String) throws -> Bool {
         _ = try trackedWindows(workspaceID: workspaceID)
-        try pruneMissingWindows(workspaceID: workspaceID)
-        guard let workspace = try store.workspace(id: workspaceID), workspace.isRunning else { return }
+        let pruned = try pruneMissingWindows(workspaceID: workspaceID)
+        var didMutate = pruned > 0
+        guard let workspace = try store.workspace(id: workspaceID), workspace.isRunning else { return didMutate }
         let hasRuntimeIndicators = try hasTrackedRuntimeIndicators(workspaceID: workspaceID)
         if !hasRuntimeIndicators {
             try store.updateWorkspaceRunning(id: workspaceID, isRunning: false, launchedAt: workspace.lastLaunchedAt)
             setWindowNavigationIndex(nil, workspaceID: workspaceID)
+            didMutate = true
         }
+        return didMutate
     }
 
-    public func refreshAllWorkspaceWindows() throws {
+    public func refreshAllWorkspaceWindows() throws -> RefreshResult {
+        var didMutate = false
+        var trackedCounts: [String: Int] = [:]
         for project in try store.projects() {
             let workspaces = try store.workspaces(projectID: project.id, includeArchived: false)
-            for workspace in workspaces { try refreshWorkspaceWindows(workspaceID: workspace.id) }
+            for workspace in workspaces {
+                if try refreshWorkspaceWindows(workspaceID: workspace.id) { didMutate = true }
+                let tracked = try trackedWindows(workspaceID: workspace.id)
+                trackedCounts[workspace.id] = tracked.count
+            }
         }
+        return RefreshResult(didMutateDB: didMutate, trackedWindowCounts: trackedCounts)
     }
 
     public func workspacePorts(workspaceID: String) throws -> [Int] { try store.workspacePorts(workspaceID: workspaceID) }
@@ -1535,16 +1551,23 @@ public final class SpaceshipOrchestrator {
         }
     }
 
-    private func pruneMissingWindows(workspaceID: String) throws {
+    @discardableResult
+    private func pruneMissingWindows(workspaceID: String) throws -> Int {
         let existingIDs = Set(try yabai.listWindows().map(\.id))
         let windows = try store.windows(workspaceID: workspaceID)
+        var pruned = 0
         for window in windows {
             guard let id = window.windowID else {
                 try store.deleteWindow(id: window.id)
+                pruned += 1
                 continue
             }
-            if !existingIDs.contains(id) { try store.deleteWindow(id: window.id) }
+            if !existingIDs.contains(id) {
+                try store.deleteWindow(id: window.id)
+                pruned += 1
+            }
         }
+        return pruned
     }
 
     private func windowTrackingKey(_ window: WindowRecord) -> String {

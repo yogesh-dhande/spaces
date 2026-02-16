@@ -37,6 +37,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     private var shortcutButtonsBySetting: [String: NSButton] = [:]
     private var activeShortcutCaptureSetting: ShortcutSetting?
     private var periodicWorkspaceRefreshTask: Task<Void, Never>?
+    private var lastTrackedWindowCounts: [String: Int] = [:]
 
     private var configCache: AppConfig?
     private let defaultSplitViewWidth: CGFloat = 360
@@ -95,8 +96,12 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 let result = await Self.refreshWorkspaceWindowsSnapshot()
                 if Task.isCancelled { break }
                 switch result {
-                case .success:
-                    if self.canReloadAfterBackgroundWorkspaceRefresh() { self.reloadData() }
+                case .success(let refreshResult):
+                    let windowCountsChanged = refreshResult.trackedWindowCounts != self.lastTrackedWindowCounts
+                    self.lastTrackedWindowCounts = refreshResult.trackedWindowCounts
+                    if (refreshResult.didMutateDB || windowCountsChanged) && self.canReloadAfterBackgroundWorkspaceRefresh() {
+                        self.reloadData()
+                    }
                 case .failure(let error):
                     self.showError(error)
                 }
@@ -120,7 +125,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         case archive
     }
 
-    nonisolated private static func refreshWorkspaceWindowsSnapshot() async -> Result<Void, Error> {
+    nonisolated private static func refreshWorkspaceWindowsSnapshot() async -> Result<SpaceshipOrchestrator.RefreshResult, Error> {
         await Task.detached(priority: .utility) {
             do {
                 let db = try DatabaseLocator.defaultPath()
@@ -128,8 +133,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 let store = try SQLiteStore(path: db)
                 let configStore = ConfigStore(path: configPath)
                 let orchestrator = SpaceshipOrchestrator(store: store, configStore: configStore)
-                try orchestrator.refreshAllWorkspaceWindows()
-                return .success(())
+                let result = try orchestrator.refreshAllWorkspaceWindows()
+                return .success(result)
             } catch {
                 return .failure(error)
             }

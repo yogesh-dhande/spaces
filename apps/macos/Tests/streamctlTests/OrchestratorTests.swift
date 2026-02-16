@@ -1419,12 +1419,27 @@ final class OrchestratorTests: XCTestCase {
         // Mocked dependency: live yabai window inventory.
         // Why: verify refresh prunes missing/stale tracked windows and recomputes running state from runtime indicators.
         // Remaining risk: rapid concurrent open/close events can still race with a single refresh snapshot.
+        var didMutate = false
         try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) {
-            try withEnv(name: "YABAI_WINDOWS_JSON", value: "[]") { try orchestrator.refreshWorkspaceWindows(workspaceID: workspace.id) }
+            try withEnv(name: "YABAI_WINDOWS_JSON", value: "[]") { didMutate = try orchestrator.refreshWorkspaceWindows(workspaceID: workspace.id) }
         }
 
+        XCTAssertTrue(didMutate)
         XCTAssertTrue(try store.windows(workspaceID: workspace.id).isEmpty)
         XCTAssertEqual(try store.workspace(id: workspace.id)?.isRunning, false)
+    }
+
+    func testRefreshWorkspaceWindowsReturnsFalseWhenNothingChanged() throws {
+        let (orchestrator, store, _, workspace, _) = try makeOrchestratorWithWorkspace()
+
+        // Workspace is not running and has no tracked windows — nothing to prune or update.
+        var didMutate = true
+        try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) {
+            try withEnv(name: "YABAI_WINDOWS_JSON", value: "[]") { didMutate = try orchestrator.refreshWorkspaceWindows(workspaceID: workspace.id) }
+        }
+
+        XCTAssertFalse(didMutate)
+        XCTAssertTrue(try store.windows(workspaceID: workspace.id).isEmpty)
     }
 
     func testRefreshAllWorkspaceWindowsSkipsArchivedWorkspaces() throws {
@@ -1458,13 +1473,40 @@ final class OrchestratorTests: XCTestCase {
         // Mocked dependency: live yabai window inventory.
         // Why: confirm bulk refresh reconciles active workspaces only and leaves archived workspace rows unchanged.
         // Remaining risk: archived rows are intentionally left untouched until explicit archive/cleanup paths run.
+        var result: SpaceshipOrchestrator.RefreshResult?
         try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) {
-            try withEnv(name: "YABAI_WINDOWS_JSON", value: "[]") { try orchestrator.refreshAllWorkspaceWindows() }
+            try withEnv(name: "YABAI_WINDOWS_JSON", value: "[]") { result = try orchestrator.refreshAllWorkspaceWindows() }
         }
+
+        let refreshResult = try XCTUnwrap(result)
+        XCTAssertTrue(refreshResult.didMutateDB)
+        // Archived workspace is excluded from refresh, so its ID should not appear in tracked counts.
+        XCTAssertNil(refreshResult.trackedWindowCounts[archivedWorkspace.id])
+        // Active workspaces had their stale windows pruned, leaving zero tracked windows each.
+        XCTAssertEqual(refreshResult.trackedWindowCounts[defaultWorkspace.id], 0)
+        XCTAssertEqual(refreshResult.trackedWindowCounts[activeWorkspace.id], 0)
 
         XCTAssertTrue(try store.windows(workspaceID: defaultWorkspace.id).isEmpty)
         XCTAssertTrue(try store.windows(workspaceID: activeWorkspace.id).isEmpty)
         XCTAssertEqual(try store.windows(workspaceID: archivedWorkspace.id).count, 1)
+    }
+
+    func testRefreshAllWorkspaceWindowsReportsNoMutationWhenNothingChanged() throws {
+        let (orchestrator, _, _, _, _) = try makeOrchestratorWithWorkspace()
+
+        // No tracked windows and workspace is not running — refresh should report no DB mutation.
+        var result: SpaceshipOrchestrator.RefreshResult?
+        try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) {
+            try withEnv(name: "YABAI_WINDOWS_JSON", value: "[]") { result = try orchestrator.refreshAllWorkspaceWindows() }
+        }
+
+        let refreshResult = try XCTUnwrap(result)
+        XCTAssertFalse(refreshResult.didMutateDB)
+        // All non-archived workspaces should still appear in tracked counts (with zero windows).
+        XCTAssertFalse(refreshResult.trackedWindowCounts.isEmpty)
+        for (_, count) in refreshResult.trackedWindowCounts {
+            XCTAssertEqual(count, 0)
+        }
     }
 
     func testListSpaceOptionsSortsByDisplayThenSpace() throws {
