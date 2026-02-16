@@ -60,6 +60,7 @@ GUI interaction notes:
 - Status checks are configured inline under each process in the `ProcessEditor` rather than in a separate form section; the process name is implicit from the parent row.
 - The run tab displays status check results as indented sub-rows under each process with colored dots (green/red) instead of inline badge text.
 - Keyboard shortcut overrides for GUI actions are persisted in SQLite settings and editable in the GUI Settings view and CLI settings commands.
+- The app provides a standard Edit menu with Copy (Cmd+C) and Select All (Cmd+A) for system clipboard support in read-only text views.
 
 ## Data Model
 Config file:

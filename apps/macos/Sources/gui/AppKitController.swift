@@ -76,6 +76,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         }
 
         buildWindow()
+        buildMainMenu()
         reloadData()
         setupGlobalHotkey()
         setupShortcutMonitor()
@@ -164,6 +165,25 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 return .failure(error)
             }
         }.value
+    }
+
+    private func buildMainMenu() {
+        let mainMenu = NSMenu()
+
+        let appMenuItem = NSMenuItem()
+        let appMenu = NSMenu()
+        appMenu.addItem(withTitle: "Quit spaceship", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        appMenuItem.submenu = appMenu
+        mainMenu.addItem(appMenuItem)
+
+        let editMenuItem = NSMenuItem()
+        let editMenu = NSMenu(title: "Edit")
+        editMenu.addItem(withTitle: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
+        editMenu.addItem(withTitle: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
+        editMenuItem.submenu = editMenu
+        mainMenu.addItem(editMenuItem)
+
+        NSApp.mainMenu = mainMenu
     }
 
     private func buildWindow() {
@@ -1231,6 +1251,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         container.translatesAutoresizingMaskIntoConstraints = false
         let envView = NSTextView()
         envView.isEditable = false
+        envView.isSelectable = true
         envView.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
         let namedPorts = (try? orchestrator.workspacePortsNamed(workspaceID: workspace.id)) ?? []
         var lines: [String] = []
