@@ -144,9 +144,9 @@
                 - Ports remain reserved for a workspace until it is archived
                 - Port allocation happens before setup script so named port env vars are available in setup scripts
             - when launched
-                - start processes defined by the workspace in their own terminal windows. keep track of these windows so they can be focused later when lopping this this workspace’s windows
-                - ensure that browser tabs for the browser sessions defined for the workspace are open, and if not, open them. keep track of them so they can be focused later when lopping this this workspace’s windows
-                - open the workspace dir in user’s preferred editor
+                - start processes defined by the workspace in their own terminal windows. keep track of these windows so they can be focused later when looping through this workspace's windows
+                - ensure that browser tabs for the browser sessions defined for the workspace are open, and if not, open them. keep track of them so they can be focused later when looping through this workspace's windows
+                - open the workspace dir in user's preferred editor
                 - if opening the editor reuses an already-open editor window, capture the currently focused editor window and include it in tracked workspace windows for cycling
                 - editor-window tracking should match known editor app-name aliases reported by yabai (for example VS Code may be reported as `Code`)
             - user can open the workspace in the preferred editor, a terminal window, or Finder from the GUI; editor and terminal windows are captured and tracked for window cycling
@@ -242,7 +242,7 @@
             - browser session mapping/focus must rely on URL matching, not window-title matching
             - browser cleanup must close matching tabs only; never close an entire browser window
             - if matching tabs already exist, reuse them and include all URL-prefix matches in workspace window cycling instead of opening duplicates
-            - during launch/restart only, extract one matching tab per browser session into a dedicated Chrome window and persist the extracted `window_id`
+            - during launch/restart only, extract one matching tab per browser session into a dedicated Chrome window and persist the extracted `window_id` **only when reusing existing tabs** (not when creating new windows for new sessions)
             - during focus, try extracted-window `yabai` focus first; if focus fails or active tab URL verification fails, mark mapping stale (`is_valid=false`) and fall back to indexed tab focus and URL-based focus (no automatic re-extraction during fallback)
             - when multiple workspaces track tabs in the same Chrome window, global next/previous shortcuts must resolve the workspace by window id plus active tab URL match (not window id alone)
             - workspace window listing/navigation should rebuild browser rows from Chrome tabs with a configurable debounce interval (default: 10 seconds, see `PollingConstants.browserWindowScanDebounceInterval`) per workspace/prefix set, and include tabs where tab URL starts with any browser session URL
@@ -251,7 +251,7 @@
             - when browser rows come from a live scan, tab focus should target cached tab index first, then verify the focused active tab URL belongs to the workspace; refresh the live scan once if it does not, then fall back to URL matching if still stale
             - window-scoped Chrome focus/close AppleScript checks should compare window id as string for reliable matching against Chrome's window-id type
             - benchmark target for real-world parity: indexed tab focus path includes ~52ms tab-index focus + ~38ms active-tab verification delays, while extracted-window focus path models ~42ms `yabai` focus delay
-            - window cycling order should be browser session tabs first, then terminal windows, then other windows
+            - window display order in GUI should be browser session tabs first, then terminal windows, then other windows
             - after cycling begins, next/previous should continue from remembered cycle position for deterministic traversal
 - GUI
     - Layout
