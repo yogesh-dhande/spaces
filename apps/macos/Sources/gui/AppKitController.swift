@@ -171,8 +171,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let mainMenu = NSMenu()
 
         let appMenuItem = NSMenuItem()
-        let appMenu = NSMenu()
-        appMenu.addItem(withTitle: "Quit spaceship", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        let appMenu = NSMenu(title: "Spaceship")
+        appMenu.addItem(withTitle: "Quit Spaceship", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         appMenuItem.submenu = appMenu
         mainMenu.addItem(appMenuItem)
 
@@ -189,7 +189,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     private func buildWindow() {
         let rect = NSRect(x: 200, y: 200, width: 1100, height: 700)
         window = NSWindow(contentRect: rect, styleMask: [.titled, .resizable, .closable], backing: .buffered, defer: false)
-        window.title = "spaceship"
+        window.title = "Spaceship"
         window.center()
         window.delegate = self
 

@@ -16,7 +16,7 @@ Key invariants:
 ```mermaid
 flowchart LR
   cli["spaceship (CLI)"] --> stream["streamctl"]
-  guiapp["spaceship-app (App entrypoint)"] --> gui["gui (AppKit UI)"]
+  guiapp["SpaceshipApp (App entrypoint)"] --> gui["gui (AppKit UI)"]
   gui --> stream
 
   stream --> config["YAML config"]
@@ -35,9 +35,9 @@ Module responsibilities:
 - `streamctl`: Orchestration, config normalization, named port allocation (via `PortAllocator` and `PortReserver`), workspace lifecycle, and persistence.
 - `gui`: AppKit UI library that calls into `streamctl`.
 - `spaceship`: CLI entrypoint that calls into `streamctl`.
-- `spaceship-app`: GUI executable entrypoint that wires `NSApplication` to the `gui` library.
+- `SpaceshipApp`: GUI executable entrypoint that wires `NSApplication` to the `gui` library.
 
-The `gui` target is the reusable UI library. `spaceship-app` is the minimal executable that boots AppKit and delegates to `gui`.
+The `gui` target is the reusable UI library. `SpaceshipApp` is the minimal executable that boots AppKit and delegates to `gui`.
 
 GUI interaction notes:
 - Right-pane forms are hosted in a scroll view so long forms do not clip at smaller window heights.

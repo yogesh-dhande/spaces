@@ -11,7 +11,7 @@ let package = Package(
         .library(name: "streamctl", targets: ["streamctl"]),
         .library(name: "gui", targets: ["gui"]),
         .executable(name: "spaceship", targets: ["spaceship"]),
-        .executable(name: "spaceship-app", targets: ["spaceship-app"])
+        .executable(name: "SpaceshipApp", targets: ["SpaceshipApp"])
     ],
     dependencies: [
         .package(url: "https://github.com/jpsim/Yams.git", from: "5.1.3")
@@ -28,7 +28,18 @@ let package = Package(
         ),
         .target(name: "gui", dependencies: ["streamctl"]),
         .executableTarget(name: "spaceship", dependencies: ["streamctl", "appctl"]),
-        .executableTarget(name: "spaceship-app", dependencies: ["gui"]),
+        .executableTarget(
+            name: "SpaceshipApp",
+            dependencies: ["gui"],
+            linkerSettings: [
+                .unsafeFlags([
+                    "-Xlinker", "-sectcreate",
+                    "-Xlinker", "__TEXT",
+                    "-Xlinker", "__info_plist",
+                    "-Xlinker", "Sources/SpaceshipApp/Info.plist"
+                ])
+            ]
+        ),
         .testTarget(name: "streamctlTests", dependencies: ["streamctl", "appctl"]),
         .testTarget(name: "guiTests", dependencies: ["gui"])
     ]
