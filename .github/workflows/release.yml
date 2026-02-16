@@ -1,0 +1,77 @@
+# Build, sign, package, and publish a Muxy release when a version tag is pushed.
+#
+# Trigger: push a tag matching v* (e.g. v0.3.0)
+#
+# Optional secrets:
+#   CODESIGN_IDENTITY - Developer ID Application certificate name for code signing.
+#                       Falls back to ad-hoc signing when unset.
+#   APPLE_ID          - Apple ID email for notarization (requires all three notarization secrets).
+#   TEAM_ID           - Apple Developer Team ID for notarization.
+#   APP_PASSWORD      - App-specific password for notarization.
+
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: macos-15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Resolve SwiftPM dependencies
+        working-directory: apps/macos
+        run: swift package resolve
+
+      - name: Build release
+        working-directory: apps/macos
+        run: swift build -c release
+
+      - name: Extract version from tag
+        id: version
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Code sign binaries
+        env:
+          CODESIGN_IDENTITY: ${{ secrets.CODESIGN_IDENTITY }}
+        run: |
+          scripts/codesign.sh \
+            apps/macos/.build/release/MuxyApp \
+            apps/macos/.build/release/muxy
+
+      - name: Package zip
+        run: |
+          staging=$(mktemp -d)
+          cp apps/macos/.build/release/MuxyApp "$staging/"
+          cp apps/macos/.build/release/muxy "$staging/"
+          zip_name="MuxyApp-${{ steps.version.outputs.version }}-macos.zip"
+          (cd "$staging" && zip -q "$GITHUB_WORKSPACE/$zip_name" MuxyApp muxy)
+          echo "ZIP_NAME=$zip_name" >> "$GITHUB_ENV"
+
+      - name: Notarize (optional)
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          TEAM_ID: ${{ secrets.TEAM_ID }}
+          APP_PASSWORD: ${{ secrets.APP_PASSWORD }}
+        if: ${{ env.APPLE_ID != '' && env.TEAM_ID != '' && env.APP_PASSWORD != '' }}
+        run: |
+          xcrun notarytool submit "$ZIP_NAME" \
+            --apple-id "$APPLE_ID" \
+            --team-id "$TEAM_ID" \
+            --password "$APP_PASSWORD" \
+            --wait
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" "$ZIP_NAME" \
+            --title "Muxy ${{ steps.version.outputs.version }}" \
+            --generate-notes

@@ -71,17 +71,21 @@ export default function HomePage() {
             </p>
             <div className="flex flex-wrap gap-3">
               <a
+                href="https://github.com/yogesh-dhande/agentmux/releases/latest"
+                className="btn-primary rounded-full px-5 py-2.5 text-sm font-semibold transition-colors cursor-pointer"
+                target="_blank"
+                rel="noopener noreferrer"
+              >
+                Download
+              </a>
+              <a
                 href="#solution"
-                className="btn-primary rounded-full px-5 py-2.5 text-sm font-semibold transition-colors"
+                className="rounded-full border border-line px-5 py-2.5 text-sm font-semibold transition-colors hover:border-accent hover:text-accent"
+
               >
                 See How It Works
               </a>
-              <Link
-                href="/docs"
-                className="rounded-full border border-line px-5 py-2.5 text-sm font-semibold transition-colors hover:border-accent hover:text-accent"
-              >
-                Read Docs
-              </Link>
+
             </div>
           </div>
           <ParallelStackIllustration />
@@ -255,18 +259,18 @@ export default function HomePage() {
             hunting, app hopping, port conflicts, and accidental interruptions.
           </p>
           <div className="mt-6 flex flex-wrap justify-center gap-3">
-            <Link
-              href="/docs"
+            <a
+              href="https://github.com/yogesh-dhande/agentmux/releases/latest"
               className="btn-primary rounded-full px-5 py-2.5 text-sm font-semibold transition-colors"
             >
-              Open Documentation
-            </Link>
-            <a
-              href="#problem"
+              Download
+            </a>
+            <Link
+              href="/docs"
               className="rounded-full border border-line px-5 py-2.5 text-sm font-semibold transition-colors hover:border-accent hover:text-accent"
             >
-              Revisit Problem
-            </a>
+              Read Docs
+            </Link>
           </div>
         </section>
       </main>

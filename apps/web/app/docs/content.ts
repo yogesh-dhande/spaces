@@ -7,6 +7,13 @@ export type DocsPageLink = {
 
 export const docsPageLinks: DocsPageLink[] = [
   {
+    href: "/docs/installation",
+    title: "Installation & Setup",
+    summary:
+      "Download Muxy, install dependencies, configure permissions, and verify your setup.",
+    audience: "New users installing muxy for the first time.",
+  },
+  {
     href: "/docs/getting-started",
     title: "Getting Started",
     summary: "Install requirements, connect a project, and launch a first workspace.",
@@ -93,6 +100,7 @@ export const docsPageLinks: DocsPageLink[] = [
 ];
 
 export const docsPublishingOrder = [
+  "Installation & Setup",
   "Getting Started",
   "Projects",
   "Workspaces",

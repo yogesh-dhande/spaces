@@ -4,6 +4,11 @@ const navItems = [
   { href: "/#problem", label: "Problem" },
   { href: "/#solution", label: "Solution" },
   { href: "/docs", label: "Docs" },
+  {
+    href: "https://github.com/yogesh-dhande/agentmux/releases/latest",
+    label: "Download",
+    external: true,
+  },
 ];
 
 export function SiteHeader() {
@@ -16,15 +21,27 @@ export function SiteHeader() {
         Muxy
       </Link>
       <nav className="flex items-center gap-1 rounded-full border border-line bg-surface/75 p-1 text-sm text-foreground-soft backdrop-blur-sm">
-        {navItems.map((item) => (
-          <Link
-            key={item.href}
-            href={item.href}
-            className="rounded-full px-3 py-1.5 transition-colors hover:bg-background-soft hover:text-foreground"
-          >
-            {item.label}
-          </Link>
-        ))}
+        {navItems.map((item) =>
+          item.external ? (
+            <a
+              key={item.href}
+              href={item.href}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="rounded-full px-3 py-1.5 transition-colors hover:bg-background-soft hover:text-foreground"
+            >
+              {item.label}
+            </a>
+          ) : (
+            <Link
+              key={item.href}
+              href={item.href}
+              className="rounded-full px-3 py-1.5 transition-colors hover:bg-background-soft hover:text-foreground"
+            >
+              {item.label}
+            </Link>
+          )
+        )}
       </nav>
     </header>
   );
