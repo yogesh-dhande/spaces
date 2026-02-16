@@ -49,7 +49,6 @@ export default function BrowserSessionsDocsPage() {
         <ul className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
           <li>• Browser rows are ordered by browser session definition order, then URL.</li>
           <li>• Workspace window listings rescan Chrome tabs to keep navigation current.</li>
-          <li>• If multiple workspaces share one Chrome window, active tab URL is used for disambiguation.</li>
           <li>• This avoids routing global next/previous shortcuts to the wrong workspace.</li>
         </ul>
       </article>

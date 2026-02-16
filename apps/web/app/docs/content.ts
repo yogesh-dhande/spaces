@@ -82,6 +82,14 @@ export const docsPageLinks: DocsPageLink[] = [
       "Answer common workflow questions and clarify boundaries and non-goals.",
     audience: "Teams evaluating fit and defining internal usage conventions.",
   },
+  {
+    href: "/docs/guides",
+    title: "Cookbook Guides",
+    summary:
+      "End-to-end project setup recipes for common stacks you can copy and adapt.",
+    audience:
+      "Developers looking for ready-made configuration examples for real-world projects.",
+  },
 ];
 
 export const docsPublishingOrder = [
@@ -96,4 +104,5 @@ export const docsPublishingOrder = [
   "Keyboard Shortcuts",
   "Troubleshooting",
   "FAQ",
+  "Cookbook Guides",
 ];
