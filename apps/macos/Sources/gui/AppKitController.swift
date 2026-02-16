@@ -37,7 +37,12 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     private var shortcutButtonsBySetting: [String: NSButton] = [:]
     private var activeShortcutCaptureSetting: ShortcutSetting?
     private var periodicWorkspaceRefreshTask: Task<Void, Never>?
+    private var periodicUpdateCheckTask: Task<Void, Never>?
     private var lastTrackedWindowCounts: [String: Int] = [:]
+    private let updateChecker = UpdateChecker()
+    private let appUpdater = AppUpdater()
+    private var checkForUpdatesMenuItem: NSMenuItem?
+    private var availableUpdate: UpdateInfo?
 
     private var configCache: AppConfig?
     private let defaultSplitViewWidth: CGFloat = 360
@@ -81,10 +86,12 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         setupGlobalHotkey()
         setupShortcutMonitor()
         startPeriodicWorkspaceWindowRefresh()
+        startPeriodicUpdateCheck()
     }
 
     public func applicationWillTerminate(_ notification: Notification) {
         periodicWorkspaceRefreshTask?.cancel()
+        periodicUpdateCheckTask?.cancel()
         teardownGlobalHotkey()
         if let shortcutMonitor { NSEvent.removeMonitor(shortcutMonitor) }
     }
@@ -111,6 +118,81 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 } catch {
                     break
                 }
+            }
+        }
+    }
+
+    private func startPeriodicUpdateCheck() {
+        periodicUpdateCheckTask?.cancel()
+        periodicUpdateCheckTask = Task { [weak self] in
+            guard let self else { return }
+            await self.performUpdateCheck()
+            while !Task.isCancelled {
+                do {
+                    try await Task.sleep(for: .seconds(4 * 60 * 60))
+                } catch { break }
+                await self.performUpdateCheck()
+            }
+        }
+    }
+
+    private func performUpdateCheck() async {
+        let info = await updateChecker.checkForUpdate()
+        availableUpdate = info
+        if let info {
+            checkForUpdatesMenuItem?.title = "Update Available: v\(info.version)"
+        } else {
+            checkForUpdatesMenuItem?.title = "Up to Date"
+            checkForUpdatesMenuItem?.action = #selector(checkForUpdatesMenuAction(_:))
+        }
+    }
+
+    @objc private func checkForUpdatesMenuAction(_ sender: Any?) {
+        Task {
+            checkForUpdatesMenuItem?.title = "Checking..."
+            checkForUpdatesMenuItem?.isEnabled = false
+            let info = await updateChecker.forceCheck()
+            availableUpdate = info
+            checkForUpdatesMenuItem?.isEnabled = true
+            if let info {
+                checkForUpdatesMenuItem?.title = "Update Available: v\(info.version)"
+                showUpdateAlert(info: info)
+            } else {
+                checkForUpdatesMenuItem?.title = "Up to Date"
+                let alert = NSAlert()
+                alert.messageText = "You're up to date"
+                alert.informativeText = "Muxy \(AppVersion.current) is the latest version."
+                alert.alertStyle = .informational
+                alert.addButton(withTitle: "OK")
+                alert.runModal()
+                checkForUpdatesMenuItem?.title = "Check for Updates..."
+            }
+        }
+    }
+
+    private func showUpdateAlert(info: UpdateInfo) {
+        let alert = NSAlert()
+        alert.messageText = "Update Available"
+        alert.informativeText = "Muxy v\(info.version) is available (you have v\(AppVersion.current)).\n\n\(info.releaseNotes.prefix(500))"
+        alert.alertStyle = .informational
+        alert.addButton(withTitle: "Download & Install")
+        alert.addButton(withTitle: "Later")
+        let response = alert.runModal()
+        if response == .alertFirstButtonReturn {
+            performUpdate(info: info)
+        }
+    }
+
+    private func performUpdate(info: UpdateInfo) {
+        Task {
+            checkForUpdatesMenuItem?.title = "Downloading..."
+            checkForUpdatesMenuItem?.isEnabled = false
+            do {
+                try await appUpdater.downloadAndInstall(from: info.downloadURL)
+            } catch {
+                checkForUpdatesMenuItem?.title = "Update Available: v\(info.version)"
+                checkForUpdatesMenuItem?.isEnabled = true
+                showError(error)
             }
         }
     }
@@ -172,6 +254,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
         let appMenuItem = NSMenuItem()
         let appMenu = NSMenu(title: "Muxy")
+        let updateItem = NSMenuItem(title: "Check for Updates...", action: #selector(checkForUpdatesMenuAction(_:)), keyEquivalent: "")
+        updateItem.target = self
+        checkForUpdatesMenuItem = updateItem
+        appMenu.addItem(updateItem)
+        appMenu.addItem(.separator())
         appMenu.addItem(withTitle: "Quit Muxy", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         appMenuItem.submenu = appMenu
         mainMenu.addItem(appMenuItem)

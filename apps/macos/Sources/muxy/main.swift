@@ -11,6 +11,12 @@ struct CLI {
         }
 
         let command = args[1]
+
+        if command == "version" || command == "--version" {
+            print("muxy \(AppVersion.current)")
+            return
+        }
+
         let db = try DatabaseLocator.defaultPath()
         let configPath = try ConfigStore.defaultPath()
         let store = try SQLiteStore(path: db)
@@ -332,6 +338,8 @@ struct CLI {
             muxy command line
 
             Usage:
+              muxy version
+
               muxy config path
               muxy config show
 

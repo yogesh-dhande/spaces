@@ -4,3 +4,6 @@ default.profraw
 node_modules/
 apps/web/.next/
 apps/web/out/
+
+# Release artifacts
+*.zip

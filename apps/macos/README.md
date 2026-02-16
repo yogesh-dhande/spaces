@@ -120,6 +120,16 @@ Browser switching benchmark:
 - Run it with:
   - `scripts/swiftpm.sh test --filter OrchestratorTests/testBenchmarkChromeIndexedTabFocusVsYabaiWindowFocusForExtractedTabs`
 
+## Auto-Update
+Muxy checks for updates from GitHub Releases on launch and every 4 hours. Use the app menu **Check for Updates...** to check manually.
+
+When an update is available, clicking "Download & Install" downloads the new binary, replaces the current one, and relaunches the app.
+
+From the CLI:
+```bash
+muxy version
+```
+
 ## CLI
 ```bash
 muxy config path
@@ -168,3 +178,20 @@ scripts/lint.sh
 ```bash
 scripts/coverage.sh
 ```
+
+## Release
+Build, sign, package, and publish a new release:
+```bash
+# Optional: set code-signing identity (ad-hoc if unset)
+export CODESIGN_IDENTITY="Developer ID Application: Your Name (TEAMID)"
+
+scripts/release.sh
+```
+
+The release script:
+1. Reads the version from `AppVersion.swift`
+2. Builds in release configuration
+3. Code-signs both `MuxyApp` and `muxy` binaries
+4. Packages them into `MuxyApp-<version>-macos.zip`
+5. Optionally notarizes (set `NOTARIZE=1` with `APPLE_ID`, `TEAM_ID`, `APP_PASSWORD`)
+6. Creates a GitHub release via `gh release create`

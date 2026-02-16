@@ -332,6 +332,21 @@ All periodic polling intervals are centralized in `PollingConstants.swift` for e
 
 These constants are referenced throughout the codebase to ensure consistent polling behavior.
 
+## Versioning and Auto-Update
+- `AppVersion.current` in `streamctl/AppVersion.swift` is the single source of truth for the version string.
+- `Info.plist` contains `CFBundleShortVersionString`, `CFBundleVersion`, and `CFBundleIdentifier`.
+- `UpdateChecker` (actor in `gui`) queries `https://api.github.com/repos/yogesh-dhande/agentmux/releases/latest` for new versions.
+  - Checks on app launch and every 4 hours.
+  - Caches results to avoid redundant API calls.
+  - Compares semver tag against `AppVersion.current`.
+- `AppUpdater` handles download, extraction, binary replacement, and relaunch.
+  - Downloads the `.zip` release asset from GitHub.
+  - Extracts via `ditto`, replaces the running executable, and relaunches.
+  - Creates a backup before replacement; restores on failure.
+- The app menu includes "Check for Updates..." which shows "Up to Date" or "Update Available: vX.Y.Z" based on the last check.
+- CLI: `muxy version` prints the current version.
+- Release workflow: `scripts/release.sh` builds release config, code-signs, packages a zip, optionally notarizes, and publishes via `gh release create`.
+
 ## External Dependencies
 - macOS 14+
 - `yabai` for window IDs, focus, and display/space metadata
