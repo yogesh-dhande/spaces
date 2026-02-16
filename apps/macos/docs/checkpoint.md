@@ -1,16 +1,16 @@
 # Checkpoint
 
 ## Current Status
-- YAML config at `~/.spaceship/config.yaml` is the source of truth for editor preference, port range, projects, and project templates (processes, browser sessions, status checks).
-- Runtime state and workspace settings live in `~/.spaceship/spaceship.db` (projects, workspaces, ports, running processes, status results, windows, settings, workspace settings) and are rebuilt when the schema version changes; workspace settings are re-seeded from project templates when missing.
+- YAML config at `~/.muxy/config.yaml` is the source of truth for editor preference, port range, projects, and project templates (processes, browser sessions, status checks).
+- Runtime state and workspace settings live in `~/.muxy/muxy.db` (projects, workspaces, ports, running processes, status results, windows, settings, workspace settings) and are rebuilt when the schema version changes; workspace settings are re-seeded from project templates when missing.
 - Projects are normalized by real path; a default workspace is ensured per project with reserved ports.
-- Project creation supports either existing directories or git clone; cloned repositories are stored at `/Users/<username>/spaceship/projects/<project_name>`.
-- Project removal clears spaceship state, removes related managed git worktrees via `git worktree remove --force`, deletes related git workspace directories under `/Users/<username>/spaceship/workspaces`, and deletes the project directory only for git repositories under `/Users/<username>/spaceship/projects` (managed clones).
+- Project creation supports either existing directories or git clone; cloned repositories are stored at `/Users/<username>/muxy/projects/<project_name>`.
+- Project removal clears muxy state, removes related managed git worktrees via `git worktree remove --force`, deletes related git workspace directories under `/Users/<username>/muxy/workspaces`, and deletes the project directory only for git repositories under `/Users/<username>/muxy/projects` (managed clones).
 - Workspaces create git worktrees for git projects, run setup/stop scripts, and allocate named ports (from port definitions) at creation time; ports are released at archive.
 - Git workspace creation supports an optional directory-name override for the worktree folder; overrides must use only `A-Z`, `a-z`, `0-9`, `-`, `_` and cannot contain spaces.
 - Archiving non-git workspaces does not delete the project directory.
 - Archiving git workspaces removes the worktree via `git worktree remove --force` (and then archives workspace metadata/ports).
-- Workspace launch starts processes in iTerm2 with env vars and logs under `~/.spaceship/runtime/<workspace-id>`, opens Chrome browser sessions, optionally opens the editor, and captures window IDs via yabai in browser/editor/terminal order.
+- Workspace launch starts processes in iTerm2 with env vars and logs under `~/.muxy/runtime/<workspace-id>`, opens Chrome browser sessions, optionally opens the editor, and captures window IDs via yabai in browser/editor/terminal order.
 - Browser window tracking includes target session URL so workspace focus actions can activate the matching Chrome tab (not just focus the window).
 - Browser session mapping is URL-based; title-based fallback matching is removed to avoid binding sessions to unrelated active tabs in shared Chrome windows.
 - Workspace launch/restart reuses existing matching Chrome tabs and tracks all matches for workspace window cycling.
@@ -57,7 +57,7 @@
 - Window IDs can become stale across app/desktop changes; stale rows are pruned during reconciliation paths.
 - GUI now runs a periodic detached background refresh loop for all non-archived workspace window records using `PollingConstants.workspaceWindowRefreshInterval`.
 - New orchestrator APIs `refreshWorkspaceWindows` and `refreshAllWorkspaceWindows` reconcile stale window rows via yabai and clear `is_running` when no runtime indicators remain. `refreshAllWorkspaceWindows` returns a `RefreshResult` with DB mutation flag and per-workspace tracked window counts (including live browser scan); the GUI compares both against the previous snapshot and skips UI reloads when nothing changed.
-- Bringing spaceship to front with the global toggle hotkey refreshes the selected workspace detail view so the displayed window list reflects the most recent Chrome tab scan (up to 10 seconds old).
+- Bringing muxy to front with the global toggle hotkey refreshes the selected workspace detail view so the displayed window list reflects the most recent Chrome tab scan (up to 10 seconds old).
 - The local key monitor defers to focused text inputs so standard edit shortcuts like `cmd+v` work in forms.
 - CLI supports config path/show, project list/add/update/remove (including `project add --git-url ...`), workspace list/create/launch/stop/archive/activate, and settings get/set/reset for GUI shortcuts.
 - Workspace run view includes Open Editor/Terminal/Finder actions; editor/terminal windows opened this way are captured and included in window cycling.
@@ -79,7 +79,7 @@
 - Built the AppKit GUI with two-pane layout, project/workspace editing, and window shortcut hints.
 - Added CLI subcommands for projects/workspaces plus settings for hotkey customization.
 - Implemented named port definitions with `PortDefinition` model, `PortReserver` (socket-based reservation), `PortEditor` GUI, schema v7 migration, and updated `PortAllocator`/`buildWorkspaceEnv` to use named ports.
-- Simplified workspace env vars: `SPACESHIP_WORKSPACE_DIR` and `SPACESHIP_PROJECT_DIR` replace the old lowercase-prefixed and scoped cross-project keys.
+- Simplified workspace env vars: `MUXY_WORKSPACE_DIR` and `MUXY_PROJECT_DIR` replace the old lowercase-prefixed and scoped cross-project keys.
 - Nested status check configuration under each process in `ProcessEditor` (removed standalone `StatusCheckEditor`); run tab shows check results as indented sub-rows with colored dots.
 
 ## Remaining

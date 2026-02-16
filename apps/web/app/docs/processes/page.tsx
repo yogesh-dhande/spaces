@@ -31,8 +31,8 @@ export default function ProcessesDocsPage() {
         </p>
         <pre className="mt-3 w-full max-w-full min-w-0 overflow-x-auto whitespace-pre-wrap break-words rounded-xl border border-line bg-background-soft/80 p-3 text-xs leading-6 text-foreground">
           <code>{`FRONTEND_PORT, API_PORT, ...   # named port definitions
-SPACESHIP_PROJECT_DIR
-SPACESHIP_WORKSPACE_DIR`}</code>
+MUXY_PROJECT_DIR
+MUXY_WORKSPACE_DIR`}</code>
         </pre>
         <p className="mt-3 text-sm leading-7 text-foreground-soft">
           Use these values directly in commands, for example `PORT=$FRONTEND_PORT npm run dev`.
@@ -60,7 +60,7 @@ SPACESHIP_WORKSPACE_DIR`}</code>
       <article className="rounded-2xl border border-line bg-surface/82 p-5 backdrop-blur-sm">
         <h2 className="text-xl font-semibold tracking-tight">Coding Agent Detection</h2>
         <p className="mt-2 text-sm leading-7 text-foreground-soft">
-          Spaceship can classify agent-like process commands (for example `codex` or `claude`) and
+          Muxy can classify agent-like process commands (for example `codex` or `claude`) and
           expose idle/busy semantics in status reporting.
         </p>
         <ul className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">

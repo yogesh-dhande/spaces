@@ -23,7 +23,7 @@ export default function GuidesDocsPage() {
   return (
     <DocsShell
       title="Cookbook Guides"
-      description="Real-world project setups you can copy and adapt. Each recipe describes what to configure in the Spaceship GUI — port definitions, setup scripts, processes, browser sessions, and status checks."
+      description="Real-world project setups you can copy and adapt. Each recipe describes what to configure in the Muxy GUI — port definitions, setup scripts, processes, browser sessions, and status checks."
       pagePath="/docs/guides"
     >
       {/* ── Recipe 1: Next.js without Docker ────────────────── */}
@@ -140,7 +140,7 @@ export default function GuidesDocsPage() {
       - PORT=3000`}</code>
         </pre>
         <p className={prose}>
-          The container always listens on a fixed internal port (3000). Spaceship
+          The container always listens on a fixed internal port (3000). Muxy
           maps the reserved <code className="text-xs">FRONTEND_PORT</code> to
           the host side so each workspace gets its own port.
         </p>
@@ -294,7 +294,7 @@ export default function GuidesDocsPage() {
         </pre>
         <p className={prose}>
           Containers communicate over the Compose network using service names.
-          Spaceship maps host-side ports so each workspace is isolated.
+          Muxy maps host-side ports so each workspace is isolated.
         </p>
 
         <h3 className="mt-4 text-sm font-semibold text-foreground">
@@ -316,7 +316,7 @@ export default function GuidesDocsPage() {
       <article className={card}>
         <h2 className={heading}>Next.js + Django (Separate Repos)</h2>
         <p className={prose}>
-          Frontend and backend live in separate Spaceship projects. Because
+          Frontend and backend live in separate Muxy projects. Because
           environment variables are scoped to a single workspace, the frontend
           workspace must define both ports and run the backend process itself.
         </p>
@@ -383,7 +383,7 @@ cd /path/to/backend-project && python manage.py runserver 0.0.0.0:$BACKEND_PORT`
           <code className="text-xs">API_PORT</code> independently.
         </p>
         <p className={prose}>
-          Use <code className="text-xs">SPACESHIP_WORKSPACE_DIR</code> in setup
+          Use <code className="text-xs">MUXY_WORKSPACE_DIR</code> in setup
           scripts if you need to reference the workspace&apos;s own directory,
           for example to copy shared config files.
         </p>

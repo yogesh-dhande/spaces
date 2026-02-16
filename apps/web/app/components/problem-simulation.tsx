@@ -29,7 +29,7 @@ export function ProblemSimulation() {
         />
         <FlowColumn
           tone="after"
-          title="With Spaceship Workspaces"
+          title="With Muxy Workspaces"
           steps={afterSteps}
           outcome="Result: stay within context, faster development loop."
         />

@@ -1,7 +1,7 @@
 # Architecture
 
 ## Overview
-`spaceship` is a macOS Swift app for stream-based workspace orchestration. A stream is a captured set of windows tied to a workspace. YAML is the source of truth for global settings and project templates, while SQLite stores runtime state plus per-workspace settings that are not written back to YAML.
+`muxy` is a macOS Swift app for stream-based workspace orchestration. A stream is a captured set of windows tied to a workspace. YAML is the source of truth for global settings and project templates, while SQLite stores runtime state plus per-workspace settings that are not written back to YAML.
 
 Key invariants:
 - YAML config is the source of truth for global settings and project templates and is normalized on load.
@@ -15,8 +15,8 @@ Key invariants:
 ## Module Map
 ```mermaid
 flowchart LR
-  cli["spaceship (CLI)"] --> stream["streamctl"]
-  guiapp["SpaceshipApp (App entrypoint)"] --> gui["gui (AppKit UI)"]
+  cli["muxy (CLI)"] --> stream["streamctl"]
+  guiapp["MuxyApp (App entrypoint)"] --> gui["gui (AppKit UI)"]
   gui --> stream
 
   stream --> config["YAML config"]
@@ -34,10 +34,10 @@ Module responsibilities:
 - `appctl`: Shell + AppleScript adapters for yabai, iTerm2, and Chrome.
 - `streamctl`: Orchestration, config normalization, named port allocation (via `PortAllocator` and `PortReserver`), workspace lifecycle, and persistence.
 - `gui`: AppKit UI library that calls into `streamctl`.
-- `spaceship`: CLI entrypoint that calls into `streamctl`.
-- `SpaceshipApp`: GUI executable entrypoint that wires `NSApplication` to the `gui` library.
+- `muxy`: CLI entrypoint that calls into `streamctl`.
+- `MuxyApp`: GUI executable entrypoint that wires `NSApplication` to the `gui` library.
 
-The `gui` target is the reusable UI library. `SpaceshipApp` is the minimal executable that boots AppKit and delegates to `gui`.
+The `gui` target is the reusable UI library. `MuxyApp` is the minimal executable that boots AppKit and delegates to `gui`.
 
 GUI interaction notes:
 - Right-pane forms are hosted in a scroll view so long forms do not clip at smaller window heights.
@@ -64,16 +64,16 @@ GUI interaction notes:
 
 ## Data Model
 Config file:
-- Path: `~/.spaceship/config.yaml`.
+- Path: `~/.muxy/config.yaml`.
 - Top-level fields: `editor`, `port_range`, `projects`.
 - The GUI Settings view writes `editor` from installed VS Code, Cursor, or Windsurf.
 - Project fields: `dir`, `setup_script`, `stop_script`, `ports` (named port definitions), `processes`, `status_checks`, `browser_sessions`.
 - Script timing:
   - `setup_script` runs when a workspace is created or revived.
   - `stop_script` runs on stop/restart/archive stop phase after automatic process termination.
-- New projects can be created from an existing directory or by cloning a repository into `/Users/<username>/spaceship/projects/<project_name>`.
-- Removing a project clears spaceship state. For git projects, spaceship first removes managed worktrees with `git worktree remove --force`, then deletes related workspace directories under `/Users/<username>/spaceship/workspaces`.
-- The project directory is deleted only for git projects located under `/Users/<username>/spaceship/projects` (app-managed clones).
+- New projects can be created from an existing directory or by cloning a repository into `/Users/<username>/muxy/projects/<project_name>`.
+- Removing a project clears muxy state. For git projects, muxy first removes managed worktrees with `git worktree remove --force`, then deletes related workspace directories under `/Users/<username>/muxy/workspaces`.
+- The project directory is deleted only for git projects located under `/Users/<username>/muxy/projects` (app-managed clones).
 
 Workspace settings:
 - Each workspace snapshots project `stop_script`, `ports` (named port definitions), `processes`, `status_checks`, and `browser_sessions` at creation.
@@ -82,7 +82,7 @@ Workspace settings:
 - Edits to a running workspace reconcile processes and browser sessions immediately.
 
 Runtime database:
-- Path: `~/.spaceship/spaceship.db`.
+- Path: `~/.muxy/muxy.db`.
 - Schema is recreated when `schema_version` changes; workspace settings are re-seeded from project templates as needed.
 
 ```mermaid
@@ -236,7 +236,7 @@ Port allocation details:
 - Port definitions are configured at the project level in YAML (under a `ports` list) and inherited by workspaces; workspaces can override definitions.
 - Named ports appear as env vars in setup scripts, stop scripts, process commands, and status check commands (e.g. `$FRONTEND_PORT`, `$API_PORT`).
 - `buildWorkspaceEnv` uses named port keys from definitions instead of anonymous `PORT0`, `PORT1`, etc.
-- `buildWorkspaceEnv` sets `SPACESHIP_WORKSPACE_DIR` (workspace directory) and `SPACESHIP_PROJECT_DIR` (project directory) for every workspace process.
+- `buildWorkspaceEnv` sets `MUXY_WORKSPACE_DIR` (workspace directory) and `MUXY_PROJECT_DIR` (project directory) for every workspace process.
 
 Launch and capture windows:
 ```mermaid
@@ -265,9 +265,9 @@ Degraded runtime edge cases and handling:
 - `is_running` can drift from real OS state because users can close windows/processes manually.
 - Restart is the user-visible "bring everything back" action for partial or stale runtime state.
 - Chrome session discovery and focus are URL-prefix based end-to-end; title-based fallback matching is intentionally avoided to prevent binding sessions to the wrong tab.
-- On launch/restart, spaceship reuses existing Chrome tabs whose URLs match configured browser-session prefixes and tracks all matching tabs for workspace cycling.
-- On launch/restart, spaceship may extract one matching tab per browser session into a dedicated Chrome window and persist that extracted mapping (`extracted_target_url`, `extracted_window_id`, `extracted_window_valid`).
-- Browser windows store an optional `target_url`; when focusing browser entries, spaceship uses AppleScript to activate the matching tab (including when multiple tracked targets share one Chrome window) before falling back to raw window focus.
+- On launch/restart, muxy reuses existing Chrome tabs whose URLs match configured browser-session prefixes and tracks all matching tabs for workspace cycling.
+- On launch/restart, muxy may extract one matching tab per browser session into a dedicated Chrome window and persist that extracted mapping (`extracted_target_url`, `extracted_window_id`, `extracted_window_valid`).
+- Browser windows store an optional `target_url`; when focusing browser entries, muxy uses AppleScript to activate the matching tab (including when multiple tracked targets share one Chrome window) before falling back to raw window focus.
 - Browser focus first attempts extracted-window `yabai` focus when a valid extracted mapping exists; if the window is missing or active-tab verification fails, the mapping is marked stale (`extracted_window_valid=0`) and focus falls back to indexed-tab/URL-prefix paths without automatic re-extraction.
 - If a Chrome window is tracked both as targeted browser tabs and as an untargeted browser row, untargeted rows are filtered from workspace window navigation/listing to keep forward/backward traversal deterministic.
 - Workspace window navigation/listing rebuilds browser rows from live Chrome tab scans with a configurable debounce interval (default: 10 seconds, see `PollingConstants.browserWindowScanDebounceInterval`) per `(workspace_id, resolved browser-session prefixes)` key, including every tab whose URL starts with any configured browser-session URL (deduplicated by `window_id + tab URL`); tabs with missing URLs are skipped.
@@ -342,7 +342,7 @@ These constants are referenced throughout the codebase to ensure consistent poll
 
 ### yabai Dependency Analysis
 
-Spaceship uses 7 distinct yabai commands across 35+ call sites via `YabaiAdapter`:
+Muxy uses 7 distinct yabai commands across 35+ call sites via `YabaiAdapter`:
 
 | Command | Purpose | Call Sites |
 |---------|---------|------------|

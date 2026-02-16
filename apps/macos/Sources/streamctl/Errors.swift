@@ -1,6 +1,6 @@
 import Foundation
 
-public enum SpaceshipError: LocalizedError {
+public enum MuxyError: LocalizedError {
     case missingProject(dir: String)
     case projectAlreadyExists(dir: String)
     case missingWorkspace(project: String, workspace: String)

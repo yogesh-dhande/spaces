@@ -12,7 +12,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     private let outlineView = NSOutlineView()
     private let detailContainer = NSView()
 
-    private var orchestrator: SpaceshipOrchestrator!
+    private var orchestrator: MuxyOrchestrator!
     private var projects: [ProjectSummary] = []
     private var workspacesByProject: [String: [WorkspaceSummary]] = [:]
     private var gitActivityByWorkspaceID: [String: GitTrackedFileActivity] = [:]
@@ -67,7 +67,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             let configPath = try ConfigStore.defaultPath()
             let store = try SQLiteStore(path: db)
             let configStore = ConfigStore(path: configPath)
-            orchestrator = SpaceshipOrchestrator(store: store, configStore: configStore)
+            orchestrator = MuxyOrchestrator(store: store, configStore: configStore)
             configCache = try orchestrator.syncConfig()
             loadShortcutSpecs()
         } catch {
@@ -126,14 +126,14 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         case archive
     }
 
-    nonisolated private static func refreshWorkspaceWindowsSnapshot() async -> Result<SpaceshipOrchestrator.RefreshResult, Error> {
+    nonisolated private static func refreshWorkspaceWindowsSnapshot() async -> Result<MuxyOrchestrator.RefreshResult, Error> {
         await Task.detached(priority: .utility) {
             do {
                 let db = try DatabaseLocator.defaultPath()
                 let configPath = try ConfigStore.defaultPath()
                 let store = try SQLiteStore(path: db)
                 let configStore = ConfigStore(path: configPath)
-                let orchestrator = SpaceshipOrchestrator(store: store, configStore: configStore)
+                let orchestrator = MuxyOrchestrator(store: store, configStore: configStore)
                 let result = try orchestrator.refreshAllWorkspaceWindows()
                 return .success(result)
             } catch {
@@ -149,7 +149,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 let configPath = try ConfigStore.defaultPath()
                 let store = try SQLiteStore(path: db)
                 let configStore = ConfigStore(path: configPath)
-                let orchestrator = SpaceshipOrchestrator(store: store, configStore: configStore)
+                let orchestrator = MuxyOrchestrator(store: store, configStore: configStore)
                 switch action {
                 case .launch:
                     try orchestrator.launchWorkspace(workspaceID: workspaceID)
@@ -171,8 +171,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let mainMenu = NSMenu()
 
         let appMenuItem = NSMenuItem()
-        let appMenu = NSMenu(title: "Spaceship")
-        appMenu.addItem(withTitle: "Quit Spaceship", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        let appMenu = NSMenu(title: "Muxy")
+        appMenu.addItem(withTitle: "Quit Muxy", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         appMenuItem.submenu = appMenu
         mainMenu.addItem(appMenuItem)
 
@@ -189,7 +189,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     private func buildWindow() {
         let rect = NSRect(x: 200, y: 200, width: 1100, height: 700)
         window = NSWindow(contentRect: rect, styleMask: [.titled, .resizable, .closable], backing: .buffered, defer: false)
-        window.title = "Spaceship"
+        window.title = "Muxy"
         window.center()
         window.delegate = self
 
@@ -402,7 +402,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         stack.addArrangedSubview(label(text: "Keyboard shortcuts"))
         let shortcutsNote = NSTextField(
             labelWithString:
-                "Click a shortcut, then press the key combination you want. Next/Previous cycle running workspaces when spaceship is focused, and cycle workspace windows when a workspace window is focused."
+                "Click a shortcut, then press the key combination you want. Next/Previous cycle running workspaces when muxy is focused, and cycle workspace windows when a workspace window is focused."
         )
         shortcutsNote.font = .systemFont(ofSize: 11)
         shortcutsNote.textColor = .secondaryLabelColor
@@ -1259,8 +1259,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             let key = namedPort.name.isEmpty ? "PORT\(lines.count)" : namedPort.name
             lines.append("\(key)=\(namedPort.port)")
         }
-        lines.append("SPACESHIP_WORKSPACE_DIR=\(workspace.dir)")
-        lines.append("SPACESHIP_PROJECT_DIR=\(project.dir)")
+        lines.append("MUXY_WORKSPACE_DIR=\(workspace.dir)")
+        lines.append("MUXY_PROJECT_DIR=\(project.dir)")
         envView.string = lines.joined(separator: "\n")
         if let container = envView.textContainer, let layout = envView.layoutManager { layout.ensureLayout(for: container) }
         let scroll = scrollableTextView(envView, height: 240)
@@ -2048,9 +2048,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         alert.alertStyle = .warning
         alert.messageText = "Delete project?"
         alert.informativeText = """
-            This removes the project and its workspaces from spaceship.
-            If this project was cloned into ~/spaceship/projects by spaceship, that project directory is deleted.
-            For git projects, related workspace directories under ~/spaceship/workspaces are also deleted.
+            This removes the project and its workspaces from muxy.
+            If this project was cloned into ~/muxy/projects by muxy, that project directory is deleted.
+            For git projects, related workspace directories under ~/muxy/workspaces are also deleted.
             """
         alert.addButton(withTitle: "Delete")
         alert.addButton(withTitle: "Cancel")
@@ -2087,7 +2087,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             let record: ProjectRecord
             if refs.sourcePopup.indexOfSelectedItem == 1 {
                 let repoURL = refs.repoURLField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-                guard !repoURL.isEmpty else { throw SpaceshipError.invalidArgument(message: "Git repository URL is required.") }
+                guard !repoURL.isEmpty else { throw MuxyError.invalidArgument(message: "Git repository URL is required.") }
                 record = try orchestrator.addProject(gitURL: repoURL)
             } else {
                 let dir = refs.dirField.toolTip?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
@@ -2145,17 +2145,17 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         guard let refs = AddWorkspaceFieldCache.shared.cache[sender.tag] else { return }
         do {
             let name = refs.nameField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !name.isEmpty else { throw SpaceshipError.invalidArgument(message: "Workspace name is required.") }
+            guard !name.isEmpty else { throw MuxyError.invalidArgument(message: "Workspace name is required.") }
             let targetBranch = refs.targetBranchField?.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
             let branch = refs.branchField?.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
             let directoryName = refs.directoryNameField?.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
             let resolvedDirectoryName: String?
             if let directoryName, directoryName.isEmpty { resolvedDirectoryName = nil } else { resolvedDirectoryName = directoryName }
             if refs.isGitRepo, branch == nil || branch?.isEmpty == true {
-                throw SpaceshipError.invalidArgument(message: "Branch name is required for git projects.")
+                throw MuxyError.invalidArgument(message: "Branch name is required for git projects.")
             }
             if refs.isGitRepo, targetBranch == nil || targetBranch?.isEmpty == true {
-                throw SpaceshipError.invalidArgument(message: "Target branch is required for git projects.")
+                throw MuxyError.invalidArgument(message: "Target branch is required for git projects.")
             }
             _ = try orchestrator.createWorkspace(
                 projectID: refs.projectID, name: name, branch: branch, targetBranch: targetBranch, directoryName: resolvedDirectoryName)

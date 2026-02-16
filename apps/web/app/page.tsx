@@ -30,12 +30,12 @@ const keyFeatures = [
   {
     title: "Start and stop workspaces quickly",
     description:
-      "No need to keep those tabs open or processes running just because it is a pain to set all of it up again. Spaceship manages starting and stopping for you automatically.",
+      "No need to keep those tabs open or processes running just because it is a pain to set all of it up again. Muxy manages starting and stopping for you automatically.",
   },
   {
     title: "Bring your own tools",
     description:
-      "Spaceship works with your preferred stack, whether it is Claude Code or Codex, Cursor or Windsurf. You do not need to learn a new tool or settle for a weaker coding agent just for UX.",
+      "Muxy works with your preferred stack, whether it is Claude Code or Codex, Cursor or Windsurf. You do not need to learn a new tool or settle for a weaker coding agent just for UX.",
   },
 ];
 
@@ -65,7 +65,7 @@ export default function HomePage() {
               Multiplex development.<br />Without losing focus.
             </h1>
             <p className="max-w-2xl text-base leading-7 text-foreground-soft md:text-lg">
-              Spaceship launches isolated development contexts, each with its
+              Muxy launches isolated development contexts, each with its
               own workspace, windows, terminals, ports, agents, and environment.
               And lets you move between them instantly.
             </p>
@@ -150,7 +150,7 @@ export default function HomePage() {
             Where time actually goes
           </h2>
           <p className="mt-3 max-w-3xl text-sm leading-6 text-foreground-soft md:text-base md:leading-7">
-            Fragmented windows and ports vs. Spaceship&apos;s workspace-first
+            Fragmented windows and ports vs. Muxy&apos;s workspace-first
             model.
           </p>
           <div className="mt-6">
@@ -170,7 +170,7 @@ export default function HomePage() {
             Three steps, one loop
           </h2>
           <p className="mt-3 max-w-3xl text-sm leading-6 text-foreground-soft md:text-base md:leading-7">
-            Spaceship organizes parallel work around workspaces, then lets you
+            Muxy organizes parallel work around workspaces, then lets you
             move through them with predictable shortcuts.
           </p>
           <div className="mt-6 grid gap-4 md:grid-cols-3">
@@ -251,7 +251,7 @@ export default function HomePage() {
             Fewer context resets. More real building.
           </h2>
           <p className="mx-auto mt-3 max-w-3xl text-sm leading-7 text-foreground-soft md:text-base">
-            Spaceship exists to reduce the hidden tax of parallel work: context
+            Muxy exists to reduce the hidden tax of parallel work: context
             hunting, app hopping, port conflicts, and accidental interruptions.
           </p>
           <div className="mt-6 flex flex-wrap justify-center gap-3">

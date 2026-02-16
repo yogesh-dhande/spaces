@@ -17,7 +17,7 @@ export default function ProjectsDocsPage() {
       <article className="rounded-2xl border border-line bg-surface/82 p-5 backdrop-blur-sm">
         <h2 className="text-xl font-semibold tracking-tight">What Is a Project?</h2>
         <p className="mt-2 text-sm leading-7 text-foreground-soft">
-          A project points to a local directory. Spaceship detects whether the directory is a Git
+          A project points to a local directory. Muxy detects whether the directory is a Git
           repository and adjusts workspace behavior accordingly.
         </p>
         <ul className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
@@ -53,10 +53,10 @@ export default function ProjectsDocsPage() {
         <h2 className="text-xl font-semibold tracking-tight">Adding a Project</h2>
         <p className="mt-2 text-sm leading-7 text-foreground-soft">
           Add a project by pointing to a local directory or providing a Git repository URL.
-          Git URLs are cloned into a Spaceship-managed location.
+          Git URLs are cloned into a Muxy-managed location.
         </p>
         <ul className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
-          <li>• On add, Spaceship checks whether the directory is a Git repo and creates a default workspace automatically.</li>
+          <li>• On add, Muxy checks whether the directory is a Git repo and creates a default workspace automatically.</li>
           <li>• You can then configure processes, status checks, browser sessions, and port definitions.</li>
         </ul>
       </article>
@@ -77,7 +77,7 @@ export default function ProjectsDocsPage() {
         <h2 className="text-xl font-semibold tracking-tight">Removing a Project</h2>
         <ul className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
           <li>• Removing a project cleans up related workspaces and workspace directories.</li>
-          <li>• For Git projects cloned by Spaceship, the cloned directory is also removed.</li>
+          <li>• For Git projects cloned by Muxy, the cloned directory is also removed.</li>
           <li>• Projects pointing to directories you manage yourself are never deleted from disk.</li>
         </ul>
       </article>

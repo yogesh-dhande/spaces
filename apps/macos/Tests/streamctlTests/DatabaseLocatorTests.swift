@@ -16,12 +16,12 @@ final class DatabaseLocatorTests: XCTestCase {
         tempHomeURL = nil
     }
 
-    func testDefaultPathUsesSpaceshipDirectoryAndCreatesParent() throws {
+    func testDefaultPathUsesMuxyDirectoryAndCreatesParent() throws {
         let path = try DatabaseLocator.defaultPath(homeDirectoryURL: tempHomeURL)
         let url = URL(fileURLWithPath: path)
 
-        XCTAssertEqual(url.lastPathComponent, "spaceship.db")
-        XCTAssertEqual(url.deletingLastPathComponent().lastPathComponent, ".spaceship")
+        XCTAssertEqual(url.lastPathComponent, "muxy.db")
+        XCTAssertEqual(url.deletingLastPathComponent().lastPathComponent, ".muxy")
         var isDirectory: ObjCBool = false
         XCTAssertTrue(FileManager.default.fileExists(atPath: url.deletingLastPathComponent().path, isDirectory: &isDirectory))
         XCTAssertTrue(isDirectory.boolValue)

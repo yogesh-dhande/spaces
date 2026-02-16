@@ -1,6 +1,6 @@
 import Foundation
 
-extension SpaceshipOrchestrator {
+extension MuxyOrchestrator {
     struct NormalizedProject {
         let id: String
         let record: ProjectRecord

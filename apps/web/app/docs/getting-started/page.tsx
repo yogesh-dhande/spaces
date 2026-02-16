@@ -21,7 +21,7 @@ export default function GettingStartedDocsPage() {
           <li>• `yabai` installed and running (window IDs and focus routing).</li>
           <li>• iTerm2 installed (process terminals).</li>
           <li>• Google Chrome installed (browser sessions).</li>
-          <li>• Accessibility permissions granted to Spaceship dependencies.</li>
+          <li>• Accessibility permissions granted to Muxy dependencies.</li>
         </ul>
       </article>
 
@@ -39,7 +39,7 @@ export default function GettingStartedDocsPage() {
       <article className="rounded-2xl border border-line bg-surface/82 p-5 backdrop-blur-sm">
         <h2 className="text-xl font-semibold tracking-tight">Add Your First Project</h2>
         <p className="mt-2 text-sm leading-7 text-foreground-soft">
-          Use either a local directory or a Git repository URL. On project add, Spaceship detects
+          Use either a local directory or a Git repository URL. On project add, Muxy detects
           whether the directory is a Git repository and creates a non-archivable default workspace.
         </p>
       </article>
@@ -70,8 +70,8 @@ export default function GettingStartedDocsPage() {
       <article className="rounded-2xl border border-line bg-surface/82 p-5 backdrop-blur-sm">
         <h2 className="text-xl font-semibold tracking-tight">Product Boundaries</h2>
         <ul className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
-          <li>• Spaceship manages workspace context and switching.</li>
-          <li>• Spaceship does not manage tiling geometry; keep using yabai for layout.</li>
+          <li>• Muxy manages workspace context and switching.</li>
+          <li>• Muxy does not manage tiling geometry; keep using yabai for layout.</li>
           <li>• Browser session focus and cleanup are URL-based; tab-title matching is intentionally avoided.</li>
           <li>• Existing tools still handle editing and coding.</li>
           <li>• Multiple workspaces can run in parallel while you stay focused on one.</li>

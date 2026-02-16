@@ -5,7 +5,7 @@ import { docsPageLinks } from "./content";
 
 export const metadata: Metadata = {
   title: "Docs",
-  description: "Getting started with Spaceship workspaces.",
+  description: "Getting started with Muxy workspaces.",
 };
 
 const terms = [
@@ -52,10 +52,10 @@ export default function DocsPage() {
             Documentation
           </p>
           <h1 className="mt-3 max-w-4xl text-4xl font-semibold tracking-tight md:text-5xl">
-            Spaceship in five minutes.
+            Muxy in five minutes.
           </h1>
           <p className="mt-4 max-w-4xl text-base leading-7 text-foreground-soft">
-            This page gives a quick mental model for how Spaceship helps you run
+            This page gives a quick mental model for how Muxy helps you run
             and switch workspaces during parallel development.
           </p>
           <div className="mt-6 flex flex-wrap gap-3">

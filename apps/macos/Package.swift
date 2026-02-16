@@ -2,7 +2,7 @@
 import PackageDescription
 
 let package = Package(
-    name: "spaceship",
+    name: "muxy",
     platforms: [
         .macOS(.v14)
     ],
@@ -10,8 +10,8 @@ let package = Package(
         .library(name: "appctl", targets: ["appctl"]),
         .library(name: "streamctl", targets: ["streamctl"]),
         .library(name: "gui", targets: ["gui"]),
-        .executable(name: "spaceship", targets: ["spaceship"]),
-        .executable(name: "SpaceshipApp", targets: ["SpaceshipApp"])
+        .executable(name: "muxy", targets: ["muxy"]),
+        .executable(name: "MuxyApp", targets: ["MuxyApp"])
     ],
     dependencies: [
         .package(url: "https://github.com/jpsim/Yams.git", from: "5.1.3")
@@ -27,16 +27,16 @@ let package = Package(
             linkerSettings: [.linkedLibrary("sqlite3")]
         ),
         .target(name: "gui", dependencies: ["streamctl"]),
-        .executableTarget(name: "spaceship", dependencies: ["streamctl", "appctl"]),
+        .executableTarget(name: "muxy", dependencies: ["streamctl", "appctl"]),
         .executableTarget(
-            name: "SpaceshipApp",
+            name: "MuxyApp",
             dependencies: ["gui"],
             linkerSettings: [
                 .unsafeFlags([
                     "-Xlinker", "-sectcreate",
                     "-Xlinker", "__TEXT",
                     "-Xlinker", "__info_plist",
-                    "-Xlinker", "Sources/SpaceshipApp/Info.plist"
+                    "-Xlinker", "Sources/MuxyApp/Info.plist"
                 ])
             ]
         ),

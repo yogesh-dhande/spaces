@@ -1,6 +1,6 @@
-# spaceship
+# muxy
 
-`spaceship` is a local macOS control plane for workspace orchestration.
+`muxy` is a local macOS control plane for workspace orchestration.
 It manages projects, workspaces, processes, and window sets so you can move between coding contexts quickly.
 
 ## Docs
@@ -16,10 +16,10 @@ It manages projects, workspaces, processes, and window sets so you can move betw
 
 ## Configuration
 YAML is the source of truth:
-- Path: `~/.spaceship/config.yaml`
-- Runtime DB: `~/.spaceship/spaceship.db` (ephemeral)
-- Cloned projects: `/Users/<username>/spaceship/projects/<project_name>`
-- Git worktrees: `/Users/<username>/spaceship/workspaces/<projectname>/<dirname>` (dirname defaults to a unique food name and can be overridden on workspace creation)
+- Path: `~/.muxy/config.yaml`
+- Runtime DB: `~/.muxy/muxy.db` (ephemeral)
+- Cloned projects: `/Users/<username>/muxy/projects/<project_name>`
+- Git worktrees: `/Users/<username>/muxy/workspaces/<projectname>/<dirname>` (dirname defaults to a unique food name and can be overridden on workspace creation)
 - GUI shortcuts (when focused): `cmd+1` through `cmd+9` focus workspace windows
 - Global window navigation (when GUI not focused): `cmd+shift+]` and `cmd+shift+[`
 
@@ -70,8 +70,8 @@ Updates to workspace settings apply immediately when the workspace is running (n
 - Directory name is an optional git-only input that overrides the auto-generated worktree folder name.
 - Directory name validation allows only letters, numbers, `-`, and `_` (no spaces).
 - New branches are created from the latest commit on the selected target branch.
-- If the selected branch exists only on remote, spaceship fetches it first and then creates the worktree from `origin/<branch>`.
-- If the branch exists locally, spaceship uses the local branch as-is (no implicit pull/rebase/merge during workspace creation).
+- If the selected branch exists only on remote, muxy fetches it first and then creates the worktree from `origin/<branch>`.
+- If the branch exists locally, muxy uses the local branch as-is (no implicit pull/rebase/merge during workspace creation).
 - Workspace rows in the left pane use compact cards with workspace status + name.
 - Folder and branch labels (with icons) are shown only when those values differ from workspace name.
 - Git workspace rows also show relative last-modified time (latest tracked-file mtime) and tracked modified-file count.
@@ -102,7 +102,7 @@ Updates to workspace settings apply immediately when the workspace is running (n
 
 Hotkeys:
 - Global focus: `cmd+shift+=`
-  - Brings spaceship to front and keeps current window-selection shortcuts active; workspace-window reconciliation runs on the periodic background interval
+  - Brings muxy to front and keeps current window-selection shortcuts active; workspace-window reconciliation runs on the periodic background interval
 - Next running workspace: `cmd+shift+]`
 - Previous running workspace: `cmd+shift+[`
 - Activate selected workspace: `cmd+shift+return`
@@ -113,7 +113,7 @@ Hotkeys:
 
 When text input is focused in the GUI, standard editing shortcuts (including `cmd+v`) are handled normally.
 
-Set `DEBUG=1` when launching spaceship to log browser scan timing and browser-focus path/timing (indexed verify, refresh, cache hits/misses, and URL fallback decisions) to stderr.
+Set `DEBUG=1` when launching muxy to log browser scan timing and browser-focus path/timing (indexed verify, refresh, cache hits/misses, and URL fallback decisions) to stderr.
 
 Browser switching benchmark:
 - `OrchestratorTests.testBenchmarkChromeIndexedTabFocusVsYabaiWindowFocusForExtractedTabs` compares calibrated indexed-tab switching (~52ms tab-index focus + ~38ms active-tab verification) against extracted-window focus (~42ms `yabai`), and prints average switch timings plus estimated break-even switch count (currently ~15 switches).
@@ -122,31 +122,31 @@ Browser switching benchmark:
 
 ## CLI
 ```bash
-spaceship config path
-spaceship config show
+muxy config path
+muxy config show
 
-spaceship project list
-spaceship project add --dir /path/to/repo
-spaceship project add --git-url https://github.com/org/repo.git
-spaceship project update --dir /path/to/repo --setup-script "cp ~/.env .env" --stop-script "docker compose down --remove-orphans"
-spaceship project remove --dir /path/to/repo
+muxy project list
+muxy project add --dir /path/to/repo
+muxy project add --git-url https://github.com/org/repo.git
+muxy project update --dir /path/to/repo --setup-script "cp ~/.env .env" --stop-script "docker compose down --remove-orphans"
+muxy project remove --dir /path/to/repo
 
-spaceship workspace list --project-dir /path/to/repo --all
-spaceship workspace create --project-dir /path/to/repo --name feature-x [--branch feature-branch] [--target-branch main] [--directory-name feature_branch]
-spaceship workspace launch --project-dir /path/to/repo --name feature-x
-spaceship workspace restart --project-dir /path/to/repo --name feature-x
-spaceship workspace stop --project-dir /path/to/repo --name feature-x
-spaceship workspace archive --project-dir /path/to/repo --name feature-x
-spaceship workspace activate --project-dir /path/to/repo --name feature-x
+muxy workspace list --project-dir /path/to/repo --all
+muxy workspace create --project-dir /path/to/repo --name feature-x [--branch feature-branch] [--target-branch main] [--directory-name feature_branch]
+muxy workspace launch --project-dir /path/to/repo --name feature-x
+muxy workspace restart --project-dir /path/to/repo --name feature-x
+muxy workspace stop --project-dir /path/to/repo --name feature-x
+muxy workspace archive --project-dir /path/to/repo --name feature-x
+muxy workspace activate --project-dir /path/to/repo --name feature-x
 ```
 
 For git projects, `workspace create` requires `--branch`; `--target-branch` defaults to `main`/`master` when available.
 `workspace create --directory-name` (alias: `--dirname`) is optional for git projects and must use only letters, numbers, `-`, and `_` with no spaces.
 
 Project/workspace removal behavior:
-- `spaceship project remove --dir <path>` removes the project from spaceship. For git projects, it first removes related managed worktrees with `git worktree remove --force`, then deletes related workspace directories under `~/spaceship/workspaces`.
-- `spaceship project remove --dir <path>` deletes the project directory only when it is a git repo inside `~/spaceship/projects` (the app-managed clone location).
-- `spaceship workspace archive ...` removes git worktrees via `git worktree remove` and never deletes the project directory for non-git projects.
+- `muxy project remove --dir <path>` removes the project from muxy. For git projects, it first removes related managed worktrees with `git worktree remove --force`, then deletes related workspace directories under `~/muxy/workspaces`.
+- `muxy project remove --dir <path>` deletes the project directory only when it is a git repo inside `~/muxy/projects` (the app-managed clone location).
+- `muxy workspace archive ...` removes git worktrees via `git worktree remove` and never deletes the project directory for non-git projects.
 
 ## Build
 Use the SwiftPM wrapper to keep caches inside the workspace (avoids user cache warnings in sandboxed environments).

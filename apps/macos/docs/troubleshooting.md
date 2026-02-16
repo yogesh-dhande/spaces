@@ -24,31 +24,31 @@ Show the focused window:
 yabai -m query --windows --window
 ```
 
-## spaceship Diagnostics
+## muxy Diagnostics
 
 Show config path:
 ```bash
-spaceship config path
+muxy config path
 ```
 
 List projects:
 ```bash
-spaceship project list
+muxy project list
 ```
 
 List workspaces (including archived):
 ```bash
-spaceship workspace list --project-dir /path/to/repo --all
+muxy workspace list --project-dir /path/to/repo --all
 ```
 
 ## Runtime Logs
 
 Process logs are stored under:
 ```
-~/.spaceship/runtime/<workspace-id>/*.log
+~/.muxy/runtime/<workspace-id>/*.log
 ```
 
 Inspect a log:
 ```bash
-tail -n 200 ~/.spaceship/runtime/<workspace-id>/<process>.log
+tail -n 200 ~/.muxy/runtime/<workspace-id>/<process>.log
 ```

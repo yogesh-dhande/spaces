@@ -2,7 +2,7 @@ import Darwin
 import Foundation
 import appctl
 
-public final class SpaceshipOrchestrator {
+public final class MuxyOrchestrator {
     private enum ExtractedBrowserFocusOutcome {
         case focused
         case staleMapping
@@ -63,7 +63,7 @@ public final class SpaceshipOrchestrator {
         self.workspacesRootDirectoryURL = workspacesRootDirectory
         self.browserWindowScanDebounceInterval = browserWindowScanDebounceInterval
         self.currentDate = currentDate
-        if ProcessInfo.processInfo.environment["DEBUG"] == "1" { fputs("spaceship: DEBUG=1 enabled (browser scan/focus profiling active)\n", stderr) }
+        if ProcessInfo.processInfo.environment["DEBUG"] == "1" { fputs("muxy: DEBUG=1 enabled (browser scan/focus profiling active)\n", stderr) }
     }
 
     @discardableResult public func syncConfig() throws -> AppConfig {
@@ -79,7 +79,7 @@ public final class SpaceshipOrchestrator {
                 normalizedConfigs.append(normalized.config)
                 if normalizePath(project.dir) != normalized.config.dir { updatedPaths = true }
             } catch {
-                fputs("spaceship: skipped project due to error: \(error.localizedDescription)\n", stderr)
+                fputs("muxy: skipped project due to error: \(error.localizedDescription)\n", stderr)
                 removedInvalid = true
             }
         }
@@ -118,14 +118,14 @@ public final class SpaceshipOrchestrator {
     }
 
     public func suggestedWorkspaceName(projectID: String) throws -> String {
-        guard let project = try store.project(id: projectID) else { throw SpaceshipError.missingProject(dir: projectID) }
+        guard let project = try store.project(id: projectID) else { throw MuxyError.missingProject(dir: projectID) }
         let existingNames = Set(try store.workspaces(projectID: project.id, includeArchived: true).map(\.name))
-        for candidate in SpaceshipOrchestrator.workspaceFoodNames where !existingNames.contains(candidate) { return candidate }
-        throw SpaceshipError.invalidArgument(message: "No available workspace names remain for project \(project.name).")
+        for candidate in MuxyOrchestrator.workspaceFoodNames where !existingNames.contains(candidate) { return candidate }
+        throw MuxyError.invalidArgument(message: "No available workspace names remain for project \(project.name).")
     }
 
     public func gitBranchOptions(projectID: String) throws -> [String] {
-        guard let project = try store.project(id: projectID) else { throw SpaceshipError.missingProject(dir: projectID) }
+        guard let project = try store.project(id: projectID) else { throw MuxyError.missingProject(dir: projectID) }
         guard project.isGitRepo else { return [] }
         return git.branchOptions(path: project.dir)
     }
@@ -152,7 +152,7 @@ public final class SpaceshipOrchestrator {
         let (project, workspace) = try resolveWorkspace(id: workspaceID)
         let config = try projectConfig(projectID: project.id)
         guard var existing = try loadWorkspaceSettings(project: project, workspace: workspace, config: config) else {
-            throw SpaceshipError.missingProject(dir: project.dir)
+            throw MuxyError.missingProject(dir: project.dir)
         }
         let previous = existing
         update(&existing)
@@ -179,10 +179,10 @@ public final class SpaceshipOrchestrator {
         let normalizedDir = normalizePath(dir)
         var isDir: ObjCBool = false
         guard FileManager.default.fileExists(atPath: normalizedDir, isDirectory: &isDir), isDir.boolValue else {
-            throw SpaceshipError.invalidArgument(message: "Project directory not found: \(normalizedDir)")
+            throw MuxyError.invalidArgument(message: "Project directory not found: \(normalizedDir)")
         }
         if config.projects.contains(where: { normalizePath($0.dir) == normalizedDir }) {
-            throw SpaceshipError.projectAlreadyExists(dir: normalizedDir)
+            throw MuxyError.projectAlreadyExists(dir: normalizedDir)
         }
         config.projects.append(ProjectConfig(dir: normalizedDir))
         try configStore.save(config)
@@ -194,7 +194,7 @@ public final class SpaceshipOrchestrator {
 
     public func addProject(gitURL: String) throws -> ProjectRecord {
         let trimmedURL = gitURL.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmedURL.isEmpty else { throw SpaceshipError.invalidArgument(message: "Git repository URL is required.") }
+        guard !trimmedURL.isEmpty else { throw MuxyError.invalidArgument(message: "Git repository URL is required.") }
         let inferredName = inferredProjectName(from: trimmedURL)
         let projectDirname = sanitizeDirname(inferredName, fallback: "project")
         let destination = projectsRootDirectory().appending(path: projectDirname, directoryHint: .isDirectory)
@@ -202,10 +202,10 @@ public final class SpaceshipOrchestrator {
 
         let config = try configStore.load()
         if config.projects.contains(where: { normalizePath($0.dir) == normalizedDestination }) {
-            throw SpaceshipError.projectAlreadyExists(dir: normalizedDestination)
+            throw MuxyError.projectAlreadyExists(dir: normalizedDestination)
         }
         if FileManager.default.fileExists(atPath: destination.path) {
-            throw SpaceshipError.invalidArgument(message: "Project directory already exists: \(normalizedDestination)")
+            throw MuxyError.invalidArgument(message: "Project directory already exists: \(normalizedDestination)")
         }
         try FileManager.default.createDirectory(at: destination.deletingLastPathComponent(), withIntermediateDirectories: true)
         try git.clone(url: trimmedURL, destination: destination.path)
@@ -216,7 +216,7 @@ public final class SpaceshipOrchestrator {
         var config = try configStore.load()
         let normalizedDir = normalizePath(updated.dir)
         let idx = config.projects.firstIndex { normalizePath($0.dir) == normalizedDir }
-        guard let idx else { throw SpaceshipError.missingProject(dir: normalizedDir) }
+        guard let idx else { throw MuxyError.missingProject(dir: normalizedDir) }
         let previous = config.projects[idx]
         var normalizedUpdated = updated
         normalizedUpdated.dir = normalizedDir
@@ -232,7 +232,7 @@ public final class SpaceshipOrchestrator {
         var config = try configStore.load()
         let normalizedDir = normalizePath(projectID)
         let idx = config.projects.firstIndex { normalizePath($0.dir) == normalizedDir }
-        guard let idx else { throw SpaceshipError.missingProject(dir: normalizedDir) }
+        guard let idx else { throw MuxyError.missingProject(dir: normalizedDir) }
         let previous = config.projects[idx]
         var updated = config.projects[idx]
         update(&updated)
@@ -262,34 +262,34 @@ public final class SpaceshipOrchestrator {
     public func createWorkspace(projectID: String, name: String, branch: String? = nil, targetBranch: String? = nil, directoryName: String? = nil)
         throws -> WorkspaceRecord
     {
-        guard let project = try store.project(id: projectID) else { throw SpaceshipError.missingProject(dir: projectID) }
+        guard let project = try store.project(id: projectID) else { throw MuxyError.missingProject(dir: projectID) }
         let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmedName.isEmpty else { throw SpaceshipError.invalidArgument(message: "Workspace name is required.") }
+        guard !trimmedName.isEmpty else { throw MuxyError.invalidArgument(message: "Workspace name is required.") }
         let trimmedDirectoryName = directoryName?.trimmingCharacters(in: .whitespacesAndNewlines)
         let trimmedBranch = branch?.trimmingCharacters(in: .whitespacesAndNewlines)
         let resolvedBranch: String?
         let resolvedTargetBranch: String?
         if project.isGitRepo {
             guard let trimmedBranch, !trimmedBranch.isEmpty else {
-                throw SpaceshipError.invalidArgument(message: "Branch name is required for git projects.")
+                throw MuxyError.invalidArgument(message: "Branch name is required for git projects.")
             }
             resolvedBranch = trimmedBranch
             resolvedTargetBranch = try resolveWorkspaceTargetBranch(project: project, targetBranch: targetBranch)
         } else {
             if let trimmedDirectoryName, !trimmedDirectoryName.isEmpty {
-                throw SpaceshipError.invalidArgument(message: "Directory name override is only supported for git projects.")
+                throw MuxyError.invalidArgument(message: "Directory name override is only supported for git projects.")
             }
             resolvedBranch = nil
             resolvedTargetBranch = nil
         }
         if let existing = try store.workspace(projectID: projectID, name: trimmedName) {
-            if !existing.isArchived { throw SpaceshipError.workspaceAlreadyExists(project: project.name, workspace: trimmedName) }
+            if !existing.isArchived { throw MuxyError.workspaceAlreadyExists(project: project.name, workspace: trimmedName) }
             let revivedDir: String
             let revivedDirname: String?
             let revivedBranch: String?
             if project.isGitRepo {
                 guard let branchName = resolvedBranch else {
-                    throw SpaceshipError.invalidArgument(message: "Branch name is required for git projects.")
+                    throw MuxyError.invalidArgument(message: "Branch name is required for git projects.")
                 }
                 let dirname = try makeWorkspaceDirname(project: project, existingDirname: existing.dirname, requestedDirname: trimmedDirectoryName)
                 revivedDirname = dirname
@@ -324,7 +324,7 @@ public final class SpaceshipOrchestrator {
         let workspaceDirname: String?
         let workspaceBranch: String?
         if project.isGitRepo {
-            guard let branchName = resolvedBranch else { throw SpaceshipError.invalidArgument(message: "Branch name is required for git projects.") }
+            guard let branchName = resolvedBranch else { throw MuxyError.invalidArgument(message: "Branch name is required for git projects.") }
             let dirname = try makeWorkspaceDirname(project: project, existingDirname: nil, requestedDirname: trimmedDirectoryName)
             workspaceDirname = dirname
             let worktreeRoot = try worktreeRoot(project: project)
@@ -361,7 +361,7 @@ public final class SpaceshipOrchestrator {
         if let configured = project.defaultBranch, !configured.isEmpty { return configured }
         if git.branchExists(path: project.dir, branch: "main") || git.remoteBranchExists(path: project.dir, branch: "main") { return "main" }
         if git.branchExists(path: project.dir, branch: "master") || git.remoteBranchExists(path: project.dir, branch: "master") { return "master" }
-        throw SpaceshipError.invalidArgument(message: "Target branch is required for git projects.")
+        throw MuxyError.invalidArgument(message: "Target branch is required for git projects.")
     }
 
     public func launchWorkspace(workspaceID: String) throws {
@@ -377,10 +377,10 @@ public final class SpaceshipOrchestrator {
 
     private func launchWorkspaceUnlocked(workspaceID: String) throws {
         let (project, workspace) = try resolveWorkspace(id: workspaceID)
-        guard !workspace.isArchived else { throw SpaceshipError.invalidArgument(message: "Workspace is archived.") }
+        guard !workspace.isArchived else { throw MuxyError.invalidArgument(message: "Workspace is archived.") }
         let hasTrackedRuntime = try hasTrackedRuntimeIndicators(workspaceID: workspace.id)
         guard !(workspace.isRunning || hasTrackedRuntime) else {
-            throw SpaceshipError.invalidArgument(message: "Workspace is already running. Use restart.")
+            throw MuxyError.invalidArgument(message: "Workspace is already running. Use restart.")
         }
         let config = try loadWorkspaceSettings(project: project, workspace: workspace, config: try projectConfig(projectID: project.id))
         let portDefinitions = try store.workspacePortDefinitions(workspaceID: workspace.id)
@@ -497,7 +497,7 @@ public final class SpaceshipOrchestrator {
 
     private func archiveWorkspaceUnlocked(workspaceID: String) throws {
         let (project, workspace) = try resolveWorkspace(id: workspaceID)
-        guard !workspace.isDefault else { throw SpaceshipError.invalidArgument(message: "Default workspace cannot be archived.") }
+        guard !workspace.isDefault else { throw MuxyError.invalidArgument(message: "Default workspace cannot be archived.") }
         try stopWorkspaceUnlocked(workspaceID: workspaceID)
         if project.isGitRepo {
             do { try git.removeWorktree(path: project.dir, worktreePath: workspace.dir) } catch { if !isMissingWorktreeError(error) { throw error } }
@@ -516,7 +516,7 @@ public final class SpaceshipOrchestrator {
         workspaceLifecycleLock.lock()
         if workspaceLifecycleInFlight.contains(workspaceID) {
             workspaceLifecycleLock.unlock()
-            throw SpaceshipError.invalidArgument(message: "Workspace action is already in progress.")
+            throw MuxyError.invalidArgument(message: "Workspace action is already in progress.")
         }
         workspaceLifecycleInFlight.insert(workspaceID)
         workspaceLifecycleLock.unlock()
@@ -583,7 +583,7 @@ public final class SpaceshipOrchestrator {
     
     private func restartFailedProcess(workspaceID: String, process: RunningProcessRecord, check: StatusCheckDefinition, result: StatusResult) throws {
         // Log the restart attempt
-        fputs("spaceship: Restarting process '\(process.templateName)' due to failed status check '\(result.checkName)'\n", stderr)
+        fputs("muxy: Restarting process '\(process.templateName)' due to failed status check '\(result.checkName)'\n", stderr)
         
         // Show notification about restart
         let notification = NSUserNotification()
@@ -681,9 +681,9 @@ public final class SpaceshipOrchestrator {
 
     public func openWorkspaceEditor(workspaceID: String) throws {
         let (_, workspace) = try resolveWorkspace(id: workspaceID)
-        guard !workspace.isArchived else { throw SpaceshipError.invalidArgument(message: "Workspace is archived.") }
+        guard !workspace.isArchived else { throw MuxyError.invalidArgument(message: "Workspace is archived.") }
         guard let editor = try configStore.load().editor, editor != .none else {
-            throw SpaceshipError.configError(message: "Preferred editor is not configured.")
+            throw MuxyError.configError(message: "Preferred editor is not configured.")
         }
         let snapshot = try yabai.listWindows()
         try EditorLauncher.open(editor: editor, directory: workspace.dir)
@@ -692,8 +692,8 @@ public final class SpaceshipOrchestrator {
 
     public func openWorkspaceTerminal(workspaceID: String) throws {
         let (_, workspace) = try resolveWorkspace(id: workspaceID)
-        guard !workspace.isArchived else { throw SpaceshipError.invalidArgument(message: "Workspace is archived.") }
-        guard iterm.isAvailable() else { throw SpaceshipError.dependencyMissing(message: "iTerm2 is required to open terminal windows.") }
+        guard !workspace.isArchived else { throw MuxyError.invalidArgument(message: "Workspace is archived.") }
+        guard iterm.isAvailable() else { throw MuxyError.dependencyMissing(message: "iTerm2 is required to open terminal windows.") }
         let snapshot = try yabai.listWindows()
         let escapedDir = workspace.dir.replacingOccurrences(of: "\"", with: "\\\"")
         _ = try iterm.openWindowAndRun(command: "cd \"\(escapedDir)\"")
@@ -1085,7 +1085,7 @@ public final class SpaceshipOrchestrator {
 
     private func logBrowserFocus(_ message: String) {
         guard debugLoggingEnabled() else { return }
-        fputs("spaceship: browser focus \(message)\n", stderr)
+        fputs("muxy: browser focus \(message)\n", stderr)
     }
 
     private func debugLoggingEnabled() -> Bool { ProcessInfo.processInfo.environment["DEBUG"] == "1" }
@@ -1125,7 +1125,7 @@ public final class SpaceshipOrchestrator {
         if debugLoggingEnabled() {
             let elapsedMS = Int(Date().timeIntervalSince(scanStartedAt) * 1000)
             fputs(
-                "spaceship: browser scan workspace=\(workspaceID) tabs=\(tabs.count) matches=\(browserWindows.count) elapsed_ms=\(elapsedMS)\n",
+                "muxy: browser scan workspace=\(workspaceID) tabs=\(tabs.count) matches=\(browserWindows.count) elapsed_ms=\(elapsedMS)\n",
                 stderr)
         }
         return BrowserWindowScanResult(windows: browserWindows, tabIndexByWindowAndURL: tabIndexByWindowAndURL)
@@ -1217,7 +1217,7 @@ public final class SpaceshipOrchestrator {
         let dir = normalizePath(project.dir)
         var isDir: ObjCBool = false
         guard FileManager.default.fileExists(atPath: dir, isDirectory: &isDir), isDir.boolValue else {
-            throw SpaceshipError.invalidArgument(message: "Project directory not found: \(dir)")
+            throw MuxyError.invalidArgument(message: "Project directory not found: \(dir)")
         }
         let isGit = git.isRepo(path: dir)
         let branch = isGit ? git.defaultBranch(path: dir) : nil
@@ -1251,8 +1251,8 @@ public final class SpaceshipOrchestrator {
     }
 
     private func resolveWorkspace(id: String) throws -> (ProjectRecord, WorkspaceRecord) {
-        guard let workspace = try store.workspace(id: id) else { throw SpaceshipError.invalidArgument(message: "Workspace not found.") }
-        guard let project = try store.project(id: workspace.projectID) else { throw SpaceshipError.missingProject(dir: workspace.projectID) }
+        guard let workspace = try store.workspace(id: id) else { throw MuxyError.invalidArgument(message: "Workspace not found.") }
+        guard let project = try store.project(id: workspace.projectID) else { throw MuxyError.missingProject(dir: workspace.projectID) }
         return (project, workspace)
     }
 
@@ -1361,8 +1361,8 @@ public final class SpaceshipOrchestrator {
             let key = namedPort.name.isEmpty ? "PORT\(env.count)" : namedPort.name
             env[key] = String(namedPort.port)
         }
-        env["SPACESHIP_WORKSPACE_DIR"] = workspace.dir
-        env["SPACESHIP_PROJECT_DIR"] = project.dir
+        env["MUXY_WORKSPACE_DIR"] = workspace.dir
+        env["MUXY_PROJECT_DIR"] = project.dir
         return env
     }
 
@@ -1432,7 +1432,7 @@ public final class SpaceshipOrchestrator {
         }
 
         if !toStart.isEmpty || !toRestart.isEmpty, !iterm.isAvailable() {
-            throw SpaceshipError.dependencyMissing(message: "iTerm2 is required to launch processes.")
+            throw MuxyError.dependencyMissing(message: "iTerm2 is required to launch processes.")
         }
 
         for process in toStop {
@@ -1515,7 +1515,7 @@ public final class SpaceshipOrchestrator {
             }
             return
         }
-        guard chrome.isAvailable() else { throw SpaceshipError.dependencyMissing(message: "Google Chrome is required for browser sessions.") }
+        guard chrome.isAvailable() else { throw MuxyError.dependencyMissing(message: "Google Chrome is required for browser sessions.") }
         let snapshot = try yabai.listWindows()
         let browserSessionResult = try ensureBrowserSessions(
             project: project, workspace: workspace, sessions: sessions, env: env, extractOnAttach: false)
@@ -1654,7 +1654,7 @@ public final class SpaceshipOrchestrator {
             try store.deleteRunningProcesses(workspaceID: workspace.id)
             return
         }
-        guard iterm.isAvailable() else { throw SpaceshipError.dependencyMissing(message: "iTerm2 is required to launch processes.") }
+        guard iterm.isAvailable() else { throw MuxyError.dependencyMissing(message: "iTerm2 is required to launch processes.") }
         let runtimeRoot = try runtimeDirectory()
         let workspaceRuntime = URL(fileURLWithPath: runtimeRoot).appendingPathComponent(workspace.id, isDirectory: true)
         try FileManager.default.createDirectory(at: workspaceRuntime, withIntermediateDirectories: true)
@@ -1688,7 +1688,7 @@ public final class SpaceshipOrchestrator {
     {
         _ = project
         guard !sessions.isEmpty else { return ([], []) }
-        guard chrome.isAvailable() else { throw SpaceshipError.dependencyMissing(message: "Google Chrome is required for browser sessions.") }
+        guard chrome.isAvailable() else { throw MuxyError.dependencyMissing(message: "Google Chrome is required for browser sessions.") }
         let resolvedSessions = resolveBrowserSessions(sessions, env: env)
         var attached: [WindowRecord] = []
         var refreshedSessions = sessions
@@ -1754,11 +1754,11 @@ public final class SpaceshipOrchestrator {
 
     private func runtimeDirectory() throws -> String {
         let dir: URL
-        if let override = ProcessInfo.processInfo.environment["SPACESHIP_RUNTIME_DIR"], !override.isEmpty {
+        if let override = ProcessInfo.processInfo.environment["MUXY_RUNTIME_DIR"], !override.isEmpty {
             dir = URL(fileURLWithPath: override, isDirectory: true)
         } else {
             let home = FileManager.default.homeDirectoryForCurrentUser
-            dir = home.appendingPathComponent(".spaceship", isDirectory: true).appendingPathComponent("runtime", isDirectory: true)
+            dir = home.appendingPathComponent(".muxy", isDirectory: true).appendingPathComponent("runtime", isDirectory: true)
         }
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         return dir.path
@@ -1917,14 +1917,14 @@ public final class SpaceshipOrchestrator {
             try validateWorkspaceDirname(requestedDirname)
             let used = try usedWorkspaceDirnames(project: project, excludingDirname: existingDirname)
             guard !used.contains(requestedDirname) else {
-                throw SpaceshipError.invalidArgument(message: "Workspace directory name is already in use: \(requestedDirname)")
+                throw MuxyError.invalidArgument(message: "Workspace directory name is already in use: \(requestedDirname)")
             }
             return requestedDirname
         }
         if let existingDirname, !existingDirname.isEmpty { return existingDirname }
         let used = try usedWorkspaceDirnames(project: project, excludingDirname: nil)
-        if let available = SpaceshipOrchestrator.workspaceFoodNames.first(where: { !used.contains($0) }) { return available }
-        throw SpaceshipError.invalidArgument(message: "No available workspace dirnames remain for project \(project.name).")
+        if let available = MuxyOrchestrator.workspaceFoodNames.first(where: { !used.contains($0) }) { return available }
+        throw MuxyError.invalidArgument(message: "No available workspace dirnames remain for project \(project.name).")
     }
 
     private func usedWorkspaceDirnames(project: ProjectRecord, excludingDirname: String?) throws -> Set<String> {
@@ -1939,13 +1939,13 @@ public final class SpaceshipOrchestrator {
     }
 
     private func validateWorkspaceDirname(_ dirname: String) throws {
-        guard !dirname.isEmpty else { throw SpaceshipError.invalidArgument(message: "Workspace directory name cannot be empty.") }
+        guard !dirname.isEmpty else { throw MuxyError.invalidArgument(message: "Workspace directory name cannot be empty.") }
         if dirname.rangeOfCharacter(from: .whitespacesAndNewlines) != nil {
-            throw SpaceshipError.invalidArgument(message: "Workspace directory name cannot contain spaces.")
+            throw MuxyError.invalidArgument(message: "Workspace directory name cannot contain spaces.")
         }
         for scalar in dirname.unicodeScalars {
             guard scalar.isASCII else {
-                throw SpaceshipError.invalidArgument(message: "Workspace directory name can only use letters, numbers, '-', and '_'.")
+                throw MuxyError.invalidArgument(message: "Workspace directory name can only use letters, numbers, '-', and '_'.")
             }
             let value = scalar.value
             let isUppercaseLetter = value >= 65 && value <= 90
@@ -1954,13 +1954,13 @@ public final class SpaceshipOrchestrator {
             let isHyphen = value == 45
             let isUnderscore = value == 95
             guard isUppercaseLetter || isLowercaseLetter || isDigit || isHyphen || isUnderscore else {
-                throw SpaceshipError.invalidArgument(message: "Workspace directory name can only use letters, numbers, '-', and '_'.")
+                throw MuxyError.invalidArgument(message: "Workspace directory name can only use letters, numbers, '-', and '_'.")
             }
         }
     }
 
     private func isMissingWorktreeError(_ error: Error) -> Bool {
-        guard case SpaceshipError.gitCommandFailed(let message) = error else { return false }
+        guard case MuxyError.gitCommandFailed(let message) = error else { return false }
         let lowered = message.lowercased()
         return lowered.contains("not a working tree") || lowered.contains("does not exist") || lowered.contains("no such file or directory")
     }
@@ -1978,13 +1978,13 @@ public final class SpaceshipOrchestrator {
     private func projectsRootDirectory() -> URL {
         if let projectsRootDirectoryURL { return projectsRootDirectoryURL }
         let home = FileManager.default.homeDirectoryForCurrentUser
-        return home.appending(path: "spaceship", directoryHint: .isDirectory).appending(path: "projects", directoryHint: .isDirectory)
+        return home.appending(path: "muxy", directoryHint: .isDirectory).appending(path: "projects", directoryHint: .isDirectory)
     }
 
     private func workspaceRootDirectory() -> URL {
         if let workspacesRootDirectoryURL { return workspacesRootDirectoryURL }
         let home = FileManager.default.homeDirectoryForCurrentUser
-        return home.appending(path: "spaceship", directoryHint: .isDirectory).appending(path: "workspaces", directoryHint: .isDirectory)
+        return home.appending(path: "muxy", directoryHint: .isDirectory).appending(path: "workspaces", directoryHint: .isDirectory)
     }
 
     private func removeManagedGitWorkspaceDirectoriesIfNeeded(project: ProjectRecord) throws {

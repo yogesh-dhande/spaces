@@ -1,7 +1,7 @@
 # AGENTS.md
 
 ## Purpose
-- `spaceship` is a macOS Swift app for stream-based workspace orchestration.
+- `muxy` is a macOS Swift app for stream-based workspace orchestration.
 - Streams map to **captured window sets** managed via yabai.
 - The macOS app source lives under `apps/macos`.
 - The marketing/docs website source lives under `apps/web`.
@@ -14,7 +14,7 @@
 - Any project setting related to workspace creation and used during workspace launch must be overridable per workspace after creation.
 
 ## Data & Paths
-- DB path: `~/.spaceship/spaceship.db` (managed automatically).
+- DB path: `~/.muxy/muxy.db` (managed automatically).
 - Schema and architecture details live in `apps/macos/docs/architecture.md`.
 
 ## GUI

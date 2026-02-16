@@ -66,7 +66,7 @@ final class GitClientTests: XCTestCase {
         try "new remote".write(to: fixture.source.appending(path: "NEW_REMOTE_FOR_WORKTREE.md"), atomically: true, encoding: .utf8)
         try runGit(["add", "NEW_REMOTE_FOR_WORKTREE.md"], cwd: fixture.source.path)
         try runGit(
-            ["-c", "user.name=spaceship-test", "-c", "user.email=test@example.com", "commit", "-m", "new remote worktree"], cwd: fixture.source.path)
+            ["-c", "user.name=muxy-test", "-c", "user.email=test@example.com", "commit", "-m", "new remote worktree"], cwd: fixture.source.path)
         try runGit(["push", fixture.remote.path, "new-remote-only"], cwd: fixture.source.path)
 
         let trackedBefore = try runGit(["for-each-ref", "--format=%(refname:short)", "refs/remotes/origin/new-remote-only"], cwd: fixture.clone.path)
@@ -113,7 +113,7 @@ final class GitClientTests: XCTestCase {
         try runGit(["checkout", "-b", "develop"], cwd: repo.path)
         try "target".write(to: repo.appendingPathComponent("TARGET.txt"), atomically: true, encoding: .utf8)
         try runGit(["add", "TARGET.txt"], cwd: repo.path)
-        try runGit(["-c", "user.name=spaceship-test", "-c", "user.email=test@example.com", "commit", "-m", "target"], cwd: repo.path)
+        try runGit(["-c", "user.name=muxy-test", "-c", "user.email=test@example.com", "commit", "-m", "target"], cwd: repo.path)
         let expectedHead = try runGit(["rev-parse", "develop"], cwd: repo.path).trimmingCharacters(in: .whitespacesAndNewlines)
         try runGit(["checkout", "main"], cwd: repo.path)
 
@@ -131,7 +131,7 @@ final class GitClientTests: XCTestCase {
         try "target".write(to: fixture.source.appending(path: "NEW_REMOTE_TARGET.md"), atomically: true, encoding: .utf8)
         try runGit(["add", "NEW_REMOTE_TARGET.md"], cwd: fixture.source.path)
         try runGit(
-            ["-c", "user.name=spaceship-test", "-c", "user.email=test@example.com", "commit", "-m", "remote target"], cwd: fixture.source.path)
+            ["-c", "user.name=muxy-test", "-c", "user.email=test@example.com", "commit", "-m", "remote target"], cwd: fixture.source.path)
         try runGit(["push", fixture.remote.path, "new-remote-target"], cwd: fixture.source.path)
 
         let expectedHead = try runGit(["rev-parse", "new-remote-target"], cwd: fixture.source.path).trimmingCharacters(in: .whitespacesAndNewlines)
@@ -170,7 +170,7 @@ final class GitClientTests: XCTestCase {
         try runGit(["checkout", "-b", "new-remote-only"], cwd: fixture.source.path)
         try "new remote".write(to: fixture.source.appending(path: "NEW_REMOTE.md"), atomically: true, encoding: .utf8)
         try runGit(["add", "NEW_REMOTE.md"], cwd: fixture.source.path)
-        try runGit(["-c", "user.name=spaceship-test", "-c", "user.email=test@example.com", "commit", "-m", "new remote"], cwd: fixture.source.path)
+        try runGit(["-c", "user.name=muxy-test", "-c", "user.email=test@example.com", "commit", "-m", "new remote"], cwd: fixture.source.path)
         try runGit(["push", fixture.remote.path, "new-remote-only"], cwd: fixture.source.path)
         XCTAssertFalse(GitClient().branchExists(path: fixture.clone.path, branch: "new-remote-only"), "Local branch should not exist before fetch.")
 
@@ -188,7 +188,7 @@ final class GitClientTests: XCTestCase {
         let trackedFile = repo.appending(path: "TRACKED.md")
         try "tracked".write(to: trackedFile, atomically: true, encoding: .utf8)
         try runGit(["add", "TRACKED.md"], cwd: repo.path)
-        try runGit(["-c", "user.name=spaceship-test", "-c", "user.email=test@example.com", "commit", "-m", "add tracked"], cwd: repo.path)
+        try runGit(["-c", "user.name=muxy-test", "-c", "user.email=test@example.com", "commit", "-m", "add tracked"], cwd: repo.path)
 
         let readmeFile = repo.appending(path: "README.md")
         let oldDate = Date(timeIntervalSinceNow: -600)
@@ -243,7 +243,7 @@ final class GitClientTests: XCTestCase {
         let readme = directory.appendingPathComponent("README.md")
         try "hello".write(to: readme, atomically: true, encoding: .utf8)
         try runGit(["add", "README.md"], cwd: directory.path)
-        try runGit(["-c", "user.name=spaceship-test", "-c", "user.email=test@example.com", "commit", "-m", "init"], cwd: directory.path)
+        try runGit(["-c", "user.name=muxy-test", "-c", "user.email=test@example.com", "commit", "-m", "init"], cwd: directory.path)
     }
 
     private func makeRemoteFixture() throws -> (root: URL, source: URL, remote: URL, clone: URL) {
@@ -255,7 +255,7 @@ final class GitClientTests: XCTestCase {
         try runGit(["checkout", "-b", "remote-feature"], cwd: source.path)
         try "feature".write(to: source.appendingPathComponent("FEATURE.md"), atomically: true, encoding: .utf8)
         try runGit(["add", "FEATURE.md"], cwd: source.path)
-        try runGit(["-c", "user.name=spaceship-test", "-c", "user.email=test@example.com", "commit", "-m", "feature"], cwd: source.path)
+        try runGit(["-c", "user.name=muxy-test", "-c", "user.email=test@example.com", "commit", "-m", "feature"], cwd: source.path)
         try runGit(["checkout", "main"], cwd: source.path)
 
         let remote = root.appendingPathComponent("remote.git", isDirectory: true)
@@ -292,7 +292,7 @@ final class GitClientTests: XCTestCase {
         let outputText = String(data: output.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
         if process.terminationStatus != 0 {
             let errorText = String(data: error.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-            throw NSError(domain: "spaceship.tests", code: Int(process.terminationStatus), userInfo: [NSLocalizedDescriptionKey: errorText])
+            throw NSError(domain: "muxy.tests", code: Int(process.terminationStatus), userInfo: [NSLocalizedDescriptionKey: errorText])
         }
         return outputText
     }
@@ -304,7 +304,7 @@ final class GitClientTests: XCTestCase {
     private func modificationDate(for fileURL: URL) throws -> Date {
         let attributes = try FileManager.default.attributesOfItem(atPath: fileURL.path)
         guard let date = attributes[.modificationDate] as? Date else {
-            throw NSError(domain: "spaceship.tests", code: 1, userInfo: [NSLocalizedDescriptionKey: "Missing modification date for \(fileURL.path)"])
+            throw NSError(domain: "muxy.tests", code: 1, userInfo: [NSLocalizedDescriptionKey: "Missing modification date for \(fileURL.path)"])
         }
         return date
     }

@@ -11,7 +11,7 @@ export default function WorkspacesDocsPage() {
   return (
     <DocsShell
       title="Workspaces"
-      description="A workspace is the core runtime unit in Spaceship. It owns process templates, browser sessions, status checks, window tracking, and reserved ports."
+      description="A workspace is the core runtime unit in Muxy. It owns process templates, browser sessions, status checks, window tracking, and reserved ports."
       pagePath="/docs/workspaces"
     >
       <article className="rounded-2xl border border-line bg-surface/82 p-5 backdrop-blur-sm">
@@ -77,8 +77,8 @@ API_PORT=21002`}</code>
         </p>
         <ul className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
           <li>• Named port env vars from the workspace&apos;s port definitions (e.g. `FRONTEND_PORT=20001`, `API_PORT=20002`).</li>
-          <li>• `SPACESHIP_PROJECT_DIR` &mdash; the project directory.</li>
-          <li>• `SPACESHIP_WORKSPACE_DIR` &mdash; the workspace directory.</li>
+          <li>• `MUXY_PROJECT_DIR` &mdash; the project directory.</li>
+          <li>• `MUXY_WORKSPACE_DIR` &mdash; the workspace directory.</li>
         </ul>
         <p className="mt-3 text-sm leading-7 text-foreground-soft">
           These variables are available in setup scripts, stop scripts, process commands,
@@ -106,7 +106,7 @@ API_PORT=21002`}</code>
         />
         <ScreenshotFrame
           title="Workspace Env Tab"
-          caption="Named port env vars and built-in Spaceship env vars for the selected workspace."
+          caption="Named port env vars and built-in Muxy env vars for the selected workspace."
         />
       </article>
     </DocsShell>

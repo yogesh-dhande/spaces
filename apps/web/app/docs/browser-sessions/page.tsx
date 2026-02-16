@@ -27,7 +27,7 @@ export default function BrowserSessionsDocsPage() {
       <article className="rounded-2xl border border-line bg-surface/82 p-5 backdrop-blur-sm">
         <h2 className="text-xl font-semibold tracking-tight">Launch Behavior</h2>
         <ul className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
-          <li>• On workspace launch, Spaceship ensures session URLs are open in Chrome.</li>
+          <li>• On workspace launch, Muxy ensures session URLs are open in Chrome.</li>
           <li>• Existing matching tabs are reused when possible.</li>
           <li>• Matching is based on URL prefix, not window title.</li>
           <li>• Matching browser tabs are attached to workspace window navigation.</li>
@@ -40,7 +40,7 @@ export default function BrowserSessionsDocsPage() {
           <li>• Focus actions target matching tabs using URL information.</li>
           <li>• If a tab matches multiple session URLs, it appears once in workspace navigation.</li>
           <li>• Browser cleanup closes matching tabs only.</li>
-          <li>• Spaceship does not close full Chrome windows during workspace cleanup.</li>
+          <li>• Muxy does not close full Chrome windows during workspace cleanup.</li>
         </ul>
       </article>
 

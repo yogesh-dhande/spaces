@@ -6,7 +6,7 @@ set -euo pipefail
 
 INACTIVITY_THRESHOLD="${INACTIVITY_THRESHOLD:-2}"  # seconds without new output => waiting_for_input
 POLL_INTERVAL="${POLL_INTERVAL:-0.25}"
-DEBUG_WRAP="${SPACESHIP_WRAP_DEBUG:-0}"
+DEBUG_WRAP="${MUXY_WRAP_DEBUG:-0}"
 
 now_iso() {
   # macOS-compatible ISO-ish timestamp

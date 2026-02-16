@@ -3,12 +3,12 @@ import { DocsShell } from "../components/docs-shell";
 
 export const metadata: Metadata = {
   title: "FAQ",
-  description: "Common questions about Spaceship behavior and boundaries.",
+  description: "Common questions about Muxy behavior and boundaries.",
 };
 
 const faqs = [
   {
-    q: "What is a workspace in Spaceship?",
+    q: "What is a workspace in Muxy?",
     a: "A workspace is a stream of work with its own runtime context: processes, browser sessions, status checks, captured windows, and reserved ports. For Git projects it is typically backed by a worktree.",
   },
   {
@@ -20,15 +20,15 @@ const faqs = [
     a: "Archive stops all processes and closes tracked windows, releases reserved ports, and marks the workspace archived. For Git projects, the worktree directory is removed but branches are kept.",
   },
   {
-    q: "Does Spaceship manage window tiling and geometry?",
-    a: "No. Spaceship manages window context and focus only. Tiling and geometry stay with yabai and your existing setup.",
+    q: "Does Muxy manage window tiling and geometry?",
+    a: "No. Muxy manages window context and focus only. Tiling and geometry stay with yabai and your existing setup.",
   },
   {
     q: "How are browser tabs matched to a workspace?",
-    a: "By URL prefix from browser session definitions. Spaceship intentionally avoids title-based matching to prevent false positives.",
+    a: "By URL prefix from browser session definitions. Muxy intentionally avoids title-based matching to prevent false positives.",
   },
   {
-    q: "Does Spaceship close my entire Chrome window when stopping a workspace?",
+    q: "Does Muxy close my entire Chrome window when stopping a workspace?",
     a: "No. Browser cleanup closes matching tabs only, not entire Chrome windows.",
   },
   {
@@ -40,7 +40,7 @@ const faqs = [
     a: "Yes. Workspace settings start as copies of project templates. After creation, each workspace maintains independent overrides that do not affect the project.",
   },
   {
-    q: "What are Spaceship's supported browser and terminal apps?",
+    q: "What are Muxy's supported browser and terminal apps?",
     a: "Google Chrome for browser sessions and iTerm2 for process terminal windows.",
   },
   {
@@ -48,8 +48,8 @@ const faqs = [
     a: "Yes. Shortcut overrides are supported through the Settings view.",
   },
   {
-    q: "Does Spaceship require editor plugins?",
-    a: "No. Spaceship does not introspect editor internals and does not require extensions.",
+    q: "Does Muxy require editor plugins?",
+    a: "No. Muxy does not introspect editor internals and does not require extensions.",
   },
 ];
 

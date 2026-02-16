@@ -1,6 +1,6 @@
 import Foundation
 
-extension SpaceshipOrchestrator {
+extension MuxyOrchestrator {
     struct CommandOutcome {
         let exitCode: Int32
         let output: String

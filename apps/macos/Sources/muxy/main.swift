@@ -15,7 +15,7 @@ struct CLI {
         let configPath = try ConfigStore.defaultPath()
         let store = try SQLiteStore(path: db)
         let configStore = ConfigStore(path: configPath)
-        let orchestrator = SpaceshipOrchestrator(store: store, configStore: configStore)
+        let orchestrator = MuxyOrchestrator(store: store, configStore: configStore)
 
         _ = try orchestrator.syncConfig()
 
@@ -28,9 +28,9 @@ struct CLI {
         }
     }
 
-    private func runConfigSubcommand(orchestrator: SpaceshipOrchestrator, path: String) throws {
+    private func runConfigSubcommand(orchestrator: MuxyOrchestrator, path: String) throws {
         guard args.count >= 3 else {
-            throw NSError(domain: "spaceship.cli", code: 2, userInfo: [NSLocalizedDescriptionKey: "Missing config action. Use: config path|show"])
+            throw NSError(domain: "muxy.cli", code: 2, userInfo: [NSLocalizedDescriptionKey: "Missing config action. Use: config path|show"])
         }
         switch args[2] {
         case "path": print(path)
@@ -39,14 +39,14 @@ struct CLI {
             print(
                 "editor=\(config.editor?.rawValue ?? "none") port_range=\(config.portRange.start)-\(config.portRange.end) projects=\(config.projects.count)"
             )
-        default: throw NSError(domain: "spaceship.cli", code: 2, userInfo: [NSLocalizedDescriptionKey: "Unknown config action: \(args[2])"])
+        default: throw NSError(domain: "muxy.cli", code: 2, userInfo: [NSLocalizedDescriptionKey: "Unknown config action: \(args[2])"])
         }
     }
 
-    private func runProjectSubcommand(orchestrator: SpaceshipOrchestrator) throws {
+    private func runProjectSubcommand(orchestrator: MuxyOrchestrator) throws {
         guard args.count >= 3 else {
             throw NSError(
-                domain: "spaceship.cli", code: 2, userInfo: [NSLocalizedDescriptionKey: "Missing project action. Use: project list|add|update|remove"]
+                domain: "muxy.cli", code: 2, userInfo: [NSLocalizedDescriptionKey: "Missing project action. Use: project list|add|update|remove"]
             )
         }
 
@@ -61,7 +61,7 @@ struct CLI {
             let gitURL = optionalValue(for: "--git-url")
             if dir != nil, gitURL != nil {
                 throw NSError(
-                    domain: "spaceship.cli", code: 2,
+                    domain: "muxy.cli", code: 2,
                     userInfo: [NSLocalizedDescriptionKey: "Use either --dir <path> or --git-url <url>, but not both."])
             }
             let record: ProjectRecord
@@ -71,7 +71,7 @@ struct CLI {
                 record = try orchestrator.addProject(dir: dir)
             } else {
                 throw NSError(
-                    domain: "spaceship.cli", code: 2,
+                    domain: "muxy.cli", code: 2,
                     userInfo: [NSLocalizedDescriptionKey: "Missing required flags. Use: project add --dir <path> or project add --git-url <url>"])
             }
             print("Added project \(record.name)\t\(record.dir)")
@@ -80,7 +80,7 @@ struct CLI {
             let setupScript = optionalValue(for: "--setup-script")
             let stopScript = optionalValue(for: "--stop-script")
             guard var config = try orchestrator.projectConfig(projectID: normalizePath(dir)) else {
-                throw NSError(domain: "spaceship.cli", code: 2, userInfo: [NSLocalizedDescriptionKey: "Project not found for dir \(dir)"])
+                throw NSError(domain: "muxy.cli", code: 2, userInfo: [NSLocalizedDescriptionKey: "Project not found for dir \(dir)"])
             }
             if let setupScript { config.setupScript = setupScript }
             if let stopScript { config.stopScript = stopScript }
@@ -90,14 +90,14 @@ struct CLI {
             let dir = try value(for: "--dir")
             try orchestrator.removeProject(dir: dir)
             print("Removed project \(dir)")
-        default: throw NSError(domain: "spaceship.cli", code: 2, userInfo: [NSLocalizedDescriptionKey: "Unknown project action: \(args[2])"])
+        default: throw NSError(domain: "muxy.cli", code: 2, userInfo: [NSLocalizedDescriptionKey: "Unknown project action: \(args[2])"])
         }
     }
 
-    private func runWorkspaceSubcommand(orchestrator: SpaceshipOrchestrator) throws {
+    private func runWorkspaceSubcommand(orchestrator: MuxyOrchestrator) throws {
         guard args.count >= 3 else {
             throw NSError(
-                domain: "spaceship.cli", code: 2,
+                domain: "muxy.cli", code: 2,
                 userInfo: [NSLocalizedDescriptionKey: "Missing workspace action. Use: workspace list|create|launch|restart|stop|archive|activate"])
         }
         switch args[2] {
@@ -119,7 +119,7 @@ struct CLI {
             let dirnameFlag = optionalValue(for: "--dirname")
             if directoryNameFlag != nil, dirnameFlag != nil {
                 throw NSError(
-                    domain: "spaceship.cli", code: 2,
+                    domain: "muxy.cli", code: 2,
                     userInfo: [NSLocalizedDescriptionKey: "Use either --directory-name <name> or --dirname <name>, but not both."])
             }
             let directoryName = directoryNameFlag ?? dirnameFlag
@@ -147,24 +147,24 @@ struct CLI {
             let id = try workspaceID(orchestrator: orchestrator)
             try orchestrator.setActiveWorkspace(id: id)
             print("Activated workspace \(id)")
-        default: throw NSError(domain: "spaceship.cli", code: 2, userInfo: [NSLocalizedDescriptionKey: "Unknown workspace action: \(args[2])"])
+        default: throw NSError(domain: "muxy.cli", code: 2, userInfo: [NSLocalizedDescriptionKey: "Unknown workspace action: \(args[2])"])
         }
     }
 
-    private func workspaceID(orchestrator: SpaceshipOrchestrator) throws -> String {
+    private func workspaceID(orchestrator: MuxyOrchestrator) throws -> String {
         let projectDir = try value(for: "--project-dir")
         let name = try value(for: "--name")
         let projectID = normalizePath(projectDir)
         guard let workspace = try orchestrator.listWorkspaces(projectID: projectID, includeArchived: true).first(where: { $0.name == name }) else {
-            throw NSError(domain: "spaceship.cli", code: 2, userInfo: [NSLocalizedDescriptionKey: "Workspace not found: \(name)"])
+            throw NSError(domain: "muxy.cli", code: 2, userInfo: [NSLocalizedDescriptionKey: "Workspace not found: \(name)"])
         }
         return workspace.id
     }
 
-    private func runSettingsSubcommand(orchestrator: SpaceshipOrchestrator) throws {
+    private func runSettingsSubcommand(orchestrator: MuxyOrchestrator) throws {
         guard args.count >= 3 else {
             throw NSError(
-                domain: "spaceship.cli", code: 2, userInfo: [NSLocalizedDescriptionKey: "Missing settings action. Use: settings get|set|reset"])
+                domain: "muxy.cli", code: 2, userInfo: [NSLocalizedDescriptionKey: "Missing settings action. Use: settings get|set|reset"])
         }
 
         switch args[2] {
@@ -204,7 +204,7 @@ struct CLI {
                 print("gui-open-settings-shortcut\t\(current)")
             } else {
                 throw NSError(
-                    domain: "spaceship.cli", code: 2,
+                    domain: "muxy.cli", code: 2,
                     userInfo: [
                         NSLocalizedDescriptionKey:
                             "Missing setting flag. Use: settings get --gui-hotkey|--gui-next-shortcut|--gui-prev-shortcut|--gui-show-shortcut|--gui-add-project-shortcut|--gui-add-workspace-shortcut|--gui-reload-shortcut|--gui-open-editor-shortcut|--gui-open-terminal-shortcut|--gui-open-finder-shortcut|--gui-open-settings-shortcut"
@@ -258,7 +258,7 @@ struct CLI {
                 print("Updated gui-open-settings-shortcut\t\(spec.normalized)")
             } else {
                 throw NSError(
-                    domain: "spaceship.cli", code: 2,
+                    domain: "muxy.cli", code: 2,
                     userInfo: [
                         NSLocalizedDescriptionKey:
                             "Missing setting flag/value. Use: settings set --gui-hotkey|--gui-next-shortcut|--gui-prev-shortcut|--gui-show-shortcut|--gui-add-project-shortcut|--gui-add-workspace-shortcut|--gui-reload-shortcut|--gui-open-editor-shortcut|--gui-open-terminal-shortcut|--gui-open-finder-shortcut|--gui-open-settings-shortcut <spec>"
@@ -301,20 +301,20 @@ struct CLI {
                 print("Reset gui-open-settings-shortcut\t\(SettingsKey.defaultGUIOpenSettingsShortcut)")
             } else {
                 throw NSError(
-                    domain: "spaceship.cli", code: 2,
+                    domain: "muxy.cli", code: 2,
                     userInfo: [
                         NSLocalizedDescriptionKey:
                             "Missing setting flag. Use: settings reset --gui-hotkey|--gui-next-shortcut|--gui-prev-shortcut|--gui-show-shortcut|--gui-add-project-shortcut|--gui-add-workspace-shortcut|--gui-reload-shortcut|--gui-open-editor-shortcut|--gui-open-terminal-shortcut|--gui-open-finder-shortcut|--gui-open-settings-shortcut"
                     ])
             }
 
-        default: throw NSError(domain: "spaceship.cli", code: 2, userInfo: [NSLocalizedDescriptionKey: "Unknown settings action: \(args[2])"])
+        default: throw NSError(domain: "muxy.cli", code: 2, userInfo: [NSLocalizedDescriptionKey: "Unknown settings action: \(args[2])"])
         }
     }
 
     private func value(for flag: String) throws -> String {
         guard let idx = args.firstIndex(of: flag), idx + 1 < args.count else {
-            throw NSError(domain: "spaceship.cli", code: 2, userInfo: [NSLocalizedDescriptionKey: "Missing required flag \(flag)"])
+            throw NSError(domain: "muxy.cli", code: 2, userInfo: [NSLocalizedDescriptionKey: "Missing required flag \(flag)"])
         }
         return args[idx + 1]
     }
@@ -329,66 +329,66 @@ struct CLI {
     private func printHelp() {
         print(
             """
-            spaceship command line
+            muxy command line
 
             Usage:
-              spaceship config path
-              spaceship config show
+              muxy config path
+              muxy config show
 
-              spaceship settings get --gui-hotkey
-              spaceship settings get --gui-next-shortcut
-              spaceship settings get --gui-prev-shortcut
-              spaceship settings get --gui-show-shortcut
-              spaceship settings get --gui-add-project-shortcut
-              spaceship settings get --gui-add-workspace-shortcut
-              spaceship settings get --gui-reload-shortcut
-              spaceship settings get --gui-open-editor-shortcut
-              spaceship settings get --gui-open-terminal-shortcut
-              spaceship settings get --gui-open-finder-shortcut
-              spaceship settings get --gui-open-settings-shortcut
-              spaceship settings set --gui-hotkey <spec>
-              spaceship settings set --gui-next-shortcut <spec>
-              spaceship settings set --gui-prev-shortcut <spec>
-              spaceship settings set --gui-show-shortcut <spec>
-              spaceship settings set --gui-add-project-shortcut <spec>
-              spaceship settings set --gui-add-workspace-shortcut <spec>
-              spaceship settings set --gui-reload-shortcut <spec>
-              spaceship settings set --gui-open-editor-shortcut <spec>
-              spaceship settings set --gui-open-terminal-shortcut <spec>
-              spaceship settings set --gui-open-finder-shortcut <spec>
-              spaceship settings set --gui-open-settings-shortcut <spec>
-              spaceship settings reset --gui-hotkey
-              spaceship settings reset --gui-next-shortcut
-              spaceship settings reset --gui-prev-shortcut
-              spaceship settings reset --gui-show-shortcut
-              spaceship settings reset --gui-add-project-shortcut
-              spaceship settings reset --gui-add-workspace-shortcut
-              spaceship settings reset --gui-reload-shortcut
-              spaceship settings reset --gui-open-editor-shortcut
-              spaceship settings reset --gui-open-terminal-shortcut
-              spaceship settings reset --gui-open-finder-shortcut
-              spaceship settings reset --gui-open-settings-shortcut
+              muxy settings get --gui-hotkey
+              muxy settings get --gui-next-shortcut
+              muxy settings get --gui-prev-shortcut
+              muxy settings get --gui-show-shortcut
+              muxy settings get --gui-add-project-shortcut
+              muxy settings get --gui-add-workspace-shortcut
+              muxy settings get --gui-reload-shortcut
+              muxy settings get --gui-open-editor-shortcut
+              muxy settings get --gui-open-terminal-shortcut
+              muxy settings get --gui-open-finder-shortcut
+              muxy settings get --gui-open-settings-shortcut
+              muxy settings set --gui-hotkey <spec>
+              muxy settings set --gui-next-shortcut <spec>
+              muxy settings set --gui-prev-shortcut <spec>
+              muxy settings set --gui-show-shortcut <spec>
+              muxy settings set --gui-add-project-shortcut <spec>
+              muxy settings set --gui-add-workspace-shortcut <spec>
+              muxy settings set --gui-reload-shortcut <spec>
+              muxy settings set --gui-open-editor-shortcut <spec>
+              muxy settings set --gui-open-terminal-shortcut <spec>
+              muxy settings set --gui-open-finder-shortcut <spec>
+              muxy settings set --gui-open-settings-shortcut <spec>
+              muxy settings reset --gui-hotkey
+              muxy settings reset --gui-next-shortcut
+              muxy settings reset --gui-prev-shortcut
+              muxy settings reset --gui-show-shortcut
+              muxy settings reset --gui-add-project-shortcut
+              muxy settings reset --gui-add-workspace-shortcut
+              muxy settings reset --gui-reload-shortcut
+              muxy settings reset --gui-open-editor-shortcut
+              muxy settings reset --gui-open-terminal-shortcut
+              muxy settings reset --gui-open-finder-shortcut
+              muxy settings reset --gui-open-settings-shortcut
 
-              spaceship project list
-              spaceship project add --dir <path>
-              spaceship project add --git-url <url>
-              spaceship project update --dir <path> [--setup-script <script>] [--stop-script <script>]
-              spaceship project remove --dir <path>
+              muxy project list
+              muxy project add --dir <path>
+              muxy project add --git-url <url>
+              muxy project update --dir <path> [--setup-script <script>] [--stop-script <script>]
+              muxy project remove --dir <path>
 
-              spaceship workspace list --project-dir <path> [--all]
-              spaceship workspace create --project-dir <path> --name <name> [--branch <branch>] [--target-branch <branch>] [--directory-name <name>]
-              spaceship workspace launch --project-dir <path> --name <name>
-              spaceship workspace restart --project-dir <path> --name <name>
-              spaceship workspace stop --project-dir <path> --name <name>
-              spaceship workspace archive --project-dir <path> --name <name>
-              spaceship workspace activate --project-dir <path> --name <name>
+              muxy workspace list --project-dir <path> [--all]
+              muxy workspace create --project-dir <path> --name <name> [--branch <branch>] [--target-branch <branch>] [--directory-name <name>]
+              muxy workspace launch --project-dir <path> --name <name>
+              muxy workspace restart --project-dir <path> --name <name>
+              muxy workspace stop --project-dir <path> --name <name>
+              muxy workspace archive --project-dir <path> --name <name>
+              muxy workspace activate --project-dir <path> --name <name>
 
             Notes:
-              - Configuration is stored in ~/.spaceship/config.yaml (YAML is source of truth).
+              - Configuration is stored in ~/.muxy/config.yaml (YAML is source of truth).
               - GUI settings (⌘,) let you pick a preferred editor (VS Code, Cursor, Windsurf).
-              - Runtime state is stored in ~/.spaceship/spaceship.db and rebuilt if schema changes.
-              - Removing a git project first removes managed worktrees via `git worktree remove --force`, then deletes related workspace directories under ~/spaceship/workspaces.
-              - Removing a project deletes only spaceship state unless it is an spaceship-cloned git repo under ~/spaceship/projects; those managed project directories are deleted.
+              - Runtime state is stored in ~/.muxy/muxy.db and rebuilt if schema changes.
+              - Removing a git project first removes managed worktrees via `git worktree remove --force`, then deletes related workspace directories under ~/muxy/workspaces.
+              - Removing a project deletes only muxy state unless it is an muxy-cloned git repo under ~/muxy/projects; those managed project directories are deleted.
               - Workspaces snapshot project processes, status checks, and browser sessions into the runtime DB on creation.
               - Project `setup_script` runs when a workspace is created/revived.
               - Project/workspace `stop_script` runs whenever a workspace is stopped (including restart/archive stop phase), after automatic process termination attempts.
@@ -401,7 +401,7 @@ struct CLI {
               - Chrome tab scans used for workspace window list/cycle are debounced to at most once every \(Int(PollingConstants.browserWindowScanDebounceInterval)) seconds per workspace browser-session config.
               - Browser window focus targets cached tab index first, validates focused active-tab URL, auto-corrects with one refresh, then falls back to URL matching when needed.
               - Diagnostics: DEBUG=1 logs browser scan timing and browser focus-path timing (including cache hit/miss and fallback decisions).
-              - GUI action shortcuts can be overridden in Settings or via `spaceship settings set ...`.
+              - GUI action shortcuts can be overridden in Settings or via `muxy settings set ...`.
             """)
     }
 }

@@ -4,14 +4,14 @@ import { DocsShell } from "../components/docs-shell";
 
 export const metadata: Metadata = {
   title: "Window Management",
-  description: "How Spaceship captures and focuses workspace windows.",
+  description: "How Muxy captures and focuses workspace windows.",
 };
 
 export default function WindowManagementDocsPage() {
   return (
     <DocsShell
       title="Window Management"
-      description="Spaceship maps workspace windows to captured IDs and browser URL targets so context switching stays deterministic across terminals, editors, and Chrome tabs."
+      description="Muxy maps workspace windows to captured IDs and browser URL targets so context switching stays deterministic across terminals, editors, and Chrome tabs."
       pagePath="/docs/window-management"
     >
       <article className="rounded-2xl border border-line bg-surface/82 p-5 backdrop-blur-sm">
@@ -42,7 +42,7 @@ export default function WindowManagementDocsPage() {
         <ul className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
           <li>• Browser session matching is URL-prefix based.</li>
           <li>• Browser cleanup closes matching tabs only, never full Chrome windows.</li>
-          <li>• If tabs already match session URLs, Spaceship reuses them instead of opening duplicates.</li>
+          <li>• If tabs already match session URLs, Muxy reuses them instead of opening duplicates.</li>
         </ul>
       </article>
 

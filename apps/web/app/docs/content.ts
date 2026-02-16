@@ -10,7 +10,7 @@ export const docsPageLinks: DocsPageLink[] = [
     href: "/docs/getting-started",
     title: "Getting Started",
     summary: "Install requirements, connect a project, and launch a first workspace.",
-    audience: "New users onboarding spaceship for the first time.",
+    audience: "New users onboarding muxy for the first time.",
   },
   {
     href: "/docs/projects",

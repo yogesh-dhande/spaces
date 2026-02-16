@@ -24,7 +24,7 @@ final class ShellTests: XCTestCase {
     func testRunAndCaptureThrowsWithStderrOnFailure() throws {
         XCTAssertThrowsError(try Shell.runAndCapture(["sh", "-lc", "echo boom >&2; exit 9"])) { error in
             let nsError = error as NSError
-            XCTAssertEqual(nsError.domain, "spaceship.shell")
+            XCTAssertEqual(nsError.domain, "muxy.shell")
             XCTAssertEqual(nsError.code, 9)
             XCTAssertTrue((nsError.localizedDescription).contains("boom"))
         }

@@ -1,4 +1,4 @@
-- Application name: spaceship
+- Application name: muxy
 - Goals
     - Build a developer tool to maximize productivity in coding with the help of coding agents
     - solve for following painpoints
@@ -10,10 +10,10 @@
         - reduce overhead of context switching
         - notifications for when things are ready for human eyes (e.g. coding agent is idle or server process has exited) so time is not wasted
 - Non-goals
-    - spaceship does **not** manage window geometry or tiling (delegated to user/yabai)
-    - spaceship does **not** attempt to restore exact tab ordering inside browsers
-    - spaceship does **not** introspect editor internals (no VS Code extensions required)
-    - spaceship does **not** manage secrets beyond env vars
+    - muxy does **not** manage window geometry or tiling (delegated to user/yabai)
+    - muxy does **not** attempt to restore exact tab ordering inside browsers
+    - muxy does **not** introspect editor internals (no VS Code extensions required)
+    - muxy does **not** manage secrets beyond env vars
 - Implementation preferences
     - GUI should be a thin wrapper written in AppKit that calls code written in swift in a separate module. This is critical to make it easy to port the GUI to a different tech stack later (e.g. tauri)
     - Prefer automation using applescript, followed by shell commands whenever possible
@@ -22,7 +22,7 @@
     - Ok to have yabai will be a required dependency
     - Avoid yabai SIP
     - Show useful messages and hints to the user for a smooth UX
-    - In all failure cases, spaceship should surface a clear, actionable error message in the GUI.
+    - In all failure cases, muxy should surface a clear, actionable error message in the GUI.
     - supported browsers: chrome
     - supported terminals: iTerm2
 - Models and data
@@ -119,7 +119,7 @@
                 - valid characters: letters, numbers, `-`, `_`
                 - spaces are not allowed
         - behavior
-            - A workspace may be backed by a git worktree, but workspace is a higher-level spaceship concept
+            - A workspace may be backed by a git worktree, but workspace is a higher-level muxy concept
             - stored in db
             - Workspace detail includes actions
                 - Launch/Restart/Stop/Archive
@@ -173,7 +173,7 @@
             - stored in db
             - when started, each process receives the following env vars
                 - Named port env vars from the workspace's port definitions (e.g. `FRONTEND_PORT=20001`, `API_PORT=20002`) so they can be used when starting a server e.g. `PORT=$FRONTEND_PORT npm run dev`
-            - can be restarted from spaceship GUI (e.g. if .env files are changed). restarts in the existing terminal window
+            - can be restarted from muxy GUI (e.g. if .env files are changed). restarts in the existing terminal window
     - Window
         - fields
             - workspace: Workspace
@@ -185,24 +185,24 @@
             - Automatically identify any chrome windows that have matching BrowserSessions open (browser url starts with BrowserSession.url) and attach those to the related workspace. User may open additional tabs or windows. all of them should be automatically identified and tracked
             - when looping through windows, the order should be browser window, editor window, and then terminal windows in the order in which processes are defined
             - when GUI is focused, cmd+1 through cmd+9 focus the corresponding workspace window
-            - Window records may become stale across app restarts; spaceship must re-discover windows on launch and reconcile with stored state
+            - Window records may become stale across app restarts; muxy must re-discover windows on launch and reconcile with stored state
 - User flow
     - User installs the app
     - Check for required dependencies e.g. yabai. If missing, ask user to install and provide instructions or links to instructions
     - Check for required permissions e.g. accessibility. If missing, ask user to provide using deep links to settings whenever possible. Provide instructions.
     - Once the app is configured appropriately, prompt the user to create their first project
     - Run a periodic background reconciliation pass for all non-archived workspace windows
-        - this pass should prune stale window records for windows that were manually closed outside spaceship
+        - this pass should prune stale window records for windows that were manually closed outside muxy
         - this pass should not block UI interaction; refresh UI once reconciliation completes
     - User creates a project by either pointing to a local dir or providing a git repository URL
-        - if git URL is provided, spaceship clones it to `/Users/<username>/spaceship/projects/<project_name>` where `<project_name>` is derived from the repository name
-        - when removing a git project, remove related managed worktrees via `git worktree remove --force`, then delete related workspace directories under `/Users/<username>/spaceship/workspaces`
-        - when removing a project, delete the on-disk directory only for git repos inside `/Users/<username>/spaceship/projects` (app-managed clone location)
+        - if git URL is provided, muxy clones it to `/Users/<username>/muxy/projects/<project_name>` where `<project_name>` is derived from the repository name
+        - when removing a git project, remove related managed worktrees via `git worktree remove --force`, then delete related workspace directories under `/Users/<username>/muxy/workspaces`
+        - when removing a project, delete the on-disk directory only for git repos inside `/Users/<username>/muxy/projects` (app-managed clone location)
         - We automatically identify if the dir is a git repo. This will inform how we should handle creation of workspaces for that project
             - if not a git repo, create a default workspace corresponding to the project dir
             - if a git repo, create a default workspace corresponding to the main/master branch
         - User optionally sets up processes
-            - These are used as templates start processes that are monitored by spaceship when the workspace is launched. Examples include starting a server, task queue, coding agent
+            - These are used as templates start processes that are monitored by muxy when the workspace is launched. Examples include starting a server, task queue, coding agent
         - User optionally sets up status checks for processes
         - User optionally sets up browser sessions
             - These are used to open/track browser window tabs pointing to the specified url (start of url must match what is specified by the user)
@@ -216,7 +216,7 @@
         - by default, workspace name is auto-populated from branch input until the user customizes workspace name
         - for git projects, branch is required when creating a workspace
         - if directory name is provided, it must be filesystem-safe (`A-Z`, `a-z`, `0-9`, `-`, `_`) and cannot include spaces
-        - spaceship creates a git worktree using this precedence for the supplied branch name:
+        - muxy creates a git worktree using this precedence for the supplied branch name:
             - if the branch exists locally, create the worktree from the local branch as-is (no implicit pull/rebase/merge)
             - else if the branch exists on origin, fetch that branch tip into a local remote-tracking ref and create the worktree from `origin/<branch>`
             - else create a new branch with that name from the selected target branch tip
@@ -234,8 +234,8 @@
         - port allocation happens before setup script so named port env vars are available in setup scripts, stop scripts, process commands, and status check commands
         - each process also receives the following env vars
             - Named port env vars from the workspace's port definitions (e.g. `$FRONTEND_PORT`, `$API_PORT`)
-            - $SPACESHIP_PROJECT_DIR – the project directory
-            - $SPACESHIP_WORKSPACE_DIR – the workspace directory
+            - $MUXY_PROJECT_DIR – the project directory
+            - $MUXY_WORKSPACE_DIR – the workspace directory
         - run processes in terminal windows based on process templates defined in the workspace
         - open browser window/tabs for browser sessions defined in the workspace
             - browser tracking should preserve target session URL so focus actions can activate the matching tab (not just the window)
@@ -283,7 +283,7 @@
             - If not visible in the currently focused display and space, make it visible in that display and space (that could mean unhiding it, or simply moving it from another display and space)
             - background workspace-window reconciliation runs periodically while the app is active; focus does not synchronously block on refresh
         - Open editor: `cmd+shift+e`, open terminal: `cmd+shift+t`, open Finder: `cmd+shift+f`
-        - When spaceship in open and in focus
+        - When muxy in open and in focus
             - Loop through running workspaces (skips any workspaces that are not launched yet)
                 - forward: `cmd+shift+]`
                 - backward: `cmd+shift+[`
@@ -293,7 +293,7 @@
                         - since these are autogenerated, they can not be set to custom keys by the user
                     - `cmd+shift+return` marks the workspace as active
                         - brings the first window in list of windows belonging to the workspace in focus (by moving to the display and space that window is in)
-                        - subsequent forward: `cmd+shift+]` or backward: `cmd+shift+[` keystrokes (when spaceship is not in focus) loop through windows for the active workspace
-                            - Note that spaceship does not move windows. User choses when and where to move windows. spaceship simply moves focus to the window wherever it is on display/space
-        - If the most recently focused window belongs to a spaceship workspace, forward: `cmd+shift+]` or backward: `cmd+shift+[`  keyboard shortcuts loop through windows belonging to that workspace
+                        - subsequent forward: `cmd+shift+]` or backward: `cmd+shift+[` keystrokes (when muxy is not in focus) loop through windows for the active workspace
+                            - Note that muxy does not move windows. User choses when and where to move windows. muxy simply moves focus to the window wherever it is on display/space
+        - If the most recently focused window belongs to a muxy workspace, forward: `cmd+shift+]` or backward: `cmd+shift+[`  keyboard shortcuts loop through windows belonging to that workspace
         - When a text input is focused, default text-edit shortcuts (copy/cut/paste/select-all/undo/redo) must keep working and should not be intercepted by app-level hotkey handling

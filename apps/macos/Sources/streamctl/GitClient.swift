@@ -106,7 +106,7 @@ public final class GitClient {
         if process.terminationStatus != 0 {
             let errData = err.fileHandleForReading.readDataToEndOfFile()
             let message = String(data: errData, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "unknown"
-            throw SpaceshipError.gitCommandFailed(message: message)
+            throw MuxyError.gitCommandFailed(message: message)
         }
         return String(data: outputData, encoding: .utf8) ?? ""
     }
@@ -125,7 +125,7 @@ public final class GitClient {
         if process.terminationStatus != 0 {
             let errData = err.fileHandleForReading.readDataToEndOfFile()
             let message = String(data: errData, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "unknown"
-            throw SpaceshipError.gitCommandFailed(message: message)
+            throw MuxyError.gitCommandFailed(message: message)
         }
     }
 
@@ -136,7 +136,7 @@ public final class GitClient {
             return "origin/\(targetBranch)"
         }
         if branchExists(path: path, branch: targetBranch) { return targetBranch }
-        throw SpaceshipError.invalidArgument(message: "Target branch not found: \(targetBranch)")
+        throw MuxyError.invalidArgument(message: "Target branch not found: \(targetBranch)")
     }
 
     private func fetchRemoteBranch(path: String, branch: String) throws {

@@ -11,7 +11,7 @@ func makeTempDirectory() throws -> URL {
 
 func makeTemporaryStore() throws -> SQLiteStore {
     let dir = try makeTempDirectory()
-    let dbURL = dir.appendingPathComponent("spaceship-test.db")
+    let dbURL = dir.appendingPathComponent("muxy-test.db")
     return try SQLiteStore(path: dbURL.path)
 }
 

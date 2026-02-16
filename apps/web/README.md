@@ -1,6 +1,6 @@
-# Spaceship Web
+# Muxy Web
 
-Static marketing and docs website for Spaceship.
+Static marketing and docs website for Muxy.
 
 ## Stack
 - Next.js App Router
