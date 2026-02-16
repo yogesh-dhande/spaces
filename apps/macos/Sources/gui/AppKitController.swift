@@ -1194,7 +1194,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                     statusIcon = "circle"
                     statusColor = .tertiaryLabelColor
                 }
-                let row = windowRow(icon: statusIcon, iconColor: statusColor, label: process.command, shortcut: process.status.rawValue)
+                let row = processRow(icon: statusIcon, iconColor: statusColor, name: process.templateName, command: process.command, shortcut: process.status.rawValue)
                 processesStack.addArrangedSubview(row)
                 constrainFormFieldToFillWidth(row, in: processesStack)
 
@@ -1418,6 +1418,48 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         return row
     }
 
+    private func processRow(icon: String, iconColor: NSColor, name: String, command: String, shortcut: String) -> NSView {
+        let row = NSStackView()
+        row.orientation = .horizontal
+        row.alignment = .centerY
+        row.spacing = 8
+        row.wantsLayer = true
+        row.layer?.cornerRadius = 6
+        row.layer?.backgroundColor = NSColor.quaternaryLabelColor.cgColor
+        row.edgeInsets = NSEdgeInsets(top: 6, left: 8, bottom: 6, right: 8)
+
+        let badge = NSTextField(labelWithString: shortcut)
+        badge.font = .monospacedSystemFont(ofSize: 10, weight: .medium)
+        badge.textColor = .secondaryLabelColor
+        badge.setContentHuggingPriority(.required, for: .horizontal)
+        badge.setContentCompressionResistancePriority(.required, for: .horizontal)
+
+        let iconView = NSImageView()
+        iconView.image = NSImage(systemSymbolName: icon, accessibilityDescription: nil)
+        iconView.contentTintColor = iconColor
+        iconView.setContentHuggingPriority(.required, for: .horizontal)
+        iconView.setContentCompressionResistancePriority(.required, for: .horizontal)
+
+        let nameField = NSTextField(labelWithString: name)
+        nameField.font = .systemFont(ofSize: 12, weight: .semibold)
+        nameField.textColor = .labelColor
+        nameField.setContentHuggingPriority(.defaultHigh, for: .horizontal)
+        nameField.setContentCompressionResistancePriority(.required, for: .horizontal)
+
+        let commandField = NSTextField(labelWithString: command)
+        commandField.font = .systemFont(ofSize: 11)
+        commandField.textColor = .secondaryLabelColor
+        commandField.lineBreakMode = .byTruncatingTail
+        commandField.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        commandField.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+
+        row.addArrangedSubview(badge)
+        row.addArrangedSubview(iconView)
+        row.addArrangedSubview(nameField)
+        row.addArrangedSubview(commandField)
+        return row
+    }
+
     private func statusCheckSubRow(name: String, color: NSColor, status: String) -> NSView {
         let row = NSStackView()
         row.orientation = .horizontal
@@ -1443,15 +1485,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         label.lineBreakMode = .byTruncatingTail
         label.setContentHuggingPriority(.defaultLow, for: .horizontal)
 
-        let badge = NSTextField(labelWithString: status)
-        badge.font = .monospacedSystemFont(ofSize: 10, weight: .medium)
-        badge.textColor = .tertiaryLabelColor
-        badge.setContentHuggingPriority(.required, for: .horizontal)
-
         row.addArrangedSubview(arrow)
         row.addArrangedSubview(dot)
         row.addArrangedSubview(label)
-        row.addArrangedSubview(badge)
         return row
     }
 
