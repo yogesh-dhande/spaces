@@ -1672,11 +1672,12 @@ public final class SpaceshipOrchestrator {
         var seenKeys = Set<String>()
         for resolvedSession in resolvedSessions {
             var matches = try chrome.windowMatches(forURLPrefix: resolvedSession.prefix)
+            let foundExistingTab = !matches.isEmpty
             if matches.isEmpty {
                 _ = try chrome.openWindow(url: resolvedSession.prefix)
                 matches = try chrome.windowMatches(forURLPrefix: resolvedSession.prefix)
             }
-            if extractOnAttach,
+            if extractOnAttach, foundExistingTab,
                 let extractedWindowID = try extractSessionWindowIfNeeded(
                     session: resolvedSession, matches: matches, refreshedSessions: &refreshedSessions)
             {
