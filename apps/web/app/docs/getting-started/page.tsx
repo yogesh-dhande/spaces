@@ -37,49 +37,18 @@ export default function GettingStartedDocsPage() {
       </article>
 
       <article className="rounded-2xl border border-line bg-surface/82 p-5 backdrop-blur-sm">
-        <h2 className="text-xl font-semibold tracking-tight">Core Paths</h2>
-        <p className="mt-2 text-sm leading-7 text-foreground-soft">
-          Spaceship keeps shared configuration in YAML and runtime state in SQLite.
-        </p>
-        <pre className="mt-3 w-full max-w-full min-w-0 overflow-x-auto whitespace-pre-wrap break-words rounded-xl border border-line bg-background-soft/80 p-3 text-xs leading-6 text-foreground">
-          <code>{`~/.spaceship/config.yaml            # global settings + project templates
-~/.spaceship/spaceship.db            # workspace/runtime state
-/Users/<username>/spaceship/projects # app-managed git clones
-/Users/<username>/spaceship/workspaces/<project>/<dirname> # git worktrees`}</code>
-        </pre>
-      </article>
-
-      <article className="rounded-2xl border border-line bg-surface/82 p-5 backdrop-blur-sm">
         <h2 className="text-xl font-semibold tracking-tight">Add Your First Project</h2>
         <p className="mt-2 text-sm leading-7 text-foreground-soft">
-          Use either a local directory or a Git repository URL.
-        </p>
-        <pre className="mt-3 w-full max-w-full min-w-0 overflow-x-auto whitespace-pre-wrap break-words rounded-xl border border-line bg-background-soft/80 p-3 text-xs leading-6 text-foreground">
-          <code>{`# existing local directory
-spaceship project add --dir /path/to/repo
-
-# clone from Git URL into /Users/<username>/spaceship/projects/<repo_name>
-spaceship project add --git-url https://github.com/org/repo.git`}</code>
-        </pre>
-        <p className="mt-3 text-sm leading-7 text-foreground-soft">
-          On project add, Spaceship detects whether the directory is a Git repository and creates a non-archivable default workspace.
+          Use either a local directory or a Git repository URL. On project add, Spaceship detects
+          whether the directory is a Git repository and creates a non-archivable default workspace.
         </p>
       </article>
 
       <article className="rounded-2xl border border-line bg-surface/82 p-5 backdrop-blur-sm">
         <h2 className="text-xl font-semibold tracking-tight">Create a Workspace</h2>
         <p className="mt-2 text-sm leading-7 text-foreground-soft">
-          For Git projects, create a workspace with workspace name, branch, and target branch.
+          For Git projects, create a workspace by choosing a workspace name, branch, and target branch.
           Target branch defaults to `main` or `master` when available.
-        </p>
-        <pre className="mt-3 w-full max-w-full min-w-0 overflow-x-auto whitespace-pre-wrap break-words rounded-xl border border-line bg-background-soft/80 p-3 text-xs leading-6 text-foreground">
-          <code>{`spaceship workspace create \
-  --project-dir /path/to/repo \
-  --name payments-work \
-  --branch feat/payments \
-  --target-branch main`}</code>
-        </pre>
-        <p className="mt-3 text-sm leading-7 text-foreground-soft">
           Non-Git projects create workspaces from the project directory and do not require branch inputs.
         </p>
       </article>
@@ -90,15 +59,11 @@ spaceship project add --git-url https://github.com/org/repo.git`}</code>
           Launch is valid only for stopped workspaces. A launch allocates ports, starts configured processes,
           opens browser sessions, and opens the preferred editor.
         </p>
-        <pre className="mt-3 w-full max-w-full min-w-0 overflow-x-auto whitespace-pre-wrap break-words rounded-xl border border-line bg-background-soft/80 p-3 text-xs leading-6 text-foreground">
-          <code>{`spaceship workspace launch --project-dir /path/to/repo --name payments-work
-spaceship workspace list --project-dir /path/to/repo --all`}</code>
-        </pre>
         <ul className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
-          <li>• Confirm the workspace row shows as running.</li>
+          <li>• Confirm the workspace shows as running in the sidebar.</li>
           <li>• Confirm process rows appear in the Run tab.</li>
           <li>• Confirm URLs in browser sessions are open in Chrome.</li>
-          <li>• Confirm `PORT0` to `PORT9` appear in the Env tab.</li>
+          <li>• Confirm named port env vars (e.g. `FRONTEND_PORT`, `API_PORT`) appear in the Env tab.</li>
         </ul>
       </article>
 
@@ -122,35 +87,6 @@ spaceship workspace list --project-dir /path/to/repo --all`}</code>
           title="Workspace Run Tab"
           caption="Launch/restart/stop/archive actions, running processes, and window shortcuts."
         />
-      </article>
-
-      <article className="rounded-2xl border border-line bg-surface/82 p-5 backdrop-blur-sm">
-        <h2 className="text-xl font-semibold tracking-tight">Starter Config Example</h2>
-        <pre className="mt-3 w-full max-w-full min-w-0 overflow-x-auto whitespace-pre-wrap break-words rounded-xl border border-line bg-background-soft/80 p-3 text-xs leading-6 text-foreground">
-          <code>{`editor: vscode
-port_range:
-  start: 20000
-  end: 30000
-projects:
-  - dir: /path/to/repo
-    setup_script: cp /shared/.env .env
-    stop_script: docker compose down --remove-orphans
-    processes:
-      - name: web
-        command: PORT=$PORT0 npm run dev
-      - name: worker
-        command: PORT=$PORT1 npm run worker
-    status_checks:
-      - name: web-health
-        process: web
-        command: curl -fsS http://localhost:$PORT0/health
-        interval: 10
-        timeout: 2
-        on_exit: notify
-    browser_sessions:
-      - url: http://localhost:$PORT0
-      - url: http://localhost:$PORT0/admin`}</code>
-        </pre>
       </article>
     </DocsShell>
   );

@@ -13,6 +13,20 @@ export const docsPageLinks: DocsPageLink[] = [
     audience: "New users onboarding spaceship for the first time.",
   },
   {
+    href: "/docs/projects",
+    title: "Projects",
+    summary:
+      "Project configuration, templates, directory structure, and default workspace creation.",
+    audience: "Developers setting up and managing project definitions.",
+  },
+  {
+    href: "/docs/workspaces",
+    title: "Workspaces",
+    summary:
+      "Workspace concepts, fields, settings overrides, ports, env vars, and switching.",
+    audience: "Developers creating and configuring workspaces within projects.",
+  },
+  {
     href: "/docs/workspace-lifecycle",
     title: "Workspace Lifecycle",
     summary:
@@ -72,6 +86,8 @@ export const docsPageLinks: DocsPageLink[] = [
 
 export const docsPublishingOrder = [
   "Getting Started",
+  "Projects",
+  "Workspaces",
   "Workspace Lifecycle",
   "Window Management",
   "Processes",

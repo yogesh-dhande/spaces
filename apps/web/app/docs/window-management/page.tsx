@@ -15,16 +15,6 @@ export default function WindowManagementDocsPage() {
       pagePath="/docs/window-management"
     >
       <article className="rounded-2xl border border-line bg-surface/82 p-5 backdrop-blur-sm">
-        <h2 className="text-xl font-semibold tracking-tight">Contract</h2>
-        <ul className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
-          <li>• `yabai` is the source of truth for window IDs.</li>
-          <li>• Stream capture is required before show/focus.</li>
-          <li>• Window-level automation outside yabai is intentionally minimized.</li>
-          <li>• Spaceship focuses windows, but does not manage tiling geometry.</li>
-        </ul>
-      </article>
-
-      <article className="rounded-2xl border border-line bg-surface/82 p-5 backdrop-blur-sm">
         <h2 className="text-xl font-semibold tracking-tight">Window Sources</h2>
         <ul className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
           <li>• Terminal windows from workspace processes.</li>
@@ -51,10 +41,8 @@ export default function WindowManagementDocsPage() {
         <h2 className="text-xl font-semibold tracking-tight">Browser Tab Matching</h2>
         <ul className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
           <li>• Browser session matching is URL-prefix based.</li>
-          <li>• Title-based browser tab matching is intentionally avoided.</li>
           <li>• Browser cleanup closes matching tabs only, never full Chrome windows.</li>
           <li>• If tabs already match session URLs, Spaceship reuses them instead of opening duplicates.</li>
-          <li>• Global next/previous resolves shared Chrome windows using window ID plus active tab URL match.</li>
         </ul>
       </article>
 
@@ -64,7 +52,6 @@ export default function WindowManagementDocsPage() {
           <li>• `cmd+1` through `cmd+9` focus numbered windows for the selected workspace.</li>
           <li>• Window shortcut hints are shown inline in the workspace detail pane.</li>
           <li>• `cmd+shift+]` and `cmd+shift+[` cycle workspace windows forward/backward.</li>
-          <li>• Text-edit shortcuts are not intercepted when an input field is focused.</li>
         </ul>
       </article>
 

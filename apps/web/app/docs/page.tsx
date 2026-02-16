@@ -29,6 +29,16 @@ const terms = [
     description:
       "Pages you want tied to a workspace so you can return to the same context.",
   },
+  {
+    name: "Reserved Ports",
+    description:
+      "Named port definitions allocated per workspace so parallel streams never collide on the same local port.",
+  },
+  {
+    name: "Status Check",
+    description:
+      "A periodic shell command that tests a running process and surfaces green/red health in the UI.",
+  },
 ];
 
 export default function DocsPage() {

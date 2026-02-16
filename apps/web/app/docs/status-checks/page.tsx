@@ -11,32 +11,23 @@ export default function StatusChecksDocsPage() {
   return (
     <DocsShell
       title="Status Checks"
-      description="Status checks execute shell commands against running workspace processes and publish green/red status indicators in the UI."
+      description="Status checks run shell commands against running workspace processes and show green/red status indicators in the UI."
       pagePath="/docs/status-checks"
     >
       <article className="rounded-2xl border border-line bg-surface/82 p-5 backdrop-blur-sm">
-        <h2 className="text-xl font-semibold tracking-tight">Definition</h2>
+        <h2 className="text-xl font-semibold tracking-tight">What Is a Status Check?</h2>
         <p className="mt-2 text-sm leading-7 text-foreground-soft">
-          A status check is tied to a process and includes command, interval, timeout,
-          and an `on_exit` preference.
+          A status check is tied to a process and includes a command, check interval, timeout,
+          and an action to take when the check fails (do nothing, restart the process, or notify).
         </p>
-        <pre className="mt-3 w-full max-w-full min-w-0 overflow-x-auto whitespace-pre-wrap break-words rounded-xl border border-line bg-background-soft/80 p-3 text-xs leading-6 text-foreground">
-          <code>{`status_checks:
-  - name: web-health
-    process: web
-    command: curl -fsS http://localhost:$PORT0/health
-    interval: 10
-    timeout: 2
-    on_exit: notify`}</code>
-        </pre>
       </article>
 
       <article className="rounded-2xl border border-line bg-surface/82 p-5 backdrop-blur-sm">
-        <h2 className="text-xl font-semibold tracking-tight">Where Checks Live</h2>
+        <h2 className="text-xl font-semibold tracking-tight">How Checks Work</h2>
         <ul className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
-          <li>• Project templates in YAML provide initial check definitions.</li>
-          <li>• Workspace copies in SQLite can be edited without mutating YAML.</li>
-          <li>• Running workspace updates apply check edits immediately.</li>
+          <li>• Checks are defined at the project level and inherited by each workspace.</li>
+          <li>• Each workspace can customize its own checks independently.</li>
+          <li>• Edits to checks in a running workspace apply immediately.</li>
           <li>• A process may have multiple checks.</li>
         </ul>
       </article>
@@ -44,43 +35,23 @@ export default function StatusChecksDocsPage() {
       <article className="rounded-2xl border border-line bg-surface/82 p-5 backdrop-blur-sm">
         <h2 className="text-xl font-semibold tracking-tight">Status Output</h2>
         <ul className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
-          <li>• Successful check exit: green status.</li>
-          <li>• Non-zero exit or timeout: red status.</li>
-          <li>• Check message stores command output for inspection.</li>
+          <li>• Successful check: green status indicator.</li>
+          <li>• Failed check or timeout: red status indicator.</li>
+          <li>• Check output is available for inspection.</li>
           <li>• Process rows in the Run tab display check summaries.</li>
         </ul>
       </article>
 
       <article className="rounded-2xl border border-line bg-surface/82 p-5 backdrop-blur-sm">
-        <h2 className="text-xl font-semibold tracking-tight">Related Runtime States</h2>
+        <h2 className="text-xl font-semibold tracking-tight">Related Process States</h2>
         <p className="mt-2 text-sm leading-7 text-foreground-soft">
-          Status checks are one layer of runtime visibility. Process state remains the primary source
-          for running/exited, and coding-agent processes can report idle/busy.
+          Status checks are one layer of visibility. Process state provides additional context.
         </p>
         <ul className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
-          <li>• `running`: process is alive.</li>
-          <li>• `exited`: process has stopped.</li>
-          <li>• `idle`: agent process is alive but no output has been emitted for the idle interval.</li>
+          <li>• <strong>Running</strong>: process is alive.</li>
+          <li>• <strong>Exited</strong>: process has stopped.</li>
+          <li>• <strong>Idle</strong>: agent process is alive but no output for the configured interval.</li>
         </ul>
-      </article>
-
-      <article className="rounded-2xl border border-line bg-surface/82 p-5 backdrop-blur-sm">
-        <h2 className="text-xl font-semibold tracking-tight">Check Suite Example</h2>
-        <pre className="mt-3 w-full max-w-full min-w-0 overflow-x-auto whitespace-pre-wrap break-words rounded-xl border border-line bg-background-soft/80 p-3 text-xs leading-6 text-foreground">
-          <code>{`status_checks:
-  - name: web
-    process: web
-    command: curl -fsS http://localhost:$PORT0/health
-    interval: 10
-    timeout: 2
-    on_exit: notify
-  - name: queue
-    process: queue
-    command: curl -fsS http://localhost:$PORT1/metrics
-    interval: 15
-    timeout: 3
-    on_exit: restart`}</code>
-        </pre>
       </article>
 
       <article className="grid gap-4 rounded-2xl border border-line bg-surface/82 p-5 backdrop-blur-sm md:grid-cols-2">
