@@ -31,6 +31,7 @@ let package = Package(
         .executableTarget(
             name: "MuxyApp",
             dependencies: ["gui"],
+            exclude: ["Info.plist"],
             linkerSettings: [
                 .unsafeFlags([
                     "-Xlinker", "-sectcreate",

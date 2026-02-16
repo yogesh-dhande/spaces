@@ -1,5 +1,6 @@
 import Darwin
 import Foundation
+@preconcurrency import UserNotifications
 import appctl
 
 public final class MuxyOrchestrator {
@@ -559,6 +560,31 @@ public final class MuxyOrchestrator {
         return results
     }
     
+    private func deliverNotification(title: String, body: String, subtitle: String? = nil) {
+        guard NSClassFromString("XCTest") == nil else {
+            return
+        }
+        
+        let content = UNMutableNotificationContent()
+        content.title = title
+        content.body = body
+        if let subtitle {
+            content.subtitle = subtitle
+        }
+        let request = UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil)
+        
+        let center = UNUserNotificationCenter.current()
+        center.requestAuthorization(options: [.alert, .sound]) { granted, error in
+            if granted {
+                center.add(request) { error in
+                    if let error {
+                        fputs("muxy: Failed to deliver notification: \(error.localizedDescription)\n", stderr)
+                    }
+                }
+            }
+        }
+    }
+    
     private func handleStatusCheckFailure(workspaceID: String, process: RunningProcessRecord, check: StatusCheckDefinition, result: StatusResult) throws {
         switch check.onExit {
         case .none:
@@ -566,14 +592,11 @@ public final class MuxyOrchestrator {
             break
             
         case .notify:
-            // Show notification to the user
-            let notification = NSUserNotification()
-            notification.title = "Status Check Failed"
-            notification.informativeText = "Process '\(process.templateName)' check '\(result.checkName)' failed"
-            if let message = result.message {
-                notification.subtitle = message
-            }
-            NSUserNotificationCenter.default.deliver(notification)
+            deliverNotification(
+                title: "Status Check Failed",
+                body: "Process '\(process.templateName)' check '\(result.checkName)' failed",
+                subtitle: result.message
+            )
             
         case .restart:
             // Restart the process
@@ -586,13 +609,11 @@ public final class MuxyOrchestrator {
         fputs("muxy: Restarting process '\(process.templateName)' due to failed status check '\(result.checkName)'\n", stderr)
         
         // Show notification about restart
-        let notification = NSUserNotification()
-        notification.title = "Process Restarting"
-        notification.informativeText = "Process '\(process.templateName)' is being restarted due to failed status check"
-        if let message = result.message {
-            notification.subtitle = "Reason: \(message)"
-        }
-        NSUserNotificationCenter.default.deliver(notification)
+        deliverNotification(
+            title: "Process Restarting",
+            body: "Process '\(process.templateName)' is being restarted due to failed status check",
+            subtitle: result.message.map { "Reason: \($0)" }
+        )
         
         // Terminate the existing process group if PID exists
         if let pid = process.pid {
