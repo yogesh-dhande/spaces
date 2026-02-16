@@ -2,8 +2,8 @@
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "$0")/.." && pwd)"
-APP="$repo_root/apps/macos/.build/debug/MuxyApp"
-LOG_FILE="/tmp/MuxyApp.log"
+APP="$repo_root/apps/macos/.build/debug/Muxy"
+LOG_FILE="/tmp/Muxy.log"
 
 "$repo_root/scripts/swiftpm.sh" build
 

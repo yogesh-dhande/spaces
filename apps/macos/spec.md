@@ -295,7 +295,7 @@
                         - brings the first window in list of windows belonging to the workspace in focus (by moving to the display and space that window is in)
                         - subsequent forward: `cmd+shift+]` or backward: `cmd+shift+[` keystrokes (when muxy is not in focus) loop through windows for the active workspace
                             - Note that muxy does not move windows. User choses when and where to move windows. muxy simply moves focus to the window wherever it is on display/space
-        - If the most recently focused window belongs to a muxy workspace, forward: `cmd+shift+]` or backward: `cmd+shift+[`  keyboard shortcuts loop through windows belonging to that workspace
+        - If the most recently focused window belongs to a mx workspace, forward: `cmd+shift+]` or backward: `cmd+shift+[`  keyboard shortcuts loop through windows belonging to that workspace
         - When a text input is focused, default text-edit shortcuts (copy/cut/paste/select-all/undo/redo) must keep working and should not be intercepted by app-level hotkey handling
 - Auto-Update
     - `AppVersion.current` is the single source of truth for the version string (in `streamctl`)

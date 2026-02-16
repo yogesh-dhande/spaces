@@ -29,15 +29,18 @@ public final class AppUpdater {
         try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: tempDir) }
 
-        let zipPath = tempDir.appending(path: "update.zip")
-        try await download(from: url, to: zipPath)
-        try extractZip(at: zipPath, to: tempDir)
-
-        let currentExecutable = URL(fileURLWithPath: ProcessInfo.processInfo.arguments[0]).resolvingSymlinksInPath()
-        let extractedBinary = try findBinary(named: currentExecutable.lastPathComponent, in: tempDir)
-
-        try replaceBinary(current: currentExecutable, replacement: extractedBinary)
-        relaunch(executable: currentExecutable)
+        let dmgPath = tempDir.appending(path: "update.dmg")
+        try await download(from: url, to: dmgPath)
+        
+        let mountPoint = try mountDMG(at: dmgPath)
+        defer { try? unmountDMG(at: mountPoint) }
+        
+        let appBundle = try findAppBundle(in: mountPoint)
+        let applicationsDir = URL(fileURLWithPath: "/Applications")
+        let targetApp = applicationsDir.appending(path: "Muxy.app")
+        
+        try installApp(from: appBundle, to: targetApp)
+        relaunchApp(at: targetApp)
     }
 
     private func download(from url: URL, to destination: URL) async throws {
@@ -48,59 +51,73 @@ public final class AppUpdater {
         try FileManager.default.moveItem(at: localURL, to: destination)
     }
 
-    private func extractZip(at zipPath: URL, to directory: URL) throws {
+    private func mountDMG(at dmgPath: URL) throws -> URL {
         let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/ditto")
-        process.arguments = ["-xk", zipPath.path, directory.path]
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/hdiutil")
+        process.arguments = ["attach", dmgPath.path, "-nobrowse", "-plist"]
+        
+        let pipe = Pipe()
+        process.standardOutput = pipe
         try process.run()
         process.waitUntilExit()
+        
         guard process.terminationStatus == 0 else { throw UpdateError.extractionFailed }
+        
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        guard let plist = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any],
+              let entities = plist["system-entities"] as? [[String: Any]]
+        else {
+            throw UpdateError.extractionFailed
+        }
+        
+        for entity in entities {
+            if let mountPoint = entity["mount-point"] as? String {
+                return URL(fileURLWithPath: mountPoint)
+            }
+        }
+        throw UpdateError.extractionFailed
     }
-
-    private func findBinary(named name: String, in directory: URL) throws -> URL {
+    
+    private func unmountDMG(at mountPoint: URL) throws {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/hdiutil")
+        process.arguments = ["detach", mountPoint.path]
+        try process.run()
+        process.waitUntilExit()
+    }
+    
+    private func findAppBundle(in directory: URL) throws -> URL {
         let fm = FileManager.default
-        guard let enumerator = fm.enumerator(at: directory, includingPropertiesForKeys: [.isExecutableKey]) else {
+        guard let contents = try? fm.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil) else {
             throw UpdateError.binaryNotFound
         }
-        for case let fileURL as URL in enumerator {
-            if fileURL.lastPathComponent == name {
-                var isExecutable: AnyObject?
-                try (fileURL as NSURL).getResourceValue(&isExecutable, forKey: .isExecutableKey)
-                if isExecutable as? Bool == true {
-                    return fileURL
-                }
+        
+        for item in contents {
+            if item.pathExtension == "app" && item.lastPathComponent == "Muxy.app" {
+                return item
             }
         }
         throw UpdateError.binaryNotFound
     }
-
-    private func replaceBinary(current: URL, replacement: URL) throws {
+    
+    private func installApp(from source: URL, to destination: URL) throws {
         let fm = FileManager.default
-        let backupURL = current.deletingLastPathComponent().appending(path: "\(current.lastPathComponent).bak")
-        try? fm.removeItem(at: backupURL)
-
-        do {
-            try fm.moveItem(at: current, to: backupURL)
-        } catch {
-            throw UpdateError.replacementFailed("Could not back up current binary: \(error.localizedDescription)")
+        
+        if fm.fileExists(atPath: destination.path) {
+            try? fm.removeItem(at: destination)
         }
-
+        
         do {
-            try fm.moveItem(at: replacement, to: current)
+            try fm.copyItem(at: source, to: destination)
         } catch {
-            // Restore backup on failure.
-            try? fm.moveItem(at: backupURL, to: current)
-            throw UpdateError.replacementFailed("Could not install new binary: \(error.localizedDescription)")
+            throw UpdateError.replacementFailed("Could not install app: \(error.localizedDescription)")
         }
-
-        // Clean up backup.
-        try? fm.removeItem(at: backupURL)
     }
-
-    private func relaunch(executable: URL) {
+    
+    private func relaunchApp(at appPath: URL) {
         let process = Process()
-        process.executableURL = executable
-        process.arguments = Array(ProcessInfo.processInfo.arguments.dropFirst())
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/open")
+        process.arguments = ["-n", appPath.path]
         try? process.run()
         NSApp.terminate(nil)
     }

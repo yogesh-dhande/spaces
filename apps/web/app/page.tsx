@@ -71,10 +71,8 @@ export default function HomePage() {
             </p>
             <div className="flex flex-wrap gap-3">
               <a
-                href="https://github.com/yogesh-dhande/agentmux/releases/latest"
+                href="https://muxy-dev.web.app/releases/latest"
                 className="btn-primary rounded-full px-5 py-2.5 text-sm font-semibold transition-colors cursor-pointer"
-                target="_blank"
-                rel="noopener noreferrer"
               >
                 Download
               </a>
@@ -260,7 +258,7 @@ export default function HomePage() {
           </p>
           <div className="mt-6 flex flex-wrap justify-center gap-3">
             <a
-              href="https://github.com/yogesh-dhande/agentmux/releases/latest"
+              href="https://muxy-dev.web.app/releases/latest"
               className="btn-primary rounded-full px-5 py-2.5 text-sm font-semibold transition-colors"
             >
               Download

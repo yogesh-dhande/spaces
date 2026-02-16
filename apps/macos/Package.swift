@@ -2,7 +2,7 @@
 import PackageDescription
 
 let package = Package(
-    name: "muxy",
+    name: "mx",
     platforms: [
         .macOS(.v14)
     ],
@@ -10,11 +10,12 @@ let package = Package(
         .library(name: "appctl", targets: ["appctl"]),
         .library(name: "streamctl", targets: ["streamctl"]),
         .library(name: "gui", targets: ["gui"]),
-        .executable(name: "muxy", targets: ["muxy"]),
-        .executable(name: "MuxyApp", targets: ["MuxyApp"])
+        .executable(name: "mx", targets: ["mx"]),
+        .executable(name: "Muxy", targets: ["Muxy"])
     ],
     dependencies: [
-        .package(url: "https://github.com/jpsim/Yams.git", from: "5.1.3")
+        .package(url: "https://github.com/jpsim/Yams.git", from: "5.1.3"),
+        .package(url: "https://github.com/sparkle-project/Sparkle.git", from: "2.6.0")
     ],
     targets: [
         .target(name: "appctl"),
@@ -27,17 +28,20 @@ let package = Package(
             linkerSettings: [.linkedLibrary("sqlite3")]
         ),
         .target(name: "gui", dependencies: ["streamctl"]),
-        .executableTarget(name: "muxy", dependencies: ["streamctl", "appctl"]),
+        .executableTarget(name: "mx", dependencies: ["streamctl", "appctl"]),
         .executableTarget(
-            name: "MuxyApp",
-            dependencies: ["gui"],
+            name: "Muxy",
+            dependencies: [
+                "gui",
+                .product(name: "Sparkle", package: "Sparkle")
+            ],
             exclude: ["Info.plist"],
             linkerSettings: [
                 .unsafeFlags([
                     "-Xlinker", "-sectcreate",
                     "-Xlinker", "__TEXT",
                     "-Xlinker", "__info_plist",
-                    "-Xlinker", "Sources/MuxyApp/Info.plist"
+                    "-Xlinker", "Sources/Muxy/Info.plist"
                 ])
             ]
         ),

@@ -2,8 +2,16 @@
 .worktrees/
 default.profraw
 node_modules/
-apps/web/.next/
-apps/web/out/
+apps/web/out
+apps/web/.next
+
+# Firebase Hosting - generated files (deployed, not committed)
+apps/web/public/*
+!apps/web/public/.gitkeep
+!apps/web/public/releases/
+apps/web/public/releases/*
+!apps/web/public/releases/.gitkeep
 
 # Release artifacts
 *.zip
+releases/*.dmg

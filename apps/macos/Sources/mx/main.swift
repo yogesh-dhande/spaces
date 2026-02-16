@@ -13,7 +13,7 @@ struct CLI {
         let command = args[1]
 
         if command == "version" || command == "--version" {
-            print("muxy \(AppVersion.current)")
+            print("mx \(AppVersion.current)")
             return
         }
 
@@ -36,7 +36,7 @@ struct CLI {
 
     private func runConfigSubcommand(orchestrator: MuxyOrchestrator, path: String) throws {
         guard args.count >= 3 else {
-            throw NSError(domain: "muxy.cli", code: 2, userInfo: [NSLocalizedDescriptionKey: "Missing config action. Use: config path|show"])
+            throw NSError(domain: "mx.cli", code: 2, userInfo: [NSLocalizedDescriptionKey: "Missing config action. Use: config path|show"])
         }
         switch args[2] {
         case "path": print(path)
@@ -45,14 +45,14 @@ struct CLI {
             print(
                 "editor=\(config.editor?.rawValue ?? "none") port_range=\(config.portRange.start)-\(config.portRange.end) projects=\(config.projects.count)"
             )
-        default: throw NSError(domain: "muxy.cli", code: 2, userInfo: [NSLocalizedDescriptionKey: "Unknown config action: \(args[2])"])
+        default: throw NSError(domain: "mx.cli", code: 2, userInfo: [NSLocalizedDescriptionKey: "Unknown config action: \(args[2])"])
         }
     }
 
     private func runProjectSubcommand(orchestrator: MuxyOrchestrator) throws {
         guard args.count >= 3 else {
             throw NSError(
-                domain: "muxy.cli", code: 2, userInfo: [NSLocalizedDescriptionKey: "Missing project action. Use: project list|add|update|remove"]
+                domain: "mx.cli", code: 2, userInfo: [NSLocalizedDescriptionKey: "Missing project action. Use: project list|add|update|remove"]
             )
         }
 
@@ -67,7 +67,7 @@ struct CLI {
             let gitURL = optionalValue(for: "--git-url")
             if dir != nil, gitURL != nil {
                 throw NSError(
-                    domain: "muxy.cli", code: 2,
+                    domain: "mx.cli", code: 2,
                     userInfo: [NSLocalizedDescriptionKey: "Use either --dir <path> or --git-url <url>, but not both."])
             }
             let record: ProjectRecord
@@ -77,7 +77,7 @@ struct CLI {
                 record = try orchestrator.addProject(dir: dir)
             } else {
                 throw NSError(
-                    domain: "muxy.cli", code: 2,
+                    domain: "mx.cli", code: 2,
                     userInfo: [NSLocalizedDescriptionKey: "Missing required flags. Use: project add --dir <path> or project add --git-url <url>"])
             }
             print("Added project \(record.name)\t\(record.dir)")
@@ -86,7 +86,7 @@ struct CLI {
             let setupScript = optionalValue(for: "--setup-script")
             let stopScript = optionalValue(for: "--stop-script")
             guard var config = try orchestrator.projectConfig(projectID: normalizePath(dir)) else {
-                throw NSError(domain: "muxy.cli", code: 2, userInfo: [NSLocalizedDescriptionKey: "Project not found for dir \(dir)"])
+                throw NSError(domain: "mx.cli", code: 2, userInfo: [NSLocalizedDescriptionKey: "Project not found for dir \(dir)"])
             }
             if let setupScript { config.setupScript = setupScript }
             if let stopScript { config.stopScript = stopScript }
@@ -96,14 +96,14 @@ struct CLI {
             let dir = try value(for: "--dir")
             try orchestrator.removeProject(dir: dir)
             print("Removed project \(dir)")
-        default: throw NSError(domain: "muxy.cli", code: 2, userInfo: [NSLocalizedDescriptionKey: "Unknown project action: \(args[2])"])
+        default: throw NSError(domain: "mx.cli", code: 2, userInfo: [NSLocalizedDescriptionKey: "Unknown project action: \(args[2])"])
         }
     }
 
     private func runWorkspaceSubcommand(orchestrator: MuxyOrchestrator) throws {
         guard args.count >= 3 else {
             throw NSError(
-                domain: "muxy.cli", code: 2,
+                domain: "mx.cli", code: 2,
                 userInfo: [NSLocalizedDescriptionKey: "Missing workspace action. Use: workspace list|create|launch|restart|stop|archive|activate"])
         }
         switch args[2] {
@@ -125,7 +125,7 @@ struct CLI {
             let dirnameFlag = optionalValue(for: "--dirname")
             if directoryNameFlag != nil, dirnameFlag != nil {
                 throw NSError(
-                    domain: "muxy.cli", code: 2,
+                    domain: "mx.cli", code: 2,
                     userInfo: [NSLocalizedDescriptionKey: "Use either --directory-name <name> or --dirname <name>, but not both."])
             }
             let directoryName = directoryNameFlag ?? dirnameFlag
@@ -153,7 +153,7 @@ struct CLI {
             let id = try workspaceID(orchestrator: orchestrator)
             try orchestrator.setActiveWorkspace(id: id)
             print("Activated workspace \(id)")
-        default: throw NSError(domain: "muxy.cli", code: 2, userInfo: [NSLocalizedDescriptionKey: "Unknown workspace action: \(args[2])"])
+        default: throw NSError(domain: "mx.cli", code: 2, userInfo: [NSLocalizedDescriptionKey: "Unknown workspace action: \(args[2])"])
         }
     }
 
@@ -162,7 +162,7 @@ struct CLI {
         let name = try value(for: "--name")
         let projectID = normalizePath(projectDir)
         guard let workspace = try orchestrator.listWorkspaces(projectID: projectID, includeArchived: true).first(where: { $0.name == name }) else {
-            throw NSError(domain: "muxy.cli", code: 2, userInfo: [NSLocalizedDescriptionKey: "Workspace not found: \(name)"])
+            throw NSError(domain: "mx.cli", code: 2, userInfo: [NSLocalizedDescriptionKey: "Workspace not found: \(name)"])
         }
         return workspace.id
     }
@@ -170,7 +170,7 @@ struct CLI {
     private func runSettingsSubcommand(orchestrator: MuxyOrchestrator) throws {
         guard args.count >= 3 else {
             throw NSError(
-                domain: "muxy.cli", code: 2, userInfo: [NSLocalizedDescriptionKey: "Missing settings action. Use: settings get|set|reset"])
+                domain: "mx.cli", code: 2, userInfo: [NSLocalizedDescriptionKey: "Missing settings action. Use: settings get|set|reset"])
         }
 
         switch args[2] {
@@ -210,7 +210,7 @@ struct CLI {
                 print("gui-open-settings-shortcut\t\(current)")
             } else {
                 throw NSError(
-                    domain: "muxy.cli", code: 2,
+                    domain: "mx.cli", code: 2,
                     userInfo: [
                         NSLocalizedDescriptionKey:
                             "Missing setting flag. Use: settings get --gui-hotkey|--gui-next-shortcut|--gui-prev-shortcut|--gui-show-shortcut|--gui-add-project-shortcut|--gui-add-workspace-shortcut|--gui-reload-shortcut|--gui-open-editor-shortcut|--gui-open-terminal-shortcut|--gui-open-finder-shortcut|--gui-open-settings-shortcut"
@@ -264,7 +264,7 @@ struct CLI {
                 print("Updated gui-open-settings-shortcut\t\(spec.normalized)")
             } else {
                 throw NSError(
-                    domain: "muxy.cli", code: 2,
+                    domain: "mx.cli", code: 2,
                     userInfo: [
                         NSLocalizedDescriptionKey:
                             "Missing setting flag/value. Use: settings set --gui-hotkey|--gui-next-shortcut|--gui-prev-shortcut|--gui-show-shortcut|--gui-add-project-shortcut|--gui-add-workspace-shortcut|--gui-reload-shortcut|--gui-open-editor-shortcut|--gui-open-terminal-shortcut|--gui-open-finder-shortcut|--gui-open-settings-shortcut <spec>"
@@ -307,20 +307,20 @@ struct CLI {
                 print("Reset gui-open-settings-shortcut\t\(SettingsKey.defaultGUIOpenSettingsShortcut)")
             } else {
                 throw NSError(
-                    domain: "muxy.cli", code: 2,
+                    domain: "mx.cli", code: 2,
                     userInfo: [
                         NSLocalizedDescriptionKey:
                             "Missing setting flag. Use: settings reset --gui-hotkey|--gui-next-shortcut|--gui-prev-shortcut|--gui-show-shortcut|--gui-add-project-shortcut|--gui-add-workspace-shortcut|--gui-reload-shortcut|--gui-open-editor-shortcut|--gui-open-terminal-shortcut|--gui-open-finder-shortcut|--gui-open-settings-shortcut"
                     ])
             }
 
-        default: throw NSError(domain: "muxy.cli", code: 2, userInfo: [NSLocalizedDescriptionKey: "Unknown settings action: \(args[2])"])
+        default: throw NSError(domain: "mx.cli", code: 2, userInfo: [NSLocalizedDescriptionKey: "Unknown settings action: \(args[2])"])
         }
     }
 
     private func value(for flag: String) throws -> String {
         guard let idx = args.firstIndex(of: flag), idx + 1 < args.count else {
-            throw NSError(domain: "muxy.cli", code: 2, userInfo: [NSLocalizedDescriptionKey: "Missing required flag \(flag)"])
+            throw NSError(domain: "mx.cli", code: 2, userInfo: [NSLocalizedDescriptionKey: "Missing required flag \(flag)"])
         }
         return args[idx + 1]
     }
@@ -335,10 +335,10 @@ struct CLI {
     private func printHelp() {
         print(
             """
-            muxy command line
+            mx command line
 
             Usage:
-              muxy version
+              mx version
 
               mx config path
               mx config show

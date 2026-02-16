@@ -1,6 +1,6 @@
-# muxy
+# Muxy
 
-`muxy` is a local macOS control plane for workspace orchestration.
+`mx` is a local macOS control plane for workspace orchestration.
 It manages projects, workspaces, processes, and window sets so you can move between coding contexts quickly.
 
 ## Docs
@@ -113,7 +113,7 @@ Hotkeys:
 
 When text input is focused in the GUI, standard editing shortcuts (including `cmd+v`) are handled normally.
 
-Set `DEBUG=1` when launching muxy to log browser scan timing and browser-focus path/timing (indexed verify, refresh, cache hits/misses, and URL fallback decisions) to stderr.
+Set `DEBUG=1` when launching Muxy to log browser scan timing and browser-focus path/timing (indexed verify, refresh, cache hits/misses, and URL fallback decisions) to stderr.
 
 Browser switching benchmark:
 - `OrchestratorTests.testBenchmarkChromeIndexedTabFocusVsYabaiWindowFocusForExtractedTabs` compares calibrated indexed-tab switching (~52ms tab-index focus + ~38ms active-tab verification) against extracted-window focus (~42ms `yabai`), and prints average switch timings plus estimated break-even switch count (currently ~15 switches).
@@ -121,42 +121,42 @@ Browser switching benchmark:
   - `scripts/swiftpm.sh test --filter OrchestratorTests/testBenchmarkChromeIndexedTabFocusVsYabaiWindowFocusForExtractedTabs`
 
 ## Auto-Update
-Muxy checks for updates from GitHub Releases on launch and every 4 hours. Use the app menu **Check for Updates...** to check manually.
+Muxy checks for updates from the appcast feed on launch and every 4 hours. Use the app menu **Check for Updates...** to check manually.
 
-When an update is available, clicking "Download & Install" downloads the new binary, replaces the current one, and relaunches the app.
+When an update is available, a CTA button appears at the top of the left panel. Clicking it downloads the DMG, installs the app to /Applications, and relaunches.
 
 From the CLI:
 ```bash
-muxy version
+mx version
 ```
 
 ## CLI
 ```bash
-muxy config path
-muxy config show
+mx config path
+mx config show
 
-muxy project list
-muxy project add --dir /path/to/repo
-muxy project add --git-url https://github.com/org/repo.git
-muxy project update --dir /path/to/repo --setup-script "cp ~/.env .env" --stop-script "docker compose down --remove-orphans"
-muxy project remove --dir /path/to/repo
+mx project list
+mx project add --dir /path/to/repo
+mx project add --git-url https://github.com/org/repo.git
+mx project update --dir /path/to/repo --setup-script "cp ~/.env .env" --stop-script "docker compose down --remove-orphans"
+mx project remove --dir /path/to/repo
 
-muxy workspace list --project-dir /path/to/repo --all
-muxy workspace create --project-dir /path/to/repo --name feature-x [--branch feature-branch] [--target-branch main] [--directory-name feature_branch]
-muxy workspace launch --project-dir /path/to/repo --name feature-x
-muxy workspace restart --project-dir /path/to/repo --name feature-x
-muxy workspace stop --project-dir /path/to/repo --name feature-x
-muxy workspace archive --project-dir /path/to/repo --name feature-x
-muxy workspace activate --project-dir /path/to/repo --name feature-x
+mx workspace list --project-dir /path/to/repo --all
+mx workspace create --project-dir /path/to/repo --name feature-x [--branch feature-branch] [--target-branch main] [--directory-name feature_branch]
+mx workspace launch --project-dir /path/to/repo --name feature-x
+mx workspace restart --project-dir /path/to/repo --name feature-x
+mx workspace stop --project-dir /path/to/repo --name feature-x
+mx workspace archive --project-dir /path/to/repo --name feature-x
+mx workspace activate --project-dir /path/to/repo --name feature-x
 ```
 
 For git projects, `workspace create` requires `--branch`; `--target-branch` defaults to `main`/`master` when available.
 `workspace create --directory-name` (alias: `--dirname`) is optional for git projects and must use only letters, numbers, `-`, and `_` with no spaces.
 
 Project/workspace removal behavior:
-- `muxy project remove --dir <path>` removes the project from muxy. For git projects, it first removes related managed worktrees with `git worktree remove --force`, then deletes related workspace directories under `~/muxy/workspaces`.
-- `muxy project remove --dir <path>` deletes the project directory only when it is a git repo inside `~/muxy/projects` (the app-managed clone location).
-- `muxy workspace archive ...` removes git worktrees via `git worktree remove` and never deletes the project directory for non-git projects.
+- `mx project remove --dir <path>` removes the project from Muxy. For git projects, it first removes related managed worktrees with `git worktree remove --force`, then deletes related workspace directories under `~/muxy/workspaces`.
+- `mx project remove --dir <path>` deletes the project directory only when it is a git repo inside `~/muxy/projects` (the app-managed clone location).
+- `mx workspace archive ...` removes git worktrees via `git worktree remove` and never deletes the project directory for non-git projects.
 
 ## Build
 Use the SwiftPM wrapper to keep caches inside the workspace (avoids user cache warnings in sandboxed environments).
@@ -180,18 +180,22 @@ scripts/coverage.sh
 ```
 
 ## Release
-Build, sign, package, and publish a new release:
+Releases are automated via GitHub Actions when a version tag is pushed:
 ```bash
-# Optional: set code-signing identity (ad-hoc if unset)
-export CODESIGN_IDENTITY="Developer ID Application: Your Name (TEAMID)"
-
-scripts/release.sh
+git tag v0.2.0
+git push origin v0.2.0
 ```
 
-The release script:
-1. Reads the version from `AppVersion.swift`
-2. Builds in release configuration
-3. Code-signs both `MuxyApp` and `muxy` binaries
-4. Packages them into `MuxyApp-<version>-macos.zip`
-5. Optionally notarizes (set `NOTARIZE=1` with `APPLE_ID`, `TEAM_ID`, `APP_PASSWORD`)
-6. Creates a GitHub release via `gh release create`
+The release workflow:
+1. Builds in release configuration
+2. Code-signs `Muxy` app and `mx` CLI
+3. Creates a DMG installer with app bundle and CLI installer
+4. Optionally notarizes the DMG
+5. Uploads to Firebase Storage with long cache headers
+6. Generates and uploads appcast.xml with no-cache headers
+7. Creates a GitHub release
+
+Required secrets:
+- `CODESIGN_IDENTITY`: Developer ID Application certificate
+- `APPLE_ID`, `TEAM_ID`, `APP_PASSWORD`: For notarization
+- `FIREBASE_SERVICE_ACCOUNT`: Service account JSON for Firebase Storage

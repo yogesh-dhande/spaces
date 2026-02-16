@@ -1,7 +1,8 @@
 # AGENTS.md
 
 ## Purpose
-- `muxy` is a macOS Swift app for stream-based workspace orchestration.
+- `Muxy` is a macOS Swift app for stream-based workspace orchestration.
+- The CLI is named `mx`.
 - Streams map to **captured window sets** managed via yabai.
 - The macOS app source lives under `apps/macos`.
 - The marketing/docs website source lives under `apps/web`.

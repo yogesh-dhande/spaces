@@ -1,7 +1,7 @@
 import AppKit
 import gui
 
-@main struct MuxyApp {
+@main struct Muxy {
     static func main() {
         let app = NSApplication.shared
         let delegate = AppKitController()

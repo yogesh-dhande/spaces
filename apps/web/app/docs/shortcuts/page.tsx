@@ -65,11 +65,11 @@ export default function ShortcutsDocsPage() {
           Keyboard bindings can be overridden in the Settings view and through CLI settings commands.
         </p>
         <pre className="mt-3 w-full max-w-full min-w-0 overflow-x-auto whitespace-pre-wrap break-words rounded-xl border border-line bg-background-soft/80 p-3 text-xs leading-6 text-foreground">
-          <code>{`muxy settings get --gui-hotkey
-muxy settings set --gui-hotkey cmd+shift+9
-muxy settings set --gui-next-shortcut cmd+shift+]
-muxy settings set --gui-prev-shortcut cmd+shift+[
-muxy settings reset --gui-hotkey`}</code>
+          <code>{`mx settings get --gui-hotkey
+mx settings set --gui-hotkey cmd+shift+9
+mx settings set --gui-next-shortcut cmd+shift+]
+mx settings set --gui-prev-shortcut cmd+shift+[
+mx settings reset --gui-hotkey`}</code>
         </pre>
       </article>
 

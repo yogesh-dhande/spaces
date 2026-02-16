@@ -1,9 +1,9 @@
-# muxy monorepo
+# Muxy monorepo
 
 This repository is now structured to host multiple projects.
 
 ## Layout
-- `apps/macos`: the `muxy` macOS Swift app
+- `apps/macos`: the `mx` CLI and `Muxy` macOS Swift app
 - `apps/web`: static Next.js marketing + docs website
 - `scripts`: root wrappers that delegate to `apps/macos/scripts`
 

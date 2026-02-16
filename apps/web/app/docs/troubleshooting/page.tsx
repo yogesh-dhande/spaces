@@ -44,9 +44,9 @@ export default function TroubleshootingDocsPage() {
           <li>• Services remain after stop: move extra teardown into workspace `stop_script`.</li>
         </ul>
         <pre className="mt-3 w-full max-w-full min-w-0 overflow-x-auto whitespace-pre-wrap break-words rounded-xl border border-line bg-background-soft/80 p-3 text-xs leading-6 text-foreground">
-          <code>{`muxy workspace restart --project-dir /path/to/repo --name feat-auth
-muxy workspace stop --project-dir /path/to/repo --name feat-auth
-muxy workspace launch --project-dir /path/to/repo --name feat-auth`}</code>
+          <code>{`mx workspace restart --project-dir /path/to/repo --name feat-auth
+mx workspace stop --project-dir /path/to/repo --name feat-auth
+mx workspace launch --project-dir /path/to/repo --name feat-auth`}</code>
         </pre>
       </article>
 

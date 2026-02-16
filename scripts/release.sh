@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Build, sign, package, and publish a muxy release.
+# Build, sign, package, and publish a Muxy release.
 #
 # Usage:
 #   scripts/release.sh
@@ -28,34 +28,29 @@ if [[ -z "$VERSION" ]]; then
   echo "Error: Could not extract version from $version_file" >&2
   exit 1
 fi
-echo "Building muxy v$VERSION"
+echo "Building Muxy v$VERSION"
 
 # Build release configuration.
 "$scripts_dir/swiftpm.sh" build -c release
 echo "Build complete."
 
 build_dir="$macos_dir/.build/release"
-muxyapp_bin="$build_dir/MuxyApp"
-muxy_bin="$build_dir/muxy"
+muxy_app="$build_dir/Muxy"
+mx_cli="$build_dir/mx"
 
-if [[ ! -f "$muxyapp_bin" ]] || [[ ! -f "$muxy_bin" ]]; then
+if [[ ! -f "$muxy_app" ]] || [[ ! -f "$mx_cli" ]]; then
   echo "Error: Release binaries not found in $build_dir" >&2
   exit 1
 fi
 
 # Code sign.
-"$scripts_dir/codesign.sh" "$muxyapp_bin" "$muxy_bin"
+"$scripts_dir/codesign.sh" "$muxy_app" "$mx_cli"
 
-# Package into a zip.
-staging_dir=$(mktemp -d)
-trap 'rm -rf "$staging_dir"' EXIT
-cp "$muxyapp_bin" "$staging_dir/"
-cp "$muxy_bin" "$staging_dir/"
-
-zip_name="MuxyApp-${VERSION}-macos.zip"
-zip_path="$repo_root/$zip_name"
-(cd "$staging_dir" && zip -q "$zip_path" MuxyApp muxy)
-echo "Packaged: $zip_path"
+# Create DMG.
+"$scripts_dir/create-dmg.sh" "$muxy_app" "$mx_cli" "$VERSION"
+dmg_name="Muxy-${VERSION}.dmg"
+dmg_path="$repo_root/$dmg_name"
+echo "Packaged: $dmg_path"
 
 # Notarize if requested.
 if [[ "${NOTARIZE:-}" == "1" ]]; then
@@ -64,18 +59,23 @@ if [[ "${NOTARIZE:-}" == "1" ]]; then
     exit 1
   fi
   echo "Submitting for notarization..."
-  xcrun notarytool submit "$zip_path" \
+  xcrun notarytool submit "$dmg_path" \
     --apple-id "$APPLE_ID" \
     --team-id "$TEAM_ID" \
     --password "$APP_PASSWORD" \
     --wait
+  xcrun stapler staple "$dmg_path"
   echo "Notarization complete."
 fi
+
+# Deploy to Firebase Hosting
+echo "Deploying to Firebase Hosting..."
+"$scripts_dir/deploy-to-firebase.sh" "$dmg_path" "$VERSION"
 
 # Create GitHub release.
 tag="v$VERSION"
 echo "Creating GitHub release $tag..."
-gh release create "$tag" "$zip_path" \
+gh release create "$tag" "$dmg_path" \
   --title "Muxy $VERSION" \
   --generate-notes
 

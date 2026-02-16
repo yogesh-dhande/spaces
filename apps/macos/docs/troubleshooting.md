@@ -28,17 +28,17 @@ yabai -m query --windows --window
 
 Show config path:
 ```bash
-muxy config path
+mx config path
 ```
 
 List projects:
 ```bash
-muxy project list
+mx project list
 ```
 
 List workspaces (including archived):
 ```bash
-muxy workspace list --project-dir /path/to/repo --all
+mx workspace list --project-dir /path/to/repo --all
 ```
 
 ## Runtime Logs
