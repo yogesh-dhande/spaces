@@ -339,3 +339,39 @@ These constants are referenced throughout the codebase to ensure consistent poll
 - Google Chrome for browser sessions
 - Yams for YAML config parsing and encoding
 - SQLite3 for runtime persistence
+
+### yabai Dependency Analysis
+
+Spaceship uses 7 distinct yabai commands across 35+ call sites via `YabaiAdapter`:
+
+| Command | Purpose | Call Sites |
+|---------|---------|------------|
+| `query --windows` | List all windows (snapshot-diff capture) | ~13 |
+| `query --windows --window` | Get focused window | ~5 |
+| `query --windows --space <N>` | List windows in a space | ~1 |
+| `query --spaces` | List spaces across displays | 1 |
+| `query --displays` | List all displays | 1 |
+| `window --focus <ID>` | Focus a window by ID | 2 |
+| `window --close <ID>` | Close a window by ID | 1 |
+
+**Core usage patterns:**
+1. **Snapshot-diff capture** — list windows before an action, list after, diff to find newly created windows. Used for terminal, editor, and browser window capture during launch.
+2. **Window focus fallback** — after AppleScript-based browser focus attempts, yabai provides reliable cross-app window-level focus.
+3. **Window cleanup** — close tracked non-browser windows on workspace stop.
+4. **Space/display enumeration** — populate configuration UI dropdowns.
+
+**Replacement feasibility (tested against real system):**
+
+`CGWindowListCopyWindowInfo` returns the same integer window IDs as yabai (`kCGWindowNumber` == yabai `id`), so the snapshot-diff pattern could use CGWindowList for discovery. However, CGWindowList lacks `title`, `space`, `display`, `is-visible`, `is-sticky`, and `is-native-fullscreen` fields that yabai provides.
+
+| Feature | macOS API Alternative | Viable? |
+|---------|----------------------|---------|
+| Window discovery/listing | `CGWindowListCopyWindowInfo` | Partial — IDs match, but no title/space/display |
+| App-level focus | `NSRunningApplication.activate()` | Yes — but focuses app, not specific window |
+| Window-level focus | Accessibility API (AXUIElement raise) | Unreliable across apps; yabai is the only reliable option |
+| Space assignment | None (private SPI only) | No public API |
+| Display assignment | Geometry matching via `kCGWindowBounds` | Fragile workaround |
+| Window close | AX close button / AppleScript | Feasible but more complex |
+| Window title | AX `kAXTitleAttribute` | Requires Accessibility permission per app |
+
+**Conclusion:** yabai cannot be fully replaced with public macOS APIs. The critical gaps are window-level focus (vs app-level), space index assignment, and reliable cross-app window title access. The query side could be partially replaced by CGWindowList for ID-based snapshot-diff, but mutations (`--focus`, `--close`) and space/display metadata have no equivalent.
