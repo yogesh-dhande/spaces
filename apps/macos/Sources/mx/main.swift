@@ -127,8 +127,12 @@ struct CLI {
         case "add":
             let name = optionalValue(for: "--name")
             let command = try value(for: "--command")
+            let onExitStr = optionalValue(for: "--on-exit") ?? StatusCheckOnExit.none.rawValue
+            guard let onExit = StatusCheckOnExit(rawValue: onExitStr) else {
+                throw NSError(domain: "mx.cli", code: 2, userInfo: [NSLocalizedDescriptionKey: "Invalid --on-exit value '\(onExitStr)'. Use: none|restart|notify"])
+            }
             try orchestrator.updateProjectConfig(projectID: projectID) { config in
-                config.processes.append(ProcessTemplate(name: name, command: command))
+                config.processes.append(ProcessTemplate(name: name, command: command, onExit: onExit))
             }
             print("Added process \(name ?? command) to \(dir)")
         case "remove":
@@ -142,7 +146,7 @@ struct CLI {
                 throw NSError(domain: "mx.cli", code: 2, userInfo: [NSLocalizedDescriptionKey: "Project not found for dir \(dir)"])
             }
             for process in project.processes {
-                print("\(process.name ?? "-")\t\(process.command)")
+                print("\(process.name ?? "-")\t\(process.command)\ton-exit=\(process.onExit.rawValue)")
             }
         default:
             throw NSError(domain: "mx.cli", code: 2, userInfo: [NSLocalizedDescriptionKey: "Unknown action: \(args[3]). Use: project process add|remove|list"])
@@ -596,7 +600,7 @@ struct CLI {
               mx project port add --dir <path> --name <NAME>
               mx project port remove --dir <path> --name <NAME>
               mx project process list --dir <path>
-              mx project process add --dir <path> --command <cmd> [--name <name>]
+              mx project process add --dir <path> --command <cmd> [--name <name>] [--on-exit none|restart|notify]
               mx project process remove --dir <path> --name <name>
               mx project status-check list --dir <path>
               mx project status-check add --dir <path> --process <process> --command <cmd> [--name <name>] [--interval <seconds>] [--timeout <seconds>] [--on-exit none|restart|notify]

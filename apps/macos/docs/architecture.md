@@ -72,6 +72,12 @@ Project data (stored in SQLite):
 - Script timing:
   - `setup_script` runs when a workspace is created or revived.
   - `stop_script` runs on stop/restart/archive stop phase after automatic process termination.
+- Process on-exit behavior:
+  - Each process has an `on_exit` setting with options: `none` (default), `restart`, `notify`.
+  - When a process exits, the orchestrator detects it during status polling and applies the configured behavior.
+  - `none`: Process exit is logged but no action is taken.
+  - `notify`: A macOS notification is shown when the process exits.
+  - `restart`: The process is automatically restarted in a new terminal window with a notification.
 - New projects can be created from an existing directory or by cloning a repository into `/Users/<username>/muxy/projects/<project_name>`.
 - Removing a project clears muxy state. For git projects, muxy first removes managed worktrees with `git worktree remove --force`, then deletes related workspace directories under `/Users/<username>/muxy/workspaces`.
 - The project directory is deleted only for git projects located under `/Users/<username>/muxy/projects` (app-managed clones).
@@ -129,6 +135,7 @@ erDiagram
     TEXT project_id
     TEXT name
     TEXT command
+    TEXT on_exit
     TEXT kind
     INTEGER order_index
   }
@@ -190,6 +197,7 @@ erDiagram
     TEXT workspace_id
     TEXT name
     TEXT command
+    TEXT on_exit
     INTEGER order_index
   }
 

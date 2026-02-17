@@ -639,6 +639,9 @@ public final class MuxyOrchestrator {
                         )
                         try store.upsert(runningProcess: updatedProcess)
                         didUpdate = true
+                        
+                        // Handle on-exit behavior for the process
+                        try handleProcessExit(workspaceID: workspace.id, process: process, project: project, workspace: workspace)
                     }
                 }
             }
@@ -747,6 +750,42 @@ public final class MuxyOrchestrator {
         
         // Restart the process in a new terminal
         try restartProcessInTerminal(workspaceID: workspaceID, process: process)
+    }
+    
+    private func handleProcessExit(workspaceID: String, process: RunningProcessRecord, project: ProjectRecord, workspace: WorkspaceRecord) throws {
+        // Find the process template to get the on-exit behavior
+        guard let config = try loadWorkspaceSettings(project: project, workspace: workspace) else {
+            return
+        }
+        
+        guard let processTemplate = config.processes.first(where: { ($0.name ?? "") == process.templateName }) else {
+            return
+        }
+        
+        switch processTemplate.onExit {
+        case .none:
+            // Do nothing - just log the exit
+            break
+            
+        case .notify:
+            deliverNotification(
+                title: "Process Exited",
+                body: "Process '\(process.templateName)' has exited",
+                subtitle: nil
+            )
+            
+        case .restart:
+            // Restart the process
+            fputs("muxy: Restarting process '\(process.templateName)' due to exit\n", stderr)
+            
+            deliverNotification(
+                title: "Process Restarting",
+                body: "Process '\(process.templateName)' is being restarted",
+                subtitle: nil
+            )
+            
+            try restartProcessInTerminal(workspaceID: workspaceID, process: process)
+        }
     }
     
     private func restartProcessInTerminal(workspaceID: String, process: RunningProcessRecord) throws {

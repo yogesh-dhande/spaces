@@ -20,20 +20,32 @@ import streamctl
         addButton.toolTip = "Add process"
         addButton.target = self
         addButton.action = #selector(addRowFromButton)
+
+        // Header: fixed widths match data rows; command label stretches via low hugging
         let header = NSStackView()
         header.orientation = .horizontal
         header.spacing = 6
         header.alignment = .centerY
-        let nameHeader = makeFieldHeader("Name")
-        let commandHeader = makeFieldHeader("Command")
-        header.addArrangedSubview(nameHeader)
-        header.addArrangedSubview(commandHeader)
-        header.addArrangedSubview(NSView())
+        header.distribution = .fill
+
+        let nameLabel = makeFieldHeader("Name")
+        let commandLabel = makeFieldHeader("Command")
+        let onExitLabel = makeFieldHeader("On Exit")
+
+        header.addArrangedSubview(nameLabel)
+        header.addArrangedSubview(commandLabel)
+        header.addArrangedSubview(onExitLabel)
         header.addArrangedSubview(addButton)
-        nameHeader.widthAnchor.constraint(equalToConstant: 160).isActive = true
-        commandHeader.setContentHuggingPriority(.defaultLow, for: .horizontal)
-        commandHeader.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+
+        nameLabel.widthAnchor.constraint(equalToConstant: 160).isActive = true
+        onExitLabel.widthAnchor.constraint(equalToConstant: 80).isActive = true
+        addButton.widthAnchor.constraint(equalToConstant: 28).isActive = true
+        commandLabel.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        commandLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+
         container.addArrangedSubview(header)
+        header.translatesAutoresizingMaskIntoConstraints = false
+        header.widthAnchor.constraint(equalTo: container.widthAnchor).isActive = true
         container.addArrangedSubview(rowsStack)
         rowsStack.widthAnchor.constraint(equalTo: container.widthAnchor).isActive = true
         addRow(with: nil, checks: [])
@@ -58,8 +70,9 @@ import streamctl
         rows.compactMap { row in
             let name = row.nameField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
             let command = row.commandField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            let onExit = StatusCheckOnExit(rawValue: row.onExitPopup.titleOfSelectedItem ?? "") ?? .none
             guard !command.isEmpty else { return nil }
-            return ProcessTemplate(name: name.isEmpty ? nil : name, command: command)
+            return ProcessTemplate(name: name.isEmpty ? nil : name, command: command, onExit: onExit)
         }
     }
 
@@ -82,13 +95,16 @@ import streamctl
     private func addRow(with process: ProcessTemplate?, checks: [StatusCheckDefinition]) {
         let row = ProcessRowRefs(rowsStack: rowsStack)
         rows.append(row)
+        row.processRow.translatesAutoresizingMaskIntoConstraints = false
         rowsStack.addArrangedSubview(row.processRow)
+        row.processRow.widthAnchor.constraint(equalTo: rowsStack.widthAnchor).isActive = true
         rowsStack.addArrangedSubview(row.checksSection)
         row.checksSection.translatesAutoresizingMaskIntoConstraints = false
         row.checksSection.widthAnchor.constraint(equalTo: rowsStack.widthAnchor).isActive = true
         if let process {
             row.nameField.stringValue = process.name ?? ""
             row.commandField.stringValue = process.command
+            row.onExitPopup.selectItem(withTitle: process.onExit.rawValue)
         }
         row.setChecks(checks)
         row.onChange = { [weak self] in self?.onDirty?() }
@@ -108,7 +124,9 @@ import streamctl
         let checksSection = NSStackView()
         let nameField = NSTextField(string: "")
         let commandField = NSTextField(string: "")
+        let onExitPopup = NSPopUpButton()
         private let checksStack = NSStackView()
+        private let checksFieldHeader = NSStackView()
         private var checkRows: [StatusCheckRowRefs] = []
         private weak var rowsStack: NSStackView?
         var onRemove: (() -> Void)?
@@ -123,6 +141,11 @@ import streamctl
 
             nameField.placeholderString = "name"
             commandField.placeholderString = "command"
+            
+            onExitPopup.addItems(withTitles: StatusCheckOnExit.allCases.map { $0.rawValue })
+            onExitPopup.controlSize = .small
+            onExitPopup.font = .systemFont(ofSize: 11)
+            onExitPopup.toolTip = "Action on process exit"
 
             let removeButton = NSButton(title: "", target: self, action: #selector(removeRow))
             removeButton.bezelStyle = .texturedRounded
@@ -131,9 +154,12 @@ import streamctl
 
             processRow.addArrangedSubview(nameField)
             processRow.addArrangedSubview(commandField)
+            processRow.addArrangedSubview(onExitPopup)
             processRow.addArrangedSubview(removeButton)
 
             nameField.widthAnchor.constraint(equalToConstant: 160).isActive = true
+            onExitPopup.widthAnchor.constraint(equalToConstant: 80).isActive = true
+            removeButton.widthAnchor.constraint(equalToConstant: 28).isActive = true
             commandField.setContentHuggingPriority(.defaultLow, for: .horizontal)
             commandField.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
 
@@ -142,6 +168,8 @@ import streamctl
                     Task { @MainActor in self?.onChange?() }
                 }
             }
+            onExitPopup.target = self
+            onExitPopup.action = #selector(changedPopup)
 
             // Status checks sub-section
             checksStack.orientation = .vertical
@@ -167,6 +195,38 @@ import streamctl
             checksHeader.addArrangedSubview(arrow)
             checksHeader.addArrangedSubview(checksLabel)
             checksHeader.addArrangedSubview(addCheckButton)
+            
+            // Status check field header — uses same fixed widths as StatusCheckRowRefs
+            checksFieldHeader.orientation = .horizontal
+            checksFieldHeader.spacing = 4
+            checksFieldHeader.alignment = .centerY
+            checksFieldHeader.distribution = .fill
+            
+            let nameLabel = makeFieldHeader("Name")
+            let commandLabel = makeFieldHeader("Command")
+            let intervalLabel = makeFieldHeader("Interval (s)")
+            let timeoutLabel = makeFieldHeader("Timeout (s)")
+            let onFailLabel = makeFieldHeader("On Fail")
+            
+            checksFieldHeader.addArrangedSubview(nameLabel)
+            checksFieldHeader.addArrangedSubview(commandLabel)
+            checksFieldHeader.addArrangedSubview(intervalLabel)
+            checksFieldHeader.addArrangedSubview(timeoutLabel)
+            checksFieldHeader.addArrangedSubview(onFailLabel)
+            // Spacer to account for the remove button column
+            let btnSpacer = NSView()
+            btnSpacer.setContentHuggingPriority(.required, for: .horizontal)
+            checksFieldHeader.addArrangedSubview(btnSpacer)
+            
+            nameLabel.widthAnchor.constraint(equalToConstant: 80).isActive = true
+            intervalLabel.widthAnchor.constraint(equalToConstant: 70).isActive = true
+            timeoutLabel.widthAnchor.constraint(equalToConstant: 70).isActive = true
+            onFailLabel.widthAnchor.constraint(equalToConstant: 80).isActive = true
+            btnSpacer.widthAnchor.constraint(equalToConstant: 20).isActive = true
+            commandLabel.setContentHuggingPriority(.defaultLow, for: .horizontal)
+            commandLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+            checksFieldHeader.isHidden = true
+            checksFieldHeader.translatesAutoresizingMaskIntoConstraints = false
 
             checksSection.orientation = .horizontal
             checksSection.spacing = 0
@@ -181,16 +241,23 @@ import streamctl
             innerStack.spacing = 4
             innerStack.alignment = .leading
             innerStack.setContentHuggingPriority(.defaultLow, for: .horizontal)
+            innerStack.translatesAutoresizingMaskIntoConstraints = false
+            checksStack.translatesAutoresizingMaskIntoConstraints = false
             innerStack.addArrangedSubview(checksHeader)
+            innerStack.addArrangedSubview(checksFieldHeader)
             innerStack.addArrangedSubview(checksStack)
             checksSection.addArrangedSubview(indent)
             checksSection.addArrangedSubview(innerStack)
+            innerStack.widthAnchor.constraint(equalTo: checksSection.widthAnchor, constant: -20).isActive = true
+            checksStack.widthAnchor.constraint(equalTo: innerStack.widthAnchor).isActive = true
+            checksFieldHeader.widthAnchor.constraint(equalTo: innerStack.widthAnchor).isActive = true
         }
 
         func setChecks(_ checks: [StatusCheckDefinition]) {
             for row in checkRows { row.remove() }
             checkRows = []
             for check in checks { addCheck(with: check) }
+            updateChecksFieldHeaderVisibility()
         }
 
         func currentChecks(processName: String) -> [StatusCheckDefinition] {
@@ -212,8 +279,14 @@ import streamctl
         }
 
         @objc private func removeRow() { onRemove?() }
+        
+        @objc private func changedPopup() { onChange?() }
 
-        @objc private func addCheckRow() { addCheck(with: nil); onChange?() }
+        @objc private func addCheckRow() { addCheck(with: nil); updateChecksFieldHeaderVisibility(); onChange?() }
+
+        private func updateChecksFieldHeaderVisibility() {
+            checksFieldHeader.isHidden = checkRows.isEmpty
+        }
 
         private func addCheck(with check: StatusCheckDefinition?) {
             let row = StatusCheckRowRefs()
@@ -233,6 +306,7 @@ import streamctl
                 guard let self, let row else { return }
                 if let idx = self.checkRows.firstIndex(where: { $0 === row }) { self.checkRows.remove(at: idx) }
                 row.remove()
+                self.updateChecksFieldHeaderVisibility()
                 self.onChange?()
             }
         }
@@ -255,16 +329,21 @@ import streamctl
 
             nameField.placeholderString = "name"
             nameField.font = .systemFont(ofSize: 11)
+            nameField.toolTip = "Check name (optional)"
             commandField.placeholderString = "command"
             commandField.font = .systemFont(ofSize: 11)
-            intervalField.placeholderString = "sec"
+            commandField.toolTip = "Health check command to run"
+            intervalField.placeholderString = "60"
             intervalField.font = .systemFont(ofSize: 11)
-            timeoutField.placeholderString = "sec"
+            intervalField.toolTip = "Seconds between checks"
+            timeoutField.placeholderString = "5"
             timeoutField.font = .systemFont(ofSize: 11)
+            timeoutField.toolTip = "Command timeout in seconds"
 
             onExitPopup.addItems(withTitles: StatusCheckOnExit.allCases.map { $0.rawValue })
             onExitPopup.controlSize = .small
             onExitPopup.font = .systemFont(ofSize: 11)
+            onExitPopup.toolTip = "Action when check fails"
 
             let removeButton = NSButton(title: "", target: self, action: #selector(removeRow))
             removeButton.bezelStyle = .texturedRounded
@@ -280,9 +359,10 @@ import streamctl
             container.addArrangedSubview(removeButton)
 
             nameField.widthAnchor.constraint(equalToConstant: 80).isActive = true
-            intervalField.widthAnchor.constraint(equalToConstant: 50).isActive = true
-            timeoutField.widthAnchor.constraint(equalToConstant: 50).isActive = true
+            intervalField.widthAnchor.constraint(equalToConstant: 70).isActive = true
+            timeoutField.widthAnchor.constraint(equalToConstant: 70).isActive = true
             onExitPopup.widthAnchor.constraint(equalToConstant: 80).isActive = true
+            removeButton.widthAnchor.constraint(equalToConstant: 20).isActive = true
             commandField.widthAnchor.constraint(greaterThanOrEqualToConstant: 100).isActive = true
             commandField.setContentHuggingPriority(.defaultLow, for: .horizontal)
             commandField.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)

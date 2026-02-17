@@ -3,7 +3,7 @@ import SQLite3
 
 public final class SQLiteStore {
     private let db: OpaquePointer
-    private let schemaVersion = 2
+    private let schemaVersion = 3
 
     public init(path: String) throws {
         var handle: OpaquePointer?
@@ -43,8 +43,8 @@ public final class SQLiteStore {
         try execute(sql: "DELETE FROM project_processes WHERE project_id = ?", bindings: [project.id])
         for (index, process) in project.processes.enumerated() {
             try execute(
-                sql: "INSERT INTO project_processes(id, project_id, name, command, order_index) VALUES (?, ?, ?, ?, ?)",
-                bindings: [UUID().uuidString, project.id, process.name ?? "", process.command, String(index)])
+                sql: "INSERT INTO project_processes(id, project_id, name, command, on_exit, order_index) VALUES (?, ?, ?, ?, ?, ?)",
+                bindings: [UUID().uuidString, project.id, process.name ?? "", process.command, process.onExit.rawValue, String(index)])
         }
         try execute(sql: "DELETE FROM project_status_checks WHERE project_id = ?", bindings: [project.id])
         for (index, check) in project.statusChecks.enumerated() {
@@ -249,23 +249,23 @@ public final class SQLiteStore {
         for (index, process) in processes.enumerated() {
             try execute(
                 sql: """
-                    INSERT INTO workspace_processes(id, workspace_id, name, command, order_index)
-                    VALUES (?, ?, ?, ?, ?)
-                    """, bindings: [UUID().uuidString, workspaceID, process.name ?? "", process.command, String(index)])
+                    INSERT INTO workspace_processes(id, workspace_id, name, command, on_exit, order_index)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """, bindings: [UUID().uuidString, workspaceID, process.name ?? "", process.command, process.onExit.rawValue, String(index)])
         }
     }
 
     public func workspaceProcesses(workspaceID: String) throws -> [ProcessTemplate] {
         let rows = try queryRows(
             sql: """
-                SELECT name, command
+                SELECT name, command, on_exit
                 FROM workspace_processes
                 WHERE workspace_id = ?
                 ORDER BY order_index
                 """, bindings: [workspaceID])
         return rows.map { row in
             let name = row[0].isEmpty ? nil : row[0]
-            return ProcessTemplate(name: name, command: row[1])
+            return ProcessTemplate(name: name, command: row[1], onExit: StatusCheckOnExit(rawValue: row[2]) ?? .none)
         }
     }
 
@@ -545,6 +545,7 @@ public final class SQLiteStore {
               project_id TEXT NOT NULL,
               name TEXT,
               command TEXT NOT NULL,
+              on_exit TEXT NOT NULL DEFAULT 'none',
               order_index INTEGER NOT NULL
             );
 
@@ -608,6 +609,7 @@ public final class SQLiteStore {
               workspace_id TEXT NOT NULL,
               name TEXT,
               command TEXT NOT NULL,
+              on_exit TEXT NOT NULL DEFAULT 'none',
               order_index INTEGER NOT NULL
             );
 
@@ -723,8 +725,8 @@ public final class SQLiteStore {
             sql: "SELECT name FROM project_port_definitions WHERE project_id = ? ORDER BY order_index", bindings: [id]
         ).map { PortDefinition(name: $0[0]) }
         let processes = try queryRows(
-            sql: "SELECT name, command FROM project_processes WHERE project_id = ? ORDER BY order_index", bindings: [id]
-        ).map { row in ProcessTemplate(name: row[0].isEmpty ? nil : row[0], command: row[1]) }
+            sql: "SELECT name, command, on_exit FROM project_processes WHERE project_id = ? ORDER BY order_index", bindings: [id]
+        ).map { row in ProcessTemplate(name: row[0].isEmpty ? nil : row[0], command: row[1], onExit: StatusCheckOnExit(rawValue: row[2]) ?? .none) }
         let statusChecks = try queryRows(
             sql: "SELECT name, process, command, interval, timeout, on_exit FROM project_status_checks WHERE project_id = ? ORDER BY order_index",
             bindings: [id]
