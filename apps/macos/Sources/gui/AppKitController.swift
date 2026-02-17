@@ -43,6 +43,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     private let appUpdater = AppUpdater()
     private var checkForUpdatesMenuItem: NSMenuItem?
     private var availableUpdate: UpdateInfo?
+    private var tooltipWindow: NSWindow?
 
     private var configCache: AppConfig?
     private let defaultSplitViewWidth: CGFloat = 360
@@ -975,6 +976,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         branchField.delegate = self
         let directoryNameField = NSTextField(string: "")
         directoryNameField.placeholderString = "optional: letters, numbers, -, _"
+        let tooltipField = NSTextField(string: "")
+        tooltipField.placeholderString = "optional: context about what you're working on"
         let autoNameState = project.isGitRepo ? AddWorkspaceAutoNameState() : nil
 
         // --- Single card with all inputs ---
@@ -1005,6 +1008,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             contentStack.addArrangedSubview(directoryNameField)
             constrainFormFieldToFillWidth(directoryNameField, in: contentStack)
         }
+
+        contentStack.addArrangedSubview(label(text: "Tooltip"))
+        contentStack.addArrangedSubview(helpTextLabel("Optional context to display when viewing this workspace."))
+        contentStack.addArrangedSubview(tooltipField)
+        constrainFormFieldToFillWidth(tooltipField, in: contentStack)
 
         let card = formSectionCard(
             icon: "plus.rectangle.on.folder", title: "Workspace",
@@ -1040,7 +1048,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         createButton.tag = storeAddWorkspaceFields(
             projectID: project.id, isGitRepo: project.isGitRepo, targetBranchField: project.isGitRepo ? targetBranchField : nil, nameField: nameField,
             directoryNameField: project.isGitRepo ? directoryNameField : nil, branchField: project.isGitRepo ? branchField : nil,
-            autoNameState: autoNameState)
+            tooltipField: tooltipField, autoNameState: autoNameState)
     }
 
     private func showWorkspaceDetail(project: ProjectSummary, workspace: WorkspaceSummary) {
@@ -1377,6 +1385,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let stopScroll = scrollableTextView(stopView, height: 90)
         let browserView = makeEditableTextView()
         let browserScroll = scrollableTextView(browserView, height: 80)
+        let tooltipField = NSTextField(string: "")
+        tooltipField.placeholderString = "optional: context about what you're working on"
 
         if let config = try? orchestrator.workspaceSettings(workspaceID: workspace.id) {
             stopView.string = config.stopScript ?? ""
@@ -1390,6 +1400,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             processEditor.setProcessesWithChecks(fullProject?.processes ?? [], statusChecks: fullProject?.statusChecks ?? [])
             browserView.string = (fullProject?.browserSessions ?? []).compactMap { $0.url }.joined(separator: "\n")
         }
+        tooltipField.stringValue = workspace.tooltip ?? ""
 
         let saveButton = actionButton(
             title: "Save Workspace", symbol: "square.and.arrow.down", tooltip: "Save workspace settings", action: #selector(saveWorkspace(_:)),
@@ -1405,6 +1416,14 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             let imgConfig = NSImage.SymbolConfiguration(paletteColors: [buttonTextColor])
             saveButton.image = saveImg.withSymbolConfiguration(imgConfig)
         }
+
+        // --- Tooltip card ---
+        let tooltipCard = formSectionCard(
+            icon: "info.circle", title: "Tooltip",
+            subtitle: "Optional context to display when viewing this workspace.",
+            contentViews: [tooltipField])
+        contentStack.addArrangedSubview(tooltipCard)
+        constrainFormFieldToFillWidth(tooltipCard, in: contentStack)
 
         // --- Port definitions card ---
         let wsPortCard = formSectionCard(
@@ -1472,9 +1491,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         constrainFormFieldToFillWidth(buttonRow, in: container)
 
         saveButton.tag = storeWorkspaceFields(
-            workspaceID: workspace.id, stopView: stopView, portEditor: portEditor, processEditor: processEditor, browserView: browserView)
+            workspaceID: workspace.id, stopView: stopView, portEditor: portEditor, processEditor: processEditor, browserView: browserView,
+            tooltipField: tooltipField)
         registerWorkspaceDirtyTracking(
-            stopView: stopView, portEditor: portEditor, processEditor: processEditor, browserView: browserView)
+            stopView: stopView, portEditor: portEditor, processEditor: processEditor, browserView: browserView, tooltipField: tooltipField)
 
         return insetContainerView(container)
     }
@@ -2006,11 +2026,13 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     }
 
     private func storeWorkspaceFields(
-        workspaceID: String, stopView: NSTextView, portEditor: PortEditor, processEditor: ProcessEditor, browserView: NSTextView
+        workspaceID: String, stopView: NSTextView, portEditor: PortEditor, processEditor: ProcessEditor, browserView: NSTextView,
+        tooltipField: NSTextField
     ) -> Int {
         let id = workspaceID.hashValue
         WorkspaceFieldCache.shared.cache[id] = WorkspaceFieldRefs(
-            workspaceID: workspaceID, stopView: stopView, portEditor: portEditor, processEditor: processEditor, browserView: browserView)
+            workspaceID: workspaceID, stopView: stopView, portEditor: portEditor, processEditor: processEditor, browserView: browserView,
+            tooltipField: tooltipField)
         return id
     }
 
@@ -2031,12 +2053,12 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
     private func storeAddWorkspaceFields(
         projectID: String, isGitRepo: Bool, targetBranchField: NSComboBox?, nameField: NSTextField, directoryNameField: NSTextField?,
-        branchField: NSTextField?, autoNameState: AddWorkspaceAutoNameState?
+        branchField: NSTextField?, tooltipField: NSTextField?, autoNameState: AddWorkspaceAutoNameState?
     ) -> Int {
         let id = UUID().uuidString.hashValue
         AddWorkspaceFieldCache.shared.cache[id] = AddWorkspaceFieldRefs(
             projectID: projectID, isGitRepo: isGitRepo, targetBranchField: targetBranchField, nameField: nameField,
-            directoryNameField: directoryNameField, branchField: branchField, autoNameState: autoNameState)
+            directoryNameField: directoryNameField, branchField: branchField, tooltipField: tooltipField, autoNameState: autoNameState)
         return id
     }
 
@@ -2161,6 +2183,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 config.browserSessions = parseBrowserSessions(refs.browserView.string)
                 config.statusChecks = refs.processEditor.currentStatusChecks()
             }
+            let tooltip = refs.tooltipField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            try orchestrator.updateWorkspaceTooltip(workspaceID: refs.workspaceID, tooltip: tooltip.isEmpty ? nil : tooltip)
             workspaceHasUnsavedChanges = false
             reloadData()
         } catch { showError(error) }
@@ -2236,14 +2260,20 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             let directoryName = refs.directoryNameField?.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
             let resolvedDirectoryName: String?
             if let directoryName, directoryName.isEmpty { resolvedDirectoryName = nil } else { resolvedDirectoryName = directoryName }
+            let tooltip = refs.tooltipField?.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            let resolvedTooltip: String?
+            if let tooltip, tooltip.isEmpty { resolvedTooltip = nil } else { resolvedTooltip = tooltip }
             if refs.isGitRepo, branch == nil || branch?.isEmpty == true {
                 throw MuxyError.invalidArgument(message: "Branch name is required for git projects.")
             }
             if refs.isGitRepo, targetBranch == nil || targetBranch?.isEmpty == true {
                 throw MuxyError.invalidArgument(message: "Target branch is required for git projects.")
             }
-            _ = try orchestrator.createWorkspace(
+            let workspace = try orchestrator.createWorkspace(
                 projectID: refs.projectID, name: name, branch: branch, targetBranch: targetBranch, directoryName: resolvedDirectoryName)
+            if let resolvedTooltip {
+                try orchestrator.updateWorkspaceTooltip(workspaceID: workspace.id, tooltip: resolvedTooltip)
+            }
             reloadData()
         } catch { showError(error) }
     }
@@ -2428,6 +2458,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         registerHotkey(spec: toggle, id: GlobalHotkey.toggle.rawValue, signature: signature, target: target)
         if let next { registerHotkey(spec: next, id: GlobalHotkey.next.rawValue, signature: signature, target: target) }
         if let previous { registerHotkey(spec: previous, id: GlobalHotkey.previous.rawValue, signature: signature, target: target) }
+        if let tooltipSpec = try? HotkeySpec.parse("cmd+shift+i") {
+            registerHotkey(spec: tooltipSpec, id: GlobalHotkey.tooltip.rawValue, signature: signature, target: target)
+        }
 
         var eventSpec = EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyPressed))
         _ = InstallEventHandler(
@@ -2575,7 +2608,62 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         case .toggle: toggleWindowFromHotkey()
         case .next: if NSApp.isActive { selectNextRunningWorkspace() } else { focusGlobalWindowNavigation(direction: 1) }
         case .previous: if NSApp.isActive { selectPreviousRunningWorkspace() } else { focusGlobalWindowNavigation(direction: -1) }
+        case .tooltip: toggleTooltipDisplay()
         }
+    }
+
+    private func toggleTooltipDisplay() {
+        if let tooltipWindow, tooltipWindow.isVisible {
+            tooltipWindow.orderOut(nil)
+            self.tooltipWindow = nil
+            return
+        }
+        
+        guard let focusedWorkspaceID = try? orchestrator.workspaceIDForFocusedWindow() else { return }
+        guard let workspace = try? orchestrator.store.workspace(id: focusedWorkspaceID) else { return }
+        guard let tooltip = workspace.tooltip, !tooltip.isEmpty else { return }
+        
+        guard let screen = NSScreen.main else { return }
+        let screenFrame = screen.frame
+        
+        let textField = NSTextField(labelWithString: tooltip)
+        textField.font = .systemFont(ofSize: 18, weight: .medium)
+        textField.textColor = .white
+        textField.alignment = .center
+        textField.lineBreakMode = .byWordWrapping
+        textField.maximumNumberOfLines = 0
+        
+        let maxWidth: CGFloat = 600
+        let padding: CGFloat = 40
+        textField.preferredMaxLayoutWidth = maxWidth - padding * 2
+        textField.sizeToFit()
+        
+        let contentView = NSView(frame: NSRect(x: 0, y: 0, width: textField.frame.width + padding * 2, height: textField.frame.height + padding * 2))
+        contentView.wantsLayer = true
+        contentView.layer?.backgroundColor = NSColor.black.cgColor
+        contentView.layer?.cornerRadius = 12
+        
+        textField.frame.origin = NSPoint(x: padding, y: padding)
+        contentView.addSubview(textField)
+        
+        let windowWidth = contentView.frame.width
+        let windowHeight = contentView.frame.height
+        let windowX = screenFrame.origin.x + (screenFrame.width - windowWidth) / 2
+        let windowY = screenFrame.origin.y + (screenFrame.height - windowHeight) / 2
+        
+        let window = NSWindow(
+            contentRect: NSRect(x: windowX, y: windowY, width: windowWidth, height: windowHeight),
+            styleMask: [.borderless],
+            backing: .buffered,
+            defer: false)
+        window.backgroundColor = .clear
+        window.isOpaque = false
+        window.hasShadow = true
+        window.level = .floating
+        window.contentView = contentView
+        window.makeKeyAndOrderFront(nil)
+        
+        self.tooltipWindow = window
     }
 
     private func loadShortcutSpecs() {
@@ -3081,13 +3169,16 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     }
 
     private func registerWorkspaceDirtyTracking(
-        stopView: NSTextView, portEditor: PortEditor, processEditor: ProcessEditor, browserView: NSTextView
+        stopView: NSTextView, portEditor: PortEditor, processEditor: ProcessEditor, browserView: NSTextView, tooltipField: NSTextField
     ) {
         workspaceHasUnsavedChanges = false
         NotificationCenter.default.addObserver(forName: NSText.didChangeNotification, object: stopView, queue: .main) { [weak self] _ in
             Task { @MainActor in self?.workspaceHasUnsavedChanges = true }
         }
         NotificationCenter.default.addObserver(forName: NSText.didChangeNotification, object: browserView, queue: .main) { [weak self] _ in
+            Task { @MainActor in self?.workspaceHasUnsavedChanges = true }
+        }
+        NotificationCenter.default.addObserver(forName: NSControl.textDidChangeNotification, object: tooltipField, queue: .main) { [weak self] _ in
             Task { @MainActor in self?.workspaceHasUnsavedChanges = true }
         }
         portEditor.onDirty = { [weak self] in Task { @MainActor in self?.workspaceHasUnsavedChanges = true } }

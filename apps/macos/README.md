@@ -115,7 +115,6 @@ mx version
 
 ## CLI
 ```bash
-mx config path
 mx config show
 
 mx project list

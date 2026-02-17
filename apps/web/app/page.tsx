@@ -28,6 +28,11 @@ const keyFeatures = [
       "Cycle through the current workspace windows with deterministic shortcuts, instead of hunting across apps.",
   },
   {
+    title: "Workspace context tooltips",
+    description:
+      "Add optional tooltips to workspaces describing what you're working on. Press cmd+shift+i to display the tooltip for the focused workspace as an overlay.",
+  },
+  {
     title: "Start and stop workspaces quickly",
     description:
       "No need to keep those tabs open or processes running just because it is a pain to set all of it up again. Muxy manages starting and stopping for you automatically.",

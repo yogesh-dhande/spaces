@@ -8,8 +8,9 @@ public struct WorkspaceSummary: Sendable {
     public let isRunning: Bool
     public let isArchived: Bool
     public let isDefault: Bool
+    public let tooltip: String?
 
-    public init(id: String, name: String, branch: String?, dir: String, isRunning: Bool, isArchived: Bool, isDefault: Bool) {
+    public init(id: String, name: String, branch: String?, dir: String, isRunning: Bool, isArchived: Bool, isDefault: Bool, tooltip: String? = nil) {
         self.id = id
         self.name = name
         self.branch = branch
@@ -17,5 +18,6 @@ public struct WorkspaceSummary: Sendable {
         self.isRunning = isRunning
         self.isArchived = isArchived
         self.isDefault = isDefault
+        self.tooltip = tooltip
     }
 }

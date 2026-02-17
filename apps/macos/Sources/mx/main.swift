@@ -279,7 +279,7 @@ struct CLI {
         guard args.count >= 3 else {
             throw NSError(
                 domain: "mx.cli", code: 2,
-                userInfo: [NSLocalizedDescriptionKey: "Missing workspace action. Use: workspace list|create|import|discover|launch|restart|stop|archive|activate"])
+                userInfo: [NSLocalizedDescriptionKey: "Missing workspace action. Use: workspace list|create|import|discover|launch|restart|stop|archive|activate|tooltip"])
         }
         switch args[2] {
         case "list":
@@ -304,9 +304,14 @@ struct CLI {
                     userInfo: [NSLocalizedDescriptionKey: "Use either --directory-name <name> or --dirname <name>, but not both."])
             }
             let directoryName = directoryNameFlag ?? dirnameFlag
+            let tooltip = optionalValue(for: "--tooltip")
             let projectID = normalizePath(projectDir)
-            let workspace = try orchestrator.createWorkspace(
+            var workspace = try orchestrator.createWorkspace(
                 projectID: projectID, name: name, branch: branch, targetBranch: targetBranch, directoryName: directoryName)
+            if let tooltip {
+                try orchestrator.updateWorkspaceTooltip(workspaceID: workspace.id, tooltip: tooltip)
+                workspace = try orchestrator.store.workspace(id: workspace.id)!
+            }
             print("Created workspace \(workspace.name)\t\(workspace.dir)")
         case "import":
             let dir = optionalValue(for: "--dir") ?? FileManager.default.currentDirectoryPath
@@ -345,6 +350,22 @@ struct CLI {
             let id = try workspaceID(orchestrator: orchestrator)
             try orchestrator.setActiveWorkspace(id: id)
             print("Activated workspace \(id)")
+        case "tooltip":
+            let id = try workspaceID(orchestrator: orchestrator)
+            if let tooltip = optionalValue(for: "--tooltip") {
+                try orchestrator.updateWorkspaceTooltip(workspaceID: id, tooltip: tooltip)
+                print("Updated tooltip for workspace \(id)")
+            } else if args.contains("--clear") {
+                try orchestrator.updateWorkspaceTooltip(workspaceID: id, tooltip: nil)
+                print("Cleared tooltip for workspace \(id)")
+            } else {
+                let workspace = try orchestrator.store.workspace(id: id)!
+                if let tooltip = workspace.tooltip {
+                    print(tooltip)
+                } else {
+                    print("(no tooltip set)")
+                }
+            }
         default: throw NSError(domain: "mx.cli", code: 2, userInfo: [NSLocalizedDescriptionKey: "Unknown workspace action: \(args[2])"])
         }
     }
@@ -590,7 +611,7 @@ struct CLI {
               mx project browser-session remove --dir <path> --url <url>
 
               mx workspace list --project-dir <path> [--all]
-              mx workspace create --project-dir <path> --name <name> --branch <branch> [--target-branch <branch>] [--directory-name <name>]
+              mx workspace create --project-dir <path> --name <name> --branch <branch> [--target-branch <branch>] [--directory-name <name>] [--tooltip <text>]
               mx workspace import [--dir <path>] [--name <name>]
               mx workspace discover [--project-dir <path>]
               mx workspace launch [--dir <path>]
@@ -598,6 +619,7 @@ struct CLI {
               mx workspace stop [--dir <path>]
               mx workspace archive [--dir <path>]
               mx workspace activate [--dir <path>]
+              mx workspace tooltip [--dir <path>] [--tooltip <text>] [--clear]
 
             Notes:
               - Configuration (editor, port_range) is stored in ~/.muxy/muxy.db. YAML config is no longer used.

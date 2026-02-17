@@ -99,7 +99,8 @@ public final class MuxyOrchestrator {
         let records = try store.workspaces(projectID: projectID, includeArchived: includeArchived)
         return records.map {
             WorkspaceSummary(
-                id: $0.id, name: $0.name, branch: $0.branch, dir: $0.dir, isRunning: $0.isRunning, isArchived: $0.isArchived, isDefault: $0.isDefault)
+                id: $0.id, name: $0.name, branch: $0.branch, dir: $0.dir, isRunning: $0.isRunning, isArchived: $0.isArchived, isDefault: $0.isDefault,
+                tooltip: $0.tooltip)
         }
     }
 
@@ -150,6 +151,11 @@ public final class MuxyOrchestrator {
         if workspace.isRunning || hasRuntimeIndicators {
             try applyWorkspaceSettingsUpdate(project: project, workspace: workspace, previous: previous, updated: existing)
         }
+    }
+
+    public func updateWorkspaceTooltip(workspaceID: String, tooltip: String?) throws {
+        let (_, workspace) = try resolveWorkspace(id: workspaceID)
+        try store.updateWorkspaceTooltip(id: workspace.id, tooltip: tooltip)
     }
 
     public func addProject(dir: String) throws -> ProjectRecord {

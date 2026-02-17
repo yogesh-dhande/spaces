@@ -75,9 +75,7 @@ export default function CliReferencePage() {
         </p>
         <CodeBlock>{`# Verify installation
 mx version
-
-# Print config file path
-mx config path`}</CodeBlock>
+`}</CodeBlock>
         <p className="mt-3 text-sm leading-7 text-foreground-soft">
           If the command is not found, open Muxy.app once — it will install the symlink.
         </p>
@@ -249,6 +247,7 @@ mx workspace create \\
           <Flag name="--branch <branch>" description="Git branch name. Created from --target-branch if it does not exist. Required for git projects." />
           <Flag name="--target-branch <branch>" description="Base branch for the new branch. Defaults to main or master." />
           <Flag name="--dirname <name>" description="Override the git worktree directory name. Letters, numbers, - and _ only." />
+          <Flag name="--tooltip <text>" description="Optional context about what you're working on. Display with cmd+shift+i global hotkey." />
         </ul>
         <p className="mt-3 text-sm leading-7 text-foreground-soft">
           On creation, the workspace snapshots port definitions, processes, status checks, and browser
@@ -332,15 +331,27 @@ mx workspace activate --dir /path/to/workspace`}</CodeBlock>
         <p className="mt-2 text-sm leading-7 text-foreground-soft">
           Brings the workspace windows to the front so the developer can immediately resume work.
         </p>
+
+        <h3 className="mt-5 text-base font-semibold">Manage workspace tooltip</h3>
+        <CodeBlock>{`# View current tooltip
+mx workspace tooltip --dir /path/to/workspace
+
+# Set or update tooltip
+mx workspace tooltip --dir /path/to/workspace --tooltip "Working on OAuth integration"
+
+# Clear tooltip
+mx workspace tooltip --dir /path/to/workspace --clear`}</CodeBlock>
+        <p className="mt-2 text-sm leading-7 text-foreground-soft">
+          Tooltips provide context about what you're working on. Press <Cmd>cmd+shift+i</Cmd> when
+          any workspace window is focused to display the tooltip as an overlay on the current screen.
+          Press the hotkey again to hide it.
+        </p>
       </article>
 
       {/* Config commands */}
       <article className="rounded-2xl border border-line bg-surface/82 p-5 backdrop-blur-sm">
         <h2 className="text-xl font-semibold tracking-tight">Config Commands</h2>
-        <CodeBlock>{`# Print the config file path
-mx config path
-
-# Show editor, port range, and project count
+        <CodeBlock>{`# Show Muxy config
 mx config show`}</CodeBlock>
       </article>
 

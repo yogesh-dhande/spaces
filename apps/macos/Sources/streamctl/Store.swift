@@ -3,7 +3,7 @@ import SQLite3
 
 public final class SQLiteStore {
     private let db: OpaquePointer
-    private let schemaVersion = 1
+    private let schemaVersion = 2
 
     public init(path: String) throws {
         var handle: OpaquePointer?
@@ -111,8 +111,8 @@ public final class SQLiteStore {
     public func upsert(workspace: WorkspaceRecord) throws {
         try execute(
             sql: """
-                INSERT INTO workspaces(id, project_id, name, dir, dirname, branch, is_default, is_archived, is_running, last_launched_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO workspaces(id, project_id, name, dir, dirname, branch, is_default, is_archived, is_running, last_launched_at, tooltip)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(id) DO UPDATE SET
                   name = excluded.name,
                   dir = excluded.dir,
@@ -121,11 +121,13 @@ public final class SQLiteStore {
                   is_default = excluded.is_default,
                   is_archived = excluded.is_archived,
                   is_running = excluded.is_running,
-                  last_launched_at = excluded.last_launched_at
+                  last_launched_at = excluded.last_launched_at,
+                  tooltip = excluded.tooltip
                 """,
             bindings: [
                 workspace.id, workspace.projectID, workspace.name, workspace.dir, workspace.dirname ?? "", workspace.branch ?? "",
                 workspace.isDefault ? "1" : "0", workspace.isArchived ? "1" : "0", workspace.isRunning ? "1" : "0", workspace.lastLaunchedAt ?? "",
+                workspace.tooltip ?? "",
             ])
     }
 
@@ -133,7 +135,7 @@ public final class SQLiteStore {
         guard
             let row = try queryRow(
                 sql: """
-                    SELECT id, project_id, name, dir, dirname, branch, is_default, is_archived, is_running, last_launched_at
+                    SELECT id, project_id, name, dir, dirname, branch, is_default, is_archived, is_running, last_launched_at, tooltip
                     FROM workspaces WHERE id = ?
                     """, bindings: [id])
         else { return nil }
@@ -144,7 +146,7 @@ public final class SQLiteStore {
         guard
             let row = try queryRow(
                 sql: """
-                    SELECT id, project_id, name, dir, dirname, branch, is_default, is_archived, is_running, last_launched_at
+                    SELECT id, project_id, name, dir, dirname, branch, is_default, is_archived, is_running, last_launched_at, tooltip
                     FROM workspaces WHERE project_id = ? AND name = ?
                     """, bindings: [projectID, name])
         else { return nil }
@@ -155,7 +157,7 @@ public final class SQLiteStore {
         guard
             let row = try queryRow(
                 sql: """
-                    SELECT id, project_id, name, dir, dirname, branch, is_default, is_archived, is_running, last_launched_at
+                    SELECT id, project_id, name, dir, dirname, branch, is_default, is_archived, is_running, last_launched_at, tooltip
                     FROM workspaces WHERE dir = ?
                     """, bindings: [dir])
         else { return nil }
@@ -165,7 +167,7 @@ public final class SQLiteStore {
     public func workspaces(projectID: String, includeArchived: Bool = false) throws -> [WorkspaceRecord] {
         let rows = try queryRows(
             sql: """
-                SELECT id, project_id, name, dir, dirname, branch, is_default, is_archived, is_running, last_launched_at
+                SELECT id, project_id, name, dir, dirname, branch, is_default, is_archived, is_running, last_launched_at, tooltip
                 FROM workspaces
                 WHERE project_id = ? AND (? = '1' OR is_archived = 0)
                 ORDER BY is_default DESC, name
@@ -197,6 +199,10 @@ public final class SQLiteStore {
 
     public func updateWorkspaceArchived(id: String, isArchived: Bool) throws {
         try execute(sql: "UPDATE workspaces SET is_archived = ? WHERE id = ?", bindings: [isArchived ? "1" : "0", id])
+    }
+
+    public func updateWorkspaceTooltip(id: String, tooltip: String?) throws {
+        try execute(sql: "UPDATE workspaces SET tooltip = ? WHERE id = ?", bindings: [tooltip ?? "", id])
     }
 
     public func setWorkspacePorts(workspaceID: String, ports: [Int], names: [String] = []) throws {
@@ -572,6 +578,7 @@ public final class SQLiteStore {
               is_archived INTEGER NOT NULL,
               is_running INTEGER NOT NULL,
               last_launched_at TEXT,
+              tooltip TEXT,
               UNIQUE(project_id, name)
             );
 
@@ -738,10 +745,11 @@ public final class SQLiteStore {
     }
 
     private func decodeWorkspace(row: [String]) -> WorkspaceRecord? {
-        guard row.count >= 10 else { return nil }
+        guard row.count >= 11 else { return nil }
         return WorkspaceRecord(
             id: row[0], projectID: row[1], name: row[2], dir: row[3], dirname: row[4].isEmpty ? nil : row[4], branch: row[5].isEmpty ? nil : row[5],
-            isDefault: row[6] == "1", isArchived: row[7] == "1", isRunning: row[8] == "1", lastLaunchedAt: row[9].isEmpty ? nil : row[9])
+            isDefault: row[6] == "1", isArchived: row[7] == "1", isRunning: row[8] == "1", lastLaunchedAt: row[9].isEmpty ? nil : row[9],
+            tooltip: row[10].isEmpty ? nil : row[10])
     }
 
     private func decodeRunningProcess(row: [String]) -> RunningProcessRecord? {

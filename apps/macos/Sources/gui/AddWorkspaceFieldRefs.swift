@@ -12,5 +12,6 @@ struct AddWorkspaceFieldRefs {
     let nameField: NSTextField
     let directoryNameField: NSTextField?
     let branchField: NSTextField?
+    let tooltipField: NSTextField?
     let autoNameState: AddWorkspaceAutoNameState?
 }

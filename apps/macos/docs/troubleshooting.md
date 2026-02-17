@@ -26,11 +26,6 @@ yabai -m query --windows --window
 
 ## muxy Diagnostics
 
-Show config path:
-```bash
-mx config path
-```
-
 List projects:
 ```bash
 mx project list
