@@ -14,17 +14,13 @@ let package = Package(
         .executable(name: "Muxy", targets: ["Muxy"])
     ],
     dependencies: [
-        .package(url: "https://github.com/jpsim/Yams.git", from: "5.1.3"),
         .package(url: "https://github.com/sparkle-project/Sparkle.git", from: "2.6.0")
     ],
     targets: [
         .target(name: "appctl"),
         .target(
             name: "streamctl",
-            dependencies: [
-                "appctl",
-                .product(name: "Yams", package: "Yams")
-            ],
+            dependencies: ["appctl"],
             linkerSettings: [.linkedLibrary("sqlite3")]
         ),
         .target(name: "gui", dependencies: ["streamctl"]),

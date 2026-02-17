@@ -6,9 +6,8 @@
 Key invariants:
 - SQLite is the single source of truth for all model data and global preferences.
 - Global preferences (`editor`, `port_range`) are stored in the SQLite `settings` table.
-- YAML config (`~/.muxy/config.yaml`) is deprecated; on first launch, any existing `editor`, `port_range`, and `projects:` values are auto-migrated to SQLite and the file is then ignored.
 - Workspace settings are stored in SQLite and seeded from project templates; per-workspace overrides are preserved.
-- SQLite stores runtime state and can be recreated when the schema version changes (workspace settings are re-seeded from templates).
+- SQLite stores runtime state; schema is versioned and rebuilt on version change (currently v1).
 - yabai is the source of truth for window IDs and focus.
 - Stream capture must happen before a stream is shown or focused.
 - Avoid window-level automation outside yabai.
@@ -68,8 +67,6 @@ Global preferences (stored in SQLite `settings` table):
 - Keys: `app_editor` (optional), `app_port_range_start`, `app_port_range_end`.
 - Default port range: 20000–30000.
 - The GUI Settings view and `mx config set` write `editor` and `port_range`.
-- On first launch, any existing `~/.muxy/config.yaml` values are migrated to the DB and the file is then ignored.
-
 Project data (stored in SQLite):
 - Fields: `dir`, `setup_script`, `stop_script`, `ports` (named port definitions), `processes`, `status_checks`, `browser_sessions`.
 - Script timing:
@@ -86,7 +83,7 @@ Workspace settings:
 
 Runtime database:
 - Path: `~/.muxy/muxy.db`.
-- Schema is recreated when `schema_version` changes; workspace settings are re-seeded from project templates as needed.
+- Schema is versioned via a `schema_version` table; when the version changes all tables are dropped and recreated. Currently at v1.
 
 ```mermaid
 erDiagram
@@ -394,7 +391,6 @@ These constants are referenced throughout the codebase to ensure consistent poll
 - `yabai` for window IDs, focus, and display/space metadata
 - iTerm2 for terminal processes
 - Google Chrome for browser sessions
-- Yams for legacy YAML migration (one-time import of old config.yaml on first launch)
 - SQLite3 for runtime persistence and global preferences
 
 ### yabai Dependency Analysis

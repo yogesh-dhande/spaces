@@ -1516,33 +1516,6 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertEqual(projects.map(\.isGitRepo), [false, false])
     }
 
-    func testSyncConfigDropsInvalidProjectAndSeedsDefaultWorkspace() throws {
-        let root = try makeTempDirectory()
-        let validDir = root.appendingPathComponent("valid", isDirectory: true)
-        try FileManager.default.createDirectory(at: validDir, withIntermediateDirectories: true)
-        let missingDir = root.appendingPathComponent("missing", isDirectory: true)
-        // Write a legacy YAML with projects (migration path)
-        let yaml = """
-            port_range:
-              start: 20000
-              end: 30000
-            projects:
-              - dir: \(validDir.path)
-              - dir: \(missingDir.path)
-            """
-        let yamlURL = root.appendingPathComponent("config.yaml")
-        try yaml.write(to: yamlURL, atomically: true, encoding: .utf8)
-
-        let store = try makeTemporaryStore()
-        let orchestrator = MuxyOrchestrator(store: store, legacyYAMLConfigURL: yamlURL)
-        _ = try orchestrator.syncConfig()
-
-        // Only valid dir should be migrated
-        XCTAssertEqual(try store.projects().count, 1)
-        XCTAssertEqual(try store.projects().first?.dir, validDir.path)
-        XCTAssertNotNil(try store.workspace(projectID: validDir.path, name: "default"))
-    }
-
     func testUpdateProjectConfigAndReadBackProjectConfig() throws {
         let (orchestrator, _, project, _, _) = try makeOrchestratorWithWorkspace()
 
@@ -2372,72 +2345,6 @@ final class OrchestratorTests: XCTestCase {
         let env = orchestrator.buildWorkspaceEnv(project: project, workspace: workspace, namedPorts: [])
         let scopedKeys = env.keys.filter { $0.hasPrefix("muxy_") || $0.hasPrefix("MUXY_PROJECT_") && $0.hasSuffix("_WORKSPACE_DIR") }
         XCTAssertTrue(scopedKeys.isEmpty, "Expected no scoped cross-project keys, found: \(scopedKeys)")
-    }
-
-    func testSyncConfigMigratesLegacyProjectsFromYAML() throws {
-        let projectDir = try makeTempDirectory()
-        let root = try makeTempDirectory()
-        let configPath = root.appendingPathComponent("config.yaml").path
-        let yaml = """
-            port_range:
-              start: 20000
-              end: 30000
-            projects:
-              - dir: \(projectDir.path)
-                setup_script: echo setup
-                stop_script: echo stop
-                ports:
-                  - name: API_PORT
-                processes:
-                  - command: npm start
-            """
-        let configURL = URL(fileURLWithPath: configPath)
-        try yaml.write(to: configURL, atomically: true, encoding: .utf8)
-        let store = try makeTemporaryStore()
-        let orchestrator = MuxyOrchestrator(store: store, legacyYAMLConfigURL: configURL)
-
-        _ = try orchestrator.syncConfig()
-
-        // Project should now be in DB
-        let importedProject = try store.project(dir: projectDir.path)
-        XCTAssertNotNil(importedProject)
-        XCTAssertEqual(importedProject?.setupScript, "echo setup")
-        XCTAssertEqual(importedProject?.stopScript, "echo stop")
-        XCTAssertEqual(importedProject?.ports.count, 1)
-        XCTAssertEqual(importedProject?.ports.first?.name, "API_PORT")
-        XCTAssertEqual(importedProject?.processes.count, 1)
-        XCTAssertEqual(importedProject?.processes.first?.command, "npm start")
-
-        // Default workspace should be created
-        let project = try XCTUnwrap(importedProject)
-        let workspaces = try store.workspaces(projectID: project.id)
-        XCTAssertFalse(workspaces.isEmpty)
-    }
-
-    func testSyncConfigMigrationIsIdempotent() throws {
-        let projectDir = try makeTempDirectory()
-        let root = try makeTempDirectory()
-        let configPath = root.appendingPathComponent("config.yaml").path
-        let yaml = """
-            port_range:
-              start: 20000
-              end: 30000
-            projects:
-              - dir: \(projectDir.path)
-            """
-        let configURL = URL(fileURLWithPath: configPath)
-        try yaml.write(to: configURL, atomically: true, encoding: .utf8)
-        let store = try makeTemporaryStore()
-        let orchestrator = MuxyOrchestrator(store: store, legacyYAMLConfigURL: configURL)
-
-        _ = try orchestrator.syncConfig()
-        let countAfterFirst = try store.projects().count
-
-        // Second call should not duplicate
-        _ = try orchestrator.syncConfig()
-        let countAfterSecond = try store.projects().count
-
-        XCTAssertEqual(countAfterFirst, countAfterSecond)
     }
 
     func testAddProjectStoresInDBOnly() throws {

@@ -3,7 +3,7 @@ import SQLite3
 
 public final class SQLiteStore {
     private let db: OpaquePointer
-    private let schemaVersion = 9
+    private let schemaVersion = 1
 
     public init(path: String) throws {
         var handle: OpaquePointer?
@@ -504,41 +504,6 @@ public final class SQLiteStore {
         try setSetting(key: SettingsKey.appPortRangeEnd, value: String(config.portRange.end))
     }
 
-    private func rebuildSchemaIfNeeded() throws {
-        let currentVersion = try schemaVersionValue()
-        if currentVersion == schemaVersion { return }
-        try executeBatch(
-            sql: """
-                DROP TABLE IF EXISTS status_results;
-                DROP TABLE IF EXISTS running_processes;
-                DROP TABLE IF EXISTS workspace_browser_sessions;
-                DROP TABLE IF EXISTS workspace_status_checks;
-                DROP TABLE IF EXISTS workspace_processes;
-                DROP TABLE IF EXISTS workspace_settings;
-                DROP TABLE IF EXISTS workspace_port_definitions;
-                DROP TABLE IF EXISTS workspace_ports;
-                DROP TABLE IF EXISTS windows;
-                DROP TABLE IF EXISTS workspaces;
-                DROP TABLE IF EXISTS project_browser_sessions;
-                DROP TABLE IF EXISTS project_status_checks;
-                DROP TABLE IF EXISTS project_processes;
-                DROP TABLE IF EXISTS project_port_definitions;
-                DROP TABLE IF EXISTS projects;
-                DROP TABLE IF EXISTS settings;
-                DROP TABLE IF EXISTS schema_version;
-                """)
-        try createSchema()
-        try execute(sql: "INSERT INTO schema_version(version) VALUES (?)", bindings: [String(schemaVersion)])
-    }
-
-    private func schemaVersionValue() throws -> Int? {
-        do {
-            let rows = try queryRows(sql: "SELECT version FROM schema_version")
-            guard let raw = rows.first?.first, let value = Int(raw) else { return nil }
-            return value
-        } catch { return nil }
-    }
-
     private func createSchema() throws {
         let sql = """
             CREATE TABLE IF NOT EXISTS projects (
@@ -696,6 +661,41 @@ public final class SQLiteStore {
             );
             """
         try executeBatch(sql: sql)
+    }
+
+    private func rebuildSchemaIfNeeded() throws {
+        let currentVersion = try schemaVersionValue()
+        if currentVersion == schemaVersion { return }
+        try executeBatch(
+            sql: """
+                DROP TABLE IF EXISTS status_results;
+                DROP TABLE IF EXISTS running_processes;
+                DROP TABLE IF EXISTS workspace_browser_sessions;
+                DROP TABLE IF EXISTS workspace_status_checks;
+                DROP TABLE IF EXISTS workspace_processes;
+                DROP TABLE IF EXISTS workspace_settings;
+                DROP TABLE IF EXISTS workspace_port_definitions;
+                DROP TABLE IF EXISTS workspace_ports;
+                DROP TABLE IF EXISTS windows;
+                DROP TABLE IF EXISTS workspaces;
+                DROP TABLE IF EXISTS project_browser_sessions;
+                DROP TABLE IF EXISTS project_status_checks;
+                DROP TABLE IF EXISTS project_processes;
+                DROP TABLE IF EXISTS project_port_definitions;
+                DROP TABLE IF EXISTS projects;
+                DROP TABLE IF EXISTS settings;
+                DROP TABLE IF EXISTS schema_version;
+                """)
+        try createSchema()
+        try execute(sql: "INSERT INTO schema_version(version) VALUES (?)", bindings: [String(schemaVersion)])
+    }
+
+    private func schemaVersionValue() throws -> Int? {
+        do {
+            let rows = try queryRows(sql: "SELECT version FROM schema_version")
+            guard let raw = rows.first?.first, let value = Int(raw) else { return nil }
+            return value
+        } catch { return nil }
     }
 
     private func decodeProjectWithTemplates(row: [String]) throws -> ProjectRecord? {

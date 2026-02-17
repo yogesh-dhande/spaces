@@ -1,8 +1,7 @@
 # Checkpoint
 
 ## Current Status
-- SQLite (`~/.muxy/muxy.db`) is the single source of truth for all model data and global preferences: projects (including templates: processes, status checks, browser sessions, ports, scripts), workspaces, ports, running processes, status results, windows, settings, `editor`, and `port_range`. The DB is rebuilt when the schema version changes; workspace settings are re-seeded from project templates when missing.
-- YAML config (`~/.muxy/config.yaml`) is fully deprecated. On first launch, any existing `editor`, `port_range`, and `projects:` values are automatically migrated to the DB (settings table). The file is then ignored and can be deleted.
+- SQLite (`~/.muxy/muxy.db`) is the single source of truth for all model data and global preferences: projects (including templates: processes, status checks, browser sessions, ports, scripts), workspaces, ports, running processes, status results, windows, settings, `editor`, and `port_range`. Schema is versioned (`schema_version` table); all tables are dropped and recreated when the version changes (currently v1).
 - Projects are stored in SQLite and normalized by real path; a default workspace is ensured per project with reserved ports.
 - Project creation supports either existing directories or git clone; cloned repositories are stored at `/Users/<username>/muxy/projects/<project_name>`.
 - Project removal clears muxy state, removes related managed git worktrees via `git worktree remove --force`, deletes related git workspace directories under `/Users/<username>/muxy/workspaces`, and deletes the project directory only for git repositories under `/Users/<username>/muxy/projects` (managed clones).
@@ -66,14 +65,14 @@
 - Named port env vars are available in setup scripts, stop scripts, process commands, and status check commands.
 - Port allocation now happens before the setup script so env vars are available during setup.
 - `PortAllocator.allocatePorts` accepts `definitions: [PortDefinition]` instead of a fixed count; `buildWorkspaceEnv` uses named port keys.
-- Schema v8: `workspace_browser_sessions` gains extracted-window mapping columns (`extracted_target_url`, `extracted_window_id`, `extracted_window_valid`).
-- Schema v9: `projects` table gains `setup_script` and `stop_script` columns; four new project template tables added (`project_port_definitions`, `project_processes`, `project_status_checks`, `project_browser_sessions`); one-time YAML→SQLite project migration runs on first launch after upgrade.
-- YAML config deprecated: `editor` and `port_range` migrated to DB `settings` table (`app_editor`, `app_port_range_start`, `app_port_range_end`); `ConfigStore` removed; `mx config set --editor`/`--port-range` added.
+- `workspace_browser_sessions` has extracted-window mapping columns (`extracted_target_url`, `extracted_window_id`, `extracted_window_valid`).
+- `projects` table has `setup_script` and `stop_script` columns; four project template tables: `project_port_definitions`, `project_processes`, `project_status_checks`, `project_browser_sessions`.
+- Global preferences (`editor`, `port_range`) stored in DB `settings` table (`app_editor`, `app_port_range_start`, `app_port_range_end`); `mx config set --editor`/`--port-range` available.
 - GUI: `PortEditor` provides an inline editor for port definitions in project detail, add-project form, and workspace settings.
 
 ## Accomplished
 - Replaced stream-based model with project/workspace/process design.
-- Global preferences (`editor`, `port_range`) stored in DB settings table; legacy YAML migrated on first launch.
+- Global preferences (`editor`, `port_range`) stored in DB settings table.
 - New runtime schema for projects, workspaces, ports, processes, windows, status results, and settings.
 - Implemented git worktree create/remove, port allocation, and setup/stop scripts.
 - Added iTerm2 process launch with env injection, PID/log capture, and runtime tracking.

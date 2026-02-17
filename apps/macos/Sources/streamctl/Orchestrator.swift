@@ -1,7 +1,6 @@
 import Darwin
 import Foundation
 @preconcurrency import UserNotifications
-import Yams
 import appctl
 
 public final class MuxyOrchestrator {
@@ -42,7 +41,6 @@ public final class MuxyOrchestrator {
     private let currentDate: () -> Date
     private let projectsRootDirectoryURL: URL?
     private let workspacesRootDirectoryURL: URL?
-    private let legacyYAMLConfigOverride: URL?
     private let workspaceLifecycleLock = NSLock()
     private var workspaceLifecycleInFlight: Set<String> = []
     private let windowNavigationLock = NSLock()
@@ -52,7 +50,6 @@ public final class MuxyOrchestrator {
 
     public init(
         store: SQLiteStore, projectsRootDirectory: URL? = nil, workspacesRootDirectory: URL? = nil,
-        legacyYAMLConfigURL: URL? = nil,
         git: GitClient = .init(), yabai: YabaiAdapter = .init(), iterm: Iterm2Adapter = .init(), chrome: ChromeAdapter = .init(),
         browserWindowScanDebounceInterval: TimeInterval = PollingConstants.browserWindowScanDebounceInterval, currentDate: @escaping () -> Date = Date.init
     ) {
@@ -63,15 +60,12 @@ public final class MuxyOrchestrator {
         self.iterm = iterm
         self.chrome = chrome
         self.workspacesRootDirectoryURL = workspacesRootDirectory
-        self.legacyYAMLConfigOverride = legacyYAMLConfigURL
         self.browserWindowScanDebounceInterval = browserWindowScanDebounceInterval
         self.currentDate = currentDate
         if ProcessInfo.processInfo.environment["DEBUG"] == "1" { fputs("muxy: DEBUG=1 enabled (browser scan/focus profiling active)\n", stderr) }
     }
 
     @discardableResult public func syncConfig() throws -> AppConfig {
-        try migrateConfigFromYAMLIfNeeded()
-        try migrateLegacyProjectsIfNeeded()
         return try store.appConfig()
     }
 
@@ -82,94 +76,6 @@ public final class MuxyOrchestrator {
         config.portRange = range
         try store.setAppConfig(config)
         return config
-    }
-
-    private struct LegacyProjectConfig: Decodable {
-        var dir: String
-        var setupScript: String?
-        var stopScript: String?
-        var ports: [PortDefinition]
-        var processes: [ProcessTemplate]
-        var statusChecks: [StatusCheckDefinition]
-        var browserSessions: [BrowserSession]
-
-        enum CodingKeys: String, CodingKey {
-            case dir
-            case setupScript = "setup_script"
-            case stopScript = "stop_script"
-            case ports
-            case processes
-            case statusChecks = "status_checks"
-            case browserSessions = "browser_sessions"
-        }
-
-        init(from decoder: Decoder) throws {
-            let container = try decoder.container(keyedBy: CodingKeys.self)
-            dir = try container.decode(String.self, forKey: .dir)
-            setupScript = try container.decodeIfPresent(String.self, forKey: .setupScript)
-            stopScript = try container.decodeIfPresent(String.self, forKey: .stopScript)
-            ports = try container.decodeIfPresent([PortDefinition].self, forKey: .ports) ?? []
-            processes = try container.decodeIfPresent([ProcessTemplate].self, forKey: .processes) ?? []
-            statusChecks = try container.decodeIfPresent([StatusCheckDefinition].self, forKey: .statusChecks) ?? []
-            browserSessions = try container.decodeIfPresent([BrowserSession].self, forKey: .browserSessions) ?? []
-        }
-    }
-
-    private struct LegacyAppConfig: Decodable {
-        var editor: EditorPreference?
-        var portRange: PortRange?
-        var projects: [LegacyProjectConfig]?
-        enum CodingKeys: String, CodingKey {
-            case editor
-            case portRange = "port_range"
-            case projects
-        }
-    }
-
-    private func resolvedYAMLConfigURL() -> URL {
-        legacyYAMLConfigOverride ?? FileManager.default.homeDirectoryForCurrentUser.appending(path: ".muxy/config.yaml")
-    }
-
-    private func migrateConfigFromYAMLIfNeeded() throws {
-        guard try store.setting(key: SettingsKey.appPortRangeStart) == nil else { return }
-        let url = resolvedYAMLConfigURL()
-        var config = AppConfig(editor: nil, portRange: PortRange(start: 20000, end: 30000))
-        if FileManager.default.fileExists(atPath: url.path),
-           let text = try? String(contentsOf: url),
-           let legacy = try? YAMLDecoder().decode(LegacyAppConfig.self, from: text) {
-            let range = legacy.portRange ?? PortRange(start: 20000, end: 30000)
-            let validRange = (range.start > 0 && range.end > range.start) ? range : PortRange(start: 20000, end: 30000)
-            config = AppConfig(editor: legacy.editor, portRange: validRange)
-        }
-        try store.setAppConfig(config)
-    }
-
-    private func migrateLegacyProjectsIfNeeded() throws {
-        let url = resolvedYAMLConfigURL()
-        guard FileManager.default.fileExists(atPath: url.path) else { return }
-        let text = try String(contentsOf: url)
-        guard let legacy = try? YAMLDecoder().decode(LegacyAppConfig.self, from: text),
-              let legacyProjects = legacy.projects, !legacyProjects.isEmpty else { return }
-        for project in legacyProjects {
-            let normalizedDir = normalizePath(project.dir)
-            var isDir: ObjCBool = false
-            guard FileManager.default.fileExists(atPath: normalizedDir, isDirectory: &isDir), isDir.boolValue else {
-                fputs("muxy: skipped legacy project (dir not found): \(project.dir)\n", stderr)
-                continue
-            }
-            if (try? store.project(dir: normalizedDir)) != nil { continue }
-            let isGit = git.isRepo(path: normalizedDir)
-            let branch = isGit ? git.defaultBranch(path: normalizedDir) : nil
-            let record = ProjectRecord(
-                id: normalizedDir, name: URL(fileURLWithPath: normalizedDir).lastPathComponent,
-                dir: normalizedDir, isGitRepo: isGit, defaultBranch: branch,
-                setupScript: project.setupScript, stopScript: project.stopScript,
-                ports: project.ports, processes: project.processes,
-                statusChecks: project.statusChecks, browserSessions: project.browserSessions)
-            try store.upsert(project: record)
-            try ensureDefaultWorkspace(for: record)
-            try ensureWorkspaceSettings(for: record)
-        }
     }
 
     public func listProjects() throws -> [ProjectSummary] {
