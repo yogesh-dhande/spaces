@@ -35,7 +35,7 @@
 - Whenever `scripts/coverage.sh` is run, always report the overall coverage percentage in the response.
 - When running `git commit` via Codex, allow at least a 10-minute command timeout so pre-commit lint/coverage checks are not interrupted; this is a safety ceiling, not an expected runtime.
 - Always consider adding or expanding tests to increase coverage before finalizing changes.
-- Whenever changes are made to the macOS app, keep `apps/macos/spec.md`, `apps/macos/docs/architecture.md`, `apps/macos/docs/checkpoint.md`, and `apps/macos/README.md` up to date in the same change.
+- Whenever changes are made to the macOS app, keep `apps/macos/spec.md`, `apps/macos/docs/architecture.md`, `apps/macos/docs/checkpoint.md`, `apps/macos/README.md`, and the nextjs project docs (`apps/web/app/docs/content.ts`) up to date in the same change.
 - Keep changes local-first and deterministic.
 - When adding behavior, update CLI help and architecture docs in the same change.
 
