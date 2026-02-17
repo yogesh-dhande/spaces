@@ -14,6 +14,7 @@ extension AppKitController {
         case guiOpenTerminalShortcut
         case guiOpenFinderShortcut
         case guiOpenSettingsShortcut
+        case guiTooltipShortcut
 
         var label: String {
             switch self {
@@ -28,12 +29,13 @@ extension AppKitController {
             case .guiOpenTerminalShortcut: return "Open terminal"
             case .guiOpenFinderShortcut: return "Open Finder"
             case .guiOpenSettingsShortcut: return "Open settings"
+            case .guiTooltipShortcut: return "Toggle tooltip"
             }
         }
 
         static let settingsPanelCases: [ShortcutSetting] = [
             .guiHotkey, .guiNextShortcut, .guiPreviousShortcut, .guiShowShortcut, .guiOpenEditorShortcut, .guiOpenTerminalShortcut,
-            .guiOpenFinderShortcut,
+            .guiOpenFinderShortcut, .guiTooltipShortcut,
         ]
 
         var settingKey: String {
@@ -49,6 +51,7 @@ extension AppKitController {
             case .guiOpenTerminalShortcut: return SettingsKey.guiOpenTerminalShortcut
             case .guiOpenFinderShortcut: return SettingsKey.guiOpenFinderShortcut
             case .guiOpenSettingsShortcut: return SettingsKey.guiOpenSettingsShortcut
+            case .guiTooltipShortcut: return SettingsKey.guiTooltipShortcut
             }
         }
 
@@ -65,6 +68,7 @@ extension AppKitController {
             case .guiOpenTerminalShortcut: return SettingsKey.defaultGUIOpenTerminalShortcut
             case .guiOpenFinderShortcut: return SettingsKey.defaultGUIOpenFinderShortcut
             case .guiOpenSettingsShortcut: return SettingsKey.defaultGUIOpenSettingsShortcut
+            case .guiTooltipShortcut: return SettingsKey.defaultGUITooltipShortcut
             }
         }
 
@@ -81,6 +85,7 @@ extension AppKitController {
             case SettingsKey.guiOpenTerminalShortcut: self = .guiOpenTerminalShortcut
             case SettingsKey.guiOpenFinderShortcut: self = .guiOpenFinderShortcut
             case SettingsKey.guiOpenSettingsShortcut: self = .guiOpenSettingsShortcut
+            case SettingsKey.guiTooltipShortcut: self = .guiTooltipShortcut
             default: return nil
             }
         }

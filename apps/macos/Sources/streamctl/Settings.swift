@@ -26,4 +26,6 @@ public enum SettingsKey {
     public static let defaultGUIOpenFinderShortcut = "cmd+shift+f"
     public static let guiOpenSettingsShortcut = "gui_open_settings_shortcut"
     public static let defaultGUIOpenSettingsShortcut = "cmd+,"
+    public static let guiTooltipShortcut = "gui_tooltip_shortcut"
+    public static let defaultGUITooltipShortcut = "cmd+shift+i"
 }

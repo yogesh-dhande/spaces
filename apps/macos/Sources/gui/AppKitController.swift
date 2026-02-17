@@ -34,6 +34,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     private var openEditorShortcutSpec: HotkeySpec?
     private var openTerminalShortcutSpec: HotkeySpec?
     private var openFinderShortcutSpec: HotkeySpec?
+    private var tooltipShortcutSpec: HotkeySpec?
     private var shortcutButtonsBySetting: [String: NSButton] = [:]
     private var activeShortcutCaptureSetting: ShortcutSetting?
     private var periodicWorkspaceRefreshTask: Task<Void, Never>?
@@ -2458,7 +2459,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         registerHotkey(spec: toggle, id: GlobalHotkey.toggle.rawValue, signature: signature, target: target)
         if let next { registerHotkey(spec: next, id: GlobalHotkey.next.rawValue, signature: signature, target: target) }
         if let previous { registerHotkey(spec: previous, id: GlobalHotkey.previous.rawValue, signature: signature, target: target) }
-        if let tooltipSpec = try? HotkeySpec.parse("cmd+shift+i") {
+        if let tooltipSpec = tooltipShortcutSpec {
             registerHotkey(spec: tooltipSpec, id: GlobalHotkey.tooltip.rawValue, signature: signature, target: target)
         }
 
@@ -2674,6 +2675,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         openEditorShortcutSpec = loadShortcutSpec(setting: .guiOpenEditorShortcut)
         openTerminalShortcutSpec = loadShortcutSpec(setting: .guiOpenTerminalShortcut)
         openFinderShortcutSpec = loadShortcutSpec(setting: .guiOpenFinderShortcut)
+        tooltipShortcutSpec = loadShortcutSpec(setting: .guiTooltipShortcut)
     }
 
     private func loadShortcutSpec(setting: ShortcutSetting) -> HotkeySpec? {
@@ -2694,6 +2696,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         case .guiOpenTerminalShortcut: return try orchestrator.guiOpenTerminalShortcut()
         case .guiOpenFinderShortcut: return try orchestrator.guiOpenFinderShortcut()
         case .guiOpenSettingsShortcut: return try orchestrator.guiOpenSettingsShortcut()
+        case .guiTooltipShortcut: return try orchestrator.guiTooltipShortcut()
         }
     }
 
@@ -2710,6 +2713,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         case .guiOpenTerminalShortcut: try orchestrator.setGUIOpenTerminalShortcut(value)
         case .guiOpenFinderShortcut: try orchestrator.setGUIOpenFinderShortcut(value)
         case .guiOpenSettingsShortcut: try orchestrator.setGUIOpenSettingsShortcut(value)
+        case .guiTooltipShortcut: try orchestrator.setGUITooltipShortcut(value)
         }
     }
 
@@ -2726,6 +2730,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         case .guiOpenTerminalShortcut: return openTerminalShortcutSpec
         case .guiOpenFinderShortcut: return openFinderShortcutSpec
         case .guiOpenSettingsShortcut: return nil
+        case .guiTooltipShortcut: return tooltipShortcutSpec
         }
     }
 

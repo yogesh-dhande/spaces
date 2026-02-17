@@ -1306,6 +1306,12 @@ public final class MuxyOrchestrator {
 
     public func setGUIOpenSettingsShortcut(_ raw: String?) throws { try store.setSetting(key: SettingsKey.guiOpenSettingsShortcut, value: raw) }
 
+    public func guiTooltipShortcut() throws -> String {
+        try store.setting(key: SettingsKey.guiTooltipShortcut) ?? SettingsKey.defaultGUITooltipShortcut
+    }
+
+    public func setGUITooltipShortcut(_ raw: String?) throws { try store.setSetting(key: SettingsKey.guiTooltipShortcut, value: raw) }
+
     public func activeWorkspaceID() throws -> String? { try store.setting(key: "active_workspace_id") }
 
     public func setActiveWorkspace(id: String?) throws { try store.setSetting(key: "active_workspace_id", value: id) }
