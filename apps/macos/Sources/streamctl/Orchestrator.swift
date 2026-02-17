@@ -34,7 +34,6 @@ public final class MuxyOrchestrator {
     }
 
     private let store: SQLiteStore
-    private let configStore: ConfigStore
     private let git: GitClient
     private let yabai: YabaiAdapter
     private let iterm: Iterm2Adapter
@@ -43,6 +42,7 @@ public final class MuxyOrchestrator {
     private let currentDate: () -> Date
     private let projectsRootDirectoryURL: URL?
     private let workspacesRootDirectoryURL: URL?
+    private let legacyYAMLConfigOverride: URL?
     private let workspaceLifecycleLock = NSLock()
     private var workspaceLifecycleInFlight: Set<String> = []
     private let windowNavigationLock = NSLock()
@@ -51,26 +51,36 @@ public final class MuxyOrchestrator {
     private var browserWindowScanCacheByWorkspace: [String: BrowserWindowScanCacheEntry] = [:]
 
     public init(
-        store: SQLiteStore, configStore: ConfigStore, projectsRootDirectory: URL? = nil, workspacesRootDirectory: URL? = nil,
+        store: SQLiteStore, projectsRootDirectory: URL? = nil, workspacesRootDirectory: URL? = nil,
+        legacyYAMLConfigURL: URL? = nil,
         git: GitClient = .init(), yabai: YabaiAdapter = .init(), iterm: Iterm2Adapter = .init(), chrome: ChromeAdapter = .init(),
         browserWindowScanDebounceInterval: TimeInterval = PollingConstants.browserWindowScanDebounceInterval, currentDate: @escaping () -> Date = Date.init
     ) {
         self.store = store
-        self.configStore = configStore
         projectsRootDirectoryURL = projectsRootDirectory
         self.git = git
         self.yabai = yabai
         self.iterm = iterm
         self.chrome = chrome
         self.workspacesRootDirectoryURL = workspacesRootDirectory
+        self.legacyYAMLConfigOverride = legacyYAMLConfigURL
         self.browserWindowScanDebounceInterval = browserWindowScanDebounceInterval
         self.currentDate = currentDate
         if ProcessInfo.processInfo.environment["DEBUG"] == "1" { fputs("muxy: DEBUG=1 enabled (browser scan/focus profiling active)\n", stderr) }
     }
 
     @discardableResult public func syncConfig() throws -> AppConfig {
-        let config = try configStore.load()
+        try migrateConfigFromYAMLIfNeeded()
         try migrateLegacyProjectsIfNeeded()
+        return try store.appConfig()
+    }
+
+    public func appConfig() throws -> AppConfig { try store.appConfig() }
+
+    @discardableResult public func updatePortRange(_ range: PortRange) throws -> AppConfig {
+        var config = try store.appConfig()
+        config.portRange = range
+        try store.setAppConfig(config)
         return config
     }
 
@@ -106,17 +116,40 @@ public final class MuxyOrchestrator {
     }
 
     private struct LegacyAppConfig: Decodable {
+        var editor: EditorPreference?
+        var portRange: PortRange?
         var projects: [LegacyProjectConfig]?
-        enum CodingKeys: String, CodingKey { case projects }
+        enum CodingKeys: String, CodingKey {
+            case editor
+            case portRange = "port_range"
+            case projects
+        }
+    }
+
+    private func resolvedYAMLConfigURL() -> URL {
+        legacyYAMLConfigOverride ?? FileManager.default.homeDirectoryForCurrentUser.appending(path: ".muxy/config.yaml")
+    }
+
+    private func migrateConfigFromYAMLIfNeeded() throws {
+        guard try store.setting(key: SettingsKey.appPortRangeStart) == nil else { return }
+        let url = resolvedYAMLConfigURL()
+        var config = AppConfig(editor: nil, portRange: PortRange(start: 20000, end: 30000))
+        if FileManager.default.fileExists(atPath: url.path),
+           let text = try? String(contentsOf: url),
+           let legacy = try? YAMLDecoder().decode(LegacyAppConfig.self, from: text) {
+            let range = legacy.portRange ?? PortRange(start: 20000, end: 30000)
+            let validRange = (range.start > 0 && range.end > range.start) ? range : PortRange(start: 20000, end: 30000)
+            config = AppConfig(editor: legacy.editor, portRange: validRange)
+        }
+        try store.setAppConfig(config)
     }
 
     private func migrateLegacyProjectsIfNeeded() throws {
-        let url = URL(fileURLWithPath: configStore.path)
+        let url = resolvedYAMLConfigURL()
         guard FileManager.default.fileExists(atPath: url.path) else { return }
         let text = try String(contentsOf: url)
         guard let legacy = try? YAMLDecoder().decode(LegacyAppConfig.self, from: text),
               let legacyProjects = legacy.projects, !legacyProjects.isEmpty else { return }
-        var didMigrate = false
         for project in legacyProjects {
             let normalizedDir = normalizePath(project.dir)
             var isDir: ObjCBool = false
@@ -136,11 +169,6 @@ public final class MuxyOrchestrator {
             try store.upsert(project: record)
             try ensureDefaultWorkspace(for: record)
             try ensureWorkspaceSettings(for: record)
-            didMigrate = true
-        }
-        if didMigrate {
-            let config = try configStore.load()
-            try configStore.save(config)
         }
     }
 
@@ -155,9 +183,9 @@ public final class MuxyOrchestrator {
     }
 
     @discardableResult public func updateEditorPreference(_ editor: EditorPreference?) throws -> AppConfig {
-        var config = try configStore.load()
+        var config = try store.appConfig()
         config.editor = editor
-        try configStore.save(config)
+        try store.setAppConfig(config)
         return config
     }
 
@@ -331,7 +359,7 @@ public final class MuxyOrchestrator {
                 isDefault: false, isArchived: false, isRunning: false, lastLaunchedAt: nil)
             try store.upsert(workspace: revived)
             try seedWorkspaceSettings(project: project, workspace: revived)
-            let config = try configStore.load()
+            let config = try store.appConfig()
             let portDefinitions = try store.workspacePortDefinitions(workspaceID: revived.id)
             _ = try PortAllocator(store: store).allocatePorts(workspaceID: revived.id, definitions: portDefinitions, range: config.portRange)
             if let script = project.setupScript, !script.isEmpty {
@@ -364,7 +392,7 @@ public final class MuxyOrchestrator {
         try store.upsert(workspace: workspace)
         try seedWorkspaceSettings(project: project, workspace: workspace)
 
-        let appConfig = try configStore.load()
+        let appConfig = try store.appConfig()
         let portDefinitions = try store.workspacePortDefinitions(workspaceID: workspace.id)
         _ = try PortAllocator(store: store).allocatePorts(workspaceID: workspace.id, definitions: portDefinitions, range: appConfig.portRange)
 
@@ -407,7 +435,7 @@ public final class MuxyOrchestrator {
         let portDefinitions = try store.workspacePortDefinitions(workspaceID: workspace.id)
         let ports = try store.workspacePorts(workspaceID: workspace.id)
         if ports.count != portDefinitions.count {
-            let portRange = try configStore.load().portRange
+            let portRange = try store.appConfig().portRange
             _ = try PortAllocator(store: store).allocatePorts(workspaceID: workspace.id, definitions: portDefinitions, range: portRange)
         } else {
             try PortAllocator(store: store).reserveExistingPorts(workspaceID: workspace.id)
@@ -437,7 +465,7 @@ public final class MuxyOrchestrator {
             windowSnapshot = try yabai.listWindows()
         }
 
-        if let editor = try configStore.load().editor {
+        if let editor = try store.appConfig().editor {
             let editorApps = editorAppNames(editor)
             try EditorLauncher.open(editor: editor, directory: workspace.dir)
             var editorWindows = try captureNewWindows(
@@ -723,7 +751,7 @@ public final class MuxyOrchestrator {
     public func openWorkspaceEditor(workspaceID: String) throws {
         let (_, workspace) = try resolveWorkspace(id: workspaceID)
         guard !workspace.isArchived else { throw MuxyError.invalidArgument(message: "Workspace is archived.") }
-        guard let editor = try configStore.load().editor, editor != .none else {
+        guard let editor = try store.appConfig().editor, editor != .none else {
             throw MuxyError.configError(message: "Preferred editor is not configured.")
         }
         let snapshot = try yabai.listWindows()
@@ -1281,7 +1309,7 @@ public final class MuxyOrchestrator {
             isDefault: true, isArchived: false, isRunning: false, lastLaunchedAt: nil)
         try store.upsert(workspace: workspace)
         try seedWorkspaceSettings(project: project, workspace: workspace)
-        let appConfig = try configStore.load()
+        let appConfig = try store.appConfig()
         let portDefinitions = try store.workspacePortDefinitions(workspaceID: workspace.id)
         _ = try PortAllocator(store: store).allocatePorts(workspaceID: workspace.id, definitions: portDefinitions, range: appConfig.portRange)
     }

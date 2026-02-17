@@ -1,8 +1,8 @@
 # Checkpoint
 
 ## Current Status
-- SQLite (`~/.muxy/muxy.db`) is the single source of truth for all model data: projects (including templates: processes, status checks, browser sessions, ports, scripts), workspaces, ports, running processes, status results, windows, and settings. The DB is rebuilt when the schema version changes; workspace settings are re-seeded from project templates when missing.
-- YAML config at `~/.muxy/config.yaml` holds only global preferences: `editor` and `port_range`. Old YAML files with a `projects:` key are automatically migrated to SQLite on first launch (v9 migration) and the key is then removed from YAML.
+- SQLite (`~/.muxy/muxy.db`) is the single source of truth for all model data and global preferences: projects (including templates: processes, status checks, browser sessions, ports, scripts), workspaces, ports, running processes, status results, windows, settings, `editor`, and `port_range`. The DB is rebuilt when the schema version changes; workspace settings are re-seeded from project templates when missing.
+- YAML config (`~/.muxy/config.yaml`) is fully deprecated. On first launch, any existing `editor`, `port_range`, and `projects:` values are automatically migrated to the DB (settings table). The file is then ignored and can be deleted.
 - Projects are stored in SQLite and normalized by real path; a default workspace is ensured per project with reserved ports.
 - Project creation supports either existing directories or git clone; cloned repositories are stored at `/Users/<username>/muxy/projects/<project_name>`.
 - Project removal clears muxy state, removes related managed git worktrees via `git worktree remove --force`, deletes related git workspace directories under `/Users/<username>/muxy/workspaces`, and deletes the project directory only for git repositories under `/Users/<username>/muxy/projects` (managed clones).
@@ -52,14 +52,14 @@
 - Left-pane workspace rows now use compact cards with workspace status + name.
 - Folder and branch metadata rows are shown with icons only when the value differs from workspace name.
 - Git workspace rows show relative last-modified time (from latest tracked-file mtime) plus tracked modified-file count.
-- Settings view in the GUI lets users pick a preferred editor from installed VS Code, Cursor, or Windsurf; the choice is stored in the YAML config.
+- Settings view in the GUI lets users pick a preferred editor from installed VS Code, Cursor, or Windsurf; the choice is stored in the DB (`app_editor` setting).
 - Settings view in the GUI also allows overriding default shortcuts for global toggle, workspace navigation/activation, and open editor/terminal/Finder; these values are stored in the runtime DB.
 - Window IDs can become stale across app/desktop changes; stale rows are pruned during reconciliation paths.
 - GUI now runs a periodic detached background refresh loop for all non-archived workspace window records using `PollingConstants.workspaceWindowRefreshInterval`.
 - New orchestrator APIs `refreshWorkspaceWindows` and `refreshAllWorkspaceWindows` reconcile stale window rows via yabai and clear `is_running` when no runtime indicators remain. `refreshAllWorkspaceWindows` returns a `RefreshResult` with DB mutation flag and per-workspace tracked window counts (including live browser scan); the GUI compares both against the previous snapshot and skips UI reloads when nothing changed.
 - Bringing muxy to front with the global toggle hotkey refreshes the selected workspace detail view so the displayed window list reflects the most recent Chrome tab scan (up to 10 seconds old).
 - The local key monitor defers to focused text inputs so standard edit shortcuts like `cmd+v` work in forms.
-- CLI supports config path/show, project list/add/update/remove (including `project add --git-url ...`), workspace list/create/launch/stop/archive/activate, and settings get/set/reset for GUI shortcuts.
+- CLI supports `config show`, `config set --editor`, `config set --port-range`, project list/add/update/remove (including `project add --git-url ...`), workspace list/create/launch/stop/archive/activate, and settings get/set/reset for GUI shortcuts.
 - Workspace run view includes Open Editor/Terminal/Finder actions; editor/terminal windows opened this way are captured and included in window cycling.
 - Projects can define named ports (e.g. `FRONTEND_PORT`, `API_PORT`) instead of anonymous `PORT0`-`PORT9`; port definitions are configured at the project level in SQLite and inherited/overridable at the workspace level.
 - Named ports are OS-reserved via sockets (`PortReserver` singleton) so no other process can claim them between allocation and use.
@@ -68,11 +68,12 @@
 - `PortAllocator.allocatePorts` accepts `definitions: [PortDefinition]` instead of a fixed count; `buildWorkspaceEnv` uses named port keys.
 - Schema v8: `workspace_browser_sessions` gains extracted-window mapping columns (`extracted_target_url`, `extracted_window_id`, `extracted_window_valid`).
 - Schema v9: `projects` table gains `setup_script` and `stop_script` columns; four new project template tables added (`project_port_definitions`, `project_processes`, `project_status_checks`, `project_browser_sessions`); one-time YAML→SQLite project migration runs on first launch after upgrade.
+- YAML config deprecated: `editor` and `port_range` migrated to DB `settings` table (`app_editor`, `app_port_range_start`, `app_port_range_end`); `ConfigStore` removed; `mx config set --editor`/`--port-range` added.
 - GUI: `PortEditor` provides an inline editor for port definitions in project detail, add-project form, and workspace settings.
 
 ## Accomplished
 - Replaced stream-based model with project/workspace/process design.
-- Added YAML config loader/saver with default config generation and port-range validation.
+- Global preferences (`editor`, `port_range`) stored in DB settings table; legacy YAML migrated on first launch.
 - New runtime schema for projects, workspaces, ports, processes, windows, status results, and settings.
 - Implemented git worktree create/remove, port allocation, and setup/stop scripts.
 - Added iTerm2 process launch with env injection, PID/log capture, and runtime tracking.

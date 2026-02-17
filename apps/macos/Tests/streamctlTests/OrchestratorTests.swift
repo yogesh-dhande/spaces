@@ -7,20 +7,15 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertGreaterThan(PollingConstants.workspaceWindowRefreshInterval, 0)
     }
 
-    func testUpdateEditorPreferencePersistsToConfig() throws {
-        let dir = try makeTempDirectory()
-        let path = dir.appendingPathComponent("config.yaml").path
-        let configStore = ConfigStore(path: path)
+    func testUpdateEditorPreferencePersistsToDB() throws {
         let store = try makeTemporaryStore()
-        let orchestrator = MuxyOrchestrator(store: store, configStore: configStore)
+        let orchestrator = MuxyOrchestrator(store: store)
 
         _ = try orchestrator.updateEditorPreference(.cursor)
-        let reloaded = try configStore.load()
-        XCTAssertEqual(reloaded.editor, .cursor)
+        XCTAssertEqual(try store.appConfig().editor, .cursor)
 
         _ = try orchestrator.updateEditorPreference(nil)
-        let cleared = try configStore.load()
-        XCTAssertNil(cleared.editor)
+        XCTAssertNil(try store.appConfig().editor)
     }
 
     func testNextWindowOrderIndexUsesRoleOffsetAndMax() {
@@ -47,9 +42,8 @@ final class OrchestratorTests: XCTestCase {
         let fixture = try makeTempGitRepo(name: "sample-repo")
         let root = try makeTempDirectory()
         let projectsRoot = root.appendingPathComponent("projects", isDirectory: true)
-        let configStore = ConfigStore(path: root.appendingPathComponent("config.yaml").path)
         let store = try makeTemporaryStore()
-        let orchestrator = MuxyOrchestrator(store: store, configStore: configStore, projectsRootDirectory: projectsRoot)
+        let orchestrator = MuxyOrchestrator(store: store, projectsRootDirectory: projectsRoot)
 
         let project = try orchestrator.addProject(gitURL: fixture.path)
 
@@ -63,9 +57,8 @@ final class OrchestratorTests: XCTestCase {
         let fixture = try makeTempGitRepo(name: "source.git")
         let root = try makeTempDirectory()
         let projectsRoot = root.appendingPathComponent("projects", isDirectory: true)
-        let configStore = ConfigStore(path: root.appendingPathComponent("config.yaml").path)
         let store = try makeTemporaryStore()
-        let orchestrator = MuxyOrchestrator(store: store, configStore: configStore, projectsRootDirectory: projectsRoot)
+        let orchestrator = MuxyOrchestrator(store: store, projectsRootDirectory: projectsRoot)
 
         let project = try orchestrator.addProject(gitURL: fixture.path)
 
@@ -79,9 +72,8 @@ final class OrchestratorTests: XCTestCase {
         let fixture = try makeTempGitRepo(name: "managed")
         let root = try makeTempDirectory()
         let projectsRoot = root.appendingPathComponent("projects", isDirectory: true)
-        let configStore = ConfigStore(path: root.appendingPathComponent("config.yaml").path)
         let store = try makeTemporaryStore()
-        let orchestrator = MuxyOrchestrator(store: store, configStore: configStore, projectsRootDirectory: projectsRoot)
+        let orchestrator = MuxyOrchestrator(store: store, projectsRootDirectory: projectsRoot)
 
         let project = try orchestrator.addProject(gitURL: fixture.path)
         XCTAssertTrue(FileManager.default.fileExists(atPath: project.dir))
@@ -98,10 +90,9 @@ final class OrchestratorTests: XCTestCase {
         let root = try makeTempDirectory()
         let projectsRoot = root.appendingPathComponent("projects", isDirectory: true)
         let workspacesRoot = root.appendingPathComponent("workspaces", isDirectory: true)
-        let configStore = ConfigStore(path: root.appendingPathComponent("config.yaml").path)
         let store = try makeTemporaryStore()
         let orchestrator = MuxyOrchestrator(
-            store: store, configStore: configStore, projectsRootDirectory: projectsRoot, workspacesRootDirectory: workspacesRoot)
+            store: store, projectsRootDirectory: projectsRoot, workspacesRootDirectory: workspacesRoot)
 
         let project = try orchestrator.addProject(gitURL: fixture.path)
         let projectWorkspaceRoot = workspacesRoot.appendingPathComponent(project.name, isDirectory: true)
@@ -126,10 +117,9 @@ final class OrchestratorTests: XCTestCase {
         let root = try makeTempDirectory()
         let projectsRoot = root.appendingPathComponent("projects", isDirectory: true)
         let workspacesRoot = root.appendingPathComponent("workspaces", isDirectory: true)
-        let configStore = ConfigStore(path: root.appendingPathComponent("config.yaml").path)
         let store = try makeTemporaryStore()
         let orchestrator = MuxyOrchestrator(
-            store: store, configStore: configStore, projectsRootDirectory: projectsRoot, workspacesRootDirectory: workspacesRoot)
+            store: store, projectsRootDirectory: projectsRoot, workspacesRootDirectory: workspacesRoot)
 
         let project = try orchestrator.addProject(dir: projectDir.path)
         let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature", branch: "feature")
@@ -156,10 +146,8 @@ final class OrchestratorTests: XCTestCase {
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
         let marker = projectDir.appendingPathComponent("marker.txt")
         try "marker".write(to: marker, atomically: true, encoding: .utf8)
-
-        let configStore = ConfigStore(path: root.appendingPathComponent("config.yaml").path)
         let store = try makeTemporaryStore()
-        let orchestrator = MuxyOrchestrator(store: store, configStore: configStore)
+        let orchestrator = MuxyOrchestrator(store: store)
 
         let project = try orchestrator.addProject(dir: projectDir.path)
         let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
@@ -176,10 +164,8 @@ final class OrchestratorTests: XCTestCase {
         let root = try makeTempDirectory()
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
-
-        let configStore = ConfigStore(path: root.appendingPathComponent("config.yaml").path)
         let store = try makeTemporaryStore()
-        let orchestrator = MuxyOrchestrator(store: store, configStore: configStore)
+        let orchestrator = MuxyOrchestrator(store: store)
 
         let project = try orchestrator.addProject(dir: projectDir.path)
         let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
@@ -193,10 +179,8 @@ final class OrchestratorTests: XCTestCase {
         let root = try makeTempDirectory()
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
-
-        let configStore = ConfigStore(path: root.appendingPathComponent("config.yaml").path)
         let store = try makeTemporaryStore()
-        let orchestrator = MuxyOrchestrator(store: store, configStore: configStore)
+        let orchestrator = MuxyOrchestrator(store: store)
 
         let project = try orchestrator.addProject(dir: projectDir.path)
         XCTAssertThrowsError(try orchestrator.createWorkspace(projectID: project.id, name: "feature", directoryName: "feature_dir")) { error in
@@ -208,10 +192,8 @@ final class OrchestratorTests: XCTestCase {
         let root = try makeTempDirectory()
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
-
-        let configStore = ConfigStore(path: root.appendingPathComponent("config.yaml").path)
         let store = try makeTemporaryStore()
-        let orchestrator = MuxyOrchestrator(store: store, configStore: configStore)
+        let orchestrator = MuxyOrchestrator(store: store)
 
         let project = try orchestrator.addProject(dir: projectDir.path)
         try orchestrator.updateProjectConfig(projectID: project.id) { config in config.stopScript = "echo project-stop" }
@@ -231,9 +213,8 @@ final class OrchestratorTests: XCTestCase {
         let repo = try makeTempGitRepo(name: "workspace-name-default")
         let root = try makeTempDirectory()
         let workspacesRoot = root.appendingPathComponent("workspaces", isDirectory: true)
-        let configStore = ConfigStore(path: root.appendingPathComponent("config.yaml").path)
         let store = try makeTemporaryStore()
-        let orchestrator = MuxyOrchestrator(store: store, configStore: configStore, workspacesRootDirectory: workspacesRoot)
+        let orchestrator = MuxyOrchestrator(store: store, workspacesRootDirectory: workspacesRoot)
 
         let project = try orchestrator.addProject(dir: repo.path)
         let suggested = try orchestrator.suggestedWorkspaceName(projectID: project.id)
@@ -251,9 +232,8 @@ final class OrchestratorTests: XCTestCase {
         let repo = try makeTempGitRepo(name: "workspace-name-custom")
         let root = try makeTempDirectory()
         let workspacesRoot = root.appendingPathComponent("workspaces", isDirectory: true)
-        let configStore = ConfigStore(path: root.appendingPathComponent("config.yaml").path)
         let store = try makeTemporaryStore()
-        let orchestrator = MuxyOrchestrator(store: store, configStore: configStore, workspacesRootDirectory: workspacesRoot)
+        let orchestrator = MuxyOrchestrator(store: store, workspacesRootDirectory: workspacesRoot)
 
         let project = try orchestrator.addProject(dir: repo.path)
         let suggested = try orchestrator.suggestedWorkspaceName(projectID: project.id)
@@ -268,9 +248,8 @@ final class OrchestratorTests: XCTestCase {
         let repo = try makeTempGitRepo(name: "workspace-name-override")
         let root = try makeTempDirectory()
         let workspacesRoot = root.appendingPathComponent("workspaces", isDirectory: true)
-        let configStore = ConfigStore(path: root.appendingPathComponent("config.yaml").path)
         let store = try makeTemporaryStore()
-        let orchestrator = MuxyOrchestrator(store: store, configStore: configStore, workspacesRootDirectory: workspacesRoot)
+        let orchestrator = MuxyOrchestrator(store: store, workspacesRootDirectory: workspacesRoot)
 
         let project = try orchestrator.addProject(dir: repo.path)
         let workspace = try orchestrator.createWorkspace(
@@ -284,9 +263,8 @@ final class OrchestratorTests: XCTestCase {
         let repo = try makeTempGitRepo(name: "workspace-name-invalid-dirname")
         let root = try makeTempDirectory()
         let workspacesRoot = root.appendingPathComponent("workspaces", isDirectory: true)
-        let configStore = ConfigStore(path: root.appendingPathComponent("config.yaml").path)
         let store = try makeTemporaryStore()
-        let orchestrator = MuxyOrchestrator(store: store, configStore: configStore, workspacesRootDirectory: workspacesRoot)
+        let orchestrator = MuxyOrchestrator(store: store, workspacesRootDirectory: workspacesRoot)
 
         let project = try orchestrator.addProject(dir: repo.path)
         XCTAssertThrowsError(
@@ -298,9 +276,8 @@ final class OrchestratorTests: XCTestCase {
         let repo = try makeTempGitRepo(name: "workspace-name-space-dirname")
         let root = try makeTempDirectory()
         let workspacesRoot = root.appendingPathComponent("workspaces", isDirectory: true)
-        let configStore = ConfigStore(path: root.appendingPathComponent("config.yaml").path)
         let store = try makeTemporaryStore()
-        let orchestrator = MuxyOrchestrator(store: store, configStore: configStore, workspacesRootDirectory: workspacesRoot)
+        let orchestrator = MuxyOrchestrator(store: store, workspacesRootDirectory: workspacesRoot)
 
         let project = try orchestrator.addProject(dir: repo.path)
         XCTAssertThrowsError(
@@ -318,9 +295,8 @@ final class OrchestratorTests: XCTestCase {
 
         let root = try makeTempDirectory()
         let workspacesRoot = root.appendingPathComponent("workspaces", isDirectory: true)
-        let configStore = ConfigStore(path: root.appendingPathComponent("config.yaml").path)
         let store = try makeTemporaryStore()
-        let orchestrator = MuxyOrchestrator(store: store, configStore: configStore, workspacesRootDirectory: workspacesRoot)
+        let orchestrator = MuxyOrchestrator(store: store, workspacesRootDirectory: workspacesRoot)
 
         let project = try orchestrator.addProject(dir: repo.path)
         let workspace = try orchestrator.createWorkspace(
@@ -333,9 +309,8 @@ final class OrchestratorTests: XCTestCase {
         let repo = try makeTempGitRepo(name: "workspace-branch-list")
         let root = try makeTempDirectory()
         let workspacesRoot = root.appendingPathComponent("workspaces", isDirectory: true)
-        let configStore = ConfigStore(path: root.appendingPathComponent("config.yaml").path)
         let store = try makeTemporaryStore()
-        let orchestrator = MuxyOrchestrator(store: store, configStore: configStore, workspacesRootDirectory: workspacesRoot)
+        let orchestrator = MuxyOrchestrator(store: store, workspacesRootDirectory: workspacesRoot)
 
         let project = try orchestrator.addProject(dir: repo.path)
         _ = try orchestrator.createWorkspace(projectID: project.id, name: "feature-branch", branch: "feature-branch")
@@ -349,10 +324,8 @@ final class OrchestratorTests: XCTestCase {
         let root = try makeTempDirectory()
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
-
-        let configStore = ConfigStore(path: root.appendingPathComponent("config.yaml").path)
         let store = try makeTemporaryStore()
-        let orchestrator = MuxyOrchestrator(store: store, configStore: configStore)
+        let orchestrator = MuxyOrchestrator(store: store)
 
         let project = try orchestrator.addProject(dir: projectDir.path)
         let created = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
@@ -370,10 +343,8 @@ final class OrchestratorTests: XCTestCase {
         let root = try makeTempDirectory()
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
-
-        let configStore = ConfigStore(path: root.appendingPathComponent("config.yaml").path)
         let store = try makeTemporaryStore()
-        let orchestrator = MuxyOrchestrator(store: store, configStore: configStore)
+        let orchestrator = MuxyOrchestrator(store: store)
 
         let project = try orchestrator.addProject(dir: projectDir.path)
         let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
@@ -390,9 +361,8 @@ final class OrchestratorTests: XCTestCase {
         let repo = try makeTempGitRepo(name: "workspace-archive-git-worktree-remove")
         let root = try makeTempDirectory()
         let workspacesRoot = root.appendingPathComponent("workspaces", isDirectory: true)
-        let configStore = ConfigStore(path: root.appendingPathComponent("config.yaml").path)
         let store = try makeTemporaryStore()
-        let orchestrator = MuxyOrchestrator(store: store, configStore: configStore, workspacesRootDirectory: workspacesRoot)
+        let orchestrator = MuxyOrchestrator(store: store, workspacesRootDirectory: workspacesRoot)
 
         let project = try orchestrator.addProject(dir: repo.path)
         let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature-archive", branch: "feature-archive")
@@ -411,9 +381,8 @@ final class OrchestratorTests: XCTestCase {
 
     func testGUIShortcutsAndActiveWorkspaceRoundTrip() throws {
         let root = try makeTempDirectory()
-        let configStore = ConfigStore(path: root.appendingPathComponent("config.yaml").path)
         let store = try makeTemporaryStore()
-        let orchestrator = MuxyOrchestrator(store: store, configStore: configStore)
+        let orchestrator = MuxyOrchestrator(store: store)
 
         XCTAssertEqual(try orchestrator.guiHotkey(), SettingsKey.defaultGUIHotkey)
         XCTAssertEqual(try orchestrator.guiNextShortcut(), SettingsKey.defaultGUINextShortcut)
@@ -461,10 +430,8 @@ final class OrchestratorTests: XCTestCase {
         let root = try makeTempDirectory()
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
-
-        let configStore = ConfigStore(path: root.appendingPathComponent("config.yaml").path)
         let store = try makeTemporaryStore()
-        let orchestrator = MuxyOrchestrator(store: store, configStore: configStore)
+        let orchestrator = MuxyOrchestrator(store: store)
 
         let project = try orchestrator.addProject(dir: projectDir.path)
         let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
@@ -496,10 +463,8 @@ final class OrchestratorTests: XCTestCase {
         let root = try makeTempDirectory()
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
-
-        let configStore = ConfigStore(path: root.appendingPathComponent("config.yaml").path)
         let store = try makeTemporaryStore()
-        let orchestrator = MuxyOrchestrator(store: store, configStore: configStore)
+        let orchestrator = MuxyOrchestrator(store: store)
 
         let project = try orchestrator.addProject(dir: projectDir.path)
         let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
@@ -529,10 +494,8 @@ final class OrchestratorTests: XCTestCase {
         let root = try makeTempDirectory()
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
-
-        let configStore = ConfigStore(path: root.appendingPathComponent("config.yaml").path)
         let store = try makeTemporaryStore()
-        let orchestrator = MuxyOrchestrator(store: store, configStore: configStore)
+        let orchestrator = MuxyOrchestrator(store: store)
 
         let project = try orchestrator.addProject(dir: projectDir.path)
         let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
@@ -565,13 +528,11 @@ final class OrchestratorTests: XCTestCase {
         let root = try makeTempDirectory()
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
-
-        let configStore = ConfigStore(path: root.appendingPathComponent("config.yaml").path)
         let store = try makeTemporaryStore()
         
         // Use mock iTerm2 adapter to prevent actual terminal windows from opening
         let mockIterm = MockIterm2Adapter()
-        let orchestrator = MuxyOrchestrator(store: store, configStore: configStore, iterm: mockIterm)
+        let orchestrator = MuxyOrchestrator(store: store, iterm: mockIterm)
 
         let project = try orchestrator.addProject(dir: projectDir.path)
         let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
@@ -609,13 +570,11 @@ final class OrchestratorTests: XCTestCase {
         let root = try makeTempDirectory()
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
-
-        let configStore = ConfigStore(path: root.appendingPathComponent("config.yaml").path)
         let store = try makeTemporaryStore()
         
         // Use mock iTerm2 adapter to prevent actual terminal windows from opening
         let mockIterm = MockIterm2Adapter()
-        let orchestrator = MuxyOrchestrator(store: store, configStore: configStore, iterm: mockIterm)
+        let orchestrator = MuxyOrchestrator(store: store, iterm: mockIterm)
 
         let project = try orchestrator.addProject(dir: projectDir.path)
         let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
@@ -650,9 +609,8 @@ final class OrchestratorTests: XCTestCase {
 
     func testCreateWorkspaceThrowsForUnknownProject() throws {
         let root = try makeTempDirectory()
-        let configStore = ConfigStore(path: root.appendingPathComponent("config.yaml").path)
         let store = try makeTemporaryStore()
-        let orchestrator = MuxyOrchestrator(store: store, configStore: configStore)
+        let orchestrator = MuxyOrchestrator(store: store)
 
         XCTAssertThrowsError(try orchestrator.createWorkspace(projectID: "missing", name: "feature"))
     }
@@ -661,9 +619,8 @@ final class OrchestratorTests: XCTestCase {
         let repo = try makeTempGitRepo(name: "workspace-requires-branch")
         let root = try makeTempDirectory()
         let workspacesRoot = root.appendingPathComponent("workspaces", isDirectory: true)
-        let configStore = ConfigStore(path: root.appendingPathComponent("config.yaml").path)
         let store = try makeTemporaryStore()
-        let orchestrator = MuxyOrchestrator(store: store, configStore: configStore, workspacesRootDirectory: workspacesRoot)
+        let orchestrator = MuxyOrchestrator(store: store, workspacesRootDirectory: workspacesRoot)
         let project = try orchestrator.addProject(dir: repo.path)
 
         XCTAssertThrowsError(try orchestrator.createWorkspace(projectID: project.id, name: "workspace")) { error in
@@ -1446,9 +1403,8 @@ final class OrchestratorTests: XCTestCase {
         let root = try makeTempDirectory()
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
-        let configStore = ConfigStore(path: root.appendingPathComponent("config.yaml").path)
         let store = try makeTemporaryStore()
-        let orchestrator = MuxyOrchestrator(store: store, configStore: configStore)
+        let orchestrator = MuxyOrchestrator(store: store)
 
         let project = try orchestrator.addProject(dir: projectDir.path)
         let defaultWorkspace = try XCTUnwrap(
@@ -1511,9 +1467,8 @@ final class OrchestratorTests: XCTestCase {
 
     func testListSpaceOptionsSortsByDisplayThenSpace() throws {
         let root = try makeTempDirectory()
-        let configStore = ConfigStore(path: root.appendingPathComponent("config.yaml").path)
         let store = try makeTemporaryStore()
-        let orchestrator = MuxyOrchestrator(store: store, configStore: configStore)
+        let orchestrator = MuxyOrchestrator(store: store)
 
         // Mocked dependency: `yabai --spaces` payload ordering.
         // Why: guarantee sort assertions independently of host window-manager state.
@@ -1550,10 +1505,8 @@ final class OrchestratorTests: XCTestCase {
         let bDir = root.appendingPathComponent("beta", isDirectory: true)
         try FileManager.default.createDirectory(at: aDir, withIntermediateDirectories: true)
         try FileManager.default.createDirectory(at: bDir, withIntermediateDirectories: true)
-
-        let configStore = ConfigStore(path: root.appendingPathComponent("config.yaml").path)
         let store = try makeTemporaryStore()
-        let orchestrator = MuxyOrchestrator(store: store, configStore: configStore)
+        let orchestrator = MuxyOrchestrator(store: store)
 
         _ = try orchestrator.addProject(dir: bDir.path)
         _ = try orchestrator.addProject(dir: aDir.path)
@@ -1568,8 +1521,6 @@ final class OrchestratorTests: XCTestCase {
         let validDir = root.appendingPathComponent("valid", isDirectory: true)
         try FileManager.default.createDirectory(at: validDir, withIntermediateDirectories: true)
         let missingDir = root.appendingPathComponent("missing", isDirectory: true)
-
-        let configStore = ConfigStore(path: root.appendingPathComponent("config.yaml").path)
         // Write a legacy YAML with projects (migration path)
         let yaml = """
             port_range:
@@ -1579,10 +1530,11 @@ final class OrchestratorTests: XCTestCase {
               - dir: \(validDir.path)
               - dir: \(missingDir.path)
             """
-        try yaml.write(toFile: configStore.path, atomically: true, encoding: .utf8)
+        let yamlURL = root.appendingPathComponent("config.yaml")
+        try yaml.write(to: yamlURL, atomically: true, encoding: .utf8)
 
         let store = try makeTemporaryStore()
-        let orchestrator = MuxyOrchestrator(store: store, configStore: configStore)
+        let orchestrator = MuxyOrchestrator(store: store, legacyYAMLConfigURL: yamlURL)
         _ = try orchestrator.syncConfig()
 
         // Only valid dir should be migrated
@@ -1627,9 +1579,8 @@ final class OrchestratorTests: XCTestCase {
         let root = try makeTempDirectory()
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
-        let configStore = ConfigStore(path: root.appendingPathComponent("config.yaml").path)
         let store = try makeTemporaryStore()
-        let orchestrator = MuxyOrchestrator(store: store, configStore: configStore)
+        let orchestrator = MuxyOrchestrator(store: store)
         let project = try orchestrator.addProject(dir: projectDir.path)
         let defaultWorkspace = try XCTUnwrap(
             try orchestrator.listWorkspaces(projectID: project.id, includeArchived: true).first(where: { $0.isDefault }))
@@ -1652,9 +1603,8 @@ final class OrchestratorTests: XCTestCase {
         let root = try makeTempDirectory()
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
-        let configStore = ConfigStore(path: root.appendingPathComponent("config.yaml").path)
         let store = try makeTemporaryStore()
-        let orchestrator = MuxyOrchestrator(store: store, configStore: configStore)
+        let orchestrator = MuxyOrchestrator(store: store)
         let project = try orchestrator.addProject(dir: projectDir.path)
         let defaultWorkspace = try XCTUnwrap(
             try orchestrator.listWorkspaces(projectID: project.id, includeArchived: true).first(where: { $0.isDefault }))
@@ -1981,11 +1931,9 @@ final class OrchestratorTests: XCTestCase {
         let root = try makeTempDirectory()
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
-
-        let configStore = ConfigStore(path: root.appendingPathComponent("config.yaml").path)
         let store = try makeTemporaryStore()
         let orchestrator = MuxyOrchestrator(
-            store: store, configStore: configStore, browserWindowScanDebounceInterval: browserWindowScanDebounceInterval, currentDate: currentDate)
+            store: store, browserWindowScanDebounceInterval: browserWindowScanDebounceInterval, currentDate: currentDate)
         if let editor { _ = try orchestrator.updateEditorPreference(editor) }
 
         let project = try orchestrator.addProject(dir: projectDir.path)
@@ -2400,8 +2348,7 @@ final class OrchestratorTests: XCTestCase {
 
     func testBuildWorkspaceEnvSetsMuxyWorkspaceDir() throws {
         let store = try makeTemporaryStore()
-        let configStore = ConfigStore(path: try makeTempDirectory().appendingPathComponent("config.yaml").path)
-        let orchestrator = MuxyOrchestrator(store: store, configStore: configStore)
+        let orchestrator = MuxyOrchestrator(store: store)
         let project = makeProjectRecord(dir: "/tmp/project")
         let workspace = makeWorkspaceRecord(projectID: project.id, name: "dev", dir: "/tmp/project/ws")
         let env = orchestrator.buildWorkspaceEnv(project: project, workspace: workspace, namedPorts: [])
@@ -2410,8 +2357,7 @@ final class OrchestratorTests: XCTestCase {
 
     func testBuildWorkspaceEnvSetsMuxyProjectDir() throws {
         let store = try makeTemporaryStore()
-        let configStore = ConfigStore(path: try makeTempDirectory().appendingPathComponent("config.yaml").path)
-        let orchestrator = MuxyOrchestrator(store: store, configStore: configStore)
+        let orchestrator = MuxyOrchestrator(store: store)
         let project = makeProjectRecord(dir: "/tmp/project")
         let workspace = makeWorkspaceRecord(projectID: project.id, name: "dev", dir: "/tmp/project/ws")
         let env = orchestrator.buildWorkspaceEnv(project: project, workspace: workspace, namedPorts: [])
@@ -2420,8 +2366,7 @@ final class OrchestratorTests: XCTestCase {
 
     func testBuildWorkspaceEnvDoesNotContainScopedKey() throws {
         let store = try makeTemporaryStore()
-        let configStore = ConfigStore(path: try makeTempDirectory().appendingPathComponent("config.yaml").path)
-        let orchestrator = MuxyOrchestrator(store: store, configStore: configStore)
+        let orchestrator = MuxyOrchestrator(store: store)
         let project = makeProjectRecord(dir: "/tmp/project")
         let workspace = makeWorkspaceRecord(projectID: project.id, name: "dev", dir: "/tmp/project/ws")
         let env = orchestrator.buildWorkspaceEnv(project: project, workspace: workspace, namedPorts: [])
@@ -2446,11 +2391,10 @@ final class OrchestratorTests: XCTestCase {
                 processes:
                   - command: npm start
             """
-        try yaml.write(toFile: configPath, atomically: true, encoding: .utf8)
-
-        let configStore = ConfigStore(path: configPath)
+        let configURL = URL(fileURLWithPath: configPath)
+        try yaml.write(to: configURL, atomically: true, encoding: .utf8)
         let store = try makeTemporaryStore()
-        let orchestrator = MuxyOrchestrator(store: store, configStore: configStore)
+        let orchestrator = MuxyOrchestrator(store: store, legacyYAMLConfigURL: configURL)
 
         _ = try orchestrator.syncConfig()
 
@@ -2481,11 +2425,10 @@ final class OrchestratorTests: XCTestCase {
             projects:
               - dir: \(projectDir.path)
             """
-        try yaml.write(toFile: configPath, atomically: true, encoding: .utf8)
-
-        let configStore = ConfigStore(path: configPath)
+        let configURL = URL(fileURLWithPath: configPath)
+        try yaml.write(to: configURL, atomically: true, encoding: .utf8)
         let store = try makeTemporaryStore()
-        let orchestrator = MuxyOrchestrator(store: store, configStore: configStore)
+        let orchestrator = MuxyOrchestrator(store: store, legacyYAMLConfigURL: configURL)
 
         _ = try orchestrator.syncConfig()
         let countAfterFirst = try store.projects().count
@@ -2501,29 +2444,24 @@ final class OrchestratorTests: XCTestCase {
         let root = try makeTempDirectory()
         let projectDir = root.appendingPathComponent("myproject", isDirectory: true)
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
-
-        let configStore = ConfigStore(path: root.appendingPathComponent("config.yaml").path)
         let store = try makeTemporaryStore()
-        let orchestrator = MuxyOrchestrator(store: store, configStore: configStore)
+        let orchestrator = MuxyOrchestrator(store: store)
 
         let record = try orchestrator.addProject(dir: projectDir.path)
 
         // Project is in DB
         XCTAssertNotNil(try store.project(id: record.id))
 
-        // YAML does not contain project
-        let config = try configStore.load()
-        let _ = config // AppConfig has no projects field; just verify it loads without error
+        // Project count in DB is correct
+        XCTAssertEqual(try store.projects().count, 1)
     }
 
     func testUpdateProjectConfigPersistsTemplatesToDB() throws {
         let root = try makeTempDirectory()
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
-
-        let configStore = ConfigStore(path: root.appendingPathComponent("config.yaml").path)
         let store = try makeTemporaryStore()
-        let orchestrator = MuxyOrchestrator(store: store, configStore: configStore)
+        let orchestrator = MuxyOrchestrator(store: store)
 
         let project = try orchestrator.addProject(dir: projectDir.path)
         try orchestrator.updateProjectConfig(projectID: project.id) { p in
@@ -2544,10 +2482,8 @@ final class OrchestratorTests: XCTestCase {
         let root = try makeTempDirectory()
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
-
-        let configStore = ConfigStore(path: root.appendingPathComponent("config.yaml").path)
         let store = try makeTemporaryStore()
-        let orchestrator = MuxyOrchestrator(store: store, configStore: configStore)
+        let orchestrator = MuxyOrchestrator(store: store)
 
         let project = try orchestrator.addProject(dir: projectDir.path)
         XCTAssertNotNil(try store.project(id: project.id))
@@ -2559,8 +2495,7 @@ final class OrchestratorTests: XCTestCase {
 
     func testBuildWorkspaceEnvIncludesNamedPorts() throws {
         let store = try makeTemporaryStore()
-        let configStore = ConfigStore(path: try makeTempDirectory().appendingPathComponent("config.yaml").path)
-        let orchestrator = MuxyOrchestrator(store: store, configStore: configStore)
+        let orchestrator = MuxyOrchestrator(store: store)
         let project = makeProjectRecord(dir: "/tmp/project")
         let workspace = makeWorkspaceRecord(projectID: project.id, name: "dev", dir: "/tmp/project/ws")
         let ports: [(port: Int, name: String)] = [(port: 3000, name: "FRONTEND_PORT"), (port: 8080, name: "API_PORT")]

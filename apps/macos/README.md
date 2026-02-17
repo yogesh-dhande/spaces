@@ -15,22 +15,25 @@ It manages projects, workspaces, processes, and window sets so you can move betw
 - Accessibility permissions granted for window focus and control
 
 ## Configuration
-- YAML config: `~/.muxy/config.yaml` — global preferences only (`editor`, `port_range`)
-- Runtime DB: `~/.muxy/muxy.db` — all model data (projects, templates, workspaces, ports, windows, settings)
+- DB: `~/.muxy/muxy.db` — all model data and global preferences (projects, templates, workspaces, ports, windows, settings, editor, port range)
 - Cloned projects: `/Users/<username>/muxy/projects/<project_name>`
 - Git worktrees: `/Users/<username>/muxy/workspaces/<projectname>/<dirname>` (dirname defaults to a unique food name and can be overridden on workspace creation)
 - GUI shortcuts (when focused): `cmd+1` through `cmd+9` focus workspace windows
 - Global window navigation (when GUI not focused): `cmd+shift+]` and `cmd+shift+[`
 
-Example YAML config (global settings only):
-```yaml
-editor: vscode
-port_range:
-  start: 20000
-  end: 30000
+Global preferences are stored in the DB and configurable via `mx config set` or the GUI Settings (⌘,):
+- `editor`: preferred editor for `mx workspace open-editor` (`none`, `vscode`, `cursor`, `windsurf`, `vim`)
+- `port_range`: range for workspace port allocation (default `20000-30000`)
+
+```
+mx config set --editor vscode
+mx config set --port-range 20000-30000
+mx config show
 ```
 
-Projects and all project templates (processes, status checks, browser sessions, port definitions, setup/stop scripts) are stored in the SQLite database. Use `mx project add` or the GUI to add projects. If you have an existing config with a `projects:` section, it will be automatically migrated to the database on first launch.
+> **Note:** If you have an existing `~/.muxy/config.yaml`, its `editor`, `port_range`, and any legacy `projects:` entries are automatically migrated to the database on first launch. The YAML file is then ignored and can be deleted.
+
+Projects and all project templates (processes, status checks, browser sessions, port definitions, setup/stop scripts) are stored in the SQLite database. Use `mx project add` or the GUI to add projects.
 
 Port definitions are configured at the project level and inherited by workspaces. Each named port (e.g. `FRONTEND_PORT`) is allocated a real port number from the configured `port_range`, reserved via OS sockets so no other process can claim it. Named port env vars are available in setup scripts, stop scripts, process commands, and status check commands. Workspaces can override port definitions in their settings.
 

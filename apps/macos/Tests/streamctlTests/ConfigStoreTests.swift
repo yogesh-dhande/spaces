@@ -2,58 +2,40 @@ import XCTest
 
 @testable import streamctl
 
-final class ConfigStoreTests: XCTestCase {
-    func testLoadCreatesDefaultConfigWhenMissing() throws {
-        let dir = try makeTempDirectory()
-        let path = dir.appendingPathComponent("config.yaml").path
-        let store = ConfigStore(path: path)
-
-        let config = try store.load()
-
-        XCTAssertEqual(config.portRange.start, 20000)
-        XCTAssertEqual(config.portRange.end, 30000)
-        XCTAssertTrue(FileManager.default.fileExists(atPath: path))
-
-        let reloaded = try store.load()
-        XCTAssertEqual(reloaded.portRange.start, 20000)
-        XCTAssertEqual(reloaded.portRange.end, 30000)
-    }
-
-    func testLoadResetsInvalidPortRange() throws {
-        let dir = try makeTempDirectory()
-        let path = dir.appendingPathComponent("config.yaml").path
-        let yaml = """
-            editor: none
-            port_range:
-              start: 30000
-              end: 20000
-            """
-        try yaml.write(toFile: path, atomically: true, encoding: .utf8)
-        let store = ConfigStore(path: path)
-
-        let config = try store.load()
-
+final class AppConfigStoreTests: XCTestCase {
+    func testDefaultsWhenNotSet() throws {
+        let store = try makeTemporaryStore()
+        let config = try store.appConfig()
+        XCTAssertNil(config.editor)
         XCTAssertEqual(config.portRange.start, 20000)
         XCTAssertEqual(config.portRange.end, 30000)
     }
 
-    func testLoadIgnoresLegacyProjectsKey() throws {
-        let dir = try makeTempDirectory()
-        let path = dir.appendingPathComponent("config.yaml").path
-        let yaml = """
-            editor: none
-            port_range:
-              start: 20000
-              end: 30000
-            projects:
-              - dir: /tmp/some-project
-                setup_script: echo setup
-            """
-        try yaml.write(toFile: path, atomically: true, encoding: .utf8)
-        let store = ConfigStore(path: path)
+    func testRoundTrip() throws {
+        let store = try makeTemporaryStore()
+        let config = AppConfig(editor: .cursor, portRange: PortRange(start: 10000, end: 20000))
+        try store.setAppConfig(config)
+        let loaded = try store.appConfig()
+        XCTAssertEqual(loaded.editor, .cursor)
+        XCTAssertEqual(loaded.portRange.start, 10000)
+        XCTAssertEqual(loaded.portRange.end, 20000)
+    }
 
-        // AppConfig no longer has projects; decoding should succeed without error
-        let config = try store.load()
+    func testClearsEditor() throws {
+        let store = try makeTemporaryStore()
+        try store.setAppConfig(AppConfig(editor: .vscode, portRange: PortRange(start: 20000, end: 30000)))
+        try store.setAppConfig(AppConfig(editor: nil, portRange: PortRange(start: 20000, end: 30000)))
+        let loaded = try store.appConfig()
+        XCTAssertNil(loaded.editor)
+    }
+
+    func testResetsInvalidPortRange() throws {
+        let store = try makeTemporaryStore()
+        // Manually write invalid values
+        try store.setSetting(key: SettingsKey.appPortRangeStart, value: "30000")
+        try store.setSetting(key: SettingsKey.appPortRangeEnd, value: "20000")
+        let config = try store.appConfig()
         XCTAssertEqual(config.portRange.start, 20000)
+        XCTAssertEqual(config.portRange.end, 30000)
     }
 }

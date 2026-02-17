@@ -69,10 +69,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     public func applicationDidFinishLaunching(_ notification: Notification) {
         do {
             let db = try DatabaseLocator.defaultPath()
-            let configPath = try ConfigStore.defaultPath()
             let store = try SQLiteStore(path: db)
-            let configStore = ConfigStore(path: configPath)
-            orchestrator = MuxyOrchestrator(store: store, configStore: configStore)
+            orchestrator = MuxyOrchestrator(store: store)
             configCache = try orchestrator.syncConfig()
             loadShortcutSpecs()
         } catch {
@@ -212,10 +210,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         await Task.detached(priority: .utility) {
             do {
                 let db = try DatabaseLocator.defaultPath()
-                let configPath = try ConfigStore.defaultPath()
                 let store = try SQLiteStore(path: db)
-                let configStore = ConfigStore(path: configPath)
-                let orchestrator = MuxyOrchestrator(store: store, configStore: configStore)
+                let orchestrator = MuxyOrchestrator(store: store)
                 let result = try orchestrator.refreshAllWorkspaceWindows()
                 return .success(result)
             } catch {
@@ -228,10 +224,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         await Task.detached(priority: .userInitiated) {
             do {
                 let db = try DatabaseLocator.defaultPath()
-                let configPath = try ConfigStore.defaultPath()
                 let store = try SQLiteStore(path: db)
-                let configStore = ConfigStore(path: configPath)
-                let orchestrator = MuxyOrchestrator(store: store, configStore: configStore)
+                let orchestrator = MuxyOrchestrator(store: store)
                 switch action {
                 case .launch:
                     try orchestrator.launchWorkspace(workspaceID: workspaceID)

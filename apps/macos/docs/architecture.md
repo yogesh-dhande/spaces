@@ -1,12 +1,12 @@
 # Architecture
 
 ## Overview
-`muxy` is a macOS Swift app for stream-based workspace orchestration. A stream is a captured set of windows tied to a workspace. SQLite is the single source of truth for all model data (projects, workspaces, processes, status checks, browser sessions); YAML retains only global settings (`editor`, `port_range`).
+`muxy` is a macOS Swift app for stream-based workspace orchestration. A stream is a captured set of windows tied to a workspace. SQLite is the single source of truth for all data including global preferences (`editor`, `port_range`).
 
 Key invariants:
-- SQLite is the single source of truth for all model data including project templates.
-- YAML config (`~/.muxy/config.yaml`) holds only `editor` and `port_range`; projects are no longer stored in YAML.
-- Old YAML files with `projects:` are automatically migrated to SQLite on first launch (one-time migration).
+- SQLite is the single source of truth for all model data and global preferences.
+- Global preferences (`editor`, `port_range`) are stored in the SQLite `settings` table.
+- YAML config (`~/.muxy/config.yaml`) is deprecated; on first launch, any existing `editor`, `port_range`, and `projects:` values are auto-migrated to SQLite and the file is then ignored.
 - Workspace settings are stored in SQLite and seeded from project templates; per-workspace overrides are preserved.
 - SQLite stores runtime state and can be recreated when the schema version changes (workspace settings are re-seeded from templates).
 - yabai is the source of truth for window IDs and focus.
@@ -21,8 +21,7 @@ flowchart LR
   guiapp["MuxyApp (App entrypoint)"] --> gui["gui (AppKit UI)"]
   gui --> stream
 
-  stream --> config["YAML config"]
-  stream --> db["SQLite runtime DB"]
+  stream --> db["SQLite DB (data + config)"]
   stream --> appctl["appctl (system adapters)"]
   stream --> git["Git client"]
   stream --> editor["Editor launcher"]
@@ -65,11 +64,11 @@ GUI interaction notes:
 - The app provides a standard Edit menu with Copy (Cmd+C) and Select All (Cmd+A) for system clipboard support in read-only text views.
 
 ## Data Model
-Config file:
-- Path: `~/.muxy/config.yaml`.
-- Top-level fields: `editor`, `port_range` only. Projects are **not** stored in YAML.
-- The GUI Settings view writes `editor` from installed VS Code, Cursor, or Windsurf.
-- Old YAML files that contain a `projects:` key are automatically migrated to SQLite on first launch (one-time); the key is then stripped from YAML.
+Global preferences (stored in SQLite `settings` table):
+- Keys: `app_editor` (optional), `app_port_range_start`, `app_port_range_end`.
+- Default port range: 20000–30000.
+- The GUI Settings view and `mx config set` write `editor` and `port_range`.
+- On first launch, any existing `~/.muxy/config.yaml` values are migrated to the DB and the file is then ignored.
 
 Project data (stored in SQLite):
 - Fields: `dir`, `setup_script`, `stop_script`, `ports` (named port definitions), `processes`, `status_checks`, `browser_sessions`.
@@ -395,8 +394,8 @@ These constants are referenced throughout the codebase to ensure consistent poll
 - `yabai` for window IDs, focus, and display/space metadata
 - iTerm2 for terminal processes
 - Google Chrome for browser sessions
-- Yams for YAML config parsing and encoding
-- SQLite3 for runtime persistence
+- Yams for legacy YAML migration (one-time import of old config.yaml on first launch)
+- SQLite3 for runtime persistence and global preferences
 
 ### yabai Dependency Analysis
 

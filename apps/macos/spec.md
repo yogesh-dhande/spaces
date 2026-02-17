@@ -32,8 +32,8 @@
             - Workspace state and per-workspace settings overrides are stored in SQLite.
             - Workspace settings are seeded from project templates on creation or when missing.
             - Schema changes rebuild the DB; missing workspace settings are re-seeded from project templates.
-        - YAML (`~/.muxy/config.yaml`) holds only global preferences: `editor` and `port_range`.
-            - Old YAML files with `projects:` are automatically migrated to SQLite once on first launch.
+        - Global preferences (`editor`, `port_range`) are stored in the SQLite `settings` table.
+            - Old YAML files (`~/.muxy/config.yaml`) with `editor`/`port_range`/`projects:` are automatically migrated to SQLite once on first launch. The YAML file is no longer written or read after migration.
     - User preferences
         - editor: enum - None, VS Code, Cursor, Windsurf, Vim - if specified, used to open an editor at workspace launch
             - GUI settings only surface installed VS Code, Cursor, or Windsurf

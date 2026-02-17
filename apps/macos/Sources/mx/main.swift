@@ -18,15 +18,13 @@ struct CLI {
         }
 
         let db = try DatabaseLocator.defaultPath()
-        let configPath = try ConfigStore.defaultPath()
         let store = try SQLiteStore(path: db)
-        let configStore = ConfigStore(path: configPath)
-        let orchestrator = MuxyOrchestrator(store: store, configStore: configStore)
+        let orchestrator = MuxyOrchestrator(store: store)
 
         _ = try orchestrator.syncConfig()
 
         switch command {
-        case "config": try runConfigSubcommand(orchestrator: orchestrator, path: configPath)
+        case "config": try runConfigSubcommand(orchestrator: orchestrator)
         case "settings": try runSettingsSubcommand(orchestrator: orchestrator)
         case "project": try runProjectSubcommand(orchestrator: orchestrator)
         case "workspace": try runWorkspaceSubcommand(orchestrator: orchestrator)
@@ -34,19 +32,39 @@ struct CLI {
         }
     }
 
-    private func runConfigSubcommand(orchestrator: MuxyOrchestrator, path: String) throws {
+    private func runConfigSubcommand(orchestrator: MuxyOrchestrator) throws {
         guard args.count >= 3 else {
-            throw NSError(domain: "mx.cli", code: 2, userInfo: [NSLocalizedDescriptionKey: "Missing config action. Use: config path|show"])
+            throw NSError(domain: "mx.cli", code: 2, userInfo: [NSLocalizedDescriptionKey: "Missing config action. Use: config show|set"])
         }
         switch args[2] {
-        case "path": print(path)
         case "show":
-            let config = try ConfigStore(path: path).load()
-            let projectCount = try SQLiteStore(path: try DatabaseLocator.defaultPath()).projects().count
-            print(
-                "editor=\(config.editor?.rawValue ?? "none") port_range=\(config.portRange.start)-\(config.portRange.end) projects=\(projectCount)"
-            )
-        default: throw NSError(domain: "mx.cli", code: 2, userInfo: [NSLocalizedDescriptionKey: "Unknown config action: \(args[2])"])
+            let config = try orchestrator.appConfig()
+            let projectCount = try orchestrator.listProjects().count
+            print("editor=\(config.editor?.rawValue ?? "none") port_range=\(config.portRange.start)-\(config.portRange.end) projects=\(projectCount)")
+        case "set":
+            if let rawEditor = optionalValue(for: "--editor") {
+                guard let pref = EditorPreference(rawValue: rawEditor) else {
+                    throw NSError(
+                        domain: "mx.cli", code: 2,
+                        userInfo: [NSLocalizedDescriptionKey: "Unknown editor: \(rawEditor). Use: none|vscode|cursor|windsurf|vim"])
+                }
+                _ = try orchestrator.updateEditorPreference(pref == .none ? nil : pref)
+                print("editor=\(pref.rawValue)")
+            } else if let rangeStr = optionalValue(for: "--port-range") {
+                let parts = rangeStr.split(separator: "-").compactMap { Int($0) }
+                guard parts.count == 2, parts[0] > 0, parts[1] > parts[0] else {
+                    throw NSError(
+                        domain: "mx.cli", code: 2,
+                        userInfo: [NSLocalizedDescriptionKey: "Invalid port range: \(rangeStr). Format: <start>-<end> e.g. 20000-30000"])
+                }
+                _ = try orchestrator.updatePortRange(PortRange(start: parts[0], end: parts[1]))
+                print("port_range=\(parts[0])-\(parts[1])")
+            } else {
+                throw NSError(
+                    domain: "mx.cli", code: 2,
+                    userInfo: [NSLocalizedDescriptionKey: "Use --editor <value> or --port-range <start>-<end>"])
+            }
+        default: throw NSError(domain: "mx.cli", code: 2, userInfo: [NSLocalizedDescriptionKey: "Unknown config action: \(args[2]). Use: show|set"])
         }
     }
 
@@ -497,8 +515,9 @@ struct CLI {
             Usage:
               mx version
 
-              mx config path
               mx config show
+              mx config set --editor none|vscode|cursor|windsurf|vim
+              mx config set --port-range <start>-<end>
 
               mx settings get --gui-hotkey
               mx settings get --gui-next-shortcut
@@ -561,7 +580,7 @@ struct CLI {
               mx workspace activate --project-dir <path> --name <name>
 
             Notes:
-              - Configuration is stored in ~/.muxy/config.yaml (YAML is source of truth).
+              - Configuration (editor, port_range) is stored in ~/.muxy/muxy.db. YAML config is no longer used.
               - GUI settings (⌘,) let you pick a preferred editor (VS Code, Cursor, Windsurf).
               - Runtime state is stored in ~/.muxy/muxy.db and rebuilt if schema changes.
               - Removing a git project first removes managed worktrees via `git worktree remove --force`, then deletes related workspace directories under ~/muxy/workspaces.

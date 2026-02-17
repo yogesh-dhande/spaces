@@ -1,6 +1,9 @@
 import Foundation
 
 public enum SettingsKey {
+    public static let appEditor = "app_editor"
+    public static let appPortRangeStart = "app_port_range_start"
+    public static let appPortRangeEnd = "app_port_range_end"
     public static let guiHotkey = "gui_hotkey"
     public static let defaultGUIHotkey = "cmd+shift+="
     public static let guiNextShortcut = "gui_next_shortcut"
