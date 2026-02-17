@@ -39,6 +39,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     private var activeShortcutCaptureSetting: ShortcutSetting?
     private var periodicWorkspaceRefreshTask: Task<Void, Never>?
     private var periodicUpdateCheckTask: Task<Void, Never>?
+    private var periodicProcessMonitorTask: Task<Void, Never>?
     private var lastTrackedWindowCounts: [String: Int] = [:]
     private let updateChecker = UpdateChecker()
     private let appUpdater = AppUpdater()
@@ -87,11 +88,13 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         setupShortcutMonitor()
         startPeriodicWorkspaceWindowRefresh()
         startPeriodicUpdateCheck()
+        startPeriodicProcessMonitor()
     }
 
     public func applicationWillTerminate(_ notification: Notification) {
         periodicWorkspaceRefreshTask?.cancel()
         periodicUpdateCheckTask?.cancel()
+        periodicProcessMonitorTask?.cancel()
         teardownGlobalHotkey()
         if let shortcutMonitor { NSEvent.removeMonitor(shortcutMonitor) }
     }
@@ -115,6 +118,30 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 }
                 do {
                     try await Task.sleep(for: .seconds(PollingConstants.workspaceWindowRefreshInterval))
+                } catch {
+                    break
+                }
+            }
+        }
+    }
+
+    private func startPeriodicProcessMonitor() {
+        periodicProcessMonitorTask?.cancel()
+        periodicProcessMonitorTask = Task { [weak self] in
+            guard let self else { return }
+            while !Task.isCancelled {
+                let didUpdate: Bool
+                do {
+                    didUpdate = try orchestrator.checkAndUpdateProcessStatuses()
+                } catch {
+                    didUpdate = false
+                }
+                if Task.isCancelled { break }
+                if didUpdate && self.canReloadAfterBackgroundWorkspaceRefresh() {
+                    self.reloadData()
+                }
+                do {
+                    try await Task.sleep(for: .seconds(PollingConstants.processStatusCheckInterval))
                 } catch {
                     break
                 }

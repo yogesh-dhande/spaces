@@ -607,6 +607,45 @@ public final class MuxyOrchestrator {
     }
 
     public func runningProcesses(workspaceID: String) throws -> [RunningProcessRecord] { try store.runningProcesses(workspaceID: workspaceID) }
+    
+    public func checkAndUpdateProcessStatuses() throws -> Bool {
+        var didUpdate = false
+        let allProjects = try store.projects()
+        let now = currentDate()
+        
+        for project in allProjects {
+            let workspaces = try store.workspaces(projectID: project.id, includeArchived: false)
+            
+            for workspace in workspaces {
+                let processes = try store.runningProcesses(workspaceID: workspace.id)
+                
+                for process in processes where process.status == .running {
+                    if let startedAtStr = process.startedAt, let startedAt = ISO8601DateFormatter().date(from: startedAtStr) {
+                        let secondsSinceStart = now.timeIntervalSince(startedAt)
+                        if secondsSinceStart < 10.0 {
+                            continue
+                        }
+                    }
+                    
+                    guard let pid = resolvedRuntimePID(for: process) else { continue }
+                    
+                    if !isProcessAlive(pid: pid) {
+                        let updatedProcess = RunningProcessRecord(
+                            id: process.id, workspaceID: process.workspaceID, templateName: process.templateName,
+                            command: process.command, terminalApp: process.terminalApp, windowID: process.windowID,
+                            pid: process.pid, status: .exited, logPath: process.logPath,
+                            lastOutputAt: process.lastOutputAt, startedAt: process.startedAt,
+                            exitedAt: nowISO8601()
+                        )
+                        try store.upsert(runningProcess: updatedProcess)
+                        didUpdate = true
+                    }
+                }
+            }
+        }
+        
+        return didUpdate
+    }
 
     public func runStatusChecks(workspaceID: String) throws -> [StatusResult] {
         let (project, workspace) = try resolveWorkspace(id: workspaceID)
@@ -1859,8 +1898,14 @@ public final class MuxyOrchestrator {
         let safeCwd = cwd
         let safeLog = logFile
         let safePid = pidFile
+        
+        // Write shell PID and keep shell alive with wait
+        // isProcessAlive will check if any process in the group is alive
         let commands = [
-            "cd \"\(safeCwd)\"", envExports.isEmpty ? nil : envExports, "echo $$ > \"\(safePid)\"", "\(base) 2>&1 | tee -a \"\(safeLog)\"",
+            "cd \"\(safeCwd)\"",
+            envExports.isEmpty ? nil : envExports,
+            "echo $$ > \"\(safePid)\"",
+            "\(base) 2>&1 | tee -a \"\(safeLog)\"",
         ].compactMap { $0 }
         let script = commands.joined(separator: "; ")
         let singleQuoted = script.replacing("'", with: "'\\''")
@@ -1952,8 +1997,16 @@ public final class MuxyOrchestrator {
 
     private func isProcessAlive(pid: Int) -> Bool {
         guard pid > 0 else { return false }
+        
+        // First check if the specific PID is alive
         if Darwin.kill(pid_t(pid), 0) == 0 { return true }
-        return errno == EPERM
+        if errno == EPERM { return true }
+        
+        // If the PID is dead, check if any child processes are still alive
+        // This handles cases where the shell exits but the actual command continues
+        guard let output = try? Shell.runAndCapture(["pgrep", "-P", "\(pid)"]) else { return false }
+        let trimmed = output.trimmingCharacters(in: .whitespacesAndNewlines)
+        return !trimmed.isEmpty
     }
 
     private func waitForProcessExit(pid: Int, timeout: TimeInterval) {

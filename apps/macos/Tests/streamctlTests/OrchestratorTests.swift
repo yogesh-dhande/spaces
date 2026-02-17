@@ -607,6 +607,106 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertNotEqual(currentProcess.windowID, 123)
     }
 
+    func testCheckAndUpdateProcessStatusesMarksDeadProcessAsExited() throws {
+        let root = try makeTempDirectory()
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let store = try makeTemporaryStore()
+        let orchestrator = MuxyOrchestrator(store: store)
+
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
+        
+        // Create a process with a PID that doesn't exist
+        let deadProcess = RunningProcessRecord(
+            id: UUID().uuidString, workspaceID: workspace.id, templateName: "api", command: "npm start", 
+            terminalApp: "iTerm2", windowID: 123, pid: 99999, status: .running, logPath: nil, 
+            lastOutputAt: nil, startedAt: ISO8601DateFormatter().string(from: Date().addingTimeInterval(-20)), exitedAt: nil)
+        try store.upsert(runningProcess: deadProcess)
+        
+        let didUpdate = try orchestrator.checkAndUpdateProcessStatuses()
+        
+        XCTAssertTrue(didUpdate)
+        let updated = try store.runningProcesses(workspaceID: workspace.id).first
+        XCTAssertEqual(updated?.status, .exited)
+        XCTAssertNotNil(updated?.exitedAt)
+    }
+    
+    func testCheckAndUpdateProcessStatusesSkipsNewlyStartedProcesses() throws {
+        let root = try makeTempDirectory()
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let store = try makeTemporaryStore()
+        let orchestrator = MuxyOrchestrator(store: store)
+
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
+        
+        // Create a process that just started (within grace period)
+        let newProcess = RunningProcessRecord(
+            id: UUID().uuidString, workspaceID: workspace.id, templateName: "api", command: "npm start", 
+            terminalApp: "iTerm2", windowID: 123, pid: 99999, status: .running, logPath: nil, 
+            lastOutputAt: nil, startedAt: ISO8601DateFormatter().string(from: Date().addingTimeInterval(-5)), exitedAt: nil)
+        try store.upsert(runningProcess: newProcess)
+        
+        let didUpdate = try orchestrator.checkAndUpdateProcessStatuses()
+        
+        // Should not update because process is within grace period
+        XCTAssertFalse(didUpdate)
+        let unchanged = try store.runningProcesses(workspaceID: workspace.id).first
+        XCTAssertEqual(unchanged?.status, .running)
+        XCTAssertNil(unchanged?.exitedAt)
+    }
+    
+    func testCheckAndUpdateProcessStatusesSkipsProcessesWithoutPID() throws {
+        let root = try makeTempDirectory()
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let store = try makeTemporaryStore()
+        let orchestrator = MuxyOrchestrator(store: store)
+
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
+        
+        // Create a process without a PID (still starting up)
+        let noPidProcess = RunningProcessRecord(
+            id: UUID().uuidString, workspaceID: workspace.id, templateName: "api", command: "npm start", 
+            terminalApp: "iTerm2", windowID: 123, pid: nil, status: .running, logPath: nil, 
+            lastOutputAt: nil, startedAt: ISO8601DateFormatter().string(from: Date().addingTimeInterval(-20)), exitedAt: nil)
+        try store.upsert(runningProcess: noPidProcess)
+        
+        let didUpdate = try orchestrator.checkAndUpdateProcessStatuses()
+        
+        // Should not update because process has no PID to check
+        XCTAssertFalse(didUpdate)
+        let unchanged = try store.runningProcesses(workspaceID: workspace.id).first
+        XCTAssertEqual(unchanged?.status, .running)
+    }
+    
+    func testCheckAndUpdateProcessStatusesOnlyChecksRunningProcesses() throws {
+        let root = try makeTempDirectory()
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let store = try makeTemporaryStore()
+        let orchestrator = MuxyOrchestrator(store: store)
+
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
+        
+        // Create an already-exited process
+        let exitedProcess = RunningProcessRecord(
+            id: UUID().uuidString, workspaceID: workspace.id, templateName: "api", command: "npm start", 
+            terminalApp: "iTerm2", windowID: 123, pid: 99999, status: .exited, logPath: nil, 
+            lastOutputAt: nil, startedAt: ISO8601DateFormatter().string(from: Date().addingTimeInterval(-20)), 
+            exitedAt: ISO8601DateFormatter().string(from: Date()))
+        try store.upsert(runningProcess: exitedProcess)
+        
+        let didUpdate = try orchestrator.checkAndUpdateProcessStatuses()
+        
+        // Should not check or update already-exited processes
+        XCTAssertFalse(didUpdate)
+    }
+
     func testCreateWorkspaceThrowsForUnknownProject() throws {
         let root = try makeTempDirectory()
         let store = try makeTemporaryStore()
