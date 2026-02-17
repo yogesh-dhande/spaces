@@ -23,7 +23,7 @@ export const docsPageLinks: DocsPageLink[] = [
     href: "/docs/projects",
     title: "Projects",
     summary:
-      "Project configuration, templates, directory structure, and default workspace creation.",
+      "Add and manage projects stored in the database, configure templates (processes, ports, scripts, browser sessions), and understand default workspace creation.",
     audience: "Developers setting up and managing project definitions.",
   },
   {

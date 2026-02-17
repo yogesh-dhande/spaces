@@ -1,9 +1,9 @@
 # Checkpoint
 
 ## Current Status
-- YAML config at `~/.muxy/config.yaml` is the source of truth for editor preference, port range, projects, and project templates (processes, browser sessions, status checks).
-- Runtime state and workspace settings live in `~/.muxy/muxy.db` (projects, workspaces, ports, running processes, status results, windows, settings, workspace settings) and are rebuilt when the schema version changes; workspace settings are re-seeded from project templates when missing.
-- Projects are normalized by real path; a default workspace is ensured per project with reserved ports.
+- SQLite (`~/.muxy/muxy.db`) is the single source of truth for all model data: projects (including templates: processes, status checks, browser sessions, ports, scripts), workspaces, ports, running processes, status results, windows, and settings. The DB is rebuilt when the schema version changes; workspace settings are re-seeded from project templates when missing.
+- YAML config at `~/.muxy/config.yaml` holds only global preferences: `editor` and `port_range`. Old YAML files with a `projects:` key are automatically migrated to SQLite on first launch (v9 migration) and the key is then removed from YAML.
+- Projects are stored in SQLite and normalized by real path; a default workspace is ensured per project with reserved ports.
 - Project creation supports either existing directories or git clone; cloned repositories are stored at `/Users/<username>/muxy/projects/<project_name>`.
 - Project removal clears muxy state, removes related managed git worktrees via `git worktree remove --force`, deletes related git workspace directories under `/Users/<username>/muxy/workspaces`, and deletes the project directory only for git repositories under `/Users/<username>/muxy/projects` (managed clones).
 - Workspaces create git worktrees for git projects, run setup/stop scripts, and allocate named ports (from port definitions) at creation time; ports are released at archive.
@@ -61,12 +61,13 @@
 - The local key monitor defers to focused text inputs so standard edit shortcuts like `cmd+v` work in forms.
 - CLI supports config path/show, project list/add/update/remove (including `project add --git-url ...`), workspace list/create/launch/stop/archive/activate, and settings get/set/reset for GUI shortcuts.
 - Workspace run view includes Open Editor/Terminal/Finder actions; editor/terminal windows opened this way are captured and included in window cycling.
-- Projects can define named ports (e.g. `FRONTEND_PORT`, `API_PORT`) instead of anonymous `PORT0`-`PORT9`; port definitions are configured at the project level in YAML and inherited/overridable at the workspace level.
+- Projects can define named ports (e.g. `FRONTEND_PORT`, `API_PORT`) instead of anonymous `PORT0`-`PORT9`; port definitions are configured at the project level in SQLite and inherited/overridable at the workspace level.
 - Named ports are OS-reserved via sockets (`PortReserver` singleton) so no other process can claim them between allocation and use.
 - Named port env vars are available in setup scripts, stop scripts, process commands, and status check commands.
 - Port allocation now happens before the setup script so env vars are available during setup.
 - `PortAllocator.allocatePorts` accepts `definitions: [PortDefinition]` instead of a fixed count; `buildWorkspaceEnv` uses named port keys.
 - Schema v8: `workspace_browser_sessions` gains extracted-window mapping columns (`extracted_target_url`, `extracted_window_id`, `extracted_window_valid`).
+- Schema v9: `projects` table gains `setup_script` and `stop_script` columns; four new project template tables added (`project_port_definitions`, `project_processes`, `project_status_checks`, `project_browser_sessions`); one-time YAML→SQLite project migration runs on first launch after upgrade.
 - GUI: `PortEditor` provides an inline editor for port definitions in project detail, add-project form, and workspace settings.
 
 ## Accomplished

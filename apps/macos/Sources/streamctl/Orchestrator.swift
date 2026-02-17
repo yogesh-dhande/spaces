@@ -1,6 +1,7 @@
 import Darwin
 import Foundation
 @preconcurrency import UserNotifications
+import Yams
 import appctl
 
 public final class MuxyOrchestrator {
@@ -68,39 +69,89 @@ public final class MuxyOrchestrator {
     }
 
     @discardableResult public func syncConfig() throws -> AppConfig {
-        var config = try configStore.load()
-        var normalizedProjects: [NormalizedProject] = []
-        var normalizedConfigs: [ProjectConfig] = []
-        var removedInvalid = false
-        var updatedPaths = false
-        for project in config.projects {
-            do {
-                let normalized = try normalize(project: project)
-                normalizedProjects.append(normalized)
-                normalizedConfigs.append(normalized.config)
-                if normalizePath(project.dir) != normalized.config.dir { updatedPaths = true }
-            } catch {
-                fputs("muxy: skipped project due to error: \(error.localizedDescription)\n", stderr)
-                removedInvalid = true
-            }
-        }
-        config.projects = normalizedConfigs
-        let keepIDs = Set(normalizedProjects.map(\.id))
-        let existing = try store.projects()
-        for project in existing where !keepIDs.contains(project.id) { try store.deleteProject(id: project.id) }
-        for project in normalizedProjects {
-            try store.upsert(project: project.record)
-            try ensureDefaultWorkspace(for: project.record)
-            try ensureWorkspaceSettings(for: project.record, config: project.config)
-        }
-        if removedInvalid || updatedPaths { try configStore.save(config) }
+        let config = try configStore.load()
+        try migrateLegacyProjectsIfNeeded()
         return config
+    }
+
+    private struct LegacyProjectConfig: Decodable {
+        var dir: String
+        var setupScript: String?
+        var stopScript: String?
+        var ports: [PortDefinition]
+        var processes: [ProcessTemplate]
+        var statusChecks: [StatusCheckDefinition]
+        var browserSessions: [BrowserSession]
+
+        enum CodingKeys: String, CodingKey {
+            case dir
+            case setupScript = "setup_script"
+            case stopScript = "stop_script"
+            case ports
+            case processes
+            case statusChecks = "status_checks"
+            case browserSessions = "browser_sessions"
+        }
+
+        init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            dir = try container.decode(String.self, forKey: .dir)
+            setupScript = try container.decodeIfPresent(String.self, forKey: .setupScript)
+            stopScript = try container.decodeIfPresent(String.self, forKey: .stopScript)
+            ports = try container.decodeIfPresent([PortDefinition].self, forKey: .ports) ?? []
+            processes = try container.decodeIfPresent([ProcessTemplate].self, forKey: .processes) ?? []
+            statusChecks = try container.decodeIfPresent([StatusCheckDefinition].self, forKey: .statusChecks) ?? []
+            browserSessions = try container.decodeIfPresent([BrowserSession].self, forKey: .browserSessions) ?? []
+        }
+    }
+
+    private struct LegacyAppConfig: Decodable {
+        var projects: [LegacyProjectConfig]?
+        enum CodingKeys: String, CodingKey { case projects }
+    }
+
+    private func migrateLegacyProjectsIfNeeded() throws {
+        let url = URL(fileURLWithPath: configStore.path)
+        guard FileManager.default.fileExists(atPath: url.path) else { return }
+        let text = try String(contentsOf: url)
+        guard let legacy = try? YAMLDecoder().decode(LegacyAppConfig.self, from: text),
+              let legacyProjects = legacy.projects, !legacyProjects.isEmpty else { return }
+        var didMigrate = false
+        for project in legacyProjects {
+            let normalizedDir = normalizePath(project.dir)
+            var isDir: ObjCBool = false
+            guard FileManager.default.fileExists(atPath: normalizedDir, isDirectory: &isDir), isDir.boolValue else {
+                fputs("muxy: skipped legacy project (dir not found): \(project.dir)\n", stderr)
+                continue
+            }
+            if (try? store.project(dir: normalizedDir)) != nil { continue }
+            let isGit = git.isRepo(path: normalizedDir)
+            let branch = isGit ? git.defaultBranch(path: normalizedDir) : nil
+            let record = ProjectRecord(
+                id: normalizedDir, name: URL(fileURLWithPath: normalizedDir).lastPathComponent,
+                dir: normalizedDir, isGitRepo: isGit, defaultBranch: branch,
+                setupScript: project.setupScript, stopScript: project.stopScript,
+                ports: project.ports, processes: project.processes,
+                statusChecks: project.statusChecks, browserSessions: project.browserSessions)
+            try store.upsert(project: record)
+            try ensureDefaultWorkspace(for: record)
+            try ensureWorkspaceSettings(for: record)
+            didMigrate = true
+        }
+        if didMigrate {
+            let config = try configStore.load()
+            try configStore.save(config)
+        }
     }
 
     public func listProjects() throws -> [ProjectSummary] {
         return try store.projects().map {
             ProjectSummary(id: $0.id, name: $0.name, dir: $0.dir, isGitRepo: $0.isGitRepo, defaultBranch: $0.defaultBranch)
         }
+    }
+
+    public func project(id: String) throws -> ProjectRecord? {
+        try store.project(id: id)
     }
 
     @discardableResult public func updateEditorPreference(_ editor: EditorPreference?) throws -> AppConfig {
@@ -137,22 +188,14 @@ public final class MuxyOrchestrator {
         return git.trackedFileActivity(path: workspace.dir)
     }
 
-    public func projectConfig(projectID: String) throws -> ProjectConfig? {
-        let config = try configStore.load()
-        guard let project = try store.project(id: projectID) else { return nil }
-        return config.projects.first { normalizePath($0.dir) == project.dir }
-    }
-
     public func workspaceSettings(workspaceID: String) throws -> WorkspaceSettings? {
         let (project, workspace) = try resolveWorkspace(id: workspaceID)
-        let config = try projectConfig(projectID: project.id)
-        return try loadWorkspaceSettings(project: project, workspace: workspace, config: config)
+        return try loadWorkspaceSettings(project: project, workspace: workspace)
     }
 
     public func updateWorkspaceSettings(workspaceID: String, update: (inout WorkspaceSettings) -> Void) throws {
         let (project, workspace) = try resolveWorkspace(id: workspaceID)
-        let config = try projectConfig(projectID: project.id)
-        guard var existing = try loadWorkspaceSettings(project: project, workspace: workspace, config: config) else {
+        guard var existing = try loadWorkspaceSettings(project: project, workspace: workspace) else {
             throw MuxyError.missingProject(dir: project.dir)
         }
         let previous = existing
@@ -176,21 +219,18 @@ public final class MuxyOrchestrator {
     }
 
     public func addProject(dir: String) throws -> ProjectRecord {
-        var config = try configStore.load()
         let normalizedDir = normalizePath(dir)
         var isDir: ObjCBool = false
         guard FileManager.default.fileExists(atPath: normalizedDir, isDirectory: &isDir), isDir.boolValue else {
             throw MuxyError.invalidArgument(message: "Project directory not found: \(normalizedDir)")
         }
-        if config.projects.contains(where: { normalizePath($0.dir) == normalizedDir }) {
+        if try store.project(dir: normalizedDir) != nil {
             throw MuxyError.projectAlreadyExists(dir: normalizedDir)
         }
-        config.projects.append(ProjectConfig(dir: normalizedDir))
-        try configStore.save(config)
-        let normalized = try normalize(project: ProjectConfig(dir: normalizedDir))
-        try store.upsert(project: normalized.record)
-        try ensureDefaultWorkspace(for: normalized.record)
-        return normalized.record
+        let record = try normalizeDir(normalizedDir)
+        try store.upsert(project: record)
+        try ensureDefaultWorkspace(for: record)
+        return record
     }
 
     public func addProject(gitURL: String) throws -> ProjectRecord {
@@ -201,8 +241,7 @@ public final class MuxyOrchestrator {
         let destination = projectsRootDirectory().appending(path: projectDirname, directoryHint: .isDirectory)
         let normalizedDestination = normalizePath(destination.path)
 
-        let config = try configStore.load()
-        if config.projects.contains(where: { normalizePath($0.dir) == normalizedDestination }) {
+        if try store.project(dir: normalizedDestination) != nil {
             throw MuxyError.projectAlreadyExists(dir: normalizedDestination)
         }
         if FileManager.default.fileExists(atPath: destination.path) {
@@ -213,44 +252,25 @@ public final class MuxyOrchestrator {
         return try addProject(dir: destination.path)
     }
 
-    public func updateProjectConfig(_ updated: ProjectConfig) throws {
-        var config = try configStore.load()
-        let normalizedDir = normalizePath(updated.dir)
-        let idx = config.projects.firstIndex { normalizePath($0.dir) == normalizedDir }
-        guard let idx else { throw MuxyError.missingProject(dir: normalizedDir) }
-        let previous = config.projects[idx]
-        var normalizedUpdated = updated
-        normalizedUpdated.dir = normalizedDir
-        config.projects[idx] = normalizedUpdated
-        try configStore.save(config)
-        let normalized = try normalize(project: normalizedUpdated)
-        try store.upsert(project: normalized.record)
-        try ensureDefaultWorkspace(for: normalized.record)
-        try syncDefaultWorkspaceSettingsIfTemplateBased(project: normalized.record, previousConfig: previous, updatedConfig: normalized.config)
-    }
-
-    public func updateProjectConfig(projectID: String, update: (inout ProjectConfig) -> Void) throws {
-        var config = try configStore.load()
-        let normalizedDir = normalizePath(projectID)
-        let idx = config.projects.firstIndex { normalizePath($0.dir) == normalizedDir }
-        guard let idx else { throw MuxyError.missingProject(dir: normalizedDir) }
-        let previous = config.projects[idx]
-        var updated = config.projects[idx]
-        update(&updated)
-        updated.dir = normalizedDir
-        config.projects[idx] = updated
-        try configStore.save(config)
-        let normalized = try normalize(project: updated)
-        try store.upsert(project: normalized.record)
-        try ensureDefaultWorkspace(for: normalized.record)
-        try syncDefaultWorkspaceSettingsIfTemplateBased(project: normalized.record, previousConfig: previous, updatedConfig: normalized.config)
+    public func updateProjectConfig(projectID: String, update: (inout ProjectRecord) -> Void) throws {
+        let normalizedID = normalizePath(projectID)
+        guard var record = try store.project(id: normalizedID) else {
+            throw MuxyError.missingProject(dir: normalizedID)
+        }
+        let previousRecord = record
+        update(&record)
+        record = ProjectRecord(
+            id: normalizedID, name: record.name, dir: record.dir, isGitRepo: record.isGitRepo,
+            defaultBranch: record.defaultBranch, setupScript: record.setupScript, stopScript: record.stopScript,
+            ports: record.ports, processes: record.processes,
+            statusChecks: record.statusChecks, browserSessions: record.browserSessions)
+        try store.upsert(project: record)
+        try ensureDefaultWorkspace(for: record)
+        try syncDefaultWorkspaceSettingsIfTemplateBased(project: record, previousRecord: previousRecord, updatedRecord: record)
     }
 
     public func removeProject(dir: String) throws {
-        var config = try configStore.load()
         let normalizedDir = normalizePath(dir)
-        config.projects.removeAll { normalizePath($0.dir) == normalizedDir }
-        try configStore.save(config)
         if let project = try store.project(dir: normalizedDir) {
             let workspaces = try store.workspaces(projectID: project.id, includeArchived: true)
             try removeManagedGitWorktreesIfNeeded(project: project, workspaces: workspaces)
@@ -314,7 +334,7 @@ public final class MuxyOrchestrator {
             let config = try configStore.load()
             let portDefinitions = try store.workspacePortDefinitions(workspaceID: revived.id)
             _ = try PortAllocator(store: store).allocatePorts(workspaceID: revived.id, definitions: portDefinitions, range: config.portRange)
-            if let projectConfig = try projectConfig(projectID: projectID), let script = projectConfig.setupScript, !script.isEmpty {
+            if let script = project.setupScript, !script.isEmpty {
                 let namedPorts = try store.workspacePortsNamed(workspaceID: revived.id)
                 let env = buildWorkspaceEnv(project: project, workspace: revived, namedPorts: namedPorts)
                 try runScript(applyEnvVars(script, env: env), cwd: revived.dir)
@@ -348,7 +368,7 @@ public final class MuxyOrchestrator {
         let portDefinitions = try store.workspacePortDefinitions(workspaceID: workspace.id)
         _ = try PortAllocator(store: store).allocatePorts(workspaceID: workspace.id, definitions: portDefinitions, range: appConfig.portRange)
 
-        if let config = try projectConfig(projectID: projectID), let script = config.setupScript, !script.isEmpty {
+        if let script = project.setupScript, !script.isEmpty {
             let namedPorts = try store.workspacePortsNamed(workspaceID: workspace.id)
             let env = buildWorkspaceEnv(project: project, workspace: workspace, namedPorts: namedPorts)
             try runScript(applyEnvVars(script, env: env), cwd: workspaceDir)
@@ -383,7 +403,7 @@ public final class MuxyOrchestrator {
         guard !(workspace.isRunning || hasTrackedRuntime) else {
             throw MuxyError.invalidArgument(message: "Workspace is already running. Use restart.")
         }
-        let config = try loadWorkspaceSettings(project: project, workspace: workspace, config: try projectConfig(projectID: project.id))
+        let config = try loadWorkspaceSettings(project: project, workspace: workspace)
         let portDefinitions = try store.workspacePortDefinitions(workspaceID: workspace.id)
         let ports = try store.workspacePorts(workspaceID: workspace.id)
         if ports.count != portDefinitions.count {
@@ -468,7 +488,7 @@ public final class MuxyOrchestrator {
         let windows = try trackedWindows(workspaceID: workspace.id)
         let namedPorts = try store.workspacePortsNamed(workspaceID: workspace.id)
         let env = buildWorkspaceEnv(project: project, workspace: workspace, namedPorts: namedPorts)
-        let settings = try loadWorkspaceSettings(project: project, workspace: workspace, config: try projectConfig(projectID: project.id))
+        let settings = try loadWorkspaceSettings(project: project, workspace: workspace)
         let processes = try store.runningProcesses(workspaceID: workspace.id)
         for process in processes { if let pid = resolvedRuntimePID(for: process) { terminateProcessGroup(pid: pid) } }
         if let script = settings?.stopScript?.trimmingCharacters(in: .whitespacesAndNewlines), !script.isEmpty {
@@ -534,7 +554,7 @@ public final class MuxyOrchestrator {
 
     public func runStatusChecks(workspaceID: String) throws -> [StatusResult] {
         let (project, workspace) = try resolveWorkspace(id: workspaceID)
-        guard let config = try loadWorkspaceSettings(project: project, workspace: workspace, config: try projectConfig(projectID: project.id)) else {
+        guard let config = try loadWorkspaceSettings(project: project, workspace: workspace) else {
             return []
         }
         let processes = try store.runningProcesses(workspaceID: workspaceID)
@@ -1234,20 +1254,15 @@ public final class MuxyOrchestrator {
 
     public func setActiveWorkspace(id: String?) throws { try store.setSetting(key: "active_workspace_id", value: id) }
 
-    private func normalize(project: ProjectConfig) throws -> NormalizedProject {
-        let dir = normalizePath(project.dir)
+    private func normalizeDir(_ dir: String) throws -> ProjectRecord {
         var isDir: ObjCBool = false
         guard FileManager.default.fileExists(atPath: dir, isDirectory: &isDir), isDir.boolValue else {
             throw MuxyError.invalidArgument(message: "Project directory not found: \(dir)")
         }
         let isGit = git.isRepo(path: dir)
         let branch = isGit ? git.defaultBranch(path: dir) : nil
-        let id = dir
         let name = URL(fileURLWithPath: dir).lastPathComponent
-        var updatedConfig = project
-        updatedConfig.dir = dir
-        return NormalizedProject(
-            id: id, record: ProjectRecord(id: id, name: name, dir: dir, isGitRepo: isGit, defaultBranch: branch), config: updatedConfig)
+        return ProjectRecord(id: dir, name: name, dir: dir, isGitRepo: isGit, defaultBranch: branch)
     }
 
     private func ensureDefaultWorkspace(for project: ProjectRecord) throws {
@@ -1277,22 +1292,22 @@ public final class MuxyOrchestrator {
         return (project, workspace)
     }
 
-    private func ensureWorkspaceSettings(for project: ProjectRecord, config: ProjectConfig) throws {
+    private func ensureWorkspaceSettings(for project: ProjectRecord) throws {
         let workspaces = try store.workspaces(projectID: project.id, includeArchived: true)
         for workspace in workspaces {
             let hasSettings = try store.workspaceSettingsExists(workspaceID: workspace.id)
-            if !hasSettings { try seedWorkspaceSettings(project: project, workspace: workspace, config: config) }
+            if !hasSettings { try seedWorkspaceSettings(project: project, workspace: workspace) }
         }
     }
 
-    private func syncDefaultWorkspaceSettingsIfTemplateBased(project: ProjectRecord, previousConfig: ProjectConfig, updatedConfig: ProjectConfig)
+    private func syncDefaultWorkspaceSettingsIfTemplateBased(project: ProjectRecord, previousRecord: ProjectRecord, updatedRecord: ProjectRecord)
         throws
     {
         guard let defaultWorkspace = try store.workspace(projectID: project.id, name: "default") else { return }
 
         let hasSettings = try store.workspaceSettingsExists(workspaceID: defaultWorkspace.id)
         if !hasSettings {
-            try seedWorkspaceSettings(project: project, workspace: defaultWorkspace, config: updatedConfig)
+            try seedWorkspaceSettings(project: updatedRecord, workspace: defaultWorkspace)
             return
         }
 
@@ -1304,12 +1319,12 @@ public final class MuxyOrchestrator {
             browserSessions: try store.workspaceBrowserSessions(workspaceID: defaultWorkspace.id))
 
         let previousTemplate = WorkspaceSettings(
-            stopScript: previousConfig.stopScript, ports: previousConfig.ports, processes: previousConfig.processes,
-            statusChecks: previousConfig.statusChecks, browserSessions: previousConfig.browserSessions)
+            stopScript: previousRecord.stopScript, ports: previousRecord.ports, processes: previousRecord.processes,
+            statusChecks: previousRecord.statusChecks, browserSessions: previousRecord.browserSessions)
 
         guard workspaceSettingsMatch(currentSettings, previousTemplate) else { return }
 
-        try seedWorkspaceSettings(project: project, workspace: defaultWorkspace, config: updatedConfig)
+        try seedWorkspaceSettings(project: updatedRecord, workspace: defaultWorkspace)
     }
 
     private func workspaceSettingsMatch(_ lhs: WorkspaceSettings, _ rhs: WorkspaceSettings) -> Bool {
@@ -1346,25 +1361,17 @@ public final class MuxyOrchestrator {
     }
 
     private func seedWorkspaceSettings(project: ProjectRecord, workspace: WorkspaceRecord) throws {
-        let config = try projectConfig(projectID: project.id)
-        try seedWorkspaceSettings(project: project, workspace: workspace, config: config)
-    }
-
-    private func seedWorkspaceSettings(project _: ProjectRecord, workspace: WorkspaceRecord, config: ProjectConfig?) throws {
-        let snapshot = WorkspaceSettings(
-            stopScript: config?.stopScript, ports: config?.ports ?? [], processes: config?.processes ?? [],
-            statusChecks: config?.statusChecks ?? [], browserSessions: config?.browserSessions ?? [])
-        try store.setWorkspaceStopScript(workspaceID: workspace.id, stopScript: snapshot.stopScript)
-        try store.setWorkspacePortDefinitions(workspaceID: workspace.id, definitions: snapshot.ports)
-        try store.setWorkspaceProcesses(workspaceID: workspace.id, processes: snapshot.processes)
-        try store.setWorkspaceStatusChecks(workspaceID: workspace.id, checks: snapshot.statusChecks)
-        try store.setWorkspaceBrowserSessions(workspaceID: workspace.id, sessions: snapshot.browserSessions)
+        try store.setWorkspaceStopScript(workspaceID: workspace.id, stopScript: project.stopScript)
+        try store.setWorkspacePortDefinitions(workspaceID: workspace.id, definitions: project.ports)
+        try store.setWorkspaceProcesses(workspaceID: workspace.id, processes: project.processes)
+        try store.setWorkspaceStatusChecks(workspaceID: workspace.id, checks: project.statusChecks)
+        try store.setWorkspaceBrowserSessions(workspaceID: workspace.id, sessions: project.browserSessions)
         try store.touchWorkspaceSettings(workspaceID: workspace.id, updatedAt: nowISO8601())
     }
 
-    private func loadWorkspaceSettings(project: ProjectRecord, workspace: WorkspaceRecord, config: ProjectConfig?) throws -> WorkspaceSettings? {
+    private func loadWorkspaceSettings(project: ProjectRecord, workspace: WorkspaceRecord) throws -> WorkspaceSettings? {
         let hasSettings = try store.workspaceSettingsExists(workspaceID: workspace.id)
-        if !hasSettings { try seedWorkspaceSettings(project: project, workspace: workspace, config: config) }
+        if !hasSettings { try seedWorkspaceSettings(project: project, workspace: workspace) }
         let stopScript = try store.workspaceStopScript(workspaceID: workspace.id)
         let ports = try store.workspacePortDefinitions(workspaceID: workspace.id)
         let processes = try store.workspaceProcesses(workspaceID: workspace.id)

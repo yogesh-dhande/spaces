@@ -15,44 +15,24 @@ It manages projects, workspaces, processes, and window sets so you can move betw
 - Accessibility permissions granted for window focus and control
 
 ## Configuration
-YAML is the source of truth:
-- Path: `~/.muxy/config.yaml`
-- Runtime DB: `~/.muxy/muxy.db` (ephemeral)
+- YAML config: `~/.muxy/config.yaml` — global preferences only (`editor`, `port_range`)
+- Runtime DB: `~/.muxy/muxy.db` — all model data (projects, templates, workspaces, ports, windows, settings)
 - Cloned projects: `/Users/<username>/muxy/projects/<project_name>`
 - Git worktrees: `/Users/<username>/muxy/workspaces/<projectname>/<dirname>` (dirname defaults to a unique food name and can be overridden on workspace creation)
 - GUI shortcuts (when focused): `cmd+1` through `cmd+9` focus workspace windows
 - Global window navigation (when GUI not focused): `cmd+shift+]` and `cmd+shift+[`
 
-Example config:
+Example YAML config (global settings only):
 ```yaml
 editor: vscode
 port_range:
   start: 20000
   end: 30000
-projects:
-  - dir: /path/to/repo
-    setup_script: cp /shared/.env .env
-    stop_script: docker compose down --remove-orphans
-    ports:
-      - name: FRONTEND_PORT
-      - name: API_PORT
-    processes:
-      - name: server
-        command: PORT=$FRONTEND_PORT npm run dev
-      - name: api
-        command: PORT=$API_PORT npm run api
-    status_checks:
-      - name: web
-        process: server
-        command: curl -fsS http://localhost:$FRONTEND_PORT/health
-        interval: 10
-        timeout: 2
-        onExit: notify
-    browser_sessions:
-      - url: http://localhost:$FRONTEND_PORT
 ```
 
-Port definitions (`ports`) are configured at the project level and inherited by workspaces. Each named port (e.g. `FRONTEND_PORT`) is allocated a real port number from the configured `port_range`, reserved via OS sockets so no other process can claim it. Named port env vars are available in setup scripts, stop scripts, process commands, and status check commands. Workspaces can override port definitions in their settings.
+Projects and all project templates (processes, status checks, browser sessions, port definitions, setup/stop scripts) are stored in the SQLite database. Use `mx project add` or the GUI to add projects. If you have an existing config with a `projects:` section, it will be automatically migrated to the database on first launch.
+
+Port definitions are configured at the project level and inherited by workspaces. Each named port (e.g. `FRONTEND_PORT`) is allocated a real port number from the configured `port_range`, reserved via OS sockets so no other process can claim it. Named port env vars are available in setup scripts, stop scripts, process commands, and status check commands. Workspaces can override port definitions in their settings.
 
 Workspaces snapshot project port definitions, processes, status checks, and browser sessions at creation time into the runtime DB.
 Updates to workspace settings apply immediately when the workspace is running (new processes start, changed commands restart, and new browser sessions open).

@@ -1570,30 +1570,39 @@ final class OrchestratorTests: XCTestCase {
         let missingDir = root.appendingPathComponent("missing", isDirectory: true)
 
         let configStore = ConfigStore(path: root.appendingPathComponent("config.yaml").path)
-        try configStore.save(
-            AppConfig(
-                editor: nil, portRange: PortRange(start: 20000, end: 30000),
-                projects: [ProjectConfig(dir: validDir.path), ProjectConfig(dir: missingDir.path)]))
+        // Write a legacy YAML with projects (migration path)
+        let yaml = """
+            port_range:
+              start: 20000
+              end: 30000
+            projects:
+              - dir: \(validDir.path)
+              - dir: \(missingDir.path)
+            """
+        try yaml.write(toFile: configStore.path, atomically: true, encoding: .utf8)
 
         let store = try makeTemporaryStore()
         let orchestrator = MuxyOrchestrator(store: store, configStore: configStore)
-        let synced = try orchestrator.syncConfig()
+        _ = try orchestrator.syncConfig()
 
-        XCTAssertEqual(synced.projects.map(\.dir), [validDir.path])
+        // Only valid dir should be migrated
         XCTAssertEqual(try store.projects().count, 1)
+        XCTAssertEqual(try store.projects().first?.dir, validDir.path)
         XCTAssertNotNil(try store.workspace(projectID: validDir.path, name: "default"))
     }
 
     func testUpdateProjectConfigAndReadBackProjectConfig() throws {
         let (orchestrator, _, project, _, _) = try makeOrchestratorWithWorkspace()
 
-        let updated = ProjectConfig(
-            dir: project.dir, setupScript: "echo setup", stopScript: "echo stop", processes: [ProcessTemplate(name: "api", command: "npm run api")],
-            statusChecks: [StatusCheckDefinition(name: "health", process: "api", command: "echo ok", interval: 10, timeout: 2, onExit: .notify)],
-            browserSessions: [BrowserSession(url: "https://example.com")])
-        try orchestrator.updateProjectConfig(updated)
+        try orchestrator.updateProjectConfig(projectID: project.id) { p in
+            p.setupScript = "echo setup"
+            p.stopScript = "echo stop"
+            p.processes = [ProcessTemplate(name: "api", command: "npm run api")]
+            p.statusChecks = [StatusCheckDefinition(name: "health", process: "api", command: "echo ok", interval: 10, timeout: 2, onExit: .notify)]
+            p.browserSessions = [BrowserSession(url: "https://example.com")]
+        }
 
-        let loaded = try orchestrator.projectConfig(projectID: project.id)
+        let loaded = try orchestrator.project(id: project.id)
         XCTAssertEqual(loaded?.setupScript, "echo setup")
         XCTAssertEqual(loaded?.stopScript, "echo stop")
         XCTAssertEqual(loaded?.processes.first?.name, "api")
@@ -1609,7 +1618,7 @@ final class OrchestratorTests: XCTestCase {
             config.processes = [ProcessTemplate(command: "echo process")]
         }
 
-        let loaded = try orchestrator.projectConfig(projectID: project.id)
+        let loaded = try orchestrator.project(id: project.id)
         XCTAssertEqual(loaded?.stopScript, "echo bye")
         XCTAssertEqual(loaded?.processes.first?.command, "echo process")
     }
@@ -2418,6 +2427,134 @@ final class OrchestratorTests: XCTestCase {
         let env = orchestrator.buildWorkspaceEnv(project: project, workspace: workspace, namedPorts: [])
         let scopedKeys = env.keys.filter { $0.hasPrefix("muxy_") || $0.hasPrefix("MUXY_PROJECT_") && $0.hasSuffix("_WORKSPACE_DIR") }
         XCTAssertTrue(scopedKeys.isEmpty, "Expected no scoped cross-project keys, found: \(scopedKeys)")
+    }
+
+    func testSyncConfigMigratesLegacyProjectsFromYAML() throws {
+        let projectDir = try makeTempDirectory()
+        let root = try makeTempDirectory()
+        let configPath = root.appendingPathComponent("config.yaml").path
+        let yaml = """
+            port_range:
+              start: 20000
+              end: 30000
+            projects:
+              - dir: \(projectDir.path)
+                setup_script: echo setup
+                stop_script: echo stop
+                ports:
+                  - name: API_PORT
+                processes:
+                  - command: npm start
+            """
+        try yaml.write(toFile: configPath, atomically: true, encoding: .utf8)
+
+        let configStore = ConfigStore(path: configPath)
+        let store = try makeTemporaryStore()
+        let orchestrator = MuxyOrchestrator(store: store, configStore: configStore)
+
+        _ = try orchestrator.syncConfig()
+
+        // Project should now be in DB
+        let importedProject = try store.project(dir: projectDir.path)
+        XCTAssertNotNil(importedProject)
+        XCTAssertEqual(importedProject?.setupScript, "echo setup")
+        XCTAssertEqual(importedProject?.stopScript, "echo stop")
+        XCTAssertEqual(importedProject?.ports.count, 1)
+        XCTAssertEqual(importedProject?.ports.first?.name, "API_PORT")
+        XCTAssertEqual(importedProject?.processes.count, 1)
+        XCTAssertEqual(importedProject?.processes.first?.command, "npm start")
+
+        // Default workspace should be created
+        let project = try XCTUnwrap(importedProject)
+        let workspaces = try store.workspaces(projectID: project.id)
+        XCTAssertFalse(workspaces.isEmpty)
+    }
+
+    func testSyncConfigMigrationIsIdempotent() throws {
+        let projectDir = try makeTempDirectory()
+        let root = try makeTempDirectory()
+        let configPath = root.appendingPathComponent("config.yaml").path
+        let yaml = """
+            port_range:
+              start: 20000
+              end: 30000
+            projects:
+              - dir: \(projectDir.path)
+            """
+        try yaml.write(toFile: configPath, atomically: true, encoding: .utf8)
+
+        let configStore = ConfigStore(path: configPath)
+        let store = try makeTemporaryStore()
+        let orchestrator = MuxyOrchestrator(store: store, configStore: configStore)
+
+        _ = try orchestrator.syncConfig()
+        let countAfterFirst = try store.projects().count
+
+        // Second call should not duplicate
+        _ = try orchestrator.syncConfig()
+        let countAfterSecond = try store.projects().count
+
+        XCTAssertEqual(countAfterFirst, countAfterSecond)
+    }
+
+    func testAddProjectStoresInDBOnly() throws {
+        let root = try makeTempDirectory()
+        let projectDir = root.appendingPathComponent("myproject", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+
+        let configStore = ConfigStore(path: root.appendingPathComponent("config.yaml").path)
+        let store = try makeTemporaryStore()
+        let orchestrator = MuxyOrchestrator(store: store, configStore: configStore)
+
+        let record = try orchestrator.addProject(dir: projectDir.path)
+
+        // Project is in DB
+        XCTAssertNotNil(try store.project(id: record.id))
+
+        // YAML does not contain project
+        let config = try configStore.load()
+        let _ = config // AppConfig has no projects field; just verify it loads without error
+    }
+
+    func testUpdateProjectConfigPersistsTemplatesToDB() throws {
+        let root = try makeTempDirectory()
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+
+        let configStore = ConfigStore(path: root.appendingPathComponent("config.yaml").path)
+        let store = try makeTemporaryStore()
+        let orchestrator = MuxyOrchestrator(store: store, configStore: configStore)
+
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        try orchestrator.updateProjectConfig(projectID: project.id) { p in
+            p.setupScript = "echo setup"
+            p.stopScript = "echo stop"
+            p.ports = [PortDefinition(name: "API_PORT")]
+            p.processes = [ProcessTemplate(name: "api", command: "npm start")]
+        }
+
+        let updated = try store.project(id: project.id)
+        XCTAssertEqual(updated?.setupScript, "echo setup")
+        XCTAssertEqual(updated?.stopScript, "echo stop")
+        XCTAssertEqual(updated?.ports.count, 1)
+        XCTAssertEqual(updated?.processes.count, 1)
+    }
+
+    func testRemoveProjectDeletesFromDB() throws {
+        let root = try makeTempDirectory()
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+
+        let configStore = ConfigStore(path: root.appendingPathComponent("config.yaml").path)
+        let store = try makeTemporaryStore()
+        let orchestrator = MuxyOrchestrator(store: store, configStore: configStore)
+
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        XCTAssertNotNil(try store.project(id: project.id))
+
+        try orchestrator.removeProject(dir: projectDir.path)
+
+        XCTAssertNil(try store.project(id: project.id))
     }
 
     func testBuildWorkspaceEnvIncludesNamedPorts() throws {

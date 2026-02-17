@@ -3,14 +3,14 @@ import Yams
 
 public final class ConfigStore {
     public static let defaultFilename = "config.yaml"
-    private let path: String
+    public let path: String
 
     public init(path: String) { self.path = path }
 
     public func load() throws -> AppConfig {
         let url = URL(fileURLWithPath: path)
         if !FileManager.default.fileExists(atPath: url.path) {
-            let config = AppConfig(editor: nil, portRange: PortRange(start: 20000, end: 30000), projects: [])
+            let config = AppConfig(editor: nil, portRange: PortRange(start: 20000, end: 30000))
             try save(config)
             return config
         }

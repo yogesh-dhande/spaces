@@ -16,7 +16,8 @@ func makeTemporaryStore() throws -> SQLiteStore {
 }
 
 func makeProjectRecord(id: String = UUID().uuidString, dir: String) -> ProjectRecord {
-    ProjectRecord(id: id, name: "Project", dir: dir, isGitRepo: false, defaultBranch: nil)
+    ProjectRecord(id: id, name: "Project", dir: dir, isGitRepo: false, defaultBranch: nil,
+                  setupScript: nil, stopScript: nil, ports: [], processes: [], statusChecks: [], browserSessions: [])
 }
 
 func makeWorkspaceRecord(id: String = UUID().uuidString, projectID: String, name: String, dir: String) -> WorkspaceRecord {

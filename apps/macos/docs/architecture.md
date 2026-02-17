@@ -1,11 +1,13 @@
 # Architecture
 
 ## Overview
-`muxy` is a macOS Swift app for stream-based workspace orchestration. A stream is a captured set of windows tied to a workspace. YAML is the source of truth for global settings and project templates, while SQLite stores runtime state plus per-workspace settings that are not written back to YAML.
+`muxy` is a macOS Swift app for stream-based workspace orchestration. A stream is a captured set of windows tied to a workspace. SQLite is the single source of truth for all model data (projects, workspaces, processes, status checks, browser sessions); YAML retains only global settings (`editor`, `port_range`).
 
 Key invariants:
-- YAML config is the source of truth for global settings and project templates and is normalized on load.
-- Workspace settings are stored in SQLite and seeded from project templates; no YAML workspace overrides exist.
+- SQLite is the single source of truth for all model data including project templates.
+- YAML config (`~/.muxy/config.yaml`) holds only `editor` and `port_range`; projects are no longer stored in YAML.
+- Old YAML files with `projects:` are automatically migrated to SQLite on first launch (one-time migration).
+- Workspace settings are stored in SQLite and seeded from project templates; per-workspace overrides are preserved.
 - SQLite stores runtime state and can be recreated when the schema version changes (workspace settings are re-seeded from templates).
 - yabai is the source of truth for window IDs and focus.
 - Stream capture must happen before a stream is shown or focused.
@@ -65,9 +67,12 @@ GUI interaction notes:
 ## Data Model
 Config file:
 - Path: `~/.muxy/config.yaml`.
-- Top-level fields: `editor`, `port_range`, `projects`.
+- Top-level fields: `editor`, `port_range` only. Projects are **not** stored in YAML.
 - The GUI Settings view writes `editor` from installed VS Code, Cursor, or Windsurf.
-- Project fields: `dir`, `setup_script`, `stop_script`, `ports` (named port definitions), `processes`, `status_checks`, `browser_sessions`.
+- Old YAML files that contain a `projects:` key are automatically migrated to SQLite on first launch (one-time); the key is then stripped from YAML.
+
+Project data (stored in SQLite):
+- Fields: `dir`, `setup_script`, `stop_script`, `ports` (named port definitions), `processes`, `status_checks`, `browser_sessions`.
 - Script timing:
   - `setup_script` runs when a workspace is created or revived.
   - `stop_script` runs on stop/restart/archive stop phase after automatic process termination.
@@ -78,7 +83,6 @@ Config file:
 Workspace settings:
 - Each workspace snapshots project `stop_script`, `ports` (named port definitions), `processes`, `status_checks`, and `browser_sessions` at creation.
 - Snapshots are stored in the runtime DB alongside other workspace data.
-- Edits are stored in SQLite only; YAML remains unchanged.
 - Edits to a running workspace reconcile processes and browser sessions immediately.
 
 Runtime database:
@@ -87,6 +91,10 @@ Runtime database:
 
 ```mermaid
 erDiagram
+  projects ||--o{ project_port_definitions : defines
+  projects ||--o{ project_processes : templates
+  projects ||--o{ project_status_checks : templates
+  projects ||--o{ project_browser_sessions : templates
   projects ||--o{ workspaces : has
   workspaces ||--o{ workspace_port_definitions : defines
   workspaces ||--o{ workspace_ports : allocates
@@ -104,6 +112,42 @@ erDiagram
     TEXT dir
     INTEGER is_git
     TEXT default_branch
+    TEXT setup_script
+    TEXT stop_script
+  }
+
+  project_port_definitions {
+    TEXT project_id
+    TEXT name
+    INTEGER order_index
+  }
+
+  project_processes {
+    TEXT id PK
+    TEXT project_id
+    TEXT name
+    TEXT command
+    TEXT kind
+    INTEGER order_index
+  }
+
+  project_status_checks {
+    TEXT id PK
+    TEXT project_id
+    TEXT name
+    TEXT process
+    TEXT command
+    INTEGER interval
+    INTEGER timeout
+    TEXT on_exit
+    INTEGER order_index
+  }
+
+  project_browser_sessions {
+    TEXT id PK
+    TEXT project_id
+    TEXT url
+    INTEGER order_index
   }
 
   workspaces {
@@ -233,7 +277,7 @@ Port allocation details:
 - Ports are allocated at workspace creation and persisted in the `workspace_ports` table; they are available immediately (including during the setup script).
 - `PortReserver` (singleton) re-reserves allocated ports via OS sockets on app launch so they cannot be claimed by other processes between allocation and use.
 - Ports are released when a workspace is archived.
-- Port definitions are configured at the project level in YAML (under a `ports` list) and inherited by workspaces; workspaces can override definitions.
+- Port definitions are configured at the project level in SQLite (stored in `project_port_definitions`) and inherited by workspaces; workspaces can override definitions.
 - Named ports appear as env vars in setup scripts, stop scripts, process commands, and status check commands (e.g. `$FRONTEND_PORT`, `$API_PORT`).
 - `buildWorkspaceEnv` uses named port keys from definitions instead of anonymous `PORT0`, `PORT1`, etc.
 - `buildWorkspaceEnv` sets `MUXY_WORKSPACE_DIR` (workspace directory) and `MUXY_PROJECT_DIR` (project directory) for every workspace process.

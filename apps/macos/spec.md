@@ -27,13 +27,13 @@
     - supported terminals: iTerm2
 - Models and data
     - Configuration sources
-        - YAML is the source of truth for global preferences and project templates.
-            - User specified project data is stored in a YAML config file so it can be easily shared
-            - Project templates include processes, status checks, and browser sessions
-        - SQLite stores workspace state and per-workspace settings overrides.
-            - Workspace settings are seeded from project templates on creation or when missing
-            - Workspace edits are not written back to YAML
-            - Schema changes rebuild the DB; missing workspace settings are re-seeded from project templates
+        - SQLite (`~/.muxy/muxy.db`) is the single source of truth for all model data.
+            - Projects (including templates: processes, status checks, browser sessions, ports, setup/stop scripts) are stored in SQLite.
+            - Workspace state and per-workspace settings overrides are stored in SQLite.
+            - Workspace settings are seeded from project templates on creation or when missing.
+            - Schema changes rebuild the DB; missing workspace settings are re-seeded from project templates.
+        - YAML (`~/.muxy/config.yaml`) holds only global preferences: `editor` and `port_range`.
+            - Old YAML files with `projects:` are automatically migrated to SQLite once on first launch.
     - User preferences
         - editor: enum - None, VS Code, Cursor, Windsurf, Vim - if specified, used to open an editor at workspace launch
             - GUI settings only surface installed VS Code, Cursor, or Windsurf
@@ -44,7 +44,7 @@
                 - use cases: copy .env file from a shared location to the desired path in the git worktree folder
             - stop_script: str, shell script to run whenever a workspace is stopped (including restart/archive stop phase), after automatic process termination
         - behavior
-            - stored in yaml config
+            - stored in SQLite (all project fields, including templates)
             - Project ID is derived from the absolute path (normalized, realpath). Renaming the folder creates a new project unless explicitly migrated.
             - if the project is a git repo, a default workspace corresponding to the main/master branch is created. this workspace cannot be archived
             - if the project is not a git repo, a default workspace corresponding to the project folder is created. this workspace cannot be archived
@@ -56,8 +56,8 @@
             - project: Project
             - command: terminal command to run. can use named port identifiers (e.g. `$FRONTEND_PORT`) to set port env vars
         - behavior
-            - Project templates stored in yaml config
-            - Workspace copies stored in db and editable per workspace
+            - Project templates stored in SQLite (`project_processes`)
+            - Workspace copies stored in SQLite (`workspace_processes`) and editable per workspace
             - types or use cases
                 - web server
                 - task queue
@@ -77,8 +77,8 @@
             - timeout: int, seconds after which check command is marked as failed
             - on exit: enum, do nothing | restart process | notify
         - behavior
-            - Project templates stored in yaml config
-            - Workspace copies stored in db and editable per workspace
+            - Project templates stored in SQLite (`project_status_checks`)
+            - Workspace copies stored in SQLite (`workspace_status_checks`) and editable per workspace
             - these checks run at specified intervals and update the status indicator (green, red) in the GUI
             - each running process can have multiple status indicators e.g. when the command starts several docker services and the status check is run for multiple services defined in the docker compose file
     - Status
@@ -94,15 +94,15 @@
                 - window_id: int, extracted dedicated Chrome window ID
                 - is_valid: bool, false when stale mapping is detected and disabled
         - behavior
-            - Project templates stored in yaml config
-            - Workspace copies stored in db and editable per workspace
+            - Project templates stored in SQLite (`project_browser_sessions`)
+            - Workspace copies stored in SQLite (`workspace_browser_sessions`) and editable per workspace
             - the url should be specified using named port vars made available to the workspace e.g. `$FRONTEND_PORT`. at runtime, it is decoded based on the actual values of these variables
             - user can add multiple browser sessions to each project, each will be opened a new window when the workspace is launched e.g. localhost:3000, localhost:3000/blog
     - PortDefinition
         - fields
             - name: str, the env var name for this port (e.g. `FRONTEND_PORT`, `API_PORT`). Must be a valid shell identifier.
         - behavior
-            - Defined at the project level in YAML under a `ports` list
+            - Defined at the project level in SQLite (`project_port_definitions`)
             - Inherited by workspaces at creation; workspaces can add, remove, or rename port definitions
             - Each definition results in a reserved port number exposed as an env var with the definition's name
             - `PortReserver` (singleton) reserves ports via OS sockets so they cannot be claimed by other processes between allocation and use

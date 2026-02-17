@@ -265,4 +265,87 @@ final class StoreTests: XCTestCase {
         try store.deleteRunningProcesses(workspaceID: workspace.id)
         XCTAssertTrue(try store.runningProcesses(workspaceID: workspace.id).isEmpty)
     }
+
+    func testProjectTemplateFieldsRoundTrip() throws {
+        let store = try makeTemporaryStore()
+        let dir = try makeTempDirectory().path
+        var project = ProjectRecord(
+            id: dir, name: "myproject", dir: dir, isGitRepo: false, defaultBranch: nil,
+            setupScript: "echo setup", stopScript: "echo stop",
+            ports: [PortDefinition(name: "API_PORT"), PortDefinition(name: "WEB_PORT")],
+            processes: [ProcessTemplate(name: "api", command: "npm run api"), ProcessTemplate(command: "npm run worker")],
+            statusChecks: [
+                StatusCheckDefinition(name: "health", process: "api", command: "curl /health", interval: 10, timeout: 3, onExit: .notify),
+            ],
+            browserSessions: [BrowserSession(url: "https://localhost:3000")])
+
+        try store.upsert(project: project)
+
+        let loaded = try store.project(id: dir)
+        XCTAssertNotNil(loaded)
+        XCTAssertEqual(loaded?.setupScript, "echo setup")
+        XCTAssertEqual(loaded?.stopScript, "echo stop")
+        XCTAssertEqual(loaded?.ports.count, 2)
+        XCTAssertEqual(loaded?.ports[0].name, "API_PORT")
+        XCTAssertEqual(loaded?.ports[1].name, "WEB_PORT")
+        XCTAssertEqual(loaded?.processes.count, 2)
+        XCTAssertEqual(loaded?.processes[0].name, "api")
+        XCTAssertEqual(loaded?.processes[1].name, nil)
+        XCTAssertEqual(loaded?.statusChecks.count, 1)
+        XCTAssertEqual(loaded?.statusChecks[0].name, "health")
+        XCTAssertEqual(loaded?.statusChecks[0].onExit, .notify)
+        XCTAssertEqual(loaded?.browserSessions.count, 1)
+        XCTAssertEqual(loaded?.browserSessions[0].url, "https://localhost:3000")
+    }
+
+    func testProjectTemplateFieldsAreUpdatedOnUpsert() throws {
+        let store = try makeTemporaryStore()
+        let dir = try makeTempDirectory().path
+        var project = ProjectRecord(
+            id: dir, name: "project", dir: dir, isGitRepo: false, defaultBranch: nil,
+            ports: [PortDefinition(name: "OLD_PORT")])
+        try store.upsert(project: project)
+
+        project.ports = [PortDefinition(name: "NEW_PORT"), PortDefinition(name: "EXTRA_PORT")]
+        project.setupScript = "echo updated"
+        try store.upsert(project: project)
+
+        let loaded = try store.project(id: dir)
+        XCTAssertEqual(loaded?.ports.count, 2)
+        XCTAssertEqual(loaded?.ports[0].name, "NEW_PORT")
+        XCTAssertEqual(loaded?.setupScript, "echo updated")
+    }
+
+    func testDeleteProjectCascadesTemplateTables() throws {
+        let store = try makeTemporaryStore()
+        let dir = try makeTempDirectory().path
+        let project = ProjectRecord(
+            id: dir, name: "project", dir: dir, isGitRepo: false, defaultBranch: nil,
+            ports: [PortDefinition(name: "PORT")],
+            processes: [ProcessTemplate(command: "echo run")])
+        try store.upsert(project: project)
+
+        try store.deleteProject(id: dir)
+
+        XCTAssertNil(try store.project(id: dir))
+    }
+
+    func testProjectsListLoadsAllTemplateFields() throws {
+        let store = try makeTemporaryStore()
+        let dir1 = try makeTempDirectory().path
+        let dir2 = try makeTempDirectory().path
+        let p1 = ProjectRecord(id: dir1, name: "alpha", dir: dir1, isGitRepo: false, defaultBranch: nil,
+                               ports: [PortDefinition(name: "PORT1")])
+        let p2 = ProjectRecord(id: dir2, name: "beta", dir: dir2, isGitRepo: false, defaultBranch: nil,
+                               processes: [ProcessTemplate(command: "run")])
+        try store.upsert(project: p1)
+        try store.upsert(project: p2)
+
+        let all = try store.projects()
+        XCTAssertEqual(all.count, 2)
+        let alpha = try XCTUnwrap(all.first(where: { $0.name == "alpha" }))
+        XCTAssertEqual(alpha.ports.count, 1)
+        let beta = try XCTUnwrap(all.first(where: { $0.name == "beta" }))
+        XCTAssertEqual(beta.processes.count, 1)
+    }
 }

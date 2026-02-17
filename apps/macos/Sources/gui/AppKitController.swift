@@ -516,6 +516,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         detailContainer.wantsLayer = true
         detailContainer.layer?.backgroundColor = sidebarPanelBackgroundColor().cgColor
 
+        let fullProject = (try? orchestrator.project(id: project.id))
+
         let stack = NSStackView()
         stack.orientation = .vertical
         stack.alignment = .leading
@@ -567,13 +569,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let processEditor = ProcessEditor()
         let browserView = makeEditableTextView()
         let browserScroll = scrollableTextView(browserView, height: 80)
-        if let config = configCache?.projects.first(where: { normalizePath($0.dir) == project.dir }) {
-            setupView.string = config.setupScript ?? ""
-            stopView.string = config.stopScript ?? ""
-            portEditor.setDefinitions(config.ports)
-            processEditor.setProcessesWithChecks(config.processes, statusChecks: config.statusChecks)
-            browserView.string = config.browserSessions.compactMap { $0.url }.joined(separator: "\n")
-        }
+        setupView.string = fullProject?.setupScript ?? ""
+        stopView.string = fullProject?.stopScript ?? ""
+        portEditor.setDefinitions(fullProject?.ports ?? [])
+        processEditor.setProcessesWithChecks(fullProject?.processes ?? [], statusChecks: fullProject?.statusChecks ?? [])
+        browserView.string = (fullProject?.browserSessions ?? []).compactMap { $0.url }.joined(separator: "\n")
 
         // --- Setup script card ---
         let setupScroll = scrollableTextView(setupView, height: 90)
@@ -1389,11 +1389,12 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             portEditor.setDefinitions(config.ports)
             processEditor.setProcessesWithChecks(config.processes, statusChecks: config.statusChecks)
             browserView.string = config.browserSessions.compactMap { $0.url }.joined(separator: "\n")
-        } else if let config = configCache?.projects.first(where: { normalizePath($0.dir) == project.dir }) {
-            stopView.string = config.stopScript ?? ""
-            portEditor.setDefinitions(config.ports)
-            processEditor.setProcessesWithChecks(config.processes, statusChecks: config.statusChecks)
-            browserView.string = config.browserSessions.compactMap { $0.url }.joined(separator: "\n")
+        } else {
+            let fullProject = try? orchestrator.project(id: project.id)
+            stopView.string = fullProject?.stopScript ?? ""
+            portEditor.setDefinitions(fullProject?.ports ?? [])
+            processEditor.setProcessesWithChecks(fullProject?.processes ?? [], statusChecks: fullProject?.statusChecks ?? [])
+            browserView.string = (fullProject?.browserSessions ?? []).compactMap { $0.url }.joined(separator: "\n")
         }
 
         let saveButton = actionButton(
@@ -2184,14 +2185,14 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 guard !dir.isEmpty else { return }
                 record = try orchestrator.addProject(dir: dir)
             }
-            var config = ProjectConfig(dir: record.dir)
-            config.setupScript = refs.setupView.string.isEmpty ? nil : refs.setupView.string
-            config.stopScript = refs.stopView.string.isEmpty ? nil : refs.stopView.string
-            config.ports = refs.portEditor.currentDefinitions()
-            config.processes = refs.processEditor.currentProcesses()
-            config.browserSessions = parseBrowserSessions(refs.browserView.string)
-            config.statusChecks = refs.processEditor.currentStatusChecks()
-            try orchestrator.updateProjectConfig(config)
+            try orchestrator.updateProjectConfig(projectID: record.id) { project in
+                project.setupScript = refs.setupView.string.isEmpty ? nil : refs.setupView.string
+                project.stopScript = refs.stopView.string.isEmpty ? nil : refs.stopView.string
+                project.ports = refs.portEditor.currentDefinitions()
+                project.processes = refs.processEditor.currentProcesses()
+                project.browserSessions = parseBrowserSessions(refs.browserView.string)
+                project.statusChecks = refs.processEditor.currentStatusChecks()
+            }
             reloadData()
         } catch { showError(error) }
     }

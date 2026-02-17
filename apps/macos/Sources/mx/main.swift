@@ -42,8 +42,9 @@ struct CLI {
         case "path": print(path)
         case "show":
             let config = try ConfigStore(path: path).load()
+            let projectCount = try SQLiteStore(path: try DatabaseLocator.defaultPath()).projects().count
             print(
-                "editor=\(config.editor?.rawValue ?? "none") port_range=\(config.portRange.start)-\(config.portRange.end) projects=\(config.projects.count)"
+                "editor=\(config.editor?.rawValue ?? "none") port_range=\(config.portRange.start)-\(config.portRange.end) projects=\(projectCount)"
             )
         default: throw NSError(domain: "mx.cli", code: 2, userInfo: [NSLocalizedDescriptionKey: "Unknown config action: \(args[2])"])
         }
@@ -90,12 +91,10 @@ struct CLI {
             let dir = try value(for: "--dir")
             let setupScript = optionalValue(for: "--setup-script")
             let stopScript = optionalValue(for: "--stop-script")
-            guard var config = try orchestrator.projectConfig(projectID: normalizePath(dir)) else {
-                throw NSError(domain: "mx.cli", code: 2, userInfo: [NSLocalizedDescriptionKey: "Project not found for dir \(dir)"])
+            try orchestrator.updateProjectConfig(projectID: normalizePath(dir)) { project in
+                if let setupScript { project.setupScript = setupScript }
+                if let stopScript { project.stopScript = stopScript }
             }
-            if let setupScript { config.setupScript = setupScript }
-            if let stopScript { config.stopScript = stopScript }
-            try orchestrator.updateProjectConfig(config)
             print("Updated project \(dir)")
         case "remove":
             let dir = try value(for: "--dir")
@@ -127,10 +126,10 @@ struct CLI {
             }
             print("Removed port \(name) from \(dir)")
         case "list":
-            guard let config = try orchestrator.projectConfig(projectID: projectID) else {
+            guard let project = try orchestrator.project(id: projectID) else {
                 throw NSError(domain: "mx.cli", code: 2, userInfo: [NSLocalizedDescriptionKey: "Project not found for dir \(dir)"])
             }
-            for port in config.ports { print(port.name) }
+            for port in project.ports { print(port.name) }
         default:
             throw NSError(domain: "mx.cli", code: 2, userInfo: [NSLocalizedDescriptionKey: "Unknown action: \(args[3]). Use: project port add|remove|list"])
         }
@@ -157,10 +156,10 @@ struct CLI {
             }
             print("Removed process \(name) from \(dir)")
         case "list":
-            guard let config = try orchestrator.projectConfig(projectID: projectID) else {
+            guard let project = try orchestrator.project(id: projectID) else {
                 throw NSError(domain: "mx.cli", code: 2, userInfo: [NSLocalizedDescriptionKey: "Project not found for dir \(dir)"])
             }
-            for process in config.processes {
+            for process in project.processes {
                 print("\(process.name ?? "-")\t\(process.command)")
             }
         default:
@@ -216,10 +215,10 @@ struct CLI {
             }
             print("Removed status check \(name) from \(dir)")
         case "list":
-            guard let config = try orchestrator.projectConfig(projectID: projectID) else {
+            guard let project = try orchestrator.project(id: projectID) else {
                 throw NSError(domain: "mx.cli", code: 2, userInfo: [NSLocalizedDescriptionKey: "Project not found for dir \(dir)"])
             }
-            for check in config.statusChecks {
+            for check in project.statusChecks {
                 print("\(check.name ?? "-")\tprocess=\(check.process)\tcommand=\(check.command)\tinterval=\(check.interval)\ttimeout=\(check.timeout)\ton-exit=\(check.onExit.rawValue)")
             }
         default:
@@ -247,10 +246,10 @@ struct CLI {
             }
             print("Removed browser session \(url) from \(dir)")
         case "list":
-            guard let config = try orchestrator.projectConfig(projectID: projectID) else {
+            guard let project = try orchestrator.project(id: projectID) else {
                 throw NSError(domain: "mx.cli", code: 2, userInfo: [NSLocalizedDescriptionKey: "Project not found for dir \(dir)"])
             }
-            for session in config.browserSessions {
+            for session in project.browserSessions {
                 print(session.url ?? "-")
             }
         default:

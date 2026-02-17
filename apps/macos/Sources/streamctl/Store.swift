@@ -3,7 +3,7 @@ import SQLite3
 
 public final class SQLiteStore {
     private let db: OpaquePointer
-    private let schemaVersion = 8
+    private let schemaVersion = 9
 
     public init(path: String) throws {
         var handle: OpaquePointer?
@@ -20,33 +20,69 @@ public final class SQLiteStore {
     public func upsert(project: ProjectRecord) throws {
         try execute(
             sql: """
-                INSERT INTO projects(id, name, dir, is_git, default_branch)
-                VALUES (?, ?, ?, ?, ?)
+                INSERT INTO projects(id, name, dir, is_git, default_branch, setup_script, stop_script)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(id) DO UPDATE SET
                   name = excluded.name,
                   dir = excluded.dir,
                   is_git = excluded.is_git,
-                  default_branch = excluded.default_branch
-                """, bindings: [project.id, project.name, project.dir, project.isGitRepo ? "1" : "0", project.defaultBranch ?? ""])
+                  default_branch = excluded.default_branch,
+                  setup_script = excluded.setup_script,
+                  stop_script = excluded.stop_script
+                """,
+            bindings: [
+                project.id, project.name, project.dir, project.isGitRepo ? "1" : "0",
+                project.defaultBranch ?? "", project.setupScript ?? "", project.stopScript ?? "",
+            ])
+        try execute(sql: "DELETE FROM project_port_definitions WHERE project_id = ?", bindings: [project.id])
+        for (index, definition) in project.ports.enumerated() {
+            try execute(
+                sql: "INSERT INTO project_port_definitions(project_id, name, order_index) VALUES (?, ?, ?)",
+                bindings: [project.id, definition.name, String(index)])
+        }
+        try execute(sql: "DELETE FROM project_processes WHERE project_id = ?", bindings: [project.id])
+        for (index, process) in project.processes.enumerated() {
+            try execute(
+                sql: "INSERT INTO project_processes(id, project_id, name, command, order_index) VALUES (?, ?, ?, ?, ?)",
+                bindings: [UUID().uuidString, project.id, process.name ?? "", process.command, String(index)])
+        }
+        try execute(sql: "DELETE FROM project_status_checks WHERE project_id = ?", bindings: [project.id])
+        for (index, check) in project.statusChecks.enumerated() {
+            try execute(
+                sql: """
+                    INSERT INTO project_status_checks(id, project_id, name, process, command, interval, timeout, on_exit, order_index)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                bindings: [
+                    UUID().uuidString, project.id, check.name ?? "", check.process, check.command,
+                    String(check.interval), String(check.timeout), check.onExit.rawValue, String(index),
+                ])
+        }
+        try execute(sql: "DELETE FROM project_browser_sessions WHERE project_id = ?", bindings: [project.id])
+        for (index, session) in project.browserSessions.enumerated() {
+            try execute(
+                sql: "INSERT INTO project_browser_sessions(id, project_id, url, order_index) VALUES (?, ?, ?, ?)",
+                bindings: [UUID().uuidString, project.id, session.url ?? "", String(index)])
+        }
     }
 
     public func project(id: String) throws -> ProjectRecord? {
-        guard let row = try queryRow(sql: "SELECT id, name, dir, is_git, default_branch FROM projects WHERE id = ?", bindings: [id]) else {
+        guard let row = try queryRow(sql: "SELECT id, name, dir, is_git, default_branch, setup_script, stop_script FROM projects WHERE id = ?", bindings: [id]) else {
             return nil
         }
-        return decodeProject(row: row)
+        return try decodeProjectWithTemplates(row: row)
     }
 
     public func project(dir: String) throws -> ProjectRecord? {
-        guard let row = try queryRow(sql: "SELECT id, name, dir, is_git, default_branch FROM projects WHERE dir = ?", bindings: [dir]) else {
+        guard let row = try queryRow(sql: "SELECT id, name, dir, is_git, default_branch, setup_script, stop_script FROM projects WHERE dir = ?", bindings: [dir]) else {
             return nil
         }
-        return decodeProject(row: row)
+        return try decodeProjectWithTemplates(row: row)
     }
 
     public func projects() throws -> [ProjectRecord] {
-        let rows = try queryRows(sql: "SELECT id, name, dir, is_git, default_branch FROM projects ORDER BY name")
-        return rows.compactMap { decodeProject(row: $0) }
+        let rows = try queryRows(sql: "SELECT id, name, dir, is_git, default_branch, setup_script, stop_script FROM projects ORDER BY name")
+        return try rows.compactMap { try decodeProjectWithTemplates(row: $0) }
     }
 
     public func deleteProject(id: String) throws {
@@ -65,6 +101,10 @@ public final class SQLiteStore {
         try execute(
             sql: "DELETE FROM workspace_port_definitions WHERE workspace_id IN (SELECT id FROM workspaces WHERE project_id = ?)", bindings: [id])
         try execute(sql: "DELETE FROM workspaces WHERE project_id = ?", bindings: [id])
+        try execute(sql: "DELETE FROM project_port_definitions WHERE project_id = ?", bindings: [id])
+        try execute(sql: "DELETE FROM project_processes WHERE project_id = ?", bindings: [id])
+        try execute(sql: "DELETE FROM project_status_checks WHERE project_id = ?", bindings: [id])
+        try execute(sql: "DELETE FROM project_browser_sessions WHERE project_id = ?", bindings: [id])
         try execute(sql: "DELETE FROM projects WHERE id = ?", bindings: [id])
     }
 
@@ -463,6 +503,10 @@ public final class SQLiteStore {
                 DROP TABLE IF EXISTS workspace_ports;
                 DROP TABLE IF EXISTS windows;
                 DROP TABLE IF EXISTS workspaces;
+                DROP TABLE IF EXISTS project_browser_sessions;
+                DROP TABLE IF EXISTS project_status_checks;
+                DROP TABLE IF EXISTS project_processes;
+                DROP TABLE IF EXISTS project_port_definitions;
                 DROP TABLE IF EXISTS projects;
                 DROP TABLE IF EXISTS settings;
                 DROP TABLE IF EXISTS schema_version;
@@ -486,7 +530,43 @@ public final class SQLiteStore {
               name TEXT NOT NULL,
               dir TEXT NOT NULL UNIQUE,
               is_git INTEGER NOT NULL,
-              default_branch TEXT
+              default_branch TEXT,
+              setup_script TEXT,
+              stop_script TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS project_port_definitions (
+              project_id TEXT NOT NULL,
+              name TEXT NOT NULL,
+              order_index INTEGER NOT NULL,
+              PRIMARY KEY (project_id, order_index)
+            );
+
+            CREATE TABLE IF NOT EXISTS project_processes (
+              id TEXT PRIMARY KEY,
+              project_id TEXT NOT NULL,
+              name TEXT,
+              command TEXT NOT NULL,
+              order_index INTEGER NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS project_status_checks (
+              id TEXT PRIMARY KEY,
+              project_id TEXT NOT NULL,
+              name TEXT,
+              process TEXT NOT NULL,
+              command TEXT NOT NULL,
+              interval INTEGER NOT NULL,
+              timeout INTEGER NOT NULL,
+              on_exit TEXT NOT NULL,
+              order_index INTEGER NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS project_browser_sessions (
+              id TEXT PRIMARY KEY,
+              project_id TEXT NOT NULL,
+              url TEXT,
+              order_index INTEGER NOT NULL
             );
 
             CREATE TABLE IF NOT EXISTS workspaces (
@@ -602,9 +682,32 @@ public final class SQLiteStore {
         try executeBatch(sql: sql)
     }
 
-    private func decodeProject(row: [String]) -> ProjectRecord? {
-        guard row.count >= 5 else { return nil }
-        return ProjectRecord(id: row[0], name: row[1], dir: row[2], isGitRepo: row[3] == "1", defaultBranch: row[4].isEmpty ? nil : row[4])
+    private func decodeProjectWithTemplates(row: [String]) throws -> ProjectRecord? {
+        guard row.count >= 7 else { return nil }
+        let id = row[0]
+        let ports = try queryRows(
+            sql: "SELECT name FROM project_port_definitions WHERE project_id = ? ORDER BY order_index", bindings: [id]
+        ).map { PortDefinition(name: $0[0]) }
+        let processes = try queryRows(
+            sql: "SELECT name, command FROM project_processes WHERE project_id = ? ORDER BY order_index", bindings: [id]
+        ).map { row in ProcessTemplate(name: row[0].isEmpty ? nil : row[0], command: row[1]) }
+        let statusChecks = try queryRows(
+            sql: "SELECT name, process, command, interval, timeout, on_exit FROM project_status_checks WHERE project_id = ? ORDER BY order_index",
+            bindings: [id]
+        ).map { row in
+            StatusCheckDefinition(
+                name: row[0].isEmpty ? nil : row[0], process: row[1], command: row[2],
+                interval: Int(row[3]) ?? PollingConstants.statusCheckDefaultInterval,
+                timeout: Int(row[4]) ?? PollingConstants.statusCheckDefaultTimeout,
+                onExit: StatusCheckOnExit(rawValue: row[5]) ?? .none)
+        }
+        let browserSessions = try queryRows(
+            sql: "SELECT url FROM project_browser_sessions WHERE project_id = ? ORDER BY order_index", bindings: [id]
+        ).map { row in BrowserSession(url: row[0].isEmpty ? nil : row[0]) }
+        return ProjectRecord(
+            id: id, name: row[1], dir: row[2], isGitRepo: row[3] == "1", defaultBranch: row[4].isEmpty ? nil : row[4],
+            setupScript: row[5].isEmpty ? nil : row[5], stopScript: row[6].isEmpty ? nil : row[6],
+            ports: ports, processes: processes, statusChecks: statusChecks, browserSessions: browserSessions)
     }
 
     private func decodeWorkspace(row: [String]) -> WorkspaceRecord? {
