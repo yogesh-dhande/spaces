@@ -11,12 +11,12 @@ VERSION="$2"
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 RELEASES_DIR="$REPO_ROOT/apps/web/public/releases"
 
-# Create releases directory structure
-mkdir -p "$RELEASES_DIR/$VERSION"
-
-# Copy DMG to releases directory
-cp "$DMG_FILE" "$RELEASES_DIR/$VERSION/"
-echo "✓ Copied $DMG_FILE to $RELEASES_DIR/$VERSION/"
+# Verify DMG exists (it should already be in public/releases/<version>/)
+if [ ! -f "$DMG_FILE" ]; then
+  echo "Error: DMG file not found at $DMG_FILE" >&2
+  exit 1
+fi
+echo "✓ DMG found at $DMG_FILE"
 
 # Generate appcast.xml
 FILE_SIZE=$(stat -f%z "$DMG_FILE")
@@ -80,14 +80,12 @@ EOF
 
 echo "✓ Generated appcast.xml and latest.html"
 
-# Ensure Next.js is built (copy static export to public if it exists)
-if [ -d "$REPO_ROOT/apps/web/out" ]; then
-  echo "Copying Next.js static export to public..."
-  # Clean public directory first (except releases)
-  find "$REPO_ROOT/apps/web/public" -mindepth 1 -maxdepth 1 ! -name 'releases' -exec rm -rf {} +
-  # Copy static site files
-  rsync -av "$REPO_ROOT/apps/web/out/" "$REPO_ROOT/apps/web/public/"
-  echo "✓ Next.js static files copied"
+# Copy releases directory to out/ for deployment
+if [ -d "$REPO_ROOT/apps/web/public/releases" ]; then
+  echo "Copying releases to out/ for deployment..."
+  mkdir -p "$REPO_ROOT/apps/web/out/releases"
+  rsync -av "$REPO_ROOT/apps/web/public/releases/" "$REPO_ROOT/apps/web/out/releases/"
+  echo "✓ Releases copied to out/"
 fi
 
 # Deploy to Firebase Hosting

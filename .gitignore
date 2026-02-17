@@ -4,6 +4,7 @@ default.profraw
 node_modules/
 apps/web/out
 apps/web/.next
+.DS_Store
 
 # Firebase Hosting - generated files (deployed, not committed)
 apps/web/public/*
@@ -14,4 +15,4 @@ apps/web/public/releases/*
 
 # Release artifacts
 *.zip
-releases/*.dmg
+.env

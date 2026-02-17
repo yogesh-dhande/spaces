@@ -20,6 +20,14 @@
 # production
 /build
 
+# build artifacts in public (prevent _next conflict)
+/public/_next/
+/public/_not-found/
+/public/docs/
+/public/*.html
+/public/*.txt
+/public/__next.*
+
 # misc
 .DS_Store
 *.pem

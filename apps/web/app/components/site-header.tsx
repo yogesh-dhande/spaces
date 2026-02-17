@@ -5,7 +5,7 @@ const navItems = [
   { href: "/#solution", label: "Solution" },
   { href: "/docs", label: "Docs" },
   {
-    href: "https://github.com/yogesh-dhande/agentmux/releases/latest",
+    href: "/releases/latest",
     label: "Download",
     external: true,
   },

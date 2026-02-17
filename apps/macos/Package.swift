@@ -41,7 +41,9 @@ let package = Package(
                     "-Xlinker", "-sectcreate",
                     "-Xlinker", "__TEXT",
                     "-Xlinker", "__info_plist",
-                    "-Xlinker", "Sources/Muxy/Info.plist"
+                    "-Xlinker", "Sources/Muxy/Info.plist",
+                    "-Xlinker", "-rpath",
+                    "-Xlinker", "@executable_path/../Frameworks"
                 ])
             ]
         ),

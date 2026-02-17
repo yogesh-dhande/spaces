@@ -104,6 +104,10 @@ if [[ ! -f "$MUXY_APP" ]] || [[ ! -f "$MX_CLI" ]]; then
   exit 1
 fi
 
+set -a          # auto-export all variables defined from now on
+source "$REPO_ROOT/.env"
+set +a          # stop auto-exporting
+
 "$SCRIPTS_DIR/codesign.sh" "$MUXY_APP" "$MX_CLI"
 echo "✓ Code signing complete"
 echo ""
@@ -112,7 +116,7 @@ echo ""
 echo "💿 Step 3/6: Creating DMG installer..."
 "$SCRIPTS_DIR/create-dmg.sh" "$MUXY_APP" "$MX_CLI" "$VERSION"
 DMG_NAME="Muxy-${VERSION}.dmg"
-DMG_PATH="$REPO_ROOT/releases/$DMG_NAME"
+DMG_PATH="$REPO_ROOT/apps/web/public/releases/$VERSION/$DMG_NAME"
 
 if [[ ! -f "$DMG_PATH" ]]; then
   echo "Error: DMG not created at $DMG_PATH" >&2
@@ -163,9 +167,4 @@ echo "📍 URLs:"
 echo "  • Appcast:  https://muxy-dev.web.app/releases/appcast.xml"
 echo "  • Download: https://muxy-dev.web.app/releases/latest"
 echo "  • DMG:      https://muxy-dev.web.app/releases/$VERSION/$DMG_NAME"
-echo ""
-echo "📝 Next steps:"
-echo "  1. Test the download link"
-echo "  2. Create GitHub release: gh release create v$VERSION $DMG_PATH --title \"Muxy $VERSION\" --generate-notes"
-echo "  3. Announce the release"
 echo ""

@@ -4,6 +4,10 @@
 <dict>
     <key>CFBundleName</key>
     <string>Muxy</string>
+    <key>CFBundleExecutable</key>
+    <string>Muxy</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
     <key>CFBundleIdentifier</key>
     <string>com.muxy.app</string>
     <key>CFBundleShortVersionString</key>

@@ -70,19 +70,18 @@ export default function HomePage() {
               And lets you move between them instantly.
             </p>
             <div className="flex flex-wrap gap-3">
-              <a
-                href="https://muxy-dev.web.app/releases/latest"
+              <Link
+                href="/releases/latest"
                 className="btn-primary rounded-full px-5 py-2.5 text-sm font-semibold transition-colors cursor-pointer"
               >
                 Download
-              </a>
-              <a
+              </Link>
+              <Link
                 href="#solution"
                 className="rounded-full border border-line px-5 py-2.5 text-sm font-semibold transition-colors hover:border-accent hover:text-accent"
-
               >
                 See How It Works
-              </a>
+              </Link>
 
             </div>
           </div>
@@ -257,12 +256,12 @@ export default function HomePage() {
             hunting, app hopping, port conflicts, and accidental interruptions.
           </p>
           <div className="mt-6 flex flex-wrap justify-center gap-3">
-            <a
-              href="https://muxy-dev.web.app/releases/latest"
+            <Link
+              href="/releases/latest"
               className="btn-primary rounded-full px-5 py-2.5 text-sm font-semibold transition-colors"
             >
               Download
-            </a>
+            </Link>
             <Link
               href="/docs"
               className="rounded-full border border-line px-5 py-2.5 text-sm font-semibold transition-colors hover:border-accent hover:text-accent"

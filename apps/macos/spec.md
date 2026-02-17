@@ -299,9 +299,8 @@
         - When a text input is focused, default text-edit shortcuts (copy/cut/paste/select-all/undo/redo) must keep working and should not be intercepted by app-level hotkey handling
 - Auto-Update
     - `AppVersion.current` is the single source of truth for the version string (in `streamctl`)
-    - App checks GitHub Releases API on launch and every 4 hours for new versions
+    - App checks for updates on launch and every 4 hours for new versions
     - App menu shows "Check for Updates..." which reflects current update status
     - When an update is available, user can download and install from within the app
     - Update flow: download zip, extract, replace binary, relaunch
-    - CLI: `muxy version` prints the current version
-    - Release: `scripts/release.sh` builds, signs, packages, and publishes via `gh release create`
+    - CLI: `mx version` prints the current version

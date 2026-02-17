@@ -82,10 +82,9 @@
 - Simplified workspace env vars: `MUXY_WORKSPACE_DIR` and `MUXY_PROJECT_DIR` replace the old lowercase-prefixed and scoped cross-project keys.
 - Nested status check configuration under each process in `ProcessEditor` (removed standalone `StatusCheckEditor`); run tab shows check results as indented sub-rows with colored dots.
 - Added versioning (`AppVersion.current` in `streamctl`) and `Info.plist` bundle metadata (`CFBundleShortVersionString`, `CFBundleVersion`, `CFBundleIdentifier`).
-- Added auto-update system: `UpdateChecker` queries GitHub Releases API on launch and every 4 hours; `AppUpdater` downloads, extracts, replaces the binary, and relaunches.
+- Added auto-update system: `UpdateChecker` queries for updates on launch and every 4 hours; `AppUpdater` downloads, extracts, replaces the binary, and relaunches.
 - App menu includes "Check for Updates..." item that reflects update status.
-- CLI `muxy version` prints the current version.
-- Added `scripts/release.sh` (build, sign, package, publish) and `scripts/codesign.sh` (Developer ID signing helper).
+- CLI `mx version` prints the current version.
 
 ## Remaining
 - Dependency/permission onboarding (detect missing `yabai` or macOS accessibility permissions and guide the user).
@@ -94,7 +93,6 @@
 - Window reconciliation on app restart (re-scan existing windows, match browser sessions, and map them to workspaces) for cases where the app has not been focused yet.
 
 ## Polish
-- ~~Auto-update system~~ Done: GitHub Releases-based auto-update with in-app download and binary replacement.
 - Make a plan for charging users by selling licenses 
 - Crash reporting + opt-in analytics, plus a diagnostics export (logs, db schema version, config summary).
 - Structured logging with log levels and rotating files.

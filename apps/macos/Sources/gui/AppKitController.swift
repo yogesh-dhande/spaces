@@ -258,6 +258,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         updateItem.target = self
         checkForUpdatesMenuItem = updateItem
         appMenu.addItem(updateItem)
+        let versionItem = NSMenuItem(title: "Version \(AppVersion.current)", action: nil, keyEquivalent: "")
+        versionItem.isEnabled = false
+        appMenu.addItem(versionItem)
         appMenu.addItem(.separator())
         appMenu.addItem(withTitle: "Quit Muxy", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         appMenuItem.submenu = appMenu

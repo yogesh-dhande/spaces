@@ -10,7 +10,7 @@ MUXY_APP="$1"
 MX_CLI="$2"
 VERSION="$3"
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-RELEASES_DIR="$REPO_ROOT/releases"
+RELEASES_DIR="$REPO_ROOT/apps/web/public/releases/$VERSION"
 DMG_NAME="Muxy-${VERSION}.dmg"
 DMG_PATH="$RELEASES_DIR/$DMG_NAME"
 VOLUME_NAME="Muxy-${VERSION}"
@@ -51,7 +51,7 @@ fi
 
 # Copy mx CLI
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-cp "$SCRIPT_DIR/../Resources/mx" "$INSTALL_DIR/mx"
+cp "$SCRIPT_DIR/Muxy.app/Contents/Resources/mx" "$INSTALL_DIR/mx"
 chmod +x "$INSTALL_DIR/mx"
 
 echo "✓ mx CLI installed to $INSTALL_DIR/mx"
@@ -74,6 +74,36 @@ chmod +x "$cli_installer"
 # Copy mx CLI to Resources
 mkdir -p "$app_bundle/Contents/Resources"
 cp "$MX_CLI" "$app_bundle/Contents/Resources/mx"
+
+# Copy Sparkle.framework (required dependency)
+mkdir -p "$app_bundle/Contents/Frameworks"
+SPARKLE_FRAMEWORK="apps/macos/.build/arm64-apple-macosx/release/Sparkle.framework"
+if [[ -d "$SPARKLE_FRAMEWORK" ]]; then
+  cp -R "$SPARKLE_FRAMEWORK" "$app_bundle/Contents/Frameworks/"
+else
+  echo "Error: Sparkle.framework not found at $SPARKLE_FRAMEWORK" >&2
+  exit 1
+fi
+
+# Sign the complete app bundle (required for notarization)
+IDENTITY="${CODESIGN_IDENTITY:--}"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+ENTITLEMENTS="$SCRIPT_DIR/entitlements.plist"
+echo "Signing app bundle with identity: $IDENTITY"
+codesign --force --deep --options runtime --entitlements "$ENTITLEMENTS" --sign "$IDENTITY" "$app_bundle"
+
+# Verify signature
+codesign --verify --verbose=2 "$app_bundle"
+echo "✓ App bundle signature verified"
+
+# Staple notarization ticket (if notarized)
+# This embeds the ticket so the app can be verified offline
+if xcrun stapler staple "$app_bundle" 2>/dev/null; then
+  echo "✓ Notarization ticket stapled"
+  xcrun stapler validate "$app_bundle"
+else
+  echo "⚠️  No notarization ticket found (app not notarized or stapling failed)"
+fi
 
 # Create symlink to Applications
 ln -s /Applications "$staging/Applications"

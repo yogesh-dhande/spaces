@@ -180,22 +180,16 @@ scripts/coverage.sh
 ```
 
 ## Release
-Releases are automated via GitHub Actions when a version tag is pushed:
-```bash
-git tag v0.2.0
-git push origin v0.2.0
-```
+
 
 The release workflow:
 1. Builds in release configuration
 2. Code-signs `Muxy` app and `mx` CLI
 3. Creates a DMG installer with app bundle and CLI installer
 4. Optionally notarizes the DMG
-5. Uploads to Firebase Storage with long cache headers
+5. Uploads to Firebase Hosting with long cache headers
 6. Generates and uploads appcast.xml with no-cache headers
-7. Creates a GitHub release
 
 Required secrets:
 - `CODESIGN_IDENTITY`: Developer ID Application certificate
 - `APPLE_ID`, `TEAM_ID`, `APP_PASSWORD`: For notarization
-- `FIREBASE_SERVICE_ACCOUNT`: Service account JSON for Firebase Storage
