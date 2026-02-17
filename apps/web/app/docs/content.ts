@@ -97,6 +97,14 @@ export const docsPageLinks: DocsPageLink[] = [
     audience:
       "Developers looking for ready-made configuration examples for real-world projects.",
   },
+  {
+    href: "/docs/cli",
+    title: "CLI Reference",
+    summary:
+      "Complete mx command reference for managing projects, workspaces, config, and settings from scripts and AI agent pipelines.",
+    audience:
+      "AI coding agents and developers who drive Muxy from the terminal or automated workflows.",
+  },
 ];
 
 export const docsPublishingOrder = [
@@ -113,4 +121,5 @@ export const docsPublishingOrder = [
   "Troubleshooting",
   "FAQ",
   "Cookbook Guides",
+  "CLI Reference",
 ];

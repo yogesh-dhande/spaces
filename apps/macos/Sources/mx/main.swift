@@ -52,11 +52,16 @@ struct CLI {
     private func runProjectSubcommand(orchestrator: MuxyOrchestrator) throws {
         guard args.count >= 3 else {
             throw NSError(
-                domain: "mx.cli", code: 2, userInfo: [NSLocalizedDescriptionKey: "Missing project action. Use: project list|add|update|remove"]
+                domain: "mx.cli", code: 2,
+                userInfo: [NSLocalizedDescriptionKey: "Missing project action. Use: project list|add|update|remove|port|process|status-check|browser-session"]
             )
         }
 
         switch args[2] {
+        case "port": try runProjectPortSubcommand(orchestrator: orchestrator)
+        case "process": try runProjectProcessSubcommand(orchestrator: orchestrator)
+        case "status-check": try runProjectStatusCheckSubcommand(orchestrator: orchestrator)
+        case "browser-session": try runProjectBrowserSessionSubcommand(orchestrator: orchestrator)
         case "list":
             let projects = try orchestrator.listProjects()
             for project in projects {
@@ -97,6 +102,159 @@ struct CLI {
             try orchestrator.removeProject(dir: dir)
             print("Removed project \(dir)")
         default: throw NSError(domain: "mx.cli", code: 2, userInfo: [NSLocalizedDescriptionKey: "Unknown project action: \(args[2])"])
+        }
+    }
+
+    private func runProjectPortSubcommand(orchestrator: MuxyOrchestrator) throws {
+        guard args.count >= 4 else {
+            throw NSError(domain: "mx.cli", code: 2, userInfo: [NSLocalizedDescriptionKey: "Missing action. Use: project port add|remove|list --dir <path> [--name <name>]"])
+        }
+        let dir = try value(for: "--dir")
+        let projectID = normalizePath(dir)
+        switch args[3] {
+        case "add":
+            let name = try value(for: "--name")
+            try orchestrator.updateProjectConfig(projectID: projectID) { config in
+                if !config.ports.contains(where: { $0.name == name }) {
+                    config.ports.append(PortDefinition(name: name))
+                }
+            }
+            print("Added port \(name) to \(dir)")
+        case "remove":
+            let name = try value(for: "--name")
+            try orchestrator.updateProjectConfig(projectID: projectID) { config in
+                config.ports.removeAll { $0.name == name }
+            }
+            print("Removed port \(name) from \(dir)")
+        case "list":
+            guard let config = try orchestrator.projectConfig(projectID: projectID) else {
+                throw NSError(domain: "mx.cli", code: 2, userInfo: [NSLocalizedDescriptionKey: "Project not found for dir \(dir)"])
+            }
+            for port in config.ports { print(port.name) }
+        default:
+            throw NSError(domain: "mx.cli", code: 2, userInfo: [NSLocalizedDescriptionKey: "Unknown action: \(args[3]). Use: project port add|remove|list"])
+        }
+    }
+
+    private func runProjectProcessSubcommand(orchestrator: MuxyOrchestrator) throws {
+        guard args.count >= 4 else {
+            throw NSError(domain: "mx.cli", code: 2, userInfo: [NSLocalizedDescriptionKey: "Missing action. Use: project process add|remove|list --dir <path>"])
+        }
+        let dir = try value(for: "--dir")
+        let projectID = normalizePath(dir)
+        switch args[3] {
+        case "add":
+            let name = optionalValue(for: "--name")
+            let command = try value(for: "--command")
+            try orchestrator.updateProjectConfig(projectID: projectID) { config in
+                config.processes.append(ProcessTemplate(name: name, command: command))
+            }
+            print("Added process \(name ?? command) to \(dir)")
+        case "remove":
+            let name = try value(for: "--name")
+            try orchestrator.updateProjectConfig(projectID: projectID) { config in
+                config.processes.removeAll { $0.name == name }
+            }
+            print("Removed process \(name) from \(dir)")
+        case "list":
+            guard let config = try orchestrator.projectConfig(projectID: projectID) else {
+                throw NSError(domain: "mx.cli", code: 2, userInfo: [NSLocalizedDescriptionKey: "Project not found for dir \(dir)"])
+            }
+            for process in config.processes {
+                print("\(process.name ?? "-")\t\(process.command)")
+            }
+        default:
+            throw NSError(domain: "mx.cli", code: 2, userInfo: [NSLocalizedDescriptionKey: "Unknown action: \(args[3]). Use: project process add|remove|list"])
+        }
+    }
+
+    private func runProjectStatusCheckSubcommand(orchestrator: MuxyOrchestrator) throws {
+        guard args.count >= 4 else {
+            throw NSError(domain: "mx.cli", code: 2, userInfo: [NSLocalizedDescriptionKey: "Missing action. Use: project status-check add|remove|list --dir <path>"])
+        }
+        let dir = try value(for: "--dir")
+        let projectID = normalizePath(dir)
+        switch args[3] {
+        case "add":
+            let name = optionalValue(for: "--name")
+            let process = try value(for: "--process")
+            let command = try value(for: "--command")
+            let intervalStr = optionalValue(for: "--interval")
+            let timeoutStr = optionalValue(for: "--timeout")
+            let onExitStr = optionalValue(for: "--on-exit") ?? StatusCheckOnExit.none.rawValue
+            guard let onExit = StatusCheckOnExit(rawValue: onExitStr) else {
+                throw NSError(domain: "mx.cli", code: 2, userInfo: [NSLocalizedDescriptionKey: "Invalid --on-exit value '\(onExitStr)'. Use: none|restart|notify"])
+            }
+            let interval: Int
+            if let s = intervalStr {
+                guard let n = Int(s), n > 0 else {
+                    throw NSError(domain: "mx.cli", code: 2, userInfo: [NSLocalizedDescriptionKey: "Invalid --interval '\(s)'. Must be a positive integer."])
+                }
+                interval = n
+            } else {
+                interval = PollingConstants.statusCheckDefaultInterval
+            }
+            let timeout: Int
+            if let s = timeoutStr {
+                guard let n = Int(s), n > 0 else {
+                    throw NSError(domain: "mx.cli", code: 2, userInfo: [NSLocalizedDescriptionKey: "Invalid --timeout '\(s)'. Must be a positive integer."])
+                }
+                timeout = n
+            } else {
+                timeout = PollingConstants.statusCheckDefaultTimeout
+            }
+            try orchestrator.updateProjectConfig(projectID: projectID) { config in
+                config.statusChecks.append(
+                    StatusCheckDefinition(name: name, process: process, command: command, interval: interval, timeout: timeout, onExit: onExit)
+                )
+            }
+            print("Added status check \(name ?? process) to \(dir)")
+        case "remove":
+            let name = try value(for: "--name")
+            try orchestrator.updateProjectConfig(projectID: projectID) { config in
+                config.statusChecks.removeAll { $0.name == name }
+            }
+            print("Removed status check \(name) from \(dir)")
+        case "list":
+            guard let config = try orchestrator.projectConfig(projectID: projectID) else {
+                throw NSError(domain: "mx.cli", code: 2, userInfo: [NSLocalizedDescriptionKey: "Project not found for dir \(dir)"])
+            }
+            for check in config.statusChecks {
+                print("\(check.name ?? "-")\tprocess=\(check.process)\tcommand=\(check.command)\tinterval=\(check.interval)\ttimeout=\(check.timeout)\ton-exit=\(check.onExit.rawValue)")
+            }
+        default:
+            throw NSError(domain: "mx.cli", code: 2, userInfo: [NSLocalizedDescriptionKey: "Unknown action: \(args[3]). Use: project status-check add|remove|list"])
+        }
+    }
+
+    private func runProjectBrowserSessionSubcommand(orchestrator: MuxyOrchestrator) throws {
+        guard args.count >= 4 else {
+            throw NSError(domain: "mx.cli", code: 2, userInfo: [NSLocalizedDescriptionKey: "Missing action. Use: project browser-session add|remove|list --dir <path>"])
+        }
+        let dir = try value(for: "--dir")
+        let projectID = normalizePath(dir)
+        switch args[3] {
+        case "add":
+            let url = try value(for: "--url")
+            try orchestrator.updateProjectConfig(projectID: projectID) { config in
+                config.browserSessions.append(BrowserSession(url: url))
+            }
+            print("Added browser session \(url) to \(dir)")
+        case "remove":
+            let url = try value(for: "--url")
+            try orchestrator.updateProjectConfig(projectID: projectID) { config in
+                config.browserSessions.removeAll { $0.url == url }
+            }
+            print("Removed browser session \(url) from \(dir)")
+        case "list":
+            guard let config = try orchestrator.projectConfig(projectID: projectID) else {
+                throw NSError(domain: "mx.cli", code: 2, userInfo: [NSLocalizedDescriptionKey: "Project not found for dir \(dir)"])
+            }
+            for session in config.browserSessions {
+                print(session.url ?? "-")
+            }
+        default:
+            throw NSError(domain: "mx.cli", code: 2, userInfo: [NSLocalizedDescriptionKey: "Unknown action: \(args[3]). Use: project browser-session add|remove|list"])
         }
     }
 
@@ -382,6 +540,18 @@ struct CLI {
               mx project add --git-url <url>
               mx project update --dir <path> [--setup-script <script>] [--stop-script <script>]
               mx project remove --dir <path>
+              mx project port list --dir <path>
+              mx project port add --dir <path> --name <NAME>
+              mx project port remove --dir <path> --name <NAME>
+              mx project process list --dir <path>
+              mx project process add --dir <path> --command <cmd> [--name <name>]
+              mx project process remove --dir <path> --name <name>
+              mx project status-check list --dir <path>
+              mx project status-check add --dir <path> --process <process> --command <cmd> [--name <name>] [--interval <seconds>] [--timeout <seconds>] [--on-exit none|restart|notify]
+              mx project status-check remove --dir <path> --name <name>
+              mx project browser-session list --dir <path>
+              mx project browser-session add --dir <path> --url <url>
+              mx project browser-session remove --dir <path> --url <url>
 
               mx workspace list --project-dir <path> [--all]
               mx workspace create --project-dir <path> --name <name> [--branch <branch>] [--target-branch <branch>] [--directory-name <name>]

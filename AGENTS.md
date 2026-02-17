@@ -13,6 +13,7 @@
 - Avoid window-level automation outside yabai.
 - Do not add backward compatibility layers unless explicitly requested.
 - Any project setting related to workspace creation and used during workspace launch must be overridable per workspace after creation.
+- Anything configurable via the GUI must also be configurable via the CLI (`mx`). Keep the two in sync.
 
 ## Data & Paths
 - DB path: `~/.muxy/muxy.db` (managed automatically).
