@@ -89,6 +89,49 @@ final class GitClientTests: XCTestCase {
         XCTAssertEqual(branch, "new-remote-only")
     }
 
+    func testListWorktreesReturnsAllWorktrees() throws {
+        let root = try makeTempDirectory()
+        let repo = root.appendingPathComponent("repo", isDirectory: true)
+        try FileManager.default.createDirectory(at: repo, withIntermediateDirectories: true)
+        try initializeGitRepository(at: repo, initialBranch: "main")
+        let client = GitClient()
+        
+        let worktree1 = root.appendingPathComponent("feature-1", isDirectory: true)
+        let worktree2 = root.appendingPathComponent("feature-2", isDirectory: true)
+        try client.createWorktree(path: repo.path, worktreePath: worktree1.path, branch: "feature-1")
+        try client.createWorktree(path: repo.path, worktreePath: worktree2.path, branch: "feature-2")
+        
+        let worktrees = try client.listWorktrees(path: repo.path)
+        
+        XCTAssertEqual(worktrees.count, 3)
+        
+        let normalizedRepoPath = URL(fileURLWithPath: repo.path).resolvingSymlinksInPath().path
+        let normalizedWorktree1Path = URL(fileURLWithPath: worktree1.path).resolvingSymlinksInPath().path
+        let normalizedWorktree2Path = URL(fileURLWithPath: worktree2.path).resolvingSymlinksInPath().path
+        
+        let mainWorktree = try XCTUnwrap(worktrees.first(where: { 
+            URL(fileURLWithPath: $0.path).resolvingSymlinksInPath().path == normalizedRepoPath 
+        }))
+        XCTAssertEqual(mainWorktree.branchName, "main")
+        
+        let feature1 = try XCTUnwrap(worktrees.first(where: { 
+            URL(fileURLWithPath: $0.path).resolvingSymlinksInPath().path == normalizedWorktree1Path 
+        }))
+        XCTAssertEqual(feature1.branchName, "feature-1")
+        
+        let feature2 = try XCTUnwrap(worktrees.first(where: { 
+            URL(fileURLWithPath: $0.path).resolvingSymlinksInPath().path == normalizedWorktree2Path 
+        }))
+        XCTAssertEqual(feature2.branchName, "feature-2")
+    }
+    
+    func testListWorktreesReturnsEmptyForNonGitRepo() throws {
+        let nonRepo = try makeTempDirectory()
+        let client = GitClient()
+        
+        XCTAssertThrowsError(try client.listWorktrees(path: nonRepo.path))
+    }
+
     func testCreateAndRemoveWorktreeForNewBranch() throws {
         let root = try makeTempDirectory()
         let repo = root.appendingPathComponent("repo", isDirectory: true)

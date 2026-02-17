@@ -81,6 +81,12 @@ Workspace settings:
 - Snapshots are stored in the runtime DB alongside other workspace data.
 - Edits to a running workspace reconcile processes and browser sessions immediately.
 
+Workspace identification:
+- Workspaces are uniquely identified by their directory path (`dir` field).
+- CLI commands accept `--dir <path>` (defaults to current directory) to identify workspaces.
+- `mx workspace import` registers existing git worktrees as Muxy workspaces by inferring project, branch, and name from the worktree path.
+- `mx workspace discover` automatically discovers and registers all untracked worktrees for registered projects.
+
 Runtime database:
 - Path: `~/.muxy/muxy.db`.
 - Schema is versioned via a `schema_version` table; when the version changes all tables are dropped and recreated. Currently at v1.

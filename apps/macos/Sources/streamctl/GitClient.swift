@@ -83,6 +83,47 @@ public final class GitClient {
         try runGitOrThrow(["-C", repoPath, "worktree", "remove", "--force", worktreePath])
     }
 
+    public func listWorktrees(path repoPath: String) throws -> [WorktreeInfo] {
+        let output = try runGitAndCapture(["-C", repoPath, "worktree", "list", "--porcelain"])
+        return parseWorktreeList(output)
+    }
+
+    private func parseWorktreeList(_ output: String) -> [WorktreeInfo] {
+        var worktrees: [WorktreeInfo] = []
+        var currentWorktree: [String: String] = [:]
+        
+        for line in output.split(separator: "\n", omittingEmptySubsequences: false) {
+            let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+            if trimmed.isEmpty {
+                if let path = currentWorktree["worktree"] {
+                    worktrees.append(WorktreeInfo(
+                        path: path,
+                        head: currentWorktree["HEAD"],
+                        branch: currentWorktree["branch"]
+                    ))
+                }
+                currentWorktree = [:]
+                continue
+            }
+            
+            if let spaceIndex = trimmed.firstIndex(of: " ") {
+                let key = String(trimmed[..<spaceIndex])
+                let value = String(trimmed[trimmed.index(after: spaceIndex)...])
+                currentWorktree[key] = value
+            }
+        }
+        
+        if let path = currentWorktree["worktree"] {
+            worktrees.append(WorktreeInfo(
+                path: path,
+                head: currentWorktree["HEAD"],
+                branch: currentWorktree["branch"]
+            ))
+        }
+        
+        return worktrees
+    }
+
     public func clone(url: String, destination: String) throws { try runGitOrThrow(["clone", url, destination]) }
 
     public func deleteBranch(path repoPath: String, branch: String) { _ = try? runGit(["-C", repoPath, "branch", "-D", branch]) }
@@ -94,7 +135,7 @@ public final class GitClient {
         return process.terminationStatus
     }
 
-    private func runGitAndCapture(_ arguments: [String]) throws -> String {
+    public func runGitAndCapture(_ arguments: [String]) throws -> String {
         let process = makeGitProcess(arguments)
         let out = Pipe()
         let err = Pipe()

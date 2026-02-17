@@ -32,7 +32,7 @@ public final class MuxyOrchestrator {
         let scanResult: BrowserWindowScanResult
     }
 
-    private let store: SQLiteStore
+    public let store: SQLiteStore
     private let git: GitClient
     private let yabai: YabaiAdapter
     private let iterm: Iterm2Adapter
@@ -317,6 +317,122 @@ public final class MuxyOrchestrator {
         if git.branchExists(path: project.dir, branch: "main") || git.remoteBranchExists(path: project.dir, branch: "main") { return "main" }
         if git.branchExists(path: project.dir, branch: "master") || git.remoteBranchExists(path: project.dir, branch: "master") { return "master" }
         throw MuxyError.invalidArgument(message: "Target branch is required for git projects.")
+    }
+
+    public func createWorkspaceFromWorktree(worktreePath: String, name: String? = nil) throws -> WorkspaceRecord {
+        let normalizedWorktreePath = normalizePath(worktreePath)
+        guard FileManager.default.fileExists(atPath: normalizedWorktreePath) else {
+            throw MuxyError.invalidArgument(message: "Worktree path does not exist: \(normalizedWorktreePath)")
+        }
+        guard git.isRepo(path: normalizedWorktreePath) else {
+            throw MuxyError.invalidArgument(message: "Path is not a git repository: \(normalizedWorktreePath)")
+        }
+        
+        let gitCommonDirOutput = try git.runGitAndCapture(["-C", normalizedWorktreePath, "rev-parse", "--git-common-dir"])
+        let gitCommonDir = gitCommonDirOutput.trimmingCharacters(in: .whitespacesAndNewlines)
+        let gitCommonDirURL = URL(fileURLWithPath: gitCommonDir, relativeTo: URL(fileURLWithPath: normalizedWorktreePath))
+            .standardized
+        let gitRoot = gitCommonDirURL.deletingLastPathComponent().path
+        let projectID = normalizePath(gitRoot)
+        
+        guard let project = try store.project(id: projectID) else {
+            throw MuxyError.invalidArgument(
+                message: "Project not found for git root: \(gitRoot). Add the project first using: mx project add --dir \(gitRoot)")
+        }
+        
+        if let existing = try store.workspace(dir: normalizedWorktreePath) {
+            if existing.isArchived {
+                throw MuxyError.invalidArgument(
+                    message: "Workspace already exists but is archived: \(existing.name). Unarchive it or use a different worktree.")
+            }
+            throw MuxyError.invalidArgument(message: "Workspace already exists: \(existing.name)")
+        }
+        
+        let branchOutput = try git.runGitAndCapture(["-C", normalizedWorktreePath, "rev-parse", "--abbrev-ref", "HEAD"])
+        let branch = branchOutput.trimmingCharacters(in: .whitespacesAndNewlines)
+        
+        let inferredName: String
+        if let providedName = name?.trimmingCharacters(in: .whitespacesAndNewlines), !providedName.isEmpty {
+            inferredName = providedName
+        } else {
+            inferredName = branch
+        }
+        
+        if let existing = try store.workspace(projectID: projectID, name: inferredName), !existing.isArchived {
+            throw MuxyError.workspaceAlreadyExists(project: project.name, workspace: inferredName)
+        }
+        
+        let dirname = URL(fileURLWithPath: normalizedWorktreePath).lastPathComponent
+        
+        let workspace = WorkspaceRecord(
+            id: UUID().uuidString, projectID: project.id, name: inferredName, dir: normalizedWorktreePath, dirname: dirname, branch: branch,
+            isDefault: false, isArchived: false, isRunning: false, lastLaunchedAt: nil)
+        try store.upsert(workspace: workspace)
+        try seedWorkspaceSettings(project: project, workspace: workspace)
+        
+        let appConfig = try store.appConfig()
+        let portDefinitions = try store.workspacePortDefinitions(workspaceID: workspace.id)
+        _ = try PortAllocator(store: store).allocatePorts(workspaceID: workspace.id, definitions: portDefinitions, range: appConfig.portRange)
+        
+        if let script = project.setupScript, !script.isEmpty {
+            let namedPorts = try store.workspacePortsNamed(workspaceID: workspace.id)
+            let env = buildWorkspaceEnv(project: project, workspace: workspace, namedPorts: namedPorts)
+            try runScript(applyEnvVars(script, env: env), cwd: workspace.dir)
+        }
+        
+        return workspace
+    }
+
+    public func scanAndCreateWorkspacesFromWorktrees(projectID: String? = nil) throws -> [WorkspaceRecord] {
+        let projects: [ProjectRecord]
+        if let projectID {
+            guard let project = try store.project(id: projectID) else {
+                throw MuxyError.missingProject(dir: projectID)
+            }
+            projects = [project]
+        } else {
+            projects = try store.projects()
+        }
+        
+        var createdWorkspaces: [WorkspaceRecord] = []
+        
+        for project in projects where project.isGitRepo {
+            let worktrees = try git.listWorktrees(path: project.dir)
+            
+            for worktree in worktrees {
+                let normalizedPath = normalizePath(worktree.path)
+                
+                if let _ = try store.workspace(dir: normalizedPath) {
+                    continue
+                }
+                
+                guard let branchName = worktree.branchName else {
+                    continue
+                }
+                
+                let workspace = WorkspaceRecord(
+                    id: UUID().uuidString, projectID: project.id, name: branchName, dir: normalizedPath,
+                    dirname: URL(fileURLWithPath: normalizedPath).lastPathComponent, branch: branchName,
+                    isDefault: false, isArchived: false, isRunning: false, lastLaunchedAt: nil)
+                try store.upsert(workspace: workspace)
+                try seedWorkspaceSettings(project: project, workspace: workspace)
+                
+                let appConfig = try store.appConfig()
+                let portDefinitions = try store.workspacePortDefinitions(workspaceID: workspace.id)
+                _ = try PortAllocator(store: store).allocatePorts(
+                    workspaceID: workspace.id, definitions: portDefinitions, range: appConfig.portRange)
+                
+                if let script = project.setupScript, !script.isEmpty {
+                    let namedPorts = try store.workspacePortsNamed(workspaceID: workspace.id)
+                    let env = buildWorkspaceEnv(project: project, workspace: workspace, namedPorts: namedPorts)
+                    try runScript(applyEnvVars(script, env: env), cwd: workspace.dir)
+                }
+                
+                createdWorkspaces.append(workspace)
+            }
+        }
+        
+        return createdWorkspaces
     }
 
     public func launchWorkspace(workspaceID: String) throws {

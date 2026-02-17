@@ -256,31 +256,79 @@ mx workspace create \\
           <Cmd>setup_script</Cmd> runs with those port env vars already set.
         </p>
 
+        <h3 className="mt-5 text-base font-semibold">Import existing worktree</h3>
+        <CodeBlock>{`# Import workspace from current directory (infers name from branch)
+mx workspace import
+
+# Import workspace from specific worktree path
+mx workspace import --dir /path/to/worktree
+
+# Import workspace with custom name
+mx workspace import --dir /path/to/worktree --name "my-workspace"`}</CodeBlock>
+        <p className="mt-2 text-sm leading-7 text-foreground-soft">
+          Registers an existing git worktree as a Muxy workspace. The project must already be
+          registered. Muxy infers the workspace name from the branch name if not provided.
+          Port numbers are allocated and the <Cmd>setup_script</Cmd> runs immediately.
+        </p>
+
+        <h3 className="mt-5 text-base font-semibold">Discover and auto-create workspaces</h3>
+        <CodeBlock>{`# Discover all worktrees across all registered projects
+mx workspace discover
+
+# Discover worktrees for a specific project only
+mx workspace discover --project-dir /path/to/repo`}</CodeBlock>
+        <p className="mt-2 text-sm leading-7 text-foreground-soft">
+          Automatically discovers all git worktrees for registered projects and creates Muxy
+          workspaces for any that aren't already tracked. Useful for bulk-importing existing
+          worktrees or syncing after manual git worktree operations.
+        </p>
+
         <h3 className="mt-5 text-base font-semibold">Launch a workspace</h3>
-        <CodeBlock>{`mx workspace launch --project-dir /path/to/repo --name "feat-auth"`}</CodeBlock>
+        <CodeBlock>{`# Launch from current directory
+mx workspace launch
+
+# Launch from specific workspace directory
+mx workspace launch --dir /path/to/workspace`}</CodeBlock>
         <p className="mt-2 text-sm leading-7 text-foreground-soft">
           Starts configured processes in iTerm2, opens browser sessions in Chrome, and opens the
-          preferred editor. Only valid for stopped workspaces.
+          preferred editor. Only valid for stopped workspaces. When run without arguments, uses
+          the current directory to identify the workspace.
         </p>
 
         <h3 className="mt-5 text-base font-semibold">Stop a workspace</h3>
-        <CodeBlock>{`mx workspace stop --project-dir /path/to/repo --name "feat-auth"`}</CodeBlock>
+        <CodeBlock>{`# Stop from current directory
+mx workspace stop
+
+# Stop specific workspace
+mx workspace stop --dir /path/to/workspace`}</CodeBlock>
 
         <h3 className="mt-5 text-base font-semibold">Restart a workspace</h3>
-        <CodeBlock>{`mx workspace restart --project-dir /path/to/repo --name "feat-auth"`}</CodeBlock>
+        <CodeBlock>{`# Restart from current directory
+mx workspace restart
+
+# Restart specific workspace
+mx workspace restart --dir /path/to/workspace`}</CodeBlock>
         <p className="mt-2 text-sm leading-7 text-foreground-soft">
           Stops then immediately launches. Useful after a dependency install or config change.
         </p>
 
         <h3 className="mt-5 text-base font-semibold">Archive a workspace</h3>
-        <CodeBlock>{`mx workspace archive --project-dir /path/to/repo --name "feat-auth"`}</CodeBlock>
+        <CodeBlock>{`# Archive from current directory
+mx workspace archive
+
+# Archive specific workspace
+mx workspace archive --dir /path/to/workspace`}</CodeBlock>
         <p className="mt-2 text-sm leading-7 text-foreground-soft">
           Stops the workspace, releases reserved ports, and marks it archived. Use{" "}
           <Cmd>--all</Cmd> on <Cmd>workspace list</Cmd> to see archived workspaces.
         </p>
 
         <h3 className="mt-5 text-base font-semibold">Activate a workspace</h3>
-        <CodeBlock>{`mx workspace activate --project-dir /path/to/repo --name "feat-auth"`}</CodeBlock>
+        <CodeBlock>{`# Activate from current directory
+mx workspace activate
+
+# Activate specific workspace
+mx workspace activate --dir /path/to/workspace`}</CodeBlock>
         <p className="mt-2 text-sm leading-7 text-foreground-soft">
           Brings the workspace windows to the front so the developer can immediately resume work.
         </p>
@@ -404,14 +452,18 @@ mx workspace create \\
   --target-branch main
 
 # 8. Launch (starts processes, opens browser sessions)
-mx workspace launch --project-dir "$REPO" --name "$NAME"
+# Navigate to workspace directory and launch
+WORKSPACE_DIR="$HOME/muxy/workspaces/\${NAME}"
+cd "$WORKSPACE_DIR"
+mx workspace launch
 
 echo "Workspace '$NAME' is running."
 `}</CodeBlock>
         <p className="mt-3 text-sm leading-7 text-foreground-soft">
           Tear down when done:
         </p>
-        <CodeBlock>{`mx workspace archive --project-dir "$REPO" --name "$NAME"`}</CodeBlock>
+        <CodeBlock>{`cd "$WORKSPACE_DIR"
+mx workspace archive`}</CodeBlock>
       </article>
 
       {/* Exit codes */}

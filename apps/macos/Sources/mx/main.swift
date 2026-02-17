@@ -279,7 +279,7 @@ struct CLI {
         guard args.count >= 3 else {
             throw NSError(
                 domain: "mx.cli", code: 2,
-                userInfo: [NSLocalizedDescriptionKey: "Missing workspace action. Use: workspace list|create|launch|restart|stop|archive|activate"])
+                userInfo: [NSLocalizedDescriptionKey: "Missing workspace action. Use: workspace list|create|import|discover|launch|restart|stop|archive|activate"])
         }
         switch args[2] {
         case "list":
@@ -308,6 +308,23 @@ struct CLI {
             let workspace = try orchestrator.createWorkspace(
                 projectID: projectID, name: name, branch: branch, targetBranch: targetBranch, directoryName: directoryName)
             print("Created workspace \(workspace.name)\t\(workspace.dir)")
+        case "import":
+            let dir = optionalValue(for: "--dir") ?? FileManager.default.currentDirectoryPath
+            let name = optionalValue(for: "--name")
+            let workspace = try orchestrator.createWorkspaceFromWorktree(worktreePath: dir, name: name)
+            print("Created workspace \(workspace.name)\t\(workspace.dir)")
+        case "discover":
+            let projectDir = optionalValue(for: "--project-dir")
+            let projectID = projectDir.map { normalizePath($0) }
+            let workspaces = try orchestrator.scanAndCreateWorkspacesFromWorktrees(projectID: projectID)
+            if workspaces.isEmpty {
+                print("No new workspaces created")
+            } else {
+                print("Created \(workspaces.count) workspace(s):")
+                for ws in workspaces {
+                    print("\(ws.name)\t\(ws.dir)")
+                }
+            }
         case "launch":
             let id = try workspaceID(orchestrator: orchestrator)
             try orchestrator.launchWorkspace(workspaceID: id)
@@ -333,11 +350,12 @@ struct CLI {
     }
 
     private func workspaceID(orchestrator: MuxyOrchestrator) throws -> String {
-        let projectDir = try value(for: "--project-dir")
-        let name = try value(for: "--name")
-        let projectID = normalizePath(projectDir)
-        guard let workspace = try orchestrator.listWorkspaces(projectID: projectID, includeArchived: true).first(where: { $0.name == name }) else {
-            throw NSError(domain: "mx.cli", code: 2, userInfo: [NSLocalizedDescriptionKey: "Workspace not found: \(name)"])
+        let dir = optionalValue(for: "--dir") ?? FileManager.default.currentDirectoryPath
+        let normalizedDir = normalizePath(dir)
+        guard let workspace = try orchestrator.store.workspace(dir: normalizedDir) else {
+            throw NSError(
+                domain: "mx.cli", code: 2,
+                userInfo: [NSLocalizedDescriptionKey: "Workspace not found at: \(normalizedDir). Use --dir <path> to specify a different workspace directory."])
         }
         return workspace.id
     }
@@ -572,12 +590,14 @@ struct CLI {
               mx project browser-session remove --dir <path> --url <url>
 
               mx workspace list --project-dir <path> [--all]
-              mx workspace create --project-dir <path> --name <name> [--branch <branch>] [--target-branch <branch>] [--directory-name <name>]
-              mx workspace launch --project-dir <path> --name <name>
-              mx workspace restart --project-dir <path> --name <name>
-              mx workspace stop --project-dir <path> --name <name>
-              mx workspace archive --project-dir <path> --name <name>
-              mx workspace activate --project-dir <path> --name <name>
+              mx workspace create --project-dir <path> --name <name> --branch <branch> [--target-branch <branch>] [--directory-name <name>]
+              mx workspace import [--dir <path>] [--name <name>]
+              mx workspace discover [--project-dir <path>]
+              mx workspace launch [--dir <path>]
+              mx workspace restart [--dir <path>]
+              mx workspace stop [--dir <path>]
+              mx workspace archive [--dir <path>]
+              mx workspace activate [--dir <path>]
 
             Notes:
               - Configuration (editor, port_range) is stored in ~/.muxy/muxy.db. YAML config is no longer used.

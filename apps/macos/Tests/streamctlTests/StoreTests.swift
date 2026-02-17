@@ -348,4 +348,35 @@ final class StoreTests: XCTestCase {
         let beta = try XCTUnwrap(all.first(where: { $0.name == "beta" }))
         XCTAssertEqual(beta.processes.count, 1)
     }
+
+    func testWorkspaceLookupByDirectory() throws {
+        let store = try makeTemporaryStore()
+        let projectDir = try makeTempDirectory().path
+        let workspace1Dir = try makeTempDirectory().path
+        let workspace2Dir = try makeTempDirectory().path
+        
+        let project = makeProjectRecord(dir: projectDir)
+        let workspace1 = WorkspaceRecord(
+            id: "ws1", projectID: project.id, name: "feature-1", dir: workspace1Dir, dirname: "feature-1",
+            branch: "feature-1", isDefault: false, isArchived: false, isRunning: false, lastLaunchedAt: nil)
+        let workspace2 = WorkspaceRecord(
+            id: "ws2", projectID: project.id, name: "feature-2", dir: workspace2Dir, dirname: "feature-2",
+            branch: "feature-2", isDefault: false, isArchived: false, isRunning: false, lastLaunchedAt: nil)
+        
+        try store.upsert(project: project)
+        try store.upsert(workspace: workspace1)
+        try store.upsert(workspace: workspace2)
+        
+        let found1 = try store.workspace(dir: workspace1Dir)
+        XCTAssertEqual(found1?.id, "ws1")
+        XCTAssertEqual(found1?.name, "feature-1")
+        XCTAssertEqual(found1?.dir, workspace1Dir)
+        
+        let found2 = try store.workspace(dir: workspace2Dir)
+        XCTAssertEqual(found2?.id, "ws2")
+        XCTAssertEqual(found2?.name, "feature-2")
+        
+        let notFound = try store.workspace(dir: "/nonexistent/path")
+        XCTAssertNil(notFound)
+    }
 }

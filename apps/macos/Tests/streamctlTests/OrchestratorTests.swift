@@ -2251,7 +2251,7 @@ final class OrchestratorTests: XCTestCase {
         let root = try makeTempDirectory()
         let repo = root.appendingPathComponent(name, isDirectory: true)
         try FileManager.default.createDirectory(at: repo, withIntermediateDirectories: true)
-        try runGit(["init"], cwd: repo.path)
+        try runGit(["init", "-b", "main"], cwd: repo.path)
         try "hello".write(to: repo.appendingPathComponent("README.md"), atomically: true, encoding: .utf8)
         try runGit(["add", "README.md"], cwd: repo.path)
         try runGit(["-c", "user.name=muxy-test", "-c", "user.email=test@example.com", "commit", "-m", "init"], cwd: repo.path)
@@ -2411,5 +2411,168 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertEqual(env["API_PORT"], "8080")
         XCTAssertEqual(env["MUXY_WORKSPACE_DIR"], "/tmp/project/ws")
         XCTAssertEqual(env["MUXY_PROJECT_DIR"], "/tmp/project")
+    }
+
+    func testCreateWorkspaceFromWorktreeInfersProjectAndBranch() throws {
+        let repo = try makeTempGitRepo(name: "test-repo")
+        
+        let store = try makeTemporaryStore()
+        let orchestrator = MuxyOrchestrator(store: store)
+        let project = try orchestrator.addProject(dir: repo.path)
+        
+        let root = repo.deletingLastPathComponent()
+        
+        let worktree = root.appendingPathComponent("feature-branch", isDirectory: true)
+        let client = GitClient()
+        try client.createWorktree(path: repo.path, worktreePath: worktree.path, branch: "feature-branch")
+        
+        let workspace = try orchestrator.createWorkspaceFromWorktree(worktreePath: worktree.path, name: nil)
+        
+        XCTAssertEqual(workspace.projectID, project.id)
+        XCTAssertEqual(workspace.name, "feature-branch")
+        XCTAssertEqual(workspace.branch, "feature-branch")
+        XCTAssertEqual(workspace.dir, worktree.path)
+        XCTAssertEqual(workspace.dirname, "feature-branch")
+        XCTAssertFalse(workspace.isArchived)
+        
+        let stored = try store.workspace(id: workspace.id)
+        XCTAssertNotNil(stored)
+        XCTAssertEqual(stored?.name, "feature-branch")
+    }
+
+    func testCreateWorkspaceFromWorktreeWithCustomName() throws {
+        let repo = try makeTempGitRepo(name: "test-repo")
+        let root = repo.deletingLastPathComponent()
+        
+        let store = try makeTemporaryStore()
+        let orchestrator = MuxyOrchestrator(store: store)
+        _ = try orchestrator.addProject(dir: repo.path)
+        
+        let worktree = root.appendingPathComponent("fix-bug", isDirectory: true)
+        let client = GitClient()
+        try client.createWorktree(path: repo.path, worktreePath: worktree.path, branch: "fix/bug-123")
+        
+        let workspace = try orchestrator.createWorkspaceFromWorktree(worktreePath: worktree.path, name: "bug-fix")
+        
+        XCTAssertEqual(workspace.name, "bug-fix")
+        XCTAssertEqual(workspace.branch, "fix/bug-123")
+    }
+
+    func testCreateWorkspaceFromWorktreeFailsIfProjectNotRegistered() throws {
+        let repo = try makeTempGitRepo(name: "test-repo")
+        let root = repo.deletingLastPathComponent()
+        
+        let worktree = root.appendingPathComponent("feature", isDirectory: true)
+        let client = GitClient()
+        try client.createWorktree(path: repo.path, worktreePath: worktree.path, branch: "feature")
+        
+        let store = try makeTemporaryStore()
+        let orchestrator = MuxyOrchestrator(store: store)
+        
+        XCTAssertThrowsError(try orchestrator.createWorkspaceFromWorktree(worktreePath: worktree.path, name: nil)) { error in
+            let nsError = error as NSError
+            XCTAssertTrue(nsError.localizedDescription.contains("Project not found"))
+            XCTAssertTrue(nsError.localizedDescription.contains("mx project add"))
+        }
+    }
+
+    func testCreateWorkspaceFromWorktreeFailsIfAlreadyExists() throws {
+        let repo = try makeTempGitRepo(name: "test-repo")
+        let root = repo.deletingLastPathComponent()
+        
+        let store = try makeTemporaryStore()
+        let orchestrator = MuxyOrchestrator(store: store)
+        _ = try orchestrator.addProject(dir: repo.path)
+        
+        let worktree = root.appendingPathComponent("feature", isDirectory: true)
+        let client = GitClient()
+        try client.createWorktree(path: repo.path, worktreePath: worktree.path, branch: "feature")
+        
+        _ = try orchestrator.createWorkspaceFromWorktree(worktreePath: worktree.path, name: nil)
+        
+        XCTAssertThrowsError(try orchestrator.createWorkspaceFromWorktree(worktreePath: worktree.path, name: nil)) { error in
+            let nsError = error as NSError
+            XCTAssertTrue(nsError.localizedDescription.contains("already exists"))
+        }
+    }
+
+    func testScanAndCreateWorkspacesFromWorktreesFindsAllWorktrees() throws {
+        let repo = try makeTempGitRepo(name: "test-repo")
+        let root = repo.deletingLastPathComponent()
+        
+        let store = try makeTemporaryStore()
+        let orchestrator = MuxyOrchestrator(store: store)
+        let project = try orchestrator.addProject(dir: repo.path)
+        
+        let client = GitClient()
+        let worktree1 = root.appendingPathComponent("feature-1", isDirectory: true)
+        let worktree2 = root.appendingPathComponent("feature-2", isDirectory: true)
+        try client.createWorktree(path: repo.path, worktreePath: worktree1.path, branch: "feature-1")
+        try client.createWorktree(path: repo.path, worktreePath: worktree2.path, branch: "feature-2")
+        
+        let created = try orchestrator.scanAndCreateWorkspacesFromWorktrees(projectID: project.id)
+        
+        XCTAssertEqual(created.count, 2)
+        
+        let names = Set(created.map(\.name))
+        XCTAssertTrue(names.contains("feature-1"))
+        XCTAssertTrue(names.contains("feature-2"))
+        
+        let allWorkspaces = try store.workspaces(projectID: project.id, includeArchived: false)
+        XCTAssertEqual(allWorkspaces.count, 3)
+    }
+
+    func testScanAndCreateWorkspacesFromWorktreesSkipsExistingWorkspaces() throws {
+        let repo = try makeTempGitRepo(name: "test-repo")
+        let root = repo.deletingLastPathComponent()
+        
+        let store = try makeTemporaryStore()
+        let orchestrator = MuxyOrchestrator(store: store)
+        let project = try orchestrator.addProject(dir: repo.path)
+        
+        let client = GitClient()
+        let worktree1 = root.appendingPathComponent("feature-1", isDirectory: true)
+        try client.createWorktree(path: repo.path, worktreePath: worktree1.path, branch: "feature-1")
+        
+        _ = try orchestrator.createWorkspaceFromWorktree(worktreePath: worktree1.path, name: nil)
+        
+        let worktree2 = root.appendingPathComponent("feature-2", isDirectory: true)
+        try client.createWorktree(path: repo.path, worktreePath: worktree2.path, branch: "feature-2")
+        
+        let created = try orchestrator.scanAndCreateWorkspacesFromWorktrees(projectID: project.id)
+        
+        XCTAssertEqual(created.count, 1)
+        let names = Set(created.map(\.name))
+        XCTAssertTrue(names.contains("feature-2"))
+        XCTAssertFalse(names.contains("feature-1"))
+        XCTAssertFalse(names.contains("main"))
+    }
+
+    func testScanAndCreateWorkspacesFromWorktreesScansAllProjectsWhenNoProjectIDProvided() throws {
+        let repo1 = try makeTempGitRepo(name: "repo1")
+        let repo2 = try makeTempGitRepo(name: "repo2")
+        let root = repo1.deletingLastPathComponent()
+        
+        let store = try makeTemporaryStore()
+        let orchestrator = MuxyOrchestrator(store: store)
+        let project1 = try orchestrator.addProject(dir: repo1.path)
+        let project2 = try orchestrator.addProject(dir: repo2.path)
+        
+        let client = GitClient()
+        let worktree1 = root.appendingPathComponent("repo1-feature", isDirectory: true)
+        try client.createWorktree(path: repo1.path, worktreePath: worktree1.path, branch: "feature")
+        
+        let worktree2 = root.appendingPathComponent("repo2-bugfix", isDirectory: true)
+        try client.createWorktree(path: repo2.path, worktreePath: worktree2.path, branch: "bugfix")
+        
+        let created = try orchestrator.scanAndCreateWorkspacesFromWorktrees(projectID: nil)
+        
+        XCTAssertEqual(created.count, 2)
+        
+        let project1Workspaces = try store.workspaces(projectID: project1.id, includeArchived: false)
+        XCTAssertEqual(project1Workspaces.count, 2)
+        
+        let project2Workspaces = try store.workspaces(projectID: project2.id, includeArchived: false)
+        XCTAssertEqual(project2Workspaces.count, 2)
     }
 }
