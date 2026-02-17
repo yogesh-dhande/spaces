@@ -348,13 +348,6 @@ mx workspace tooltip --dir /path/to/workspace --clear`}</CodeBlock>
         </p>
       </article>
 
-      {/* Config commands */}
-      <article className="rounded-2xl border border-line bg-surface/82 p-5 backdrop-blur-sm">
-        <h2 className="text-xl font-semibold tracking-tight">Config Commands</h2>
-        <CodeBlock>{`# Show Muxy config
-mx config show`}</CodeBlock>
-      </article>
-
       {/* Settings commands */}
       <article className="rounded-2xl border border-line bg-surface/82 p-5 backdrop-blur-sm">
         <h2 className="text-xl font-semibold tracking-tight">Settings Commands</h2>
@@ -382,37 +375,6 @@ mx settings reset --gui-next-shortcut`}</CodeBlock>
           <Cmd>--gui-open-editor-shortcut</Cmd>, <Cmd>--gui-open-terminal-shortcut</Cmd>,{" "}
           <Cmd>--gui-open-finder-shortcut</Cmd>, <Cmd>--gui-open-settings-shortcut</Cmd>.
         </p>
-      </article>
-
-      {/* Data paths */}
-      <article className="rounded-2xl border border-line bg-surface/82 p-5 backdrop-blur-sm">
-        <h2 className="text-xl font-semibold tracking-tight">Data &amp; File Paths</h2>
-        <p className="mt-3 text-sm leading-7 text-foreground-soft">
-          All Muxy data is local. There is no remote API or authentication step.
-        </p>
-        <div className="mt-4 overflow-x-auto">
-          <table className="w-full min-w-[36rem] border-collapse text-sm">
-            <thead>
-              <tr className="border-b border-line">
-                <th className="pb-2 pr-6 text-left font-mono text-xs uppercase tracking-[0.12em] text-foreground-soft">Path</th>
-                <th className="pb-2 text-left font-mono text-xs uppercase tracking-[0.12em] text-foreground-soft">Purpose</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-line">
-              {[
-                ["~/.muxy/config.yaml", "YAML source of truth. Edit this to configure ports, processes, status checks, and browser sessions."],
-                ["~/.muxy/muxy.db", "SQLite runtime state. Rebuilt automatically on schema change."],
-                ["~/muxy/projects/", "Git repositories cloned via mx project add --git-url."],
-                ["~/muxy/workspaces/", "Git worktree directories, one per workspace."],
-              ].map(([path, desc]) => (
-                <tr key={path}>
-                  <td className="py-2 pr-6 font-mono text-xs text-accent">{path}</td>
-                  <td className="py-2 text-sm leading-6 text-foreground-soft">{desc}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
       </article>
 
       {/* AI agent recipe */}

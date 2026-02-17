@@ -21,14 +21,15 @@ It manages projects, workspaces, processes, and window sets so you can move betw
 - GUI shortcuts (when focused): `cmd+1` through `cmd+9` focus workspace windows
 - Global window navigation (when GUI not focused): `cmd+shift+]` and `cmd+shift+[`
 
-Global preferences are stored in the DB and configurable via `mx config set` or the GUI Settings (⌘,):
+Global preferences are stored in the DB and configurable via `mx settings set` or the GUI Settings (⌘,):
 - `editor`: preferred editor for `mx workspace open-editor` (`none`, `vscode`, `cursor`, `windsurf`, `vim`)
 - `port_range`: range for workspace port allocation (default `20000-30000`)
 
 ```
-mx config set --editor vscode
-mx config set --port-range 20000-30000
-mx config show
+mx settings set --editor vscode
+mx settings set --port-range 20000-30000
+mx settings get --editor
+mx settings get --port-range
 ```
 
 > **Note:** If you have an existing `~/.muxy/config.yaml`, its `editor`, `port_range`, and any legacy `projects:` entries are automatically migrated to the database on first launch. The YAML file is then ignored and can be deleted.
@@ -115,7 +116,10 @@ mx version
 
 ## CLI
 ```bash
-mx config show
+mx settings get --editor
+mx settings get --port-range
+mx settings set --editor vscode
+mx settings set --port-range 20000-30000
 
 mx project list
 mx project add --dir /path/to/repo

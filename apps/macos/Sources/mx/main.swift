@@ -24,7 +24,6 @@ struct CLI {
         _ = try orchestrator.syncConfig()
 
         switch command {
-        case "config": try runConfigSubcommand(orchestrator: orchestrator)
         case "settings": try runSettingsSubcommand(orchestrator: orchestrator)
         case "project": try runProjectSubcommand(orchestrator: orchestrator)
         case "workspace": try runWorkspaceSubcommand(orchestrator: orchestrator)
@@ -32,41 +31,6 @@ struct CLI {
         }
     }
 
-    private func runConfigSubcommand(orchestrator: MuxyOrchestrator) throws {
-        guard args.count >= 3 else {
-            throw NSError(domain: "mx.cli", code: 2, userInfo: [NSLocalizedDescriptionKey: "Missing config action. Use: config show|set"])
-        }
-        switch args[2] {
-        case "show":
-            let config = try orchestrator.appConfig()
-            let projectCount = try orchestrator.listProjects().count
-            print("editor=\(config.editor?.rawValue ?? "none") port_range=\(config.portRange.start)-\(config.portRange.end) projects=\(projectCount)")
-        case "set":
-            if let rawEditor = optionalValue(for: "--editor") {
-                guard let pref = EditorPreference(rawValue: rawEditor) else {
-                    throw NSError(
-                        domain: "mx.cli", code: 2,
-                        userInfo: [NSLocalizedDescriptionKey: "Unknown editor: \(rawEditor). Use: none|vscode|cursor|windsurf|vim"])
-                }
-                _ = try orchestrator.updateEditorPreference(pref == .none ? nil : pref)
-                print("editor=\(pref.rawValue)")
-            } else if let rangeStr = optionalValue(for: "--port-range") {
-                let parts = rangeStr.split(separator: "-").compactMap { Int($0) }
-                guard parts.count == 2, parts[0] > 0, parts[1] > parts[0] else {
-                    throw NSError(
-                        domain: "mx.cli", code: 2,
-                        userInfo: [NSLocalizedDescriptionKey: "Invalid port range: \(rangeStr). Format: <start>-<end> e.g. 20000-30000"])
-                }
-                _ = try orchestrator.updatePortRange(PortRange(start: parts[0], end: parts[1]))
-                print("port_range=\(parts[0])-\(parts[1])")
-            } else {
-                throw NSError(
-                    domain: "mx.cli", code: 2,
-                    userInfo: [NSLocalizedDescriptionKey: "Use --editor <value> or --port-range <start>-<end>"])
-            }
-        default: throw NSError(domain: "mx.cli", code: 2, userInfo: [NSLocalizedDescriptionKey: "Unknown config action: \(args[2]). Use: show|set"])
-        }
-    }
 
     private func runProjectSubcommand(orchestrator: MuxyOrchestrator) throws {
         guard args.count >= 3 else {
@@ -389,7 +353,13 @@ struct CLI {
 
         switch args[2] {
         case "get":
-            if args.contains("--gui-hotkey") {
+            if args.contains("--editor") {
+                let config = try orchestrator.appConfig()
+                print("editor\t\(config.editor?.rawValue ?? "none")")
+            } else if args.contains("--port-range") {
+                let config = try orchestrator.appConfig()
+                print("port-range\t\(config.portRange.start)-\(config.portRange.end)")
+            } else if args.contains("--gui-hotkey") {
                 let current = try orchestrator.guiHotkey()
                 print("gui-hotkey\t\(current)")
             } else if args.contains("--gui-next-shortcut") {
@@ -427,12 +397,29 @@ struct CLI {
                     domain: "mx.cli", code: 2,
                     userInfo: [
                         NSLocalizedDescriptionKey:
-                            "Missing setting flag. Use: settings get --gui-hotkey|--gui-next-shortcut|--gui-prev-shortcut|--gui-show-shortcut|--gui-add-project-shortcut|--gui-add-workspace-shortcut|--gui-reload-shortcut|--gui-open-editor-shortcut|--gui-open-terminal-shortcut|--gui-open-finder-shortcut|--gui-open-settings-shortcut"
+                            "Missing setting flag. Use: settings get --editor|--port-range|--gui-hotkey|--gui-next-shortcut|--gui-prev-shortcut|--gui-show-shortcut|--gui-add-project-shortcut|--gui-add-workspace-shortcut|--gui-reload-shortcut|--gui-open-editor-shortcut|--gui-open-terminal-shortcut|--gui-open-finder-shortcut|--gui-open-settings-shortcut"
                     ])
             }
 
         case "set":
-            if let raw = optionalValue(for: "--gui-hotkey") {
+            if let rawEditor = optionalValue(for: "--editor") {
+                guard let pref = EditorPreference(rawValue: rawEditor) else {
+                    throw NSError(
+                        domain: "mx.cli", code: 2,
+                        userInfo: [NSLocalizedDescriptionKey: "Unknown editor: \(rawEditor). Use: none|vscode|cursor|windsurf|vim"])
+                }
+                _ = try orchestrator.updateEditorPreference(pref == .none ? nil : pref)
+                print("Updated editor\t\(pref.rawValue)")
+            } else if let rangeStr = optionalValue(for: "--port-range") {
+                let parts = rangeStr.split(separator: "-").compactMap { Int($0) }
+                guard parts.count == 2, parts[0] > 0, parts[1] > parts[0] else {
+                    throw NSError(
+                        domain: "mx.cli", code: 2,
+                        userInfo: [NSLocalizedDescriptionKey: "Invalid port range: \(rangeStr). Format: <start>-<end> e.g. 20000-30000"])
+                }
+                _ = try orchestrator.updatePortRange(PortRange(start: parts[0], end: parts[1]))
+                print("Updated port-range\t\(parts[0])-\(parts[1])")
+            } else if let raw = optionalValue(for: "--gui-hotkey") {
                 let spec = try HotkeySpec.parse(raw)
                 try orchestrator.setGUIHotkey(spec.normalized)
                 print("Updated gui-hotkey\t\(spec.normalized)")
@@ -481,7 +468,7 @@ struct CLI {
                     domain: "mx.cli", code: 2,
                     userInfo: [
                         NSLocalizedDescriptionKey:
-                            "Missing setting flag/value. Use: settings set --gui-hotkey|--gui-next-shortcut|--gui-prev-shortcut|--gui-show-shortcut|--gui-add-project-shortcut|--gui-add-workspace-shortcut|--gui-reload-shortcut|--gui-open-editor-shortcut|--gui-open-terminal-shortcut|--gui-open-finder-shortcut|--gui-open-settings-shortcut <spec>"
+                            "Missing setting flag/value. Use: settings set --editor <value>|--port-range <start>-<end>|--gui-hotkey <spec>|--gui-next-shortcut <spec>|--gui-prev-shortcut <spec>|--gui-show-shortcut <spec>|--gui-add-project-shortcut <spec>|--gui-add-workspace-shortcut <spec>|--gui-reload-shortcut <spec>|--gui-open-editor-shortcut <spec>|--gui-open-terminal-shortcut <spec>|--gui-open-finder-shortcut <spec>|--gui-open-settings-shortcut <spec>"
                     ])
             }
 
@@ -519,12 +506,18 @@ struct CLI {
             } else if args.contains("--gui-open-settings-shortcut") {
                 try orchestrator.setGUIOpenSettingsShortcut(nil)
                 print("Reset gui-open-settings-shortcut\t\(SettingsKey.defaultGUIOpenSettingsShortcut)")
+            } else if args.contains("--editor") {
+                _ = try orchestrator.updateEditorPreference(nil)
+                print("Reset editor\tnone")
+            } else if args.contains("--port-range") {
+                _ = try orchestrator.updatePortRange(PortRange(start: 20000, end: 30000))
+                print("Reset port-range\t20000-30000")
             } else {
                 throw NSError(
                     domain: "mx.cli", code: 2,
                     userInfo: [
                         NSLocalizedDescriptionKey:
-                            "Missing setting flag. Use: settings reset --gui-hotkey|--gui-next-shortcut|--gui-prev-shortcut|--gui-show-shortcut|--gui-add-project-shortcut|--gui-add-workspace-shortcut|--gui-reload-shortcut|--gui-open-editor-shortcut|--gui-open-terminal-shortcut|--gui-open-finder-shortcut|--gui-open-settings-shortcut"
+                            "Missing setting flag. Use: settings reset --editor|--port-range|--gui-hotkey|--gui-next-shortcut|--gui-prev-shortcut|--gui-show-shortcut|--gui-add-project-shortcut|--gui-add-workspace-shortcut|--gui-reload-shortcut|--gui-open-editor-shortcut|--gui-open-terminal-shortcut|--gui-open-finder-shortcut|--gui-open-settings-shortcut"
                     ])
             }
 
@@ -554,10 +547,8 @@ struct CLI {
             Usage:
               mx version
 
-              mx config show
-              mx config set --editor none|vscode|cursor|windsurf|vim
-              mx config set --port-range <start>-<end>
-
+              mx settings get --editor
+              mx settings get --port-range
               mx settings get --gui-hotkey
               mx settings get --gui-next-shortcut
               mx settings get --gui-prev-shortcut
@@ -569,6 +560,8 @@ struct CLI {
               mx settings get --gui-open-terminal-shortcut
               mx settings get --gui-open-finder-shortcut
               mx settings get --gui-open-settings-shortcut
+              mx settings set --editor none|vscode|cursor|windsurf|vim
+              mx settings set --port-range <start>-<end>
               mx settings set --gui-hotkey <spec>
               mx settings set --gui-next-shortcut <spec>
               mx settings set --gui-prev-shortcut <spec>
@@ -580,6 +573,8 @@ struct CLI {
               mx settings set --gui-open-terminal-shortcut <spec>
               mx settings set --gui-open-finder-shortcut <spec>
               mx settings set --gui-open-settings-shortcut <spec>
+              mx settings reset --editor
+              mx settings reset --port-range
               mx settings reset --gui-hotkey
               mx settings reset --gui-next-shortcut
               mx settings reset --gui-prev-shortcut
@@ -622,7 +617,7 @@ struct CLI {
               mx workspace tooltip [--dir <path>] [--tooltip <text>] [--clear]
 
             Notes:
-              - Configuration (editor, port_range) is stored in ~/.muxy/muxy.db. YAML config is no longer used.
+              - All settings are stored in ~/.muxy/muxy.db.
               - GUI settings (⌘,) let you pick a preferred editor (VS Code, Cursor, Windsurf).
               - Runtime state is stored in ~/.muxy/muxy.db and rebuilt if schema changes.
               - Removing a git project first removes managed worktrees via `git worktree remove --force`, then deletes related workspace directories under ~/muxy/workspaces.

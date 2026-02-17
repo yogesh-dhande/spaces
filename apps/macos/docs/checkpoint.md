@@ -58,7 +58,7 @@
 - New orchestrator APIs `refreshWorkspaceWindows` and `refreshAllWorkspaceWindows` reconcile stale window rows via yabai and clear `is_running` when no runtime indicators remain. `refreshAllWorkspaceWindows` returns a `RefreshResult` with DB mutation flag and per-workspace tracked window counts (including live browser scan); the GUI compares both against the previous snapshot and skips UI reloads when nothing changed.
 - Bringing muxy to front with the global toggle hotkey refreshes the selected workspace detail view so the displayed window list reflects the most recent Chrome tab scan (up to 10 seconds old).
 - The local key monitor defers to focused text inputs so standard edit shortcuts like `cmd+v` work in forms.
-- CLI supports `config show`, `config set --editor`, `config set --port-range`, project list/add/update/remove (including `project add --git-url ...`), workspace list/create/launch/stop/archive/activate, and settings get/set/reset for GUI shortcuts.
+- CLI supports project list/add/update/remove (including `project add --git-url ...`), workspace list/create/launch/stop/archive/activate, and settings get/set/reset for all preferences (editor, port-range, GUI shortcuts).
 - Workspace run view includes Open Editor/Terminal/Finder actions; editor/terminal windows opened this way are captured and included in window cycling.
 - Projects can define named ports (e.g. `FRONTEND_PORT`, `API_PORT`) instead of anonymous `PORT0`-`PORT9`; port definitions are configured at the project level in SQLite and inherited/overridable at the workspace level.
 - Named ports are OS-reserved via sockets (`PortReserver` singleton) so no other process can claim them between allocation and use.
@@ -67,7 +67,7 @@
 - `PortAllocator.allocatePorts` accepts `definitions: [PortDefinition]` instead of a fixed count; `buildWorkspaceEnv` uses named port keys.
 - `workspace_browser_sessions` has extracted-window mapping columns (`extracted_target_url`, `extracted_window_id`, `extracted_window_valid`).
 - `projects` table has `setup_script` and `stop_script` columns; four project template tables: `project_port_definitions`, `project_processes`, `project_status_checks`, `project_browser_sessions`.
-- Global preferences (`editor`, `port_range`) stored in DB `settings` table (`app_editor`, `app_port_range_start`, `app_port_range_end`); `mx config set --editor`/`--port-range` available.
+- Global preferences (`editor`, `port_range`) stored in DB `settings` table (`app_editor`, `app_port_range_start`, `app_port_range_end`); `mx settings set --editor`/`--port-range` available.
 - GUI: `PortEditor` provides an inline editor for port definitions in project detail, add-project form, and workspace settings.
 
 ## Accomplished

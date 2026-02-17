@@ -66,7 +66,7 @@ GUI interaction notes:
 Global preferences (stored in SQLite `settings` table):
 - Keys: `app_editor` (optional), `app_port_range_start`, `app_port_range_end`.
 - Default port range: 20000–30000.
-- The GUI Settings view and `mx config set` write `editor` and `port_range`.
+- The GUI Settings view and `mx settings set` write `editor` and `port_range`.
 Project data (stored in SQLite):
 - Fields: `dir`, `setup_script`, `stop_script`, `ports` (named port definitions), `processes`, `status_checks`, `browser_sessions`.
 - Script timing:
