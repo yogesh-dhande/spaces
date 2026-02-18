@@ -3,6 +3,7 @@ import XCTest
 @testable import streamctl
 
 final class ProjectSummaryTests: XCTestCase {
+    // Tests init stores fields by arranging representative inputs and asserting the expected result.
     func testInitStoresFields() {
         let summary = ProjectSummary(id: "project-1", name: "Project", dir: "/tmp/project", isGitRepo: true, defaultBranch: "main")
 

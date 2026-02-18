@@ -4,12 +4,15 @@ import XCTest
 @testable import streamctl
 
 final class EditorLauncherTests: XCTestCase {
+    // Tests open returns when editor is nil by arranging representative inputs and asserting the expected result.
     func testOpenReturnsWhenEditorIsNil() throws { XCTAssertNoThrow(try EditorLauncher.open(editor: nil, directory: "/path/that/does/not/exist")) }
 
+    // Tests open returns when editor is none by arranging representative inputs and asserting the expected result.
     func testOpenReturnsWhenEditorIsNone() throws {
         XCTAssertNoThrow(try EditorLauncher.open(editor: EditorPreference.none, directory: "/path/that/does/not/exist"))
     }
 
+    // Tests open uses expected app per editor by arranging representative inputs and asserting the expected result.
     func testOpenUsesExpectedAppPerEditor() throws {
         let directory = "/tmp/workspace"
         let root = try makeTempDirectory()
@@ -35,6 +38,7 @@ final class EditorLauncherTests: XCTestCase {
         XCTAssertTrue(lines[3].contains("-a|Terminal|\(directory)|"))
     }
 
+    // Tests open does not throw when open command fails by arranging representative inputs and asserting the expected result.
     func testOpenDoesNotThrowWhenOpenCommandFails() throws {
         // Mocked dependency: failing `open` command exit code.
         // Why: document and assert current behavior (Shell.run status is ignored by EditorLauncher).

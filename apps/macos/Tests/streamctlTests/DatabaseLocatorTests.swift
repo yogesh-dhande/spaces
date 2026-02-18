@@ -16,6 +16,7 @@ final class DatabaseLocatorTests: XCTestCase {
         tempHomeURL = nil
     }
 
+    // Tests default path uses muxy directory and creates parent by arranging representative inputs and asserting the expected result.
     func testDefaultPathUsesMuxyDirectoryAndCreatesParent() throws {
         let path = try DatabaseLocator.defaultPath(homeDirectoryURL: tempHomeURL)
         let url = URL(fileURLWithPath: path)
@@ -27,6 +28,7 @@ final class DatabaseLocatorTests: XCTestCase {
         XCTAssertTrue(isDirectory.boolValue)
     }
 
+    // Tests default path is stable across calls by arranging representative inputs and asserting the expected result.
     func testDefaultPathIsStableAcrossCalls() throws {
         let first = try DatabaseLocator.defaultPath(homeDirectoryURL: tempHomeURL)
         let second = try DatabaseLocator.defaultPath(homeDirectoryURL: tempHomeURL)

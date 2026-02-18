@@ -4,6 +4,7 @@ import SQLite3
 @testable import streamctl
 
 final class StoreTests: XCTestCase {
+    // Tests schema migration from legacy version preserves data by arranging representative inputs and asserting the expected result.
     func testSchemaMigrationFromLegacyVersionPreservesData() throws {
         let root = try makeTempDirectory()
         let dbURL = root.appendingPathComponent("legacy.db")
@@ -52,6 +53,7 @@ final class StoreTests: XCTestCase {
         XCTAssertEqual(version, 6)
     }
 
+    // Tests additive migrations run when schema version already current by arranging representative inputs and asserting the expected result.
     func testAdditiveMigrationsRunWhenSchemaVersionAlreadyCurrent() throws {
         let root = try makeTempDirectory()
         let dbURL = root.appendingPathComponent("current-version-missing-columns.db")
@@ -75,6 +77,7 @@ final class StoreTests: XCTestCase {
         XCTAssertTrue(columns.contains("stop_script"))
     }
 
+    // Tests workspace collections round trip and replacement by arranging representative inputs and asserting the expected result.
     func testWorkspaceCollectionsRoundTripAndReplacement() throws {
         let store = try makeTemporaryStore()
         let project = makeProjectRecord(dir: try makeTempDirectory().path)
@@ -154,6 +157,7 @@ final class StoreTests: XCTestCase {
         XCTAssertEqual(try store.workspacePortDefinitions(workspaceID: workspace.id)[0].name, "DB_PORT")
     }
 
+    // Tests running processes status results and windows round trip by arranging representative inputs and asserting the expected result.
     func testRunningProcessesStatusResultsAndWindowsRoundTrip() throws {
         let store = try makeTemporaryStore()
         let project = makeProjectRecord(dir: try makeTempDirectory().path)
@@ -208,6 +212,7 @@ final class StoreTests: XCTestCase {
         XCTAssertTrue(try store.windows(workspaceID: workspace.id).isEmpty)
     }
 
+    // Tests delete workspace removes dependent rows by arranging representative inputs and asserting the expected result.
     func testDeleteWorkspaceRemovesDependentRows() throws {
         let store = try makeTemporaryStore()
         let project = makeProjectRecord(dir: try makeTempDirectory().path)
@@ -247,6 +252,7 @@ final class StoreTests: XCTestCase {
         XCTAssertTrue(try store.isIgnoredWorktree(path: workspace.dir))
     }
 
+    // Tests upsert workspace clears ignored worktree path by arranging representative inputs and asserting the expected result.
     func testUpsertWorkspaceClearsIgnoredWorktreePath() throws {
         let store = try makeTemporaryStore()
         let project = makeProjectRecord(dir: try makeTempDirectory().path)
@@ -259,6 +265,7 @@ final class StoreTests: XCTestCase {
         XCTAssertFalse(try store.isIgnoredWorktree(path: workspace.dir))
     }
 
+    // Tests delete project removes project workspaces and dependents by arranging representative inputs and asserting the expected result.
     func testDeleteProjectRemovesProjectWorkspacesAndDependents() throws {
         let store = try makeTemporaryStore()
         let project = makeProjectRecord(id: "project-1", dir: try makeTempDirectory().path)
@@ -279,6 +286,7 @@ final class StoreTests: XCTestCase {
         XCTAssertNil(try store.workspaceID(windowID: 91))
     }
 
+    // Tests workspace and setting state updates persist by arranging representative inputs and asserting the expected result.
     func testWorkspaceAndSettingStateUpdatesPersist() throws {
         let store = try makeTemporaryStore()
         let project = makeProjectRecord(dir: try makeTempDirectory().path)
@@ -300,6 +308,7 @@ final class StoreTests: XCTestCase {
         XCTAssertNil(try store.setting(key: "key"))
     }
 
+    // Tests project and workspace lookup and ordering by arranging representative inputs and asserting the expected result.
     func testProjectAndWorkspaceLookupAndOrdering() throws {
         let store = try makeTemporaryStore()
         let aDir = try makeTempDirectory().path
@@ -327,6 +336,7 @@ final class StoreTests: XCTestCase {
         XCTAssertEqual(Set(try store.workspaces(projectID: aProject.id, includeArchived: true).map(\.id)), Set(["default", "archived"]))
     }
 
+    // Tests delete running process and delete running processes by arranging representative inputs and asserting the expected result.
     func testDeleteRunningProcessAndDeleteRunningProcesses() throws {
         let store = try makeTemporaryStore()
         let project = makeProjectRecord(dir: try makeTempDirectory().path)
@@ -354,6 +364,7 @@ final class StoreTests: XCTestCase {
         XCTAssertTrue(try store.runningProcesses(workspaceID: workspace.id).isEmpty)
     }
 
+    // Tests project template fields round trip by arranging representative inputs and asserting the expected result.
     func testProjectTemplateFieldsRoundTrip() throws {
         let store = try makeTemporaryStore()
         let dir = try makeTempDirectory().path
@@ -387,6 +398,7 @@ final class StoreTests: XCTestCase {
         XCTAssertEqual(loaded?.browserSessions[0].url, "https://localhost:3000")
     }
 
+    // Tests project template fields are updated on upsert by arranging representative inputs and asserting the expected result.
     func testProjectTemplateFieldsAreUpdatedOnUpsert() throws {
         let store = try makeTemporaryStore()
         let dir = try makeTempDirectory().path
@@ -405,6 +417,7 @@ final class StoreTests: XCTestCase {
         XCTAssertEqual(loaded?.setupScript, "echo updated")
     }
 
+    // Tests delete project cascades template tables by arranging representative inputs and asserting the expected result.
     func testDeleteProjectCascadesTemplateTables() throws {
         let store = try makeTemporaryStore()
         let dir = try makeTempDirectory().path
@@ -419,6 +432,7 @@ final class StoreTests: XCTestCase {
         XCTAssertNil(try store.project(id: dir))
     }
 
+    // Tests projects list loads all template fields by arranging representative inputs and asserting the expected result.
     func testProjectsListLoadsAllTemplateFields() throws {
         let store = try makeTemporaryStore()
         let dir1 = try makeTempDirectory().path
@@ -438,6 +452,7 @@ final class StoreTests: XCTestCase {
         XCTAssertEqual(beta.processes.count, 1)
     }
 
+    // Tests workspace lookup by directory by arranging representative inputs and asserting the expected result.
     func testWorkspaceLookupByDirectory() throws {
         let store = try makeTemporaryStore()
         let projectDir = try makeTempDirectory().path

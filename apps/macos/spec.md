@@ -23,6 +23,7 @@
     - Avoid yabai SIP
     - Show useful messages and hints to the user for a smooth UX
     - In all failure cases, muxy should surface a clear, actionable error message in the GUI.
+    - Test and coverage workflows should favor fast feedback: run tests in parallel when safe and cap artificial mock delays during tests.
     - supported browsers: chrome
     - supported terminals: iTerm2
 - Models and data

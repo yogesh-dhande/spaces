@@ -3,6 +3,7 @@ import XCTest
 @testable import streamctl
 
 final class AppConfigStoreTests: XCTestCase {
+    // Tests defaults when not set by arranging representative inputs and asserting the expected result.
     func testDefaultsWhenNotSet() throws {
         let store = try makeTemporaryStore()
         let config = try store.appConfig()
@@ -11,6 +12,7 @@ final class AppConfigStoreTests: XCTestCase {
         XCTAssertEqual(config.portRange.end, 30000)
     }
 
+    // Tests round trip by arranging representative inputs and asserting the expected result.
     func testRoundTrip() throws {
         let store = try makeTemporaryStore()
         let config = AppConfig(editor: .cursor, portRange: PortRange(start: 10000, end: 20000))
@@ -21,6 +23,7 @@ final class AppConfigStoreTests: XCTestCase {
         XCTAssertEqual(loaded.portRange.end, 20000)
     }
 
+    // Tests clears editor by arranging representative inputs and asserting the expected result.
     func testClearsEditor() throws {
         let store = try makeTemporaryStore()
         try store.setAppConfig(AppConfig(editor: .vscode, portRange: PortRange(start: 20000, end: 30000)))
@@ -29,6 +32,7 @@ final class AppConfigStoreTests: XCTestCase {
         XCTAssertNil(loaded.editor)
     }
 
+    // Tests resets invalid port range by arranging representative inputs and asserting the expected result.
     func testResetsInvalidPortRange() throws {
         let store = try makeTemporaryStore()
         // Manually write invalid values

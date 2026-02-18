@@ -3,6 +3,7 @@ import XCTest
 import appctl
 
 final class AppctlAdapterTests: XCTestCase {
+    // Tests yabai adapter queries validation and window operations by arranging representative inputs and asserting the expected result.
     func testYabaiAdapterQueriesValidationAndWindowOperations() throws {
         // Mocked dependency: `yabai` CLI.
         // Why: exercise JSON parsing and adapter control-flow deterministically without requiring a running window manager.
@@ -41,6 +42,7 @@ final class AppctlAdapterTests: XCTestCase {
         }
     }
 
+    // Tests yabai adapter returns nil when focused window query fails by arranging representative inputs and asserting the expected result.
     func testYabaiAdapterReturnsNilWhenFocusedWindowQueryFails() throws {
         // Mocked dependency: focused-window query failure path from `yabai`.
         // Why: guarantee the adapter's "return nil on failure" behavior without forcing a real focus-state failure.
@@ -53,6 +55,7 @@ final class AppctlAdapterTests: XCTestCase {
         }
     }
 
+    // Tests chrome and i term adapters parse apple script output by arranging representative inputs and asserting the expected result.
     func testChromeAndITermAdaptersParseAppleScriptOutput() throws {
         // Mocked dependency: `osascript` command output for Chrome/iTerm automation.
         // Why: verify script parsing and adapter logic in a hermetic environment.
@@ -108,6 +111,7 @@ final class AppctlAdapterTests: XCTestCase {
         }
     }
 
+    // Tests apple script run throws on failure by arranging representative inputs and asserting the expected result.
     func testAppleScriptRunThrowsOnFailure() throws {
         // Mocked dependency: failing `osascript`.
         // Why: force deterministic AppleScript error propagation.

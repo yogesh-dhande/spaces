@@ -13,6 +13,13 @@ Key invariants:
 - Avoid window-level automation outside yabai.
 - Local key monitors must not override standard text-edit shortcuts while an input has focus.
 
+Test execution:
+- Coverage runs execute Swift tests with `--parallel`.
+- Coverage runs auto-detect logical CPU count for `--num-workers`.
+- `MUXY_TEST_WORKERS` can override worker concurrency for local/CI stability.
+- `MUXY_TEST_SKIP_BUILD=1` enables faster repeated local coverage reruns when no rebuild is needed.
+- Orchestrator mock scripts cap configured test delays with `MOCK_TEST_DELAY_CAP_MS` (default `25`) to reduce artificial waiting.
+
 ## Module Map
 ```mermaid
 flowchart LR

@@ -162,7 +162,7 @@ scripts/swiftpm.sh build
 
 ## Tests
 ```bash
-scripts/swiftpm.sh test
+scripts/swiftpm.sh test --parallel
 ```
 
 ## Lint
@@ -174,6 +174,13 @@ scripts/lint.sh
 ```bash
 scripts/coverage.sh
 ```
+
+Test-speed knobs:
+- `scripts/coverage.sh` runs tests in parallel by default.
+- `scripts/coverage.sh` auto-detects logical CPU count for `--num-workers`.
+- Set `MUXY_TEST_WORKERS=<n>` to override worker count.
+- Set `MUXY_TEST_SKIP_BUILD=1` for faster repeated local coverage reruns when build artifacts are already current.
+- Set `MOCK_TEST_DELAY_CAP_MS=<ms>` to cap mock-script sleeps used by orchestrator tests.
 
 ## Release
 

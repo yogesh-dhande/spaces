@@ -3,6 +3,7 @@ import XCTest
 @testable import streamctl
 
 final class ProcessOnExitTests: XCTestCase {
+    // Tests process on exit none does nothing by arranging representative inputs and asserting the expected result.
     func testProcessOnExitNoneDoesNothing() throws {
         let root = try makeTempDirectory()
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
@@ -38,6 +39,7 @@ final class ProcessOnExitTests: XCTestCase {
         XCTAssertEqual(currentProcess.status, .exited)
     }
 
+    // Tests process on exit notify shows notification by arranging representative inputs and asserting the expected result.
     func testProcessOnExitNotifyShowsNotification() throws {
         let root = try makeTempDirectory()
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
@@ -67,6 +69,7 @@ final class ProcessOnExitTests: XCTestCase {
         XCTAssertEqual(currentProcess.status, .running)
     }
 
+    // Tests process on exit restart restarts process by arranging representative inputs and asserting the expected result.
     func testProcessOnExitRestartRestartsProcess() throws {
         let root = try makeTempDirectory()
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
@@ -97,6 +100,7 @@ final class ProcessOnExitTests: XCTestCase {
         XCTAssertEqual(mockIterm.openWindowAndRunCallCount, 0)
     }
     
+    // Tests process template serializes on exit by arranging representative inputs and asserting the expected result.
     func testProcessTemplateSerializesOnExit() throws {
         let process = ProcessTemplate(name: "api", command: "npm start", onExit: .restart)
         let encoder = JSONEncoder()
@@ -110,6 +114,7 @@ final class ProcessOnExitTests: XCTestCase {
         XCTAssertEqual(decoded.onExit, .restart)
     }
     
+    // Tests process template defaults to none on exit by arranging representative inputs and asserting the expected result.
     func testProcessTemplateDefaultsToNoneOnExit() throws {
         let process = ProcessTemplate(name: "api", command: "npm start")
         XCTAssertEqual(process.onExit, .none)

@@ -3,14 +3,17 @@ import XCTest
 @testable import streamctl
 
 final class OrchestratorTests: XCTestCase {
+    // Tests workspace window refresh interval is positive by arranging representative inputs and asserting the expected result.
     func testWorkspaceWindowRefreshIntervalIsPositive() {
         XCTAssertGreaterThan(PollingConstants.workspaceWindowRefreshInterval, 0)
     }
 
+    // Tests worktree discovery interval is positive by arranging representative inputs and asserting the expected result.
     func testWorktreeDiscoveryIntervalIsPositive() {
         XCTAssertGreaterThan(PollingConstants.worktreeDiscoveryInterval, 0)
     }
 
+    // Tests update editor preference persists to db by arranging representative inputs and asserting the expected result.
     func testUpdateEditorPreferencePersistsToDB() throws {
         let store = try makeTemporaryStore()
         let orchestrator = MuxyOrchestrator(store: store)
@@ -22,6 +25,7 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertNil(try store.appConfig().editor)
     }
 
+    // Tests next window order index uses role offset and max by arranging representative inputs and asserting the expected result.
     func testNextWindowOrderIndexUsesRoleOffsetAndMax() {
         let windows = [
             WindowRecord(
@@ -42,6 +46,7 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertEqual(nextEditor, 100)
     }
 
+    // Tests add project by cloning uses projects root and repo name by arranging representative inputs and asserting the expected result.
     func testAddProjectByCloningUsesProjectsRootAndRepoName() throws {
         let fixture = try makeTempGitRepo(name: "sample-repo")
         let root = try makeTempDirectory()
@@ -57,6 +62,7 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertTrue(FileManager.default.fileExists(atPath: "\(expected)/README.md"))
     }
 
+    // Tests add project by cloning strips git suffix from repo name by arranging representative inputs and asserting the expected result.
     func testAddProjectByCloningStripsGitSuffixFromRepoName() throws {
         let fixture = try makeTempGitRepo(name: "source.git")
         let root = try makeTempDirectory()
@@ -72,6 +78,7 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertTrue(FileManager.default.fileExists(atPath: "\(expected)/README.md"))
     }
 
+    // Tests remove project deletes managed git project directory by arranging representative inputs and asserting the expected result.
     func testRemoveProjectDeletesManagedGitProjectDirectory() throws {
         let fixture = try makeTempGitRepo(name: "managed")
         let root = try makeTempDirectory()
@@ -89,6 +96,7 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertTrue(try orchestrator.listProjects().isEmpty)
     }
 
+    // Tests remove project deletes managed workspace directories for managed git project by arranging representative inputs and asserting the expected result.
     func testRemoveProjectDeletesManagedWorkspaceDirectoriesForManagedGitProject() throws {
         let fixture = try makeTempGitRepo(name: "managed-with-workspace")
         let root = try makeTempDirectory()
@@ -111,6 +119,7 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: projectWorkspaceRoot.path))
     }
 
+    // Tests remove project does not delete unmanaged project directory but deletes managed workspace directories by arranging representative inputs and asserting the expected result.
     func testRemoveProjectDoesNotDeleteUnmanagedProjectDirectoryButDeletesManagedWorkspaceDirectories() throws {
         let projectDir = try makeTempDirectory()
         try runGit(["init"], cwd: projectDir.path)
@@ -144,6 +153,7 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertFalse(parseWorktreePaths(worktreesAfter).contains(normalizedWorkspaceDir))
     }
 
+    // Tests archive workspace does not delete project directory for non git project by arranging representative inputs and asserting the expected result.
     func testArchiveWorkspaceDoesNotDeleteProjectDirectoryForNonGitProject() throws {
         let root = try makeTempDirectory()
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
@@ -164,6 +174,7 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertEqual(archivedWorkspace?.isArchived, true)
     }
 
+    // Tests create workspace for non git project allocates ports by arranging representative inputs and asserting the expected result.
     func testCreateWorkspaceForNonGitProjectAllocatesPorts() throws {
         let root = try makeTempDirectory()
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
@@ -179,6 +190,7 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertEqual(try orchestrator.workspacePorts(workspaceID: workspace.id).count, 0)
     }
 
+    // Tests create workspace rejects directory name override for non git project by arranging representative inputs and asserting the expected result.
     func testCreateWorkspaceRejectsDirectoryNameOverrideForNonGitProject() throws {
         let root = try makeTempDirectory()
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
@@ -192,6 +204,7 @@ final class OrchestratorTests: XCTestCase {
         }
     }
 
+    // Tests workspace stop script is seeded from project and can be overridden by arranging representative inputs and asserting the expected result.
     func testWorkspaceStopScriptIsSeededFromProjectAndCanBeOverridden() throws {
         let root = try makeTempDirectory()
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
@@ -213,6 +226,7 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertEqual(try orchestrator.workspaceSettings(workspaceID: workspace.id)?.stopScript, "echo workspace-stop")
     }
 
+    // Tests suggested workspace name matches auto generated dirname by arranging representative inputs and asserting the expected result.
     func testSuggestedWorkspaceNameMatchesAutoGeneratedDirname() throws {
         let repo = try makeTempGitRepo(name: "workspace-name-default")
         let root = try makeTempDirectory()
@@ -232,6 +246,7 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertNotEqual(nextSuggested, suggested)
     }
 
+    // Tests create workspace uses custom name with auto generated dirname by arranging representative inputs and asserting the expected result.
     func testCreateWorkspaceUsesCustomNameWithAutoGeneratedDirname() throws {
         let repo = try makeTempGitRepo(name: "workspace-name-custom")
         let root = try makeTempDirectory()
@@ -248,6 +263,7 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertEqual(workspace.dirname, suggested)
     }
 
+    // Tests create workspace uses provided directory name for git project by arranging representative inputs and asserting the expected result.
     func testCreateWorkspaceUsesProvidedDirectoryNameForGitProject() throws {
         let repo = try makeTempGitRepo(name: "workspace-name-override")
         let root = try makeTempDirectory()
@@ -263,6 +279,7 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertTrue(workspace.dir.hasSuffix("/feature_branch_1"))
     }
 
+    // Tests create workspace rejects directory name with invalid characters by arranging representative inputs and asserting the expected result.
     func testCreateWorkspaceRejectsDirectoryNameWithInvalidCharacters() throws {
         let repo = try makeTempGitRepo(name: "workspace-name-invalid-dirname")
         let root = try makeTempDirectory()
@@ -276,6 +293,7 @@ final class OrchestratorTests: XCTestCase {
         ) { error in XCTAssertTrue(error.localizedDescription.contains("letters, numbers, '-', and '_'")) }
     }
 
+    // Tests create workspace rejects directory name with spaces by arranging representative inputs and asserting the expected result.
     func testCreateWorkspaceRejectsDirectoryNameWithSpaces() throws {
         let repo = try makeTempGitRepo(name: "workspace-name-space-dirname")
         let root = try makeTempDirectory()
@@ -289,6 +307,7 @@ final class OrchestratorTests: XCTestCase {
         ) { error in XCTAssertTrue(error.localizedDescription.contains("cannot contain spaces")) }
     }
 
+    // Tests create workspace uses selected target branch as base for new branch by arranging representative inputs and asserting the expected result.
     func testCreateWorkspaceUsesSelectedTargetBranchAsBaseForNewBranch() throws {
         let repo = try makeTempGitRepo(name: "workspace-target-branch")
         try runGit(["checkout", "-b", "develop"], cwd: repo.path)
@@ -309,6 +328,7 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertTrue(FileManager.default.fileExists(atPath: workspace.dir + "/TARGET.txt"))
     }
 
+    // Tests list workspaces includes branch metadata by arranging representative inputs and asserting the expected result.
     func testListWorkspacesIncludesBranchMetadata() throws {
         let repo = try makeTempGitRepo(name: "workspace-branch-list")
         let root = try makeTempDirectory()
@@ -324,6 +344,7 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertEqual(feature.branch, "feature-branch")
     }
 
+    // Tests create workspace revives archived workspace by arranging representative inputs and asserting the expected result.
     func testCreateWorkspaceRevivesArchivedWorkspace() throws {
         let root = try makeTempDirectory()
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
@@ -343,6 +364,7 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertEqual(try orchestrator.workspacePorts(workspaceID: revived.id).count, 0)
     }
 
+    // Tests list workspaces honors include archived flag by arranging representative inputs and asserting the expected result.
     func testListWorkspacesHonorsIncludeArchivedFlag() throws {
         let root = try makeTempDirectory()
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
@@ -361,6 +383,7 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertEqual(Set(all.map(\.name)), Set(["default", "feature"]))
     }
 
+    // Tests archive workspace removes git worktree registration by arranging representative inputs and asserting the expected result.
     func testArchiveWorkspaceRemovesGitWorktreeRegistration() throws {
         let repo = try makeTempGitRepo(name: "workspace-archive-git-worktree-remove")
         let root = try makeTempDirectory()
@@ -383,6 +406,7 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: workspace.dir))
     }
 
+    // Tests archive workspace gracefully handles missing worktree directory by arranging representative inputs and asserting the expected result.
     func testArchiveWorkspaceGracefullyHandlesMissingWorktreeDirectory() throws {
         let repo = try makeTempGitRepo(name: "workspace-archive-missing-worktree")
         let root = try makeTempDirectory()
@@ -405,6 +429,7 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: marker.path))
     }
 
+    // Tests gui shortcuts and active workspace round trip by arranging representative inputs and asserting the expected result.
     func testGUIShortcutsAndActiveWorkspaceRoundTrip() throws {
         let root = try makeTempDirectory()
         let store = try makeTemporaryStore()
@@ -452,6 +477,7 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertNil(try orchestrator.activeWorkspaceID())
     }
 
+    // Tests run status checks persists results for matching processes by arranging representative inputs and asserting the expected result.
     func testRunStatusChecksPersistsResultsForMatchingProcesses() throws {
         let root = try makeTempDirectory()
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
@@ -485,6 +511,7 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertEqual(persisted.count, 2)
     }
 
+    // Tests run status checks due only respects interval by arranging representative inputs and asserting the expected result.
     func testRunStatusChecksDueOnlyRespectsInterval() throws {
         let root = try makeTempDirectory()
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
@@ -518,6 +545,7 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertEqual(forcedRun.count, 1)
     }
 
+    // Tests run due status checks for running workspaces runs checks by arranging representative inputs and asserting the expected result.
     func testRunDueStatusChecksForRunningWorkspacesRunsChecks() throws {
         let root = try makeTempDirectory()
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
@@ -548,6 +576,7 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertEqual(persisted.first?.status, "green")
     }
 
+    // Tests status check on fail none does nothing by arranging representative inputs and asserting the expected result.
     func testStatusCheckOnFailNoneDoesNothing() throws {
         let root = try makeTempDirectory()
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
@@ -579,6 +608,7 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertEqual(currentProcess.pid, 9000)
     }
 
+    // Tests status check on fail notify shows notification by arranging representative inputs and asserting the expected result.
     func testStatusCheckOnFailNotifyShowsNotification() throws {
         let root = try makeTempDirectory()
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
@@ -613,6 +643,7 @@ final class OrchestratorTests: XCTestCase {
         // but we can verify the process wasn't restarted, which is the key behavior
     }
 
+    // Tests status check on fail restart restarts process by arranging representative inputs and asserting the expected result.
     func testStatusCheckOnFailRestartRestartsProcess() throws {
         let root = try makeTempDirectory()
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
@@ -666,6 +697,7 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertEqual(currentProcess.pid, 10001) // PID should be updated from PID file
     }
 
+    // Tests status check on fail restart with missing pid does not crash by arranging representative inputs and asserting the expected result.
     func testStatusCheckOnFailRestartWithMissingPidDoesNotCrash() throws {
         let root = try makeTempDirectory()
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
@@ -709,6 +741,7 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertEqual(currentProcess.windowID, 123)
     }
 
+    // Tests check and update process statuses marks dead process as exited by arranging representative inputs and asserting the expected result.
     func testCheckAndUpdateProcessStatusesMarksDeadProcessAsExited() throws {
         let root = try makeTempDirectory()
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
@@ -734,6 +767,7 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertNotNil(updated?.exitedAt)
     }
     
+    // Tests check and update process statuses skips newly started processes by arranging representative inputs and asserting the expected result.
     func testCheckAndUpdateProcessStatusesSkipsNewlyStartedProcesses() throws {
         let root = try makeTempDirectory()
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
@@ -760,6 +794,7 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertNil(unchanged?.exitedAt)
     }
     
+    // Tests check and update process statuses skips processes without pid by arranging representative inputs and asserting the expected result.
     func testCheckAndUpdateProcessStatusesSkipsProcessesWithoutPID() throws {
         let root = try makeTempDirectory()
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
@@ -785,6 +820,7 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertEqual(unchanged?.status, .running)
     }
     
+    // Tests check and update process statuses only checks running processes by arranging representative inputs and asserting the expected result.
     func testCheckAndUpdateProcessStatusesOnlyChecksRunningProcesses() throws {
         let root = try makeTempDirectory()
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
@@ -809,6 +845,7 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertFalse(didUpdate)
     }
 
+    // Tests create workspace throws for unknown project by arranging representative inputs and asserting the expected result.
     func testCreateWorkspaceThrowsForUnknownProject() throws {
         let root = try makeTempDirectory()
         let store = try makeTemporaryStore()
@@ -817,6 +854,7 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertThrowsError(try orchestrator.createWorkspace(projectID: "missing", name: "feature"))
     }
 
+    // Tests create workspace for git project requires branch by arranging representative inputs and asserting the expected result.
     func testCreateWorkspaceForGitProjectRequiresBranch() throws {
         let repo = try makeTempGitRepo(name: "workspace-requires-branch")
         let root = try makeTempDirectory()
@@ -830,12 +868,14 @@ final class OrchestratorTests: XCTestCase {
         }
     }
 
+    // Tests open workspace editor throws when editor is not configured by arranging representative inputs and asserting the expected result.
     func testOpenWorkspaceEditorThrowsWhenEditorIsNotConfigured() throws {
         let (orchestrator, _, _, workspace, _) = try makeOrchestratorWithWorkspace()
 
         XCTAssertThrowsError(try orchestrator.openWorkspaceEditor(workspaceID: workspace.id))
     }
 
+    // Tests open workspace editor does not track editor windows by arranging representative inputs and asserting the expected result.
     func testOpenWorkspaceEditorDoesNotTrackEditorWindows() throws {
         let (orchestrator, _, _, workspace, root) = try makeOrchestratorWithWorkspace(editor: .vscode)
         let openLog = root.appendingPathComponent("open.log")
@@ -856,6 +896,7 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertTrue(openArgs.contains(workspace.dir))
     }
 
+    // Tests open workspace editor does not require yabai by arranging representative inputs and asserting the expected result.
     func testOpenWorkspaceEditorDoesNotRequireYabai() throws {
         let (orchestrator, _, _, workspace, root) = try makeOrchestratorWithWorkspace(editor: .vscode)
         let openLog = root.appendingPathComponent("open-no-yabai.log")
@@ -872,6 +913,7 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertTrue(openArgs.contains("-a Visual Studio Code"))
     }
 
+    // Tests open workspace terminal attaches focused terminal window by arranging representative inputs and asserting the expected result.
     func testOpenWorkspaceTerminalAttachesFocusedTerminalWindow() throws {
         let (orchestrator, _, _, workspace, _) = try makeOrchestratorWithWorkspace()
 
@@ -890,6 +932,7 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertEqual(terminalWindows.first?.windowID, 777)
     }
 
+    // Tests open workspace terminal throws when i term is unavailable by arranging representative inputs and asserting the expected result.
     func testOpenWorkspaceTerminalThrowsWhenITermIsUnavailable() throws {
         let (orchestrator, _, _, workspace, _) = try makeOrchestratorWithWorkspace()
 
@@ -903,6 +946,7 @@ final class OrchestratorTests: XCTestCase {
         }
     }
 
+    // Tests focus workspace skips failed window and sets active workspace by arranging representative inputs and asserting the expected result.
     func testFocusWorkspaceSkipsFailedWindowAndSetsActiveWorkspace() throws {
         let (orchestrator, store, _, workspace, root) = try makeOrchestratorWithWorkspace()
         let focusLog = root.appendingPathComponent("focus.log")
@@ -928,6 +972,7 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertEqual(focusedIDs, ["101"])
     }
 
+    // Tests focus window navigation uses relative order and wraps by arranging representative inputs and asserting the expected result.
     func testFocusWindowNavigationUsesRelativeOrderAndWraps() throws {
         let (orchestrator, store, _, workspace, root) = try makeOrchestratorWithWorkspace()
         let focusLog = root.appendingPathComponent("relative-focus.log")
@@ -961,6 +1006,7 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertEqual(try orchestrator.activeWorkspaceID(), workspace.id)
     }
 
+    // Tests focus workspace window uses browser target url when present by arranging representative inputs and asserting the expected result.
     func testFocusWorkspaceWindowUsesBrowserTargetURLWhenPresent() throws {
         let (orchestrator, store, _, workspace, root) = try makeOrchestratorWithWorkspace()
         let focusLog = root.appendingPathComponent("browser-focus.log")
@@ -987,6 +1033,7 @@ final class OrchestratorTests: XCTestCase {
         }
     }
 
+    // Tests focus window navigation wraps across browser targets in same chrome window by arranging representative inputs and asserting the expected result.
     func testFocusWindowNavigationWrapsAcrossBrowserTargetsInSameChromeWindow() throws {
         let (orchestrator, store, _, workspace, root) = try makeOrchestratorWithWorkspace()
         let focusLog = root.appendingPathComponent("browser-nav-focus.log")
@@ -1032,6 +1079,7 @@ final class OrchestratorTests: XCTestCase {
         }
     }
 
+    // Tests focus workspace window uses tracked chrome window id when target url is shared by arranging representative inputs and asserting the expected result.
     func testFocusWorkspaceWindowUsesTrackedChromeWindowIDWhenTargetURLIsShared() throws {
         let (orchestrator, store, _, workspace, root) = try makeOrchestratorWithWorkspace()
         let focusLog = root.appendingPathComponent("browser-shared-url-focus.log")
@@ -1065,6 +1113,7 @@ final class OrchestratorTests: XCTestCase {
         }
     }
 
+    // Tests windows live scan uses session prefixes and deduplicates overlapping matches by arranging representative inputs and asserting the expected result.
     func testWindowsLiveScanUsesSessionPrefixesAndDeduplicatesOverlappingMatches() throws {
         let (orchestrator, store, _, workspace, _) = try makeOrchestratorWithWorkspace()
         try store.setWorkspaceBrowserSessions(
@@ -1090,6 +1139,7 @@ final class OrchestratorTests: XCTestCase {
         }
     }
 
+    // Tests windows live scan debounces refresh for ten seconds by arranging representative inputs and asserting the expected result.
     func testWindowsLiveScanDebouncesRefreshForTenSeconds() throws {
         let clock = TestClock(now: Date(timeIntervalSince1970: 1_700_000_000))
         let (orchestrator, store, _, workspace, root) = try makeOrchestratorWithWorkspace(
@@ -1127,6 +1177,7 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertEqual(scanCount, 2)
     }
 
+    // Tests focus workspace window uses tab index fast path when live scan is present by arranging representative inputs and asserting the expected result.
     func testFocusWorkspaceWindowUsesTabIndexFastPathWhenLiveScanIsPresent() throws {
         let (orchestrator, store, _, workspace, root) = try makeOrchestratorWithWorkspace()
         let tabIndexLog = root.appendingPathComponent("browser-tab-index-focus.log")
@@ -1152,6 +1203,7 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertEqual(focusedTabs, ["202\t2"])
     }
 
+    // Tests focus workspace window auto corrects when focused indexed tab does not match workspace by arranging representative inputs and asserting the expected result.
     func testFocusWorkspaceWindowAutoCorrectsWhenFocusedIndexedTabDoesNotMatchWorkspace() throws {
         let (orchestrator, store, _, workspace, root) = try makeOrchestratorWithWorkspace()
         let scanLog = root.appendingPathComponent("browser-tab-index-refresh.log")
@@ -1185,6 +1237,7 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertEqual(focusedByIndex, ["202\t1", "202\t1"])
     }
 
+    // Tests focus workspace window uses distinct live tab ur ls for overlapping session prefixes by arranging representative inputs and asserting the expected result.
     func testFocusWorkspaceWindowUsesDistinctLiveTabURLsForOverlappingSessionPrefixes() throws {
         let (orchestrator, store, _, workspace, root) = try makeOrchestratorWithWorkspace()
         let chromeLog = root.appendingPathComponent("browser-overlap-focus.log")
@@ -1210,6 +1263,7 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertEqual(focusedURLs, ["http://localhost:3001", "http://localhost:3001/admin", "http://localhost:3001/admin/users"])
     }
 
+    // Tests focus window navigation prefers remembered index across browser rows sharing window id by arranging representative inputs and asserting the expected result.
     func testFocusWindowNavigationPrefersRememberedIndexAcrossBrowserRowsSharingWindowID() throws {
         let (orchestrator, store, _, workspace, root) = try makeOrchestratorWithWorkspace()
         let chromeLog = root.appendingPathComponent("browser-nav-remembered.log")
@@ -1247,6 +1301,7 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertEqual(focusedURLs, ["http://localhost:3001", "http://localhost:8000/admin"])
     }
 
+    // Tests tracked windows orders browser then terminal then other roles by arranging representative inputs and asserting the expected result.
     func testTrackedWindowsOrdersBrowserThenTerminalThenOtherRoles() throws {
         let (orchestrator, store, _, workspace, _) = try makeOrchestratorWithWorkspace()
         try store.setWorkspaceBrowserSessions(workspaceID: workspace.id, sessions: [BrowserSession(url: "http://localhost:3001")])
@@ -1271,6 +1326,7 @@ final class OrchestratorTests: XCTestCase {
         }
     }
 
+    // Tests windows live scan orders browser rows by session prefix then url by arranging representative inputs and asserting the expected result.
     func testWindowsLiveScanOrdersBrowserRowsBySessionPrefixThenURL() throws {
         let (orchestrator, store, _, workspace, _) = try makeOrchestratorWithWorkspace()
         try store.setWorkspaceBrowserSessions(
@@ -1293,6 +1349,7 @@ final class OrchestratorTests: XCTestCase {
         }
     }
 
+    // Tests windows omits untargeted browser rows when targeted row shares window id by arranging representative inputs and asserting the expected result.
     func testWindowsOmitsUntargetedBrowserRowsWhenTargetedRowSharesWindowID() throws {
         let (orchestrator, store, _, workspace, _) = try makeOrchestratorWithWorkspace()
 
@@ -1310,6 +1367,7 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertEqual(windows.first(where: { $0.role == "browser" })?.targetURL, "http://localhost:3001")
     }
 
+    // Tests focus window navigation uses active browser tab when remembered index is stale by arranging representative inputs and asserting the expected result.
     func testFocusWindowNavigationUsesActiveBrowserTabWhenRememberedIndexIsStale() throws {
         let (orchestrator, store, _, workspace, root) = try makeOrchestratorWithWorkspace()
         let focusLog = root.appendingPathComponent("browser-nav-stale-focus.log")
@@ -1359,6 +1417,7 @@ final class OrchestratorTests: XCTestCase {
         }
     }
 
+    // Tests launch workspace tracks all terminal windows from running processes by arranging representative inputs and asserting the expected result.
     func testLaunchWorkspaceTracksAllTerminalWindowsFromRunningProcesses() throws {
         let (orchestrator, store, _, workspace, root) = try makeOrchestratorWithWorkspace()
         let itermWindowIDsFile = root.appendingPathComponent("iterm-window-ids.txt")
@@ -1388,6 +1447,7 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertEqual(Set(terminalWindows.compactMap(\.windowID)), Set([701, 702]))
     }
 
+    // Tests launch workspace does not auto open editor by arranging representative inputs and asserting the expected result.
     func testLaunchWorkspaceDoesNotAutoOpenEditor() throws {
         let (orchestrator, _, _, workspace, _) = try makeOrchestratorWithWorkspace(editor: .vscode)
         let root = try makeTempDirectory()
@@ -1410,6 +1470,7 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: openLog.path))
     }
 
+    // Tests launch workspace reuses existing browser matches and tracks all matching tabs by arranging representative inputs and asserting the expected result.
     func testLaunchWorkspaceReusesExistingBrowserMatchesAndTracksAllMatchingTabs() throws {
         let (orchestrator, store, _, workspace, root) = try makeOrchestratorWithWorkspace()
         let chromeOpenLog = root.appendingPathComponent("chrome-open.log")
@@ -1440,6 +1501,7 @@ final class OrchestratorTests: XCTestCase {
         }
     }
 
+    // Tests launch workspace extracts browser session into dedicated window and persists mapping by arranging representative inputs and asserting the expected result.
     func testLaunchWorkspaceExtractsBrowserSessionIntoDedicatedWindowAndPersistsMapping() throws {
         let (orchestrator, store, _, workspace, root) = try makeOrchestratorWithWorkspace()
         let extractLog = root.appendingPathComponent("chrome-extract.log")
@@ -1463,6 +1525,7 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertEqual(extractedEvents, ["888\t1"])
     }
 
+    // Tests focus workspace window marks stale extracted mapping invalid and falls back to indexed tab focus by arranging representative inputs and asserting the expected result.
     func testFocusWorkspaceWindowMarksStaleExtractedMappingInvalidAndFallsBackToIndexedTabFocus() throws {
         let (orchestrator, store, _, workspace, root) = try makeOrchestratorWithWorkspace()
         let chromeFocusLog = root.appendingPathComponent("chrome-stale-fallback.log")
@@ -1491,6 +1554,7 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertEqual(focusURLs.last, "http://localhost:3001")
     }
 
+    // Tests workspace id for focused window maps from yabai by arranging representative inputs and asserting the expected result.
     func testWorkspaceIDForFocusedWindowMapsFromYabai() throws {
         let (orchestrator, store, _, workspace, _) = try makeOrchestratorWithWorkspace()
         try store.upsert(
@@ -1508,6 +1572,7 @@ final class OrchestratorTests: XCTestCase {
         }
     }
 
+    // Tests workspace id for focused chrome window uses active tab url match by arranging representative inputs and asserting the expected result.
     func testWorkspaceIDForFocusedChromeWindowUsesActiveTabURLMatch() throws {
         let (orchestrator, store, project, workspace, root) = try makeOrchestratorWithWorkspace()
         let otherWorkspace = try orchestrator.createWorkspace(projectID: project.id, name: "other")
@@ -1537,6 +1602,7 @@ final class OrchestratorTests: XCTestCase {
         }
     }
 
+    // Tests refresh workspace windows prunes stale rows and clears running when no runtime indicators remain by arranging representative inputs and asserting the expected result.
     func testRefreshWorkspaceWindowsPrunesStaleRowsAndClearsRunningWhenNoRuntimeIndicatorsRemain() throws {
         let (orchestrator, store, _, workspace, _) = try makeOrchestratorWithWorkspace()
         try store.updateWorkspaceRunning(id: workspace.id, isRunning: true, launchedAt: "now")
@@ -1558,6 +1624,7 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertEqual(try store.workspace(id: workspace.id)?.isRunning, false)
     }
 
+    // Tests refresh workspace windows returns false when nothing changed by arranging representative inputs and asserting the expected result.
     func testRefreshWorkspaceWindowsReturnsFalseWhenNothingChanged() throws {
         let (orchestrator, store, _, workspace, _) = try makeOrchestratorWithWorkspace()
 
@@ -1571,6 +1638,7 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertTrue(try store.windows(workspaceID: workspace.id).isEmpty)
     }
 
+    // Tests refresh all workspace windows skips archived workspaces by arranging representative inputs and asserting the expected result.
     func testRefreshAllWorkspaceWindowsSkipsArchivedWorkspaces() throws {
         let root = try makeTempDirectory()
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
@@ -1619,6 +1687,7 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertEqual(try store.windows(workspaceID: archivedWorkspace.id).count, 1)
     }
 
+    // Tests refresh all workspace windows reports no mutation when nothing changed by arranging representative inputs and asserting the expected result.
     func testRefreshAllWorkspaceWindowsReportsNoMutationWhenNothingChanged() throws {
         let (orchestrator, _, _, _, _) = try makeOrchestratorWithWorkspace()
 
@@ -1637,6 +1706,7 @@ final class OrchestratorTests: XCTestCase {
         }
     }
 
+    // Tests list space options sorts by display then space by arranging representative inputs and asserting the expected result.
     func testListSpaceOptionsSortsByDisplayThenSpace() throws {
         let root = try makeTempDirectory()
         let store = try makeTemporaryStore()
@@ -1652,6 +1722,7 @@ final class OrchestratorTests: XCTestCase {
         }
     }
 
+    // Tests update workspace settings marks workspace running when runtime indicators exist by arranging representative inputs and asserting the expected result.
     func testUpdateWorkspaceSettingsMarksWorkspaceRunningWhenRuntimeIndicatorsExist() throws {
         let (orchestrator, store, _, workspace, _) = try makeOrchestratorWithWorkspace()
         try store.upsert(
@@ -1671,6 +1742,7 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertTrue(try store.runningProcesses(workspaceID: workspace.id).isEmpty)
     }
 
+    // Tests list projects returns sorted summaries by arranging representative inputs and asserting the expected result.
     func testListProjectsReturnsSortedSummaries() throws {
         let root = try makeTempDirectory()
         let aDir = root.appendingPathComponent("alpha", isDirectory: true)
@@ -1688,6 +1760,7 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertEqual(projects.map(\.isGitRepo), [false, false])
     }
 
+    // Tests update project config and read back project config by arranging representative inputs and asserting the expected result.
     func testUpdateProjectConfigAndReadBackProjectConfig() throws {
         let (orchestrator, _, project, _, _) = try makeOrchestratorWithWorkspace()
 
@@ -1707,6 +1780,7 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertEqual(loaded?.browserSessions.first?.url, "https://example.com")
     }
 
+    // Tests update project config using closure persists changes by arranging representative inputs and asserting the expected result.
     func testUpdateProjectConfigUsingClosurePersistsChanges() throws {
         let (orchestrator, _, project, _, _) = try makeOrchestratorWithWorkspace()
 
@@ -1720,6 +1794,7 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertEqual(loaded?.processes.first?.command, "echo process")
     }
 
+    // Tests update project config seeds default workspace when settings match previous template by arranging representative inputs and asserting the expected result.
     func testUpdateProjectConfigSeedsDefaultWorkspaceWhenSettingsMatchPreviousTemplate() throws {
         let root = try makeTempDirectory()
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
@@ -1744,6 +1819,7 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertEqual(settings?.browserSessions.first?.url, "https://example.com")
     }
 
+    // Tests update project config does not overwrite customized default workspace settings by arranging representative inputs and asserting the expected result.
     func testUpdateProjectConfigDoesNotOverwriteCustomizedDefaultWorkspaceSettings() throws {
         let root = try makeTempDirectory()
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
@@ -1783,17 +1859,20 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertEqual(settings?.browserSessions.first?.url, "https://custom.example.com")
     }
 
+    // Tests create workspace rejects duplicate active workspace by arranging representative inputs and asserting the expected result.
     func testCreateWorkspaceRejectsDuplicateActiveWorkspace() throws {
         let (orchestrator, _, project, _, _) = try makeOrchestratorWithWorkspace()
         XCTAssertThrowsError(try orchestrator.createWorkspace(projectID: project.id, name: "feature"))
     }
 
+    // Tests archive default workspace throws by arranging representative inputs and asserting the expected result.
     func testArchiveDefaultWorkspaceThrows() throws {
         let (orchestrator, _, project, _, _) = try makeOrchestratorWithWorkspace()
         let defaultWorkspace = try XCTUnwrap(try orchestrator.listWorkspaces(projectID: project.id).first(where: { $0.isDefault }))
         XCTAssertThrowsError(try orchestrator.archiveWorkspace(workspaceID: defaultWorkspace.id))
     }
 
+    // Tests stop workspace updates running state and cleans runtime records by arranging representative inputs and asserting the expected result.
     func testStopWorkspaceUpdatesRunningStateAndCleansRuntimeRecords() throws {
         let (orchestrator, store, _, workspace, _) = try makeOrchestratorWithWorkspace()
         try store.updateWorkspaceRunning(id: workspace.id, isRunning: true, launchedAt: "now")
@@ -1818,6 +1897,7 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertTrue(try orchestrator.runningProcesses(workspaceID: workspace.id).isEmpty)
     }
 
+    // Tests stop workspace handles missing workspace directory and returns outcome by arranging representative inputs and asserting the expected result.
     func testStopWorkspaceHandlesMissingWorkspaceDirectoryAndReturnsOutcome() throws {
         let (orchestrator, store, _, workspace, root) = try makeOrchestratorWithWorkspace()
         let marker = root.appendingPathComponent("stop-script-marker.txt")
@@ -1834,6 +1914,7 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: marker.path))
     }
 
+    // Tests stop workspace terminates process before closing tracked terminal window by arranging representative inputs and asserting the expected result.
     func testStopWorkspaceTerminatesProcessBeforeClosingTrackedTerminalWindow() throws {
         let (orchestrator, store, _, workspace, root) = try makeOrchestratorWithWorkspace()
         let eventLog = root.appendingPathComponent("stop-workspace-events.log")
@@ -1869,6 +1950,7 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertLessThan(killIndex, closeIndex)
     }
 
+    // Tests stop workspace resolves pid from runtime file when tracked pid is missing by arranging representative inputs and asserting the expected result.
     func testStopWorkspaceResolvesPIDFromRuntimeFileWhenTrackedPIDIsMissing() throws {
         let (orchestrator, store, _, workspace, root) = try makeOrchestratorWithWorkspace()
         let eventLog = root.appendingPathComponent("stop-workspace-runtime-events.log")
@@ -1898,6 +1980,7 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertTrue(events.contains("kill -INT -- -8765"))
     }
 
+    // Tests stop workspace closes tracked browser tabs without closing chrome window by arranging representative inputs and asserting the expected result.
     func testStopWorkspaceClosesTrackedBrowserTabsWithoutClosingChromeWindow() throws {
         let (orchestrator, store, _, workspace, root) = try makeOrchestratorWithWorkspace()
         let closeLog = root.appendingPathComponent("yabai-close.log")
@@ -1930,6 +2013,7 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertTrue(closedTabs.contains("http://localhost:3001"))
     }
 
+    // Tests stop workspace closes all live detected browser session tabs by arranging representative inputs and asserting the expected result.
     func testStopWorkspaceClosesAllLiveDetectedBrowserSessionTabs() throws {
         let (orchestrator, store, _, workspace, root) = try makeOrchestratorWithWorkspace()
         let closeLog = root.appendingPathComponent("yabai-close-live.log")
@@ -1967,6 +2051,7 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertFalse(closedTabs.contains("https://calendar.google.com"))
     }
 
+    // Tests launch workspace throws when runtime indicators exist by arranging representative inputs and asserting the expected result.
     func testLaunchWorkspaceThrowsWhenRuntimeIndicatorsExist() throws {
         let (orchestrator, store, _, workspace, _) = try makeOrchestratorWithWorkspace()
         try store.upsert(
@@ -1977,6 +2062,7 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertThrowsError(try orchestrator.launchWorkspace(workspaceID: workspace.id))
     }
 
+    // Tests launch workspace without processes does not require i term by arranging representative inputs and asserting the expected result.
     func testLaunchWorkspaceWithoutProcessesDoesNotRequireITerm() throws {
         let (orchestrator, store, _, workspace, _) = try makeOrchestratorWithWorkspace()
 
@@ -1986,6 +2072,7 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertEqual(try store.workspace(id: workspace.id)?.isRunning, true)
     }
 
+    // Tests restart workspace stops then launches by arranging representative inputs and asserting the expected result.
     func testRestartWorkspaceStopsThenLaunches() throws {
         let (orchestrator, store, _, workspace, _) = try makeOrchestratorWithWorkspace()
         try store.updateWorkspaceRunning(id: workspace.id, isRunning: true, launchedAt: "now")
@@ -2007,6 +2094,7 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertEqual(try store.workspace(id: workspace.id)?.isRunning, true)
     }
 
+    // Tests update workspace settings removing browser sessions closes tabs without closing chrome window by arranging representative inputs and asserting the expected result.
     func testUpdateWorkspaceSettingsRemovingBrowserSessionsClosesTabsWithoutClosingChromeWindow() throws {
         let (orchestrator, store, _, workspace, root) = try makeOrchestratorWithWorkspace()
         let closeLog = root.appendingPathComponent("browser-settings-yabai-close.log")
@@ -2036,6 +2124,7 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertTrue(try store.windows(workspaceID: workspace.id).filter { $0.role == "browser" }.isEmpty)
     }
 
+    // Tests launch workspace rejects archived workspace by arranging representative inputs and asserting the expected result.
     func testLaunchWorkspaceRejectsArchivedWorkspace() throws {
         let (orchestrator, _, _, workspace, _) = try makeOrchestratorWithWorkspace()
         try orchestrator.archiveWorkspace(workspaceID: workspace.id)
@@ -2047,6 +2136,7 @@ final class OrchestratorTests: XCTestCase {
         }
     }
 
+    // Tests workspace settings and accessors reflect store state by arranging representative inputs and asserting the expected result.
     func testWorkspaceSettingsAndAccessorsReflectStoreState() throws {
         let (orchestrator, store, _, workspace, _) = try makeOrchestratorWithWorkspace()
         try store.setWorkspacePorts(workspaceID: workspace.id, ports: [4100, 4101])
@@ -2144,6 +2234,10 @@ final class OrchestratorTests: XCTestCase {
           if [[ -z "$value" || "$value" == "0" ]]; then
             return
           fi
+          local cap="${MOCK_TEST_DELAY_CAP_MS:-25}"
+          if [[ "$value" =~ ^[0-9]+$ && "$cap" =~ ^[0-9]+$ && "$value" -gt "$cap" ]]; then
+            value="$cap"
+          fi
           perl -e "select(undef, undef, undef, $value / 1000);"
         }
 
@@ -2239,6 +2333,10 @@ final class OrchestratorTests: XCTestCase {
           local value="$1"
           if [[ -z "$value" || "$value" == "0" ]]; then
             return
+          fi
+          local cap="${MOCK_TEST_DELAY_CAP_MS:-25}"
+          if [[ "$value" =~ ^[0-9]+$ && "$cap" =~ ^[0-9]+$ && "$value" -gt "$cap" ]]; then
+            value="$cap"
           fi
           perl -e "select(undef, undef, undef, $value / 1000);"
         }
@@ -2507,6 +2605,7 @@ final class OrchestratorTests: XCTestCase {
 
     // MARK: - buildWorkspaceEnv
 
+    // Tests build workspace env sets muxy workspace dir by arranging representative inputs and asserting the expected result.
     func testBuildWorkspaceEnvSetsMuxyWorkspaceDir() throws {
         let store = try makeTemporaryStore()
         let orchestrator = MuxyOrchestrator(store: store)
@@ -2516,6 +2615,7 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertEqual(env["MUXY_WORKSPACE_DIR"], "/tmp/project/ws")
     }
 
+    // Tests build workspace env sets muxy project dir by arranging representative inputs and asserting the expected result.
     func testBuildWorkspaceEnvSetsMuxyProjectDir() throws {
         let store = try makeTemporaryStore()
         let orchestrator = MuxyOrchestrator(store: store)
@@ -2525,6 +2625,7 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertEqual(env["MUXY_PROJECT_DIR"], "/tmp/project")
     }
 
+    // Tests build workspace env does not contain scoped key by arranging representative inputs and asserting the expected result.
     func testBuildWorkspaceEnvDoesNotContainScopedKey() throws {
         let store = try makeTemporaryStore()
         let orchestrator = MuxyOrchestrator(store: store)
@@ -2535,6 +2636,7 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertTrue(scopedKeys.isEmpty, "Expected no scoped cross-project keys, found: \(scopedKeys)")
     }
 
+    // Tests add project stores in db only by arranging representative inputs and asserting the expected result.
     func testAddProjectStoresInDBOnly() throws {
         let root = try makeTempDirectory()
         let projectDir = root.appendingPathComponent("myproject", isDirectory: true)
@@ -2551,6 +2653,7 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertEqual(try store.projects().count, 1)
     }
 
+    // Tests update project config persists templates to db by arranging representative inputs and asserting the expected result.
     func testUpdateProjectConfigPersistsTemplatesToDB() throws {
         let root = try makeTempDirectory()
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
@@ -2573,6 +2676,7 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertEqual(updated?.processes.count, 1)
     }
 
+    // Tests remove project deletes from db by arranging representative inputs and asserting the expected result.
     func testRemoveProjectDeletesFromDB() throws {
         let root = try makeTempDirectory()
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
@@ -2588,6 +2692,7 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertNil(try store.project(id: project.id))
     }
 
+    // Tests build workspace env includes named ports by arranging representative inputs and asserting the expected result.
     func testBuildWorkspaceEnvIncludesNamedPorts() throws {
         let store = try makeTemporaryStore()
         let orchestrator = MuxyOrchestrator(store: store)
@@ -2601,6 +2706,7 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertEqual(env["MUXY_PROJECT_DIR"], "/tmp/project")
     }
 
+    // Tests create workspace from worktree infers project and branch by arranging representative inputs and asserting the expected result.
     func testCreateWorkspaceFromWorktreeInfersProjectAndBranch() throws {
         let repo = try makeTempGitRepo(name: "test-repo")
         
@@ -2628,6 +2734,7 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertEqual(stored?.name, "feature-branch")
     }
 
+    // Tests create workspace from worktree with custom name by arranging representative inputs and asserting the expected result.
     func testCreateWorkspaceFromWorktreeWithCustomName() throws {
         let repo = try makeTempGitRepo(name: "test-repo")
         let root = repo.deletingLastPathComponent()
@@ -2646,6 +2753,7 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertEqual(workspace.branch, "fix/bug-123")
     }
 
+    // Tests create workspace from worktree fails if project not registered by arranging representative inputs and asserting the expected result.
     func testCreateWorkspaceFromWorktreeFailsIfProjectNotRegistered() throws {
         let repo = try makeTempGitRepo(name: "test-repo")
         let root = repo.deletingLastPathComponent()
@@ -2664,6 +2772,7 @@ final class OrchestratorTests: XCTestCase {
         }
     }
 
+    // Tests create workspace from worktree fails if already exists by arranging representative inputs and asserting the expected result.
     func testCreateWorkspaceFromWorktreeFailsIfAlreadyExists() throws {
         let repo = try makeTempGitRepo(name: "test-repo")
         let root = repo.deletingLastPathComponent()
@@ -2684,6 +2793,7 @@ final class OrchestratorTests: XCTestCase {
         }
     }
 
+    // Tests scan and create workspaces from worktrees finds all worktrees by arranging representative inputs and asserting the expected result.
     func testScanAndCreateWorkspacesFromWorktreesFindsAllWorktrees() throws {
         let repo = try makeTempGitRepo(name: "test-repo")
         let root = repo.deletingLastPathComponent()
@@ -2710,6 +2820,7 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertEqual(allWorkspaces.count, 3)
     }
 
+    // Tests scan and create workspaces from worktrees skips existing workspaces by arranging representative inputs and asserting the expected result.
     func testScanAndCreateWorkspacesFromWorktreesSkipsExistingWorkspaces() throws {
         let repo = try makeTempGitRepo(name: "test-repo")
         let root = repo.deletingLastPathComponent()
@@ -2736,6 +2847,7 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertFalse(names.contains("main"))
     }
 
+    // Tests scan and create workspaces from worktrees runs setup script for created workspace by arranging representative inputs and asserting the expected result.
     func testScanAndCreateWorkspacesFromWorktreesRunsSetupScriptForCreatedWorkspace() throws {
         let repo = try makeTempGitRepo(name: "test-repo")
         let root = repo.deletingLastPathComponent()
@@ -2761,6 +2873,7 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertEqual(marker, "discovered")
     }
 
+    // Tests scan and create workspaces from worktrees skips deleted workspace paths marked ignored by arranging representative inputs and asserting the expected result.
     func testScanAndCreateWorkspacesFromWorktreesSkipsDeletedWorkspacePathsMarkedIgnored() throws {
         let repo = try makeTempGitRepo(name: "test-repo")
         let root = repo.deletingLastPathComponent()
@@ -2782,6 +2895,7 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertTrue(try store.isIgnoredWorktree(path: worktree.path))
     }
 
+    // Tests scan and create workspaces from worktrees skips missing worktree directories by arranging representative inputs and asserting the expected result.
     func testScanAndCreateWorkspacesFromWorktreesSkipsMissingWorktreeDirectories() throws {
         let repo = try makeTempGitRepo(name: "test-repo")
         let root = repo.deletingLastPathComponent()
@@ -2800,6 +2914,7 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertNil(try store.workspace(dir: missingWorktree.path))
     }
 
+    // Tests scan and create workspaces from worktrees scans all projects when no project id provided by arranging representative inputs and asserting the expected result.
     func testScanAndCreateWorkspacesFromWorktreesScansAllProjectsWhenNoProjectIDProvided() throws {
         let repo1 = try makeTempGitRepo(name: "repo1")
         let repo2 = try makeTempGitRepo(name: "repo2")

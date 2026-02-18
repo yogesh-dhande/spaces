@@ -6,6 +6,7 @@ import Foundation
 struct StatusCheckTests {
     
     @Test("Status check command failure detection with docker commands")
+    // Tests status check detects docker container failure by arranging representative inputs and asserting the expected result.
     func testStatusCheckDetectsDockerContainerFailure() throws {
         let root = try makeTempDirectory()
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
@@ -72,6 +73,7 @@ struct StatusCheckTests {
     }
     
     @Test("Status check command success detection with docker commands")
+    // Tests status check detects docker container success by arranging representative inputs and asserting the expected result.
     func testStatusCheckDetectsDockerContainerSuccess() throws {
         let root = try makeTempDirectory()
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
@@ -118,6 +120,7 @@ struct StatusCheckTests {
     }
     
     @Test("Status check with incorrect docker command logic demonstrates the bug")
+    // Tests status check with incorrect docker command logic by arranging representative inputs and asserting the expected result.
     func testStatusCheckWithIncorrectDockerCommandLogic() throws {
         let root = try makeTempDirectory()
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
@@ -164,6 +167,7 @@ struct StatusCheckTests {
     }
 
     @Test("Status-check restart handles missing tracked PID using runtime PID file")
+    // Tests status check restart handles missing tracked pid using runtime pid file by arranging representative inputs and asserting the expected result.
     func testStatusCheckRestartHandlesMissingTrackedPIDUsingRuntimePIDFile() throws {
         let root = try makeTempDirectory()
         let projectDir = root.appendingPathComponent("project", isDirectory: true)

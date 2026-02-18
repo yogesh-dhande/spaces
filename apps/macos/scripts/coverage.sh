@@ -2,15 +2,47 @@
 set -eu
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
+start_epoch="$(date +%s)"
 cache_dir="$root/.build/clang-module-cache"
 coverage_dir="$root/.build/coverage"
 mkdir -p "$cache_dir"
 mkdir -p "$coverage_dir"
 export CLANG_MODULE_CACHE_PATH="$cache_dir"
 export LLVM_PROFILE_FILE="$coverage_dir/%m.profraw"
+export MOCK_TEST_DELAY_CAP_MS="${MOCK_TEST_DELAY_CAP_MS:-25}"
+
+report_elapsed_time() {
+    end_epoch="$(date +%s)"
+    elapsed_seconds=$((end_epoch - start_epoch))
+    echo "Coverage script elapsed: ${elapsed_seconds}s"
+}
+trap report_elapsed_time EXIT
 
 echo "Running swift test with coverage..."
-"$root/scripts/swiftpm.sh" test --enable-code-coverage --disable-sandbox
+workers="${MUXY_TEST_WORKERS:-}"
+if [ -z "$workers" ]; then
+    detected_workers="$(sysctl -n hw.logicalcpu 2>/dev/null || echo "")"
+    case "$detected_workers" in
+        ''|*[!0-9]*)
+            workers=""
+            ;;
+        *)
+            workers="$detected_workers"
+            ;;
+    esac
+fi
+
+set -- test --parallel --enable-code-coverage --disable-sandbox
+if [ -n "$workers" ]; then
+    echo "Using parallel test workers: $workers"
+    set -- "$@" --num-workers "$workers"
+fi
+if [ "${MUXY_TEST_SKIP_BUILD:-0}" = "1" ]; then
+    echo "Skipping rebuild before tests (MUXY_TEST_SKIP_BUILD=1)"
+    set -- "$@" --skip-build
+fi
+
+"$root/scripts/swiftpm.sh" "$@"
 
 profdata_path=$(find "$root/.build" -type f -name "*.profdata" | sort | tail -n 1)
 if [ -z "${profdata_path:-}" ]; then

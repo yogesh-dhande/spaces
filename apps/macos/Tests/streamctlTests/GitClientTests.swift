@@ -4,6 +4,7 @@ import XCTest
 @testable import streamctl
 
 final class GitClientTests: XCTestCase {
+    // Tests is repo detects repository and non repository by arranging representative inputs and asserting the expected result.
     func testIsRepoDetectsRepositoryAndNonRepository() throws {
         let repo = try makeTempDirectory()
         try initializeGitRepository(at: repo, initialBranch: "main")
@@ -14,6 +15,7 @@ final class GitClientTests: XCTestCase {
         XCTAssertFalse(client.isRepo(path: nonRepo.path))
     }
 
+    // Tests default branch uses remote head then fallbacks by arranging representative inputs and asserting the expected result.
     func testDefaultBranchUsesRemoteHeadThenFallbacks() throws {
         let fixture = try makeRemoteFixture()
         let client = GitClient()
@@ -28,6 +30,7 @@ final class GitClientTests: XCTestCase {
         XCTAssertNil(client.defaultBranch(path: nonRepo.path))
     }
 
+    // Tests create worktree when branch exists locally by arranging representative inputs and asserting the expected result.
     func testCreateWorktreeWhenBranchExistsLocally() throws {
         let root = try makeTempDirectory()
         let repo = root.appendingPathComponent("repo", isDirectory: true)
@@ -45,6 +48,7 @@ final class GitClientTests: XCTestCase {
         XCTAssertEqual(branch, "feature")
     }
 
+    // Tests create worktree when branch exists only on remote by arranging representative inputs and asserting the expected result.
     func testCreateWorktreeWhenBranchExistsOnlyOnRemote() throws {
         let fixture = try makeRemoteFixture()
         let client = GitClient()
@@ -60,6 +64,7 @@ final class GitClientTests: XCTestCase {
         XCTAssertEqual(branch, "remote-feature")
     }
 
+    // Tests create worktree when branch exists only on remote without local tracking ref by arranging representative inputs and asserting the expected result.
     func testCreateWorktreeWhenBranchExistsOnlyOnRemoteWithoutLocalTrackingRef() throws {
         let fixture = try makeRemoteFixture()
         try runGit(["checkout", "-b", "new-remote-only"], cwd: fixture.source.path)
@@ -89,6 +94,7 @@ final class GitClientTests: XCTestCase {
         XCTAssertEqual(branch, "new-remote-only")
     }
 
+    // Tests list worktrees returns all worktrees by arranging representative inputs and asserting the expected result.
     func testListWorktreesReturnsAllWorktrees() throws {
         let root = try makeTempDirectory()
         let repo = root.appendingPathComponent("repo", isDirectory: true)
@@ -125,6 +131,7 @@ final class GitClientTests: XCTestCase {
         XCTAssertEqual(feature2.branchName, "feature-2")
     }
     
+    // Tests list worktrees returns empty for non git repo by arranging representative inputs and asserting the expected result.
     func testListWorktreesReturnsEmptyForNonGitRepo() throws {
         let nonRepo = try makeTempDirectory()
         let client = GitClient()
@@ -132,6 +139,7 @@ final class GitClientTests: XCTestCase {
         XCTAssertThrowsError(try client.listWorktrees(path: nonRepo.path))
     }
 
+    // Tests create and remove worktree for new branch by arranging representative inputs and asserting the expected result.
     func testCreateAndRemoveWorktreeForNewBranch() throws {
         let root = try makeTempDirectory()
         let repo = root.appendingPathComponent("repo", isDirectory: true)
@@ -148,6 +156,7 @@ final class GitClientTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: worktree.path))
     }
 
+    // Tests create worktree for new branch uses target branch head by arranging representative inputs and asserting the expected result.
     func testCreateWorktreeForNewBranchUsesTargetBranchHead() throws {
         let root = try makeTempDirectory()
         let repo = root.appendingPathComponent("repo", isDirectory: true)
@@ -168,6 +177,7 @@ final class GitClientTests: XCTestCase {
         XCTAssertEqual(featureHead, expectedHead)
     }
 
+    // Tests create worktree for new branch uses remote target branch without local tracking ref by arranging representative inputs and asserting the expected result.
     func testCreateWorktreeForNewBranchUsesRemoteTargetBranchWithoutLocalTrackingRef() throws {
         let fixture = try makeRemoteFixture()
         try runGit(["checkout", "-b", "new-remote-target"], cwd: fixture.source.path)
@@ -195,6 +205,7 @@ final class GitClientTests: XCTestCase {
         XCTAssertEqual(featureHead, expectedHead)
     }
 
+    // Tests branch options include local and remote branches by arranging representative inputs and asserting the expected result.
     func testBranchOptionsIncludeLocalAndRemoteBranches() throws {
         let fixture = try makeRemoteFixture()
         try runGit(["checkout", "-b", "local-only"], cwd: fixture.clone.path)
@@ -208,6 +219,7 @@ final class GitClientTests: XCTestCase {
         XCTAssertTrue(options.contains("local-only"))
     }
 
+    // Tests branch options include live remote heads without fetch by arranging representative inputs and asserting the expected result.
     func testBranchOptionsIncludeLiveRemoteHeadsWithoutFetch() throws {
         let fixture = try makeRemoteFixture()
         try runGit(["checkout", "-b", "new-remote-only"], cwd: fixture.source.path)
@@ -222,6 +234,7 @@ final class GitClientTests: XCTestCase {
         XCTAssertTrue(options.contains("new-remote-only"))
     }
 
+    // Tests tracked file activity uses tracked files for latest timestamp and count by arranging representative inputs and asserting the expected result.
     func testTrackedFileActivityUsesTrackedFilesForLatestTimestampAndCount() throws {
         let root = try makeTempDirectory()
         let repo = root.appending(path: "repo", directoryHint: .isDirectory)
@@ -256,6 +269,7 @@ final class GitClientTests: XCTestCase {
         assertEqualDate(updatedActivity.latestTrackedFileModificationDate, expectedLatestDate)
     }
 
+    // Tests tracked file activity returns empty snapshot for non repository by arranging representative inputs and asserting the expected result.
     func testTrackedFileActivityReturnsEmptySnapshotForNonRepository() throws {
         let directory = try makeTempDirectory()
         let activity = GitClient().trackedFileActivity(path: directory.path)
@@ -263,6 +277,7 @@ final class GitClientTests: XCTestCase {
         XCTAssertEqual(activity.modifiedTrackedFileCount, 0)
     }
 
+    // Tests clone and delete branch by arranging representative inputs and asserting the expected result.
     func testCloneAndDeleteBranch() throws {
         let source = try makeTempDirectory()
         try initializeGitRepository(at: source, initialBranch: "main")
