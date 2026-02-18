@@ -46,7 +46,6 @@ export default function WorkspaceLifecycleDocsPage() {
         <ul className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
           <li>• Starts workspace processes in dedicated terminal windows.</li>
           <li>• Opens browser sessions and tracks matching Chrome tabs by URL prefix.</li>
-          <li>• Opens the workspace in the preferred editor (if configured).</li>
           <li>• Captures workspace windows so they can be focused later by shortcut.</li>
         </ul>
       </article>
@@ -68,7 +67,7 @@ export default function WorkspaceLifecycleDocsPage() {
         <ul className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
           <li>• Processes are gracefully interrupted, then terminated if needed.</li>
           <li>• The stop script runs after process termination (if configured).</li>
-          <li>• Tracked workspace windows are closed (terminals, browsers, editor).</li>
+          <li>• Tracked workspace windows are closed (terminals and browsers).</li>
         </ul>
       </article>
 

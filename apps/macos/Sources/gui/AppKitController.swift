@@ -2637,6 +2637,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         if let tooltipSpec = tooltipShortcutSpec {
             registerHotkey(spec: tooltipSpec, id: GlobalHotkey.tooltip.rawValue, signature: signature, target: target)
         }
+        if let openEditorShortcutSpec {
+            registerHotkey(spec: openEditorShortcutSpec, id: GlobalHotkey.openEditor.rawValue, signature: signature, target: target)
+        }
 
         var eventSpec = EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyPressed))
         _ = InstallEventHandler(
@@ -2656,10 +2659,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             if self.handleShortcutCaptureEvent(event: event) { return nil }
             if self.handleFocusedTextInputShortcut(event: event) { return nil }
             if self.isTextInputFocused() { return event }
-            if let openEditorShortcutSpec, matches(event: event, spec: openEditorShortcutSpec) {
-                if let workspaceID = self.selectedWorkspaceID { self.openWorkspaceEditor(workspaceID: workspaceID) }
-                return nil
-            }
             if let openTerminalShortcutSpec, matches(event: event, spec: openTerminalShortcutSpec) {
                 if let workspaceID = self.selectedWorkspaceID { self.openWorkspaceTerminal(workspaceID: workspaceID) }
                 return nil
@@ -2785,7 +2784,20 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         case .next: if NSApp.isActive { selectNextRunningWorkspace() } else { focusGlobalWindowNavigation(direction: 1) }
         case .previous: if NSApp.isActive { selectPreviousRunningWorkspace() } else { focusGlobalWindowNavigation(direction: -1) }
         case .tooltip: toggleTooltipDisplay()
+        case .openEditor: openGlobalEditorFromHotkey()
         }
+    }
+
+    private func openGlobalEditorFromHotkey() {
+        guard let workspaceID = globalEditorWorkspaceID() else { return }
+        openWorkspaceEditor(workspaceID: workspaceID)
+    }
+
+    private func globalEditorWorkspaceID() -> String? {
+        if let workspaceID = try? orchestrator.workspaceIDForFocusedWindow() { return workspaceID }
+        if NSApp.isActive, let selectedWorkspaceID { return selectedWorkspaceID }
+        if let workspaceID = try? orchestrator.activeWorkspaceID() { return workspaceID }
+        return nil
     }
 
     private func toggleTooltipDisplay() {

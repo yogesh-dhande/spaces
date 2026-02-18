@@ -149,10 +149,7 @@
             - when launched
                 - start processes defined by the workspace in their own terminal windows. keep track of these windows so they can be focused later when looping through this workspace's windows
                 - ensure that browser tabs for the browser sessions defined for the workspace are open, and if not, open them. keep track of them so they can be focused later when looping through this workspace's windows
-                - open the workspace dir in user's preferred editor
-                - if opening the editor reuses an already-open editor window, capture the currently focused editor window and include it in tracked workspace windows for cycling
-                - editor-window tracking should match known editor app-name aliases reported by yabai (for example VS Code may be reported as `Code`)
-            - user can open the workspace in the preferred editor, a terminal window, or Finder from the GUI; editor and terminal windows are captured and tracked for window cycling
+            - user can open the workspace in the preferred editor, a terminal window, or Finder from the GUI; terminal windows are captured and tracked for window cycling
             - when updated while running
                 - start newly added processes in new terminals
                 - restart processes whose commands change in the same terminal window
@@ -162,7 +159,7 @@
                     - signal the tracked process group first (ctrl-c equivalent before term) so child services (e.g. docker compose) shut down cleanly and do not become orphaned
                     - if automatic process termination is not sufficient for a command stack, run the workspace stop script
                     - if the workspace directory is missing, skip stop-script execution, still complete stop cleanup, and inform the user that the directory was missing
-                - close any windows or tabs open for this workspace (terminals, browsers, editor)
+                - close any tracked windows or tabs open for this workspace (terminals, browsers)
             - when archived
                 - run the same stop flow used by stop/restart (including workspace stop script if set)
                 - if the worktree directory is already missing, archive should still succeed and remove workspace metadata/state
@@ -188,7 +185,7 @@
             - application manages these
             - stored in db so that application restart does not lose pointer to existing windows open on mac; if identifying windows on the fly is robust and fast, then these may be stored in memory instead
             - Automatically identify any chrome windows that have matching BrowserSessions open (browser url starts with BrowserSession.url) and attach those to the related workspace. User may open additional tabs or windows. all of them should be automatically identified and tracked
-            - when looping through windows, the order should be browser window, editor window, and then terminal windows in the order in which processes are defined
+            - when looping through windows, the order should be browser windows and then terminal windows in the order in which processes are defined
             - when GUI is focused, cmd+1 through cmd+9 focus the corresponding workspace window
             - Window records may become stale across app restarts; muxy must re-discover windows on launch and reconcile with stored state
 - User flow
@@ -294,7 +291,7 @@
         - Global hotkey (default: cmd+shift+=) focuses the app
             - If not visible in the currently focused display and space, make it visible in that display and space (that could mean unhiding it, or simply moving it from another display and space)
             - background workspace-window reconciliation runs periodically while the app is active; focus does not synchronously block on refresh
-        - Open editor: `cmd+shift+e`, open terminal: `cmd+shift+t`, open Finder: `cmd+shift+f`
+        - Open editor (global): `cmd+shift+e`, open terminal: `cmd+shift+t`, open Finder: `cmd+shift+f`
         - When muxy in open and in focus
             - Loop through running workspaces (skips any workspaces that are not launched yet)
                 - forward: `cmd+shift+]`

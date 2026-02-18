@@ -12,7 +12,7 @@ const shortcutRows = [
   { shortcut: "cmd+shift+]", action: "Next workspace (or next window for active workspace)", scope: "Global + App" },
   { shortcut: "cmd+shift+[", action: "Previous workspace (or previous window for active workspace)", scope: "Global + App" },
   { shortcut: "cmd+shift+return", action: "Focus selected workspace and first window", scope: "App" },
-  { shortcut: "cmd+shift+e", action: "Open selected workspace in editor", scope: "App" },
+  { shortcut: "cmd+shift+e", action: "Open editor for workspace owning focused window", scope: "Global" },
   { shortcut: "cmd+shift+t", action: "Open selected workspace terminal", scope: "App" },
   { shortcut: "cmd+shift+f", action: "Open selected workspace in Finder", scope: "App" },
   { shortcut: "cmd+1 ... cmd+9", action: "Focus workspace window by index", scope: "App" },

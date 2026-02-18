@@ -11,7 +11,7 @@ export default function WindowManagementDocsPage() {
   return (
     <DocsShell
       title="Window Management"
-      description="Muxy maps workspace windows to captured IDs and browser URL targets so context switching stays deterministic across terminals, editors, and Chrome tabs."
+      description="Muxy maps workspace windows to captured IDs and browser URL targets so context switching stays deterministic across terminals and Chrome tabs."
       pagePath="/docs/window-management"
     >
       <article className="rounded-2xl border border-line bg-surface/82 p-5 backdrop-blur-sm">
@@ -19,7 +19,7 @@ export default function WindowManagementDocsPage() {
         <ul className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
           <li>• Terminal windows from workspace processes.</li>
           <li>• Browser tabs/windows discovered from browser session URL prefixes.</li>
-          <li>• Editor and terminal windows opened from workspace action buttons.</li>
+          <li>• Terminal windows opened from workspace action buttons.</li>
           <li>• Reconciled window records persisted with workspace state.</li>
         </ul>
       </article>
@@ -61,9 +61,8 @@ export default function WindowManagementDocsPage() {
           <code>{`Workspace: feat/checkout
 1. Google Chrome — http://localhost:21004/checkout
 2. Google Chrome — https://github.com/org/repo/pull/912
-3. Cursor — feat/checkout worktree
-4. iTerm2 — web process
-5. iTerm2 — worker process`}</code>
+3. iTerm2 — web process
+4. iTerm2 — worker process`}</code>
         </pre>
       </article>
 

@@ -526,21 +526,6 @@ public final class MuxyOrchestrator {
             windowSnapshot = try yabai.listWindows()
         }
 
-        if let editor = try store.appConfig().editor {
-            let editorApps = editorAppNames(editor)
-            try EditorLauncher.open(editor: editor, directory: workspace.dir)
-            var editorWindows = try captureNewWindows(
-                snapshot: windowSnapshot, role: "editor", appNames: editorApps, workspaceID: workspace.id, orderOffset: 100)
-            if editorWindows.isEmpty, let focused = try yabai.focusedWindow(), editorApps.contains(focused.app) {
-                editorWindows = [
-                    WindowRecord(
-                        id: UUID().uuidString, workspaceID: workspace.id, app: focused.app, title: focused.title, windowID: focused.id, role: "editor",
-                        orderIndex: 100, lastSeenAt: nowISO8601())
-                ]
-            }
-            newWindows.append(contentsOf: editorWindows)
-        }
-
         try store.deleteWindows(workspaceID: workspace.id)
         var index = 0
         let browserWindowIDsWithTarget = Set(
@@ -964,9 +949,7 @@ public final class MuxyOrchestrator {
         guard let editor = try store.appConfig().editor, editor != .none else {
             throw MuxyError.configError(message: "Preferred editor is not configured.")
         }
-        let snapshot = try yabai.listWindows()
         try EditorLauncher.open(editor: editor, directory: workspace.dir)
-        try attachNewWindows(snapshot: snapshot, workspaceID: workspace.id, role: "editor", appNames: editorAppNames(editor), orderOffset: 100)
     }
 
     public func openWorkspaceTerminal(workspaceID: String) throws {
@@ -2353,23 +2336,4 @@ public final class MuxyOrchestrator {
         }.reduce("") { $0 + String($1) }
     }
 
-    private func editorAppName(_ editor: EditorPreference) -> String {
-        switch editor {
-        case .vscode: return "Visual Studio Code"
-        case .cursor: return "Cursor"
-        case .windsurf: return "Windsurf"
-        case .vim: return "Terminal"
-        case .none: return "Terminal"
-        }
-    }
-
-    private func editorAppNames(_ editor: EditorPreference) -> Set<String> {
-        switch editor {
-        case .vscode: return ["Visual Studio Code", "Code"]
-        case .cursor: return ["Cursor"]
-        case .windsurf: return ["Windsurf"]
-        case .vim: return ["Terminal"]
-        case .none: return ["Terminal"]
-        }
-    }
 }

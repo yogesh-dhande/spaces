@@ -57,7 +57,7 @@ export default function GettingStartedDocsPage() {
         <h2 className="text-xl font-semibold tracking-tight">Launch and Validate</h2>
         <p className="mt-2 text-sm leading-7 text-foreground-soft">
           Launch is valid only for stopped workspaces. A launch allocates ports, starts configured processes,
-          opens browser sessions, and opens the preferred editor.
+          and opens browser sessions.
         </p>
         <ul className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
           <li>• Confirm the workspace shows as running in the sidebar.</li>

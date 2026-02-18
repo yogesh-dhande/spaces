@@ -64,13 +64,11 @@ Muxy periodically discovers untracked git worktrees for existing projects and au
 - Workspace view includes:
   - Launch/Restart/Stop/Archive buttons
   - Launch/Restart/Stop/Archive actions run in background tasks so the UI stays responsive during long-running workspace automation
-  - Open Editor/Terminal/Finder buttons (editor/terminal windows are tracked for cycling)
+  - Open Editor/Terminal/Finder buttons (terminal windows are tracked for cycling)
   - Workspace window records are refreshed periodically in a background pass so stale closed windows are pruned without blocking interaction
   - Launch/Restart can extract one matching tab per browser session into a dedicated Chrome window and persist extracted-window mappings for faster focus
   - Browser focus tries extracted-window `yabai` focus first; stale mappings are invalidated and fallback continues via indexed tab focus + URL matching (without automatic re-extraction)
   - Launch/Restart reuses existing matching Chrome tabs and tracks all matches instead of opening duplicate tabs when matches already exist
-  - If opening the preferred editor reuses an already-open editor window, launch captures the currently focused editor window so it is included in workspace window cycling
-  - Editor tracking handles known yabai app-name aliases (for example VS Code can be reported as `Code`) so editor windows continue to appear in next/previous window loops
   - Stop/Restart/browser-session updates close tracked Chrome tabs only and never close full Chrome windows
   - If a workspace directory is missing during stop, muxy still stops the workspace and shows an informational message that stop-script execution was skipped
   - Workspace window list/navigation rebuilds browser rows from Chrome tabs with a 10-second debounce (per workspace/prefix set) and includes tabs whose URLs start with configured browser session URLs (deduped by window+tab URL)
@@ -96,7 +94,7 @@ Hotkeys:
 - Next running workspace: `cmd+shift+]`
 - Previous running workspace: `cmd+shift+[`
 - Focus selected workspace: `cmd+shift+return`
-- Open editor: `cmd+shift+e`
+- Open editor (global): `cmd+shift+e` (opens editor for the workspace owning the focused workspace window)
 - Open terminal: `cmd+shift+t`
 - Open Finder: `cmd+shift+f`
 - Focus workspace window 1-9: `cmd+1` through `cmd+9`

@@ -836,47 +836,40 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertThrowsError(try orchestrator.openWorkspaceEditor(workspaceID: workspace.id))
     }
 
-    func testOpenWorkspaceEditorAttachesFocusedEditorWindow() throws {
+    func testOpenWorkspaceEditorDoesNotTrackEditorWindows() throws {
         let (orchestrator, _, _, workspace, root) = try makeOrchestratorWithWorkspace(editor: .vscode)
         let openLog = root.appendingPathComponent("open.log")
 
-        // Mocked dependencies: `yabai`, `osascript`, and `open`.
-        // Why: deterministically emulate window discovery/focus and editor launching without GUI side effects.
-        // Remaining risk: real macOS focus timing, launch delays, and yabai window snapshots may diverge.
-        try withMockCommands(["yabai": Self.orchestratorYabaiMockScript, "osascript": Self.orchestratorOsaScriptMock, "open": Self.openMockScript]) {
-            try withEnv(name: "YABAI_FOCUSED_ID", value: "555") {
-                try withEnv(name: "YABAI_FOCUSED_APP", value: "Visual Studio Code") {
-                    try withEnv(name: "OPEN_LOG_FILE", value: openLog.path) { try orchestrator.openWorkspaceEditor(workspaceID: workspace.id) }
-                }
-            }
+        // Mocked dependency: `open`.
+        // Why: verify editor launch call without touching real GUI apps.
+        // Remaining risk: real editor startup behavior is outside this unit test.
+        try withMockCommands(["open": Self.openMockScript]) {
+            try withEnv(name: "OPEN_LOG_FILE", value: openLog.path) { try orchestrator.openWorkspaceEditor(workspaceID: workspace.id) }
         }
 
         let windows = try orchestrator.windows(workspaceID: workspace.id)
         let editorWindows = windows.filter { $0.role == "editor" }
-        XCTAssertEqual(editorWindows.count, 1)
-        XCTAssertEqual(editorWindows.first?.windowID, 555)
+        XCTAssertEqual(editorWindows.count, 0)
 
         let openArgs = try String(contentsOf: openLog)
         XCTAssertTrue(openArgs.contains("-a Visual Studio Code"))
         XCTAssertTrue(openArgs.contains(workspace.dir))
     }
 
-    func testOpenWorkspaceEditorAttachesFocusedEditorWindowWhenYabaiUsesCodeAlias() throws {
+    func testOpenWorkspaceEditorDoesNotRequireYabai() throws {
         let (orchestrator, _, _, workspace, root) = try makeOrchestratorWithWorkspace(editor: .vscode)
-        let openLog = root.appendingPathComponent("open-code-alias.log")
+        let openLog = root.appendingPathComponent("open-no-yabai.log")
 
-        try withMockCommands(["yabai": Self.orchestratorYabaiMockScript, "osascript": Self.orchestratorOsaScriptMock, "open": Self.openMockScript]) {
-            try withEnv(name: "YABAI_FOCUSED_ID", value: "556") {
-                try withEnv(name: "YABAI_FOCUSED_APP", value: "Code") {
-                    try withEnv(name: "OPEN_LOG_FILE", value: openLog.path) { try orchestrator.openWorkspaceEditor(workspaceID: workspace.id) }
-                }
-            }
+        try withMockCommands(["open": Self.openMockScript]) {
+            try withEnv(name: "OPEN_LOG_FILE", value: openLog.path) { try orchestrator.openWorkspaceEditor(workspaceID: workspace.id) }
         }
 
         let windows = try orchestrator.windows(workspaceID: workspace.id)
         let editorWindows = windows.filter { $0.role == "editor" }
-        XCTAssertEqual(editorWindows.count, 1)
-        XCTAssertEqual(editorWindows.first?.windowID, 556)
+        XCTAssertEqual(editorWindows.count, 0)
+
+        let openArgs = try String(contentsOf: openLog)
+        XCTAssertTrue(openArgs.contains("-a Visual Studio Code"))
     }
 
     func testOpenWorkspaceTerminalAttachesFocusedTerminalWindow() throws {
@@ -1395,49 +1388,26 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertEqual(Set(terminalWindows.compactMap(\.windowID)), Set([701, 702]))
     }
 
-    func testLaunchWorkspaceTracksFocusedEditorWhenNoNewEditorWindowIsCaptured() throws {
+    func testLaunchWorkspaceDoesNotAutoOpenEditor() throws {
         let (orchestrator, _, _, workspace, _) = try makeOrchestratorWithWorkspace(editor: .vscode)
+        let root = try makeTempDirectory()
+        let openLog = root.appendingPathComponent("launch-open.log")
 
         let windowsJSON =
             "[{\"id\":101,\"pid\":11,\"app\":\"iTerm2\",\"title\":\"shell\",\"space\":1,\"display\":1,\"is-sticky\":false,\"is-hidden\":false,\"is-visible\":true,\"is-native-fullscreen\":false},{\"id\":202,\"pid\":22,\"app\":\"Google Chrome\",\"title\":\"docs\",\"space\":1,\"display\":1,\"is-sticky\":false,\"is-hidden\":false,\"is-visible\":true,\"is-native-fullscreen\":false}]"
 
         // Mocked dependencies: `yabai`, `osascript`, and `open`.
-        // Why: model launch behavior where opening editor reuses an existing focused editor window, so snapshot-diff capture is empty.
-        // Remaining risk: real launch/focus timing may still differ under heavy desktop churn.
+        // Why: verify launch behavior keeps editor unopened/untracked.
+        // Remaining risk: real launch timing may still differ under heavy desktop churn.
         try withMockCommands(["yabai": Self.orchestratorYabaiMockScript, "osascript": Self.orchestratorOsaScriptMock, "open": Self.openMockScript]) {
             try withEnv(name: "YABAI_WINDOWS_JSON", value: windowsJSON) {
-                try withEnv(name: "YABAI_FOCUSED_ID", value: "555") {
-                    try withEnv(name: "YABAI_FOCUSED_APP", value: "Visual Studio Code") {
-                        try orchestrator.launchWorkspace(workspaceID: workspace.id)
-                    }
-                }
+                try withEnv(name: "OPEN_LOG_FILE", value: openLog.path) { try orchestrator.launchWorkspace(workspaceID: workspace.id) }
             }
         }
 
         let editorWindows = try orchestrator.windows(workspaceID: workspace.id).filter { $0.role == "editor" }
-        XCTAssertEqual(editorWindows.count, 1)
-        XCTAssertEqual(editorWindows.first?.windowID, 555)
-    }
-
-    func testLaunchWorkspaceTracksFocusedEditorWhenYabaiUsesCodeAlias() throws {
-        let (orchestrator, _, _, workspace, _) = try makeOrchestratorWithWorkspace(editor: .vscode)
-
-        let windowsJSON =
-            "[{\"id\":101,\"pid\":11,\"app\":\"iTerm2\",\"title\":\"shell\",\"space\":1,\"display\":1,\"is-sticky\":false,\"is-hidden\":false,\"is-visible\":true,\"is-native-fullscreen\":false},{\"id\":202,\"pid\":22,\"app\":\"Google Chrome\",\"title\":\"docs\",\"space\":1,\"display\":1,\"is-sticky\":false,\"is-hidden\":false,\"is-visible\":true,\"is-native-fullscreen\":false}]"
-
-        try withMockCommands(["yabai": Self.orchestratorYabaiMockScript, "osascript": Self.orchestratorOsaScriptMock, "open": Self.openMockScript]) {
-            try withEnv(name: "YABAI_WINDOWS_JSON", value: windowsJSON) {
-                try withEnv(name: "YABAI_FOCUSED_ID", value: "556") {
-                    try withEnv(name: "YABAI_FOCUSED_APP", value: "Code") {
-                        try orchestrator.launchWorkspace(workspaceID: workspace.id)
-                    }
-                }
-            }
-        }
-
-        let editorWindows = try orchestrator.windows(workspaceID: workspace.id).filter { $0.role == "editor" }
-        XCTAssertEqual(editorWindows.count, 1)
-        XCTAssertEqual(editorWindows.first?.windowID, 556)
+        XCTAssertEqual(editorWindows.count, 0)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: openLog.path))
     }
 
     func testLaunchWorkspaceReusesExistingBrowserMatchesAndTracksAllMatchingTabs() throws {

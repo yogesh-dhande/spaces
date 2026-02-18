@@ -10,7 +10,7 @@
 - Archiving non-git workspaces does not delete the project directory.
 - Archiving git workspaces removes the worktree via `git worktree remove --force` (and then archives workspace metadata/ports).
 - Stop/archive now tolerate missing workspace/worktree directories: stop skips `stop_script` and still clears runtime state (with GUI/CLI notice), and archive still succeeds when the worktree path is already gone.
-- Workspace launch starts processes in iTerm2 with env vars and logs under `~/.muxy/runtime/<workspace-id>`, opens Chrome browser sessions, optionally opens the editor, and captures window IDs via yabai in browser/editor/terminal order.
+- Workspace launch starts processes in iTerm2 with env vars and logs under `~/.muxy/runtime/<workspace-id>`, opens Chrome browser sessions, and captures window IDs via yabai in browser/terminal order.
 - Status-check/on-exit restarts now resolve runtime PID fallback, terminate the existing process, and wait for exit before relaunch; if shutdown does not complete in time, restart falls back to a new terminal window.
 - Status checks now run continuously in periodic background monitoring for running workspaces (respecting per-check intervals), so `status_results` stay fresh and on-fail actions execute without requiring the run tab to be open.
 - Browser window tracking includes target session URL so workspace focus actions can activate the matching Chrome tab (not just focus the window).
@@ -31,8 +31,7 @@
 - Focused Chrome windows now map to workspaces using both `window_id` and active tab URL prefix so global next/previous shortcuts choose the correct workspace even when Chrome windows are reused across workspaces.
 - Workspace window listing/navigation filters untargeted browser rows when a targeted browser row already exists for the same Chrome `window_id`.
 - Terminal window tracking now backfills from running-process window IDs and persists all newly captured terminal windows during process reconciliation.
-- Launch-time editor tracking now falls back to the currently focused editor window when snapshot-diff capture sees no new editor windows, so editor windows are still included in workspace cycling.
-- Editor capture now recognizes known yabai app-name aliases (for example VS Code reported as `Code`) so editor windows are not dropped from workspace looping.
+- Editor launch is no longer part of workspace launch/window tracking; users open editor on demand (GUI action or global open-editor shortcut).
 - Launch is now reserved for stopped workspaces; running workspaces use explicit restart semantics (stop then launch) via GUI/CLI.
 - Workspace settings snapshot project templates on creation into the runtime DB and are editable per workspace; updates to running workspaces reconcile processes and browser sessions immediately.
 - AppKit GUI is two-pane with in-place forms and editors for processes (with nested inline status checks), browser sessions; workspace detail includes run/stop/archive, windows list with shortcut hints, an env/ports tab, and workspace settings.
@@ -67,7 +66,7 @@
 - The local key monitor defers to focused text inputs so standard edit shortcuts like `cmd+v` work in forms.
 - CLI supports project list/add/update/remove (including `project add --git-url ...`), workspace list/create/launch/stop/archive/focus (including `--window` and `--tooltip`), and settings get/set/reset for all preferences (editor, port-range, GUI shortcuts).
 - CLI now supports top-level `mx discover` (alias: `mx workspace discover`) with optional `--watch`/`--interval` periodic scanning; discovery-created workspaces run project setup scripts.
-- Workspace run view includes Open Editor/Terminal/Finder actions; editor/terminal windows opened this way are captured and included in window cycling.
+- Workspace run view includes Open Editor/Terminal/Finder actions; terminal windows opened this way are captured and included in window cycling.
 - Projects can define named ports (e.g. `FRONTEND_PORT`, `API_PORT`) instead of anonymous `PORT0`-`PORT9`; port definitions are configured at the project level in SQLite and inherited/overridable at the workspace level.
 - Named ports are OS-reserved via sockets (`PortReserver` singleton) so no other process can claim them between allocation and use.
 - Named port env vars are available in setup scripts, stop scripts, process commands, and status check commands.
