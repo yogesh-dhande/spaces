@@ -330,14 +330,28 @@ mx workspace archive --dir /path/to/workspace`}</CodeBlock>
           <Cmd>--all</Cmd> on <Cmd>workspace list</Cmd> to see archived workspaces.
         </p>
 
-        <h3 className="mt-5 text-base font-semibold">Activate a workspace</h3>
-        <CodeBlock>{`# Activate from current directory
-mx workspace activate
+        <h3 className="mt-5 text-base font-semibold">Focus a workspace</h3>
+        <CodeBlock>{`# Focus from current directory
+mx workspace focus
 
-# Activate specific workspace
-mx workspace activate --dir /path/to/workspace`}</CodeBlock>
+# Focus specific workspace
+mx workspace focus --dir /path/to/workspace
+
+# Focus specific window index in the workspace
+mx workspace focus --dir /path/to/workspace --window 2
+
+# Focus and set tooltip in one command
+mx workspace focus --dir /path/to/workspace --tooltip "Reviewing Next.js auth callback flow"
+
+# Focus and show existing workspace tooltip without changing it
+mx workspace focus --dir /path/to/workspace --tooltip
+
+# Focus a specific window and set tooltip in one command
+mx workspace focus --dir /path/to/workspace --window 2 --tooltip "Debugging API timeout in window 2"`}</CodeBlock>
         <p className="mt-2 text-sm leading-7 text-foreground-soft">
           Brings the workspace windows to the front so the developer can immediately resume work.
+          When <Cmd>--tooltip</Cmd> is provided with text, Muxy updates the workspace tooltip field before focusing.
+          When <Cmd>--tooltip</Cmd> is provided without text, Muxy keeps the existing tooltip and displays it.
         </p>
 
         <h3 className="mt-5 text-base font-semibold">Manage workspace tooltip</h3>
@@ -437,6 +451,12 @@ mx workspace create \\
 WORKSPACE_DIR="$HOME/muxy/workspaces/\${NAME}"
 cd "$WORKSPACE_DIR"
 mx workspace launch
+
+# 9. Focus and set tooltip in one command (agent context update)
+mx workspace focus --tooltip "Next.js: implementing \${BRANCH}"
+
+# 10. Focus a specific tracked window and overwrite tooltip in one command
+mx workspace focus --window 2 --tooltip "Next.js: validating OAuth callback in browser"
 
 echo "Workspace '$NAME' is running."
 `}</CodeBlock>

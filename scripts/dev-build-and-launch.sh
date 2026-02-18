@@ -5,10 +5,10 @@ repo_root="$(cd "$(dirname "$0")/.." && pwd)"
 APP="$repo_root/apps/macos/.build/debug/Muxy"
 LOG_FILE="/tmp/Muxy.log"
 
-"$repo_root/scripts/swiftpm.sh" build
-
 # Kill any running instance before relaunching.
 pkill -f "$APP" 2>/dev/null || true
+
+"$repo_root/scripts/swiftpm.sh" build
 
 # Relaunch in background and keep logs so launch failures are visible.
 nohup "$APP" >"$LOG_FILE" 2>&1 &

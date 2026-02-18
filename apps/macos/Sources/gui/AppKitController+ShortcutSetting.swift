@@ -21,7 +21,7 @@ extension AppKitController {
             case .guiHotkey: return "Toggle app"
             case .guiNextShortcut: return "Next workspace/window"
             case .guiPreviousShortcut: return "Previous workspace/window"
-            case .guiShowShortcut: return "Activate selected workspace"
+            case .guiShowShortcut: return "Focus selected workspace"
             case .guiAddProjectShortcut: return "New project"
             case .guiAddWorkspaceShortcut: return "New workspace"
             case .guiReloadShortcut: return "Reload data"

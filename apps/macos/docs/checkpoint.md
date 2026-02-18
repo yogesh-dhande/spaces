@@ -56,7 +56,7 @@
 - Folder and branch metadata rows are shown with icons only when the value differs from workspace name.
 - Git workspace rows show relative last-modified time (from latest tracked-file mtime) plus tracked modified-file count.
 - Settings view in the GUI lets users pick a preferred editor from installed VS Code, Cursor, or Windsurf; the choice is stored in the DB (`app_editor` setting).
-- Settings view in the GUI also allows overriding default shortcuts for global toggle, workspace navigation/activation, and open editor/terminal/Finder; these values are stored in the runtime DB.
+- Settings view in the GUI also allows overriding default shortcuts for global toggle, workspace navigation/focus, and open editor/terminal/Finder; these values are stored in the runtime DB.
 - Window IDs can become stale across app/desktop changes; stale rows are pruned during reconciliation paths.
 - GUI now runs a periodic detached background refresh loop for all non-archived workspace window records using `PollingConstants.workspaceWindowRefreshInterval`.
 - GUI now runs a periodic detached background worktree-discovery loop using `PollingConstants.worktreeDiscoveryInterval`; newly detected git worktrees are auto-registered as workspaces.
@@ -65,7 +65,7 @@
 - New orchestrator APIs `refreshWorkspaceWindows` and `refreshAllWorkspaceWindows` reconcile stale window rows via yabai and clear `is_running` when no runtime indicators remain. `refreshAllWorkspaceWindows` returns a `RefreshResult` with DB mutation flag and per-workspace tracked window counts (including live browser scan); the GUI compares both against the previous snapshot and skips UI reloads when nothing changed.
 - Bringing muxy to front with the global toggle hotkey refreshes the selected workspace detail view so the displayed window list reflects the most recent Chrome tab scan (up to 10 seconds old).
 - The local key monitor defers to focused text inputs so standard edit shortcuts like `cmd+v` work in forms.
-- CLI supports project list/add/update/remove (including `project add --git-url ...`), workspace list/create/launch/stop/archive/activate, and settings get/set/reset for all preferences (editor, port-range, GUI shortcuts).
+- CLI supports project list/add/update/remove (including `project add --git-url ...`), workspace list/create/launch/stop/archive/focus (including `--window` and `--tooltip`), and settings get/set/reset for all preferences (editor, port-range, GUI shortcuts).
 - CLI now supports top-level `mx discover` (alias: `mx workspace discover`) with optional `--watch`/`--interval` periodic scanning; discovery-created workspaces run project setup scripts.
 - Workspace run view includes Open Editor/Terminal/Finder actions; editor/terminal windows opened this way are captured and included in window cycling.
 - Projects can define named ports (e.g. `FRONTEND_PORT`, `API_PORT`) instead of anonymous `PORT0`-`PORT9`; port definitions are configured at the project level in SQLite and inherited/overridable at the workspace level.

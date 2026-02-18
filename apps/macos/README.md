@@ -95,7 +95,7 @@ Hotkeys:
   - Brings muxy to front and keeps current window-selection shortcuts active; workspace-window reconciliation runs on the periodic background interval
 - Next running workspace: `cmd+shift+]`
 - Previous running workspace: `cmd+shift+[`
-- Activate selected workspace: `cmd+shift+return`
+- Focus selected workspace: `cmd+shift+return`
 - Open editor: `cmd+shift+e`
 - Open terminal: `cmd+shift+t`
 - Open Finder: `cmd+shift+f`
@@ -144,7 +144,7 @@ mx workspace launch --project-dir /path/to/repo --name feature-x
 mx workspace restart --project-dir /path/to/repo --name feature-x
 mx workspace stop --project-dir /path/to/repo --name feature-x
 mx workspace archive --project-dir /path/to/repo --name feature-x
-mx workspace activate --project-dir /path/to/repo --name feature-x
+mx workspace focus --project-dir /path/to/repo --name feature-x [--tooltip "Working on auth flows"]
 ```
 
 For git projects, `workspace create` requires `--branch`; `--target-branch` defaults to `main`/`master` when available.

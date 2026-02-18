@@ -94,7 +94,7 @@ API_PORT=21002`}</code>
         </p>
         <ol className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
           <li>1. Select another running workspace from the sidebar or with next/previous shortcuts.</li>
-          <li>2. Activate it to focus the first tracked window (`cmd+shift+return`).</li>
+          <li>2. Focus it to bring the first tracked window forward (`cmd+shift+return`).</li>
           <li>3. Continue cycling within that workspace using next/previous or `cmd+1..9`.</li>
         </ol>
       </article>

@@ -11,7 +11,7 @@ const shortcutRows = [
   { shortcut: "cmd+shift+=", action: "Toggle/focus Muxy window", scope: "Global" },
   { shortcut: "cmd+shift+]", action: "Next workspace (or next window for active workspace)", scope: "Global + App" },
   { shortcut: "cmd+shift+[", action: "Previous workspace (or previous window for active workspace)", scope: "Global + App" },
-  { shortcut: "cmd+shift+return", action: "Activate selected workspace and focus first window", scope: "App" },
+  { shortcut: "cmd+shift+return", action: "Focus selected workspace and first window", scope: "App" },
   { shortcut: "cmd+shift+e", action: "Open selected workspace in editor", scope: "App" },
   { shortcut: "cmd+shift+t", action: "Open selected workspace terminal", scope: "App" },
   { shortcut: "cmd+shift+f", action: "Open selected workspace in Finder", scope: "App" },
@@ -53,7 +53,7 @@ export default function ShortcutsDocsPage() {
         <h2 className="text-xl font-semibold tracking-tight">Workspace vs Window Navigation</h2>
         <ul className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
           <li>• In-app next/previous cycles only running workspaces.</li>
-          <li>• Activating a workspace sets it as the target for global window cycling.</li>
+          <li>• Focusing a workspace sets it as the target for global window cycling.</li>
           <li>• When Muxy is not focused, next/previous cycles windows for the active or focused workspace.</li>
           <li>• Browser window disambiguation uses active tab URL matching in addition to window ID.</li>
         </ul>

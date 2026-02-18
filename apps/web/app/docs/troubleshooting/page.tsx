@@ -75,7 +75,7 @@ mx workspace launch --project-dir /path/to/repo --name feat-auth`}</code>
         <ul className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
           <li>• Global toggle shortcut does nothing: rebind in Settings if another app intercepts it.</li>
           <li>• `cmd+1..9` does not focus windows: ensure workspace has tracked windows in the Run tab list.</li>
-          <li>• Next/previous cycles wrong context: activate the intended workspace first (`cmd+shift+return`).</li>
+          <li>• Next/previous cycles wrong context: focus the intended workspace first (`cmd+shift+return`).</li>
           <li>• Text input edits blocked: verify focus is inside a text field before using edit shortcuts.</li>
         </ul>
       </article>

@@ -48,6 +48,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     private var checkForUpdatesMenuItem: NSMenuItem?
     private var availableUpdate: UpdateInfo?
     private var tooltipWindow: NSWindow?
+    private var tooltipIPCObserver: NSObjectProtocol?
 
     private var configCache: AppConfig?
     private let defaultSplitViewWidth: CGFloat = 360
@@ -88,6 +89,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         reloadData()
         setupGlobalHotkey()
         setupShortcutMonitor()
+        setupTooltipIPCObserver()
         startPeriodicWorkspaceWindowRefresh()
         startPeriodicUpdateCheck()
         startPeriodicProcessMonitor()
@@ -101,6 +103,22 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         periodicWorktreeDiscoveryTask?.cancel()
         teardownGlobalHotkey()
         if let shortcutMonitor { NSEvent.removeMonitor(shortcutMonitor) }
+        if let tooltipIPCObserver {
+            DistributedNotificationCenter.default().removeObserver(tooltipIPCObserver)
+            self.tooltipIPCObserver = nil
+        }
+    }
+
+    private func setupTooltipIPCObserver() {
+        tooltipIPCObserver = DistributedNotificationCenter.default().addObserver(
+            forName: IPCNotification.showTooltipOverlay,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.refreshTooltipOverlay()
+            }
+        }
     }
 
     private func startPeriodicWorkspaceWindowRefresh() {
@@ -2663,7 +2681,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 return nil
             }
             if let activateShortcutSpec, matches(event: event, spec: activateShortcutSpec) {
-                self.activateSelectedWorkspace()
+                self.focusSelectedWorkspace()
                 return nil
             }
             return event
@@ -2772,43 +2790,58 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
     private func toggleTooltipDisplay() {
         if let tooltipWindow, tooltipWindow.isVisible {
-            tooltipWindow.orderOut(nil)
-            self.tooltipWindow = nil
+            dismissTooltipOverlay()
             return
         }
-        
+        showTooltipOverlayIfHidden()
+    }
+
+    private func refreshTooltipOverlay() {
+        dismissTooltipOverlay()
+        showTooltipOverlayIfHidden()
+    }
+
+    private func dismissTooltipOverlay() {
+        guard let tooltipWindow else { return }
+        tooltipWindow.orderOut(nil)
+        self.tooltipWindow = nil
+    }
+
+    private func showTooltipOverlayIfHidden() {
+        if let tooltipWindow, tooltipWindow.isVisible { return }
+
         guard let focusedWorkspaceID = try? orchestrator.workspaceIDForFocusedWindow() else { return }
         guard let workspace = try? orchestrator.store.workspace(id: focusedWorkspaceID) else { return }
         guard let tooltip = workspace.tooltip, !tooltip.isEmpty else { return }
-        
+
         guard let screen = NSScreen.main else { return }
         let screenFrame = screen.frame
-        
+
         let textField = NSTextField(labelWithString: tooltip)
         textField.font = .systemFont(ofSize: 18, weight: .medium)
         textField.textColor = .white
         textField.alignment = .center
         textField.lineBreakMode = .byWordWrapping
         textField.maximumNumberOfLines = 0
-        
+
         let maxWidth: CGFloat = 600
         let padding: CGFloat = 40
         textField.preferredMaxLayoutWidth = maxWidth - padding * 2
         textField.sizeToFit()
-        
+
         let contentView = NSView(frame: NSRect(x: 0, y: 0, width: textField.frame.width + padding * 2, height: textField.frame.height + padding * 2))
         contentView.wantsLayer = true
         contentView.layer?.backgroundColor = NSColor.black.cgColor
         contentView.layer?.cornerRadius = 12
-        
+
         textField.frame.origin = NSPoint(x: padding, y: padding)
         contentView.addSubview(textField)
-        
+
         let windowWidth = contentView.frame.width
         let windowHeight = contentView.frame.height
         let windowX = screenFrame.origin.x + (screenFrame.width - windowWidth) / 2
         let windowY = screenFrame.origin.y + (screenFrame.height - windowHeight) / 2
-        
+
         let window = NSWindow(
             contentRect: NSRect(x: windowX, y: windowY, width: windowWidth, height: windowHeight),
             styleMask: [.borderless],
@@ -2929,7 +2962,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         }
     }
 
-    private func activateSelectedWorkspace() {
+    private func focusSelectedWorkspace() {
         guard let selectedWorkspaceID else { return }
         do { try orchestrator.focusWorkspace(workspaceID: selectedWorkspaceID) } catch { showError(error) }
     }

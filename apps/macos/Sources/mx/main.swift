@@ -251,7 +251,7 @@ struct CLI {
         guard args.count >= 3 else {
             throw NSError(
                 domain: "mx.cli", code: 2,
-                userInfo: [NSLocalizedDescriptionKey: "Missing workspace action. Use: workspace list|create|import|discover|launch|restart|stop|archive|activate|tooltip"])
+                userInfo: [NSLocalizedDescriptionKey: "Missing workspace action. Use: workspace list|create|import|discover|launch|restart|stop|archive|focus|tooltip"])
         }
         switch args[2] {
         case "list":
@@ -311,10 +311,29 @@ struct CLI {
             let id = try workspaceID(orchestrator: orchestrator)
             try orchestrator.archiveWorkspace(workspaceID: id)
             print("Archived workspace \(id)")
-        case "activate":
+        case "focus":
             let id = try workspaceID(orchestrator: orchestrator)
-            try orchestrator.setActiveWorkspace(id: id)
-            print("Activated workspace \(id)")
+            let tooltipFlagPresent = args.contains("--tooltip")
+            var shouldDisplayTooltipOverlay = tooltipFlagPresent
+            if let tooltip = optionalValueAllowingMissingValue(for: "--tooltip") {
+                try orchestrator.updateWorkspaceTooltip(workspaceID: id, tooltip: tooltip)
+                shouldDisplayTooltipOverlay = true
+            }
+            if let rawWindowIndex = optionalValue(for: "--window") {
+                guard let windowIndex = Int(rawWindowIndex), windowIndex > 0 else {
+                    throw NSError(
+                        domain: "mx.cli", code: 2,
+                        userInfo: [NSLocalizedDescriptionKey: "Invalid --window '\(rawWindowIndex)'. Must be a positive integer."])
+                }
+                try orchestrator.focusWorkspaceWindow(workspaceID: id, index: windowIndex)
+                print("Focused workspace window \(windowIndex) for workspace \(id)")
+            } else {
+                try orchestrator.focusWorkspace(workspaceID: id)
+                print("Focused workspace \(id)")
+            }
+            if shouldDisplayTooltipOverlay {
+                requestTooltipOverlayDisplay()
+            }
         case "tooltip":
             let id = try workspaceID(orchestrator: orchestrator)
             if let tooltip = optionalValue(for: "--tooltip") {
@@ -569,6 +588,22 @@ struct CLI {
         return args[idx + 1]
     }
 
+    private func optionalValueAllowingMissingValue(for flag: String) -> String? {
+        guard let idx = args.firstIndex(of: flag), idx + 1 < args.count else { return nil }
+        let candidate = args[idx + 1]
+        if candidate.hasPrefix("--") { return nil }
+        return candidate
+    }
+
+    private func requestTooltipOverlayDisplay() {
+        DistributedNotificationCenter.default().postNotificationName(
+            IPCNotification.showTooltipOverlay,
+            object: nil,
+            userInfo: nil,
+            options: [.deliverImmediately]
+        )
+    }
+
     private func normalizePath(_ path: String) -> String { URL(fileURLWithPath: path).resolvingSymlinksInPath().standardizedFileURL.path }
 
     private func printHelp() {
@@ -646,7 +681,7 @@ struct CLI {
               mx workspace restart [--dir <path>]
               mx workspace stop [--dir <path>]
               mx workspace archive [--dir <path>]
-              mx workspace activate [--dir <path>]
+              mx workspace focus [--dir <path>] [--window <index>] [--tooltip [<text>]]
               mx workspace tooltip [--dir <path>] [--tooltip <text>] [--clear]
 
             Notes:
