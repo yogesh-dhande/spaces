@@ -52,6 +52,29 @@ final class StoreTests: XCTestCase {
         XCTAssertEqual(version, 6)
     }
 
+    func testAdditiveMigrationsRunWhenSchemaVersionAlreadyCurrent() throws {
+        let root = try makeTempDirectory()
+        let dbURL = root.appendingPathComponent("current-version-missing-columns.db")
+        try runSQLiteExec(
+            dbURL: dbURL,
+            sql: """
+                CREATE TABLE projects (
+                  id TEXT PRIMARY KEY,
+                  name TEXT NOT NULL,
+                  dir TEXT NOT NULL UNIQUE,
+                  is_git INTEGER NOT NULL,
+                  default_branch TEXT
+                );
+                CREATE TABLE schema_version (version INTEGER NOT NULL);
+                INSERT INTO schema_version(version) VALUES (6);
+                """)
+
+        _ = try SQLiteStore(path: dbURL.path)
+        let columns = try readTableColumns(dbURL: dbURL, table: "projects")
+        XCTAssertTrue(columns.contains("setup_script"))
+        XCTAssertTrue(columns.contains("stop_script"))
+    }
+
     func testWorkspaceCollectionsRoundTripAndReplacement() throws {
         let store = try makeTemporaryStore()
         let project = makeProjectRecord(dir: try makeTempDirectory().path)
@@ -474,5 +497,27 @@ final class StoreTests: XCTestCase {
             throw NSError(domain: "muxy.tests", code: 5, userInfo: [NSLocalizedDescriptionKey: "Missing row for query: \(sql)"])
         }
         return Int(sqlite3_column_int(statement, 0))
+    }
+
+    private func readTableColumns(dbURL: URL, table: String) throws -> [String] {
+        var db: OpaquePointer?
+        guard sqlite3_open(dbURL.path, &db) == SQLITE_OK, let db else {
+            throw NSError(domain: "muxy.tests", code: 6, userInfo: [NSLocalizedDescriptionKey: "Failed opening test sqlite db"])
+        }
+        defer { sqlite3_close(db) }
+        var statement: OpaquePointer?
+        let sql = "PRAGMA table_info(\(table))"
+        guard sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK, let statement else {
+            let message = String(cString: sqlite3_errmsg(db))
+            throw NSError(domain: "muxy.tests", code: 7, userInfo: [NSLocalizedDescriptionKey: message])
+        }
+        defer { sqlite3_finalize(statement) }
+
+        var columns: [String] = []
+        while sqlite3_step(statement) == SQLITE_ROW {
+            guard let namePtr = sqlite3_column_text(statement, 1) else { continue }
+            columns.append(String(cString: namePtr))
+        }
+        return columns
     }
 }
