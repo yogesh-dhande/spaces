@@ -714,9 +714,9 @@ public final class SQLiteStore {
 
     private func rebuildSchemaIfNeeded() throws {
         try createSchema()
+        try applyAdditiveMigrations()
         let currentVersion = try schemaVersionValue()
         if currentVersion != schemaVersion {
-            try applyAdditiveMigrations()
             try setSchemaVersion(schemaVersion)
         }
     }
@@ -735,6 +735,8 @@ public final class SQLiteStore {
     }
 
     private func applyAdditiveMigrations() throws {
+        try ensureColumnExists(table: "projects", name: "setup_script", definition: "setup_script TEXT")
+        try ensureColumnExists(table: "projects", name: "stop_script", definition: "stop_script TEXT")
         try ensureColumnExists(table: "project_processes", name: "on_exit", definition: "on_exit TEXT NOT NULL DEFAULT 'none'")
         try ensureColumnExists(table: "workspace_processes", name: "on_exit", definition: "on_exit TEXT NOT NULL DEFAULT 'none'")
         try ensureColumnExists(table: "workspace_ports", name: "port_name", definition: "port_name TEXT NOT NULL DEFAULT ''")
