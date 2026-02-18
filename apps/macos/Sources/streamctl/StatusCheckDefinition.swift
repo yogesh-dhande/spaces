@@ -6,15 +6,15 @@ public struct StatusCheckDefinition: Codable, Sendable {
     public var command: String
     public var interval: Int
     public var timeout: Int
-    public var onExit: StatusCheckOnExit
+    public var onFail: OnFailAction
 
-    public init(name: String? = nil, process: String, command: String, interval: Int, timeout: Int, onExit: StatusCheckOnExit = .none) {
+    public init(name: String? = nil, process: String, command: String, interval: Int, timeout: Int, onFail: OnFailAction = .none) {
         self.name = name
         self.process = process
         self.command = command
         self.interval = interval
         self.timeout = timeout
-        self.onExit = onExit
+        self.onFail = onFail
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -23,6 +23,6 @@ public struct StatusCheckDefinition: Codable, Sendable {
         case command
         case interval
         case timeout
-        case onExit = "on_exit"
+        case onFail = "on_fail"
     }
 }

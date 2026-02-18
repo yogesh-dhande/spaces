@@ -29,7 +29,9 @@ func makeWorkspaceRecord(id: String = UUID().uuidString, projectID: String, name
 // Mock iTerm2 adapter for testing that doesn't open actual terminal windows
 class MockIterm2Adapter: Iterm2Adapter {
     var openWindowAndRunCallCount = 0
+    var runInWindowCallCount = 0
     var lastCommand: String?
+    var lastWindowID: Int?
     var nextWindowID: Int = 9999
     
     override func openWindowAndRun(command: String) throws -> ItermWindowInfo {
@@ -39,6 +41,12 @@ class MockIterm2Adapter: Iterm2Adapter {
         nextWindowID += 1
         // Don't actually open a terminal window - just return the window info
         return ItermWindowInfo(id: windowID)
+    }
+    
+    override func runInWindow(id: Int, command: String) throws {
+        runInWindowCallCount += 1
+        lastCommand = command
+        lastWindowID = id
     }
     
     override func isAvailable() -> Bool {

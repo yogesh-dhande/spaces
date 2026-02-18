@@ -3,7 +3,7 @@ import SQLite3
 
 public final class SQLiteStore {
     private let db: OpaquePointer
-    private let schemaVersion = 3
+    private let schemaVersion = 4
 
     public init(path: String) throws {
         var handle: OpaquePointer?
@@ -50,12 +50,12 @@ public final class SQLiteStore {
         for (index, check) in project.statusChecks.enumerated() {
             try execute(
                 sql: """
-                    INSERT INTO project_status_checks(id, project_id, name, process, command, interval, timeout, on_exit, order_index)
+                    INSERT INTO project_status_checks(id, project_id, name, process, command, interval, timeout, on_fail, order_index)
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                 bindings: [
                     UUID().uuidString, project.id, check.name ?? "", check.process, check.command,
-                    String(check.interval), String(check.timeout), check.onExit.rawValue, String(index),
+                    String(check.interval), String(check.timeout), check.onFail.rawValue, String(index),
                 ])
         }
         try execute(sql: "DELETE FROM project_browser_sessions WHERE project_id = ?", bindings: [project.id])
@@ -265,7 +265,7 @@ public final class SQLiteStore {
                 """, bindings: [workspaceID])
         return rows.map { row in
             let name = row[0].isEmpty ? nil : row[0]
-            return ProcessTemplate(name: name, command: row[1], onExit: StatusCheckOnExit(rawValue: row[2]) ?? .none)
+            return ProcessTemplate(name: name, command: row[1], onExit: ProcessExitAction(rawValue: row[2]) ?? .none)
         }
     }
 
@@ -274,12 +274,12 @@ public final class SQLiteStore {
         for (index, check) in checks.enumerated() {
             try execute(
                 sql: """
-                    INSERT INTO workspace_status_checks(id, workspace_id, name, process, command, interval, timeout, on_exit, order_index)
+                    INSERT INTO workspace_status_checks(id, workspace_id, name, process, command, interval, timeout, on_fail, order_index)
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                 bindings: [
                     UUID().uuidString, workspaceID, check.name ?? "", check.process, check.command, String(check.interval), String(check.timeout),
-                    check.onExit.rawValue, String(index),
+                    check.onFail.rawValue, String(index),
                 ])
         }
     }
@@ -287,7 +287,7 @@ public final class SQLiteStore {
     public func workspaceStatusChecks(workspaceID: String) throws -> [StatusCheckDefinition] {
         let rows = try queryRows(
             sql: """
-                SELECT name, process, command, interval, timeout, on_exit
+                SELECT name, process, command, interval, timeout, on_fail
                 FROM workspace_status_checks
                 WHERE workspace_id = ?
                 ORDER BY order_index
@@ -295,7 +295,7 @@ public final class SQLiteStore {
         return rows.map { row in
             StatusCheckDefinition(
                 name: row[0].isEmpty ? nil : row[0], process: row[1], command: row[2], interval: Int(row[3]) ?? PollingConstants.statusCheckDefaultInterval, timeout: Int(row[4]) ?? PollingConstants.statusCheckDefaultTimeout,
-                onExit: StatusCheckOnExit(rawValue: row[5]) ?? .none)
+                onFail: OnFailAction(rawValue: row[5]) ?? .none)
         }
     }
 
@@ -557,7 +557,7 @@ public final class SQLiteStore {
               command TEXT NOT NULL,
               interval INTEGER NOT NULL,
               timeout INTEGER NOT NULL,
-              on_exit TEXT NOT NULL,
+              on_fail TEXT NOT NULL,
               order_index INTEGER NOT NULL
             );
 
@@ -621,7 +621,7 @@ public final class SQLiteStore {
               command TEXT NOT NULL,
               interval INTEGER NOT NULL,
               timeout INTEGER NOT NULL,
-              on_exit TEXT NOT NULL,
+              on_fail TEXT NOT NULL,
               order_index INTEGER NOT NULL
             );
 
@@ -726,16 +726,16 @@ public final class SQLiteStore {
         ).map { PortDefinition(name: $0[0]) }
         let processes = try queryRows(
             sql: "SELECT name, command, on_exit FROM project_processes WHERE project_id = ? ORDER BY order_index", bindings: [id]
-        ).map { row in ProcessTemplate(name: row[0].isEmpty ? nil : row[0], command: row[1], onExit: StatusCheckOnExit(rawValue: row[2]) ?? .none) }
+        ).map { row in ProcessTemplate(name: row[0].isEmpty ? nil : row[0], command: row[1], onExit: ProcessExitAction(rawValue: row[2]) ?? .none) }
         let statusChecks = try queryRows(
-            sql: "SELECT name, process, command, interval, timeout, on_exit FROM project_status_checks WHERE project_id = ? ORDER BY order_index",
+            sql: "SELECT name, process, command, interval, timeout, on_fail FROM project_status_checks WHERE project_id = ? ORDER BY order_index",
             bindings: [id]
         ).map { row in
             StatusCheckDefinition(
                 name: row[0].isEmpty ? nil : row[0], process: row[1], command: row[2],
                 interval: Int(row[3]) ?? PollingConstants.statusCheckDefaultInterval,
                 timeout: Int(row[4]) ?? PollingConstants.statusCheckDefaultTimeout,
-                onExit: StatusCheckOnExit(rawValue: row[5]) ?? .none)
+                onFail: OnFailAction(rawValue: row[5]) ?? .none)
         }
         let browserSessions = try queryRows(
             sql: "SELECT url FROM project_browser_sessions WHERE project_id = ? ORDER BY order_index", bindings: [id]

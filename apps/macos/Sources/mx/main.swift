@@ -127,8 +127,8 @@ struct CLI {
         case "add":
             let name = optionalValue(for: "--name")
             let command = try value(for: "--command")
-            let onExitStr = optionalValue(for: "--on-exit") ?? StatusCheckOnExit.none.rawValue
-            guard let onExit = StatusCheckOnExit(rawValue: onExitStr) else {
+            let onExitStr = optionalValue(for: "--on-exit") ?? ProcessExitAction.none.rawValue
+            guard let onExit = ProcessExitAction(rawValue: onExitStr) else {
                 throw NSError(domain: "mx.cli", code: 2, userInfo: [NSLocalizedDescriptionKey: "Invalid --on-exit value '\(onExitStr)'. Use: none|restart|notify"])
             }
             try orchestrator.updateProjectConfig(projectID: projectID) { config in
@@ -166,9 +166,9 @@ struct CLI {
             let command = try value(for: "--command")
             let intervalStr = optionalValue(for: "--interval")
             let timeoutStr = optionalValue(for: "--timeout")
-            let onExitStr = optionalValue(for: "--on-exit") ?? StatusCheckOnExit.none.rawValue
-            guard let onExit = StatusCheckOnExit(rawValue: onExitStr) else {
-                throw NSError(domain: "mx.cli", code: 2, userInfo: [NSLocalizedDescriptionKey: "Invalid --on-exit value '\(onExitStr)'. Use: none|restart|notify"])
+            let onFailStr = optionalValue(for: "--on-fail") ?? OnFailAction.none.rawValue
+            guard let onFail = OnFailAction(rawValue: onFailStr) else {
+                throw NSError(domain: "mx.cli", code: 2, userInfo: [NSLocalizedDescriptionKey: "Invalid --on-fail value '\(onFailStr)'. Use: none|restart|notify"])
             }
             let interval: Int
             if let s = intervalStr {
@@ -190,7 +190,7 @@ struct CLI {
             }
             try orchestrator.updateProjectConfig(projectID: projectID) { config in
                 config.statusChecks.append(
-                    StatusCheckDefinition(name: name, process: process, command: command, interval: interval, timeout: timeout, onExit: onExit)
+                    StatusCheckDefinition(name: name, process: process, command: command, interval: interval, timeout: timeout, onFail: onFail)
                 )
             }
             print("Added status check \(name ?? process) to \(dir)")
@@ -205,7 +205,7 @@ struct CLI {
                 throw NSError(domain: "mx.cli", code: 2, userInfo: [NSLocalizedDescriptionKey: "Project not found for dir \(dir)"])
             }
             for check in project.statusChecks {
-                print("\(check.name ?? "-")\tprocess=\(check.process)\tcommand=\(check.command)\tinterval=\(check.interval)\ttimeout=\(check.timeout)\ton-exit=\(check.onExit.rawValue)")
+                print("\(check.name ?? "-")\tprocess=\(check.process)\tcommand=\(check.command)\tinterval=\(check.interval)\ttimeout=\(check.timeout)\ton-fail=\(check.onFail.rawValue)")
             }
         default:
             throw NSError(domain: "mx.cli", code: 2, userInfo: [NSLocalizedDescriptionKey: "Unknown action: \(args[3]). Use: project status-check add|remove|list"])
@@ -603,7 +603,7 @@ struct CLI {
               mx project process add --dir <path> --command <cmd> [--name <name>] [--on-exit none|restart|notify]
               mx project process remove --dir <path> --name <name>
               mx project status-check list --dir <path>
-              mx project status-check add --dir <path> --process <process> --command <cmd> [--name <name>] [--interval <seconds>] [--timeout <seconds>] [--on-exit none|restart|notify]
+              mx project status-check add --dir <path> --process <process> --command <cmd> [--name <name>] [--interval <seconds>] [--timeout <seconds>] [--on-fail none|restart|notify]
               mx project status-check remove --dir <path> --name <name>
               mx project browser-session list --dir <path>
               mx project browser-session add --dir <path> --url <url>

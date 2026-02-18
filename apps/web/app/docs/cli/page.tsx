@@ -178,7 +178,7 @@ mx project status-check add    --dir /path/to/repo \\
   --command "curl -fsS http://localhost:$FRONTEND_PORT/health" \\
   --interval 10 \\
   --timeout 2 \\
-  --on-exit notify
+  --on-fail notify
 mx project status-check remove --dir /path/to/repo --name web-health`}</CodeBlock>
         <ul className="mt-3 space-y-1">
           <Flag name="--name <name>" description="Check identifier. Required for remove." />
@@ -186,7 +186,7 @@ mx project status-check remove --dir /path/to/repo --name web-health`}</CodeBloc
           <Flag name="--command <cmd>" description="Shell command to run. Exit 0 = healthy, non-zero = unhealthy." />
           <Flag name="--interval <seconds>" description="Seconds between runs. Default: 60." />
           <Flag name="--timeout <seconds>" description="Seconds before the command is killed. Default: 5." />
-          <Flag name="--on-exit <action>" description="Action when the process exits: none | restart | notify. Default: none." />
+          <Flag name="--on-fail <action>" description="Action when the check fails: none | restart | notify. Default: none." />
         </ul>
       </article>
 
@@ -412,7 +412,7 @@ mx project process add --dir "$REPO" --name api      --command "PORT=\$API_PORT 
 mx project status-check add --dir "$REPO" \\
   --name web-health --process frontend \\
   --command "curl -fsS http://localhost:\$FRONTEND_PORT/health" \\
-  --interval 10 --timeout 2 --on-exit notify
+  --interval 10 --timeout 2 --on-fail notify
 
 # 6. Add browser sessions (opened in Chrome on launch)
 mx project browser-session add --dir "$REPO" --url "http://localhost:\$FRONTEND_PORT"

@@ -95,7 +95,7 @@ Workspace identification:
 
 Runtime database:
 - Path: `~/.muxy/muxy.db`.
-- Schema is versioned via a `schema_version` table; when the version changes all tables are dropped and recreated. Currently at v1.
+- Schema is versioned via a `schema_version` table; when the version changes all tables are dropped and recreated. Currently at v4.
 
 ```mermaid
 erDiagram
@@ -148,7 +148,7 @@ erDiagram
     TEXT command
     INTEGER interval
     INTEGER timeout
-    TEXT on_exit
+    TEXT on_fail
     INTEGER order_index
   }
 
@@ -209,7 +209,7 @@ erDiagram
     TEXT command
     INTEGER interval
     INTEGER timeout
-    TEXT on_exit
+    TEXT on_fail
     INTEGER order_index
   }
 

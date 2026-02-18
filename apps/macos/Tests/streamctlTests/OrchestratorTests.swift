@@ -459,7 +459,7 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertEqual(persisted.count, 2)
     }
 
-    func testStatusCheckOnExitNoneDoesNothing() throws {
+    func testStatusCheckOnFailNoneDoesNothing() throws {
         let root = try makeTempDirectory()
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
@@ -472,7 +472,7 @@ final class OrchestratorTests: XCTestCase {
         try store.setWorkspaceStatusChecks(
             workspaceID: workspace.id,
             checks: [
-                StatusCheckDefinition(process: "api", command: "echo failed && exit 1", interval: 10, timeout: 2, onExit: .none),
+                StatusCheckDefinition(process: "api", command: "echo failed && exit 1", interval: 10, timeout: 2, onFail: .none),
             ])
         let runningProcess = RunningProcessRecord(
             id: UUID().uuidString, workspaceID: workspace.id, templateName: "api", command: "echo api", terminalApp: nil, windowID: nil, pid: 9000,
@@ -490,7 +490,7 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertEqual(currentProcess.pid, 9000)
     }
 
-    func testStatusCheckOnExitNotifyShowsNotification() throws {
+    func testStatusCheckOnFailNotifyShowsNotification() throws {
         let root = try makeTempDirectory()
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
@@ -503,7 +503,7 @@ final class OrchestratorTests: XCTestCase {
         try store.setWorkspaceStatusChecks(
             workspaceID: workspace.id,
             checks: [
-                StatusCheckDefinition(name: "health", process: "api", command: "echo unhealthy && exit 1", interval: 10, timeout: 2, onExit: .notify),
+                StatusCheckDefinition(name: "health", process: "api", command: "echo unhealthy && exit 1", interval: 10, timeout: 2, onFail: .notify),
             ])
         let runningProcess = RunningProcessRecord(
             id: UUID().uuidString, workspaceID: workspace.id, templateName: "api", command: "echo api", terminalApp: nil, windowID: nil, pid: 9000,
@@ -524,7 +524,7 @@ final class OrchestratorTests: XCTestCase {
         // but we can verify the process wasn't restarted, which is the key behavior
     }
 
-    func testStatusCheckOnExitRestartRestartsProcess() throws {
+    func testStatusCheckOnFailRestartRestartsProcess() throws {
         let root = try makeTempDirectory()
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
@@ -540,33 +540,43 @@ final class OrchestratorTests: XCTestCase {
         try store.setWorkspaceStatusChecks(
             workspaceID: workspace.id,
             checks: [
-                StatusCheckDefinition(name: "health", process: "api", command: "echo crashed && exit 1", interval: 10, timeout: 2, onExit: .restart),
+                StatusCheckDefinition(name: "health", process: "api", command: "echo crashed && exit 1", interval: 10, timeout: 2, onFail: .restart),
             ])
         let runningProcess = RunningProcessRecord(
             id: UUID().uuidString, workspaceID: workspace.id, templateName: "api", command: "npm start", terminalApp: "iTerm2", windowID: 123, pid: 9000,
             status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil)
         try store.upsert(runningProcess: runningProcess)
 
+        // Create a mock PID file to simulate the new PID after restart
+        let pidFileURL = URL(fileURLWithPath: projectDir.path)
+            .appendingPathComponent(".muxy")
+            .appendingPathComponent("pids")
+            .appendingPathComponent("api.pid")
+        try FileManager.default.createDirectory(at: pidFileURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try "10001".write(to: pidFileURL, atomically: true, encoding: .utf8)
+
         let results = try orchestrator.runStatusChecks(workspaceID: workspace.id)
 
         XCTAssertEqual(results.count, 1)
         XCTAssertEqual(results.first?.status, "red")
         
-        // Verify iTerm2 was called to open new window (but didn't actually open one)
-        XCTAssertEqual(mockIterm.openWindowAndRunCallCount, 1)
+        // Verify iTerm2 was called to run in existing window (not create new one)
+        XCTAssertEqual(mockIterm.openWindowAndRunCallCount, 0)
+        XCTAssertEqual(mockIterm.runInWindowCallCount, 1)
+        XCTAssertEqual(mockIterm.lastWindowID, 123)
         XCTAssertTrue(mockIterm.lastCommand!.contains("cd \"\(workspace.dir)\""))
         XCTAssertTrue(mockIterm.lastCommand!.contains("npm start"))
         
-        // Verify process was marked as exited and then restarted
+        // Verify process was restarted in the same window
         let currentProcesses = try store.runningProcesses(workspaceID: workspace.id)
         XCTAssertEqual(currentProcesses.count, 1)
         let currentProcess = currentProcesses.first!
         XCTAssertEqual(currentProcess.status, .running)
-        XCTAssertNotEqual(currentProcess.windowID, 123) // Should have new window ID
-        XCTAssertNil(currentProcess.pid) // PID should be cleared until process starts
+        XCTAssertEqual(currentProcess.windowID, 123) // Should have same window ID
+        XCTAssertEqual(currentProcess.pid, 10001) // PID should be updated from PID file
     }
 
-    func testStatusCheckOnExitRestartWithMissingPidDoesNotCrash() throws {
+    func testStatusCheckOnFailRestartWithMissingPidDoesNotCrash() throws {
         let root = try makeTempDirectory()
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
@@ -582,7 +592,7 @@ final class OrchestratorTests: XCTestCase {
         try store.setWorkspaceStatusChecks(
             workspaceID: workspace.id,
             checks: [
-                StatusCheckDefinition(process: "api", command: "echo failed && exit 1", interval: 10, timeout: 2, onExit: .restart),
+                StatusCheckDefinition(process: "api", command: "echo failed && exit 1", interval: 10, timeout: 2, onFail: .restart),
             ])
         let runningProcess = RunningProcessRecord(
             id: UUID().uuidString, workspaceID: workspace.id, templateName: "api", command: "npm start", terminalApp: "iTerm2", windowID: 123, pid: nil,
@@ -1623,7 +1633,7 @@ final class OrchestratorTests: XCTestCase {
             p.setupScript = "echo setup"
             p.stopScript = "echo stop"
             p.processes = [ProcessTemplate(name: "api", command: "npm run api")]
-            p.statusChecks = [StatusCheckDefinition(name: "health", process: "api", command: "echo ok", interval: 10, timeout: 2, onExit: .notify)]
+            p.statusChecks = [StatusCheckDefinition(name: "health", process: "api", command: "echo ok", interval: 10, timeout: 2, onFail: .notify)]
             p.browserSessions = [BrowserSession(url: "https://example.com")]
         }
 

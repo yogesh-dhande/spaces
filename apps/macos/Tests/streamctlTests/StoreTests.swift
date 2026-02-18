@@ -30,14 +30,14 @@ final class StoreTests: XCTestCase {
 
         let checks = [
             StatusCheckDefinition(
-                name: "api health", process: "api", command: "curl -f http://localhost:$PORT0/health", interval: 10, timeout: 3, onExit: .notify),
-            StatusCheckDefinition(process: "worker", command: "echo ok", interval: 60, timeout: 5, onExit: .restart),
+                name: "api health", process: "api", command: "curl -f http://localhost:$PORT0/health", interval: 10, timeout: 3, onFail: .notify),
+            StatusCheckDefinition(process: "worker", command: "echo ok", interval: 60, timeout: 5, onFail: .restart),
         ]
         try store.setWorkspaceStatusChecks(workspaceID: workspace.id, checks: checks)
         let storedChecks = try store.workspaceStatusChecks(workspaceID: workspace.id)
         XCTAssertEqual(storedChecks.count, 2)
-        XCTAssertEqual(storedChecks[0].onExit, .notify)
-        XCTAssertEqual(storedChecks[1].onExit, .restart)
+        XCTAssertEqual(storedChecks[0].onFail, .notify)
+        XCTAssertEqual(storedChecks[1].onFail, .restart)
 
         try store.setWorkspaceBrowserSessions(
             workspaceID: workspace.id,
@@ -275,7 +275,7 @@ final class StoreTests: XCTestCase {
             ports: [PortDefinition(name: "API_PORT"), PortDefinition(name: "WEB_PORT")],
             processes: [ProcessTemplate(name: "api", command: "npm run api"), ProcessTemplate(command: "npm run worker")],
             statusChecks: [
-                StatusCheckDefinition(name: "health", process: "api", command: "curl /health", interval: 10, timeout: 3, onExit: .notify),
+                StatusCheckDefinition(name: "health", process: "api", command: "curl /health", interval: 10, timeout: 3, onFail: .notify),
             ],
             browserSessions: [BrowserSession(url: "https://localhost:3000")])
 
@@ -293,7 +293,7 @@ final class StoreTests: XCTestCase {
         XCTAssertEqual(loaded?.processes[1].name, nil)
         XCTAssertEqual(loaded?.statusChecks.count, 1)
         XCTAssertEqual(loaded?.statusChecks[0].name, "health")
-        XCTAssertEqual(loaded?.statusChecks[0].onExit, .notify)
+        XCTAssertEqual(loaded?.statusChecks[0].onFail, .notify)
         XCTAssertEqual(loaded?.browserSessions.count, 1)
         XCTAssertEqual(loaded?.browserSessions[0].url, "https://localhost:3000")
     }

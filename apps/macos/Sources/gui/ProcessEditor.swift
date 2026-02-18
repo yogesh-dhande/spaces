@@ -70,7 +70,7 @@ import streamctl
         rows.compactMap { row in
             let name = row.nameField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
             let command = row.commandField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-            let onExit = StatusCheckOnExit(rawValue: row.onExitPopup.titleOfSelectedItem ?? "") ?? .none
+            let onExit = ProcessExitAction(rawValue: row.onExitPopup.titleOfSelectedItem ?? "") ?? .none
             guard !command.isEmpty else { return nil }
             return ProcessTemplate(name: name.isEmpty ? nil : name, command: command, onExit: onExit)
         }
@@ -142,7 +142,7 @@ import streamctl
             nameField.placeholderString = "name"
             commandField.placeholderString = "command"
             
-            onExitPopup.addItems(withTitles: StatusCheckOnExit.allCases.map { $0.rawValue })
+            onExitPopup.addItems(withTitles: ProcessExitAction.allCases.map { $0.rawValue })
             onExitPopup.controlSize = .small
             onExitPopup.font = .systemFont(ofSize: 11)
             onExitPopup.toolTip = "Action on process exit"
@@ -266,10 +266,10 @@ import streamctl
                 let command = row.commandField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
                 let interval = Int(row.intervalField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)) ?? PollingConstants.statusCheckDefaultInterval
                 let timeout = Int(row.timeoutField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)) ?? PollingConstants.statusCheckDefaultTimeout
-                let onExit = StatusCheckOnExit(rawValue: row.onExitPopup.titleOfSelectedItem ?? "") ?? .none
+                let onFail = OnFailAction(rawValue: row.onExitPopup.titleOfSelectedItem ?? "") ?? .none
                 guard !command.isEmpty else { return nil }
                 return StatusCheckDefinition(
-                    name: name.isEmpty ? nil : name, process: processName, command: command, interval: interval, timeout: timeout, onExit: onExit)
+                    name: name.isEmpty ? nil : name, process: processName, command: command, interval: interval, timeout: timeout, onFail: onFail)
             }
         }
 
@@ -299,7 +299,7 @@ import streamctl
                 row.commandField.stringValue = check.command
                 row.intervalField.stringValue = String(check.interval)
                 row.timeoutField.stringValue = String(check.timeout)
-                row.onExitPopup.selectItem(withTitle: check.onExit.rawValue)
+                row.onExitPopup.selectItem(withTitle: check.onFail.rawValue)
             }
             row.onChange = { [weak self] in self?.onChange?() }
             row.onRemove = { [weak self, weak row] in
@@ -340,7 +340,7 @@ import streamctl
             timeoutField.font = .systemFont(ofSize: 11)
             timeoutField.toolTip = "Command timeout in seconds"
 
-            onExitPopup.addItems(withTitles: StatusCheckOnExit.allCases.map { $0.rawValue })
+            onExitPopup.addItems(withTitles: OnFailAction.allCases.map { $0.rawValue })
             onExitPopup.controlSize = .small
             onExitPopup.font = .systemFont(ofSize: 11)
             onExitPopup.toolTip = "Action when check fails"

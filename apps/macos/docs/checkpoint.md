@@ -89,7 +89,7 @@
 
 ## Remaining
 - Dependency/permission onboarding (detect missing `yabai` or macOS accessibility permissions and guide the user).
-- Periodic status check runner (honor interval/timeout) plus on-exit actions, with GUI status updates.
+- Periodic status check runner (honor interval/timeout) plus on-fail actions, with GUI status updates.
 - Coding agent detection with idle/busy state tracking and notifications for idle/exited events.
 - Window reconciliation on app restart (re-scan existing windows, match browser sessions, and map them to workspaces) for cases where the app has not been focused yet.
 

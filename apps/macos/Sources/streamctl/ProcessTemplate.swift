@@ -4,9 +4,9 @@ public struct ProcessTemplate: Codable, Sendable {
     public var name: String?
     public var command: String
     public var kind: String?
-    public var onExit: StatusCheckOnExit
+    public var onExit: ProcessExitAction
 
-    public init(name: String? = nil, command: String, kind: String? = nil, onExit: StatusCheckOnExit = .none) {
+    public init(name: String? = nil, command: String, kind: String? = nil, onExit: ProcessExitAction = .none) {
         self.name = name
         self.command = command
         self.kind = kind

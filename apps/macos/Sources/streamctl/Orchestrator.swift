@@ -641,7 +641,7 @@ public final class MuxyOrchestrator {
                         didUpdate = true
                         
                         // Handle on-exit behavior for the process
-                        try handleProcessExit(workspaceID: workspace.id, process: process, project: project, workspace: workspace)
+                        try handleProcessExit(workspaceID: workspace.id, process: updatedProcess, project: project, workspace: workspace)
                     }
                 }
             }
@@ -670,7 +670,7 @@ public final class MuxyOrchestrator {
             try store.upsert(statusResult: result)
             results.append(result)
             
-            // Handle onExit behavior for failed status checks
+            // Handle onFail behavior for failed status checks
             if outcome.exitCode != 0 {
                 try handleStatusCheckFailure(workspaceID: workspaceID, process: process, check: check, result: result)
             }
@@ -704,7 +704,7 @@ public final class MuxyOrchestrator {
     }
     
     private func handleStatusCheckFailure(workspaceID: String, process: RunningProcessRecord, check: StatusCheckDefinition, result: StatusResult) throws {
-        switch check.onExit {
+        switch check.onFail {
         case .none:
             // Do nothing - just log the failure
             break
@@ -758,7 +758,7 @@ public final class MuxyOrchestrator {
             return
         }
         
-        guard let processTemplate = config.processes.first(where: { ($0.name ?? "") == process.templateName }) else {
+        guard let processTemplate = config.processes.first(where: { ($0.name ?? $0.command) == process.templateName }) else {
             return
         }
         
@@ -789,25 +789,46 @@ public final class MuxyOrchestrator {
     }
     
     private func restartProcessInTerminal(workspaceID: String, process: RunningProcessRecord) throws {
-        let (_, workspace) = try resolveWorkspace(id: workspaceID)
-        let _ = try store.workspacePortsNamed(workspaceID: workspaceID)
+        let (project, workspace) = try resolveWorkspace(id: workspaceID)
+        let namedPorts = try store.workspacePortsNamed(workspaceID: workspaceID)
+        let env = buildWorkspaceEnv(project: project, workspace: workspace, namedPorts: namedPorts)
         
-        // Open new terminal and run the command
-        let escapedCommand = process.command.replacingOccurrences(of: "\"", with: "\\\"")
-        let escapedDir = workspace.dir.replacingOccurrences(of: "\"", with: "\\\"")
-        let fullCommand = "cd \"\(escapedDir)\" && \(escapedCommand)"
+        // Prepare the command with proper environment and PID tracking
+        let (logFile, pidFile) = try processRuntimePaths(workspaceID: workspace.id, name: process.templateName)
+        let command = shellCommand(base: process.command, cwd: workspace.dir, env: env, logFile: logFile, pidFile: pidFile)
         
-        let windowInfo = try iterm.openWindowAndRun(command: fullCommand)
-        let windowID = windowInfo.id
-        
-        // Update the process record with new window ID and running status
-        let restartedProcess = RunningProcessRecord(
-            id: process.id, workspaceID: process.workspaceID, templateName: process.templateName,
-            command: process.command, terminalApp: "iTerm2", windowID: windowID,
-            pid: nil, status: .running, logPath: process.logPath,
-            lastOutputAt: nil, startedAt: nowISO8601(), exitedAt: nil
-        )
-        try store.upsert(runningProcess: restartedProcess)
+        if let windowID = process.windowID, process.terminalApp == "iTerm2" {
+            // Reuse existing terminal window
+            fputs("muxy: Restarting process '\(process.templateName)' in existing terminal window \(windowID)\n", stderr)
+            try iterm.runInWindow(id: windowID, command: command)
+            
+            // Read the new PID from the PID file and update the process record
+            let newPID = try? Int(String(contentsOfFile: pidFile).trimmingCharacters(in: .whitespacesAndNewlines))
+            
+            let restartedProcess = RunningProcessRecord(
+                id: process.id, workspaceID: process.workspaceID, templateName: process.templateName,
+                command: process.command, terminalApp: process.terminalApp, windowID: windowID,
+                pid: newPID, status: .running, logPath: process.logPath,
+                lastOutputAt: nil, startedAt: nowISO8601(), exitedAt: nil
+            )
+            try store.upsert(runningProcess: restartedProcess)
+        } else {
+            // Fallback: create new terminal window (shouldn't normally happen)
+            fputs("muxy: Creating new terminal window for process '\(process.templateName)' (no existing window found)\n", stderr)
+            let windowInfo = try iterm.openWindowAndRun(command: command)
+            let windowID = windowInfo.id
+            
+            // Read the new PID from the PID file and update the process record
+            let newPID = try? Int(String(contentsOfFile: pidFile).trimmingCharacters(in: .whitespacesAndNewlines))
+            
+            let restartedProcess = RunningProcessRecord(
+                id: process.id, workspaceID: process.workspaceID, templateName: process.templateName,
+                command: process.command, terminalApp: "iTerm2", windowID: windowID,
+                pid: newPID, status: .running, logPath: process.logPath,
+                lastOutputAt: nil, startedAt: nowISO8601(), exitedAt: nil
+            )
+            try store.upsert(runningProcess: restartedProcess)
+        }
     }
 
     public func statusResults(processID: String) throws -> [StatusResult] { try store.statusResults(processID: processID) }
@@ -1486,7 +1507,7 @@ public final class MuxyOrchestrator {
         guard lhs.count == rhs.count else { return false }
         for (left, right) in zip(lhs, rhs) {
             if left.name != right.name || left.process != right.process || left.command != right.command || left.interval != right.interval
-                || left.timeout != right.timeout || left.onExit != right.onExit
+                || left.timeout != right.timeout || left.onFail != right.onFail
             {
                 return false
             }
