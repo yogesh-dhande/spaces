@@ -692,7 +692,7 @@ struct CLI {
               - Removing a project deletes only muxy state unless it is an muxy-cloned git repo under ~/muxy/projects; those managed project directories are deleted.
               - Workspaces snapshot project processes, status checks, and browser sessions into the runtime DB on creation.
               - Project `setup_script` runs when a workspace is created/revived.
-              - `mx discover` (and `mx workspace discover`) creates workspaces for newly detected git worktrees and runs the project `setup_script` for each created workspace.
+              - `mx discover` (and `mx workspace discover`) reconciles git worktrees by creating missing workspaces, archiving workspaces whose worktrees are no longer valid, refreshing stored branch names from disk, and running the project `setup_script` for each newly created workspace.
               - Add `--watch` to `mx discover` to keep scanning periodically (default interval: \(Int(PollingConstants.worktreeDiscoveryInterval)) seconds; override with `--interval`).
               - Project/workspace `stop_script` runs whenever a workspace is stopped (including restart/archive stop phase), after automatic process termination attempts.
               - If a workspace directory is missing during stop, muxy still stops the workspace, skips `stop_script`, and prints a note.

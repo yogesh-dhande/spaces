@@ -105,6 +105,7 @@ Workspace identification:
 - `mx discover` (alias: `mx workspace discover`) automatically discovers and registers all untracked worktrees for registered projects.
 - Discovery-created workspaces run the same setup-script flow as any other new workspace.
 - Discovery validates candidate worktrees before import (`dir` exists and is a directory, path is a git worktree, and the git common-dir resolves to the same registered project root).
+- Discovery also archives non-default workspaces when their worktree is no longer valid and refreshes stored workspace branch names from current on-disk worktree metadata.
 - Worktree paths for workspaces deleted from Muxy are persisted in `ignored_worktrees` and skipped by auto-discovery until the user explicitly recreates/imports that workspace.
 
 Runtime database:

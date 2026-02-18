@@ -412,6 +412,34 @@ public final class MuxyOrchestrator {
         
         for project in projects where project.isGitRepo {
             let worktrees = try git.listWorktrees(path: project.dir)
+            var discoverableWorktreeByPath: [String: WorktreeInfo] = [:]
+            for worktree in worktrees {
+                let normalizedPath = normalizePath(worktree.path)
+                guard isDiscoverableWorktreePath(project: project, path: normalizedPath) else {
+                    continue
+                }
+                discoverableWorktreeByPath[normalizedPath] = worktree
+            }
+
+            let existingWorkspaces = try store.workspaces(projectID: project.id, includeArchived: true)
+            for workspace in existingWorkspaces {
+                let normalizedWorkspacePath = normalizePath(workspace.dir)
+                if let worktree = discoverableWorktreeByPath[normalizedWorkspacePath], workspace.branch != worktree.branchName {
+                    let updatedWorkspace = WorkspaceRecord(
+                        id: workspace.id, projectID: workspace.projectID, name: workspace.name, dir: workspace.dir, dirname: workspace.dirname,
+                        branch: worktree.branchName, isDefault: workspace.isDefault, isArchived: workspace.isArchived, isRunning: workspace.isRunning,
+                        lastLaunchedAt: workspace.lastLaunchedAt, tooltip: workspace.tooltip)
+                    try store.upsert(workspace: updatedWorkspace)
+                }
+
+                guard !workspace.isArchived, !workspace.isDefault else {
+                    continue
+                }
+                guard discoverableWorktreeByPath[normalizedWorkspacePath] == nil else {
+                    continue
+                }
+                try archiveWorkspaceBecauseWorktreeIsInvalid(workspaceID: workspace.id)
+            }
             
             for worktree in worktrees {
                 let normalizedPath = normalizePath(worktree.path)
@@ -455,6 +483,14 @@ public final class MuxyOrchestrator {
         }
         
         return createdWorkspaces
+    }
+
+    private func archiveWorkspaceBecauseWorktreeIsInvalid(workspaceID: String) throws {
+        let (_, workspace) = try resolveWorkspace(id: workspaceID)
+        guard !workspace.isArchived else { return }
+        _ = try stopWorkspaceUnlocked(workspaceID: workspaceID)
+        try PortAllocator(store: store).releasePorts(workspaceID: workspace.id)
+        try store.updateWorkspaceArchived(id: workspace.id, isArchived: true)
     }
 
     private func isDiscoverableWorktreePath(project: ProjectRecord, path: String) -> Bool {

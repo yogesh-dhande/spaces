@@ -61,6 +61,7 @@
 - GUI now runs a periodic detached background refresh loop for all non-archived workspace window records using `PollingConstants.workspaceWindowRefreshInterval`.
 - GUI now runs a periodic detached background worktree-discovery loop using `PollingConstants.worktreeDiscoveryInterval`; newly detected git worktrees are auto-registered as workspaces.
 - Discovery now validates candidate worktrees before import (directory exists, path is still a git worktree, and git common-dir maps back to the registered project root).
+- Discovery now archives non-default workspaces whose worktree is no longer valid and refreshes stored workspace branch names from on-disk git worktree metadata.
 - `store.deleteWorkspace` now records deleted workspace paths in `ignored_worktrees` so periodic discovery does not auto-recreate workspaces the user deleted from Muxy.
 - New orchestrator APIs `refreshWorkspaceWindows` and `refreshAllWorkspaceWindows` reconcile stale window rows via yabai and clear `is_running` when no runtime indicators remain. `refreshAllWorkspaceWindows` returns a `RefreshResult` with DB mutation flag and per-workspace tracked window counts (including live browser scan); the GUI compares both against the previous snapshot and skips UI reloads when nothing changed.
 - Bringing muxy to front with the global toggle hotkey refreshes the selected workspace detail view so the displayed window list reflects the most recent Chrome tab scan (up to 10 seconds old).

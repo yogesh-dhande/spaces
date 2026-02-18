@@ -201,6 +201,8 @@
         - detect valid git worktrees that do not yet have muxy workspaces
             - valid means: directory exists, path resolves as a git worktree, and git common-dir maps to the registered project
         - create a workspace for each newly discovered worktree (same behavior as `mx discover`)
+        - archive non-default workspaces whose directories are no longer valid git worktrees for the project
+        - refresh stored workspace branch names from the current worktree branch metadata on disk
         - run the project setup script for each workspace created by discovery
         - do not re-add worktrees for workspaces that were explicitly deleted from muxy unless the user manually recreates/imports them
     - User creates a project by either pointing to a local dir or providing a git repository URL

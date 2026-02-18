@@ -285,9 +285,10 @@ mx workspace discover
 # Discover worktrees for a specific project only
 mx workspace discover --project-dir /path/to/repo`}</CodeBlock>
         <p className="mt-2 text-sm leading-7 text-foreground-soft">
-          Automatically discovers all git worktrees for registered projects and creates Muxy
-          workspaces for any that aren't already tracked. Useful for bulk-importing existing
-          worktrees or syncing after manual git worktree operations.
+          Reconciles git worktrees for registered projects: creates workspaces for newly discovered
+          worktrees, archives non-default workspaces whose worktrees are no longer valid, and refreshes
+          stored branch names from disk. Useful for bulk-importing existing worktrees or syncing after
+          manual git worktree operations.
         </p>
 
         <h3 className="mt-5 text-base font-semibold">Launch a workspace</h3>

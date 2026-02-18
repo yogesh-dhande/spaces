@@ -42,7 +42,7 @@ Port definitions are configured at the project level and inherited by workspaces
 Workspaces snapshot project port definitions, processes, status checks, and browser sessions at creation time into the runtime DB.
 Updates to workspace settings apply immediately when the workspace is running (new processes start, changed commands restart, and new browser sessions open).
 `setup_script` runs when a workspace is created or revived. `stop_script` runs on stop/restart/archive after automatic process termination. If the workspace directory is missing, muxy still completes stop/archive cleanup and skips the stop script.
-Muxy periodically discovers untracked git worktrees for existing projects and auto-registers them as workspaces (running the same `setup_script` flow for each new workspace). Discovery only imports valid worktrees (existing directory + matching git root), and it will not auto-recreate workspaces you explicitly deleted from Muxy.
+Muxy periodically discovers and reconciles git worktrees for existing projects. Discovery auto-registers untracked valid worktrees (running the same `setup_script` flow for each new workspace), archives non-default workspaces whose worktrees are no longer valid, refreshes stored workspace branch names from on-disk worktrees, and will not auto-recreate workspaces you explicitly deleted from Muxy.
 
 ## GUI
 - Two panes: projects/workspaces on the left, details on the right.
@@ -147,7 +147,7 @@ mx workspace focus --project-dir /path/to/repo --name feature-x [--tooltip "Work
 
 For git projects, `workspace create` requires `--branch`; `--target-branch` defaults to `main`/`master` when available.
 `workspace create --directory-name` (alias: `--dirname`) is optional for git projects and must use only letters, numbers, `-`, and `_` with no spaces.
-`mx discover` is equivalent to `mx workspace discover`; add `--watch` to keep scanning periodically.
+`mx discover` is equivalent to `mx workspace discover`; each scan creates missing workspaces, archives workspaces whose worktrees are no longer valid, and refreshes workspace branch names from disk. Add `--watch` to keep scanning periodically.
 
 Project/workspace removal behavior:
 - `mx project remove --dir <path>` removes the project from Muxy. For git projects, it first removes related managed worktrees with `git worktree remove --force`, then deletes related workspace directories under `~/muxy/workspaces`.

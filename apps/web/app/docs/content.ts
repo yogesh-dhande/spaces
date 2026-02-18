@@ -101,7 +101,7 @@ export const docsPageLinks: DocsPageLink[] = [
     href: "/docs/cli",
     title: "CLI Reference",
     summary:
-      "Complete mx command reference for managing projects, workspaces, config, settings, and periodic worktree discovery from scripts and AI agent pipelines, plus contributor-focused automation hooks.",
+      "Complete mx command reference for managing projects, workspaces, config, settings, and periodic worktree reconciliation (create, archive stale, refresh branches) from scripts and AI agent pipelines, plus contributor-focused automation hooks.",
     audience:
       "AI coding agents and developers who drive Muxy from the terminal or automated workflows.",
   },

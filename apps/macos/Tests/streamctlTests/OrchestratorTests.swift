@@ -2914,6 +2914,50 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertNil(try store.workspace(dir: missingWorktree.path))
     }
 
+    // Tests scan and create workspaces from worktrees archives existing workspace when worktree is removed by arranging representative inputs and asserting the expected result.
+    func testScanAndCreateWorkspacesFromWorktreesArchivesWorkspaceWhenWorktreeIsRemoved() throws {
+        let repo = try makeTempGitRepo(name: "test-repo")
+        let root = repo.deletingLastPathComponent()
+
+        let store = try makeTemporaryStore()
+        let orchestrator = MuxyOrchestrator(store: store)
+        let project = try orchestrator.addProject(dir: repo.path)
+
+        let client = GitClient()
+        let removedWorktree = root.appendingPathComponent("feature-removed", isDirectory: true)
+        try client.createWorktree(path: repo.path, worktreePath: removedWorktree.path, branch: "feature-removed")
+        let workspace = try orchestrator.createWorkspaceFromWorktree(worktreePath: removedWorktree.path, name: nil)
+
+        try client.removeWorktree(path: repo.path, worktreePath: removedWorktree.path)
+
+        let created = try orchestrator.scanAndCreateWorkspacesFromWorktrees(projectID: project.id)
+        XCTAssertTrue(created.isEmpty)
+
+        let archivedWorkspace = try store.workspace(id: workspace.id)
+        XCTAssertEqual(archivedWorkspace?.isArchived, true)
+    }
+
+    // Tests scan and create workspaces from worktrees refreshes stored branch names by arranging representative inputs and asserting the expected result.
+    func testScanAndCreateWorkspacesFromWorktreesRefreshesBranchNamesFromDisk() throws {
+        let repo = try makeTempGitRepo(name: "test-repo")
+        let root = repo.deletingLastPathComponent()
+
+        let store = try makeTemporaryStore()
+        let orchestrator = MuxyOrchestrator(store: store)
+        let project = try orchestrator.addProject(dir: repo.path)
+
+        let client = GitClient()
+        let worktree = root.appendingPathComponent("feature-renamed", isDirectory: true)
+        try client.createWorktree(path: repo.path, worktreePath: worktree.path, branch: "feature-renamed")
+        let workspace = try orchestrator.createWorkspaceFromWorktree(worktreePath: worktree.path, name: nil)
+
+        _ = try client.runGitAndCapture(["-C", worktree.path, "branch", "-m", "feature-renamed-on-disk"])
+        _ = try orchestrator.scanAndCreateWorkspacesFromWorktrees(projectID: project.id)
+
+        let refreshedWorkspace = try store.workspace(id: workspace.id)
+        XCTAssertEqual(refreshedWorkspace?.branch, "feature-renamed-on-disk")
+    }
+
     // Tests scan and create workspaces from worktrees scans all projects when no project id provided by arranging representative inputs and asserting the expected result.
     func testScanAndCreateWorkspacesFromWorktreesScansAllProjectsWhenNoProjectIDProvided() throws {
         let repo1 = try makeTempGitRepo(name: "repo1")
