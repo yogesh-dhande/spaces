@@ -868,6 +868,56 @@ final class OrchestratorTests: XCTestCase {
         }
     }
 
+    // Tests workspace name can be updated after creation by arranging representative inputs and asserting the expected result.
+    func testUpdateWorkspaceNameUpdatesWorkspaceRecord() throws {
+        let root = try makeTempDirectory()
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let store = try makeTemporaryStore()
+        let orchestrator = MuxyOrchestrator(store: store)
+
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
+
+        try orchestrator.updateWorkspaceName(workspaceID: workspace.id, name: "feature-auth")
+
+        let updated = try XCTUnwrap(store.workspace(id: workspace.id))
+        XCTAssertEqual(updated.name, "feature-auth")
+    }
+
+    // Tests workspace name update rejects duplicates by arranging representative inputs and asserting the expected result.
+    func testUpdateWorkspaceNameRejectsDuplicateWorkspaceName() throws {
+        let root = try makeTempDirectory()
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let store = try makeTemporaryStore()
+        let orchestrator = MuxyOrchestrator(store: store)
+
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        let one = try orchestrator.createWorkspace(projectID: project.id, name: "feature-one")
+        _ = try orchestrator.createWorkspace(projectID: project.id, name: "feature-two")
+
+        XCTAssertThrowsError(try orchestrator.updateWorkspaceName(workspaceID: one.id, name: "feature-two")) { error in
+            XCTAssertTrue(error.localizedDescription.contains("Workspace already exists"))
+        }
+    }
+
+    // Tests default workspace name cannot be changed by arranging representative inputs and asserting the expected result.
+    func testUpdateWorkspaceNameRejectsDefaultWorkspaceRename() throws {
+        let root = try makeTempDirectory()
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let store = try makeTemporaryStore()
+        let orchestrator = MuxyOrchestrator(store: store)
+
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        let defaultWorkspace = try XCTUnwrap(store.workspace(projectID: project.id, name: "default"))
+
+        XCTAssertThrowsError(try orchestrator.updateWorkspaceName(workspaceID: defaultWorkspace.id, name: "renamed-default")) { error in
+            XCTAssertTrue(error.localizedDescription.contains("Default workspace name cannot be changed"))
+        }
+    }
+
     // Tests open workspace editor throws when editor is not configured by arranging representative inputs and asserting the expected result.
     func testOpenWorkspaceEditorThrowsWhenEditorIsNotConfigured() throws {
         let (orchestrator, _, _, workspace, _) = try makeOrchestratorWithWorkspace()

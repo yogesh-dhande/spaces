@@ -226,6 +226,10 @@ public final class SQLiteStore {
         try execute(sql: "UPDATE workspaces SET tooltip = ? WHERE id = ?", bindings: [tooltip ?? "", id])
     }
 
+    public func updateWorkspaceName(id: String, name: String) throws {
+        try execute(sql: "UPDATE workspaces SET name = ? WHERE id = ?", bindings: [name, id])
+    }
+
     public func setWorkspacePorts(workspaceID: String, ports: [Int], names: [String] = []) throws {
         try execute(sql: "DELETE FROM workspace_ports WHERE workspace_id = ?", bindings: [workspaceID])
         for (index, port) in ports.enumerated() {

@@ -1529,6 +1529,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let stopView = makeEditableTextView()
         let stopScroll = scrollableTextView(stopView, height: 90)
         let browserSessionEditor = BrowserSessionEditor()
+        let nameField = NSTextField(string: workspace.name)
+        nameField.placeholderString = "Workspace name"
+        nameField.isEnabled = !workspace.isDefault
         let tooltipField = NSTextField(string: "")
         tooltipField.placeholderString = "optional: context about what you're working on"
 
@@ -1560,6 +1563,14 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             let imgConfig = NSImage.SymbolConfiguration(paletteColors: [buttonTextColor])
             saveButton.image = saveImg.withSymbolConfiguration(imgConfig)
         }
+
+        let nameSubtitle = workspace.isDefault
+            ? "Default workspace name is fixed to preserve lifecycle behavior."
+            : "Displayed in the sidebar, focus tooltip title, and workspace commands."
+        let nameCard = formSectionCard(
+            icon: "pencil", title: "Workspace name", subtitle: nameSubtitle, contentViews: [nameField])
+        contentStack.addArrangedSubview(nameCard)
+        constrainFormFieldToFillWidth(nameCard, in: contentStack)
 
         // --- Tooltip card ---
         let tooltipCard = formSectionCard(
@@ -1636,11 +1647,12 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         constrainFormFieldToFillWidth(buttonRow, in: container)
 
         saveButton.tag = storeWorkspaceFields(
-            workspaceID: workspace.id, stopView: stopView, portEditor: portEditor, processEditor: processEditor,
+            workspaceID: workspace.id, nameField: nameField, stopView: stopView, portEditor: portEditor, processEditor: processEditor,
             browserSessionEditor: browserSessionEditor,
             tooltipField: tooltipField)
         registerWorkspaceDirtyTracking(
-            stopView: stopView, portEditor: portEditor, processEditor: processEditor, browserSessionEditor: browserSessionEditor,
+            nameField: nameField, stopView: stopView, portEditor: portEditor, processEditor: processEditor,
+            browserSessionEditor: browserSessionEditor,
             tooltipField: tooltipField)
 
         return insetContainerView(container)
@@ -2183,13 +2195,13 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     }
 
     private func storeWorkspaceFields(
-        workspaceID: String, stopView: NSTextView, portEditor: PortEditor, processEditor: ProcessEditor,
+        workspaceID: String, nameField: NSTextField, stopView: NSTextView, portEditor: PortEditor, processEditor: ProcessEditor,
         browserSessionEditor: BrowserSessionEditor,
         tooltipField: NSTextField
     ) -> Int {
         let id = workspaceID.hashValue
         WorkspaceFieldCache.shared.cache[id] = WorkspaceFieldRefs(
-            workspaceID: workspaceID, stopView: stopView, portEditor: portEditor, processEditor: processEditor,
+            workspaceID: workspaceID, nameField: nameField, stopView: stopView, portEditor: portEditor, processEditor: processEditor,
             browserSessionEditor: browserSessionEditor,
             tooltipField: tooltipField)
         return id
@@ -2335,6 +2347,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         commitEditing()
         guard let refs = WorkspaceFieldCache.shared.cache[sender.tag] else { return }
         do {
+            let name = refs.nameField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            try orchestrator.updateWorkspaceName(workspaceID: refs.workspaceID, name: name)
             try orchestrator.updateWorkspaceSettings(workspaceID: refs.workspaceID) { config in
                 config.stopScript = refs.stopView.string.isEmpty ? nil : refs.stopView.string
                 config.ports = refs.portEditor.currentDefinitions()
@@ -3415,10 +3429,14 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     }
 
     private func registerWorkspaceDirtyTracking(
-        stopView: NSTextView, portEditor: PortEditor, processEditor: ProcessEditor, browserSessionEditor: BrowserSessionEditor,
+        nameField: NSTextField, stopView: NSTextView, portEditor: PortEditor, processEditor: ProcessEditor,
+        browserSessionEditor: BrowserSessionEditor,
         tooltipField: NSTextField
     ) {
         workspaceHasUnsavedChanges = false
+        NotificationCenter.default.addObserver(forName: NSControl.textDidChangeNotification, object: nameField, queue: .main) { [weak self] _ in
+            Task { @MainActor in self?.workspaceHasUnsavedChanges = true }
+        }
         NotificationCenter.default.addObserver(forName: NSText.didChangeNotification, object: stopView, queue: .main) { [weak self] _ in
             Task { @MainActor in self?.workspaceHasUnsavedChanges = true }
         }
@@ -3458,6 +3476,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let tag = selectedWorkspaceID.hashValue
         guard let refs = WorkspaceFieldCache.shared.cache[tag] else { return true }
         do {
+            let name = refs.nameField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            try orchestrator.updateWorkspaceName(workspaceID: refs.workspaceID, name: name)
             try orchestrator.updateWorkspaceSettings(workspaceID: refs.workspaceID) { config in
                 config.stopScript = refs.stopView.string.isEmpty ? nil : refs.stopView.string
                 config.ports = refs.portEditor.currentDefinitions()
@@ -3465,6 +3485,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 config.browserSessions = refs.browserSessionEditor.currentSessions()
                 config.statusChecks = refs.processEditor.currentStatusChecks()
             }
+            let tooltip = refs.tooltipField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            try orchestrator.updateWorkspaceTooltip(workspaceID: refs.workspaceID, tooltip: tooltip.isEmpty ? nil : tooltip)
             workspaceHasUnsavedChanges = false
             reloadData()
             return true

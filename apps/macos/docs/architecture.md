@@ -96,10 +96,12 @@ Workspace settings:
 - Each workspace snapshots project `stop_script`, `ports` (named port definitions), `processes`, `status_checks`, and `browser_sessions` at creation.
 - Snapshots are stored in the runtime DB alongside other workspace data.
 - Edits to a running workspace reconcile processes and browser sessions immediately.
+- Non-default workspace names are editable after creation (GUI and CLI); default workspace name stays fixed as `default`.
 
 Workspace identification:
 - Workspaces are uniquely identified by their directory path (`dir` field).
 - CLI commands accept `--dir <path>` (defaults to current directory) to identify workspaces.
+- `mx workspace rename [--dir <path>] --name <name>` updates non-default workspace display names.
 - `mx workspace focus` focuses the workspace window set; `--window <index>` focuses a specific tracked window and `--tooltip [<text>]` displays tooltip overlay during focus (always showing workspace name as title, showing tooltip text as body when available, and updates tooltip only when text is provided).
 - `mx workspace import` registers existing git worktrees as Muxy workspaces by inferring project, branch, and name from the worktree path.
 - `mx discover` (alias: `mx workspace discover`) automatically discovers and registers all untracked worktrees for registered projects.

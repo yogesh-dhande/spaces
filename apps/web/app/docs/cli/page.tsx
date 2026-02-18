@@ -291,6 +291,17 @@ mx workspace discover --project-dir /path/to/repo`}</CodeBlock>
           manual git worktree operations.
         </p>
 
+        <h3 className="mt-5 text-base font-semibold">Rename a workspace</h3>
+        <CodeBlock>{`# Rename from current workspace directory
+mx workspace rename --name "feat-auth-v2"
+
+# Rename a specific workspace directory
+mx workspace rename --dir /path/to/workspace --name "fix-login-timeout"`}</CodeBlock>
+        <p className="mt-2 text-sm leading-7 text-foreground-soft">
+          Updates the workspace display name used in the sidebar, tooltip title, and workspace list output.
+          Default workspaces keep the fixed name <Cmd>default</Cmd>.
+        </p>
+
         <h3 className="mt-5 text-base font-semibold">Launch a workspace</h3>
         <CodeBlock>{`# Launch from current directory
 mx workspace launch

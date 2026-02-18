@@ -251,7 +251,7 @@ struct CLI {
         guard args.count >= 3 else {
             throw NSError(
                 domain: "mx.cli", code: 2,
-                userInfo: [NSLocalizedDescriptionKey: "Missing workspace action. Use: workspace list|create|import|discover|launch|restart|stop|archive|focus|tooltip"])
+                userInfo: [NSLocalizedDescriptionKey: "Missing workspace action. Use: workspace list|create|import|discover|rename|launch|restart|stop|archive|focus|tooltip"])
         }
         switch args[2] {
         case "list":
@@ -292,6 +292,14 @@ struct CLI {
             print("Created workspace \(workspace.name)\t\(workspace.dir)")
         case "discover":
             try runDiscover(orchestrator: orchestrator)
+        case "rename":
+            let id = try workspaceID(orchestrator: orchestrator)
+            let name = try value(for: "--name")
+            try orchestrator.updateWorkspaceName(workspaceID: id, name: name)
+            guard let updated = try orchestrator.store.workspace(id: id) else {
+                throw NSError(domain: "mx.cli", code: 2, userInfo: [NSLocalizedDescriptionKey: "Workspace not found for id \(id)"])
+            }
+            print("Renamed workspace \(id)\t\(updated.name)")
         case "launch":
             let id = try workspaceID(orchestrator: orchestrator)
             try orchestrator.launchWorkspace(workspaceID: id)
@@ -677,6 +685,7 @@ struct CLI {
               mx workspace create --project-dir <path> --name <name> --branch <branch> [--target-branch <branch>] [--directory-name <name>] [--tooltip <text>]
               mx workspace import [--dir <path>] [--name <name>]
               mx workspace discover [--project-dir <path>]
+              mx workspace rename [--dir <path>] --name <name>
               mx workspace launch [--dir <path>]
               mx workspace restart [--dir <path>]
               mx workspace stop [--dir <path>]
@@ -698,6 +707,7 @@ struct CLI {
               - If a workspace directory is missing during stop, muxy still stops the workspace, skips `stop_script`, and prints a note.
               - For git projects, `workspace create` requires `--branch`; `--target-branch` defaults to main/master if available.
               - `workspace create --directory-name` (or `--dirname`) overrides the auto-generated git worktree directory name; allowed characters are letters, numbers, '-', and '_', with no spaces.
+              - `workspace rename` updates the workspace display name; default workspaces keep the fixed name `default`.
               - Archiving a non-git workspace never deletes the project directory.
               - Workspaces reserve PORT0-PORT9 from the configured port range.
               - GUI window focus shortcuts: cmd+1 through cmd+9 (when GUI is focused).
