@@ -37,7 +37,7 @@ export const docsPageLinks: DocsPageLink[] = [
     href: "/docs/workspace-lifecycle",
     title: "Workspace Lifecycle",
     summary:
-      "Create, launch, stop, restart, archive, and restore workspace behavior.",
+      "Create, launch, stop, restart, archive, and restore workspace behavior, including graceful handling when worktree directories are already missing.",
     audience: "Developers managing multiple long-lived workstreams.",
   },
   {
@@ -101,7 +101,7 @@ export const docsPageLinks: DocsPageLink[] = [
     href: "/docs/cli",
     title: "CLI Reference",
     summary:
-      "Complete mx command reference for managing projects, workspaces, config, and settings from scripts and AI agent pipelines.",
+      "Complete mx command reference for managing projects, workspaces, config, settings, and periodic worktree discovery from scripts and AI agent pipelines.",
     audience:
       "AI coding agents and developers who drive Muxy from the terminal or automated workflows.",
   },

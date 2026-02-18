@@ -3,7 +3,7 @@ import SQLite3
 
 public final class SQLiteStore {
     private let db: OpaquePointer
-    private let schemaVersion = 5
+    private let schemaVersion = 6
 
     public init(path: String) throws {
         var handle: OpaquePointer?
@@ -105,6 +105,7 @@ public final class SQLiteStore {
         try execute(sql: "DELETE FROM project_processes WHERE project_id = ?", bindings: [id])
         try execute(sql: "DELETE FROM project_status_checks WHERE project_id = ?", bindings: [id])
         try execute(sql: "DELETE FROM project_browser_sessions WHERE project_id = ?", bindings: [id])
+        try execute(sql: "DELETE FROM ignored_worktrees WHERE project_id = ?", bindings: [id])
         try execute(sql: "DELETE FROM projects WHERE id = ?", bindings: [id])
     }
 
@@ -129,6 +130,7 @@ public final class SQLiteStore {
                 workspace.isDefault ? "1" : "0", workspace.isArchived ? "1" : "0", workspace.isRunning ? "1" : "0", workspace.lastLaunchedAt ?? "",
                 workspace.tooltip ?? "",
             ])
+        try execute(sql: "DELETE FROM ignored_worktrees WHERE worktree_dir = ?", bindings: [workspace.dir])
     }
 
     public func workspace(id: String) throws -> WorkspaceRecord? {
@@ -176,6 +178,7 @@ public final class SQLiteStore {
     }
 
     public func deleteWorkspace(id: String) throws {
+        let deletedWorkspace = try workspace(id: id)
         try execute(sql: "DELETE FROM windows WHERE workspace_id = ?", bindings: [id])
         try execute(sql: "DELETE FROM workspace_settings WHERE workspace_id = ?", bindings: [id])
         try execute(sql: "DELETE FROM workspace_processes WHERE workspace_id = ?", bindings: [id])
@@ -186,6 +189,24 @@ public final class SQLiteStore {
         try execute(sql: "DELETE FROM workspace_ports WHERE workspace_id = ?", bindings: [id])
         try execute(sql: "DELETE FROM workspace_port_definitions WHERE workspace_id = ?", bindings: [id])
         try execute(sql: "DELETE FROM workspaces WHERE id = ?", bindings: [id])
+        if let deletedWorkspace {
+            try markIgnoredWorktree(path: deletedWorkspace.dir, projectID: deletedWorkspace.projectID)
+        }
+    }
+
+    public func markIgnoredWorktree(path: String, projectID: String) throws {
+        try execute(
+            sql: """
+                INSERT INTO ignored_worktrees(worktree_dir, project_id)
+                VALUES (?, ?)
+                ON CONFLICT(worktree_dir) DO UPDATE SET project_id = excluded.project_id
+                """,
+            bindings: [path, projectID])
+    }
+
+    public func isIgnoredWorktree(path: String) throws -> Bool {
+        let rows = try queryRows(sql: "SELECT worktree_dir FROM ignored_worktrees WHERE worktree_dir = ?", bindings: [path])
+        return !rows.isEmpty
     }
 
     public func updateWorkspaceRunning(id: String, isRunning: Bool, launchedAt: String?) throws {
@@ -679,6 +700,11 @@ public final class SQLiteStore {
               value TEXT NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS ignored_worktrees (
+              worktree_dir TEXT PRIMARY KEY,
+              project_id TEXT NOT NULL
+            );
+
             CREATE TABLE IF NOT EXISTS schema_version (
               version INTEGER NOT NULL
             );
@@ -687,30 +713,12 @@ public final class SQLiteStore {
     }
 
     private func rebuildSchemaIfNeeded() throws {
-        let currentVersion = try schemaVersionValue()
-        if currentVersion == schemaVersion { return }
-        try executeBatch(
-            sql: """
-                DROP TABLE IF EXISTS status_results;
-                DROP TABLE IF EXISTS running_processes;
-                DROP TABLE IF EXISTS workspace_browser_sessions;
-                DROP TABLE IF EXISTS workspace_status_checks;
-                DROP TABLE IF EXISTS workspace_processes;
-                DROP TABLE IF EXISTS workspace_settings;
-                DROP TABLE IF EXISTS workspace_port_definitions;
-                DROP TABLE IF EXISTS workspace_ports;
-                DROP TABLE IF EXISTS windows;
-                DROP TABLE IF EXISTS workspaces;
-                DROP TABLE IF EXISTS project_browser_sessions;
-                DROP TABLE IF EXISTS project_status_checks;
-                DROP TABLE IF EXISTS project_processes;
-                DROP TABLE IF EXISTS project_port_definitions;
-                DROP TABLE IF EXISTS projects;
-                DROP TABLE IF EXISTS settings;
-                DROP TABLE IF EXISTS schema_version;
-                """)
         try createSchema()
-        try execute(sql: "INSERT INTO schema_version(version) VALUES (?)", bindings: [String(schemaVersion)])
+        let currentVersion = try schemaVersionValue()
+        if currentVersion != schemaVersion {
+            try applyAdditiveMigrations()
+            try setSchemaVersion(schemaVersion)
+        }
     }
 
     private func schemaVersionValue() throws -> Int? {
@@ -719,6 +727,37 @@ public final class SQLiteStore {
             guard let raw = rows.first?.first, let value = Int(raw) else { return nil }
             return value
         } catch { return nil }
+    }
+
+    private func setSchemaVersion(_ version: Int) throws {
+        try execute(sql: "DELETE FROM schema_version", bindings: [])
+        try execute(sql: "INSERT INTO schema_version(version) VALUES (?)", bindings: [String(version)])
+    }
+
+    private func applyAdditiveMigrations() throws {
+        try ensureColumnExists(table: "project_processes", name: "on_exit", definition: "on_exit TEXT NOT NULL DEFAULT 'none'")
+        try ensureColumnExists(table: "workspace_processes", name: "on_exit", definition: "on_exit TEXT NOT NULL DEFAULT 'none'")
+        try ensureColumnExists(table: "workspace_ports", name: "port_name", definition: "port_name TEXT NOT NULL DEFAULT ''")
+        try ensureColumnExists(table: "workspaces", name: "dirname", definition: "dirname TEXT")
+        try ensureColumnExists(table: "workspaces", name: "branch", definition: "branch TEXT")
+        try ensureColumnExists(table: "workspaces", name: "tooltip", definition: "tooltip TEXT")
+        try ensureColumnExists(table: "project_browser_sessions", name: "name", definition: "name TEXT")
+        try ensureColumnExists(table: "workspace_browser_sessions", name: "name", definition: "name TEXT")
+        try ensureColumnExists(table: "workspace_browser_sessions", name: "extracted_target_url", definition: "extracted_target_url TEXT")
+        try ensureColumnExists(table: "workspace_browser_sessions", name: "extracted_window_id", definition: "extracted_window_id INTEGER")
+        try ensureColumnExists(
+            table: "workspace_browser_sessions", name: "extracted_window_valid", definition: "extracted_window_valid INTEGER NOT NULL DEFAULT 0")
+        try ensureColumnExists(table: "status_results", name: "message", definition: "message TEXT")
+        try ensureColumnExists(table: "status_results", name: "last_run_at", definition: "last_run_at TEXT")
+        try ensureColumnExists(table: "running_processes", name: "last_output_at", definition: "last_output_at TEXT")
+        try ensureColumnExists(table: "running_processes", name: "started_at", definition: "started_at TEXT")
+        try ensureColumnExists(table: "running_processes", name: "exited_at", definition: "exited_at TEXT")
+    }
+
+    private func ensureColumnExists(table: String, name: String, definition: String) throws {
+        let existing = try queryRows(sql: "PRAGMA table_info(\(table))").compactMap { $0.count > 1 ? $0[1] : nil }
+        if existing.contains(name) { return }
+        try execute(sql: "ALTER TABLE \(table) ADD COLUMN \(definition)", bindings: [])
     }
 
     private func decodeProjectWithTemplates(row: [String]) throws -> ProjectRecord? {

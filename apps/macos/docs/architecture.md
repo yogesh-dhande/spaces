@@ -7,7 +7,7 @@ Key invariants:
 - SQLite is the single source of truth for all model data and global preferences.
 - Global preferences (`editor`, `port_range`) are stored in the SQLite `settings` table.
 - Workspace settings are stored in SQLite and seeded from project templates; per-workspace overrides are preserved.
-- SQLite stores runtime state; schema is versioned and rebuilt on version change (currently v5).
+- SQLite stores runtime state; schema is versioned and migrated in place with additive/non-destructive changes (currently v6).
 - yabai is the source of truth for window IDs and focus.
 - Stream capture must happen before a stream is shown or focused.
 - Avoid window-level automation outside yabai.
@@ -94,11 +94,14 @@ Workspace identification:
 - Workspaces are uniquely identified by their directory path (`dir` field).
 - CLI commands accept `--dir <path>` (defaults to current directory) to identify workspaces.
 - `mx workspace import` registers existing git worktrees as Muxy workspaces by inferring project, branch, and name from the worktree path.
-- `mx workspace discover` automatically discovers and registers all untracked worktrees for registered projects.
+- `mx discover` (alias: `mx workspace discover`) automatically discovers and registers all untracked worktrees for registered projects.
+- Discovery-created workspaces run the same setup-script flow as any other new workspace.
+- Discovery validates candidate worktrees before import (`dir` exists and is a directory, path is a git worktree, and the git common-dir resolves to the same registered project root).
+- Worktree paths for workspaces deleted from Muxy are persisted in `ignored_worktrees` and skipped by auto-discovery until the user explicitly recreates/imports that workspace.
 
 Runtime database:
 - Path: `~/.muxy/muxy.db`.
-- Schema is versioned via a `schema_version` table; when the version changes all tables are dropped and recreated. Currently at v5.
+- Schema is versioned via a `schema_version` table and upgraded in place with additive migrations (no table drops). Currently at v6.
 
 ```mermaid
 erDiagram
@@ -309,7 +312,9 @@ flowchart TD
 
 Stop or archive:
 - Stop: signal each tracked process group (`SIGINT` then `SIGTERM`), then run workspace `stop_script` (if set), then close tracked windows and clear runtime process state.
+- If the workspace directory is missing at stop time, stop still succeeds, runtime/window state is cleaned up, and the stop script is skipped (GUI/CLI show an informational notice).
 - Archive: reuse stop flow, run `git worktree remove --force` for git projects, release ports.
+- If the git worktree directory is already missing, archive still succeeds and workspace metadata is archived.
 - Archive never deletes the project directory for non-git projects.
 - Browser safety invariant: stop/restart/settings reconciliation closes tracked Chrome tabs by URL prefix, never full Chrome windows.
 
@@ -346,6 +351,7 @@ Degraded runtime edge cases and handling:
 - The GUI starts a periodic detached utility-priority refresh loop (`refreshAllWorkspaceWindows`) so non-archived workspace window rows are reconciled in the background on a fixed interval (`PollingConstants.workspaceWindowRefreshInterval`).
 - Each background refresh pass uses a fresh orchestrator/store instance for thread-safe off-main reconciliation and keeps AppKit interaction responsive while refresh is in-flight.
 - UI data is reloaded after successful periodic refresh passes only when the user is not actively editing text fields (to avoid interrupting unsaved form edits).
+- The GUI also runs periodic worktree discovery (`scanAndCreateWorkspacesFromWorktrees`) in a detached utility task using `PollingConstants.worktreeDiscoveryInterval`; newly discovered worktrees are registered as workspaces and trigger project setup scripts.
 - `refreshAllWorkspaceWindows` returns a `RefreshResult` containing `didMutateDB` (whether windows were pruned or workspace running flags changed) and `trackedWindowCounts` (per-workspace tracked window counts including live browser scan results); the GUI compares both against the previous snapshot and skips `reloadData()` entirely when nothing changed, avoiding unnecessary UI rebuilds.
 
 ## Window Capture and Focus
@@ -381,6 +387,16 @@ All periodic polling intervals are centralized in `PollingConstants.swift` for e
 - **Browser window scan debounce**: `browserWindowScanDebounceInterval` = 10 seconds
   - Controls how frequently Chrome tab scans are performed per workspace/browser-session-prefix combination
   - Used to debounce expensive Chrome AppleScript queries during window navigation and focus operations
+
+- **Workspace window refresh interval**: `workspaceWindowRefreshInterval` = 10 seconds
+  - Controls how frequently the GUI background reconciliation pass refreshes stored workspace windows
+
+- **Worktree discovery interval**: `worktreeDiscoveryInterval` = 30 seconds
+  - Controls how frequently the GUI background discovery pass scans git projects for new unmanaged worktrees
+  - New worktrees discovered in this pass are registered as workspaces and run project setup scripts
+
+- **Process monitor interval**: `processStatusCheckInterval` = 5 seconds
+  - Controls how frequently the periodic background process monitor checks process state and due status checks
 
 - **Status check default interval**: `statusCheckDefaultInterval` = 60 seconds
   - Default interval between status check executions for process health monitoring

@@ -1,8 +1,57 @@
 import XCTest
+import SQLite3
 
 @testable import streamctl
 
 final class StoreTests: XCTestCase {
+    func testSchemaMigrationFromLegacyVersionPreservesData() throws {
+        let root = try makeTempDirectory()
+        let dbURL = root.appendingPathComponent("legacy.db")
+        try runSQLiteExec(
+            dbURL: dbURL,
+            sql: """
+                CREATE TABLE projects (
+                  id TEXT PRIMARY KEY,
+                  name TEXT NOT NULL,
+                  dir TEXT NOT NULL,
+                  is_git INTEGER NOT NULL,
+                  default_branch TEXT,
+                  setup_script TEXT,
+                  stop_script TEXT
+                );
+                CREATE TABLE workspaces (
+                  id TEXT PRIMARY KEY,
+                  project_id TEXT NOT NULL,
+                  name TEXT NOT NULL,
+                  dir TEXT NOT NULL,
+                  dirname TEXT,
+                  branch TEXT,
+                  is_default INTEGER NOT NULL,
+                  is_archived INTEGER NOT NULL,
+                  is_running INTEGER NOT NULL,
+                  last_launched_at TEXT,
+                  tooltip TEXT,
+                  UNIQUE(project_id, name)
+                );
+                CREATE TABLE schema_version (version INTEGER NOT NULL);
+                INSERT INTO projects(id, name, dir, is_git, default_branch, setup_script, stop_script)
+                VALUES ('legacy-project', 'Legacy Project', '/tmp/legacy-project', 0, '', '', '');
+                INSERT INTO workspaces(id, project_id, name, dir, dirname, branch, is_default, is_archived, is_running, last_launched_at, tooltip)
+                VALUES ('legacy-workspace', 'legacy-project', 'default', '/tmp/legacy-project', '', '', 1, 0, 0, '', '');
+                INSERT INTO schema_version(version) VALUES (5);
+                """)
+
+        let store = try SQLiteStore(path: dbURL.path)
+        XCTAssertEqual(try store.project(id: "legacy-project")?.name, "Legacy Project")
+        XCTAssertEqual(try store.workspace(id: "legacy-workspace")?.name, "default")
+
+        try store.markIgnoredWorktree(path: "/tmp/legacy-project", projectID: "legacy-project")
+        XCTAssertTrue(try store.isIgnoredWorktree(path: "/tmp/legacy-project"))
+
+        let version = try readSingleInteger(dbURL: dbURL, sql: "SELECT version FROM schema_version")
+        XCTAssertEqual(version, 6)
+    }
+
     func testWorkspaceCollectionsRoundTripAndReplacement() throws {
         let store = try makeTemporaryStore()
         let project = makeProjectRecord(dir: try makeTempDirectory().path)
@@ -172,6 +221,19 @@ final class StoreTests: XCTestCase {
         XCTAssertTrue(try store.runningProcesses(workspaceID: workspace.id).isEmpty)
         XCTAssertTrue(try store.statusResults(processID: processID).isEmpty)
         XCTAssertTrue(try store.windows(workspaceID: workspace.id).isEmpty)
+        XCTAssertTrue(try store.isIgnoredWorktree(path: workspace.dir))
+    }
+
+    func testUpsertWorkspaceClearsIgnoredWorktreePath() throws {
+        let store = try makeTemporaryStore()
+        let project = makeProjectRecord(dir: try makeTempDirectory().path)
+        let workspace = makeWorkspaceRecord(projectID: project.id, name: "feature", dir: project.dir)
+        try store.upsert(project: project)
+        try store.markIgnoredWorktree(path: workspace.dir, projectID: project.id)
+        XCTAssertTrue(try store.isIgnoredWorktree(path: workspace.dir))
+
+        try store.upsert(workspace: workspace)
+        XCTAssertFalse(try store.isIgnoredWorktree(path: workspace.dir))
     }
 
     func testDeleteProjectRemovesProjectWorkspacesAndDependents() throws {
@@ -382,5 +444,35 @@ final class StoreTests: XCTestCase {
         
         let notFound = try store.workspace(dir: "/nonexistent/path")
         XCTAssertNil(notFound)
+    }
+
+    private func runSQLiteExec(dbURL: URL, sql: String) throws {
+        var db: OpaquePointer?
+        guard sqlite3_open(dbURL.path, &db) == SQLITE_OK, let db else {
+            throw NSError(domain: "muxy.tests", code: 1, userInfo: [NSLocalizedDescriptionKey: "Failed opening test sqlite db"])
+        }
+        defer { sqlite3_close(db) }
+        if sqlite3_exec(db, sql, nil, nil, nil) != SQLITE_OK {
+            let message = String(cString: sqlite3_errmsg(db))
+            throw NSError(domain: "muxy.tests", code: 2, userInfo: [NSLocalizedDescriptionKey: message])
+        }
+    }
+
+    private func readSingleInteger(dbURL: URL, sql: String) throws -> Int {
+        var db: OpaquePointer?
+        guard sqlite3_open(dbURL.path, &db) == SQLITE_OK, let db else {
+            throw NSError(domain: "muxy.tests", code: 3, userInfo: [NSLocalizedDescriptionKey: "Failed opening test sqlite db"])
+        }
+        defer { sqlite3_close(db) }
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK, let statement else {
+            let message = String(cString: sqlite3_errmsg(db))
+            throw NSError(domain: "muxy.tests", code: 4, userInfo: [NSLocalizedDescriptionKey: message])
+        }
+        defer { sqlite3_finalize(statement) }
+        guard sqlite3_step(statement) == SQLITE_ROW else {
+            throw NSError(domain: "muxy.tests", code: 5, userInfo: [NSLocalizedDescriptionKey: "Missing row for query: \(sql)"])
+        }
+        return Int(sqlite3_column_int(statement, 0))
     }
 }

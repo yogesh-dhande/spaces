@@ -27,6 +27,7 @@ struct CLI {
         case "settings": try runSettingsSubcommand(orchestrator: orchestrator)
         case "project": try runProjectSubcommand(orchestrator: orchestrator)
         case "workspace": try runWorkspaceSubcommand(orchestrator: orchestrator)
+        case "discover": try runDiscover(orchestrator: orchestrator)
         default: printHelp()
         }
     }
@@ -290,17 +291,7 @@ struct CLI {
             let workspace = try orchestrator.createWorkspaceFromWorktree(worktreePath: dir, name: name)
             print("Created workspace \(workspace.name)\t\(workspace.dir)")
         case "discover":
-            let projectDir = optionalValue(for: "--project-dir")
-            let projectID = projectDir.map { normalizePath($0) }
-            let workspaces = try orchestrator.scanAndCreateWorkspacesFromWorktrees(projectID: projectID)
-            if workspaces.isEmpty {
-                print("No new workspaces created")
-            } else {
-                print("Created \(workspaces.count) workspace(s):")
-                for ws in workspaces {
-                    print("\(ws.name)\t\(ws.dir)")
-                }
-            }
+            try runDiscover(orchestrator: orchestrator)
         case "launch":
             let id = try workspaceID(orchestrator: orchestrator)
             try orchestrator.launchWorkspace(workspaceID: id)
@@ -311,8 +302,11 @@ struct CLI {
             print("Restarted workspace \(id)")
         case "stop":
             let id = try workspaceID(orchestrator: orchestrator)
-            try orchestrator.stopWorkspace(workspaceID: id)
+            let outcome = try orchestrator.stopWorkspace(workspaceID: id)
             print("Stopped workspace \(id)")
+            if outcome.skippedStopScriptBecauseWorkspaceDirectoryMissing {
+                print("Note: workspace directory is missing, so the workspace stop script was skipped.")
+            }
         case "archive":
             let id = try workspaceID(orchestrator: orchestrator)
             try orchestrator.archiveWorkspace(workspaceID: id)
@@ -350,6 +344,37 @@ struct CLI {
                 userInfo: [NSLocalizedDescriptionKey: "Workspace not found at: \(normalizedDir). Use --dir <path> to specify a different workspace directory."])
         }
         return workspace.id
+    }
+
+    private func runDiscover(orchestrator: MuxyOrchestrator) throws {
+        let projectDir = optionalValue(for: "--project-dir")
+        let projectID = projectDir.map { normalizePath($0) }
+        let watch = args.contains("--watch")
+        let intervalSeconds = try discoverIntervalSeconds()
+
+        repeat {
+            let workspaces = try orchestrator.scanAndCreateWorkspacesFromWorktrees(projectID: projectID)
+            if workspaces.isEmpty {
+                print("No new workspaces created")
+            } else {
+                print("Created \(workspaces.count) workspace(s):")
+                for ws in workspaces {
+                    print("\(ws.name)\t\(ws.dir)")
+                }
+            }
+            guard watch else { break }
+            Thread.sleep(forTimeInterval: TimeInterval(intervalSeconds))
+        } while true
+    }
+
+    private func discoverIntervalSeconds() throws -> Int {
+        guard let value = optionalValue(for: "--interval") else { return Int(PollingConstants.worktreeDiscoveryInterval) }
+        guard let seconds = Int(value), seconds > 0 else {
+            throw NSError(
+                domain: "mx.cli", code: 2,
+                userInfo: [NSLocalizedDescriptionKey: "Invalid --interval '\(value)'. Must be a positive integer (seconds)."])
+        }
+        return seconds
     }
 
     private func runSettingsSubcommand(orchestrator: MuxyOrchestrator) throws {
@@ -553,6 +578,7 @@ struct CLI {
 
             Usage:
               mx version
+              mx discover [--project-dir <path>] [--watch] [--interval <seconds>]
 
               mx settings get --editor
               mx settings get --port-range
@@ -626,12 +652,15 @@ struct CLI {
             Notes:
               - All settings are stored in ~/.muxy/muxy.db.
               - GUI settings (⌘,) let you pick a preferred editor (VS Code, Cursor, Windsurf).
-              - Runtime state is stored in ~/.muxy/muxy.db and rebuilt if schema changes.
+              - Runtime state is stored in ~/.muxy/muxy.db and migrated in place with additive schema changes.
               - Removing a git project first removes managed worktrees via `git worktree remove --force`, then deletes related workspace directories under ~/muxy/workspaces.
               - Removing a project deletes only muxy state unless it is an muxy-cloned git repo under ~/muxy/projects; those managed project directories are deleted.
               - Workspaces snapshot project processes, status checks, and browser sessions into the runtime DB on creation.
               - Project `setup_script` runs when a workspace is created/revived.
+              - `mx discover` (and `mx workspace discover`) creates workspaces for newly detected git worktrees and runs the project `setup_script` for each created workspace.
+              - Add `--watch` to `mx discover` to keep scanning periodically (default interval: \(Int(PollingConstants.worktreeDiscoveryInterval)) seconds; override with `--interval`).
               - Project/workspace `stop_script` runs whenever a workspace is stopped (including restart/archive stop phase), after automatic process termination attempts.
+              - If a workspace directory is missing during stop, muxy still stops the workspace, skips `stop_script`, and prints a note.
               - For git projects, `workspace create` requires `--branch`; `--target-branch` defaults to main/master if available.
               - `workspace create --directory-name` (or `--dirname`) overrides the auto-generated git worktree directory name; allowed characters are letters, numbers, '-', and '_', with no spaces.
               - Archiving a non-git workspace never deletes the project directory.

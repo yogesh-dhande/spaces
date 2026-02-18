@@ -1,7 +1,7 @@
 # Checkpoint
 
 ## Current Status
-- SQLite (`~/.muxy/muxy.db`) is the single source of truth for all model data and global preferences: projects (including templates: processes, status checks, browser sessions, ports, scripts), workspaces, ports, running processes, status results, windows, settings, `editor`, and `port_range`. Schema is versioned (`schema_version` table); all tables are dropped and recreated when the version changes (currently v5).
+- SQLite (`~/.muxy/muxy.db`) is the single source of truth for all model data and global preferences: projects (including templates: processes, status checks, browser sessions, ports, scripts), workspaces, ports, running processes, status results, windows, settings, `editor`, and `port_range`. Schema is versioned (`schema_version` table) and migrated in place with additive/non-destructive changes (currently v6).
 - Projects are stored in SQLite and normalized by real path; a default workspace is ensured per project with reserved ports.
 - Project creation supports either existing directories or git clone; cloned repositories are stored at `/Users/<username>/muxy/projects/<project_name>`.
 - Project removal clears muxy state, removes related managed git worktrees via `git worktree remove --force`, deletes related git workspace directories under `/Users/<username>/muxy/workspaces`, and deletes the project directory only for git repositories under `/Users/<username>/muxy/projects` (managed clones).
@@ -9,6 +9,7 @@
 - Git workspace creation supports an optional directory-name override for the worktree folder; overrides must use only `A-Z`, `a-z`, `0-9`, `-`, `_` and cannot contain spaces.
 - Archiving non-git workspaces does not delete the project directory.
 - Archiving git workspaces removes the worktree via `git worktree remove --force` (and then archives workspace metadata/ports).
+- Stop/archive now tolerate missing workspace/worktree directories: stop skips `stop_script` and still clears runtime state (with GUI/CLI notice), and archive still succeeds when the worktree path is already gone.
 - Workspace launch starts processes in iTerm2 with env vars and logs under `~/.muxy/runtime/<workspace-id>`, opens Chrome browser sessions, optionally opens the editor, and captures window IDs via yabai in browser/editor/terminal order.
 - Status-check/on-exit restarts now resolve runtime PID fallback, terminate the existing process, and wait for exit before relaunch; if shutdown does not complete in time, restart falls back to a new terminal window.
 - Status checks now run continuously in periodic background monitoring for running workspaces (respecting per-check intervals), so `status_results` stay fresh and on-fail actions execute without requiring the run tab to be open.
@@ -58,10 +59,14 @@
 - Settings view in the GUI also allows overriding default shortcuts for global toggle, workspace navigation/activation, and open editor/terminal/Finder; these values are stored in the runtime DB.
 - Window IDs can become stale across app/desktop changes; stale rows are pruned during reconciliation paths.
 - GUI now runs a periodic detached background refresh loop for all non-archived workspace window records using `PollingConstants.workspaceWindowRefreshInterval`.
+- GUI now runs a periodic detached background worktree-discovery loop using `PollingConstants.worktreeDiscoveryInterval`; newly detected git worktrees are auto-registered as workspaces.
+- Discovery now validates candidate worktrees before import (directory exists, path is still a git worktree, and git common-dir maps back to the registered project root).
+- `store.deleteWorkspace` now records deleted workspace paths in `ignored_worktrees` so periodic discovery does not auto-recreate workspaces the user deleted from Muxy.
 - New orchestrator APIs `refreshWorkspaceWindows` and `refreshAllWorkspaceWindows` reconcile stale window rows via yabai and clear `is_running` when no runtime indicators remain. `refreshAllWorkspaceWindows` returns a `RefreshResult` with DB mutation flag and per-workspace tracked window counts (including live browser scan); the GUI compares both against the previous snapshot and skips UI reloads when nothing changed.
 - Bringing muxy to front with the global toggle hotkey refreshes the selected workspace detail view so the displayed window list reflects the most recent Chrome tab scan (up to 10 seconds old).
 - The local key monitor defers to focused text inputs so standard edit shortcuts like `cmd+v` work in forms.
 - CLI supports project list/add/update/remove (including `project add --git-url ...`), workspace list/create/launch/stop/archive/activate, and settings get/set/reset for all preferences (editor, port-range, GUI shortcuts).
+- CLI now supports top-level `mx discover` (alias: `mx workspace discover`) with optional `--watch`/`--interval` periodic scanning; discovery-created workspaces run project setup scripts.
 - Workspace run view includes Open Editor/Terminal/Finder actions; editor/terminal windows opened this way are captured and included in window cycling.
 - Projects can define named ports (e.g. `FRONTEND_PORT`, `API_PORT`) instead of anonymous `PORT0`-`PORT9`; port definitions are configured at the project level in SQLite and inherited/overridable at the workspace level.
 - Named ports are OS-reserved via sockets (`PortReserver` singleton) so no other process can claim them between allocation and use.
@@ -101,7 +106,7 @@
 - Structured logging with log levels and rotating files.
 - Accessibility pass (VoiceOver, keyboard navigation, focus order, contrast checks).
 - Localization scaffolding (even if only en-US ships initially).
-- Data migration strategy for DB schema changes (beyond rebuild if/when persistence matters).
+- Expand migration fixture coverage for older schema versions to guarantee non-destructive upgrades.
 - Backup/restore for config + workspace settings.
 - Code signing, notarization, and hardened runtime checks in CI.
 - Performance/energy budget for background polling (status checks, agent idle detection).

@@ -31,7 +31,7 @@
             - Projects (including templates: processes, status checks, browser sessions, ports, setup/stop scripts) are stored in SQLite.
             - Workspace state and per-workspace settings overrides are stored in SQLite.
             - Workspace settings are seeded from project templates on creation or when missing.
-            - Schema changes rebuild the DB; missing workspace settings are re-seeded from project templates.
+            - Schema changes use additive, non-destructive migrations; existing workspace/project data must be preserved.
         - Global preferences (`editor`, `port_range`) are stored in the SQLite `settings` table.
             - Old YAML files (`~/.muxy/config.yaml`) with `editor`/`port_range`/`projects:` are automatically migrated to SQLite once on first launch. The YAML file is no longer written or read after migration.
     - User preferences
@@ -161,9 +161,11 @@
                 - stop any processes running in this workspace
                     - signal the tracked process group first (ctrl-c equivalent before term) so child services (e.g. docker compose) shut down cleanly and do not become orphaned
                     - if automatic process termination is not sufficient for a command stack, run the workspace stop script
+                    - if the workspace directory is missing, skip stop-script execution, still complete stop cleanup, and inform the user that the directory was missing
                 - close any windows or tabs open for this workspace (terminals, browsers, editor)
             - when archived
                 - run the same stop flow used by stop/restart (including workspace stop script if set)
+                - if the worktree directory is already missing, archive should still succeed and remove workspace metadata/state
                 - keep git branches but remove worktree and workspace dir via `git worktree remove`
                 - for non-git projects, archiving a workspace must not delete the project directory
                 - release reserved ports
@@ -197,6 +199,12 @@
     - Run a periodic background reconciliation pass for all non-archived workspace windows
         - this pass should prune stale window records for windows that were manually closed outside muxy
         - this pass should not block UI interaction; refresh UI once reconciliation completes
+    - Run a periodic background worktree discovery pass for all git projects
+        - detect valid git worktrees that do not yet have muxy workspaces
+            - valid means: directory exists, path resolves as a git worktree, and git common-dir maps to the registered project
+        - create a workspace for each newly discovered worktree (same behavior as `mx discover`)
+        - run the project setup script for each workspace created by discovery
+        - do not re-add worktrees for workspaces that were explicitly deleted from muxy unless the user manually recreates/imports them
     - User creates a project by either pointing to a local dir or providing a git repository URL
         - if git URL is provided, muxy clones it to `/Users/<username>/muxy/projects/<project_name>` where `<project_name>` is derived from the repository name
         - when removing a git project, remove related managed worktrees via `git worktree remove --force`, then delete related workspace directories under `/Users/<username>/muxy/workspaces`

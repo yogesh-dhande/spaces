@@ -40,6 +40,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     private var periodicWorkspaceRefreshTask: Task<Void, Never>?
     private var periodicUpdateCheckTask: Task<Void, Never>?
     private var periodicProcessMonitorTask: Task<Void, Never>?
+    private var periodicWorktreeDiscoveryTask: Task<Void, Never>?
+    private var pendingWorktreeDiscoveryReload = false
     private var lastTrackedWindowCounts: [String: Int] = [:]
     private let updateChecker = UpdateChecker()
     private let appUpdater = AppUpdater()
@@ -89,12 +91,14 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         startPeriodicWorkspaceWindowRefresh()
         startPeriodicUpdateCheck()
         startPeriodicProcessMonitor()
+        startPeriodicWorktreeDiscovery()
     }
 
     public func applicationWillTerminate(_ notification: Notification) {
         periodicWorkspaceRefreshTask?.cancel()
         periodicUpdateCheckTask?.cancel()
         periodicProcessMonitorTask?.cancel()
+        periodicWorktreeDiscoveryTask?.cancel()
         teardownGlobalHotkey()
         if let shortcutMonitor { NSEvent.removeMonitor(shortcutMonitor) }
     }
@@ -142,6 +146,38 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 }
                 do {
                     try await Task.sleep(for: .seconds(PollingConstants.processStatusCheckInterval))
+                } catch {
+                    break
+                }
+            }
+        }
+    }
+
+    private func startPeriodicWorktreeDiscovery() {
+        periodicWorktreeDiscoveryTask?.cancel()
+        periodicWorktreeDiscoveryTask = Task { [weak self] in
+            guard let self else { return }
+            while !Task.isCancelled {
+                let result = await Self.runWorktreeDiscoverySnapshot()
+                if Task.isCancelled { break }
+                switch result {
+                case .success(let createdCount):
+                    if createdCount > 0 {
+                        if self.canReloadAfterBackgroundWorkspaceRefresh() {
+                            self.pendingWorktreeDiscoveryReload = false
+                            self.reloadData()
+                        } else {
+                            self.pendingWorktreeDiscoveryReload = true
+                        }
+                    } else if self.pendingWorktreeDiscoveryReload, self.canReloadAfterBackgroundWorkspaceRefresh() {
+                        self.pendingWorktreeDiscoveryReload = false
+                        self.reloadData()
+                    }
+                case .failure:
+                    break
+                }
+                do {
+                    try await Task.sleep(for: .seconds(PollingConstants.worktreeDiscoveryInterval))
                 } catch {
                     break
                 }
@@ -235,6 +271,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         case archive
     }
 
+    private struct WorkspaceLifecycleOutcome {
+        let notice: String?
+    }
+
     nonisolated private static func refreshWorkspaceWindowsSnapshot() async -> Result<MuxyOrchestrator.RefreshResult, Error> {
         await Task.detached(priority: .utility) {
             do {
@@ -249,23 +289,29 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         }.value
     }
 
-    nonisolated private static func runWorkspaceLifecycleAction(_ action: WorkspaceLifecycleAction, workspaceID: String) async -> Result<Void, Error> {
+    nonisolated private static func runWorkspaceLifecycleAction(
+        _ action: WorkspaceLifecycleAction, workspaceID: String
+    ) async -> Result<WorkspaceLifecycleOutcome, Error> {
         await Task.detached(priority: .userInitiated) {
             do {
                 let db = try DatabaseLocator.defaultPath()
                 let store = try SQLiteStore(path: db)
                 let orchestrator = MuxyOrchestrator(store: store)
+                var notice: String?
                 switch action {
                 case .launch:
                     try orchestrator.launchWorkspace(workspaceID: workspaceID)
                 case .restart:
                     try orchestrator.restartWorkspace(workspaceID: workspaceID)
                 case .stop:
-                    try orchestrator.stopWorkspace(workspaceID: workspaceID)
+                    let outcome = try orchestrator.stopWorkspace(workspaceID: workspaceID)
+                    if outcome.skippedStopScriptBecauseWorkspaceDirectoryMissing {
+                        notice = "Workspace directory is missing. Muxy stopped the workspace and skipped its stop script."
+                    }
                 case .archive:
                     try orchestrator.archiveWorkspace(workspaceID: workspaceID)
                 }
-                return .success(())
+                return .success(.init(notice: notice))
             } catch {
                 return .failure(error)
             }
@@ -281,6 +327,20 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 let didUpdateProcessStates = try orchestrator.checkAndUpdateProcessStatuses()
                 let didRunStatusChecks = try orchestrator.runDueStatusChecksForRunningWorkspaces()
                 return .success(didUpdateProcessStates || didRunStatusChecks)
+            } catch {
+                return .failure(error)
+            }
+        }.value
+    }
+
+    nonisolated private static func runWorktreeDiscoverySnapshot() async -> Result<Int, Error> {
+        await Task.detached(priority: .utility) {
+            do {
+                let db = try DatabaseLocator.defaultPath()
+                let store = try SQLiteStore(path: db)
+                let orchestrator = MuxyOrchestrator(store: store)
+                let created = try orchestrator.scanAndCreateWorkspacesFromWorktrees(projectID: nil)
+                return .success(created.count)
             } catch {
                 return .failure(error)
             }
@@ -412,6 +472,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
     private func reloadData() {
         do {
+            pendingWorktreeDiscoveryReload = false
             configCache = try orchestrator.syncConfig()
             loadShortcutSpecs()
             projects = try orchestrator.listProjects()
@@ -2423,8 +2484,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             let result = await Self.runWorkspaceLifecycleAction(.stop, workspaceID: id)
             sender?.isEnabled = true
             switch result {
-            case .success:
+            case .success(let outcome):
                 reloadData()
+                if let notice = outcome.notice { showInfoMessage(title: "Workspace Stopped", message: notice) }
             case .failure(let error):
                 showError(error)
             }
@@ -2490,6 +2552,14 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
     private func showError(_ error: Error) {
         let alert = NSAlert(error: error)
+        alert.runModal()
+    }
+
+    private func showInfoMessage(title: String, message: String) {
+        let alert = NSAlert()
+        alert.alertStyle = .informational
+        alert.messageText = title
+        alert.informativeText = message
         alert.runModal()
     }
 

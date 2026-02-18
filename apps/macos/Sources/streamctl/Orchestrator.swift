@@ -4,6 +4,14 @@ import Foundation
 import appctl
 
 public final class MuxyOrchestrator {
+    public struct WorkspaceStopOutcome: Sendable {
+        public let skippedStopScriptBecauseWorkspaceDirectoryMissing: Bool
+
+        public init(skippedStopScriptBecauseWorkspaceDirectoryMissing: Bool) {
+            self.skippedStopScriptBecauseWorkspaceDirectoryMissing = skippedStopScriptBecauseWorkspaceDirectoryMissing
+        }
+    }
+
     private enum ExtractedBrowserFocusOutcome {
         case focused
         case staleMapping
@@ -407,6 +415,14 @@ public final class MuxyOrchestrator {
             
             for worktree in worktrees {
                 let normalizedPath = normalizePath(worktree.path)
+
+                guard isDiscoverableWorktreePath(project: project, path: normalizedPath) else {
+                    continue
+                }
+
+                if try store.isIgnoredWorktree(path: normalizedPath) {
+                    continue
+                }
                 
                 if let _ = try store.workspace(dir: normalizedPath) {
                     continue
@@ -441,13 +457,30 @@ public final class MuxyOrchestrator {
         return createdWorkspaces
     }
 
+    private func isDiscoverableWorktreePath(project: ProjectRecord, path: String) -> Bool {
+        var isDirectory = ObjCBool(false)
+        guard FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory), isDirectory.boolValue else {
+            return false
+        }
+        guard git.isRepo(path: path) else { return false }
+        do {
+            let gitCommonDirOutput = try git.runGitAndCapture(["-C", path, "rev-parse", "--git-common-dir"])
+            let gitCommonDir = gitCommonDirOutput.trimmingCharacters(in: .whitespacesAndNewlines)
+            let gitCommonDirURL = URL(fileURLWithPath: gitCommonDir, relativeTo: URL(fileURLWithPath: path)).standardized
+            let gitRoot = normalizePath(gitCommonDirURL.deletingLastPathComponent().path)
+            return gitRoot == project.id
+        } catch {
+            return false
+        }
+    }
+
     public func launchWorkspace(workspaceID: String) throws {
         try withWorkspaceLifecycleLock(workspaceID: workspaceID) { try launchWorkspaceUnlocked(workspaceID: workspaceID) }
     }
 
     public func restartWorkspace(workspaceID: String) throws {
         try withWorkspaceLifecycleLock(workspaceID: workspaceID) {
-            try stopWorkspaceUnlocked(workspaceID: workspaceID)
+            _ = try stopWorkspaceUnlocked(workspaceID: workspaceID)
             try launchWorkspaceUnlocked(workspaceID: workspaceID)
         }
     }
@@ -535,20 +568,33 @@ public final class MuxyOrchestrator {
         setWindowNavigationIndex(nil, workspaceID: workspace.id)
     }
 
-    public func stopWorkspace(workspaceID: String) throws {
+    @discardableResult public func stopWorkspace(workspaceID: String) throws -> WorkspaceStopOutcome {
         try withWorkspaceLifecycleLock(workspaceID: workspaceID) { try stopWorkspaceUnlocked(workspaceID: workspaceID) }
     }
 
-    private func stopWorkspaceUnlocked(workspaceID: String) throws {
+    private func stopWorkspaceUnlocked(workspaceID: String) throws -> WorkspaceStopOutcome {
         let (project, workspace) = try resolveWorkspace(id: workspaceID)
         let windows = try trackedWindows(workspaceID: workspace.id)
         let namedPorts = try store.workspacePortsNamed(workspaceID: workspace.id)
         let env = buildWorkspaceEnv(project: project, workspace: workspace, namedPorts: namedPorts)
         let settings = try loadWorkspaceSettings(project: project, workspace: workspace)
         let processes = try store.runningProcesses(workspaceID: workspace.id)
+        var skippedStopScriptBecauseWorkspaceDirectoryMissing = false
         for process in processes { if let pid = resolvedRuntimePID(for: process) { terminateProcessGroup(pid: pid) } }
         if let script = settings?.stopScript?.trimmingCharacters(in: .whitespacesAndNewlines), !script.isEmpty {
-            try runScript(applyEnvVars(script, env: env), cwd: workspace.dir)
+            if directoryExists(at: workspace.dir) {
+                do {
+                    try runScript(applyEnvVars(script, env: env), cwd: workspace.dir)
+                } catch {
+                    if isMissingDirectoryError(error) {
+                        skippedStopScriptBecauseWorkspaceDirectoryMissing = true
+                    } else {
+                        throw error
+                    }
+                }
+            } else {
+                skippedStopScriptBecauseWorkspaceDirectoryMissing = true
+            }
         }
         for process in processes { if let windowID = process.windowID, process.terminalApp == "iTerm2" { _ = try? iterm.closeWindow(id: windowID) } }
         var closedWindowIDs = Set<Int>()
@@ -566,6 +612,7 @@ public final class MuxyOrchestrator {
         try store.deleteWindows(workspaceID: workspace.id)
         try store.updateWorkspaceRunning(id: workspace.id, isRunning: false, launchedAt: workspace.lastLaunchedAt)
         setWindowNavigationIndex(nil, workspaceID: workspace.id)
+        return WorkspaceStopOutcome(skippedStopScriptBecauseWorkspaceDirectoryMissing: skippedStopScriptBecauseWorkspaceDirectoryMissing)
     }
 
     public func archiveWorkspace(workspaceID: String) throws {
@@ -575,7 +622,7 @@ public final class MuxyOrchestrator {
     private func archiveWorkspaceUnlocked(workspaceID: String) throws {
         let (project, workspace) = try resolveWorkspace(id: workspaceID)
         guard !workspace.isDefault else { throw MuxyError.invalidArgument(message: "Default workspace cannot be archived.") }
-        try stopWorkspaceUnlocked(workspaceID: workspaceID)
+        _ = try stopWorkspaceUnlocked(workspaceID: workspaceID)
         if project.isGitRepo {
             do { try git.removeWorktree(path: project.dir, worktreePath: workspace.dir) } catch { if !isMissingWorktreeError(error) { throw error } }
         }
@@ -2202,6 +2249,19 @@ public final class MuxyOrchestrator {
         guard case MuxyError.gitCommandFailed(let message) = error else { return false }
         let lowered = message.lowercased()
         return lowered.contains("not a working tree") || lowered.contains("does not exist") || lowered.contains("no such file or directory")
+    }
+
+    private func directoryExists(at path: String) -> Bool {
+        var isDirectory = ObjCBool(false)
+        return FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory) && isDirectory.boolValue
+    }
+
+    private func isMissingDirectoryError(_ error: Error) -> Bool {
+        let nsError = error as NSError
+        if nsError.domain == NSCocoaErrorDomain && nsError.code == NSFileNoSuchFileError { return true }
+        if nsError.domain == NSPOSIXErrorDomain && nsError.code == ENOENT { return true }
+        let lowered = nsError.localizedDescription.lowercased()
+        return lowered.contains("no such file") || lowered.contains("does not exist")
     }
 
     private func sanitizeDirname(_ raw: String, fallback: String) -> String {

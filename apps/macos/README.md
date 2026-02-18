@@ -41,7 +41,8 @@ Port definitions are configured at the project level and inherited by workspaces
 
 Workspaces snapshot project port definitions, processes, status checks, and browser sessions at creation time into the runtime DB.
 Updates to workspace settings apply immediately when the workspace is running (new processes start, changed commands restart, and new browser sessions open).
-`setup_script` runs when a workspace is created or revived. `stop_script` runs on stop/restart/archive after automatic process termination.
+`setup_script` runs when a workspace is created or revived. `stop_script` runs on stop/restart/archive after automatic process termination. If the workspace directory is missing, muxy still completes stop/archive cleanup and skips the stop script.
+Muxy periodically discovers untracked git worktrees for existing projects and auto-registers them as workspaces (running the same `setup_script` flow for each new workspace). Discovery only imports valid worktrees (existing directory + matching git root), and it will not auto-recreate workspaces you explicitly deleted from Muxy.
 
 ## GUI
 - Two panes: projects/workspaces on the left, details on the right.
@@ -71,6 +72,7 @@ Updates to workspace settings apply immediately when the workspace is running (n
   - If opening the preferred editor reuses an already-open editor window, launch captures the currently focused editor window so it is included in workspace window cycling
   - Editor tracking handles known yabai app-name aliases (for example VS Code can be reported as `Code`) so editor windows continue to appear in next/previous window loops
   - Stop/Restart/browser-session updates close tracked Chrome tabs only and never close full Chrome windows
+  - If a workspace directory is missing during stop, muxy still stops the workspace and shows an informational message that stop-script execution was skipped
   - Workspace window list/navigation rebuilds browser rows from Chrome tabs with a 10-second debounce (per workspace/prefix set) and includes tabs whose URLs start with configured browser session URLs (deduped by window+tab URL)
   - Browser focus targets cached tab index first, validates the active tab URL against workspace prefixes, refreshes once on mismatch, and falls back to URL matching if tab positions changed
   - Window-scoped Chrome tab focus/close uses string-based window-id checks in AppleScript for reliable matching
@@ -135,6 +137,8 @@ mx project browser-session list --dir /path/to/repo
 mx project browser-session remove --dir /path/to/repo --url http://localhost:3000
 
 mx workspace list --project-dir /path/to/repo --all
+mx discover [--project-dir /path/to/repo]
+mx discover --watch [--interval 30]
 mx workspace create --project-dir /path/to/repo --name feature-x [--branch feature-branch] [--target-branch main] [--directory-name feature_branch]
 mx workspace launch --project-dir /path/to/repo --name feature-x
 mx workspace restart --project-dir /path/to/repo --name feature-x
@@ -145,6 +149,7 @@ mx workspace activate --project-dir /path/to/repo --name feature-x
 
 For git projects, `workspace create` requires `--branch`; `--target-branch` defaults to `main`/`master` when available.
 `workspace create --directory-name` (alias: `--dirname`) is optional for git projects and must use only letters, numbers, `-`, and `_` with no spaces.
+`mx discover` is equivalent to `mx workspace discover`; add `--watch` to keep scanning periodically.
 
 Project/workspace removal behavior:
 - `mx project remove --dir <path>` removes the project from Muxy. For git projects, it first removes related managed worktrees with `git worktree remove --force`, then deletes related workspace directories under `~/muxy/workspaces`.

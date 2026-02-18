@@ -7,6 +7,10 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertGreaterThan(PollingConstants.workspaceWindowRefreshInterval, 0)
     }
 
+    func testWorktreeDiscoveryIntervalIsPositive() {
+        XCTAssertGreaterThan(PollingConstants.worktreeDiscoveryInterval, 0)
+    }
+
     func testUpdateEditorPreferencePersistsToDB() throws {
         let store = try makeTemporaryStore()
         let orchestrator = MuxyOrchestrator(store: store)
@@ -377,6 +381,28 @@ final class OrchestratorTests: XCTestCase {
         let after = try runGitAndCapture(["worktree", "list", "--porcelain"], cwd: repo.path)
         XCTAssertFalse(parseWorktreePaths(after).contains(normalizedWorkspaceDir))
         XCTAssertFalse(FileManager.default.fileExists(atPath: workspace.dir))
+    }
+
+    func testArchiveWorkspaceGracefullyHandlesMissingWorktreeDirectory() throws {
+        let repo = try makeTempGitRepo(name: "workspace-archive-missing-worktree")
+        let root = try makeTempDirectory()
+        let workspacesRoot = root.appendingPathComponent("workspaces", isDirectory: true)
+        let marker = root.appendingPathComponent("archive-stop-script-marker.txt")
+        let store = try makeTemporaryStore()
+        let orchestrator = MuxyOrchestrator(store: store, workspacesRootDirectory: workspacesRoot)
+
+        let project = try orchestrator.addProject(dir: repo.path)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature-missing", branch: "feature-missing")
+        try store.setWorkspaceStopScript(workspaceID: workspace.id, stopScript: "echo ran > '\(marker.path)'")
+
+        try FileManager.default.removeItem(atPath: workspace.dir)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: workspace.dir))
+
+        try orchestrator.archiveWorkspace(workspaceID: workspace.id)
+
+        let archivedWorkspace = try store.workspace(id: workspace.id)
+        XCTAssertEqual(archivedWorkspace?.isArchived, true)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: marker.path))
     }
 
     func testGUIShortcutsAndActiveWorkspaceRoundTrip() throws {
@@ -1822,6 +1848,22 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertTrue(try orchestrator.runningProcesses(workspaceID: workspace.id).isEmpty)
     }
 
+    func testStopWorkspaceHandlesMissingWorkspaceDirectoryAndReturnsOutcome() throws {
+        let (orchestrator, store, _, workspace, root) = try makeOrchestratorWithWorkspace()
+        let marker = root.appendingPathComponent("stop-script-marker.txt")
+        try store.updateWorkspaceRunning(id: workspace.id, isRunning: true, launchedAt: "now")
+        try store.setWorkspaceStopScript(workspaceID: workspace.id, stopScript: "echo ran > '\(marker.path)'")
+
+        try FileManager.default.removeItem(atPath: workspace.dir)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: workspace.dir))
+
+        let outcome = try orchestrator.stopWorkspace(workspaceID: workspace.id)
+
+        XCTAssertEqual(outcome.skippedStopScriptBecauseWorkspaceDirectoryMissing, true)
+        XCTAssertEqual(try store.workspace(id: workspace.id)?.isRunning, false)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: marker.path))
+    }
+
     func testStopWorkspaceTerminatesProcessBeforeClosingTrackedTerminalWindow() throws {
         let (orchestrator, store, _, workspace, root) = try makeOrchestratorWithWorkspace()
         let eventLog = root.appendingPathComponent("stop-workspace-events.log")
@@ -2722,6 +2764,70 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertTrue(names.contains("feature-2"))
         XCTAssertFalse(names.contains("feature-1"))
         XCTAssertFalse(names.contains("main"))
+    }
+
+    func testScanAndCreateWorkspacesFromWorktreesRunsSetupScriptForCreatedWorkspace() throws {
+        let repo = try makeTempGitRepo(name: "test-repo")
+        let root = repo.deletingLastPathComponent()
+
+        let store = try makeTemporaryStore()
+        let orchestrator = MuxyOrchestrator(store: store)
+        let project = try orchestrator.addProject(dir: repo.path)
+
+        try orchestrator.updateProjectConfig(projectID: project.id) { config in
+            config.setupScript = "echo discovered > .muxy-discovery-setup-marker"
+        }
+
+        let client = GitClient()
+        let worktree = root.appendingPathComponent("feature-setup", isDirectory: true)
+        try client.createWorktree(path: repo.path, worktreePath: worktree.path, branch: "feature-setup")
+
+        let created = try orchestrator.scanAndCreateWorkspacesFromWorktrees(projectID: project.id)
+        XCTAssertEqual(created.count, 1)
+
+        let markerFile = worktree.appendingPathComponent(".muxy-discovery-setup-marker")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: markerFile.path))
+        let marker = try String(contentsOf: markerFile, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines)
+        XCTAssertEqual(marker, "discovered")
+    }
+
+    func testScanAndCreateWorkspacesFromWorktreesSkipsDeletedWorkspacePathsMarkedIgnored() throws {
+        let repo = try makeTempGitRepo(name: "test-repo")
+        let root = repo.deletingLastPathComponent()
+
+        let store = try makeTemporaryStore()
+        let orchestrator = MuxyOrchestrator(store: store)
+        _ = try orchestrator.addProject(dir: repo.path)
+
+        let client = GitClient()
+        let worktree = root.appendingPathComponent("feature-ignored", isDirectory: true)
+        try client.createWorktree(path: repo.path, worktreePath: worktree.path, branch: "feature-ignored")
+        let workspace = try orchestrator.createWorkspaceFromWorktree(worktreePath: worktree.path)
+
+        try store.deleteWorkspace(id: workspace.id)
+
+        let created = try orchestrator.scanAndCreateWorkspacesFromWorktrees()
+        XCTAssertTrue(created.isEmpty)
+        XCTAssertNil(try store.workspace(dir: worktree.path))
+        XCTAssertTrue(try store.isIgnoredWorktree(path: worktree.path))
+    }
+
+    func testScanAndCreateWorkspacesFromWorktreesSkipsMissingWorktreeDirectories() throws {
+        let repo = try makeTempGitRepo(name: "test-repo")
+        let root = repo.deletingLastPathComponent()
+
+        let store = try makeTemporaryStore()
+        let orchestrator = MuxyOrchestrator(store: store)
+        let project = try orchestrator.addProject(dir: repo.path)
+
+        let client = GitClient()
+        let missingWorktree = root.appendingPathComponent("feature-missing", isDirectory: true)
+        try client.createWorktree(path: repo.path, worktreePath: missingWorktree.path, branch: "feature-missing")
+        try FileManager.default.removeItem(at: missingWorktree)
+
+        let created = try orchestrator.scanAndCreateWorkspacesFromWorktrees(projectID: project.id)
+        XCTAssertTrue(created.isEmpty)
+        XCTAssertNil(try store.workspace(dir: missingWorktree.path))
     }
 
     func testScanAndCreateWorkspacesFromWorktreesScansAllProjectsWhenNoProjectIDProvided() throws {
