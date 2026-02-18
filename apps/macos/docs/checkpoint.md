@@ -68,6 +68,7 @@
 - Bringing muxy to front with the global toggle hotkey refreshes the selected workspace detail view so the displayed window list reflects the most recent Chrome tab scan (up to 10 seconds old).
 - The local key monitor defers to focused text inputs so standard edit shortcuts like `cmd+v` work in forms.
 - CLI supports project list/add/update/remove (including `project add --git-url ...`), workspace list/create/launch/stop/archive/focus (including `--window` and `--tooltip`), and settings get/set/reset for all preferences (editor, port-range, GUI shortcuts).
+- Focus tooltip overlay now renders a structured layout that always shows workspace name as title, with tooltip text shown as body content when available.
 - CLI now supports top-level `mx discover` (alias: `mx workspace discover`) with optional `--watch`/`--interval` periodic scanning; discovery-created workspaces run project setup scripts.
 - Workspace run view includes Open Editor/Terminal/Finder actions; terminal windows opened this way are captured and included in window cycling.
 - Projects can define named ports (e.g. `FRONTEND_PORT`, `API_PORT`) instead of anonymous `PORT0`-`PORT9`; port definitions are configured at the project level in SQLite and inherited/overridable at the workspace level.

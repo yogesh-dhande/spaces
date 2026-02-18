@@ -2824,30 +2824,70 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
         guard let focusedWorkspaceID = try? orchestrator.workspaceIDForFocusedWindow() else { return }
         guard let workspace = try? orchestrator.store.workspace(id: focusedWorkspaceID) else { return }
-        guard let tooltip = workspace.tooltip, !tooltip.isEmpty else { return }
+        let tooltip = workspace.tooltip?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let hasTooltipBody = !tooltip.isEmpty
 
         guard let screen = NSScreen.main else { return }
         let screenFrame = screen.frame
 
-        let textField = NSTextField(labelWithString: tooltip)
-        textField.font = .systemFont(ofSize: 18, weight: .medium)
-        textField.textColor = .white
-        textField.alignment = .center
-        textField.lineBreakMode = .byWordWrapping
-        textField.maximumNumberOfLines = 0
+        let titleField = NSTextField(labelWithString: workspace.name)
+        titleField.font = .systemFont(ofSize: 22, weight: .semibold)
+        titleField.textColor = .white
+        titleField.alignment = .center
+        titleField.lineBreakMode = .byTruncatingTail
+        titleField.maximumNumberOfLines = 1
 
-        let maxWidth: CGFloat = 600
-        let padding: CGFloat = 40
-        textField.preferredMaxLayoutWidth = maxWidth - padding * 2
-        textField.sizeToFit()
+        let bodyField = NSTextField(labelWithString: tooltip)
+        bodyField.font = .systemFont(ofSize: 17, weight: .regular)
+        bodyField.textColor = NSColor.white.withAlphaComponent(0.92)
+        bodyField.alignment = .center
+        bodyField.lineBreakMode = .byWordWrapping
+        bodyField.maximumNumberOfLines = 0
 
-        let contentView = NSView(frame: NSRect(x: 0, y: 0, width: textField.frame.width + padding * 2, height: textField.frame.height + padding * 2))
+        let maxWidth: CGFloat = 640
+        let horizontalPadding: CGFloat = 40
+        let verticalPadding: CGFloat = 32
+        let titleToBodySpacing: CGFloat = 12
+
+        titleField.preferredMaxLayoutWidth = maxWidth - horizontalPadding * 2
+        titleField.sizeToFit()
+        if hasTooltipBody {
+            bodyField.preferredMaxLayoutWidth = maxWidth - horizontalPadding * 2
+            bodyField.sizeToFit()
+        } else {
+            bodyField.frame = .zero
+        }
+
+        let contentWidth = max(titleField.frame.width, bodyField.frame.width) + horizontalPadding * 2
+        let contentHeight: CGFloat
+        if hasTooltipBody {
+            contentHeight = titleField.frame.height + titleToBodySpacing + bodyField.frame.height + verticalPadding * 2
+        } else {
+            contentHeight = titleField.frame.height + verticalPadding * 2
+        }
+        let contentView = NSView(frame: NSRect(x: 0, y: 0, width: contentWidth, height: contentHeight))
         contentView.wantsLayer = true
         contentView.layer?.backgroundColor = NSColor.black.cgColor
         contentView.layer?.cornerRadius = 12
 
-        textField.frame.origin = NSPoint(x: padding, y: padding)
-        contentView.addSubview(textField)
+        let titleX = (contentWidth - titleField.frame.width) / 2
+        let bodyX = (contentWidth - bodyField.frame.width) / 2
+        let bodyY = verticalPadding
+        let titleY: CGFloat
+        if hasTooltipBody {
+            titleY = bodyY + bodyField.frame.height + titleToBodySpacing
+        } else {
+            titleY = verticalPadding
+        }
+
+        titleField.frame.origin = NSPoint(x: titleX, y: titleY)
+        if hasTooltipBody {
+            bodyField.frame.origin = NSPoint(x: bodyX, y: bodyY)
+        }
+        contentView.addSubview(titleField)
+        if hasTooltipBody {
+            contentView.addSubview(bodyField)
+        }
 
         let windowWidth = contentView.frame.width
         let windowHeight = contentView.frame.height

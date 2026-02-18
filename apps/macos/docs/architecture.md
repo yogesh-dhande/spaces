@@ -100,7 +100,7 @@ Workspace settings:
 Workspace identification:
 - Workspaces are uniquely identified by their directory path (`dir` field).
 - CLI commands accept `--dir <path>` (defaults to current directory) to identify workspaces.
-- `mx workspace focus` focuses the workspace window set; `--window <index>` focuses a specific tracked window and `--tooltip [<text>]` displays tooltip overlay during focus (and updates tooltip only when text is provided).
+- `mx workspace focus` focuses the workspace window set; `--window <index>` focuses a specific tracked window and `--tooltip [<text>]` displays tooltip overlay during focus (always showing workspace name as title, showing tooltip text as body when available, and updates tooltip only when text is provided).
 - `mx workspace import` registers existing git worktrees as Muxy workspaces by inferring project, branch, and name from the worktree path.
 - `mx discover` (alias: `mx workspace discover`) automatically discovers and registers all untracked worktrees for registered projects.
 - Discovery-created workspaces run the same setup-script flow as any other new workspace.

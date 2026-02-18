@@ -30,7 +30,7 @@ export const docsPageLinks: DocsPageLink[] = [
     href: "/docs/workspaces",
     title: "Workspaces",
     summary:
-      "Workspace concepts, fields, settings overrides, ports, env vars, and switching.",
+      "Workspace concepts, fields, settings overrides, ports, env vars, switching, and focus tooltip context overlays.",
     audience: "Developers creating and configuring workspaces within projects.",
   },
   {

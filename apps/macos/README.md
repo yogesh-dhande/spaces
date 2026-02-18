@@ -150,6 +150,7 @@ mx workspace focus --project-dir /path/to/repo --name feature-x [--tooltip "Work
 For git projects, `workspace create` requires `--branch`; `--target-branch` defaults to `main`/`master` when available.
 `workspace create --directory-name` (alias: `--dirname`) is optional for git projects and must use only letters, numbers, `-`, and `_` with no spaces.
 `mx discover` is equivalent to `mx workspace discover`; each scan creates missing workspaces, archives workspaces whose worktrees are no longer valid, and refreshes workspace branch names from disk. Add `--watch` to keep scanning periodically.
+When tooltip overlay is shown for focused workspace, it always displays workspace name as the title; when tooltip text is set, it is shown as body content.
 
 Project/workspace removal behavior:
 - `mx project remove --dir <path>` removes the project from Muxy. For git projects, it first removes related managed worktrees with `git worktree remove --force`, then deletes related workspace directories under `~/muxy/workspaces`.
