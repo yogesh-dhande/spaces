@@ -142,16 +142,18 @@ mx discover [--project-dir /path/to/repo]
 mx discover --watch [--interval 30]
 mx workspace create --project-dir /path/to/repo --name feature-x [--branch feature-branch] [--target-branch main] [--directory-name feature_branch]
 mx workspace rename --dir /path/to/workspace --name feature-y
-mx workspace launch --project-dir /path/to/repo --name feature-x
-mx workspace restart --project-dir /path/to/repo --name feature-x
-mx workspace stop --project-dir /path/to/repo --name feature-x
-mx workspace archive --project-dir /path/to/repo --name feature-x
-mx workspace focus --project-dir /path/to/repo --name feature-x [--tooltip "Working on auth flows"]
+mx workspace launch --dir /path/to/workspace
+mx workspace restart --dir /path/to/workspace
+mx workspace up --dir /path/to/workspace
+mx workspace stop --dir /path/to/workspace
+mx workspace archive --dir /path/to/workspace
+mx workspace focus --dir /path/to/workspace [--tooltip "Working on auth flows"]
 ```
 
 For git projects, `workspace create` requires `--branch`; `--target-branch` defaults to `main`/`master` when available.
 `workspace create --directory-name` (alias: `--dirname`) is optional for git projects and must use only letters, numbers, `-`, and `_` with no spaces.
 `workspace rename` updates the workspace display name; default workspaces keep the fixed name `default`.
+`workspace up` is idempotent: it launches a stopped workspace and restarts a running/stale workspace.
 `mx discover` is equivalent to `mx workspace discover`; each scan creates missing workspaces, archives workspaces whose worktrees are no longer valid, and refreshes workspace branch names from disk. Add `--watch` to keep scanning periodically.
 When tooltip overlay is shown for focused workspace, it always displays workspace name as the title; when tooltip text is set, it is shown as body content.
 

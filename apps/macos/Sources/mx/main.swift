@@ -251,7 +251,7 @@ struct CLI {
         guard args.count >= 3 else {
             throw NSError(
                 domain: "mx.cli", code: 2,
-                userInfo: [NSLocalizedDescriptionKey: "Missing workspace action. Use: workspace list|create|import|discover|rename|launch|restart|stop|archive|focus|tooltip"])
+                userInfo: [NSLocalizedDescriptionKey: "Missing workspace action. Use: workspace list|create|import|discover|rename|launch|restart|up|stop|archive|focus|tooltip"])
         }
         switch args[2] {
         case "list":
@@ -308,6 +308,10 @@ struct CLI {
             let id = try workspaceID(orchestrator: orchestrator)
             try orchestrator.restartWorkspace(workspaceID: id)
             print("Restarted workspace \(id)")
+        case "up":
+            let id = try workspaceID(orchestrator: orchestrator)
+            try orchestrator.upWorkspace(workspaceID: id)
+            print("Workspace is running \(id)")
         case "stop":
             let id = try workspaceID(orchestrator: orchestrator)
             let outcome = try orchestrator.stopWorkspace(workspaceID: id)
@@ -688,6 +692,7 @@ struct CLI {
               mx workspace rename [--dir <path>] --name <name>
               mx workspace launch [--dir <path>]
               mx workspace restart [--dir <path>]
+              mx workspace up [--dir <path>]
               mx workspace stop [--dir <path>]
               mx workspace archive [--dir <path>]
               mx workspace focus [--dir <path>] [--window <index>] [--tooltip [<text>]]
@@ -704,6 +709,7 @@ struct CLI {
               - `mx discover` (and `mx workspace discover`) reconciles git worktrees by creating missing workspaces, archiving workspaces whose worktrees are no longer valid, refreshing stored branch names from disk, and running the project `setup_script` for each newly created workspace.
               - Add `--watch` to `mx discover` to keep scanning periodically (default interval: \(Int(PollingConstants.worktreeDiscoveryInterval)) seconds; override with `--interval`).
               - Project/workspace `stop_script` runs whenever a workspace is stopped (including restart/archive stop phase), after automatic process termination attempts.
+              - `workspace up` ensures a workspace is running: it launches stopped workspaces and restarts workspaces with running/stale runtime indicators.
               - If a workspace directory is missing during stop, muxy still stops the workspace, skips `stop_script`, and prints a note.
               - For git projects, `workspace create` requires `--branch`; `--target-branch` defaults to main/master if available.
               - `workspace create --directory-name` (or `--dirname`) overrides the auto-generated git worktree directory name; allowed characters are letters, numbers, '-', and '_', with no spaces.

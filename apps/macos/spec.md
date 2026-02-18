@@ -240,9 +240,11 @@
         - when a branch exists both locally and on origin, local branch is the source of truth for workspace creation by default
             - rationale: avoid mutating user branches during workspace creation
             - tradeoff: local branch may be behind remote until user syncs manually
-    - When launching a workspace
+    - When launching a workspace or ensuring workspace is running (`workspace up`)
         - launching is only valid for a stopped workspace
             - if runtime indicators or running flag already exist, launch should fail with guidance to restart instead
+        - if workspace is stopped with no runtime indicators, perform launch
+        - if workspace is running or has stale runtime indicators, perform restart (stop then launch)
         - allocate and reserve ports for the workspace based on named port definitions. pass those as env variables to each process that is started
         - port allocation happens before setup script so named port env vars are available in setup scripts, stop scripts, process commands, and status check commands
         - each process also receives the following env vars

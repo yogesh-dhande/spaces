@@ -331,6 +331,17 @@ mx workspace restart --dir /path/to/workspace`}</CodeBlock>
           Stops then immediately launches. Useful after a dependency install or config change.
         </p>
 
+        <h3 className="mt-5 text-base font-semibold">Ensure a workspace is running</h3>
+        <CodeBlock>{`# Ensure running from current directory
+mx workspace up
+
+# Ensure running for a specific workspace
+mx workspace up --dir /path/to/workspace`}</CodeBlock>
+        <p className="mt-2 text-sm leading-7 text-foreground-soft">
+          Idempotent run command: launches when stopped, restarts when running or when stale runtime
+          indicators exist.
+        </p>
+
         <h3 className="mt-5 text-base font-semibold">Archive a workspace</h3>
         <CodeBlock>{`# Archive from current directory
 mx workspace archive

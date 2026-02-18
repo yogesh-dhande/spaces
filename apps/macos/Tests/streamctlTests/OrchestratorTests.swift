@@ -2144,6 +2144,34 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertEqual(try store.workspace(id: workspace.id)?.isRunning, true)
     }
 
+    // Tests up workspace launches when stopped by arranging representative inputs and asserting the expected result.
+    func testUpWorkspaceLaunchesWhenStopped() throws {
+        let (orchestrator, store, _, workspace, _) = try makeOrchestratorWithWorkspace()
+
+        try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) {
+            try orchestrator.upWorkspace(workspaceID: workspace.id)
+        }
+
+        XCTAssertEqual(try store.workspace(id: workspace.id)?.isRunning, true)
+        XCTAssertTrue(try orchestrator.runningProcesses(workspaceID: workspace.id).isEmpty)
+    }
+
+    // Tests up workspace restarts when runtime indicators exist by arranging representative inputs and asserting the expected result.
+    func testUpWorkspaceRestartsWhenRuntimeIndicatorsExist() throws {
+        let (orchestrator, store, _, workspace, _) = try makeOrchestratorWithWorkspace()
+        try store.upsert(
+            runningProcess: RunningProcessRecord(
+                id: UUID().uuidString, workspaceID: workspace.id, templateName: "old", command: "echo old", terminalApp: "iTerm2", windowID: 501,
+                pid: nil, status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil))
+
+        try withMockCommands(["yabai": Self.orchestratorYabaiMockScript, "osascript": Self.orchestratorOsaScriptMock]) {
+            try orchestrator.upWorkspace(workspaceID: workspace.id)
+        }
+
+        XCTAssertEqual(try store.workspace(id: workspace.id)?.isRunning, true)
+        XCTAssertTrue(try orchestrator.runningProcesses(workspaceID: workspace.id).isEmpty)
+    }
+
     // Tests update workspace settings removing browser sessions closes tabs without closing chrome window by arranging representative inputs and asserting the expected result.
     func testUpdateWorkspaceSettingsRemovingBrowserSessionsClosesTabsWithoutClosingChromeWindow() throws {
         let (orchestrator, store, _, workspace, root) = try makeOrchestratorWithWorkspace()

@@ -20,7 +20,7 @@ export default function TroubleshootingDocsPage() {
           <li>1. Confirm dependencies: yabai, iTerm2, and Chrome are installed and running.</li>
           <li>2. Confirm accessibility permissions are granted.</li>
           <li>3. Confirm workspace is not archived and has valid settings.</li>
-          <li>4. If launch reports existing runtime state, run restart instead of launch.</li>
+          <li>4. If launch reports existing runtime state, run <code>mx workspace up</code> (or restart) instead of launch.</li>
           <li>5. Re-open workspace detail to refresh live browser-tab and window state.</li>
         </ol>
       </article>
@@ -44,9 +44,10 @@ export default function TroubleshootingDocsPage() {
           <li>• Services remain after stop: move extra teardown into workspace `stop_script`.</li>
         </ul>
         <pre className="mt-3 w-full max-w-full min-w-0 overflow-x-auto whitespace-pre-wrap break-words rounded-xl border border-line bg-background-soft/80 p-3 text-xs leading-6 text-foreground">
-          <code>{`mx workspace restart --project-dir /path/to/repo --name feat-auth
-mx workspace stop --project-dir /path/to/repo --name feat-auth
-mx workspace launch --project-dir /path/to/repo --name feat-auth`}</code>
+          <code>{`mx workspace up --dir /path/to/workspace
+mx workspace restart --dir /path/to/workspace
+mx workspace stop --dir /path/to/workspace
+mx workspace launch --dir /path/to/workspace`}</code>
         </pre>
       </article>
 

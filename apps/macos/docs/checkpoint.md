@@ -35,6 +35,7 @@
 - Terminal window tracking now backfills from running-process window IDs and persists all newly captured terminal windows during process reconciliation.
 - Editor launch is no longer part of workspace launch/window tracking; users open editor on demand (GUI action or global open-editor shortcut).
 - Launch is now reserved for stopped workspaces; running workspaces use explicit restart semantics (stop then launch) via GUI/CLI.
+- Added `mx workspace up` as an idempotent run command: launch when stopped, restart when runtime indicators already exist.
 - Workspace settings snapshot project templates on creation into the runtime DB and are editable per workspace; updates to running workspaces reconcile processes and browser sessions immediately.
 - Workspace names for non-default workspaces are editable after creation from workspace settings and `mx workspace rename`; default workspace name remains fixed as `default`.
 - AppKit GUI is two-pane with in-place forms and editors for processes (with nested inline status checks), browser sessions; workspace detail includes run/stop/archive, windows list with shortcut hints, an env/ports tab, and workspace settings.
@@ -68,7 +69,7 @@
 - New orchestrator APIs `refreshWorkspaceWindows` and `refreshAllWorkspaceWindows` reconcile stale window rows via yabai and clear `is_running` when no runtime indicators remain. `refreshAllWorkspaceWindows` returns a `RefreshResult` with DB mutation flag and per-workspace tracked window counts (including live browser scan); the GUI compares both against the previous snapshot and skips UI reloads when nothing changed.
 - Bringing muxy to front with the global toggle hotkey refreshes the selected workspace detail view so the displayed window list reflects the most recent Chrome tab scan (up to 10 seconds old).
 - The local key monitor defers to focused text inputs so standard edit shortcuts like `cmd+v` work in forms.
-- CLI supports project list/add/update/remove (including `project add --git-url ...`), workspace list/create/rename/launch/stop/archive/focus (including `--window` and `--tooltip`), and settings get/set/reset for all preferences (editor, port-range, GUI shortcuts).
+- CLI supports project list/add/update/remove (including `project add --git-url ...`), workspace list/create/rename/launch/restart/up/stop/archive/focus (including `--window` and `--tooltip`), and settings get/set/reset for all preferences (editor, port-range, GUI shortcuts).
 - Focus tooltip overlay now renders a structured layout that always shows workspace name as title, with tooltip text shown as body content when available.
 - CLI now supports top-level `mx discover` (alias: `mx workspace discover`) with optional `--watch`/`--interval` periodic scanning; discovery-created workspaces run project setup scripts.
 - Workspace run view includes Open Editor/Terminal/Finder actions; terminal windows opened this way are captured and included in window cycling.

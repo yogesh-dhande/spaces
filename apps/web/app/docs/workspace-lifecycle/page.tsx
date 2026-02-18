@@ -69,6 +69,10 @@ export default function WorkspaceLifecycleDocsPage() {
           <li>• The stop script runs after process termination (if configured).</li>
           <li>• Tracked workspace windows are closed (terminals and browsers).</li>
         </ul>
+        <p className="mt-3 text-sm leading-7 text-foreground-soft">
+          Use <code>mx workspace up</code> for idempotent automation: it launches stopped workspaces
+          and restarts running/stale workspaces.
+        </p>
       </article>
 
       <article className="rounded-2xl border border-line bg-surface/82 p-5 backdrop-blur-sm">
