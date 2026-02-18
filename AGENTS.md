@@ -3,13 +3,12 @@
 ## Purpose
 - `Muxy` is a macOS Swift app for stream-based workspace orchestration.
 - The CLI is named `mx`.
-- Streams map to **captured window sets** managed via yabai.
+- Workspaces map to **captured window sets** managed via yabai.
 - The macOS app source lives under `apps/macos`.
 - The marketing/docs website source lives under `apps/web`.
 
 ## Contributor Contract
 - Use yabai as the single source of truth for window IDs.
-- Stream capture is required before show.
 - Avoid window-level automation outside yabai.
 - Any project setting related to workspace creation and used during workspace launch must be overridable per workspace after creation.
 - Anything configurable via the GUI must also be configurable via the CLI (`mx`). Keep the two in sync.
