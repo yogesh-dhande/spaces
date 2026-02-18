@@ -2,6 +2,7 @@
 
 ## Current Status
 - SQLite (`~/.muxy/muxy.db`) is the single source of truth for all model data and global preferences: projects (including templates: processes, status checks, browser sessions, ports, scripts), workspaces, ports, running processes, status results, windows, settings, `editor`, and `port_range`. Schema is versioned (`schema_version` table) and migrated in place with additive/non-destructive changes (currently v6).
+- Additive startup migrations now explicitly backfill legacy `project_status_checks.on_fail` and `workspace_status_checks.on_fail` columns (default `none`) so pre-existing databases continue to open without reset.
 - Projects are stored in SQLite and normalized by real path; a default workspace is ensured per project with reserved ports.
 - Project creation supports either existing directories or git clone; cloned repositories are stored at `/Users/<username>/muxy/projects/<project_name>`.
 - Project removal clears muxy state, removes related managed git worktrees via `git worktree remove --force`, deletes related git workspace directories under `/Users/<username>/muxy/workspaces`, and deletes the project directory only for git repositories under `/Users/<username>/muxy/projects` (managed clones).

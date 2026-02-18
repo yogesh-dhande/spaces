@@ -33,6 +33,7 @@
             - Workspace state and per-workspace settings overrides are stored in SQLite.
             - Workspace settings are seeded from project templates on creation or when missing.
             - Schema changes use additive, non-destructive migrations; existing workspace/project data must be preserved.
+            - Additive migrations must backfill newly required status-check action columns (for example `on_fail`) with safe defaults for existing rows.
         - Global preferences (`editor`, `port_range`) are stored in the SQLite `settings` table.
             - Old YAML files (`~/.muxy/config.yaml`) with `editor`/`port_range`/`projects:` are automatically migrated to SQLite once on first launch. The YAML file is no longer written or read after migration.
     - User preferences

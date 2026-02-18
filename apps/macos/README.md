@@ -34,6 +34,8 @@ mx settings get --port-range
 
 > **Note:** If you have an existing `~/.muxy/config.yaml`, its `editor`, `port_range`, and any legacy `projects:` entries are automatically migrated to the database on first launch. The YAML file is then ignored and can be deleted.
 
+SQLite startup migrations are additive and preserve existing data, including backfilling legacy status-check `on_fail` columns with default `none` when missing.
+
 Projects and all project templates (processes, status checks, browser sessions, port definitions, setup/stop scripts) are stored in the SQLite database. Use `mx project add` or the GUI to add projects.
 Browser sessions support optional names (same pattern as process names) so workspace window rows can show stable labels instead of only raw URLs.
 
