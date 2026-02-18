@@ -7,7 +7,7 @@ Key invariants:
 - SQLite is the single source of truth for all model data and global preferences.
 - Global preferences (`editor`, `port_range`) are stored in the SQLite `settings` table.
 - Workspace settings are stored in SQLite and seeded from project templates; per-workspace overrides are preserved.
-- SQLite stores runtime state; schema is versioned and rebuilt on version change (currently v1).
+- SQLite stores runtime state; schema is versioned and rebuilt on version change (currently v5).
 - yabai is the source of truth for window IDs and focus.
 - Stream capture must happen before a stream is shown or focused.
 - Avoid window-level automation outside yabai.
@@ -58,7 +58,9 @@ GUI interaction notes:
 - Window focus shortcuts in the GUI use `cmd+1` through `cmd+9`.
 - Port definitions are editable via `PortEditor` in the project detail view, the add-project form, and workspace settings.
 - Status checks are configured inline under each process in the `ProcessEditor` rather than in a separate form section; the process name is implicit from the parent row.
+- Browser sessions are editable via `BrowserSessionEditor` (`name` + URL prefix rows) in project detail, add-project form, and workspace settings.
 - The run tab displays status check results as indented sub-rows under each process with colored dots (green/red) instead of inline badge text.
+- In the run-tab Windows list, browser rows render a two-part label: browser-session name first (when configured) plus the matched URL in secondary text.
 - Keyboard shortcut overrides for GUI actions are persisted in SQLite settings and editable in the GUI Settings view and CLI settings commands.
 - The app provides a standard Edit menu with Copy (Cmd+C) and Select All (Cmd+A) for system clipboard support in read-only text views.
 
@@ -69,6 +71,7 @@ Global preferences (stored in SQLite `settings` table):
 - The GUI Settings view and `mx settings set` write `editor` and `port_range`.
 Project data (stored in SQLite):
 - Fields: `dir`, `setup_script`, `stop_script`, `ports` (named port definitions), `processes`, `status_checks`, `browser_sessions`.
+- Browser sessions include optional `name` and required URL-prefix matching at runtime.
 - Script timing:
   - `setup_script` runs when a workspace is created or revived.
   - `stop_script` runs on stop/restart/archive stop phase after automatic process termination.
@@ -95,7 +98,7 @@ Workspace identification:
 
 Runtime database:
 - Path: `~/.muxy/muxy.db`.
-- Schema is versioned via a `schema_version` table; when the version changes all tables are dropped and recreated. Currently at v4.
+- Schema is versioned via a `schema_version` table; when the version changes all tables are dropped and recreated. Currently at v5.
 
 ```mermaid
 erDiagram
@@ -155,6 +158,7 @@ erDiagram
   project_browser_sessions {
     TEXT id PK
     TEXT project_id
+    TEXT name
     TEXT url
     INTEGER order_index
   }
@@ -216,6 +220,7 @@ erDiagram
   workspace_browser_sessions {
     TEXT id PK
     TEXT workspace_id
+    TEXT name
     TEXT url
     TEXT extracted_target_url
     INTEGER extracted_window_id

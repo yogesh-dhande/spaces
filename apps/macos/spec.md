@@ -90,6 +90,7 @@
     - BrowserSession
         - fields
             - project: Project
+            - name: optional[str], user-defined label shown in the GUI; if omitted, URL is used as display label
             - url: optional[str], if specified, used to open a browser at workspace launch
             - extracted_window: optional[object], persisted runtime mapping with fields:
                 - target_url: str, resolved browser-session URL prefix used for extraction
@@ -272,7 +273,8 @@
                             - Show running processes and status (based on status checks)
                             - Show list of windows associated with the workspace
                                 - show keyboard shortcut hints for each so user can quickly focus a window if desired. generate these shortcut hints dynamically (e.g. cmd+1)
-                                - show titles and application name
+                                - for browser rows, show browser-session name and matching URL together (name first, URL second)
+                                - for non-browser rows, show titles and application name
                         - second
                             - Show values of env vars related to ports, workspace set for processes (in a separate tab to avoid clutter in main tab)
                         - third

@@ -35,6 +35,7 @@ mx settings get --port-range
 > **Note:** If you have an existing `~/.muxy/config.yaml`, its `editor`, `port_range`, and any legacy `projects:` entries are automatically migrated to the database on first launch. The YAML file is then ignored and can be deleted.
 
 Projects and all project templates (processes, status checks, browser sessions, port definitions, setup/stop scripts) are stored in the SQLite database. Use `mx project add` or the GUI to add projects.
+Browser sessions support optional names (same pattern as process names) so workspace window rows can show stable labels instead of only raw URLs.
 
 Port definitions are configured at the project level and inherited by workspaces. Each named port (e.g. `FRONTEND_PORT`) is allocated a real port number from the configured `port_range`, reserved via OS sockets so no other process can claim it. Named port env vars are available in setup scripts, stop scripts, process commands, and status check commands. Workspaces can override port definitions in their settings.
 
@@ -74,6 +75,7 @@ Updates to workspace settings apply immediately when the workspace is running (n
   - Browser focus targets cached tab index first, validates the active tab URL against workspace prefixes, refreshes once on mismatch, and falls back to URL matching if tab positions changed
   - Window-scoped Chrome tab focus/close uses string-based window-id checks in AppleScript for reliable matching
   - Browser tab rows are sorted by configured browser-session order and then URL so shortcut indices remain stable
+  - Browser session names are optional but preferred for display labels in workspace window rows; when present, rows show `name + URL` in the same split-label style as process rows
   - Window cycling order is browser tabs first, then terminals, then other windows; once cycling starts, next/previous uses remembered cycle position
   - Global next/previous window navigation disambiguates reused Chrome windows by active tab URL, so shortcuts stay on the correct workspace
   - Process restarts (status-check failure or `on_exit=restart`) terminate and wait for the tracked runtime PID before relaunch; if a clean stop does not finish in time, muxy restarts in a new terminal window instead of queueing in the busy one
@@ -128,6 +130,9 @@ mx project add --dir /path/to/repo
 mx project add --git-url https://github.com/org/repo.git
 mx project update --dir /path/to/repo --setup-script "cp ~/.env .env" --stop-script "docker compose down --remove-orphans"
 mx project remove --dir /path/to/repo
+mx project browser-session add --dir /path/to/repo --url http://localhost:3000 --name frontend
+mx project browser-session list --dir /path/to/repo
+mx project browser-session remove --dir /path/to/repo --url http://localhost:3000
 
 mx workspace list --project-dir /path/to/repo --all
 mx workspace create --project-dir /path/to/repo --name feature-x [--branch feature-branch] [--target-branch main] [--directory-name feature_branch]

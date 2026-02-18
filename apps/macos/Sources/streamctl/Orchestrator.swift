@@ -1553,7 +1553,7 @@ public final class MuxyOrchestrator {
 
     private func browserSessionsMatch(_ lhs: [BrowserSession], _ rhs: [BrowserSession]) -> Bool {
         guard lhs.count == rhs.count else { return false }
-        for (left, right) in zip(lhs, rhs) where left.url != right.url { return false }
+        for (left, right) in zip(lhs, rhs) where left.name != right.name || left.url != right.url { return false }
         return true
     }
 

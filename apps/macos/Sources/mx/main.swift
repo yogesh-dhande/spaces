@@ -214,17 +214,20 @@ struct CLI {
 
     private func runProjectBrowserSessionSubcommand(orchestrator: MuxyOrchestrator) throws {
         guard args.count >= 4 else {
-            throw NSError(domain: "mx.cli", code: 2, userInfo: [NSLocalizedDescriptionKey: "Missing action. Use: project browser-session add|remove|list --dir <path>"])
+            throw NSError(
+                domain: "mx.cli", code: 2,
+                userInfo: [NSLocalizedDescriptionKey: "Missing action. Use: project browser-session add|remove|list --dir <path>"])
         }
         let dir = try value(for: "--dir")
         let projectID = normalizePath(dir)
         switch args[3] {
         case "add":
+            let name = optionalValue(for: "--name")
             let url = try value(for: "--url")
             try orchestrator.updateProjectConfig(projectID: projectID) { config in
-                config.browserSessions.append(BrowserSession(url: url))
+                config.browserSessions.append(BrowserSession(name: name, url: url))
             }
-            print("Added browser session \(url) to \(dir)")
+            print("Added browser session \(name ?? url) to \(dir)")
         case "remove":
             let url = try value(for: "--url")
             try orchestrator.updateProjectConfig(projectID: projectID) { config in
@@ -236,7 +239,7 @@ struct CLI {
                 throw NSError(domain: "mx.cli", code: 2, userInfo: [NSLocalizedDescriptionKey: "Project not found for dir \(dir)"])
             }
             for session in project.browserSessions {
-                print(session.url ?? "-")
+                print("\(session.name ?? "-")\t\(session.url ?? "-")")
             }
         default:
             throw NSError(domain: "mx.cli", code: 2, userInfo: [NSLocalizedDescriptionKey: "Unknown action: \(args[3]). Use: project browser-session add|remove|list"])
@@ -606,7 +609,7 @@ struct CLI {
               mx project status-check add --dir <path> --process <process> --command <cmd> [--name <name>] [--interval <seconds>] [--timeout <seconds>] [--on-fail none|restart|notify]
               mx project status-check remove --dir <path> --name <name>
               mx project browser-session list --dir <path>
-              mx project browser-session add --dir <path> --url <url>
+              mx project browser-session add --dir <path> --url <url> [--name <name>]
               mx project browser-session remove --dir <path> --url <url>
 
               mx workspace list --project-dir <path> [--all]

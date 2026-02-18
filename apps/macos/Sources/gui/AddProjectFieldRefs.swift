@@ -11,5 +11,5 @@ struct AddProjectFieldRefs {
     let stopView: NSTextView
     let portEditor: PortEditor
     let processEditor: ProcessEditor
-    let browserView: NSTextView
+    let browserSessionEditor: BrowserSessionEditor
 }

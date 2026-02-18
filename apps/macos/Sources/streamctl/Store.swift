@@ -3,7 +3,7 @@ import SQLite3
 
 public final class SQLiteStore {
     private let db: OpaquePointer
-    private let schemaVersion = 4
+    private let schemaVersion = 5
 
     public init(path: String) throws {
         var handle: OpaquePointer?
@@ -61,8 +61,8 @@ public final class SQLiteStore {
         try execute(sql: "DELETE FROM project_browser_sessions WHERE project_id = ?", bindings: [project.id])
         for (index, session) in project.browserSessions.enumerated() {
             try execute(
-                sql: "INSERT INTO project_browser_sessions(id, project_id, url, order_index) VALUES (?, ?, ?, ?)",
-                bindings: [UUID().uuidString, project.id, session.url ?? "", String(index)])
+                sql: "INSERT INTO project_browser_sessions(id, project_id, name, url, order_index) VALUES (?, ?, ?, ?, ?)",
+                bindings: [UUID().uuidString, project.id, session.name ?? "", session.url ?? "", String(index)])
         }
     }
 
@@ -307,10 +307,10 @@ public final class SQLiteStore {
             let extractedTargetURL = session.extractedWindow?.targetURL ?? ""
             try execute(
                 sql: """
-                    INSERT INTO workspace_browser_sessions(id, workspace_id, url, extracted_target_url, extracted_window_id, extracted_window_valid, order_index)
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    INSERT INTO workspace_browser_sessions(id, workspace_id, name, url, extracted_target_url, extracted_window_id, extracted_window_valid, order_index)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                     """, bindings: [
-                        UUID().uuidString, workspaceID, session.url ?? "", extractedTargetURL, extractedWindowID, extractedWindowValid,
+                        UUID().uuidString, workspaceID, session.name ?? "", session.url ?? "", extractedTargetURL, extractedWindowID, extractedWindowValid,
                         String(index),
                     ])
         }
@@ -348,16 +348,17 @@ public final class SQLiteStore {
     public func workspaceBrowserSessions(workspaceID: String) throws -> [BrowserSession] {
         let rows = try queryRows(
             sql: """
-                SELECT url, extracted_target_url, extracted_window_id, extracted_window_valid
+                SELECT name, url, extracted_target_url, extracted_window_id, extracted_window_valid
                 FROM workspace_browser_sessions
                 WHERE workspace_id = ?
                 ORDER BY order_index
                 """, bindings: [workspaceID])
         return rows.map { row in
-            let url = row[0].isEmpty ? nil : row[0]
-            let extractedTargetURL = row[1]
-            let extractedWindowID = Int(row[2])
-            let extractedWindowValid = row[3] == "1"
+            let name = row[0].isEmpty ? nil : row[0]
+            let url = row[1].isEmpty ? nil : row[1]
+            let extractedTargetURL = row[2]
+            let extractedWindowID = Int(row[3])
+            let extractedWindowValid = row[4] == "1"
             let extractedWindow: ExtractedBrowserWindowMapping?
             if let extractedWindowID, !extractedTargetURL.isEmpty {
                 extractedWindow = ExtractedBrowserWindowMapping(
@@ -365,7 +366,7 @@ public final class SQLiteStore {
             } else {
                 extractedWindow = nil
             }
-            return BrowserSession(url: url, extractedWindow: extractedWindow)
+            return BrowserSession(name: name, url: url, extractedWindow: extractedWindow)
         }
     }
 
@@ -564,6 +565,7 @@ public final class SQLiteStore {
             CREATE TABLE IF NOT EXISTS project_browser_sessions (
               id TEXT PRIMARY KEY,
               project_id TEXT NOT NULL,
+              name TEXT,
               url TEXT,
               order_index INTEGER NOT NULL
             );
@@ -628,6 +630,7 @@ public final class SQLiteStore {
             CREATE TABLE IF NOT EXISTS workspace_browser_sessions (
               id TEXT PRIMARY KEY,
               workspace_id TEXT NOT NULL,
+              name TEXT,
               url TEXT,
               extracted_target_url TEXT,
               extracted_window_id INTEGER,
@@ -738,8 +741,8 @@ public final class SQLiteStore {
                 onFail: OnFailAction(rawValue: row[5]) ?? .none)
         }
         let browserSessions = try queryRows(
-            sql: "SELECT url FROM project_browser_sessions WHERE project_id = ? ORDER BY order_index", bindings: [id]
-        ).map { row in BrowserSession(url: row[0].isEmpty ? nil : row[0]) }
+            sql: "SELECT name, url FROM project_browser_sessions WHERE project_id = ? ORDER BY order_index", bindings: [id]
+        ).map { row in BrowserSession(name: row[0].isEmpty ? nil : row[0], url: row[1].isEmpty ? nil : row[1]) }
         return ProjectRecord(
             id: id, name: row[1], dir: row[2], isGitRepo: row[3] == "1", defaultBranch: row[4].isEmpty ? nil : row[4],
             setupScript: row[5].isEmpty ? nil : row[5], stopScript: row[6].isEmpty ? nil : row[6],

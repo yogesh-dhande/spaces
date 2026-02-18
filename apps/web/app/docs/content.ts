@@ -23,7 +23,7 @@ export const docsPageLinks: DocsPageLink[] = [
     href: "/docs/projects",
     title: "Projects",
     summary:
-      "Add and manage projects stored in the database, configure templates (processes, ports, scripts, browser sessions), and understand default workspace creation.",
+      "Add and manage projects stored in the database, configure templates (processes, ports, scripts, named browser sessions), and understand default workspace creation.",
     audience: "Developers setting up and managing project definitions.",
   },
   {
@@ -58,7 +58,7 @@ export const docsPageLinks: DocsPageLink[] = [
     href: "/docs/browser-sessions",
     title: "Browser Sessions",
     summary:
-      "Bind URLs to workspace context so local routes and references reopen together.",
+      "Bind named URL sessions to workspace context so local routes and references reopen together.",
     audience: "Frontend and full-stack workflows that keep many task tabs open.",
   },
   {

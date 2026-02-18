@@ -605,13 +605,12 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let stopView = makeEditableTextView()
         let portEditor = PortEditor()
         let processEditor = ProcessEditor()
-        let browserView = makeEditableTextView()
-        let browserScroll = scrollableTextView(browserView, height: 80)
+        let browserSessionEditor = BrowserSessionEditor()
         setupView.string = fullProject?.setupScript ?? ""
         stopView.string = fullProject?.stopScript ?? ""
         portEditor.setDefinitions(fullProject?.ports ?? [])
         processEditor.setProcessesWithChecks(fullProject?.processes ?? [], statusChecks: fullProject?.statusChecks ?? [])
-        browserView.string = (fullProject?.browserSessions ?? []).compactMap { $0.url }.joined(separator: "\n")
+        browserSessionEditor.setSessions(fullProject?.browserSessions ?? [])
 
         // --- Setup script card ---
         let setupScroll = scrollableTextView(setupView, height: 90)
@@ -638,7 +637,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
         // --- Browser sessions card ---
         let browserCard = formSectionCard(
-            icon: "globe", title: "Browser sessions", subtitle: "URLs to open automatically, one per line.", contentViews: [browserScroll])
+            icon: "globe", title: "Browser sessions", subtitle: "Optional names with URL prefixes to open automatically.",
+            contentViews: [browserSessionEditor.container])
         stack.addArrangedSubview(browserCard)
         constrainFormFieldToFillWidth(browserCard, in: stack)
 
@@ -685,9 +685,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
         saveButton.tag = storeProjectFields(
             projectID: project.id, setupView: setupView, stopView: stopView, portEditor: portEditor, processEditor: processEditor,
-            browserView: browserView)
+            browserSessionEditor: browserSessionEditor)
         registerDirtyTracking(
-            setupView: setupView, stopView: stopView, portEditor: portEditor, processEditor: processEditor, browserView: browserView)
+            setupView: setupView, stopView: stopView, portEditor: portEditor, processEditor: processEditor,
+            browserSessionEditor: browserSessionEditor)
     }
 
     private func formSectionCard(icon: String, title: String, subtitle: String, trailingView: NSView? = nil, contentViews: [NSView]) -> NSView {
@@ -833,8 +834,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let stopView = makeEditableTextView()
         let portEditor = PortEditor()
         let processEditor = ProcessEditor()
-        let browserView = makeEditableTextView()
-        let browserScroll = scrollableTextView(browserView, height: 80)
+        let browserSessionEditor = BrowserSessionEditor()
         // --- Source row: popup + dir/URL input on same line ---
         let localSourceSection = NSStackView()
         localSourceSection.orientation = .horizontal
@@ -912,7 +912,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
         // --- Browser sessions card ---
         let browserCard = formSectionCard(
-            icon: "globe", title: "Browser sessions", subtitle: "URLs to open automatically, one per line.", contentViews: [browserScroll])
+            icon: "globe", title: "Browser sessions", subtitle: "Optional names with URL prefixes to open automatically.",
+            contentViews: [browserSessionEditor.container])
         stack.addArrangedSubview(browserCard)
 
         // --- Stop script card ---
@@ -956,7 +957,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         createButton.tag = storeAddProjectFields(
             sourcePopup: sourcePopup, localSourceSection: localSourceSection, cloneSourceSection: cloneSourceSection, dirField: dirField,
             repoURLField: repoURLField, setupView: setupView, stopView: stopView, portEditor: portEditor, processEditor: processEditor,
-            browserView: browserView, browseButton: browseButton)
+            browserSessionEditor: browserSessionEditor, browseButton: browseButton)
         if let refs = AddProjectFieldCache.shared.cache[createButton.tag] { updateAddProjectSourceUI(refs) }
     }
 
@@ -1278,6 +1279,12 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         // --- Windows card ---
         let processes = (try? orchestrator.runningProcesses(workspaceID: workspace.id)) ?? []
         let windows = (try? orchestrator.windows(workspaceID: workspace.id)) ?? []
+        let configuredBrowserSessions: [BrowserSession] = {
+            if let settings = try? orchestrator.workspaceSettings(workspaceID: workspace.id) {
+                return settings.browserSessions
+            }
+            return []
+        }()
         let processByWindowID: [Int: RunningProcessRecord] = {
             var map: [Int: RunningProcessRecord] = [:]
             for process in processes { if let wid = process.windowID { map[wid] = process } }
@@ -1296,11 +1303,20 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         } else {
             for (idx, win) in windows.enumerated() {
                 let windowLabel: String
+                let windowDetail: String?
                 let iconName: String
                 let iconColor: NSColor
                 switch win.role {
                 case "browser":
-                    windowLabel = win.targetURL ?? win.title ?? win.app
+                    if let sessionName = browserSessionDisplayName(for: win.targetURL, sessions: configuredBrowserSessions),
+                        let targetURL = win.targetURL
+                    {
+                        windowLabel = sessionName
+                        windowDetail = targetURL
+                    } else {
+                        windowLabel = win.targetURL ?? win.title ?? win.app
+                        windowDetail = nil
+                    }
                     iconName = "globe"
                     iconColor = .systemBlue
                 case "terminal":
@@ -1309,14 +1325,17 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                     } else {
                         windowLabel = win.title ?? win.app
                     }
+                    windowDetail = nil
                     iconName = "terminal"
                     iconColor = .systemGreen
                 default:
                     windowLabel = win.title ?? win.app
+                    windowDetail = nil
                     iconName = "chevron.left.forwardslash.chevron.right"
                     iconColor = .systemPurple
                 }
-                let row = windowRow(icon: iconName, iconColor: iconColor, label: windowLabel, shortcut: "CMD+\(idx + 1)")
+                let row = windowRow(
+                    icon: iconName, iconColor: iconColor, label: windowLabel, detail: windowDetail, shortcut: "CMD+\(idx + 1)")
                 windowsStack.addArrangedSubview(row)
                 constrainFormFieldToFillWidth(row, in: windowsStack)
             }
@@ -1430,8 +1449,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let processEditor = ProcessEditor()
         let stopView = makeEditableTextView()
         let stopScroll = scrollableTextView(stopView, height: 90)
-        let browserView = makeEditableTextView()
-        let browserScroll = scrollableTextView(browserView, height: 80)
+        let browserSessionEditor = BrowserSessionEditor()
         let tooltipField = NSTextField(string: "")
         tooltipField.placeholderString = "optional: context about what you're working on"
 
@@ -1439,13 +1457,13 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             stopView.string = config.stopScript ?? ""
             portEditor.setDefinitions(config.ports)
             processEditor.setProcessesWithChecks(config.processes, statusChecks: config.statusChecks)
-            browserView.string = config.browserSessions.compactMap { $0.url }.joined(separator: "\n")
+            browserSessionEditor.setSessions(config.browserSessions)
         } else {
             let fullProject = try? orchestrator.project(id: project.id)
             stopView.string = fullProject?.stopScript ?? ""
             portEditor.setDefinitions(fullProject?.ports ?? [])
             processEditor.setProcessesWithChecks(fullProject?.processes ?? [], statusChecks: fullProject?.statusChecks ?? [])
-            browserView.string = (fullProject?.browserSessions ?? []).compactMap { $0.url }.joined(separator: "\n")
+            browserSessionEditor.setSessions(fullProject?.browserSessions ?? [])
         }
         tooltipField.stringValue = workspace.tooltip ?? ""
 
@@ -1495,7 +1513,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
         // --- Browser sessions card ---
         let browserCard = formSectionCard(
-            icon: "globe", title: "Browser sessions", subtitle: "URLs to open automatically, one per line.", contentViews: [browserScroll])
+            icon: "globe", title: "Browser sessions", subtitle: "Optional names with URL prefixes to open automatically.",
+            contentViews: [browserSessionEditor.container])
         contentStack.addArrangedSubview(browserCard)
         constrainFormFieldToFillWidth(browserCard, in: contentStack)
 
@@ -1538,10 +1557,12 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         constrainFormFieldToFillWidth(buttonRow, in: container)
 
         saveButton.tag = storeWorkspaceFields(
-            workspaceID: workspace.id, stopView: stopView, portEditor: portEditor, processEditor: processEditor, browserView: browserView,
+            workspaceID: workspace.id, stopView: stopView, portEditor: portEditor, processEditor: processEditor,
+            browserSessionEditor: browserSessionEditor,
             tooltipField: tooltipField)
         registerWorkspaceDirtyTracking(
-            stopView: stopView, portEditor: portEditor, processEditor: processEditor, browserView: browserView, tooltipField: tooltipField)
+            stopView: stopView, portEditor: portEditor, processEditor: processEditor, browserSessionEditor: browserSessionEditor,
+            tooltipField: tooltipField)
 
         return insetContainerView(container)
     }
@@ -1562,7 +1583,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         return label
     }
 
-    private func windowRow(icon: String, iconColor: NSColor, label: String, shortcut: String) -> NSView {
+    private func windowRow(icon: String, iconColor: NSColor, label: String, detail: String? = nil, shortcut: String) -> NSView {
         let row = NSStackView()
         row.orientation = .horizontal
         row.alignment = .centerY
@@ -1579,10 +1600,19 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         iconView.setContentCompressionResistancePriority(.required, for: .horizontal)
 
         let labelField = NSTextField(labelWithString: label)
-        labelField.font = .systemFont(ofSize: 12)
+        labelField.font = detail == nil ? .systemFont(ofSize: 12) : .systemFont(ofSize: 12, weight: .semibold)
         labelField.textColor = .labelColor
         labelField.lineBreakMode = .byTruncatingTail
-        labelField.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        labelField.setContentHuggingPriority(.defaultHigh, for: .horizontal)
+        labelField.setContentCompressionResistancePriority(.required, for: .horizontal)
+
+        let detailField = NSTextField(labelWithString: detail ?? "")
+        detailField.font = .systemFont(ofSize: 11)
+        detailField.textColor = .secondaryLabelColor
+        detailField.lineBreakMode = .byTruncatingTail
+        detailField.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        detailField.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        detailField.isHidden = detail == nil
 
         let badge = NSTextField(labelWithString: shortcut)
         badge.font = .monospacedSystemFont(ofSize: 10, weight: .medium)
@@ -1593,6 +1623,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         row.addArrangedSubview(badge)
         row.addArrangedSubview(iconView)
         row.addArrangedSubview(labelField)
+        row.addArrangedSubview(detailField)
         return row
     }
 
@@ -2063,22 +2094,24 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
     private func storeProjectFields(
         projectID: String, setupView: NSTextView, stopView: NSTextView, portEditor: PortEditor, processEditor: ProcessEditor,
-        browserView: NSTextView
+        browserSessionEditor: BrowserSessionEditor
     ) -> Int {
         let id = projectID.hashValue
         ProjectFieldCache.shared.cache[id] = ProjectFieldRefs(
             projectID: projectID, setupView: setupView, stopView: stopView, portEditor: portEditor, processEditor: processEditor,
-            browserView: browserView)
+            browserSessionEditor: browserSessionEditor)
         return id
     }
 
     private func storeWorkspaceFields(
-        workspaceID: String, stopView: NSTextView, portEditor: PortEditor, processEditor: ProcessEditor, browserView: NSTextView,
+        workspaceID: String, stopView: NSTextView, portEditor: PortEditor, processEditor: ProcessEditor,
+        browserSessionEditor: BrowserSessionEditor,
         tooltipField: NSTextField
     ) -> Int {
         let id = workspaceID.hashValue
         WorkspaceFieldCache.shared.cache[id] = WorkspaceFieldRefs(
-            workspaceID: workspaceID, stopView: stopView, portEditor: portEditor, processEditor: processEditor, browserView: browserView,
+            workspaceID: workspaceID, stopView: stopView, portEditor: portEditor, processEditor: processEditor,
+            browserSessionEditor: browserSessionEditor,
             tooltipField: tooltipField)
         return id
     }
@@ -2086,13 +2119,13 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     private func storeAddProjectFields(
         sourcePopup: NSPopUpButton, localSourceSection: NSStackView, cloneSourceSection: NSStackView, dirField: NSTextField,
         repoURLField: NSTextField, setupView: NSTextView, stopView: NSTextView, portEditor: PortEditor, processEditor: ProcessEditor,
-        browserView: NSTextView, browseButton: NSButton
+        browserSessionEditor: BrowserSessionEditor, browseButton: NSButton
     ) -> Int {
         let id = UUID().uuidString.hashValue
         AddProjectFieldCache.shared.cache[id] = AddProjectFieldRefs(
             sourcePopup: sourcePopup, localSourceSection: localSourceSection, cloneSourceSection: cloneSourceSection, dirField: dirField,
             repoURLField: repoURLField, browseButton: browseButton, setupView: setupView, stopView: stopView, portEditor: portEditor,
-            processEditor: processEditor, browserView: browserView)
+            processEditor: processEditor, browserSessionEditor: browserSessionEditor)
         sourcePopup.tag = id
         browseButton.tag = id
         return id
@@ -2187,7 +2220,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 config.stopScript = refs.stopView.string.isEmpty ? nil : refs.stopView.string
                 config.ports = refs.portEditor.currentDefinitions()
                 config.processes = refs.processEditor.currentProcesses()
-                config.browserSessions = parseBrowserSessions(refs.browserView.string)
+                config.browserSessions = refs.browserSessionEditor.currentSessions()
                 config.statusChecks = refs.processEditor.currentStatusChecks()
             }
             projectHasUnsavedChanges = false
@@ -2227,7 +2260,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 config.stopScript = refs.stopView.string.isEmpty ? nil : refs.stopView.string
                 config.ports = refs.portEditor.currentDefinitions()
                 config.processes = refs.processEditor.currentProcesses()
-                config.browserSessions = parseBrowserSessions(refs.browserView.string)
+                config.browserSessions = refs.browserSessionEditor.currentSessions()
                 config.statusChecks = refs.processEditor.currentStatusChecks()
             }
             let tooltip = refs.tooltipField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -2255,7 +2288,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 project.stopScript = refs.stopView.string.isEmpty ? nil : refs.stopView.string
                 project.ports = refs.portEditor.currentDefinitions()
                 project.processes = refs.processEditor.currentProcesses()
-                project.browserSessions = parseBrowserSessions(refs.browserView.string)
+                project.browserSessions = refs.browserSessionEditor.currentSessions()
                 project.statusChecks = refs.processEditor.currentStatusChecks()
             }
             reloadData()
@@ -2435,16 +2468,24 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         return []
     }
 
-    private func parseBrowserSessions(_ raw: String) -> [BrowserSession] {
-        raw.split(separator: "\n").compactMap { line in
-            let url = line.trimmingCharacters(in: .whitespacesAndNewlines)
-            return url.isEmpty ? nil : BrowserSession(url: url)
-        }
-    }
-
     private func parseStatusChecks(_ raw: String) -> [StatusCheckDefinition] {
         _ = raw
         return []
+    }
+
+    private func browserSessionDisplayName(for targetURL: String?, sessions: [BrowserSession]) -> String? {
+        guard let targetURL, !targetURL.isEmpty else { return nil }
+        var bestMatch: (length: Int, name: String)?
+        for session in sessions {
+            guard
+                let prefix = session.url?.trimmingCharacters(in: .whitespacesAndNewlines),
+                let name = session.name?.trimmingCharacters(in: .whitespacesAndNewlines),
+                !prefix.isEmpty, !name.isEmpty, targetURL.hasPrefix(prefix)
+            else { continue }
+            if let bestMatch, bestMatch.length >= prefix.count { continue }
+            bestMatch = (length: prefix.count, name: name)
+        }
+        return bestMatch?.name
     }
 
     private func showError(_ error: Error) {
@@ -3203,7 +3244,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     }
 
     private func registerDirtyTracking(
-        setupView: NSTextView, stopView: NSTextView, portEditor: PortEditor, processEditor: ProcessEditor, browserView: NSTextView
+        setupView: NSTextView, stopView: NSTextView, portEditor: PortEditor, processEditor: ProcessEditor,
+        browserSessionEditor: BrowserSessionEditor
     ) {
         projectHasUnsavedChanges = false
         NotificationCenter.default.addObserver(forName: NSText.didChangeNotification, object: setupView, queue: .main) { [weak self] _ in
@@ -3212,21 +3254,17 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         NotificationCenter.default.addObserver(forName: NSText.didChangeNotification, object: stopView, queue: .main) { [weak self] _ in
             Task { @MainActor in self?.projectHasUnsavedChanges = true }
         }
-        NotificationCenter.default.addObserver(forName: NSText.didChangeNotification, object: browserView, queue: .main) { [weak self] _ in
-            Task { @MainActor in self?.projectHasUnsavedChanges = true }
-        }
         portEditor.onDirty = { [weak self] in Task { @MainActor in self?.projectHasUnsavedChanges = true } }
         processEditor.onDirty = { [weak self] in Task { @MainActor in self?.projectHasUnsavedChanges = true } }
+        browserSessionEditor.onDirty = { [weak self] in Task { @MainActor in self?.projectHasUnsavedChanges = true } }
     }
 
     private func registerWorkspaceDirtyTracking(
-        stopView: NSTextView, portEditor: PortEditor, processEditor: ProcessEditor, browserView: NSTextView, tooltipField: NSTextField
+        stopView: NSTextView, portEditor: PortEditor, processEditor: ProcessEditor, browserSessionEditor: BrowserSessionEditor,
+        tooltipField: NSTextField
     ) {
         workspaceHasUnsavedChanges = false
         NotificationCenter.default.addObserver(forName: NSText.didChangeNotification, object: stopView, queue: .main) { [weak self] _ in
-            Task { @MainActor in self?.workspaceHasUnsavedChanges = true }
-        }
-        NotificationCenter.default.addObserver(forName: NSText.didChangeNotification, object: browserView, queue: .main) { [weak self] _ in
             Task { @MainActor in self?.workspaceHasUnsavedChanges = true }
         }
         NotificationCenter.default.addObserver(forName: NSControl.textDidChangeNotification, object: tooltipField, queue: .main) { [weak self] _ in
@@ -3234,6 +3272,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         }
         portEditor.onDirty = { [weak self] in Task { @MainActor in self?.workspaceHasUnsavedChanges = true } }
         processEditor.onDirty = { [weak self] in Task { @MainActor in self?.workspaceHasUnsavedChanges = true } }
+        browserSessionEditor.onDirty = { [weak self] in Task { @MainActor in self?.workspaceHasUnsavedChanges = true } }
     }
 
     private func saveCurrentDetail() -> Bool {
@@ -3268,7 +3307,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 config.stopScript = refs.stopView.string.isEmpty ? nil : refs.stopView.string
                 config.ports = refs.portEditor.currentDefinitions()
                 config.processes = refs.processEditor.currentProcesses()
-                config.browserSessions = parseBrowserSessions(refs.browserView.string)
+                config.browserSessions = refs.browserSessionEditor.currentSessions()
                 config.statusChecks = refs.processEditor.currentStatusChecks()
             }
             workspaceHasUnsavedChanges = false
@@ -3291,7 +3330,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 config.stopScript = refs.stopView.string.isEmpty ? nil : refs.stopView.string
                 config.ports = refs.portEditor.currentDefinitions()
                 config.processes = refs.processEditor.currentProcesses()
-                config.browserSessions = parseBrowserSessions(refs.browserView.string)
+                config.browserSessions = refs.browserSessionEditor.currentSessions()
                 config.statusChecks = refs.processEditor.currentStatusChecks()
             }
             projectHasUnsavedChanges = false

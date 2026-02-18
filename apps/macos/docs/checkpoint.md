@@ -1,7 +1,7 @@
 # Checkpoint
 
 ## Current Status
-- SQLite (`~/.muxy/muxy.db`) is the single source of truth for all model data and global preferences: projects (including templates: processes, status checks, browser sessions, ports, scripts), workspaces, ports, running processes, status results, windows, settings, `editor`, and `port_range`. Schema is versioned (`schema_version` table); all tables are dropped and recreated when the version changes (currently v1).
+- SQLite (`~/.muxy/muxy.db`) is the single source of truth for all model data and global preferences: projects (including templates: processes, status checks, browser sessions, ports, scripts), workspaces, ports, running processes, status results, windows, settings, `editor`, and `port_range`. Schema is versioned (`schema_version` table); all tables are dropped and recreated when the version changes (currently v5).
 - Projects are stored in SQLite and normalized by real path; a default workspace is ensured per project with reserved ports.
 - Project creation supports either existing directories or git clone; cloned repositories are stored at `/Users/<username>/muxy/projects/<project_name>`.
 - Project removal clears muxy state, removes related managed git worktrees via `git worktree remove --force`, deletes related git workspace directories under `/Users/<username>/muxy/workspaces`, and deletes the project directory only for git repositories under `/Users/<username>/muxy/projects` (managed clones).
@@ -35,10 +35,11 @@
 - Launch is now reserved for stopped workspaces; running workspaces use explicit restart semantics (stop then launch) via GUI/CLI.
 - Workspace settings snapshot project templates on creation into the runtime DB and are editable per workspace; updates to running workspaces reconcile processes and browser sessions immediately.
 - AppKit GUI is two-pane with in-place forms and editors for processes (with nested inline status checks), browser sessions; workspace detail includes run/stop/archive, windows list with shortcut hints, an env/ports tab, and workspace settings.
+- Browser sessions now support an optional `name` field; GUI forms use row editors (`name` + URL), CLI supports `--name` on add/list, and workspace window rows prefer the configured browser-session name over raw URL when available.
 - App provides a standard Edit menu with Copy (Cmd+C) and Select All (Cmd+A) so text in read-only views like the env tab can be selected and copied.
 - Workspace detail header shows a colored status dot (green = running, gray = stopped) to the left of the title, git branch with icon below, and directory path with folder icon and a copy-to-clipboard button.
 - Launch/Stop/Restart buttons show icon-only labels without keyboard shortcut text (shortcuts don't function from those buttons).
-- Window list shows URLs for browser sessions and process commands for terminal windows instead of raw window titles.
+- Window list shows browser-session names when configured and the matching URL beside the name (fallback: URL only), and process commands for terminal windows instead of raw window titles.
 - New project form uses themed card sections (rounded borders, sidebar colors) for Source, Setup script, Processes (with nested inline status checks), Browser sessions, and Stop script; source popup and directory picker are on the same row.
 - Right-pane forms are scrollable, use left-aligned full-width fields, and use text-labeled actions for create/cancel flows.
 - New workspace `+` actions in project UI are shown only for git projects.

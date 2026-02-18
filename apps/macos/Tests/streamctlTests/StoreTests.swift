@@ -43,16 +43,19 @@ final class StoreTests: XCTestCase {
             workspaceID: workspace.id,
             sessions: [
                 BrowserSession(
+                    name: "checkout",
                     url: "https://example.com",
                     extractedWindow: ExtractedBrowserWindowMapping(targetURL: "https://example.com", windowID: 303, isValid: true)),
                 BrowserSession(),
             ])
         let sessions = try store.workspaceBrowserSessions(workspaceID: workspace.id)
         XCTAssertEqual(sessions.count, 2)
+        XCTAssertEqual(sessions[0].name, "checkout")
         XCTAssertEqual(sessions[0].url, "https://example.com")
         XCTAssertEqual(sessions[0].extractedWindow?.targetURL, "https://example.com")
         XCTAssertEqual(sessions[0].extractedWindow?.windowID, 303)
         XCTAssertEqual(sessions[0].extractedWindow?.isValid, true)
+        XCTAssertNil(sessions[1].name)
         XCTAssertNil(sessions[1].url)
 
         XCTAssertFalse(try store.workspaceSettingsExists(workspaceID: workspace.id))
@@ -277,7 +280,7 @@ final class StoreTests: XCTestCase {
             statusChecks: [
                 StatusCheckDefinition(name: "health", process: "api", command: "curl /health", interval: 10, timeout: 3, onFail: .notify),
             ],
-            browserSessions: [BrowserSession(url: "https://localhost:3000")])
+            browserSessions: [BrowserSession(name: "frontend", url: "https://localhost:3000")])
 
         try store.upsert(project: project)
 
@@ -295,6 +298,7 @@ final class StoreTests: XCTestCase {
         XCTAssertEqual(loaded?.statusChecks[0].name, "health")
         XCTAssertEqual(loaded?.statusChecks[0].onFail, .notify)
         XCTAssertEqual(loaded?.browserSessions.count, 1)
+        XCTAssertEqual(loaded?.browserSessions[0].name, "frontend")
         XCTAssertEqual(loaded?.browserSessions[0].url, "https://localhost:3000")
     }
 

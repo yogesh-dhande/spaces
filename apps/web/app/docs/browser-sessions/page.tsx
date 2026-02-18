@@ -18,7 +18,7 @@ export default function BrowserSessionsDocsPage() {
         <h2 className="text-xl font-semibold tracking-tight">Session Model</h2>
         <ul className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
           <li>• Browser sessions are configured at project level and copied into workspace settings.</li>
-          <li>• Each session entry is a URL prefix.</li>
+          <li>• Each session entry has an optional name plus a URL prefix.</li>
           <li>• Sessions can use named port variables like `$FRONTEND_PORT` or `$API_PORT`.</li>
           <li>• Multiple session URLs can be attached to one workspace.</li>
         </ul>
@@ -57,9 +57,12 @@ export default function BrowserSessionsDocsPage() {
         <h2 className="text-xl font-semibold tracking-tight">Example Browser Session Config</h2>
         <pre className="mt-3 w-full max-w-full min-w-0 overflow-x-auto whitespace-pre-wrap break-words rounded-xl border border-line bg-background-soft/80 p-3 text-xs leading-6 text-foreground">
           <code>{`browser_sessions:
-  - url: http://localhost:$FRONTEND_PORT
-  - url: http://localhost:$FRONTEND_PORT/admin
-  - url: https://github.com/org/repo/pull/912
+  - name: frontend
+    url: http://localhost:$FRONTEND_PORT
+  - name: admin
+    url: http://localhost:$FRONTEND_PORT/admin
+  - name: pr-review
+    url: https://github.com/org/repo/pull/912
   - url: https://docs.example.com/runbook/checkout`}</code>
         </pre>
       </article>
