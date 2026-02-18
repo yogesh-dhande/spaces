@@ -650,32 +650,60 @@ public final class MuxyOrchestrator {
         return didUpdate
     }
 
-    public func runStatusChecks(workspaceID: String) throws -> [StatusResult] {
+    public func runStatusChecks(workspaceID: String, dueOnly: Bool = false, now: Date = Date()) throws -> [StatusResult] {
         let (project, workspace) = try resolveWorkspace(id: workspaceID)
         guard let config = try loadWorkspaceSettings(project: project, workspace: workspace) else {
             return []
         }
         let processes = try store.runningProcesses(workspaceID: workspaceID)
+        let checksByProcessID = Dictionary(grouping: config.statusChecks, by: \.process)
         let namedPorts = try store.workspacePortsNamed(workspaceID: workspaceID)
         let env = buildWorkspaceEnv(project: project, workspace: workspace, namedPorts: namedPorts)
         var results: [StatusResult] = []
-        for check in config.statusChecks {
-            guard let process = processes.first(where: { $0.templateName == check.process }) else { continue }
-            let resolvedCommand = applyEnvVars(check.command, env: env)
-            let outcome = try runCommandWithTimeout(command: resolvedCommand, cwd: workspace.dir, timeout: check.timeout, env: env)
-            let status = outcome.exitCode == 0 ? "green" : "red"
-            let result = StatusResult(
-                processID: process.id, checkName: check.name ?? check.process, status: status, message: outcome.output.isEmpty ? nil : outcome.output,
-                lastRunAt: nowISO8601())
-            try store.upsert(statusResult: result)
-            results.append(result)
-            
-            // Handle onFail behavior for failed status checks
-            if outcome.exitCode != 0 {
-                try handleStatusCheckFailure(workspaceID: workspaceID, process: process, check: check, result: result)
+        let iso8601 = ISO8601DateFormatter()
+        for process in processes where process.status == .running {
+            guard let checks = checksByProcessID[process.templateName], !checks.isEmpty else { continue }
+            let existingResults = Dictionary(uniqueKeysWithValues: try store.statusResults(processID: process.id).map { ($0.checkName, $0) })
+            for check in checks {
+                let checkName = check.name ?? check.process
+                if dueOnly,
+                    let existing = existingResults[checkName],
+                    let lastRunAt = existing.lastRunAt,
+                    let lastRunDate = iso8601.date(from: lastRunAt),
+                    now.timeIntervalSince(lastRunDate) < TimeInterval(max(check.interval, 1))
+                {
+                    continue
+                }
+
+                let resolvedCommand = applyEnvVars(check.command, env: env)
+                let outcome = try runCommandWithTimeout(command: resolvedCommand, cwd: workspace.dir, timeout: check.timeout, env: env)
+                let status = outcome.exitCode == 0 ? "green" : "red"
+                let result = StatusResult(
+                    processID: process.id, checkName: checkName, status: status, message: outcome.output.isEmpty ? nil : outcome.output,
+                    lastRunAt: nowISO8601())
+                try store.upsert(statusResult: result)
+                results.append(result)
+
+                // Handle onFail behavior for failed status checks
+                if outcome.exitCode != 0 {
+                    try handleStatusCheckFailure(workspaceID: workspaceID, process: process, check: check, result: result)
+                }
             }
         }
         return results
+    }
+
+    public func runDueStatusChecksForRunningWorkspaces(now: Date = Date()) throws -> Bool {
+        var didRunChecks = false
+        let allProjects = try store.projects()
+        for project in allProjects {
+            let workspaces = try store.workspaces(projectID: project.id, includeArchived: false)
+            for workspace in workspaces where workspace.isRunning {
+                let results = try runStatusChecks(workspaceID: workspace.id, dueOnly: true, now: now)
+                if !results.isEmpty { didRunChecks = true }
+            }
+        }
+        return didRunChecks
     }
     
     private func deliverNotification(title: String, body: String, subtitle: String? = nil) {
@@ -732,12 +760,7 @@ public final class MuxyOrchestrator {
             body: "Process '\(process.templateName)' is being restarted due to failed status check",
             subtitle: result.message.map { "Reason: \($0)" }
         )
-        
-        // Terminate the existing process group if PID exists
-        if let pid = process.pid {
-            terminateProcessGroup(pid: pid)
-        }
-        
+
         // Mark the process as exited in the database
         let updatedProcess = RunningProcessRecord(
             id: process.id, workspaceID: process.workspaceID, templateName: process.templateName,
@@ -792,12 +815,13 @@ public final class MuxyOrchestrator {
         let (project, workspace) = try resolveWorkspace(id: workspaceID)
         let namedPorts = try store.workspacePortsNamed(workspaceID: workspaceID)
         let env = buildWorkspaceEnv(project: project, workspace: workspace, namedPorts: namedPorts)
+        let didTerminate = terminateProcessForRestart(process)
         
         // Prepare the command with proper environment and PID tracking
         let (logFile, pidFile) = try processRuntimePaths(workspaceID: workspace.id, name: process.templateName)
         let command = shellCommand(base: process.command, cwd: workspace.dir, env: env, logFile: logFile, pidFile: pidFile)
         
-        if let windowID = process.windowID, process.terminalApp == "iTerm2" {
+        if didTerminate, let windowID = process.windowID, process.terminalApp == "iTerm2" {
             // Reuse existing terminal window
             fputs("muxy: Restarting process '\(process.templateName)' in existing terminal window \(windowID)\n", stderr)
             try iterm.runInWindow(id: windowID, command: command)
@@ -813,8 +837,8 @@ public final class MuxyOrchestrator {
             )
             try store.upsert(runningProcess: restartedProcess)
         } else {
-            // Fallback: create new terminal window (shouldn't normally happen)
-            fputs("muxy: Creating new terminal window for process '\(process.templateName)' (no existing window found)\n", stderr)
+            // Fallback: create new terminal window when there is no reusable window or shutdown did not complete.
+            fputs("muxy: Creating new terminal window for process '\(process.templateName)'\n", stderr)
             let windowInfo = try iterm.openWindowAndRun(command: command)
             let windowID = windowInfo.id
             
@@ -829,6 +853,18 @@ public final class MuxyOrchestrator {
             )
             try store.upsert(runningProcess: restartedProcess)
         }
+    }
+
+    private func terminateProcessForRestart(_ process: RunningProcessRecord) -> Bool {
+        guard let pid = resolvedRuntimePID(for: process) else { return true }
+        terminateProcessGroup(pid: pid)
+        waitForProcessExit(pid: pid, timeout: 10.0)
+        guard isProcessAlive(pid: pid) else { return true }
+        fputs(
+            "muxy: Process '\(process.templateName)' with pid \(pid) did not exit in time; restart will use a new terminal window\n",
+            stderr
+        )
+        return false
     }
 
     public func statusResults(processID: String) throws -> [StatusResult] { try store.statusResults(processID: processID) }

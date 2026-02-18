@@ -80,6 +80,8 @@
             - Project templates stored in SQLite (`project_status_checks`)
             - Workspace copies stored in SQLite (`workspace_status_checks`) and editable per workspace
             - these checks run at specified intervals and update the status indicator (green, red) in the GUI
+            - checks run in periodic background monitoring for running workspaces; the run tab displays persisted results and must not be required to trigger check execution
+            - when `on exit` is `restart process`, muxy must terminate and wait for the tracked process to fully exit before relaunching (to avoid queuing commands behind a still-running shell)
             - each running process can have multiple status indicators e.g. when the command starts several docker services and the status check is run for multiple services defined in the docker compose file
     - Status
         - fields
@@ -173,7 +175,7 @@
             - stored in db
             - when started, each process receives the following env vars
                 - Named port env vars from the workspace's port definitions (e.g. `FRONTEND_PORT=20001`, `API_PORT=20002`) so they can be used when starting a server e.g. `PORT=$FRONTEND_PORT npm run dev`
-            - can be restarted from muxy GUI (e.g. if .env files are changed). restarts in the existing terminal window
+            - can be restarted from muxy GUI (e.g. if .env files are changed). restart attempts reuse the existing terminal window only after process exit is confirmed; otherwise muxy launches a new terminal window
     - Window
         - fields
             - workspace: Workspace

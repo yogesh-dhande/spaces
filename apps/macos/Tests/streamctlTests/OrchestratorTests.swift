@@ -459,6 +459,69 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertEqual(persisted.count, 2)
     }
 
+    func testRunStatusChecksDueOnlyRespectsInterval() throws {
+        let root = try makeTempDirectory()
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let store = try makeTemporaryStore()
+        let orchestrator = MuxyOrchestrator(store: store)
+
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
+        try store.touchWorkspaceSettings(workspaceID: workspace.id, updatedAt: "now")
+        try store.setWorkspaceStatusChecks(
+            workspaceID: workspace.id,
+            checks: [
+                StatusCheckDefinition(name: "health", process: "api", command: "echo ok", interval: 60, timeout: 2, onFail: .none),
+            ])
+        let runningProcess = RunningProcessRecord(
+            id: UUID().uuidString, workspaceID: workspace.id, templateName: "api", command: "echo api", terminalApp: nil, windowID: nil, pid: 9000,
+            status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil)
+        try store.upsert(runningProcess: runningProcess)
+
+        let now = Date()
+        let firstRun = try orchestrator.runStatusChecks(workspaceID: workspace.id, dueOnly: true, now: now)
+        XCTAssertEqual(firstRun.count, 1)
+
+        let secondRunWithinInterval = try orchestrator.runStatusChecks(
+            workspaceID: workspace.id, dueOnly: true, now: now.addingTimeInterval(5))
+        XCTAssertTrue(secondRunWithinInterval.isEmpty)
+
+        let forcedRun = try orchestrator.runStatusChecks(
+            workspaceID: workspace.id, dueOnly: false, now: now.addingTimeInterval(5))
+        XCTAssertEqual(forcedRun.count, 1)
+    }
+
+    func testRunDueStatusChecksForRunningWorkspacesRunsChecks() throws {
+        let root = try makeTempDirectory()
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let store = try makeTemporaryStore()
+        let orchestrator = MuxyOrchestrator(store: store)
+
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
+        try store.touchWorkspaceSettings(workspaceID: workspace.id, updatedAt: "now")
+        try store.updateWorkspaceRunning(id: workspace.id, isRunning: true, launchedAt: ISO8601DateFormatter().string(from: Date()))
+        try store.setWorkspaceStatusChecks(
+            workspaceID: workspace.id,
+            checks: [
+                StatusCheckDefinition(name: "health", process: "api", command: "echo ok", interval: 10, timeout: 2, onFail: .none),
+            ])
+        let runningProcess = RunningProcessRecord(
+            id: UUID().uuidString, workspaceID: workspace.id, templateName: "api", command: "echo api", terminalApp: nil, windowID: nil, pid: 9000,
+            status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil)
+        try store.upsert(runningProcess: runningProcess)
+
+        let didRunChecks = try orchestrator.runDueStatusChecksForRunningWorkspaces(now: Date())
+        XCTAssertTrue(didRunChecks)
+
+        let persisted = try orchestrator.statusResults(processID: runningProcess.id)
+        XCTAssertEqual(persisted.count, 1)
+        XCTAssertEqual(persisted.first?.checkName, "health")
+        XCTAssertEqual(persisted.first?.status, "green")
+    }
+
     func testStatusCheckOnFailNoneDoesNothing() throws {
         let root = try makeTempDirectory()
         let projectDir = root.appendingPathComponent("project", isDirectory: true)

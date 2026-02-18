@@ -77,7 +77,7 @@ Project data (stored in SQLite):
   - When a process exits, the orchestrator detects it during status polling and applies the configured behavior.
   - `none`: Process exit is logged but no action is taken.
   - `notify`: A macOS notification is shown when the process exits.
-  - `restart`: The process is automatically restarted in a new terminal window with a notification.
+  - `restart`: The orchestrator first terminates and waits for the tracked process PID (including runtime PID-file fallback), then restarts in the existing terminal window when safe; if shutdown does not complete, it falls back to a new terminal window.
 - New projects can be created from an existing directory or by cloning a repository into `/Users/<username>/muxy/projects/<project_name>`.
 - Removing a project clears muxy state. For git projects, muxy first removes managed worktrees with `git worktree remove --force`, then deletes related workspace directories under `/Users/<username>/muxy/workspaces`.
 - The project directory is deleted only for git projects located under `/Users/<username>/muxy/projects` (app-managed clones).
@@ -314,6 +314,7 @@ Run/recovery semantics:
 - Workspace lifecycle actions are guarded by a per-workspace in-flight lock so overlapping launch/stop/restart/archive actions cannot run concurrently for the same workspace.
 - GUI run controls are state-aware: show `Launch` when stopped and `Restart` when running.
 - AppKit launch/restart/stop/archive button handlers dispatch lifecycle work in detached background tasks (fresh orchestrator/store instances) so long-running automation does not block the UI event loop.
+- AppKit periodic process monitoring also runs in detached background tasks and now executes interval-based status checks for running workspaces, persisting fresh `status_results` and triggering `on_fail` actions (including restart) without requiring the run tab to be rendered.
 
 Degraded runtime edge cases and handling:
 - `is_running` can drift from real OS state because users can close windows/processes manually.

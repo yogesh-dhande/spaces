@@ -20,7 +20,18 @@ export default function ProcessesDocsPage() {
           <li>• Processes are defined at the project level and inherited by each workspace.</li>
           <li>• Each workspace can customize its own process commands independently.</li>
           <li>• Each process has a command and optional name.</li>
+          <li>• Each process has an <code>on_exit</code> policy: <code>none</code>, <code>restart</code>, or <code>notify</code>.</li>
           <li>• Typical use cases: web servers, workers, test watchers, coding agents.</li>
+        </ul>
+      </article>
+
+      <article className="rounded-2xl border border-line bg-surface/82 p-5 backdrop-blur-sm">
+        <h2 className="text-xl font-semibold tracking-tight">GUI Configuration</h2>
+        <ul className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
+          <li>• In Workspace Settings, each process row includes an <code>On Exit</code> selector.</li>
+          <li>• <code>none</code>: mark exited and do not take action.</li>
+          <li>• <code>notify</code>: show a desktop notification when the process exits.</li>
+          <li>• <code>restart</code>: automatically restart the process after exit is detected.</li>
         </ul>
       </article>
 
@@ -53,6 +64,7 @@ MUXY_WORKSPACE_DIR`}</code>
         <ul className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
           <li>• Stop gracefully interrupts processes first, then escalates if needed.</li>
           <li>• The stop script runs after process termination (if configured).</li>
+          <li>• Automatic restarts terminate and wait for prior runtime PID exit before relaunch.</li>
           <li>• Command changes in a running workspace restart the affected process in the same terminal window.</li>
         </ul>
       </article>

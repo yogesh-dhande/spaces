@@ -130,15 +130,15 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         periodicProcessMonitorTask = Task { [weak self] in
             guard let self else { return }
             while !Task.isCancelled {
-                let didUpdate: Bool
-                do {
-                    didUpdate = try orchestrator.checkAndUpdateProcessStatuses()
-                } catch {
-                    didUpdate = false
-                }
+                let result = await Self.runProcessMonitorSnapshot()
                 if Task.isCancelled { break }
-                if didUpdate && self.canReloadAfterBackgroundWorkspaceRefresh() {
-                    self.reloadData()
+                switch result {
+                case .success(let didUpdate):
+                    if didUpdate && self.canReloadAfterBackgroundWorkspaceRefresh() {
+                        self.reloadData()
+                    }
+                case .failure:
+                    break
                 }
                 do {
                     try await Task.sleep(for: .seconds(PollingConstants.processStatusCheckInterval))
@@ -266,6 +266,21 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                     try orchestrator.archiveWorkspace(workspaceID: workspaceID)
                 }
                 return .success(())
+            } catch {
+                return .failure(error)
+            }
+        }.value
+    }
+
+    nonisolated private static func runProcessMonitorSnapshot() async -> Result<Bool, Error> {
+        await Task.detached(priority: .utility) {
+            do {
+                let db = try DatabaseLocator.defaultPath()
+                let store = try SQLiteStore(path: db)
+                let orchestrator = MuxyOrchestrator(store: store)
+                let didUpdateProcessStates = try orchestrator.checkAndUpdateProcessStatuses()
+                let didRunStatusChecks = try orchestrator.runDueStatusChecksForRunningWorkspaces()
+                return .success(didUpdateProcessStates || didRunStatusChecks)
             } catch {
                 return .failure(error)
             }
@@ -1313,7 +1328,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         constrainFormFieldToFillWidth(windowsStack, in: container)
 
         // --- Processes card ---
-        let results = (try? orchestrator.runStatusChecks(workspaceID: workspace.id)) ?? []
+        var results: [StatusResult] = []
+        for process in processes {
+            let processResults = (try? orchestrator.statusResults(processID: process.id)) ?? []
+            results.append(contentsOf: processResults)
+        }
         let processesStack = NSStackView()
         processesStack.orientation = .vertical
         processesStack.spacing = 4

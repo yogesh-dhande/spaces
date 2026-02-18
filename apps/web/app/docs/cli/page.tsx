@@ -156,12 +156,17 @@ mx project port remove --dir /path/to/repo --name API_PORT`}</CodeBlock>
         </p>
         <CodeBlock>{`mx project process list   --dir /path/to/repo
 mx project process add    --dir /path/to/repo --name frontend --command "PORT=$FRONTEND_PORT npm run dev"
+mx project process add    --dir /path/to/repo --name docker   --command "docker compose up --build" --on-exit restart
 mx project process add    --dir /path/to/repo --name api      --command "PORT=$API_PORT npm run api"
 mx project process remove --dir /path/to/repo --name api`}</CodeBlock>
         <ul className="mt-3 space-y-1">
           <Flag name="--name <name>" description="Process identifier. Used to associate status checks and for display in the run tab." />
           <Flag name="--command <cmd>" description="Shell command to execute. Named port env vars are available." />
+          <Flag name="--on-exit <action>" description="Action when process exits: none | restart | notify. Default: none." />
         </ul>
+        <p className="mt-3 text-sm leading-7 text-foreground-soft">
+          <Cmd>--on-exit restart</Cmd> attempts a clean terminate/wait of the previous runtime PID before relaunching.
+        </p>
       </article>
 
       {/* Status checks */}
@@ -188,6 +193,9 @@ mx project status-check remove --dir /path/to/repo --name web-health`}</CodeBloc
           <Flag name="--timeout <seconds>" description="Seconds before the command is killed. Default: 5." />
           <Flag name="--on-fail <action>" description="Action when the check fails: none | restart | notify. Default: none." />
         </ul>
+        <p className="mt-3 text-sm leading-7 text-foreground-soft">
+          <Cmd>--on-fail restart</Cmd> marks the check red and restarts the associated process; <Cmd>--on-fail notify</Cmd> keeps the process running and sends a desktop notification.
+        </p>
       </article>
 
       {/* Browser sessions */}

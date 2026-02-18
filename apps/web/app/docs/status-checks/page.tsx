@@ -28,7 +28,18 @@ export default function StatusChecksDocsPage() {
           <li>• Checks are defined at the project level and inherited by each workspace.</li>
           <li>• Each workspace can customize its own checks independently.</li>
           <li>• Edits to checks in a running workspace apply immediately.</li>
+          <li>• Checks run in periodic background monitoring for running workspaces.</li>
           <li>• A process may have multiple checks.</li>
+        </ul>
+      </article>
+
+      <article className="rounded-2xl border border-line bg-surface/82 p-5 backdrop-blur-sm">
+        <h2 className="text-xl font-semibold tracking-tight">GUI Configuration</h2>
+        <ul className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
+          <li>• In Workspace Settings, each status check row includes an <code>On Fail</code> selector.</li>
+          <li>• <code>none</code>: store failed (red) status only.</li>
+          <li>• <code>notify</code>: store failed status and send a desktop notification.</li>
+          <li>• <code>restart</code>: store failed status and restart the linked process.</li>
         </ul>
       </article>
 

@@ -10,6 +10,8 @@
 - Archiving non-git workspaces does not delete the project directory.
 - Archiving git workspaces removes the worktree via `git worktree remove --force` (and then archives workspace metadata/ports).
 - Workspace launch starts processes in iTerm2 with env vars and logs under `~/.muxy/runtime/<workspace-id>`, opens Chrome browser sessions, optionally opens the editor, and captures window IDs via yabai in browser/editor/terminal order.
+- Status-check/on-exit restarts now resolve runtime PID fallback, terminate the existing process, and wait for exit before relaunch; if shutdown does not complete in time, restart falls back to a new terminal window.
+- Status checks now run continuously in periodic background monitoring for running workspaces (respecting per-check intervals), so `status_results` stay fresh and on-fail actions execute without requiring the run tab to be open.
 - Browser window tracking includes target session URL so workspace focus actions can activate the matching Chrome tab (not just focus the window).
 - Browser session mapping is URL-based; title-based fallback matching is removed to avoid binding sessions to unrelated active tabs in shared Chrome windows.
 - Workspace launch/restart reuses existing matching Chrome tabs and tracks all matches for workspace window cycling.
@@ -89,7 +91,6 @@
 
 ## Remaining
 - Dependency/permission onboarding (detect missing `yabai` or macOS accessibility permissions and guide the user).
-- Periodic status check runner (honor interval/timeout) plus on-fail actions, with GUI status updates.
 - Coding agent detection with idle/busy state tracking and notifications for idle/exited events.
 - Window reconciliation on app restart (re-scan existing windows, match browser sessions, and map them to workspaces) for cases where the app has not been focused yet.
 

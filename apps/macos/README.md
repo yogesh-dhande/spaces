@@ -76,7 +76,9 @@ Updates to workspace settings apply immediately when the workspace is running (n
   - Browser tab rows are sorted by configured browser-session order and then URL so shortcut indices remain stable
   - Window cycling order is browser tabs first, then terminals, then other windows; once cycling starts, next/previous uses remembered cycle position
   - Global next/previous window navigation disambiguates reused Chrome windows by active tab URL, so shortcuts stay on the correct workspace
+  - Process restarts (status-check failure or `on_exit=restart`) terminate and wait for the tracked runtime PID before relaunch; if a clean stop does not finish in time, muxy restarts in a new terminal window instead of queueing in the busy one
   - Processes with status check results shown as indented sub-rows (colored dots)
+  - Status checks run in periodic background monitoring for running workspaces (respecting each check interval), so health rows and on-fail restarts update even when the run tab is not open
   - Windows list with shortcut hints
   - Env vars/ports tab
   - Workspace settings tab

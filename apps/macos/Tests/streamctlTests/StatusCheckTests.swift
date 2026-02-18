@@ -162,4 +162,58 @@ struct StatusCheckTests {
         #expect(currentProcess.status == .running)
         #expect(currentProcess.pid == 9000)
     }
+
+    @Test("Status-check restart handles missing tracked PID using runtime PID file")
+    func testStatusCheckRestartHandlesMissingTrackedPIDUsingRuntimePIDFile() throws {
+        let root = try makeTempDirectory()
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let runtimeDir = root.appendingPathComponent("runtime", isDirectory: true)
+        try FileManager.default.createDirectory(at: runtimeDir, withIntermediateDirectories: true)
+        setenv("MUXY_RUNTIME_DIR", runtimeDir.path, 1)
+        defer { unsetenv("MUXY_RUNTIME_DIR") }
+
+        let store = try makeTemporaryStore()
+        let mockIterm = MockIterm2Adapter()
+        let orchestrator = MuxyOrchestrator(store: store, iterm: mockIterm)
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
+        try store.touchWorkspaceSettings(workspaceID: workspace.id, updatedAt: "now")
+
+        let failingCheck = projectDir.appendingPathComponent("failing-check.sh")
+        try "#!/bin/bash\nexit 1".write(to: failingCheck, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: failingCheck.path)
+
+        try store.setWorkspaceStatusChecks(
+            workspaceID: workspace.id,
+            checks: [
+                StatusCheckDefinition(
+                    name: "docker-container-health",
+                    process: "web-server",
+                    command: failingCheck.path,
+                    interval: 10,
+                    timeout: 5,
+                    onFail: .restart
+                ),
+            ])
+        
+        let workspaceRuntime = runtimeDir.appendingPathComponent(workspace.id, isDirectory: true)
+        try FileManager.default.createDirectory(at: workspaceRuntime, withIntermediateDirectories: true)
+        let pidFileURL = workspaceRuntime.appendingPathComponent("web-server.pid")
+        try "98765".write(to: pidFileURL, atomically: true, encoding: .utf8)
+
+        let runningProcess = RunningProcessRecord(
+            id: UUID().uuidString, workspaceID: workspace.id, templateName: "web-server",
+            command: "docker compose up --build", terminalApp: "iTerm2", windowID: 123, pid: nil,
+            status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil)
+        try store.upsert(runningProcess: runningProcess)
+
+        let results = try orchestrator.runStatusChecks(workspaceID: workspace.id)
+        #expect(results.count == 1)
+        #expect(results.first?.status == "red")
+        #expect(mockIterm.runInWindowCallCount == 1)
+        let currentProcesses = try store.runningProcesses(workspaceID: workspace.id)
+        #expect(currentProcesses.count == 1)
+        #expect(currentProcesses.first?.status == .running)
+    }
 }
