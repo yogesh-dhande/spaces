@@ -12,9 +12,9 @@
 - Avoid window-level automation outside yabai.
 - Any project setting related to workspace creation and used during workspace launch must be overridable per workspace after creation.
 - Anything configurable via the GUI must also be configurable via the CLI (`mx`). Keep the two in sync.
-- Use the muxy CLI `mx` to enhance user experience when working with worktrees.
 
 ## Worktree Workflow
+- Use the muxy CLI `mx` to enhance user experience when working with worktrees.
 - Always use a new local branch for each new worktree before making any code changes. DO NOT make code changes to a detached `HEAD` in a worktree.
 - Once a branch is created, a muxy workspace should be created for the worktree by running `mx workspace import` from the worktree directory.
 - When code changes are ready for user review, ensure the workspace is running with `mx workspace up`.
