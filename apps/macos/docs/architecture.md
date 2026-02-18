@@ -110,6 +110,7 @@ Workspace identification:
 Runtime database:
 - Path: `~/.muxy/muxy.db`.
 - Schema is versioned via a `schema_version` table and upgraded in place with additive migrations (no table drops). Currently at v6.
+- Additive migrations explicitly backfill status-check `on_fail` columns for legacy DBs (`project_status_checks`, `workspace_status_checks`) with default `none`.
 
 ```mermaid
 erDiagram

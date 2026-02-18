@@ -77,6 +77,75 @@ final class StoreTests: XCTestCase {
         XCTAssertTrue(columns.contains("stop_script"))
     }
 
+    // Tests additive migrations backfill on_fail columns by arranging legacy status-check tables and asserting current schema compatibility.
+    func testAdditiveMigrationsBackfillStatusCheckOnFailColumns() throws {
+        let root = try makeTempDirectory()
+        let dbURL = root.appendingPathComponent("current-version-missing-on-fail.db")
+        try runSQLiteExec(
+            dbURL: dbURL,
+            sql: """
+                CREATE TABLE projects (
+                  id TEXT PRIMARY KEY,
+                  name TEXT NOT NULL,
+                  dir TEXT NOT NULL UNIQUE,
+                  is_git INTEGER NOT NULL,
+                  default_branch TEXT
+                );
+                CREATE TABLE workspaces (
+                  id TEXT PRIMARY KEY,
+                  project_id TEXT NOT NULL,
+                  name TEXT NOT NULL,
+                  dir TEXT NOT NULL,
+                  is_default INTEGER NOT NULL,
+                  is_archived INTEGER NOT NULL,
+                  is_running INTEGER NOT NULL,
+                  UNIQUE(project_id, name)
+                );
+                CREATE TABLE project_status_checks (
+                  id TEXT PRIMARY KEY,
+                  project_id TEXT NOT NULL,
+                  name TEXT,
+                  process TEXT NOT NULL,
+                  command TEXT NOT NULL,
+                  interval INTEGER NOT NULL,
+                  timeout INTEGER NOT NULL,
+                  order_index INTEGER NOT NULL
+                );
+                CREATE TABLE workspace_status_checks (
+                  id TEXT PRIMARY KEY,
+                  workspace_id TEXT NOT NULL,
+                  name TEXT,
+                  process TEXT NOT NULL,
+                  command TEXT NOT NULL,
+                  interval INTEGER NOT NULL,
+                  timeout INTEGER NOT NULL,
+                  order_index INTEGER NOT NULL
+                );
+                CREATE TABLE schema_version (version INTEGER NOT NULL);
+                INSERT INTO projects(id, name, dir, is_git, default_branch)
+                VALUES ('legacy-project', 'Legacy Project', '/tmp/legacy-project', 0, '');
+                INSERT INTO workspaces(id, project_id, name, dir, is_default, is_archived, is_running)
+                VALUES ('legacy-workspace', 'legacy-project', 'default', '/tmp/legacy-project', 1, 0, 0);
+                INSERT INTO project_status_checks(id, project_id, name, process, command, interval, timeout, order_index)
+                VALUES ('project-check', 'legacy-project', 'api health', 'api', 'echo ok', 10, 3, 0);
+                INSERT INTO workspace_status_checks(id, workspace_id, name, process, command, interval, timeout, order_index)
+                VALUES ('workspace-check', 'legacy-workspace', 'api health', 'api', 'echo ok', 10, 3, 0);
+                INSERT INTO schema_version(version) VALUES (6);
+                """)
+
+        let store = try SQLiteStore(path: dbURL.path)
+
+        let projectStatusColumns = try readTableColumns(dbURL: dbURL, table: "project_status_checks")
+        let workspaceStatusColumns = try readTableColumns(dbURL: dbURL, table: "workspace_status_checks")
+        XCTAssertTrue(projectStatusColumns.contains("on_fail"))
+        XCTAssertTrue(workspaceStatusColumns.contains("on_fail"))
+
+        let project = try XCTUnwrap(store.project(id: "legacy-project"))
+        let workspaceChecks = try store.workspaceStatusChecks(workspaceID: "legacy-workspace")
+        XCTAssertEqual(project.statusChecks.first?.onFail, OnFailAction.none)
+        XCTAssertEqual(workspaceChecks.first?.onFail, OnFailAction.none)
+    }
+
     // Tests workspace collections round trip and replacement by arranging representative inputs and asserting the expected result.
     func testWorkspaceCollectionsRoundTripAndReplacement() throws {
         let store = try makeTemporaryStore()

@@ -79,7 +79,7 @@ export const docsPageLinks: DocsPageLink[] = [
     href: "/docs/troubleshooting",
     title: "Troubleshooting",
     summary:
-      "Common failure patterns with diagnosis and recovery playbooks.",
+      "Common failure patterns with diagnosis and recovery playbooks, including additive database migration compatibility checks.",
     audience: "Anyone debugging launch, capture, process, or focus issues.",
   },
   {
