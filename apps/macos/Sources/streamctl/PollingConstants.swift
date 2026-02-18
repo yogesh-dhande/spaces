@@ -4,6 +4,8 @@ public enum PollingConstants {
     public static let browserWindowScanDebounceInterval: TimeInterval = 10
 
     public static let workspaceWindowRefreshInterval: TimeInterval = 10
+
+    public static let worktreeDiscoveryInterval: TimeInterval = 30
     
     public static let processStatusCheckInterval: TimeInterval = 5
     

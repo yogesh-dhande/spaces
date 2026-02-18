@@ -11,7 +11,6 @@
 - Use yabai as the single source of truth for window IDs.
 - Stream capture is required before show.
 - Avoid window-level automation outside yabai.
-- Do not add backward compatibility layers unless explicitly requested.
 - Any project setting related to workspace creation and used during workspace launch must be overridable per workspace after creation.
 - Anything configurable via the GUI must also be configurable via the CLI (`mx`). Keep the two in sync.
 
@@ -38,7 +37,11 @@
 - Whenever changes are made to the macOS app, keep `apps/macos/spec.md`, `apps/macos/docs/architecture.md`, `apps/macos/docs/checkpoint.md`, `apps/macos/README.md`, and the nextjs project docs (`apps/web/app/docs/content.ts`) up to date in the same change.
 - Keep changes local-first and deterministic.
 - When adding behavior, update CLI help and architecture docs in the same change.
-
+- Database migration safety:
+  - Never bump SQLite `schemaVersion` for additive/compatible DB changes.
+  - Use non-destructive migrations (`CREATE TABLE IF NOT EXISTS`, `ALTER TABLE`, backfills) that preserve existing user data in `~/.muxy/muxy.db`.
+  - Any destructive migration/reset path that can remove existing projects/workspaces requires explicit user approval.
+- When fixing a bug, try to recreate and understand the bug first using the real system, mx cli, and database inspection on the dev computer. Write tests to catch the bug, then implement the fix. Run the tests and the real system check to confirm the fix before concluding whether the fix is sufficient.
 ## Web Color Palette
 All web colors are defined as CSS custom properties in `apps/web/app/globals.css`.
 
