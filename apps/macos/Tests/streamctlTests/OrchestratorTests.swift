@@ -548,11 +548,12 @@ final class OrchestratorTests: XCTestCase {
         try store.upsert(runningProcess: runningProcess)
 
         // Create a mock PID file to simulate the new PID after restart
-        let pidFileURL = URL(fileURLWithPath: projectDir.path)
-            .appendingPathComponent(".muxy")
-            .appendingPathComponent("pids")
-            .appendingPathComponent("api.pid")
-        try FileManager.default.createDirectory(at: pidFileURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        // The PID file is stored in ~/.muxy/runtime/<workspace-id>/
+        let homeDir = FileManager.default.homeDirectoryForCurrentUser
+        let runtimeRoot = homeDir.appendingPathComponent(".muxy").appendingPathComponent("runtime")
+        let workspaceRuntime = runtimeRoot.appendingPathComponent(workspace.id, isDirectory: true)
+        try FileManager.default.createDirectory(at: workspaceRuntime, withIntermediateDirectories: true)
+        let pidFileURL = workspaceRuntime.appendingPathComponent("api.pid")
         try "10001".write(to: pidFileURL, atomically: true, encoding: .utf8)
 
         let results = try orchestrator.runStatusChecks(workspaceID: workspace.id)
@@ -603,18 +604,20 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertNoThrow(try orchestrator.runStatusChecks(workspaceID: workspace.id))
         
         // Should still attempt to restart - verify iTerm2 was called
-        XCTAssertEqual(mockIterm.openWindowAndRunCallCount, 1)
+        XCTAssertEqual(mockIterm.openWindowAndRunCallCount, 0) // Should not create new window
+        XCTAssertEqual(mockIterm.runInWindowCallCount, 1) // Should reuse existing window
+        XCTAssertEqual(mockIterm.lastWindowID, 123) // Should use existing window
         XCTAssertTrue(mockIterm.lastCommand!.contains("cd \"\(workspace.dir)\""))
         XCTAssertTrue(mockIterm.lastCommand!.contains("npm start"))
         
         // When PID is missing, the restart logic should still attempt to restart
-        // The process should have a new window ID since restartProcessInTerminal is called
+        // The process should have the same window ID because we reuse windows
         let currentProcesses = try store.runningProcesses(workspaceID: workspace.id)
         XCTAssertEqual(currentProcesses.count, 1)
         let currentProcess = currentProcesses.first!
         XCTAssertEqual(currentProcess.status, .running)
-        // Should have new window ID because restartProcessInTerminal was called
-        XCTAssertNotEqual(currentProcess.windowID, 123)
+        // Should have same window ID because we reuse windows
+        XCTAssertEqual(currentProcess.windowID, 123)
     }
 
     func testCheckAndUpdateProcessStatusesMarksDeadProcessAsExited() throws {
