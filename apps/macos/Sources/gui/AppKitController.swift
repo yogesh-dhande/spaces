@@ -3199,17 +3199,12 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         titleRow.addArrangedSubview(nameLabel)
         contentStack.addArrangedSubview(titleRow)
 
-        if let folderName = workspaceFolderName(for: workspace), shouldShowSidebarMetadata(value: folderName, workspaceName: workspace.name) {
-            contentStack.addArrangedSubview(sidebarMetadataRow(symbol: "folder", text: folderName, isSelected: isSelected))
-        }
-
-        if let branch = workspace.branch, shouldShowSidebarMetadata(value: branch, workspaceName: workspace.name) {
-            contentStack.addArrangedSubview(sidebarMetadataRow(symbol: "arrow.triangle.branch", text: branch, isSelected: isSelected))
-        }
-
         if project.isGitRepo {
             let activity =
                 gitActivityByWorkspaceID[workspace.id] ?? GitTrackedFileActivity(latestTrackedFileModificationDate: nil, modifiedTrackedFileCount: 0)
+            contentStack.addArrangedSubview(sidebarMetadataRow(symbol: "arrow.left.arrow.right", text: gitAheadBehindSummaryLabel(activity), isSelected: isSelected))
+            let conflictSymbol = activity.hasMergeConflicts ? "exclamationmark.triangle.fill" : "checkmark.circle"
+            contentStack.addArrangedSubview(sidebarMetadataRow(symbol: conflictSymbol, text: gitConflictSummaryLabel(activity), isSelected: isSelected))
             contentStack.addArrangedSubview(sidebarMetadataRow(symbol: "clock", text: gitActivitySummaryLabel(activity), isSelected: isSelected))
         }
 
@@ -3229,19 +3224,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         ])
 
         return cell
-    }
-
-    private func workspaceFolderName(for workspace: WorkspaceSummary) -> String? {
-        let folderName = URL(fileURLWithPath: workspace.dir, isDirectory: true).lastPathComponent
-        guard !folderName.isEmpty else { return nil }
-        return folderName
-    }
-
-    private func shouldShowSidebarMetadata(value: String, workspaceName: String) -> Bool {
-        let trimmedValue = value.trimmingCharacters(in: .whitespacesAndNewlines)
-        let trimmedWorkspaceName = workspaceName.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmedValue.isEmpty else { return false }
-        return trimmedValue.localizedStandardCompare(trimmedWorkspaceName) != .orderedSame
     }
 
     private func sidebarMetadataRow(symbol: String, text: String, isSelected: Bool) -> NSStackView {
@@ -3278,16 +3260,20 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         return "\(relativeDate) • \(modifiedLabel)"
     }
 
-    private func workspaceSidebarLineCount(project: ProjectSummary, workspace: WorkspaceSummary) -> Int {
+    private func gitAheadBehindSummaryLabel(_ activity: GitTrackedFileActivity) -> String {
+        let divergenceLabel = "\(activity.aheadCount) ahead • \(activity.behindCount) behind"
+        if let baseBranch = activity.comparedBaseBranch, !baseBranch.isEmpty { return "\(divergenceLabel) vs \(baseBranch)" }
+        return divergenceLabel
+    }
+
+    private func gitConflictSummaryLabel(_ activity: GitTrackedFileActivity) -> String {
+        if activity.hasMergeConflicts { return "Merge conflicts present" }
+        return "No merge conflicts"
+    }
+
+    private func workspaceSidebarLineCount(project: ProjectSummary, workspace _: WorkspaceSummary) -> Int {
         var count = 1  // workspace name + status
-
-        if let folderName = workspaceFolderName(for: workspace), shouldShowSidebarMetadata(value: folderName, workspaceName: workspace.name) {
-            count += 1
-        }
-
-        if let branch = workspace.branch, shouldShowSidebarMetadata(value: branch, workspaceName: workspace.name) { count += 1 }
-
-        if project.isGitRepo { count += 1 }
+        if project.isGitRepo { count += 3 }
 
         return count
     }

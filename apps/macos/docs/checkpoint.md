@@ -56,8 +56,8 @@
 - When a branch exists only on remote, workspace creation fetches that branch into `origin/*` before creating the worktree.
 - When a branch exists locally, workspace creation uses local branch state as-is without implicit pull/rebase/merge.
 - Left-pane workspace rows now use compact cards with workspace status + name.
-- Folder and branch metadata rows are shown with icons only when the value differs from workspace name.
-- Git workspace rows show relative last-modified time (from latest tracked-file mtime) plus tracked modified-file count.
+- Git workspace rows show ahead/behind commit counts relative to each workspace's persisted target branch (branched-off base), merge-conflict status, and relative last-modified time (from latest tracked-file mtime) plus tracked modified-file count.
+- Additive migration now ensures `workspaces.target_branch` exists and preserves data in existing databases.
 - Settings view in the GUI lets users pick a preferred editor from installed VS Code, Cursor, or Windsurf; the choice is stored in the DB (`app_editor` setting).
 - Settings view in the GUI also allows overriding default shortcuts for global toggle, workspace navigation/focus, and open editor/terminal/Finder; these values are stored in the runtime DB.
 - Window IDs can become stale across app/desktop changes; stale rows are pruned during reconciliation paths.

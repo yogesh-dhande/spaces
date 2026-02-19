@@ -326,6 +326,7 @@ final class OrchestratorTests: XCTestCase {
             projectID: project.id, name: "feature-workspace", branch: "feature-branch", targetBranch: "develop")
 
         XCTAssertTrue(FileManager.default.fileExists(atPath: workspace.dir + "/TARGET.txt"))
+        XCTAssertEqual(workspace.targetBranch, "develop")
     }
 
     // Tests list workspaces includes branch metadata by arranging representative inputs and asserting the expected result.
