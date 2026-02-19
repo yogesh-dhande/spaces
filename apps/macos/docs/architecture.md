@@ -102,8 +102,11 @@ Workspace identification:
 - Workspaces are uniquely identified by their directory path (`dir` field).
 - CLI commands accept `--dir <path>` (defaults to current directory) to identify workspaces.
 - `mx workspace rename [--dir <path>] --name <name>` updates non-default workspace display names.
-- `mx workspace up [--dir <path>]` ensures a workspace is running (launch if stopped; restart if runtime is already present).
-- `mx workspace focus` focuses the workspace window set; `--window <index>` focuses a specific tracked window and `--tooltip [<text>]` displays tooltip overlay during focus (always showing workspace name as title, showing tooltip text as body when available, and updates tooltip only when text is provided).
+- `mx workspace up [--dir <path>] [--restart] [--tooltip [<text>]]` ensures a workspace is running and focused.
+- Default `workspace up` behavior: launch when stopped; if runtime is already present, do nothing (no restart).
+- `workspace up --restart` behavior: if runtime is already present, run stop then launch; if stopped, launch.
+- `workspace up --tooltip [<text>]` optionally updates tooltip text when provided and displays the tooltip overlay after focus.
+- `mx workspace focus` focuses the workspace window set; `--window <index>` focuses a specific tracked window.
 - `mx workspace import` registers existing git worktrees as Muxy workspaces by inferring project, branch, and name from the worktree path.
 - `mx discover` (alias: `mx workspace discover`) automatically discovers and registers all untracked worktrees for registered projects.
 - Discovery-created workspaces run the same setup-script flow as any other new workspace.
@@ -333,7 +336,7 @@ Stop or archive:
 Run/recovery semantics:
 - `launchWorkspace` is only for stopped workspaces. If `is_running` is set or runtime indicators already exist (`running_processes`/`windows` rows), launch fails with "use restart".
 - `restartWorkspace` is the explicit recovery path and always performs stop then launch for the same workspace.
-- `upWorkspace` is idempotent "ensure running": launch when stopped, otherwise restart to reconcile stale/runtime state.
+- `upWorkspace` is idempotent "ensure running": launch when stopped; if runtime is already present, either no-op (default) or restart when `restartIfRunning` is true.
 - Workspace lifecycle actions are guarded by a per-workspace in-flight lock so overlapping launch/stop/restart/archive actions cannot run concurrently for the same workspace.
 - GUI run controls are state-aware: show `Launch` when stopped and `Restart` when running.
 - AppKit launch/restart/stop/archive button handlers dispatch lifecycle work in detached background tasks (fresh orchestrator/store instances) so long-running automation does not block the UI event loop.

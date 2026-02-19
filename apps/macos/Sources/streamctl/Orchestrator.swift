@@ -535,13 +535,17 @@ public final class MuxyOrchestrator {
         }
     }
 
-    public func upWorkspace(workspaceID: String) throws {
+    public func upWorkspace(workspaceID: String, restartIfRunning: Bool = false) throws {
         try withWorkspaceLifecycleLock(workspaceID: workspaceID) {
             let (_, workspace) = try resolveWorkspace(id: workspaceID)
             guard !workspace.isArchived else { throw MuxyError.invalidArgument(message: "Workspace is archived.") }
             let hasTrackedRuntime = try hasTrackedRuntimeIndicators(workspaceID: workspace.id)
             if workspace.isRunning || hasTrackedRuntime {
-                _ = try stopWorkspaceUnlocked(workspaceID: workspaceID)
+                if restartIfRunning {
+                    _ = try stopWorkspaceUnlocked(workspaceID: workspaceID)
+                    try launchWorkspaceUnlocked(workspaceID: workspaceID)
+                }
+                return
             }
             try launchWorkspaceUnlocked(workspaceID: workspaceID)
         }

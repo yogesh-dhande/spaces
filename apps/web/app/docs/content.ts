@@ -37,7 +37,7 @@ export const docsPageLinks: DocsPageLink[] = [
     href: "/docs/workspace-lifecycle",
     title: "Workspace Lifecycle",
     summary:
-      "Create, launch, ensure-running (`workspace up`), stop, restart, archive, and restore workspace behavior, including graceful handling when worktree directories are already missing.",
+      "Create, launch, ensure-running (`workspace up` with optional `--restart`), stop, restart, archive, and restore workspace behavior, including graceful handling when worktree directories are already missing.",
     audience: "Developers managing multiple long-lived workstreams.",
   },
   {

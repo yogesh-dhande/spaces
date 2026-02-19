@@ -20,7 +20,7 @@ export default function TroubleshootingDocsPage() {
           <li>1. Confirm dependencies: yabai, iTerm2, and Chrome are installed and running.</li>
           <li>2. Confirm accessibility permissions are granted.</li>
           <li>3. Confirm workspace is not archived and has valid settings.</li>
-          <li>4. If launch reports existing runtime state, run <code>mx workspace up</code> (or restart) instead of launch.</li>
+          <li>4. If launch reports existing runtime state, run <code>mx workspace up --restart</code> (or restart) instead of launch.</li>
           <li>5. Re-open workspace detail to refresh live browser-tab and window state.</li>
         </ol>
       </article>

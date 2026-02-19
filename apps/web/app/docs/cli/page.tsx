@@ -336,10 +336,18 @@ mx workspace restart --dir /path/to/workspace`}</CodeBlock>
 mx workspace up
 
 # Ensure running for a specific workspace
-mx workspace up --dir /path/to/workspace`}</CodeBlock>
+mx workspace up --dir /path/to/workspace
+
+# Ensure running and force restart if already running/stale
+mx workspace up --dir /path/to/workspace --restart
+
+# Ensure running, focus, and show tooltip overlay
+mx workspace up --dir /path/to/workspace --tooltip "Reviewing auth callback"`}</CodeBlock>
         <p className="mt-2 text-sm leading-7 text-foreground-soft">
-          Idempotent run command: launches when stopped, restarts when running or when stale runtime
-          indicators exist.
+          Idempotent run command: launches when stopped. If already running (or runtime indicators exist),
+          it does nothing by default; pass <Cmd>--restart</Cmd> to run stop then launch. In all cases,
+          Muxy focuses the workspace once running. With <Cmd>--tooltip [text]</Cmd>, Muxy shows the tooltip
+          overlay after focus and updates tooltip text when text is provided.
         </p>
 
         <h3 className="mt-5 text-base font-semibold">Archive a workspace</h3>
@@ -361,20 +369,10 @@ mx workspace focus
 mx workspace focus --dir /path/to/workspace
 
 # Focus specific window index in the workspace
-mx workspace focus --dir /path/to/workspace --window 2
-
-# Focus and set tooltip in one command
-mx workspace focus --dir /path/to/workspace --tooltip "Reviewing Next.js auth callback flow"
-
-# Focus and show existing workspace tooltip without changing it
-mx workspace focus --dir /path/to/workspace --tooltip
-
-# Focus a specific window and set tooltip in one command
-mx workspace focus --dir /path/to/workspace --window 2 --tooltip "Debugging API timeout in window 2"`}</CodeBlock>
+mx workspace focus --dir /path/to/workspace --window 2`}</CodeBlock>
         <p className="mt-2 text-sm leading-7 text-foreground-soft">
           Brings the workspace windows to the front so the developer can immediately resume work.
-          When <Cmd>--tooltip</Cmd> is provided with text, Muxy updates the workspace tooltip field before focusing.
-          When <Cmd>--tooltip</Cmd> is provided without text, Muxy keeps the existing tooltip and displays it.
+          Tooltip updates are managed with <Cmd>mx workspace tooltip</Cmd> or <Cmd>mx workspace up --tooltip ...</Cmd>.
         </p>
 
         <h3 className="mt-5 text-base font-semibold">Manage workspace tooltip</h3>
@@ -475,11 +473,11 @@ WORKSPACE_DIR="$HOME/muxy/workspaces/\${NAME}"
 cd "$WORKSPACE_DIR"
 mx workspace launch
 
-# 9. Focus and set tooltip in one command (agent context update)
-mx workspace focus --tooltip "Next.js: implementing \${BRANCH}"
+# 9. Ensure running, focus, and set tooltip in one command (agent context update)
+mx workspace up --tooltip "Next.js: implementing \${BRANCH}"
 
-# 10. Focus a specific tracked window and overwrite tooltip in one command
-mx workspace focus --window 2 --tooltip "Next.js: validating OAuth callback in browser"
+# 10. Focus a specific tracked window
+mx workspace focus --window 2
 
 echo "Workspace '$NAME' is running."
 `}</CodeBlock>
