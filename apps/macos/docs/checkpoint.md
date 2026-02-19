@@ -67,6 +67,7 @@
 - Discovery now archives non-default workspaces whose worktree is no longer valid and refreshes stored workspace branch names from on-disk git worktree metadata.
 - `store.deleteWorkspace` now records deleted workspace paths in `ignored_worktrees` so periodic discovery does not auto-recreate workspaces the user deleted from Muxy.
 - New orchestrator APIs `refreshWorkspaceWindows` and `refreshAllWorkspaceWindows` reconcile stale window rows via yabai and clear `is_running` when no runtime indicators remain. `refreshAllWorkspaceWindows` returns a `RefreshResult` with DB mutation flag and per-workspace tracked window counts (including live browser scan); the GUI compares both against the previous snapshot and skips UI reloads when nothing changed.
+- `refreshWorkspaceWindows` also refreshes stored terminal title/app metadata from live yabai data for terminal rows that are not associated with running process records.
 - Bringing muxy to front with the global toggle hotkey refreshes the selected workspace detail view so the displayed window list reflects the most recent Chrome tab scan (up to 10 seconds old).
 - The local key monitor defers to focused text inputs so standard edit shortcuts like `cmd+v` work in forms.
 - CLI supports project list/add/update/remove (including `project add --git-url ...`), workspace list/create/rename/launch/restart/up/stop/archive/focus (with `focus --window`; tooltip options on `workspace up`/`workspace tooltip`), and settings get/set/reset for all preferences (editor, port-range, GUI shortcuts).

@@ -68,6 +68,7 @@ Muxy periodically discovers and reconciles git worktrees for existing projects. 
   - Launch/Restart/Stop/Archive actions run in background tasks so the UI stays responsive during long-running workspace automation
   - Open Editor/Terminal/Finder buttons (terminal windows are tracked for cycling)
   - Workspace window records are refreshed periodically in a background pass so stale closed windows are pruned without blocking interaction
+  - The same refresh pass updates terminal window fallback labels (title/app) from live yabai data when that terminal window is not linked to a running process record
   - Launch/Restart can extract one matching tab per browser session into a dedicated Chrome window and persist extracted-window mappings for faster focus
   - Browser focus tries extracted-window `yabai` focus first; stale mappings are invalidated and fallback continues via indexed tab focus + URL matching (without automatic re-extraction)
   - Launch/Restart reuses existing matching Chrome tabs and tracks all matches instead of opening duplicate tabs when matches already exist

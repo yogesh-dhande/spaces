@@ -266,6 +266,7 @@
             - during focus, try extracted-window `yabai` focus first; if focus fails or active tab URL verification fails, mark mapping stale (`is_valid=false`) and fall back to indexed tab focus and URL-based focus (no automatic re-extraction during fallback)
             - when multiple workspaces track tabs in the same Chrome window, global next/previous shortcuts must resolve the workspace by window id plus active tab URL match (not window id alone)
             - workspace window listing/navigation should rebuild browser rows from Chrome tabs with a configurable debounce interval (default: 10 seconds, see `PollingConstants.browserWindowScanDebounceInterval`) per workspace/prefix set, and include tabs where tab URL starts with any browser session URL
+            - during background workspace-window refresh, terminal rows that are not linked to any running process should refresh their stored title/app metadata from live yabai window state
             - if a tab matches multiple browser session URLs, include it once in the cycle/list (dedupe by window + tab URL)
             - browser tab ordering in the list/cycle should be deterministic: browser session definition order first, then tab URL
             - when browser rows come from a live scan, tab focus should target cached tab index first, then verify the focused active tab URL belongs to the workspace; refresh the live scan once if it does not, then fall back to URL matching if still stale

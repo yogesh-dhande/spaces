@@ -977,8 +977,9 @@ public final class MuxyOrchestrator {
     @discardableResult
     public func refreshWorkspaceWindows(workspaceID: String) throws -> Bool {
         _ = try trackedWindows(workspaceID: workspaceID)
+        let refreshedTerminalTitles = try refreshUnmanagedTerminalWindowTitles(workspaceID: workspaceID)
         let pruned = try pruneMissingWindows(workspaceID: workspaceID)
-        var didMutate = pruned > 0
+        var didMutate = refreshedTerminalTitles > 0 || pruned > 0
         guard let workspace = try store.workspace(id: workspaceID), workspace.isRunning else { return didMutate }
         let hasRuntimeIndicators = try hasTrackedRuntimeIndicators(workspaceID: workspaceID)
         if !hasRuntimeIndicators {
@@ -987,6 +988,32 @@ public final class MuxyOrchestrator {
             didMutate = true
         }
         return didMutate
+    }
+
+    @discardableResult
+    private func refreshUnmanagedTerminalWindowTitles(workspaceID: String) throws -> Int {
+        let windows = try store.windows(workspaceID: workspaceID)
+        let processWindowIDs = Set(try store.runningProcesses(workspaceID: workspaceID).compactMap(\.windowID))
+        let terminalWindowsToRefresh = windows.filter { window in
+            guard window.role == "terminal", let windowID = window.windowID else { return false }
+            return !processWindowIDs.contains(windowID)
+        }
+        guard !terminalWindowsToRefresh.isEmpty else { return 0 }
+
+        let liveWindowsByID = Dictionary(uniqueKeysWithValues: try yabai.listWindows().map { ($0.id, $0) })
+        var refreshedCount = 0
+        for window in terminalWindowsToRefresh {
+            guard let windowID = window.windowID, let liveWindow = liveWindowsByID[windowID] else { continue }
+            let refreshedTitle = liveWindow.title
+            let refreshedApp = liveWindow.app
+            guard window.title != refreshedTitle || window.app != refreshedApp else { continue }
+            let refreshedWindow = WindowRecord(
+                id: window.id, workspaceID: window.workspaceID, app: refreshedApp, title: refreshedTitle, targetURL: window.targetURL,
+                windowID: windowID, role: window.role, orderIndex: window.orderIndex, lastSeenAt: window.lastSeenAt)
+            try store.upsert(window: refreshedWindow)
+            refreshedCount += 1
+        }
+        return refreshedCount
     }
 
     public func refreshAllWorkspaceWindows() throws -> RefreshResult {

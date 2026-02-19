@@ -362,6 +362,7 @@ Degraded runtime edge cases and handling:
 - Terminal capture uses both yabai snapshot-diff and running-process window IDs to avoid dropping terminals when window discovery lags.
 - Editor launch is user-invoked (GUI action or global shortcut) and is not tracked in workspace window cycling.
 - Window IDs can become stale across app/desktop changes; stale rows are pruned during reconciliation paths.
+- Background refresh also re-reads live yabai title/app metadata for terminal rows that are not currently owned by any running process record, so fallback terminal labels remain current.
 - The GUI starts a periodic detached utility-priority refresh loop (`refreshAllWorkspaceWindows`) so non-archived workspace window rows are reconciled in the background on a fixed interval (`PollingConstants.workspaceWindowRefreshInterval`).
 - Each background refresh pass uses a fresh orchestrator/store instance for thread-safe off-main reconciliation and keeps AppKit interaction responsive while refresh is in-flight.
 - UI data is reloaded after successful periodic refresh passes only when the user is not actively editing text fields (to avoid interrupting unsaved form edits).

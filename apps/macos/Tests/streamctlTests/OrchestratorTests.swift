@@ -1689,6 +1689,62 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertTrue(try store.windows(workspaceID: workspace.id).isEmpty)
     }
 
+    // Tests refresh workspace windows updates unmanaged terminal titles from live yabai by arranging representative inputs and asserting the expected result.
+    func testRefreshWorkspaceWindowsUpdatesUnmanagedTerminalTitles() throws {
+        let (orchestrator, store, _, workspace, _) = try makeOrchestratorWithWorkspace()
+        let windowID = 910
+        try store.upsert(
+            window: WindowRecord(
+                id: UUID().uuidString, workspaceID: workspace.id, app: "iTerm2", title: "old-title", windowID: windowID, role: "terminal",
+                orderIndex: 0, lastSeenAt: "now"))
+
+        // Mocked dependency: live yabai window inventory.
+        // Why: verify refresh updates fallback terminal labels for windows not represented by running process records.
+        // Remaining risk: rapid title churn between snapshot calls may still produce transient stale labels.
+        let windowsJSON =
+            "[{\"id\":\(windowID),\"pid\":11,\"app\":\"iTerm2\",\"title\":\"new-title\",\"space\":1,\"display\":1,\"is-sticky\":false,\"is-hidden\":false,\"is-visible\":true,\"is-native-fullscreen\":false}]"
+        var didMutate = false
+        try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) {
+            try withEnv(name: "YABAI_WINDOWS_JSON", value: windowsJSON) {
+                didMutate = try orchestrator.refreshWorkspaceWindows(workspaceID: workspace.id)
+            }
+        }
+
+        XCTAssertTrue(didMutate)
+        let refreshedWindow = try XCTUnwrap(try store.windows(workspaceID: workspace.id).first)
+        XCTAssertEqual(refreshedWindow.title, "new-title")
+    }
+
+    // Tests refresh workspace windows keeps terminal titles unchanged when a running process owns the window by arranging representative inputs and asserting the expected result.
+    func testRefreshWorkspaceWindowsDoesNotUpdateTerminalTitlesForRunningProcessWindows() throws {
+        let (orchestrator, store, _, workspace, _) = try makeOrchestratorWithWorkspace()
+        let windowID = 911
+        try store.upsert(
+            window: WindowRecord(
+                id: UUID().uuidString, workspaceID: workspace.id, app: "iTerm2", title: "process-title", windowID: windowID, role: "terminal",
+                orderIndex: 0, lastSeenAt: "now"))
+        try store.upsert(
+            runningProcess: RunningProcessRecord(
+                id: UUID().uuidString, workspaceID: workspace.id, templateName: "api", command: "npm run api", terminalApp: "iTerm2",
+                windowID: windowID, pid: 4242, status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil))
+
+        // Mocked dependency: live yabai window inventory.
+        // Why: verify running-process command labels remain authoritative by skipping fallback-title refresh for owned terminals.
+        // Remaining risk: inconsistent runtime process metadata could still cause fallback labels to appear unexpectedly.
+        let windowsJSON =
+            "[{\"id\":\(windowID),\"pid\":11,\"app\":\"iTerm2\",\"title\":\"different-live-title\",\"space\":1,\"display\":1,\"is-sticky\":false,\"is-hidden\":false,\"is-visible\":true,\"is-native-fullscreen\":false}]"
+        var didMutate = true
+        try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) {
+            try withEnv(name: "YABAI_WINDOWS_JSON", value: windowsJSON) {
+                didMutate = try orchestrator.refreshWorkspaceWindows(workspaceID: workspace.id)
+            }
+        }
+
+        XCTAssertFalse(didMutate)
+        let unchangedWindow = try XCTUnwrap(try store.windows(workspaceID: workspace.id).first)
+        XCTAssertEqual(unchangedWindow.title, "process-title")
+    }
+
     // Tests refresh all workspace windows skips archived workspaces by arranging representative inputs and asserting the expected result.
     func testRefreshAllWorkspaceWindowsSkipsArchivedWorkspaces() throws {
         let root = try makeTempDirectory()
