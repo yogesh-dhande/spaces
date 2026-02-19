@@ -2156,8 +2156,24 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertTrue(try orchestrator.runningProcesses(workspaceID: workspace.id).isEmpty)
     }
 
-    // Tests up workspace restarts when runtime indicators exist by arranging representative inputs and asserting the expected result.
-    func testUpWorkspaceRestartsWhenRuntimeIndicatorsExist() throws {
+    // Tests up workspace does nothing when runtime indicators exist and restart is disabled by arranging representative inputs and asserting the expected result.
+    func testUpWorkspaceDoesNothingWhenRuntimeIndicatorsExistByDefault() throws {
+        let (orchestrator, store, _, workspace, _) = try makeOrchestratorWithWorkspace()
+        try store.upsert(
+            runningProcess: RunningProcessRecord(
+                id: UUID().uuidString, workspaceID: workspace.id, templateName: "old", command: "echo old", terminalApp: "iTerm2", windowID: 501,
+                pid: nil, status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil))
+
+        try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) {
+            try orchestrator.upWorkspace(workspaceID: workspace.id)
+        }
+
+        XCTAssertEqual(try store.workspace(id: workspace.id)?.isRunning, false)
+        XCTAssertEqual(try orchestrator.runningProcesses(workspaceID: workspace.id).count, 1)
+    }
+
+    // Tests up workspace restarts when runtime indicators exist and restart is enabled by arranging representative inputs and asserting the expected result.
+    func testUpWorkspaceRestartsWhenRuntimeIndicatorsExistWithRestartEnabled() throws {
         let (orchestrator, store, _, workspace, _) = try makeOrchestratorWithWorkspace()
         try store.upsert(
             runningProcess: RunningProcessRecord(
@@ -2165,7 +2181,7 @@ final class OrchestratorTests: XCTestCase {
                 pid: nil, status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil))
 
         try withMockCommands(["yabai": Self.orchestratorYabaiMockScript, "osascript": Self.orchestratorOsaScriptMock]) {
-            try orchestrator.upWorkspace(workspaceID: workspace.id)
+            try orchestrator.upWorkspace(workspaceID: workspace.id, restartIfRunning: true)
         }
 
         XCTAssertEqual(try store.workspace(id: workspace.id)?.isRunning, true)

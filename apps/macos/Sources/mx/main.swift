@@ -310,8 +310,17 @@ struct CLI {
             print("Restarted workspace \(id)")
         case "up":
             let id = try workspaceID(orchestrator: orchestrator)
-            try orchestrator.upWorkspace(workspaceID: id)
+            let shouldRestartIfRunning = args.contains("--restart")
+            let tooltipFlagPresent = args.contains("--tooltip")
+            if let tooltip = optionalValueAllowingMissingValue(for: "--tooltip") {
+                try orchestrator.updateWorkspaceTooltip(workspaceID: id, tooltip: tooltip)
+            }
+            try orchestrator.upWorkspace(workspaceID: id, restartIfRunning: shouldRestartIfRunning)
+            try orchestrator.focusWorkspace(workspaceID: id)
             print("Workspace is running \(id)")
+            if tooltipFlagPresent {
+                requestTooltipOverlayDisplay()
+            }
         case "stop":
             let id = try workspaceID(orchestrator: orchestrator)
             let outcome = try orchestrator.stopWorkspace(workspaceID: id)
@@ -325,12 +334,6 @@ struct CLI {
             print("Archived workspace \(id)")
         case "focus":
             let id = try workspaceID(orchestrator: orchestrator)
-            let tooltipFlagPresent = args.contains("--tooltip")
-            var shouldDisplayTooltipOverlay = tooltipFlagPresent
-            if let tooltip = optionalValueAllowingMissingValue(for: "--tooltip") {
-                try orchestrator.updateWorkspaceTooltip(workspaceID: id, tooltip: tooltip)
-                shouldDisplayTooltipOverlay = true
-            }
             if let rawWindowIndex = optionalValue(for: "--window") {
                 guard let windowIndex = Int(rawWindowIndex), windowIndex > 0 else {
                     throw NSError(
@@ -342,9 +345,6 @@ struct CLI {
             } else {
                 try orchestrator.focusWorkspace(workspaceID: id)
                 print("Focused workspace \(id)")
-            }
-            if shouldDisplayTooltipOverlay {
-                requestTooltipOverlayDisplay()
             }
         case "tooltip":
             let id = try workspaceID(orchestrator: orchestrator)
@@ -692,10 +692,10 @@ struct CLI {
               mx workspace rename [--dir <path>] --name <name>
               mx workspace launch [--dir <path>]
               mx workspace restart [--dir <path>]
-              mx workspace up [--dir <path>]
+              mx workspace up [--dir <path>] [--restart] [--tooltip [<text>]]
               mx workspace stop [--dir <path>]
               mx workspace archive [--dir <path>]
-              mx workspace focus [--dir <path>] [--window <index>] [--tooltip [<text>]]
+              mx workspace focus [--dir <path>] [--window <index>]
               mx workspace tooltip [--dir <path>] [--tooltip <text>] [--clear]
 
             Notes:
@@ -709,7 +709,7 @@ struct CLI {
               - `mx discover` (and `mx workspace discover`) reconciles git worktrees by creating missing workspaces, archiving workspaces whose worktrees are no longer valid, refreshing stored branch names from disk, and running the project `setup_script` for each newly created workspace.
               - Add `--watch` to `mx discover` to keep scanning periodically (default interval: \(Int(PollingConstants.worktreeDiscoveryInterval)) seconds; override with `--interval`).
               - Project/workspace `stop_script` runs whenever a workspace is stopped (including restart/archive stop phase), after automatic process termination attempts.
-              - `workspace up` ensures a workspace is running: it launches stopped workspaces and restarts workspaces with running/stale runtime indicators.
+              - `workspace up` ensures a workspace is running and focused: it launches when stopped, does nothing when already running/stale by default, and with `--restart` runs stop then launch before focusing.
               - If a workspace directory is missing during stop, muxy still stops the workspace, skips `stop_script`, and prints a note.
               - For git projects, `workspace create` requires `--branch`; `--target-branch` defaults to main/master if available.
               - `workspace create --directory-name` (or `--dirname`) overrides the auto-generated git worktree directory name; allowed characters are letters, numbers, '-', and '_', with no spaces.
