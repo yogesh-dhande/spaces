@@ -17,8 +17,7 @@
 - Use the Muxy CLI `mx` to enhance user experience when working with worktrees.
 - Always use a new local branch for each new worktree before making any code changes. DO NOT make code changes to a detached `HEAD` in a worktree.
 - Once a branch is created, a muxy workspace should be created for the worktree by running `mx workspace import` from the worktree directory.
-- When code changes are ready for user review, always run `mx workspace up` to ensure the Muxy workspace is running.
-- Focus the workspace and set a tooltip that describes what is being worked on with `mx workspace focus --tooltip [text]`.
+- When code changes are ready for user review, always run `mx workspace up --tooltip [text]` to ensure the Muxy workspace is running and set a tooltip that describes what is being worked on
 - Commit changes to the worktree branch whenever requested.
 
 ## Data & Paths
