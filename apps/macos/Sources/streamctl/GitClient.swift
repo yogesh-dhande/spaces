@@ -52,14 +52,32 @@ public final class GitClient {
         return branches.sorted { lhs, rhs in lhs.localizedStandardCompare(rhs) == .orderedAscending }
     }
 
-    public func trackedFileActivity(path: String) -> GitTrackedFileActivity {
-        guard isRepo(path: path) else { return GitTrackedFileActivity(latestTrackedFileModificationDate: nil, modifiedTrackedFileCount: 0) }
+    public func trackedFileActivity(path: String, baseBranch: String? = nil) -> GitTrackedFileActivity {
+        guard isRepo(path: path) else {
+            return GitTrackedFileActivity(
+                latestTrackedFileModificationDate: nil,
+                modifiedTrackedFileCount: 0,
+                aheadCount: 0,
+                behindCount: 0,
+                comparedBaseBranch: baseBranch?.trimmingCharacters(in: .whitespacesAndNewlines),
+                hasMergeConflicts: false)
+        }
 
         let trackedPaths = trackedFilePaths(path: path)
         let latestModificationDate = latestTrackedFileModificationDate(path: path, trackedPaths: trackedPaths)
         let modifiedTrackedFileCount = modifiedTrackedFileCount(path: path)
+        let comparisonBaseRef = resolveComparisonBaseRef(path: path, baseBranch: baseBranch)
+        let (aheadCount, behindCount) = aheadBehindCounts(path: path, baseRef: comparisonBaseRef)
+        let hasMergeConflicts = hasMergeConflicts(path: path)
+        let comparedBaseBranch = displayBranchName(forRef: comparisonBaseRef)
 
-        return GitTrackedFileActivity(latestTrackedFileModificationDate: latestModificationDate, modifiedTrackedFileCount: modifiedTrackedFileCount)
+        return GitTrackedFileActivity(
+            latestTrackedFileModificationDate: latestModificationDate,
+            modifiedTrackedFileCount: modifiedTrackedFileCount,
+            aheadCount: aheadCount,
+            behindCount: behindCount,
+            comparedBaseBranch: comparedBaseBranch,
+            hasMergeConflicts: hasMergeConflicts)
     }
 
     public func createWorktree(path repoPath: String, worktreePath: String, branch: String, targetBranch: String? = nil) throws {
@@ -214,6 +232,38 @@ public final class GitClient {
         let staged = trackedDiffPaths(path: path, includeStaged: true)
         let unstaged = trackedDiffPaths(path: path, includeStaged: false)
         return staged.union(unstaged).count
+    }
+
+    private func resolveComparisonBaseRef(path: String, baseBranch: String?) -> String? {
+        guard let rawBaseBranch = baseBranch?.trimmingCharacters(in: .whitespacesAndNewlines), !rawBaseBranch.isEmpty else { return nil }
+        if branchExists(path: path, branch: rawBaseBranch) { return rawBaseBranch }
+        if remoteTrackingBranchExists(path: path, branch: rawBaseBranch) { return "origin/\(rawBaseBranch)" }
+        return nil
+    }
+
+    private func remoteTrackingBranchExists(path: String, branch: String) -> Bool {
+        let status = (try? runGit(["-C", path, "show-ref", "--verify", "--quiet", "refs/remotes/origin/\(branch)"])) ?? 1
+        return status == 0
+    }
+
+    private func aheadBehindCounts(path: String, baseRef: String?) -> (aheadCount: Int, behindCount: Int) {
+        guard let baseRef else { return (0, 0) }
+        guard let output = try? runGitAndCapture(["-C", path, "rev-list", "--left-right", "--count", "\(baseRef)...HEAD"]) else {
+            return (0, 0)
+        }
+        let values = output.split(whereSeparator: \.isWhitespace)
+        guard values.count >= 2, let behindCount = Int(values[0]), let aheadCount = Int(values[1]) else { return (0, 0) }
+        return (aheadCount, behindCount)
+    }
+
+    private func hasMergeConflicts(path: String) -> Bool {
+        guard let output = try? runGitAndCapture(["-C", path, "diff", "--name-only", "--diff-filter=U"]) else { return false }
+        return !output.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    private func displayBranchName(forRef ref: String?) -> String? {
+        guard let ref else { return nil }
+        return ref.replacingPrefix("origin/") ?? ref
     }
 
     private func trackedDiffPaths(path: String, includeStaged: Bool) -> Set<String> {

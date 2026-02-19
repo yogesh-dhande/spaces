@@ -112,13 +112,14 @@ public final class SQLiteStore {
     public func upsert(workspace: WorkspaceRecord) throws {
         try execute(
             sql: """
-                INSERT INTO workspaces(id, project_id, name, dir, dirname, branch, is_default, is_archived, is_running, last_launched_at, tooltip)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO workspaces(id, project_id, name, dir, dirname, branch, target_branch, is_default, is_archived, is_running, last_launched_at, tooltip)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(id) DO UPDATE SET
                   name = excluded.name,
                   dir = excluded.dir,
                   dirname = excluded.dirname,
                   branch = excluded.branch,
+                  target_branch = excluded.target_branch,
                   is_default = excluded.is_default,
                   is_archived = excluded.is_archived,
                   is_running = excluded.is_running,
@@ -127,6 +128,7 @@ public final class SQLiteStore {
                 """,
             bindings: [
                 workspace.id, workspace.projectID, workspace.name, workspace.dir, workspace.dirname ?? "", workspace.branch ?? "",
+                workspace.targetBranch ?? "",
                 workspace.isDefault ? "1" : "0", workspace.isArchived ? "1" : "0", workspace.isRunning ? "1" : "0", workspace.lastLaunchedAt ?? "",
                 workspace.tooltip ?? "",
             ])
@@ -137,7 +139,7 @@ public final class SQLiteStore {
         guard
             let row = try queryRow(
                 sql: """
-                    SELECT id, project_id, name, dir, dirname, branch, is_default, is_archived, is_running, last_launched_at, tooltip
+                    SELECT id, project_id, name, dir, dirname, branch, target_branch, is_default, is_archived, is_running, last_launched_at, tooltip
                     FROM workspaces WHERE id = ?
                     """, bindings: [id])
         else { return nil }
@@ -148,7 +150,7 @@ public final class SQLiteStore {
         guard
             let row = try queryRow(
                 sql: """
-                    SELECT id, project_id, name, dir, dirname, branch, is_default, is_archived, is_running, last_launched_at, tooltip
+                    SELECT id, project_id, name, dir, dirname, branch, target_branch, is_default, is_archived, is_running, last_launched_at, tooltip
                     FROM workspaces WHERE project_id = ? AND name = ?
                     """, bindings: [projectID, name])
         else { return nil }
@@ -159,7 +161,7 @@ public final class SQLiteStore {
         guard
             let row = try queryRow(
                 sql: """
-                    SELECT id, project_id, name, dir, dirname, branch, is_default, is_archived, is_running, last_launched_at, tooltip
+                    SELECT id, project_id, name, dir, dirname, branch, target_branch, is_default, is_archived, is_running, last_launched_at, tooltip
                     FROM workspaces WHERE dir = ?
                     """, bindings: [dir])
         else { return nil }
@@ -169,7 +171,7 @@ public final class SQLiteStore {
     public func workspaces(projectID: String, includeArchived: Bool = false) throws -> [WorkspaceRecord] {
         let rows = try queryRows(
             sql: """
-                SELECT id, project_id, name, dir, dirname, branch, is_default, is_archived, is_running, last_launched_at, tooltip
+                SELECT id, project_id, name, dir, dirname, branch, target_branch, is_default, is_archived, is_running, last_launched_at, tooltip
                 FROM workspaces
                 WHERE project_id = ? AND (? = '1' OR is_archived = 0)
                 ORDER BY is_default DESC, name
@@ -602,6 +604,7 @@ public final class SQLiteStore {
               dir TEXT NOT NULL,
               dirname TEXT,
               branch TEXT,
+              target_branch TEXT,
               is_default INTEGER NOT NULL,
               is_archived INTEGER NOT NULL,
               is_running INTEGER NOT NULL,
@@ -748,6 +751,7 @@ public final class SQLiteStore {
         try ensureColumnExists(table: "workspace_ports", name: "port_name", definition: "port_name TEXT NOT NULL DEFAULT ''")
         try ensureColumnExists(table: "workspaces", name: "dirname", definition: "dirname TEXT")
         try ensureColumnExists(table: "workspaces", name: "branch", definition: "branch TEXT")
+        try ensureColumnExists(table: "workspaces", name: "target_branch", definition: "target_branch TEXT")
         try ensureColumnExists(table: "workspaces", name: "tooltip", definition: "tooltip TEXT")
         try ensureColumnExists(table: "project_browser_sessions", name: "name", definition: "name TEXT")
         try ensureColumnExists(table: "workspace_browser_sessions", name: "name", definition: "name TEXT")
@@ -797,11 +801,11 @@ public final class SQLiteStore {
     }
 
     private func decodeWorkspace(row: [String]) -> WorkspaceRecord? {
-        guard row.count >= 11 else { return nil }
+        guard row.count >= 12 else { return nil }
         return WorkspaceRecord(
             id: row[0], projectID: row[1], name: row[2], dir: row[3], dirname: row[4].isEmpty ? nil : row[4], branch: row[5].isEmpty ? nil : row[5],
-            isDefault: row[6] == "1", isArchived: row[7] == "1", isRunning: row[8] == "1", lastLaunchedAt: row[9].isEmpty ? nil : row[9],
-            tooltip: row[10].isEmpty ? nil : row[10])
+            targetBranch: row[6].isEmpty ? nil : row[6], isDefault: row[7] == "1", isArchived: row[8] == "1", isRunning: row[9] == "1",
+            lastLaunchedAt: row[10].isEmpty ? nil : row[10], tooltip: row[11].isEmpty ? nil : row[11])
     }
 
     private func decodeRunningProcess(row: [String]) -> RunningProcessRecord? {

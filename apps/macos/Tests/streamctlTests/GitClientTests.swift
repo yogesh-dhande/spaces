@@ -269,12 +269,68 @@ final class GitClientTests: XCTestCase {
         assertEqualDate(updatedActivity.latestTrackedFileModificationDate, expectedLatestDate)
     }
 
+    // Tests tracked file activity includes ahead/behind counts relative to base branch by arranging representative inputs and asserting the expected result.
+    func testTrackedFileActivityIncludesAheadBehindCountsRelativeToBaseBranch() throws {
+        let root = try makeTempDirectory()
+        let repo = root.appending(path: "repo", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: repo, withIntermediateDirectories: true)
+        try initializeGitRepository(at: repo, initialBranch: "main")
+
+        try runGit(["checkout", "-b", "feature"], cwd: repo.path)
+        try "feature".write(to: repo.appending(path: "FEATURE.md"), atomically: true, encoding: .utf8)
+        try runGit(["add", "FEATURE.md"], cwd: repo.path)
+        try runGit(["-c", "user.name=muxy-test", "-c", "user.email=test@example.com", "commit", "-m", "feature commit"], cwd: repo.path)
+
+        var activity = GitClient().trackedFileActivity(path: repo.path, baseBranch: "main")
+        XCTAssertEqual(activity.aheadCount, 1)
+        XCTAssertEqual(activity.behindCount, 0)
+        XCTAssertEqual(activity.comparedBaseBranch, "main")
+
+        try runGit(["checkout", "main"], cwd: repo.path)
+        try "main".write(to: repo.appending(path: "MAIN.md"), atomically: true, encoding: .utf8)
+        try runGit(["add", "MAIN.md"], cwd: repo.path)
+        try runGit(["-c", "user.name=muxy-test", "-c", "user.email=test@example.com", "commit", "-m", "main commit"], cwd: repo.path)
+        try runGit(["checkout", "feature"], cwd: repo.path)
+
+        activity = GitClient().trackedFileActivity(path: repo.path, baseBranch: "main")
+        XCTAssertEqual(activity.aheadCount, 1)
+        XCTAssertEqual(activity.behindCount, 1)
+    }
+
+    // Tests tracked file activity reports merge conflicts by arranging representative inputs and asserting the expected result.
+    func testTrackedFileActivityReportsMergeConflicts() throws {
+        let root = try makeTempDirectory()
+        let repo = root.appending(path: "repo", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: repo, withIntermediateDirectories: true)
+        try initializeGitRepository(at: repo, initialBranch: "main")
+
+        let readme = repo.appending(path: "README.md")
+        try runGit(["checkout", "-b", "feature"], cwd: repo.path)
+        try "feature change\n".write(to: readme, atomically: true, encoding: .utf8)
+        try runGit(["add", "README.md"], cwd: repo.path)
+        try runGit(["-c", "user.name=muxy-test", "-c", "user.email=test@example.com", "commit", "-m", "feature change"], cwd: repo.path)
+
+        try runGit(["checkout", "main"], cwd: repo.path)
+        try "main change\n".write(to: readme, atomically: true, encoding: .utf8)
+        try runGit(["add", "README.md"], cwd: repo.path)
+        try runGit(["-c", "user.name=muxy-test", "-c", "user.email=test@example.com", "commit", "-m", "main change"], cwd: repo.path)
+        try runGit(["checkout", "feature"], cwd: repo.path)
+
+        XCTAssertThrowsError(try runGit(["merge", "main"], cwd: repo.path))
+
+        let activity = GitClient().trackedFileActivity(path: repo.path, baseBranch: "main")
+        XCTAssertTrue(activity.hasMergeConflicts)
+    }
+
     // Tests tracked file activity returns empty snapshot for non repository by arranging representative inputs and asserting the expected result.
     func testTrackedFileActivityReturnsEmptySnapshotForNonRepository() throws {
         let directory = try makeTempDirectory()
         let activity = GitClient().trackedFileActivity(path: directory.path)
         XCTAssertNil(activity.latestTrackedFileModificationDate)
         XCTAssertEqual(activity.modifiedTrackedFileCount, 0)
+        XCTAssertEqual(activity.aheadCount, 0)
+        XCTAssertEqual(activity.behindCount, 0)
+        XCTAssertFalse(activity.hasMergeConflicts)
     }
 
     // Tests clone and delete branch by arranging representative inputs and asserting the expected result.

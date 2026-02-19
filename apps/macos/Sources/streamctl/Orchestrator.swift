@@ -128,7 +128,7 @@ public final class MuxyOrchestrator {
     public func workspaceGitTrackedFileActivity(workspaceID: String) throws -> GitTrackedFileActivity? {
         let (project, workspace) = try resolveWorkspace(id: workspaceID)
         guard project.isGitRepo else { return nil }
-        return git.trackedFileActivity(path: workspace.dir)
+        return git.trackedFileActivity(path: workspace.dir, baseBranch: workspace.targetBranch ?? project.defaultBranch)
     }
 
     public func workspaceSettings(workspaceID: String) throws -> WorkspaceSettings? {
@@ -290,7 +290,7 @@ public final class MuxyOrchestrator {
             }
             let revived = WorkspaceRecord(
                 id: existing.id, projectID: project.id, name: trimmedName, dir: revivedDir, dirname: revivedDirname, branch: revivedBranch,
-                isDefault: false, isArchived: false, isRunning: false, lastLaunchedAt: nil)
+                targetBranch: existing.targetBranch ?? resolvedTargetBranch, isDefault: false, isArchived: false, isRunning: false, lastLaunchedAt: nil)
             try store.upsert(workspace: revived)
             try seedWorkspaceSettings(project: project, workspace: revived)
             let config = try store.appConfig()
@@ -322,7 +322,7 @@ public final class MuxyOrchestrator {
         }
         let workspace = WorkspaceRecord(
             id: UUID().uuidString, projectID: project.id, name: trimmedName, dir: workspaceDir, dirname: workspaceDirname, branch: workspaceBranch,
-            isDefault: false, isArchived: false, isRunning: false, lastLaunchedAt: nil)
+            targetBranch: resolvedTargetBranch, isDefault: false, isArchived: false, isRunning: false, lastLaunchedAt: nil)
         try store.upsert(workspace: workspace)
         try seedWorkspaceSettings(project: project, workspace: workspace)
 
@@ -441,8 +441,8 @@ public final class MuxyOrchestrator {
                 if let worktree = discoverableWorktreeByPath[normalizedWorkspacePath], workspace.branch != worktree.branchName {
                     let updatedWorkspace = WorkspaceRecord(
                         id: workspace.id, projectID: workspace.projectID, name: workspace.name, dir: workspace.dir, dirname: workspace.dirname,
-                        branch: worktree.branchName, isDefault: workspace.isDefault, isArchived: workspace.isArchived, isRunning: workspace.isRunning,
-                        lastLaunchedAt: workspace.lastLaunchedAt, tooltip: workspace.tooltip)
+                        branch: worktree.branchName, targetBranch: workspace.targetBranch, isDefault: workspace.isDefault, isArchived: workspace.isArchived,
+                        isRunning: workspace.isRunning, lastLaunchedAt: workspace.lastLaunchedAt, tooltip: workspace.tooltip)
                     try store.upsert(workspace: updatedWorkspace)
                 }
 
@@ -1563,7 +1563,7 @@ public final class MuxyOrchestrator {
             if existing.isArchived {
                 let revived = WorkspaceRecord(
                     id: existing.id, projectID: project.id, name: existing.name, dir: existing.dir, dirname: existing.dirname,
-                    branch: existing.branch, isDefault: true, isArchived: false, isRunning: existing.isRunning,
+                    branch: existing.branch, targetBranch: existing.targetBranch, isDefault: true, isArchived: false, isRunning: existing.isRunning,
                     lastLaunchedAt: existing.lastLaunchedAt)
                 try store.upsert(workspace: revived)
             }
@@ -1571,7 +1571,7 @@ public final class MuxyOrchestrator {
         }
         let workspace = WorkspaceRecord(
             id: UUID().uuidString, projectID: project.id, name: "default", dir: project.dir, dirname: nil, branch: project.defaultBranch,
-            isDefault: true, isArchived: false, isRunning: false, lastLaunchedAt: nil)
+            targetBranch: project.defaultBranch, isDefault: true, isArchived: false, isRunning: false, lastLaunchedAt: nil)
         try store.upsert(workspace: workspace)
         try seedWorkspaceSettings(project: project, workspace: workspace)
         let appConfig = try store.appConfig()

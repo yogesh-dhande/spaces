@@ -62,8 +62,7 @@ Muxy periodically discovers and reconciles git worktrees for existing projects. 
 - If the selected branch exists only on remote, muxy fetches it first and then creates the worktree from `origin/<branch>`.
 - If the branch exists locally, muxy uses the local branch as-is (no implicit pull/rebase/merge during workspace creation).
 - Workspace rows in the left pane use compact cards with workspace status + name.
-- Folder and branch labels (with icons) are shown only when those values differ from workspace name.
-- Git workspace rows also show relative last-modified time (latest tracked-file mtime) and tracked modified-file count.
+- Git workspace rows also show ahead/behind commit counts relative to the workspace target branch (the branch the workspace branch was created from), merge-conflict status, and relative last-modified time (latest tracked-file mtime) with tracked modified-file count.
 - Workspace view includes:
   - Launch/Restart/Stop/Archive buttons
   - Launch/Restart/Stop/Archive actions run in background tasks so the UI stays responsive during long-running workspace automation
