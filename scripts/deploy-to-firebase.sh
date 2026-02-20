@@ -91,14 +91,14 @@ fi
 # Deploy to Firebase Hosting
 if [ -n "${FIREBASE_TOKEN:-}" ]; then
   echo "Using FIREBASE_TOKEN for authentication"
-  firebase deploy --only hosting --token "$FIREBASE_TOKEN"
+  cd apps/web && firebase use default && firebase deploy --only hosting --token "$FIREBASE_TOKEN"
 elif [ -n "${FIREBASE_SERVICE_ACCOUNT:-}" ]; then
   echo "Using FIREBASE_SERVICE_ACCOUNT for authentication"
   SERVICE_ACCOUNT_FILE=$(mktemp)
   trap "rm -f '$SERVICE_ACCOUNT_FILE'" EXIT
   echo "$FIREBASE_SERVICE_ACCOUNT" > "$SERVICE_ACCOUNT_FILE"
   export GOOGLE_APPLICATION_CREDENTIALS="$SERVICE_ACCOUNT_FILE"
-  firebase deploy --only hosting
+  cd apps/web && firebase use default && firebase deploy --only hosting
 else
   echo "Using local Firebase credentials"
   # Verify firebase is authenticated
@@ -106,7 +106,7 @@ else
     echo "Error: Not logged into Firebase. Run 'firebase login' first." >&2
     exit 1
   fi
-  firebase deploy --only hosting
+  cd apps/web && firebase use default && firebase deploy --only hosting
 fi
 
 echo "✓ Deployed to Firebase Hosting"

@@ -15,10 +15,8 @@
 
 ## Worktree Workflow
 - Use the Muxy CLI `mx` to enhance user experience when working with worktrees.
-- Always use a new local branch for each new worktree before making any code changes. DO NOT make code changes to a detached `HEAD` in a worktree.
-- Once a branch is created, a muxy workspace should be created for the worktree by running `mx workspace import` from the worktree directory.
-- When code changes are ready for user review, always run `mx workspace up --tooltip [text]` to ensure the Muxy workspace is running and set a tooltip that describes what is being worked on
-- Commit changes to the worktree branch whenever requested.
+- Whenever working on a worktree, ensure a Muxy workspace is created for the worktree by running `mx workspace import --name [text]` from the worktree directory.
+- When code changes are ready for user review, always run `mx workspace up --tooltip [text]` to ensure the Muxy workspace is running and set a tooltip to provide sufficient context for the user about what is being worked on and the changes
 
 ## Data & Paths
 - DB path: `~/.muxy/muxy.db` (managed automatically).
@@ -33,14 +31,12 @@
 - Use labeled input fields for configuration; do not require users to enter app-specific text formats.
 
 ## Working Rules
-- Build with `scripts/dev-build-and-launch.sh` before finishing changes (build + relaunch app).
-- Always run `scripts/dev-build-and-launch.sh` after making changes.
-- Always run `scripts/coverage.sh` after making changes.
-- Exception: when changes are limited to `apps/web` only, skip `scripts/dev-build-and-launch.sh` and `scripts/coverage.sh`.
+- Always run lint and build before finalizing changes to the macos app.
+- Run `scripts/coverage.sh` after making changes. Exception: when changes are limited to `apps/web` only.
 - Whenever `scripts/coverage.sh` is run, always report the overall coverage percentage in the response.
 - When running `git commit` via Codex, allow at least a 10-minute command timeout so pre-commit lint/coverage checks are not interrupted; this is a safety ceiling, not an expected runtime.
 - Always consider adding or expanding tests to increase coverage before finalizing changes.
-- Whenever changes are made to the macOS app, keep `apps/macos/spec.md`, `apps/macos/docs/architecture.md`, `apps/macos/docs/checkpoint.md`, `apps/macos/README.md`, and the nextjs project docs (`apps/web/app/docs/content.ts`) up to date in the same change.
+- Whenever changes are made to the macOS app, keep `apps/macos/spec.md`, `apps/macos/docs/architecture.md`, `apps/macos/README.md`, and the nextjs project docs (`apps/web/app/docs/content.ts`) up to date in the same change.
 - Keep changes local-first and deterministic.
 - When adding behavior, update CLI help and architecture docs in the same change.
 - Database migration safety:
