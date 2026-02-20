@@ -87,15 +87,15 @@ Project data (stored in SQLite):
   - `none`: Process exit is logged but no action is taken.
   - `notify`: A macOS notification is shown when the process exits.
   - `restart`: The orchestrator first terminates and waits for the tracked process PID (including runtime PID-file fallback), then restarts in the existing terminal window when safe; if shutdown does not complete, it falls back to a new terminal window.
-- New projects can be created from an existing directory or by cloning a repository into `/Users/<username>/muxy/projects/<project_name>`.
+- New projects can be created from an existing directory or by cloning a repository into a bare repo at `/Users/<username>/muxy/repos/<project_name>`.
 - Removing a project clears muxy state. For git projects, muxy first removes managed worktrees with `git worktree remove --force`, then deletes related workspace directories under `/Users/<username>/muxy/workspaces`.
-- The project directory is deleted only for git projects located under `/Users/<username>/muxy/projects` (app-managed clones).
+- The project directory is deleted only for git projects located under `/Users/<username>/muxy/repos` (plus legacy `/Users/<username>/muxy/projects`) for app-managed clones.
 
 Workspace settings:
 - Each workspace snapshots project `stop_script`, `ports` (named port definitions), `processes`, `status_checks`, and `browser_sessions` at creation.
 - Snapshots are stored in the runtime DB alongside other workspace data.
 - Edits to a running workspace reconcile processes and browser sessions immediately.
-- Non-default workspace names are editable after creation (GUI and CLI); default workspace name stays fixed as `default`.
+- Non-default workspace names are editable after creation (GUI and CLI); default workspace name stays fixed to its initial value (`default` for directory projects, `main`/`master` for git-url imports).
 
 Workspace identification:
 - Workspaces are uniquely identified by their directory path (`dir` field).

@@ -4,8 +4,9 @@
 - SQLite (`~/.muxy/muxy.db`) is the single source of truth for all model data and global preferences: projects (including templates: processes, status checks, browser sessions, ports, scripts), workspaces, ports, running processes, status results, windows, settings, `editor`, and `port_range`. Schema is versioned (`schema_version` table) and migrated in place with additive/non-destructive changes (currently v6).
 - Additive startup migrations now explicitly backfill legacy `project_status_checks.on_fail` and `workspace_status_checks.on_fail` columns (default `none`) so pre-existing databases continue to open without reset.
 - Projects are stored in SQLite and normalized by real path; a default workspace is ensured per project with reserved ports.
-- Project creation supports either existing directories or git clone; cloned repositories are stored at `/Users/<username>/muxy/projects/<project_name>`.
-- Project removal clears muxy state, removes related managed git worktrees via `git worktree remove --force`, deletes related git workspace directories under `/Users/<username>/muxy/workspaces`, and deletes the project directory only for git repositories under `/Users/<username>/muxy/projects` (managed clones).
+- Project creation supports either existing directories or git clone; git-url imports are stored as bare repositories at `/Users/<username>/muxy/repos/<project_name>`.
+- Git-url imports now create the default workspace as a worktree on `main` or `master`, and the default workspace name matches that branch name.
+- Project removal clears muxy state, removes related managed git worktrees via `git worktree remove --force`, deletes related git workspace directories under `/Users/<username>/muxy/workspaces`, and deletes the project directory only for git repositories under `/Users/<username>/muxy/repos` (plus legacy `/Users/<username>/muxy/projects`) as managed clones.
 - Workspaces create git worktrees for git projects, run setup/stop scripts, and allocate named ports (from port definitions) at creation time; ports are released at archive.
 - Git workspace creation supports an optional directory-name override for the worktree folder; overrides must use only `A-Z`, `a-z`, `0-9`, `-`, `_` and cannot contain spaces.
 - Archiving non-git workspaces does not delete the project directory.
@@ -37,7 +38,7 @@
 - Launch is now reserved for stopped workspaces; running workspaces use explicit restart semantics (stop then launch) via GUI/CLI.
 - Added `mx workspace up` as an idempotent run command: launch when stopped, and optionally restart running/stale runtime with `--restart`.
 - Workspace settings snapshot project templates on creation into the runtime DB and are editable per workspace; updates to running workspaces reconcile processes and browser sessions immediately.
-- Workspace names for non-default workspaces are editable after creation from workspace settings and `mx workspace rename`; default workspace name remains fixed as `default`.
+- Workspace names for non-default workspaces are editable after creation from workspace settings and `mx workspace rename`; default workspace name remains fixed to its initial value (`default` for directory projects, `main`/`master` for git-url imports).
 - AppKit GUI is two-pane with in-place forms and editors for processes (with nested inline status checks), browser sessions; workspace detail includes run/stop/archive, windows list with shortcut hints, an env/ports tab, and workspace settings.
 - Browser sessions now support an optional `name` field; GUI forms use row editors (`name` + URL), CLI supports `--name` on add/list, and workspace window rows prefer the configured browser-session name over raw URL when available.
 - App provides a standard Edit menu with Copy (Cmd+C) and Select All (Cmd+A) so text in read-only views like the env tab can be selected and copied.

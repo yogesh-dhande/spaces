@@ -16,7 +16,7 @@ It manages projects, workspaces, processes, and window sets so you can move betw
 
 ## Configuration
 - DB: `~/.muxy/muxy.db` — all model data and global preferences (projects, templates, workspaces, ports, windows, settings, editor, port range)
-- Cloned projects: `/Users/<username>/muxy/projects/<project_name>`
+- Managed git repos (from `mx project add --git-url`): `/Users/<username>/muxy/repos/<project_name>` (bare repo)
 - Git worktrees: `/Users/<username>/muxy/workspaces/<projectname>/<dirname>` (dirname defaults to a unique food name and can be overridden on workspace creation)
 - GUI shortcuts (when focused): `cmd+1` through `cmd+9` focus workspace windows
 - Global window navigation (when GUI not focused): `cmd+shift+]` and `cmd+shift+[`
@@ -152,7 +152,7 @@ mx workspace focus --dir /path/to/workspace [--window 2]
 
 For git projects, `workspace create` requires `--branch`; `--target-branch` defaults to `main`/`master` when available.
 `workspace create --directory-name` (alias: `--dirname`) is optional for git projects and must use only letters, numbers, `-`, and `_` with no spaces.
-`workspace rename` updates the workspace display name; default workspaces keep the fixed name `default`.
+`workspace rename` updates the workspace display name; default workspaces keep their fixed initial name (`default` for directory projects, `main`/`master` for git-url imports).
 `workspace up` is idempotent: it launches a stopped workspace, and otherwise does nothing by default.
 Add `--restart` to force stop+launch when runtime state is already present.
 `workspace up` always focuses the workspace, and `--tooltip [text]` displays the tooltip overlay after focus (updating tooltip text when text is provided).
@@ -161,7 +161,7 @@ When tooltip overlay is shown for focused workspace, it always displays workspac
 
 Project/workspace removal behavior:
 - `mx project remove --dir <path>` removes the project from Muxy. For git projects, it first removes related managed worktrees with `git worktree remove --force`, then deletes related workspace directories under `~/muxy/workspaces`.
-- `mx project remove --dir <path>` deletes the project directory only when it is a git repo inside `~/muxy/projects` (the app-managed clone location).
+- `mx project remove --dir <path>` deletes the project directory only when it is a git repo inside `~/muxy/repos` (or legacy `~/muxy/projects`) as an app-managed clone location.
 - `mx workspace archive ...` removes git worktrees via `git worktree remove` and never deletes the project directory for non-git projects.
 
 ## Build

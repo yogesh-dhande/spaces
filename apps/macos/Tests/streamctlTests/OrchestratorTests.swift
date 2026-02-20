@@ -46,43 +46,72 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertEqual(nextEditor, 100)
     }
 
-    // Tests add project by cloning uses projects root and repo name by arranging representative inputs and asserting the expected result.
-    func testAddProjectByCloningUsesProjectsRootAndRepoName() throws {
+    // Tests add project by cloning uses repos root and repo name by arranging representative inputs and asserting the expected result.
+    func testAddProjectByCloningUsesReposRootAndRepoName() throws {
         let fixture = try makeTempGitRepo(name: "sample-repo")
         let root = try makeTempDirectory()
-        let projectsRoot = root.appendingPathComponent("projects", isDirectory: true)
+        let reposRoot = root.appendingPathComponent("repos", isDirectory: true)
+        let workspacesRoot = root.appendingPathComponent("workspaces", isDirectory: true)
         let store = try makeTemporaryStore()
-        let orchestrator = MuxyOrchestrator(store: store, projectsRootDirectory: projectsRoot)
+        let orchestrator = MuxyOrchestrator(store: store, projectsRootDirectory: reposRoot, workspacesRootDirectory: workspacesRoot)
 
         let project = try orchestrator.addProject(gitURL: fixture.path)
 
-        let expected = projectsRoot.appendingPathComponent("sample-repo", isDirectory: true).path
+        let expected = reposRoot.appendingPathComponent("sample-repo", isDirectory: true).path
         XCTAssertEqual(project.dir, expected)
         XCTAssertTrue(FileManager.default.fileExists(atPath: expected))
-        XCTAssertTrue(FileManager.default.fileExists(atPath: "\(expected)/README.md"))
+        XCTAssertEqual(
+            try runGitAndCapture(["rev-parse", "--is-bare-repository"], cwd: project.dir).trimmingCharacters(in: .whitespacesAndNewlines),
+            "true")
+        let defaultWorkspace = try XCTUnwrap(try orchestrator.listWorkspaces(projectID: project.id).first(where: \.isDefault))
+        XCTAssertEqual(defaultWorkspace.name, "main")
+        XCTAssertEqual(defaultWorkspace.branch, "main")
+        XCTAssertEqual(defaultWorkspace.dir, workspacesRoot.appendingPathComponent("sample-repo/main", isDirectory: true).path)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: "\(defaultWorkspace.dir)/README.md"))
     }
 
     // Tests add project by cloning strips git suffix from repo name by arranging representative inputs and asserting the expected result.
     func testAddProjectByCloningStripsGitSuffixFromRepoName() throws {
         let fixture = try makeTempGitRepo(name: "source.git")
         let root = try makeTempDirectory()
-        let projectsRoot = root.appendingPathComponent("projects", isDirectory: true)
+        let reposRoot = root.appendingPathComponent("repos", isDirectory: true)
+        let workspacesRoot = root.appendingPathComponent("workspaces", isDirectory: true)
         let store = try makeTemporaryStore()
-        let orchestrator = MuxyOrchestrator(store: store, projectsRootDirectory: projectsRoot)
+        let orchestrator = MuxyOrchestrator(store: store, projectsRootDirectory: reposRoot, workspacesRootDirectory: workspacesRoot)
 
         let project = try orchestrator.addProject(gitURL: fixture.path)
 
-        let expected = projectsRoot.appendingPathComponent("source", isDirectory: true).path
+        let expected = reposRoot.appendingPathComponent("source", isDirectory: true).path
         XCTAssertEqual(project.dir, expected)
         XCTAssertEqual(project.name, "source")
-        XCTAssertTrue(FileManager.default.fileExists(atPath: "\(expected)/README.md"))
+        XCTAssertEqual(
+            try runGitAndCapture(["rev-parse", "--is-bare-repository"], cwd: project.dir).trimmingCharacters(in: .whitespacesAndNewlines),
+            "true")
+    }
+
+    // Tests add project by cloning uses master branch when main is unavailable by arranging representative inputs and asserting the expected result.
+    func testAddProjectByCloningUsesMasterWhenMainMissing() throws {
+        let fixture = try makeTempGitRepo(name: "master-only", initialBranch: "master")
+        let root = try makeTempDirectory()
+        let reposRoot = root.appendingPathComponent("repos", isDirectory: true)
+        let workspacesRoot = root.appendingPathComponent("workspaces", isDirectory: true)
+        let store = try makeTemporaryStore()
+        let orchestrator = MuxyOrchestrator(store: store, projectsRootDirectory: reposRoot, workspacesRootDirectory: workspacesRoot)
+
+        let project = try orchestrator.addProject(gitURL: fixture.path)
+        let defaultWorkspace = try XCTUnwrap(try orchestrator.listWorkspaces(projectID: project.id).first(where: \.isDefault))
+
+        XCTAssertEqual(project.defaultBranch, "master")
+        XCTAssertEqual(defaultWorkspace.name, "master")
+        XCTAssertEqual(defaultWorkspace.branch, "master")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: "\(defaultWorkspace.dir)/README.md"))
     }
 
     // Tests remove project deletes managed git project directory by arranging representative inputs and asserting the expected result.
     func testRemoveProjectDeletesManagedGitProjectDirectory() throws {
         let fixture = try makeTempGitRepo(name: "managed")
         let root = try makeTempDirectory()
-        let projectsRoot = root.appendingPathComponent("projects", isDirectory: true)
+        let projectsRoot = root.appendingPathComponent("repos", isDirectory: true)
         let store = try makeTemporaryStore()
         let orchestrator = MuxyOrchestrator(store: store, projectsRootDirectory: projectsRoot)
 
@@ -100,7 +129,7 @@ final class OrchestratorTests: XCTestCase {
     func testRemoveProjectDeletesManagedWorkspaceDirectoriesForManagedGitProject() throws {
         let fixture = try makeTempGitRepo(name: "managed-with-workspace")
         let root = try makeTempDirectory()
-        let projectsRoot = root.appendingPathComponent("projects", isDirectory: true)
+        let projectsRoot = root.appendingPathComponent("repos", isDirectory: true)
         let workspacesRoot = root.appendingPathComponent("workspaces", isDirectory: true)
         let store = try makeTemporaryStore()
         let orchestrator = MuxyOrchestrator(
@@ -108,8 +137,7 @@ final class OrchestratorTests: XCTestCase {
 
         let project = try orchestrator.addProject(gitURL: fixture.path)
         let projectWorkspaceRoot = workspacesRoot.appendingPathComponent(project.name, isDirectory: true)
-        let workspaceDir = projectWorkspaceRoot.appendingPathComponent("feature", isDirectory: true)
-        try FileManager.default.createDirectory(at: workspaceDir, withIntermediateDirectories: true)
+        let workspaceDir = projectWorkspaceRoot.appendingPathComponent("main", isDirectory: true)
         XCTAssertTrue(FileManager.default.fileExists(atPath: workspaceDir.path))
         XCTAssertTrue(workspaceDir.path.hasPrefix(workspacesRoot.path))
 
@@ -2684,11 +2712,11 @@ final class OrchestratorTests: XCTestCase {
         exit 0
         """
 
-    private func makeTempGitRepo(name: String) throws -> URL {
+    private func makeTempGitRepo(name: String, initialBranch: String = "main") throws -> URL {
         let root = try makeTempDirectory()
         let repo = root.appendingPathComponent(name, isDirectory: true)
         try FileManager.default.createDirectory(at: repo, withIntermediateDirectories: true)
-        try runGit(["init", "-b", "main"], cwd: repo.path)
+        try runGit(["init", "-b", initialBranch], cwd: repo.path)
         try "hello".write(to: repo.appendingPathComponent("README.md"), atomically: true, encoding: .utf8)
         try runGit(["add", "README.md"], cwd: repo.path)
         try runGit(["-c", "user.name=muxy-test", "-c", "user.email=test@example.com", "commit", "-m", "init"], cwd: repo.path)

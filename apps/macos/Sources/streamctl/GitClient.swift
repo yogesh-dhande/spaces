@@ -142,7 +142,13 @@ public final class GitClient {
         return worktrees
     }
 
-    public func clone(url: String, destination: String) throws { try runGitOrThrow(["clone", url, destination]) }
+    public func clone(url: String, destination: String, bare: Bool = false) throws {
+        if bare {
+            try runGitOrThrow(["clone", "--bare", url, destination])
+            return
+        }
+        try runGitOrThrow(["clone", url, destination])
+    }
 
     public func deleteBranch(path repoPath: String, branch: String) { _ = try? runGit(["-C", repoPath, "branch", "-D", branch]) }
 

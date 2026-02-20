@@ -703,7 +703,7 @@ struct CLI {
               - GUI settings (⌘,) let you pick a preferred editor (VS Code, Cursor, Windsurf).
               - Runtime state is stored in ~/.muxy/muxy.db and migrated in place with additive schema changes.
               - Removing a git project first removes managed worktrees via `git worktree remove --force`, then deletes related workspace directories under ~/muxy/workspaces.
-              - Removing a project deletes only muxy state unless it is an muxy-cloned git repo under ~/muxy/projects; those managed project directories are deleted.
+              - Removing a project deletes only muxy state unless it is an muxy-cloned git repo under ~/muxy/repos (or legacy ~/muxy/projects); those managed repository directories are deleted.
               - Workspaces snapshot project processes, status checks, and browser sessions into the runtime DB on creation.
               - Project `setup_script` runs when a workspace is created/revived.
               - `mx discover` (and `mx workspace discover`) reconciles git worktrees by creating missing workspaces, archiving workspaces whose worktrees are no longer valid, refreshing stored branch names from disk, and running the project `setup_script` for each newly created workspace.
@@ -713,7 +713,7 @@ struct CLI {
               - If a workspace directory is missing during stop, muxy still stops the workspace, skips `stop_script`, and prints a note.
               - For git projects, `workspace create` requires `--branch`; `--target-branch` defaults to main/master if available.
               - `workspace create --directory-name` (or `--dirname`) overrides the auto-generated git worktree directory name; allowed characters are letters, numbers, '-', and '_', with no spaces.
-              - `workspace rename` updates the workspace display name; default workspaces keep the fixed name `default`.
+              - `workspace rename` updates the workspace display name; default workspaces keep their initial fixed name (`default` for directory projects, `main`/`master` for git-url imports).
               - Archiving a non-git workspace never deletes the project directory.
               - Workspaces reserve PORT0-PORT9 from the configured port range.
               - GUI window focus shortcuts: cmd+1 through cmd+9 (when GUI is focused).

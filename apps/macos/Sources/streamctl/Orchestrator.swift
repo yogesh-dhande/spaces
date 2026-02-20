@@ -200,7 +200,7 @@ public final class MuxyOrchestrator {
         guard !trimmedURL.isEmpty else { throw MuxyError.invalidArgument(message: "Git repository URL is required.") }
         let inferredName = inferredProjectName(from: trimmedURL)
         let projectDirname = sanitizeDirname(inferredName, fallback: "project")
-        let destination = projectsRootDirectory().appending(path: projectDirname, directoryHint: .isDirectory)
+        let destination = repositoriesRootDirectory().appending(path: projectDirname, directoryHint: .isDirectory)
         let normalizedDestination = normalizePath(destination.path)
 
         if try store.project(dir: normalizedDestination) != nil {
@@ -210,8 +210,14 @@ public final class MuxyOrchestrator {
             throw MuxyError.invalidArgument(message: "Project directory already exists: \(normalizedDestination)")
         }
         try FileManager.default.createDirectory(at: destination.deletingLastPathComponent(), withIntermediateDirectories: true)
-        try git.clone(url: trimmedURL, destination: destination.path)
-        return try addProject(dir: destination.path)
+        try git.clone(url: trimmedURL, destination: destination.path, bare: true)
+
+        let defaultBranch = try preferredImportedDefaultBranch(path: destination.path)
+        let record = ProjectRecord(
+            id: normalizedDestination, name: destination.lastPathComponent, dir: normalizedDestination, isGitRepo: true, defaultBranch: defaultBranch)
+        try store.upsert(project: record)
+        try ensureImportedGitDefaultWorkspace(for: record, branch: defaultBranch)
+        return record
     }
 
     public func updateProjectConfig(projectID: String, update: (inout ProjectRecord) -> Void) throws {
@@ -1586,7 +1592,7 @@ public final class MuxyOrchestrator {
     }
 
     private func ensureDefaultWorkspace(for project: ProjectRecord) throws {
-        if let existing = try store.workspace(projectID: project.id, name: "default") {
+        if let existing = try defaultWorkspace(projectID: project.id) {
             if existing.isArchived {
                 let revived = WorkspaceRecord(
                     id: existing.id, projectID: project.id, name: existing.name, dir: existing.dir, dirname: existing.dirname,
@@ -1599,6 +1605,33 @@ public final class MuxyOrchestrator {
         let workspace = WorkspaceRecord(
             id: UUID().uuidString, projectID: project.id, name: "default", dir: project.dir, dirname: nil, branch: project.defaultBranch,
             targetBranch: project.defaultBranch, isDefault: true, isArchived: false, isRunning: false, lastLaunchedAt: nil)
+        try store.upsert(workspace: workspace)
+        try seedWorkspaceSettings(project: project, workspace: workspace)
+        let appConfig = try store.appConfig()
+        let portDefinitions = try store.workspacePortDefinitions(workspaceID: workspace.id)
+        _ = try PortAllocator(store: store).allocatePorts(workspaceID: workspace.id, definitions: portDefinitions, range: appConfig.portRange)
+    }
+
+    private func ensureImportedGitDefaultWorkspace(for project: ProjectRecord, branch: String) throws {
+        if let existing = try defaultWorkspace(projectID: project.id) {
+            if existing.isArchived {
+                let revived = WorkspaceRecord(
+                    id: existing.id, projectID: project.id, name: existing.name, dir: existing.dir, dirname: existing.dirname,
+                    branch: existing.branch, targetBranch: existing.targetBranch, isDefault: true, isArchived: false, isRunning: existing.isRunning,
+                    lastLaunchedAt: existing.lastLaunchedAt)
+                try store.upsert(workspace: revived)
+            }
+            return
+        }
+
+        let worktreeRoot = try worktreeRoot(project: project)
+        try FileManager.default.createDirectory(at: worktreeRoot, withIntermediateDirectories: true)
+        let workspaceDir = worktreeRoot.appendingPathComponent(branch, isDirectory: true).path
+        try git.createWorktree(path: project.dir, worktreePath: workspaceDir, branch: branch, targetBranch: branch)
+
+        let workspace = WorkspaceRecord(
+            id: UUID().uuidString, projectID: project.id, name: branch, dir: workspaceDir, dirname: branch, branch: branch,
+            targetBranch: branch, isDefault: true, isArchived: false, isRunning: false, lastLaunchedAt: nil)
         try store.upsert(workspace: workspace)
         try seedWorkspaceSettings(project: project, workspace: workspace)
         let appConfig = try store.appConfig()
@@ -1623,7 +1656,7 @@ public final class MuxyOrchestrator {
     private func syncDefaultWorkspaceSettingsIfTemplateBased(project: ProjectRecord, previousRecord: ProjectRecord, updatedRecord: ProjectRecord)
         throws
     {
-        guard let defaultWorkspace = try store.workspace(projectID: project.id, name: "default") else { return }
+        guard let defaultWorkspace = try defaultWorkspace(projectID: project.id) else { return }
 
         let hasSettings = try store.workspaceSettingsExists(workspaceID: defaultWorkspace.id)
         if !hasSettings {
@@ -2350,8 +2383,13 @@ public final class MuxyOrchestrator {
         return trimmed.isEmpty ? fallback : trimmed
     }
 
-    private func projectsRootDirectory() -> URL {
+    private func repositoriesRootDirectory() -> URL {
         if let projectsRootDirectoryURL { return projectsRootDirectoryURL }
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        return home.appending(path: "muxy", directoryHint: .isDirectory).appending(path: "repos", directoryHint: .isDirectory)
+    }
+
+    private func legacyProjectsRootDirectory() -> URL {
         let home = FileManager.default.homeDirectoryForCurrentUser
         return home.appending(path: "muxy", directoryHint: .isDirectory).appending(path: "projects", directoryHint: .isDirectory)
     }
@@ -2386,13 +2424,27 @@ public final class MuxyOrchestrator {
     }
 
     private func removeManagedProjectDirectoryIfNeeded(project: ProjectRecord) throws {
-        guard project.isGitRepo, isManagedProjectsDirectory(path: project.dir) else { return }
+        guard project.isGitRepo, isManagedRepositoryDirectory(path: project.dir) else { return }
         var isDirectory: ObjCBool = false
         guard FileManager.default.fileExists(atPath: project.dir, isDirectory: &isDirectory), isDirectory.boolValue else { return }
         try FileManager.default.removeItem(atPath: project.dir)
     }
 
-    private func isManagedProjectsDirectory(path: String) -> Bool { isPath(path, inside: projectsRootDirectory().path) }
+    private func isManagedRepositoryDirectory(path: String) -> Bool {
+        if isPath(path, inside: repositoriesRootDirectory().path) { return true }
+        if projectsRootDirectoryURL == nil, isPath(path, inside: legacyProjectsRootDirectory().path) { return true }
+        return false
+    }
+
+    private func defaultWorkspace(projectID: String) throws -> WorkspaceRecord? {
+        try store.workspaces(projectID: projectID, includeArchived: true).first(where: \.isDefault)
+    }
+
+    private func preferredImportedDefaultBranch(path: String) throws -> String {
+        if git.branchExists(path: path, branch: "main") { return "main" }
+        if git.branchExists(path: path, branch: "master") { return "master" }
+        throw MuxyError.invalidArgument(message: "Imported git repository must contain a main or master branch.")
+    }
 
     private func isManagedWorkspacesDirectory(path: String, allowEqual: Bool = false) -> Bool {
         isPath(path, inside: workspaceRootDirectory().path, allowEqual: allowEqual)
