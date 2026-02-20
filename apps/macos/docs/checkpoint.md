@@ -40,9 +40,10 @@
 - Workspace settings snapshot project templates on creation into the runtime DB and are editable per workspace; updates to running workspaces reconcile processes and browser sessions immediately.
 - Workspace names for non-default workspaces are editable after creation from workspace settings and `mx workspace rename`; default workspace name remains fixed to its initial value (`default` for directory projects, `main`/`master` for git-url imports).
 - AppKit GUI is two-pane with in-place forms and editors for processes (with nested inline status checks), browser sessions; workspace detail includes run/stop/archive, windows list with shortcut hints, an env/ports tab, and workspace settings.
+- Left-pane project rows now show a folder icon next to project name to make project hierarchy clearer.
 - Browser sessions now support an optional `name` field; GUI forms use row editors (`name` + URL), CLI supports `--name` on add/list, and workspace window rows prefer the configured browser-session name over raw URL when available.
 - App provides a standard Edit menu with Copy (Cmd+C) and Select All (Cmd+A) so text in read-only views like the env tab can be selected and copied.
-- Workspace detail header shows a colored status dot (green = running, gray = stopped) to the left of the title, git branch with icon below, and directory path with folder icon and a copy-to-clipboard button.
+- Workspace detail header shows a colored status dot (green = running, gray = stopped) to the left of the title, git branch with icon below (including `forked from <target>` when target branch differs), and directory path with folder icon and a copy-to-clipboard button.
 - Launch/Stop/Restart buttons show icon-only labels without keyboard shortcut text (shortcuts don't function from those buttons).
 - Window list shows browser-session names when configured and the matching URL beside the name (fallback: URL only), and process commands for terminal windows instead of raw window titles.
 - New project form uses themed card sections (rounded borders, sidebar colors) for Source, Setup script, Processes (with nested inline status checks), Browser sessions, and Stop script; source popup and directory picker are on the same row.

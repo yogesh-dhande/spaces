@@ -1215,7 +1215,13 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             branchIcon.image = NSImage(systemSymbolName: "arrow.triangle.branch", accessibilityDescription: "Branch")
             branchIcon.contentTintColor = .secondaryLabelColor
             branchIcon.setContentHuggingPriority(.required, for: .horizontal)
-            let branchLabel = NSTextField(labelWithString: branch)
+            let branchLabelText: String
+            if let targetBranch = workspace.targetBranch, !targetBranch.isEmpty, targetBranch != branch {
+                branchLabelText = "\(branch) (forked from \(targetBranch))"
+            } else {
+                branchLabelText = branch
+            }
+            let branchLabel = NSTextField(labelWithString: branchLabelText)
             branchLabel.font = .systemFont(ofSize: 12)
             branchLabel.textColor = .secondaryLabelColor
             branchRow.addArrangedSubview(branchIcon)
@@ -3111,7 +3117,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         if case .project(let project) = item as? OutlineItem {
             let workspace =
                 workspacesByProject[project.id]?[index]
-                ?? WorkspaceSummary(id: "", name: "", branch: nil, dir: "", isRunning: false, isArchived: false, isDefault: false)
+                ?? WorkspaceSummary(id: "", name: "", branch: nil, targetBranch: nil, dir: "", isRunning: false, isArchived: false, isDefault: false)
             return OutlineItem.workspace(project, workspace)
         }
         return OutlineItem.project(projects[0])
@@ -3129,6 +3135,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let cell = NSTableCellView()
         let icon = NSImageView()
         icon.translatesAutoresizingMaskIntoConstraints = false
+        icon.image = NSImage(systemSymbolName: "folder.fill", accessibilityDescription: "Project")
+        icon.contentTintColor = .secondaryLabelColor
         let text = NSTextField(labelWithString: project.name)
         text.font = .systemFont(ofSize: 13, weight: .semibold)
         text.translatesAutoresizingMaskIntoConstraints = false

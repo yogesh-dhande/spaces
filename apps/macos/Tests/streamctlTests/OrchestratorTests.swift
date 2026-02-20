@@ -360,17 +360,21 @@ final class OrchestratorTests: XCTestCase {
     // Tests list workspaces includes branch metadata by arranging representative inputs and asserting the expected result.
     func testListWorkspacesIncludesBranchMetadata() throws {
         let repo = try makeTempGitRepo(name: "workspace-branch-list")
+        try runGit(["checkout", "-b", "develop"], cwd: repo.path)
+        try runGit(["checkout", "main"], cwd: repo.path)
         let root = try makeTempDirectory()
         let workspacesRoot = root.appendingPathComponent("workspaces", isDirectory: true)
         let store = try makeTemporaryStore()
         let orchestrator = MuxyOrchestrator(store: store, workspacesRootDirectory: workspacesRoot)
 
         let project = try orchestrator.addProject(dir: repo.path)
-        _ = try orchestrator.createWorkspace(projectID: project.id, name: "feature-branch", branch: "feature-branch")
+        _ = try orchestrator.createWorkspace(
+            projectID: project.id, name: "feature-branch", branch: "feature-branch", targetBranch: "develop")
 
         let workspaces = try orchestrator.listWorkspaces(projectID: project.id, includeArchived: true)
         let feature = try XCTUnwrap(workspaces.first(where: { $0.name == "feature-branch" }))
         XCTAssertEqual(feature.branch, "feature-branch")
+        XCTAssertEqual(feature.targetBranch, "develop")
     }
 
     // Tests create workspace revives archived workspace by arranging representative inputs and asserting the expected result.

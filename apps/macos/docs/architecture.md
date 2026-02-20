@@ -60,7 +60,9 @@ GUI interaction notes:
 - If the requested branch exists only on remote, the orchestrator fetches it into `refs/remotes/origin/*` before creating the worktree from `origin/<branch>`.
 - If the requested branch exists locally, the local branch is used as-is (no implicit pull/rebase/merge in workspace creation).
 - Workspace rows use compact card styling with status + workspace name on top.
+- Project rows in the left pane show a folder icon next to the project name.
 - Git workspace rows include ahead/behind commit counts vs the workspace target branch (the branch it was created from), merge-conflict status, and relative last-modified time (from latest tracked-file mtime) with tracked modified-file count.
+- Workspace detail metadata shows the current branch and, when present and different, appends `forked from <target branch>`.
 - Window focus shortcuts in the GUI use `cmd+1` through `cmd+9`.
 - Port definitions are editable via `PortEditor` in the project detail view, the add-project form, and workspace settings.
 - Status checks are configured inline under each process in the `ProcessEditor` rather than in a separate form section; the process name is implicit from the parent row.
