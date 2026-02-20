@@ -107,8 +107,8 @@ public final class MuxyOrchestrator {
         let records = try store.workspaces(projectID: projectID, includeArchived: includeArchived)
         return records.map {
             WorkspaceSummary(
-                id: $0.id, name: $0.name, branch: $0.branch, dir: $0.dir, isRunning: $0.isRunning, isArchived: $0.isArchived, isDefault: $0.isDefault,
-                tooltip: $0.tooltip)
+                id: $0.id, name: $0.name, branch: $0.branch, targetBranch: $0.targetBranch, dir: $0.dir, isRunning: $0.isRunning,
+                isArchived: $0.isArchived, isDefault: $0.isDefault, tooltip: $0.tooltip)
         }
     }
 

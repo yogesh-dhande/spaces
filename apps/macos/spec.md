@@ -279,12 +279,14 @@
     - Layout
         - Two panes
             - left pane for list of projects, with nested list of workspaces under each project
+            - project rows in the left pane show a project icon next to project name
             - for each workspace in the list, show an indicator for whether the workspace is running (processes running, windows open)
             - workspace rows use compact cards that show workspace name and status
             - for git workspaces, rows also show ahead/behind commit counts relative to the workspace's branched-off target branch, merge-conflict status, and relative "last modified" time (latest mtime among tracked files) with tracked modified-file count
             - right pane for details about selected item
                 - when project is selected - show details about the project, allow editing details, deleting etc
                 - when a workspace is selected - show details about the workspace, allow editing, deleting etc
+                    - git metadata row shows current branch and, when available and different, the target branch as `forked from <target>`
                     - 3 tabs
                         - first (default visible) tab for running details
                             - buttons to launch (when stopped), restart (when running), stop, archive
