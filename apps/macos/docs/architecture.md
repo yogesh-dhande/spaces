@@ -55,7 +55,8 @@ GUI interaction notes:
 - The New Workspace form header includes a `cmd+n` quick-create hint.
 - In git projects, New Workspace uses progressive disclosure: branch field first, then target/title/directory/tooltip after branch input is non-empty.
 - New Project also uses progressive disclosure: source selection first, then setup script/ports/processes/browser sessions/stop script after source input is present.
-- New Project and New Workspace action buttons display shortcut hints (`Return` for create, `Esc` for cancel), and `Esc` cancels either form.
+- New Project and New Workspace forms support keyboard shortcuts (`Return` for create, `Esc` for cancel); Create labels omit shortcut text while Cancel keeps `(Esc)` in the label.
+- Primary create/save actions use shared AppKit styling (single helper) with a darker accent background and white foreground text/icons for consistent contrast.
 - Branch and tooltip remain editable via inline labels in workspace detail, title remains editable in the workspace header, and all metadata remains editable via `mx workspace update`.
 - Workspace title remains in the top header (`project / workspace`) and enters edit mode on double-click.
 - Workspace detail renders inline metadata labels for branch and tooltip above lifecycle actions; double-clicking a label enters edit mode and shows per-field Save/Cancel buttons.

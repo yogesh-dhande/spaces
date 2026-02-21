@@ -139,6 +139,7 @@
                 - lifecycle actions (launch/restart/stop/archive) run off the main UI thread; disable the clicked action until completion so the GUI stays responsive during long-running automation
             - Forms
                 - In-place editors for project and workspace data
+                - Primary form actions (create/save) use a shared high-contrast style with a darker accent fill and white text/icon treatment for consistent readability
             - when created
             - create a git worktree using this precedence for the supplied branch name:
                 - if the branch exists locally, create the worktree from the local branch as-is (no implicit pull/rebase/merge)
@@ -235,7 +236,7 @@
         - git New Workspace form uses branch-first progressive disclosure; target branch/title/directory/tooltip appear after branch input is non-empty
             - opening the form and quick-create should not block on remote branch discovery/network calls
         - New Project form uses source-first progressive disclosure; additional settings appear only after a local directory is chosen or a git URL is entered
-        - New Project and New Workspace form buttons include shortcut hints (`Return` create, `Esc` cancel), and `Esc` cancels either form
+        - New Project and New Workspace forms support keyboard shortcuts (`Return` create, `Esc` cancel); Create labels omit shortcut text while Cancel keeps `(Esc)` in the label, and `Esc` cancels either form
         - for git projects, muxy uses the same auto-generated value for initial workspace title and branch name
         - for git projects, target branch defaults using this precedence: project default branch, `main`, `master`, first discovered branch
         - for git projects, directory name defaults to muxy's auto-generated unique dirname

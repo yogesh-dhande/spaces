@@ -832,17 +832,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             title: "Save Project", symbol: "square.and.arrow.down", tooltip: "Save project (⌘S)", action: #selector(saveProject(_:)), primary: true)
         saveButton.identifier = NSUserInterfaceItemIdentifier(project.id)
         saveButton.keyEquivalent = "\r"
-        saveButton.bezelStyle = .texturedRounded
-        saveButton.wantsLayer = true
-        saveButton.layer?.backgroundColor = accentColor.cgColor
-        saveButton.layer?.cornerRadius = 6
-        let buttonTextColor = NSColor.white
-        saveButton.attributedTitle = NSAttributedString(
-            string: "Save Project", attributes: [.foregroundColor: buttonTextColor, .font: NSFont.systemFont(ofSize: 13, weight: .semibold)])
-        if let saveImg = NSImage(systemSymbolName: "square.and.arrow.down", accessibilityDescription: "Save") {
-            let imgConfig = NSImage.SymbolConfiguration(paletteColors: [buttonTextColor])
-            saveButton.image = saveImg.withSymbolConfiguration(imgConfig)
-        }
 
         let deleteButton = iconButton(symbol: "trash", tooltip: "Delete project", action: #selector(deleteProject(_:)))
         deleteButton.identifier = NSUserInterfaceItemIdentifier(project.id)
@@ -1110,17 +1099,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
         // --- Buttons ---
         let createButton = actionButton(
-            title: "Create Project (Return)", symbol: nil, tooltip: "Create project (Return)", action: #selector(createProject(_:)),
+            title: "Create Project", symbol: nil, tooltip: "Create project (Return)", action: #selector(createProject(_:)),
             primary: true)
         createButton.keyEquivalent = "\r"
-        createButton.bezelStyle = .texturedRounded
-        createButton.wantsLayer = true
-        createButton.layer?.backgroundColor = accentColor.cgColor
-        createButton.layer?.cornerRadius = 6
-        let buttonTextColor = NSColor.white
-        createButton.attributedTitle = NSAttributedString(
-            string: "Create Project (Return)",
-            attributes: [.foregroundColor: buttonTextColor, .font: NSFont.systemFont(ofSize: 13, weight: .semibold)])
         createButton.isEnabled = false
         let cancelButton = actionButton(
             title: "Cancel (Esc)", symbol: nil, tooltip: "Cancel (Esc)", action: #selector(cancelProjectForm), primary: false)
@@ -1280,17 +1261,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
         // --- Buttons ---
         let createButton = actionButton(
-            title: "Create Workspace (Return)", symbol: nil, tooltip: "Create workspace (Return)", action: #selector(createWorkspace(_:)),
+            title: "Create Workspace", symbol: nil, tooltip: "Create workspace (Return)", action: #selector(createWorkspace(_:)),
             primary: true)
         createButton.keyEquivalent = "\r"
-        createButton.bezelStyle = .texturedRounded
-        createButton.wantsLayer = true
-        createButton.layer?.backgroundColor = accentColor.cgColor
-        createButton.layer?.cornerRadius = 6
-        let buttonTextColor = NSColor.white
-        createButton.attributedTitle = NSAttributedString(
-            string: "Create Workspace (Return)",
-            attributes: [.foregroundColor: buttonTextColor, .font: NSFont.systemFont(ofSize: 13, weight: .semibold)])
         let cancelButton = actionButton(
             title: "Cancel (Esc)", symbol: nil, tooltip: "Cancel (Esc)", action: #selector(cancelProjectForm), primary: false)
         cancelButton.keyEquivalent = "\u{1b}"
@@ -1737,8 +1710,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     }
 
     private func workspaceSettingsView(project: ProjectSummary, workspace: WorkspaceSummary) -> NSView {
-        let accentColor = sidebarThemeColor(light: (13, 95, 93), dark: (61, 198, 184))
-
         let container = NSStackView()
         container.orientation = .vertical
         container.alignment = .leading
@@ -1772,17 +1743,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let saveButton = actionButton(
             title: "Save Workspace", symbol: "square.and.arrow.down", tooltip: "Save workspace settings", action: #selector(saveWorkspace(_:)),
             primary: true)
-        saveButton.bezelStyle = .texturedRounded
-        saveButton.wantsLayer = true
-        saveButton.layer?.backgroundColor = accentColor.cgColor
-        saveButton.layer?.cornerRadius = 6
-        let buttonTextColor = NSColor.white
-        saveButton.attributedTitle = NSAttributedString(
-            string: "Save Workspace", attributes: [.foregroundColor: buttonTextColor, .font: NSFont.systemFont(ofSize: 13, weight: .semibold)])
-        if let saveImg = NSImage(systemSymbolName: "square.and.arrow.down", accessibilityDescription: "Save") {
-            let imgConfig = NSImage.SymbolConfiguration(paletteColors: [buttonTextColor])
-            saveButton.image = saveImg.withSymbolConfiguration(imgConfig)
-        }
 
         // --- Port definitions card ---
         let wsPortCard = formSectionCard(
@@ -2517,9 +2477,27 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         button.toolTip = tooltip
         if primary {
             button.controlSize = .large
-            button.font = .systemFont(ofSize: 13, weight: .semibold)
+            stylePrimaryActionButton(button, title: title)
         }
         return button
+    }
+
+    private func primaryActionButtonColor() -> NSColor {
+        // Keep primary actions legible on both appearance modes.
+        sidebarThemeColor(light: (8, 66, 64), dark: (24, 124, 118))
+    }
+
+    private func stylePrimaryActionButton(_ button: NSButton, title: String) {
+        let foregroundColor = NSColor.white
+        button.bezelStyle = .rounded
+        button.bezelColor = primaryActionButtonColor()
+        button.contentTintColor = foregroundColor
+        button.attributedTitle = NSAttributedString(
+            string: title, attributes: [.foregroundColor: foregroundColor, .font: NSFont.systemFont(ofSize: 13, weight: .semibold)])
+        if let image = button.image {
+            let configuration = NSImage.SymbolConfiguration(paletteColors: [foregroundColor])
+            button.image = image.withSymbolConfiguration(configuration)
+        }
     }
 
     private func constrainFormFieldToFillWidth(_ view: NSView, in stack: NSStackView) {
