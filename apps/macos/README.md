@@ -51,13 +51,14 @@ Muxy periodically discovers and reconciles git worktrees for existing projects. 
 - Two panes: projects/workspaces on the left, details on the right.
 - No dialogs for add/edit; all forms are in the right pane.
 - Right-pane forms are scrollable to avoid clipping on smaller window heights.
-- New workspace form has separate inputs for target branch, branch name, and workspace title for git projects.
-- Target branch is the first input and shows a searchable list of branches.
-- Target branch defaults to `main`/`master` when available.
-- Branch name is required for git projects.
-- As you type branch name, workspace title is auto-populated from it by default; you can then edit workspace title to be more descriptive.
-- Directory name is an optional git-only input that overrides the auto-generated worktree folder name.
-- Directory name validation allows only letters, numbers, `-`, and `_` (no spaces).
+- New workspace `+` actions open the New Workspace form for git projects.
+- `cmd+n` opens the New Workspace form for the currently selected project/workspace.
+- On the New Workspace form, `cmd+n` quick-creates using generated defaults (suggested title/branch, auto-generated directory, default target branch).
+- Branch and tooltip can be edited from inline labels in workspace detail, title can be edited in the workspace header, and all metadata can be edited via `mx workspace update`.
+- Workspace title stays in the top header (`project / workspace`) and is editable there via double-click.
+- Workspace detail also shows inline branch and tooltip labels above Launch/Stop actions; double-click a label to edit and reveal small Save/Cancel controls.
+- While editing inline metadata, pressing `Escape` or clicking outside the inline controls cancels without saving.
+- Changing branch name from the inline editor renames the underlying git worktree branch (not metadata-only).
 - New branches are created from the latest commit on the selected target branch.
 - If the selected branch exists only on remote, muxy fetches it first and then creates the worktree from `origin/<branch>`.
 - If the branch exists locally, muxy uses the local branch as-is (no implicit pull/rebase/merge during workspace creation).

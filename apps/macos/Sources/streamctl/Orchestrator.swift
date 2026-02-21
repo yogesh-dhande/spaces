@@ -212,6 +212,7 @@ public final class MuxyOrchestrator {
             let trimmedBranch = branch.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !trimmedBranch.isEmpty else { throw MuxyError.invalidArgument(message: "Workspace branch is required.") }
             if trimmedBranch != workspace.branch {
+                try git.renameCurrentBranch(path: workspace.dir, to: trimmedBranch)
                 updatedBranch = trimmedBranch
                 didChange = true
             }

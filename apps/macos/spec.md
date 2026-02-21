@@ -116,7 +116,7 @@
     - Workspace
         - fields
             - project: Project
-            - title: str, persisted in DB as `workspaces.title` (legacy `workspaces.name` remains for compatibility), defaults to the branch name in the create form for git projects; user can edit during creation or later
+            - title: str, persisted in DB as `workspaces.title` (legacy `workspaces.name` remains for compatibility), defaults to an auto-generated workspace name for one-click GUI creation; user can edit later
                 - for default workspaces created from directory projects, use `default` as the name
                 - for default workspaces created from git-url imports, use `main`/`master` as the name
                 - default workspace title remains fixed to its initial value; non-default workspaces can be renamed later
@@ -131,6 +131,10 @@
             - Workspace detail includes actions
                 - Launch/Restart/Stop/Archive
                 - Open Editor/Terminal/Finder
+                - workspace title is shown in the top header (`project / workspace`) and is editable via double-click
+                - inline labels for branch name (git) and tooltip appear above launch/restart/stop buttons; double-click a label to edit and show Save/Cancel controls
+                - in inline label edit mode, pressing `Escape` or clicking outside the field controls cancels edits without saving
+                - editing branch name performs a git branch rename for the workspace worktree before persisting workspace metadata
                 - lifecycle actions (launch/restart/stop/archive) run off the main UI thread; disable the clicked action until completion so the GUI stays responsive during long-running automation
             - Forms
                 - In-place editors for project and workspace data
@@ -220,16 +224,15 @@
         - User optionally sets up status checks for processes
         - User optionally sets up browser sessions
             - These are used to open/track browser window tabs pointing to the specified url (start of url must match what is specified by the user)
-        - User can edit workspace settings later (including title for non-default workspaces); changes are stored in the db and applied immediately if the workspace is running
+        - User can edit workspace settings later for runtime configuration (ports, processes, stop script, browser sessions); changes are stored in the db and applied immediately if the workspace is running
     - When creating a non-default workspace
-        - workspace title, branch, and target branch are separate values in the create form for git projects
-        - directory name is an optional separate input for git projects
-        - target branch input is shown first for git projects
-        - target branch shows a searchable list of branches and defaults to main/master when available
-            - branch options combine local branches, local `origin/*` refs, and live `git ls-remote --heads origin` results so remote-only branches are visible before a fetch
-        - by default, workspace title is auto-populated from branch input until the user customizes workspace title
-        - for git projects, branch is required when creating a workspace
-        - if directory name is provided, it must be filesystem-safe (`A-Z`, `a-z`, `0-9`, `-`, `_`) and cannot include spaces
+        - project-level plus/new-workspace actions open the New Workspace form
+        - `cmd+n` opens the New Workspace form for the currently selected project/workspace
+        - when the New Workspace form is open, `cmd+n` creates immediately using generated defaults
+        - for git projects, muxy uses the same auto-generated value for initial workspace title and branch name
+        - for git projects, target branch defaults using this precedence: project default branch, `main`, `master`, first discovered branch
+        - for git projects, directory name defaults to muxy's auto-generated unique dirname
+        - users can update workspace title/branch/tooltip after creation via inline workspace-detail labels/header and can update all metadata via `mx workspace update`
         - muxy creates a git worktree using this precedence for the supplied branch name:
             - if the branch exists locally, create the worktree from the local branch as-is (no implicit pull/rebase/merge)
             - else if the branch exists on origin, fetch that branch tip into a local remote-tracking ref and create the worktree from `origin/<branch>`
@@ -313,7 +316,7 @@
                 - forward: `cmd+shift+]`
                 - backward: `cmd+shift+[`
                 - When a workspace is selected
-                    - plus-button affordances to create a new workspace are shown in project UI only when the project is a git repository
+                    - plus-button/new-workspace affordances create a workspace in one click and are shown in project UI only when the project is a git repository
                     - list of windows in the right pane belonging to the workspace get dynamically assigned keyboard shortcuts of the form  `cmd+<number>` and shown as hints next to the title so the user can quickly switch to that window by hitting the appropriate keys e.g. `cmd+2`
                         - since these are autogenerated, they can not be set to custom keys by the user
                     - `cmd+shift+return` focuses the selected workspace

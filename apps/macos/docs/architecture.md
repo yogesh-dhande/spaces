@@ -49,13 +49,14 @@ The `gui` target is the reusable UI library. `MuxyApp` is the minimal executable
 GUI interaction notes:
 - Right-pane forms are hosted in a scroll view so long forms do not clip at smaller window heights.
 - The "new workspace" affordance is shown in project UI only when the project is a git repository.
-- New workspace forms use separate target-branch, branch-name, and workspace-title fields for git projects.
-- Target branch is first and uses a searchable branch list.
-- Target branch defaults to `main`/`master` when available.
-- Workspace title auto-fills from branch while untouched, and can then be edited independently.
-- New workspace forms also include an optional git-only worktree directory-name override.
-- Directory-name overrides are validated to filesystem-safe ASCII (`A-Z`, `a-z`, `0-9`, `-`, `_`) and cannot contain spaces.
-- For git projects, branch is required when creating a workspace.
+- Project-row plus and project-detail "New Workspace" actions open the New Workspace form.
+- `cmd+n` opens the New Workspace form for the currently selected project/workspace.
+- When the New Workspace form is already open, `cmd+n` creates a workspace immediately with generated defaults.
+- Branch and tooltip remain editable via inline labels in workspace detail, title remains editable in the workspace header, and all metadata remains editable via `mx workspace update`.
+- Workspace title remains in the top header (`project / workspace`) and enters edit mode on double-click.
+- Workspace detail renders inline metadata labels for branch and tooltip above lifecycle actions; double-clicking a label enters edit mode and shows per-field Save/Cancel buttons.
+- Inline metadata edit mode cancels without saving when pressing `Escape` or clicking outside the field controls.
+- Branch edits in workspace detail call git branch rename in the worktree (`git branch -m`) before persisting metadata.
 - Newly created branches are based on the latest commit of the selected target branch.
 - If the requested branch exists only on remote, the orchestrator fetches it into `refs/remotes/origin/*` before creating the worktree from `origin/<branch>`.
 - If the requested branch exists locally, the local branch is used as-is (no implicit pull/rebase/merge in workspace creation).

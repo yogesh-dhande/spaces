@@ -30,7 +30,7 @@ export const docsPageLinks: DocsPageLink[] = [
     href: "/docs/workspaces",
     title: "Workspaces",
     summary:
-      "Workspace concepts, title field behavior, settings overrides, ports, env vars, switching, focus tooltip overlays, sidebar hierarchy cues, and git signals (ahead/behind vs target branch, merge conflicts, modified files, forked-from metadata).",
+      "Workspace concepts, New Workspace form flow (+ / cmd+n, and cmd+n quick-create when the form is open), inline metadata editing (header title + branch/tooltip labels with Escape/outside-click cancel), git branch rename-on-edit behavior, settings overrides, ports, env vars, switching, focus tooltip overlays, sidebar hierarchy cues, and git signals.",
     audience: "Developers creating and configuring workspaces within projects.",
   },
   {

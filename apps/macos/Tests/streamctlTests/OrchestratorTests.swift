@@ -357,6 +357,23 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertEqual(workspace.targetBranch, "develop")
     }
 
+    // Tests create workspace defaults target branch to project default when omitted by arranging representative inputs and asserting the expected result.
+    func testCreateWorkspaceDefaultsTargetBranchToProjectDefaultBranch() throws {
+        let repo = try makeTempGitRepo(name: "workspace-default-target")
+        let root = try makeTempDirectory()
+        let workspacesRoot = root.appendingPathComponent("workspaces", isDirectory: true)
+        let store = try makeTemporaryStore()
+        let orchestrator = MuxyOrchestrator(store: store, workspacesRootDirectory: workspacesRoot)
+
+        let project = try orchestrator.addProject(dir: repo.path)
+        let suggested = try orchestrator.suggestedWorkspaceName(projectID: project.id)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: suggested, branch: suggested)
+
+        XCTAssertEqual(workspace.name, suggested)
+        XCTAssertEqual(workspace.branch, suggested)
+        XCTAssertEqual(workspace.targetBranch, project.defaultBranch)
+    }
+
     // Tests list workspaces includes branch metadata by arranging representative inputs and asserting the expected result.
     func testListWorkspacesIncludesBranchMetadata() throws {
         let repo = try makeTempGitRepo(name: "workspace-branch-list")
@@ -969,6 +986,12 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertEqual(updated.branch, "feature-auth")
         XCTAssertEqual(updated.dirname, "feature_auth")
         XCTAssertEqual(updated.tooltip, "Reviewing OAuth flow")
+        XCTAssertEqual(
+            try runGitAndCapture(["rev-parse", "--abbrev-ref", "HEAD"], cwd: workspace.dir).trimmingCharacters(in: .whitespacesAndNewlines),
+            "feature-auth")
+        let branches = try runGitAndCapture(["branch", "--format=%(refname:short)"], cwd: project.dir)
+        XCTAssertTrue(branches.split(separator: "\n").contains("feature-auth"))
+        XCTAssertFalse(branches.split(separator: "\n").contains("feature-start"))
     }
 
     // Tests workspace metadata update can clear tooltip by arranging representative inputs and asserting the expected result.

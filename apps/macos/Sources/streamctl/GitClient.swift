@@ -152,6 +152,18 @@ public final class GitClient {
 
     public func deleteBranch(path repoPath: String, branch: String) { _ = try? runGit(["-C", repoPath, "branch", "-D", branch]) }
 
+    public func renameCurrentBranch(path worktreePath: String, to branch: String) throws {
+        let trimmedBranch = branch.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedBranch.isEmpty else { throw MuxyError.invalidArgument(message: "Workspace branch is required.") }
+        let currentOutput = try runGitAndCapture(["-C", worktreePath, "rev-parse", "--abbrev-ref", "HEAD"])
+        let currentBranch = currentOutput.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard currentBranch != "HEAD" else {
+            throw MuxyError.invalidArgument(message: "Cannot rename branch for detached HEAD worktree.")
+        }
+        guard currentBranch != trimmedBranch else { return }
+        try runGitOrThrow(["-C", worktreePath, "branch", "-m", trimmedBranch])
+    }
+
     private func runGit(_ arguments: [String]) throws -> Int32 {
         let process = makeGitProcess(arguments)
         try process.run()

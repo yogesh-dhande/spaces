@@ -26,14 +26,14 @@ export default function WorkspacesDocsPage() {
       <article className="rounded-2xl border border-line bg-surface/82 p-5 backdrop-blur-sm">
         <h2 className="text-xl font-semibold tracking-tight">Creating a Workspace</h2>
         <p className="mt-2 text-sm leading-7 text-foreground-soft">
-          Create a workspace from the sidebar using the add button on a project. For Git projects
-          you provide a branch and target branch; the workspace name defaults to the branch name
-          but can be customized.
+          Create a workspace from the sidebar using the add button on a project. For Git projects,
+          this is one click: Muxy creates the workspace immediately with sensible defaults.
         </p>
         <ul className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
-          <li>• <strong>Branch</strong> &mdash; the Git branch associated with the workspace (required for Git projects).</li>
-          <li>• <strong>Target branch</strong> &mdash; the base branch used when creating a new branch.</li>
-          <li>• <strong>Directory name</strong> &mdash; an optional custom folder name for the worktree; auto-generated if left blank.</li>
+          <li>• <strong>Workspace title + Branch</strong> &mdash; both start from Muxy&apos;s suggested workspace name.</li>
+          <li>• <strong>Target branch</strong> &mdash; defaults from project default branch, then `main`/`master` fallback.</li>
+          <li>• <strong>Directory name</strong> &mdash; auto-generated for the worktree and editable later.</li>
+          <li>• <strong>Tooltip</strong> &mdash; optional workspace context you can set after creation.</li>
         </ul>
       </article>
 
@@ -45,7 +45,11 @@ export default function WorkspacesDocsPage() {
           overrides that do not affect the project templates.
         </p>
         <ul className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
-          <li>• Update workspace metadata after creation from Workspace Settings or <code>mx workspace update</code>.</li>
+          <li>• The project/workspace <code>+</code> opens the New Workspace form.</li>
+          <li>• <code>cmd+n</code> opens the New Workspace form for the currently selected project/workspace.</li>
+          <li>• When the New Workspace form is open, <code>cmd+n</code> creates a workspace immediately with generated defaults.</li>
+          <li>• Update title by double-clicking the top header name, and update branch/tooltip by double-clicking inline labels; press <code>Escape</code> or click outside the inline controls to cancel edits. You can also use <code>mx workspace update</code>.</li>
+          <li>• Renaming a workspace branch from the inline editor renames the underlying git worktree branch.</li>
           <li>• Add, remove, or rename port definitions per workspace.</li>
           <li>• Edit process commands; changes restart the process immediately if the workspace is running.</li>
           <li>• Add browser sessions that open immediately when the workspace is running.</li>

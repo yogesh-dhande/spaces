@@ -7,6 +7,23 @@ import streamctl
 public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineViewDataSource, NSOutlineViewDelegate, NSSplitViewDelegate,
     NSWindowDelegate, NSTextFieldDelegate
 {
+    private enum InlineWorkspaceDetailField {
+        case title
+        case branch
+        case tooltip
+    }
+
+    private struct InlineWorkspaceDetailFieldRefs {
+        let workspaceID: String
+        let field: InlineWorkspaceDetailField
+        let valueLabel: NSTextField
+        let textField: NSTextField
+        let saveButton: NSButton
+        let cancelButton: NSButton
+        var originalValue: String
+        var isEditing: Bool
+    }
+
     private var window: NSWindow!
     private var splitView: NSSplitView?
     private let outlineView = NSOutlineView()
@@ -55,6 +72,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     private let shortcutLabelColumnWidth: CGFloat = 250
     private var isApplyingSplitViewWidth = false
     private var hasAppliedSplitViewWidth = false
+    private var inlineWorkspaceFieldRefsByTag: [Int: InlineWorkspaceDetailFieldRefs] = [:]
+    private var inlineWorkspaceFieldTagByObjectID: [ObjectIdentifier: Int] = [:]
+    private var inlineWorkspaceLabelTagByObjectID: [ObjectIdentifier: Int] = [:]
+    private var inlineWorkspaceOutsideClickMonitor: Any?
+    private var activeAddWorkspaceFormTag: Int?
     private lazy var relativeDateFormatter: RelativeDateTimeFormatter = {
         let formatter = RelativeDateTimeFormatter()
         formatter.unitsStyle = .short
@@ -101,6 +123,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         periodicUpdateCheckTask?.cancel()
         periodicProcessMonitorTask?.cancel()
         periodicWorktreeDiscoveryTask?.cancel()
+        teardownInlineWorkspaceOutsideClickMonitor()
         teardownGlobalHotkey()
         if let shortcutMonitor { NSEvent.removeMonitor(shortcutMonitor) }
         if let tooltipIPCObserver {
@@ -538,6 +561,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     }
 
     private func showPlaceholder() {
+        clearInlineWorkspaceFieldRefs()
+        activeAddWorkspaceFormTag = nil
         showingSettings = false
         activeShortcutCaptureSetting = nil
         for view in detailContainer.subviews { view.removeFromSuperview() }
@@ -553,6 +578,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     }
 
     private func showSettingsDetail() {
+        clearInlineWorkspaceFieldRefs()
+        activeAddWorkspaceFormTag = nil
         showingSettings = true
         shortcutButtonsBySetting.removeAll()
         activeShortcutCaptureSetting = nil
@@ -627,6 +654,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     }
 
     private func showProjectDetail(project: ProjectSummary) {
+        clearInlineWorkspaceFieldRefs()
+        activeAddWorkspaceFormTag = nil
         showingSettings = false
         activeShortcutCaptureSetting = nil
         for view in detailContainer.subviews { view.removeFromSuperview() }
@@ -847,6 +876,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     }
 
     private func showAddProjectForm() {
+        clearInlineWorkspaceFieldRefs()
+        activeAddWorkspaceFormTag = nil
         showingSettings = false
         for view in detailContainer.subviews { view.removeFromSuperview() }
         detailContainer.wantsLayer = true
@@ -1041,6 +1072,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     }
 
     private func showAddWorkspaceForm(project: ProjectSummary) {
+        clearInlineWorkspaceFieldRefs()
+        activeAddWorkspaceFormTag = nil
         showingSettings = false
         for view in detailContainer.subviews { view.removeFromSuperview() }
         detailContainer.wantsLayer = true
@@ -1172,9 +1205,12 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             projectID: project.id, isGitRepo: project.isGitRepo, targetBranchField: project.isGitRepo ? targetBranchField : nil, nameField: nameField,
             directoryNameField: project.isGitRepo ? directoryNameField : nil, branchField: project.isGitRepo ? branchField : nil,
             tooltipField: tooltipField, autoNameState: autoNameState)
+        activeAddWorkspaceFormTag = createButton.tag
     }
 
     private func showWorkspaceDetail(project: ProjectSummary, workspace: WorkspaceSummary) {
+        clearInlineWorkspaceFieldRefs()
+        activeAddWorkspaceFormTag = nil
         showingSettings = false
         activeShortcutCaptureSetting = nil
         for view in detailContainer.subviews { view.removeFromSuperview() }
@@ -1194,40 +1230,71 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             systemSymbolName: workspace.isRunning ? "circle.fill" : "circle", accessibilityDescription: workspace.isRunning ? "Running" : "Stopped")
         statusDot.contentTintColor = workspace.isRunning ? accentColor : .tertiaryLabelColor
         statusDot.setContentHuggingPriority(.required, for: .horizontal)
-        let headerText = NSTextField(labelWithString: "\(project.name) / \(workspace.name)")
-        headerText.font = .systemFont(ofSize: 20, weight: .semibold)
-        headerText.textColor = sidebarPrimaryTextColor(isSelected: false, isArchived: false)
+        let projectLabel = NSTextField(labelWithString: "\(project.name) /")
+        projectLabel.font = .systemFont(ofSize: 20, weight: .semibold)
+        projectLabel.textColor = sidebarPrimaryTextColor(isSelected: false, isArchived: false)
+        projectLabel.setContentHuggingPriority(.required, for: .horizontal)
+
+        let workspaceTitleLabel = NSTextField(labelWithString: inlineWorkspaceFieldDisplayValue(workspace.name, field: .title))
+        workspaceTitleLabel.font = .systemFont(ofSize: 20, weight: .semibold)
+        workspaceTitleLabel.textColor = sidebarPrimaryTextColor(isSelected: false, isArchived: false)
+        workspaceTitleLabel.lineBreakMode = .byTruncatingTail
+        workspaceTitleLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+
+        let workspaceTitleField = NSTextField(string: workspace.name)
+        workspaceTitleField.placeholderString = "Workspace title"
+        workspaceTitleField.delegate = self
+        workspaceTitleField.font = .systemFont(ofSize: 18, weight: .semibold)
+        workspaceTitleField.isHidden = true
+        workspaceTitleField.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+
+        let titleSaveButton = NSButton(title: "Save", target: self, action: #selector(saveInlineWorkspaceMetadata(_:)))
+        titleSaveButton.controlSize = .small
+        titleSaveButton.bezelStyle = .rounded
+        titleSaveButton.isHidden = true
+
+        let titleCancelButton = NSButton(title: "Cancel", target: self, action: #selector(cancelInlineWorkspaceMetadata(_:)))
+        titleCancelButton.controlSize = .small
+        titleCancelButton.bezelStyle = .rounded
+        titleCancelButton.isHidden = true
         let headerRow = NSStackView()
         headerRow.orientation = .horizontal
         headerRow.alignment = .centerY
         headerRow.spacing = 8
         headerRow.addArrangedSubview(statusDot)
-        headerRow.addArrangedSubview(headerText)
+        headerRow.addArrangedSubview(projectLabel)
+        headerRow.addArrangedSubview(workspaceTitleLabel)
+        headerRow.addArrangedSubview(workspaceTitleField)
+        headerRow.addArrangedSubview(titleSaveButton)
+        headerRow.addArrangedSubview(titleCancelButton)
+
+        if !workspace.isDefault {
+            let tag = UUID().uuidString.hashValue
+            let refs = InlineWorkspaceDetailFieldRefs(
+                workspaceID: workspace.id,
+                field: .title,
+                valueLabel: workspaceTitleLabel,
+                textField: workspaceTitleField,
+                saveButton: titleSaveButton,
+                cancelButton: titleCancelButton,
+                originalValue: workspace.name,
+                isEditing: false)
+            inlineWorkspaceFieldRefsByTag[tag] = refs
+            inlineWorkspaceFieldTagByObjectID[ObjectIdentifier(workspaceTitleField)] = tag
+            inlineWorkspaceLabelTagByObjectID[ObjectIdentifier(workspaceTitleLabel)] = tag
+            titleSaveButton.tag = tag
+            titleCancelButton.tag = tag
+
+            let titleDoubleClick = NSClickGestureRecognizer(target: self, action: #selector(beginInlineWorkspaceMetadataEdit(_:)))
+            titleDoubleClick.numberOfClicksRequired = 2
+            workspaceTitleLabel.addGestureRecognizer(titleDoubleClick)
+            workspaceTitleLabel.toolTip = "Double-click to edit title."
+        } else {
+            workspaceTitleLabel.toolTip = "Default workspace title is fixed."
+        }
 
         // --- Metadata rows ---
         var metadataRows: [NSView] = []
-        if let branch = workspace.branch {
-            let branchRow = NSStackView()
-            branchRow.orientation = .horizontal
-            branchRow.alignment = .centerY
-            branchRow.spacing = 4
-            let branchIcon = NSImageView()
-            branchIcon.image = NSImage(systemSymbolName: "arrow.triangle.branch", accessibilityDescription: "Branch")
-            branchIcon.contentTintColor = .secondaryLabelColor
-            branchIcon.setContentHuggingPriority(.required, for: .horizontal)
-            let branchLabelText: String
-            if let targetBranch = workspace.targetBranch, !targetBranch.isEmpty, targetBranch != branch {
-                branchLabelText = "\(branch) (forked from \(targetBranch))"
-            } else {
-                branchLabelText = branch
-            }
-            let branchLabel = NSTextField(labelWithString: branchLabelText)
-            branchLabel.font = .systemFont(ofSize: 12)
-            branchLabel.textColor = .secondaryLabelColor
-            branchRow.addArrangedSubview(branchIcon)
-            branchRow.addArrangedSubview(branchLabel)
-            metadataRows.append(branchRow)
-        }
 
         let dirRow = NSStackView()
         dirRow.orientation = .horizontal
@@ -1252,6 +1319,29 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         dirRow.addArrangedSubview(dirField)
         dirRow.addArrangedSubview(copyDirButton)
         metadataRows.append(dirRow)
+
+        // --- Inline editable metadata ---
+        let inlineBranchRow: NSView?
+        if project.isGitRepo, let branch = workspace.branch {
+            inlineBranchRow = makeInlineWorkspaceMetadataEditRow(
+                workspaceID: workspace.id,
+                field: .branch,
+                icon: "arrow.triangle.branch",
+                labelText: "Branch",
+                value: branch,
+                placeholder: "Branch name",
+                isEditable: true)
+        } else {
+            inlineBranchRow = nil
+        }
+        let inlineTooltipRow = makeInlineWorkspaceMetadataEditRow(
+            workspaceID: workspace.id,
+            field: .tooltip,
+            icon: "info.circle",
+            labelText: "Tooltip",
+            value: workspace.tooltip ?? "",
+            placeholder: "Optional workspace context",
+            isEditable: true)
 
         // --- Action buttons ---
         let launchOrRestartButton: NSButton
@@ -1304,9 +1394,13 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
         stack.addArrangedSubview(headerRow)
         for row in metadataRows { stack.addArrangedSubview(row) }
+        if let inlineBranchRow { stack.addArrangedSubview(inlineBranchRow) }
+        stack.addArrangedSubview(inlineTooltipRow)
         stack.addArrangedSubview(buttonRow)
         stack.addArrangedSubview(tabs)
         stack.addArrangedSubview(archiveButton)
+        if let inlineBranchRow { constrainFormFieldToFillWidth(inlineBranchRow, in: stack) }
+        constrainFormFieldToFillWidth(inlineTooltipRow, in: stack)
         constrainFormFieldToFillWidth(buttonRow, in: stack)
 
         detailContainer.addSubview(stack)
@@ -1535,11 +1629,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let stopView = makeEditableTextView()
         let stopScroll = scrollableTextView(stopView, height: 90)
         let browserSessionEditor = BrowserSessionEditor()
-        let nameField = NSTextField(string: workspace.name)
-        nameField.placeholderString = "Workspace title"
-        nameField.isEnabled = !workspace.isDefault
-        let tooltipField = NSTextField(string: "")
-        tooltipField.placeholderString = "optional: context about what you're working on"
 
         if let config = try? orchestrator.workspaceSettings(workspaceID: workspace.id) {
             stopView.string = config.stopScript ?? ""
@@ -1553,8 +1642,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             processEditor.setProcessesWithChecks(fullProject?.processes ?? [], statusChecks: fullProject?.statusChecks ?? [])
             browserSessionEditor.setSessions(fullProject?.browserSessions ?? [])
         }
-        tooltipField.stringValue = workspace.tooltip ?? ""
-
         let saveButton = actionButton(
             title: "Save Workspace", symbol: "square.and.arrow.down", tooltip: "Save workspace settings", action: #selector(saveWorkspace(_:)),
             primary: true)
@@ -1569,22 +1656,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             let imgConfig = NSImage.SymbolConfiguration(paletteColors: [buttonTextColor])
             saveButton.image = saveImg.withSymbolConfiguration(imgConfig)
         }
-
-        let nameSubtitle = workspace.isDefault
-            ? "Default workspace title is fixed to preserve lifecycle behavior."
-            : "Displayed in the sidebar, focus tooltip title, and workspace commands."
-        let nameCard = formSectionCard(
-            icon: "pencil", title: "Workspace title", subtitle: nameSubtitle, contentViews: [nameField])
-        contentStack.addArrangedSubview(nameCard)
-        constrainFormFieldToFillWidth(nameCard, in: contentStack)
-
-        // --- Tooltip card ---
-        let tooltipCard = formSectionCard(
-            icon: "info.circle", title: "Tooltip",
-            subtitle: "Optional context to display when viewing this workspace.",
-            contentViews: [tooltipField])
-        contentStack.addArrangedSubview(tooltipCard)
-        constrainFormFieldToFillWidth(tooltipCard, in: contentStack)
 
         // --- Port definitions card ---
         let wsPortCard = formSectionCard(
@@ -1653,15 +1724,249 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         constrainFormFieldToFillWidth(buttonRow, in: container)
 
         saveButton.tag = storeWorkspaceFields(
-            workspaceID: workspace.id, nameField: nameField, stopView: stopView, portEditor: portEditor, processEditor: processEditor,
-            browserSessionEditor: browserSessionEditor,
-            tooltipField: tooltipField)
+            workspaceID: workspace.id, stopView: stopView, portEditor: portEditor, processEditor: processEditor,
+            browserSessionEditor: browserSessionEditor)
         registerWorkspaceDirtyTracking(
-            nameField: nameField, stopView: stopView, portEditor: portEditor, processEditor: processEditor,
-            browserSessionEditor: browserSessionEditor,
-            tooltipField: tooltipField)
+            stopView: stopView, portEditor: portEditor, processEditor: processEditor,
+            browserSessionEditor: browserSessionEditor)
 
         return insetContainerView(container)
+    }
+
+    private func clearInlineWorkspaceFieldRefs() {
+        teardownInlineWorkspaceOutsideClickMonitor()
+        inlineWorkspaceFieldRefsByTag.removeAll()
+        inlineWorkspaceFieldTagByObjectID.removeAll()
+        inlineWorkspaceLabelTagByObjectID.removeAll()
+    }
+
+    private func isView(_ view: NSView?, descendantOf ancestor: NSView) -> Bool {
+        var current = view
+        while let node = current {
+            if node === ancestor { return true }
+            current = node.superview
+        }
+        return false
+    }
+
+    private func activeInlineWorkspaceEditTags() -> [Int] {
+        inlineWorkspaceFieldRefsByTag.compactMap { key, refs in refs.isEditing ? key : nil }
+    }
+
+    private func cancelInlineWorkspaceMetadataEdit(tag: Int) {
+        endInlineWorkspaceMetadataEdit(tag: tag, keepCurrentValueAsOriginal: false)
+    }
+
+    private func setupInlineWorkspaceOutsideClickMonitorIfNeeded() {
+        guard inlineWorkspaceOutsideClickMonitor == nil else { return }
+        inlineWorkspaceOutsideClickMonitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown]) { [weak self] event in
+            guard let self else { return event }
+            let activeTags = self.activeInlineWorkspaceEditTags()
+            guard !activeTags.isEmpty else { return event }
+            guard let contentView = self.window?.contentView else { return event }
+            let point = contentView.convert(event.locationInWindow, from: nil)
+            let hitView = contentView.hitTest(point)
+            for tag in activeTags {
+                guard let refs = self.inlineWorkspaceFieldRefsByTag[tag] else { continue }
+                if self.isView(hitView, descendantOf: refs.textField) ||
+                    self.isView(hitView, descendantOf: refs.saveButton) ||
+                    self.isView(hitView, descendantOf: refs.cancelButton)
+                {
+                    return event
+                }
+            }
+            for tag in activeTags {
+                self.cancelInlineWorkspaceMetadataEdit(tag: tag)
+            }
+            return event
+        }
+    }
+
+    private func teardownInlineWorkspaceOutsideClickMonitor() {
+        if let inlineWorkspaceOutsideClickMonitor {
+            NSEvent.removeMonitor(inlineWorkspaceOutsideClickMonitor)
+            self.inlineWorkspaceOutsideClickMonitor = nil
+        }
+    }
+
+    private func inlineWorkspaceFieldDisplayValue(_ value: String, field: InlineWorkspaceDetailField) -> String {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        switch field {
+        case .tooltip:
+            return trimmed.isEmpty ? "No tooltip" : trimmed
+        case .title, .branch:
+            return trimmed
+        }
+    }
+
+    private func makeInlineWorkspaceMetadataEditRow(
+        workspaceID: String,
+        field: InlineWorkspaceDetailField,
+        icon: String,
+        labelText: String,
+        value: String,
+        placeholder: String,
+        isEditable: Bool
+    ) -> NSView {
+        let row = NSStackView()
+        row.orientation = .horizontal
+        row.alignment = .centerY
+        row.spacing = 8
+        row.translatesAutoresizingMaskIntoConstraints = false
+        if field == .tooltip, !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            row.wantsLayer = true
+            row.layer?.cornerRadius = 6
+            row.layer?.borderWidth = 1
+            row.layer?.borderColor = sidebarCardBorderColor(isSelected: false).cgColor
+            row.layer?.backgroundColor = sidebarThemeColor(light: (241, 239, 230), dark: (23, 33, 36)).cgColor
+            row.edgeInsets = NSEdgeInsets(top: 6, left: 8, bottom: 6, right: 8)
+        }
+
+        let iconView = NSImageView()
+        iconView.image = NSImage(systemSymbolName: icon, accessibilityDescription: labelText)
+        iconView.contentTintColor = .secondaryLabelColor
+        iconView.setContentHuggingPriority(.required, for: .horizontal)
+
+        let valueLabel = NSTextField(labelWithString: inlineWorkspaceFieldDisplayValue(value, field: field))
+        valueLabel.font = .systemFont(ofSize: 12)
+        valueLabel.textColor = .secondaryLabelColor
+        valueLabel.lineBreakMode = .byTruncatingTail
+        valueLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        valueLabel.toolTip = "Double-click to edit \(labelText.lowercased())."
+
+        let textField = NSTextField(string: value)
+        textField.placeholderString = placeholder
+        textField.delegate = self
+        textField.isEnabled = isEditable
+        textField.isHidden = true
+        textField.font = .systemFont(ofSize: 12)
+        textField.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+
+        let saveButton = NSButton(title: "Save", target: self, action: #selector(saveInlineWorkspaceMetadata(_:)))
+        saveButton.controlSize = .small
+        saveButton.bezelStyle = .rounded
+        saveButton.isHidden = true
+
+        let cancelButton = NSButton(title: "Cancel", target: self, action: #selector(cancelInlineWorkspaceMetadata(_:)))
+        cancelButton.controlSize = .small
+        cancelButton.bezelStyle = .rounded
+        cancelButton.isHidden = true
+
+        row.addArrangedSubview(iconView)
+        row.addArrangedSubview(valueLabel)
+        row.addArrangedSubview(textField)
+        row.addArrangedSubview(saveButton)
+        row.addArrangedSubview(cancelButton)
+
+        if isEditable {
+            let tag = UUID().uuidString.hashValue
+            let refs = InlineWorkspaceDetailFieldRefs(
+                workspaceID: workspaceID,
+                field: field,
+                valueLabel: valueLabel,
+                textField: textField,
+                saveButton: saveButton,
+                cancelButton: cancelButton,
+                originalValue: value,
+                isEditing: false)
+            inlineWorkspaceFieldRefsByTag[tag] = refs
+            inlineWorkspaceFieldTagByObjectID[ObjectIdentifier(textField)] = tag
+            inlineWorkspaceLabelTagByObjectID[ObjectIdentifier(valueLabel)] = tag
+            saveButton.tag = tag
+            cancelButton.tag = tag
+
+            let doubleClick = NSClickGestureRecognizer(target: self, action: #selector(beginInlineWorkspaceMetadataEdit(_:)))
+            doubleClick.numberOfClicksRequired = 2
+            valueLabel.addGestureRecognizer(doubleClick)
+        } else {
+            textField.toolTip = "Default workspace title is fixed."
+        }
+
+        return row
+    }
+
+    private func normalizeInlineWorkspaceMetadataValue(_ value: String, for field: InlineWorkspaceDetailField) -> String {
+        switch field {
+        case .title, .branch:
+            return value.trimmingCharacters(in: .whitespacesAndNewlines)
+        case .tooltip:
+            return value.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+    }
+
+    private func updateInlineWorkspaceMetadataButtons(tag: Int) {
+        guard let refs = inlineWorkspaceFieldRefsByTag[tag] else { return }
+        refs.saveButton.isHidden = !refs.isEditing
+        refs.cancelButton.isHidden = !refs.isEditing
+    }
+
+    @objc private func beginInlineWorkspaceMetadataEdit(_ sender: NSClickGestureRecognizer) {
+        guard let valueLabel = sender.view as? NSTextField else { return }
+        guard let tag = inlineWorkspaceLabelTagByObjectID[ObjectIdentifier(valueLabel)] else { return }
+        for activeTag in activeInlineWorkspaceEditTags() where activeTag != tag {
+            cancelInlineWorkspaceMetadataEdit(tag: activeTag)
+        }
+        guard var refs = inlineWorkspaceFieldRefsByTag[tag] else { return }
+        refs.isEditing = true
+        refs.valueLabel.isHidden = true
+        refs.textField.stringValue = refs.originalValue
+        refs.textField.isHidden = false
+        refs.textField.isEnabled = true
+        setupInlineWorkspaceOutsideClickMonitorIfNeeded()
+        refs.textField.becomeFirstResponder()
+        inlineWorkspaceFieldRefsByTag[tag] = refs
+        updateInlineWorkspaceMetadataButtons(tag: tag)
+    }
+
+    private func endInlineWorkspaceMetadataEdit(tag: Int, keepCurrentValueAsOriginal: Bool) {
+        guard var refs = inlineWorkspaceFieldRefsByTag[tag] else { return }
+        if keepCurrentValueAsOriginal {
+            refs.originalValue = normalizeInlineWorkspaceMetadataValue(refs.textField.stringValue, for: refs.field)
+        } else {
+            refs.textField.stringValue = refs.originalValue
+        }
+        refs.valueLabel.stringValue = inlineWorkspaceFieldDisplayValue(refs.originalValue, field: refs.field)
+        refs.valueLabel.isHidden = false
+        refs.textField.isHidden = true
+        refs.isEditing = false
+        refs.saveButton.isHidden = true
+        refs.cancelButton.isHidden = true
+        inlineWorkspaceFieldRefsByTag[tag] = refs
+        if activeInlineWorkspaceEditTags().isEmpty {
+            teardownInlineWorkspaceOutsideClickMonitor()
+        }
+    }
+
+    @objc private func saveInlineWorkspaceMetadata(_ sender: NSButton) {
+        guard var refs = inlineWorkspaceFieldRefsByTag[sender.tag] else { return }
+        do {
+            switch refs.field {
+            case .title:
+                let title = refs.textField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+                try orchestrator.updateWorkspaceName(workspaceID: refs.workspaceID, name: title)
+                refs.originalValue = title
+            case .branch:
+                let branch = refs.textField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+                try orchestrator.updateWorkspaceMetadata(workspaceID: refs.workspaceID, branch: branch)
+                refs.originalValue = branch
+            case .tooltip:
+                let trimmedTooltip = refs.textField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+                let tooltip = trimmedTooltip.isEmpty ? nil : trimmedTooltip
+                try orchestrator.updateWorkspaceTooltip(workspaceID: refs.workspaceID, tooltip: tooltip)
+                refs.originalValue = tooltip ?? ""
+            }
+            refs.valueLabel.stringValue = inlineWorkspaceFieldDisplayValue(refs.originalValue, field: refs.field)
+            inlineWorkspaceFieldRefsByTag[sender.tag] = refs
+            endInlineWorkspaceMetadataEdit(tag: sender.tag, keepCurrentValueAsOriginal: true)
+            workspaceHasUnsavedChanges = false
+            reloadData()
+        } catch {
+            showError(error)
+        }
+    }
+
+    @objc private func cancelInlineWorkspaceMetadata(_ sender: NSButton) {
+        endInlineWorkspaceMetadataEdit(tag: sender.tag, keepCurrentValueAsOriginal: false)
     }
 
     private func label(text: String) -> NSTextField {
@@ -2201,15 +2506,12 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     }
 
     private func storeWorkspaceFields(
-        workspaceID: String, nameField: NSTextField, stopView: NSTextView, portEditor: PortEditor, processEditor: ProcessEditor,
-        browserSessionEditor: BrowserSessionEditor,
-        tooltipField: NSTextField
+        workspaceID: String, stopView: NSTextView, portEditor: PortEditor, processEditor: ProcessEditor,
+        browserSessionEditor: BrowserSessionEditor
     ) -> Int {
         let id = workspaceID.hashValue
         WorkspaceFieldCache.shared.cache[id] = WorkspaceFieldRefs(
-            workspaceID: workspaceID, nameField: nameField, stopView: stopView, portEditor: portEditor, processEditor: processEditor,
-            browserSessionEditor: browserSessionEditor,
-            tooltipField: tooltipField)
+            workspaceID: workspaceID, stopView: stopView, portEditor: portEditor, processEditor: processEditor, browserSessionEditor: browserSessionEditor)
         return id
     }
 
@@ -2308,6 +2610,26 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         return nil
     }
 
+    private func createWorkspaceWithDefaults(project: ProjectSummary) {
+        do {
+            let name = try orchestrator.suggestedWorkspaceName(projectID: project.id)
+            let targetBranch: String?
+            if project.isGitRepo {
+                let branchOptions = try orchestrator.gitBranchOptions(projectID: project.id)
+                targetBranch = defaultWorkspaceTargetBranch(project: project, branches: branchOptions)
+            } else {
+                targetBranch = nil
+            }
+            let workspace = try orchestrator.createWorkspace(
+                projectID: project.id, name: name, branch: project.isGitRepo ? name : nil, targetBranch: targetBranch)
+            activeAddWorkspaceFormTag = nil
+            selectedProjectID = project.id
+            selectedWorkspaceID = workspace.id
+            lastSelectedRow = -1
+            reloadData()
+        } catch { showError(error) }
+    }
+
     @objc private func saveProject(_ sender: NSButton) {
         commitEditing()
         guard let refs = ProjectFieldCache.shared.cache[sender.tag] else { return }
@@ -2353,8 +2675,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         commitEditing()
         guard let refs = WorkspaceFieldCache.shared.cache[sender.tag] else { return }
         do {
-            let name = refs.nameField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-            try orchestrator.updateWorkspaceName(workspaceID: refs.workspaceID, name: name)
             try orchestrator.updateWorkspaceSettings(workspaceID: refs.workspaceID) { config in
                 config.stopScript = refs.stopView.string.isEmpty ? nil : refs.stopView.string
                 config.ports = refs.portEditor.currentDefinitions()
@@ -2362,8 +2682,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 config.browserSessions = refs.browserSessionEditor.currentSessions()
                 config.statusChecks = refs.processEditor.currentStatusChecks()
             }
-            let tooltip = refs.tooltipField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-            try orchestrator.updateWorkspaceTooltip(workspaceID: refs.workspaceID, tooltip: tooltip.isEmpty ? nil : tooltip)
             workspaceHasUnsavedChanges = false
             reloadData()
         } catch { showError(error) }
@@ -2453,12 +2771,17 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             if let resolvedTooltip {
                 try orchestrator.updateWorkspaceTooltip(workspaceID: workspace.id, tooltip: resolvedTooltip)
             }
+            activeAddWorkspaceFormTag = nil
             reloadData()
         } catch { showError(error) }
     }
 
     public func controlTextDidChange(_ obj: Notification) {
         guard let changedField = obj.object as? NSTextField else { return }
+        if let tag = inlineWorkspaceFieldTagByObjectID[ObjectIdentifier(changedField)] {
+            updateInlineWorkspaceMetadataButtons(tag: tag)
+            return
+        }
         for refs in AddWorkspaceFieldCache.shared.cache.values {
             guard refs.branchField === changedField, let autoNameState = refs.autoNameState else { continue }
             let branchValue = changedField.stringValue
@@ -2478,6 +2801,16 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             }
             return
         }
+    }
+
+    public func control(_ control: NSControl, textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
+        guard let textField = control as? NSTextField else { return false }
+        guard let tag = inlineWorkspaceFieldTagByObjectID[ObjectIdentifier(textField)] else { return false }
+        if commandSelector == #selector(NSResponder.cancelOperation(_:)) {
+            cancelInlineWorkspaceMetadataEdit(tag: tag)
+            return true
+        }
+        return false
     }
 
     @objc private func cancelProjectForm() { refreshSelection() }
@@ -2677,6 +3010,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         shortcutMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
             guard let self else { return event }
             if self.handleShortcutCaptureEvent(event: event) { return nil }
+            if self.handleNewWorkspaceShortcut(event: event) { return nil }
             if self.handleFocusedTextInputShortcut(event: event) { return nil }
             if self.isTextInputFocused() { return event }
             if let openTerminalShortcutSpec, matches(event: event, spec: openTerminalShortcutSpec) {
@@ -2705,6 +3039,21 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             }
             return event
         }
+    }
+
+    private func handleNewWorkspaceShortcut(event: NSEvent) -> Bool {
+        let flags = event.modifierFlags.intersection([.command, .shift, .option, .control])
+        let key = event.charactersIgnoringModifiers?.lowercased() ?? ""
+        guard flags == .command, key == "n" else { return false }
+        if let activeAddWorkspaceFormTag,
+            let refs = AddWorkspaceFieldCache.shared.cache[activeAddWorkspaceFormTag],
+            let project = projects.first(where: { $0.id == refs.projectID })
+        {
+            createWorkspaceWithDefaults(project: project)
+            return true
+        }
+        addWorkspaceFromShortcut()
+        return true
     }
 
     private func handleShortcutCaptureEvent(event: NSEvent) -> Bool {
@@ -3423,18 +3772,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     }
 
     private func registerWorkspaceDirtyTracking(
-        nameField: NSTextField, stopView: NSTextView, portEditor: PortEditor, processEditor: ProcessEditor,
-        browserSessionEditor: BrowserSessionEditor,
-        tooltipField: NSTextField
+        stopView: NSTextView, portEditor: PortEditor, processEditor: ProcessEditor,
+        browserSessionEditor: BrowserSessionEditor
     ) {
         workspaceHasUnsavedChanges = false
-        NotificationCenter.default.addObserver(forName: NSControl.textDidChangeNotification, object: nameField, queue: .main) { [weak self] _ in
-            Task { @MainActor in self?.workspaceHasUnsavedChanges = true }
-        }
         NotificationCenter.default.addObserver(forName: NSText.didChangeNotification, object: stopView, queue: .main) { [weak self] _ in
-            Task { @MainActor in self?.workspaceHasUnsavedChanges = true }
-        }
-        NotificationCenter.default.addObserver(forName: NSControl.textDidChangeNotification, object: tooltipField, queue: .main) { [weak self] _ in
             Task { @MainActor in self?.workspaceHasUnsavedChanges = true }
         }
         portEditor.onDirty = { [weak self] in Task { @MainActor in self?.workspaceHasUnsavedChanges = true } }
@@ -3470,8 +3812,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let tag = selectedWorkspaceID.hashValue
         guard let refs = WorkspaceFieldCache.shared.cache[tag] else { return true }
         do {
-            let name = refs.nameField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-            try orchestrator.updateWorkspaceName(workspaceID: refs.workspaceID, name: name)
             try orchestrator.updateWorkspaceSettings(workspaceID: refs.workspaceID) { config in
                 config.stopScript = refs.stopView.string.isEmpty ? nil : refs.stopView.string
                 config.ports = refs.portEditor.currentDefinitions()
@@ -3479,8 +3819,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 config.browserSessions = refs.browserSessionEditor.currentSessions()
                 config.statusChecks = refs.processEditor.currentStatusChecks()
             }
-            let tooltip = refs.tooltipField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-            try orchestrator.updateWorkspaceTooltip(workspaceID: refs.workspaceID, tooltip: tooltip.isEmpty ? nil : tooltip)
             workspaceHasUnsavedChanges = false
             reloadData()
             return true
