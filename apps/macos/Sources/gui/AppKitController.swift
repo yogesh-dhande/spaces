@@ -3747,11 +3747,13 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let cardView = NSView()
         cardView.translatesAutoresizingMaskIntoConstraints = false
         cardView.wantsLayer = true
+        cardView.layer?.cornerRadius = 10
+        cardView.layer?.borderWidth = 1
+        cardView.layer?.borderColor = sidebarCardBorderColor(isSelected: isSelected).cgColor
         if isSelected {
-            cardView.layer?.cornerRadius = 10
-            cardView.layer?.borderWidth = 1
-            cardView.layer?.borderColor = sidebarCardBorderColor(isSelected: true).cgColor
             cardView.layer?.backgroundColor = sidebarSelectedCardBackgroundColor().cgColor
+        } else {
+            cardView.layer?.backgroundColor = sidebarCardBackgroundColor(isArchived: workspace.isArchived).cgColor
         }
 
         let contentStack = NSStackView()
@@ -3876,7 +3878,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         return sidebarThemeColor(light: (240, 238, 230), dark: (24, 36, 39), alpha: alpha)
     }
 
-    private func sidebarSelectedCardBackgroundColor() -> NSColor { sidebarCardBackgroundColor(isArchived: false) }
+    private func sidebarSelectedCardBackgroundColor() -> NSColor {
+        // Stronger selected tint so active workspace is obvious at a glance.
+        sidebarThemeColor(light: (217, 236, 234), dark: (27, 57, 60), alpha: 0.92)
+    }
 
     private func sidebarCardBorderColor(isSelected: Bool) -> NSColor {
         if isSelected { return sidebarThemeColor(light: (13, 95, 93), dark: (61, 198, 184), alpha: 0.50) }
@@ -3907,7 +3912,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
     public func outlineViewSelectionDidChange(_ notification: Notification) {
         let row = outlineView.selectedRow
-        let previousRow = lastSelectedRow
+        let previousWorkspaceID = selectedWorkspaceID
         if projectHasUnsavedChanges || workspaceHasUnsavedChanges {
             let response = unsavedChangesPrompt()
             if response == .alertFirstButtonReturn {
@@ -3928,7 +3933,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             selectedWorkspaceID = nil
             showingSettings = false
             showPlaceholder()
-            refreshSidebarSelectionRows(previousRow: previousRow, currentRow: row)
+            refreshSidebarSelectionRows(previousWorkspaceID: previousWorkspaceID, currentWorkspaceID: selectedWorkspaceID)
             return
         }
         lastSelectedRow = row
@@ -3944,15 +3949,23 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             showingSettings = false
             showWorkspaceDetail(project: project, workspace: workspace)
         }
-        refreshSidebarSelectionRows(previousRow: previousRow, currentRow: row)
+        refreshSidebarSelectionRows(previousWorkspaceID: previousWorkspaceID, currentWorkspaceID: selectedWorkspaceID)
     }
 
-    private func refreshSidebarSelectionRows(previousRow: Int, currentRow: Int) {
+    private func refreshSidebarSelectionRows(previousWorkspaceID: String?, currentWorkspaceID: String?) {
         var rowsToReload = IndexSet()
-        if previousRow >= 0, previousRow < outlineView.numberOfRows { rowsToReload.insert(previousRow) }
-        if currentRow >= 0, currentRow < outlineView.numberOfRows { rowsToReload.insert(currentRow) }
+        if let previousWorkspaceID, let previousRow = rowIndex(forWorkspaceID: previousWorkspaceID) { rowsToReload.insert(previousRow) }
+        if let currentWorkspaceID, let currentRow = rowIndex(forWorkspaceID: currentWorkspaceID) { rowsToReload.insert(currentRow) }
         guard !rowsToReload.isEmpty else { return }
         outlineView.reloadData(forRowIndexes: rowsToReload, columnIndexes: IndexSet(integer: 0))
+    }
+
+    private func rowIndex(forWorkspaceID workspaceID: String) -> Int? {
+        for row in 0..<outlineView.numberOfRows {
+            guard let item = outlineView.item(atRow: row) as? OutlineItem else { continue }
+            if case .workspace(_, let workspace) = item, workspace.id == workspaceID { return row }
+        }
+        return nil
     }
 
     public func splitViewDidResizeSubviews(_ notification: Notification) {}
