@@ -45,7 +45,7 @@ export default function WorkspacesDocsPage() {
           overrides that do not affect the project templates.
         </p>
         <ul className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
-          <li>• Rename non-default workspaces after creation from Workspace Settings or <code>mx workspace rename</code>.</li>
+          <li>• Update workspace metadata after creation from Workspace Settings or <code>mx workspace update</code>.</li>
           <li>• Add, remove, or rename port definitions per workspace.</li>
           <li>• Edit process commands; changes restart the process immediately if the workspace is running.</li>
           <li>• Add browser sessions that open immediately when the workspace is running.</li>

@@ -251,7 +251,7 @@ struct CLI {
         guard args.count >= 3 else {
             throw NSError(
                 domain: "mx.cli", code: 2,
-                userInfo: [NSLocalizedDescriptionKey: "Missing workspace action. Use: workspace list|create|import|discover|rename|launch|restart|up|stop|archive|focus|tooltip"])
+                userInfo: [NSLocalizedDescriptionKey: "Missing workspace action. Use: workspace list|create|import|discover|update|launch|restart|up|stop|archive|focus"])
         }
         switch args[2] {
         case "list":
@@ -287,19 +287,61 @@ struct CLI {
             print("Created workspace \(workspace.name)\t\(workspace.dir)")
         case "import":
             let dir = optionalValue(for: "--dir") ?? FileManager.default.currentDirectoryPath
-            let name = optionalValue(for: "--name")
-            let workspace = try orchestrator.createWorkspaceFromWorktree(worktreePath: dir, name: name)
+            let title = optionalValue(for: "--title") ?? optionalValue(for: "--name")
+            let tooltip = optionalValue(for: "--tooltip")
+            var workspace = try orchestrator.createWorkspaceFromWorktree(worktreePath: dir, name: title)
+            if let tooltip {
+                try orchestrator.updateWorkspaceMetadata(workspaceID: workspace.id, tooltip: .some(tooltip))
+                workspace = try orchestrator.store.workspace(id: workspace.id)!
+            }
             print("Created workspace \(workspace.name)\t\(workspace.dir)")
         case "discover":
             try runDiscover(orchestrator: orchestrator)
-        case "rename":
+        case "update":
             let id = try workspaceID(orchestrator: orchestrator)
-            let name = try value(for: "--name")
-            try orchestrator.updateWorkspaceName(workspaceID: id, name: name)
+            let title = optionalValue(for: "--title")
+            let branch = optionalValue(for: "--branch")
+            let directoryNameFlag = optionalValue(for: "--directory-name")
+            let dirnameFlag = optionalValue(for: "--dirname")
+            let dirNameFlag = optionalValue(for: "--dir-name")
+            let providedDirectoryNameFlags = [directoryNameFlag, dirnameFlag, dirNameFlag].compactMap { $0 }
+            if providedDirectoryNameFlags.count > 1 {
+                throw NSError(
+                    domain: "mx.cli", code: 2,
+                    userInfo: [NSLocalizedDescriptionKey: "Use only one of --directory-name <name>, --dirname <name>, or --dir-name <name>."])
+            }
+            let directoryName = directoryNameFlag ?? dirnameFlag ?? dirNameFlag
+            let shouldClearTooltip = args.contains("--clear-tooltip") || args.contains("--clear")
+            let tooltipValue = optionalValueAllowingMissingValue(for: "--tooltip")
+            if args.contains("--tooltip"), tooltipValue == nil {
+                throw NSError(
+                    domain: "mx.cli", code: 2,
+                    userInfo: [NSLocalizedDescriptionKey: "Missing required value for --tooltip"])
+            }
+            if shouldClearTooltip, args.contains("--tooltip") {
+                throw NSError(
+                    domain: "mx.cli", code: 2,
+                    userInfo: [NSLocalizedDescriptionKey: "Use either --tooltip <text> or --clear-tooltip, but not both."])
+            }
+            let tooltipUpdate: String??
+            if shouldClearTooltip {
+                tooltipUpdate = .some(nil)
+            } else if let tooltipValue {
+                tooltipUpdate = .some(tooltipValue)
+            } else {
+                tooltipUpdate = nil
+            }
+            guard title != nil || branch != nil || directoryName != nil || tooltipUpdate != nil else {
+                throw NSError(
+                    domain: "mx.cli", code: 2,
+                    userInfo: [NSLocalizedDescriptionKey: "No updates provided. Use one or more of --title, --branch, --directory-name/--dirname/--dir-name, --tooltip, or --clear-tooltip."])
+            }
+            try orchestrator.updateWorkspaceMetadata(
+                workspaceID: id, title: title, branch: branch, directoryName: directoryName, tooltip: tooltipUpdate)
             guard let updated = try orchestrator.store.workspace(id: id) else {
                 throw NSError(domain: "mx.cli", code: 2, userInfo: [NSLocalizedDescriptionKey: "Workspace not found for id \(id)"])
             }
-            print("Renamed workspace \(id)\t\(updated.name)")
+            print("Updated workspace \(id)\t\(updated.name)")
         case "launch":
             let id = try workspaceID(orchestrator: orchestrator)
             try orchestrator.launchWorkspace(workspaceID: id)
@@ -345,22 +387,6 @@ struct CLI {
             } else {
                 try orchestrator.focusWorkspace(workspaceID: id)
                 print("Focused workspace \(id)")
-            }
-        case "tooltip":
-            let id = try workspaceID(orchestrator: orchestrator)
-            if let tooltip = optionalValue(for: "--tooltip") {
-                try orchestrator.updateWorkspaceTooltip(workspaceID: id, tooltip: tooltip)
-                print("Updated tooltip for workspace \(id)")
-            } else if args.contains("--clear") {
-                try orchestrator.updateWorkspaceTooltip(workspaceID: id, tooltip: nil)
-                print("Cleared tooltip for workspace \(id)")
-            } else {
-                let workspace = try orchestrator.store.workspace(id: id)!
-                if let tooltip = workspace.tooltip {
-                    print(tooltip)
-                } else {
-                    print("(no tooltip set)")
-                }
             }
         default: throw NSError(domain: "mx.cli", code: 2, userInfo: [NSLocalizedDescriptionKey: "Unknown workspace action: \(args[2])"])
         }
@@ -687,16 +713,15 @@ struct CLI {
 
               mx workspace list --project-dir <path> [--all]
               mx workspace create --project-dir <path> --name <name> --branch <branch> [--target-branch <branch>] [--directory-name <name>] [--tooltip <text>]
-              mx workspace import [--dir <path>] [--name <name>]
+              mx workspace import [--dir <path>] [--title <title>] [--tooltip <text>]
               mx workspace discover [--project-dir <path>]
-              mx workspace rename [--dir <path>] --name <name>
+              mx workspace update [--dir <path>] [--title <title>] [--branch <branch>] [--directory-name <name>|--dirname <name>|--dir-name <name>] [--tooltip <text>|--clear-tooltip]
               mx workspace launch [--dir <path>]
               mx workspace restart [--dir <path>]
               mx workspace up [--dir <path>] [--restart] [--tooltip [<text>]]
               mx workspace stop [--dir <path>]
               mx workspace archive [--dir <path>]
               mx workspace focus [--dir <path>] [--window <index>]
-              mx workspace tooltip [--dir <path>] [--tooltip <text>] [--clear]
 
             Notes:
               - All settings are stored in ~/.muxy/muxy.db.
@@ -713,7 +738,8 @@ struct CLI {
               - If a workspace directory is missing during stop, muxy still stops the workspace, skips `stop_script`, and prints a note.
               - For git projects, `workspace create` requires `--branch`; `--target-branch` defaults to main/master if available.
               - `workspace create --directory-name` (or `--dirname`) overrides the auto-generated git worktree directory name; allowed characters are letters, numbers, '-', and '_', with no spaces.
-              - `workspace rename` updates the workspace display name; default workspaces keep their initial fixed name (`default` for directory projects, `main`/`master` for git-url imports).
+              - `workspace update` updates workspace metadata (`--title`, `--branch`, `--directory-name`/`--dirname`/`--dir-name`, `--tooltip`).
+              - Default workspace title cannot be changed.
               - Archiving a non-git workspace never deletes the project directory.
               - Workspaces reserve PORT0-PORT9 from the configured port range.
               - GUI window focus shortcuts: cmd+1 through cmd+9 (when GUI is focused).

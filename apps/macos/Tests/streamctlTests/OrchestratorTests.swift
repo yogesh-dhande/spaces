@@ -951,6 +951,43 @@ final class OrchestratorTests: XCTestCase {
         }
     }
 
+    // Tests workspace metadata update can change title, branch, directory name, and tooltip by arranging representative inputs and asserting the expected result.
+    func testUpdateWorkspaceMetadataUpdatesTitleBranchDirectoryNameAndTooltip() throws {
+        let repo = try makeTempGitRepo(name: "workspace-update-metadata")
+        let root = try makeTempDirectory()
+        let workspacesRoot = root.appendingPathComponent("workspaces", isDirectory: true)
+        let store = try makeTemporaryStore()
+        let orchestrator = MuxyOrchestrator(store: store, workspacesRootDirectory: workspacesRoot)
+        let project = try orchestrator.addProject(dir: repo.path)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature", branch: "feature-start")
+
+        try orchestrator.updateWorkspaceMetadata(
+            workspaceID: workspace.id, title: "feature-auth", branch: "feature-auth", directoryName: "feature_auth", tooltip: .some("Reviewing OAuth flow"))
+
+        let updated = try XCTUnwrap(store.workspace(id: workspace.id))
+        XCTAssertEqual(updated.name, "feature-auth")
+        XCTAssertEqual(updated.branch, "feature-auth")
+        XCTAssertEqual(updated.dirname, "feature_auth")
+        XCTAssertEqual(updated.tooltip, "Reviewing OAuth flow")
+    }
+
+    // Tests workspace metadata update can clear tooltip by arranging representative inputs and asserting the expected result.
+    func testUpdateWorkspaceMetadataClearsTooltip() throws {
+        let root = try makeTempDirectory()
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let store = try makeTemporaryStore()
+        let orchestrator = MuxyOrchestrator(store: store)
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
+        try orchestrator.updateWorkspaceMetadata(workspaceID: workspace.id, tooltip: .some("Investigating timeout regression"))
+
+        try orchestrator.updateWorkspaceMetadata(workspaceID: workspace.id, tooltip: .some(nil))
+
+        let updated = try XCTUnwrap(store.workspace(id: workspace.id))
+        XCTAssertNil(updated.tooltip)
+    }
+
     // Tests open workspace editor throws when editor is not configured by arranging representative inputs and asserting the expected result.
     func testOpenWorkspaceEditorThrowsWhenEditorIsNotConfigured() throws {
         let (orchestrator, _, _, workspace, _) = try makeOrchestratorWithWorkspace()

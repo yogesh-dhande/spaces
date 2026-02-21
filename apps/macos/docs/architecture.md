@@ -102,13 +102,13 @@ Workspace settings:
 Workspace identification:
 - Workspaces are uniquely identified by their directory path (`dir` field).
 - CLI commands accept `--dir <path>` (defaults to current directory) to identify workspaces.
-- `mx workspace rename [--dir <path>] --name <name>` updates non-default workspace display names.
+- `mx workspace update [--dir <path>] [--title <title>] [--branch <branch>] [--directory-name <name>|--dirname <name>|--dir-name <name>] [--tooltip <text>|--clear-tooltip]` updates workspace metadata.
 - `mx workspace up [--dir <path>] [--restart] [--tooltip [<text>]]` ensures a workspace is running and focused.
 - Default `workspace up` behavior: launch when stopped; if runtime is already present, do nothing (no restart).
 - `workspace up --restart` behavior: if runtime is already present, run stop then launch; if stopped, launch.
 - `workspace up --tooltip [<text>]` optionally updates tooltip text when provided and displays the tooltip overlay after focus.
 - `mx workspace focus` focuses the workspace window set; `--window <index>` focuses a specific tracked window.
-- `mx workspace import` registers existing git worktrees as Muxy workspaces by inferring project, branch, and name from the worktree path.
+- `mx workspace import [--dir <path>] [--title <title>] [--tooltip <text>]` registers existing git worktrees as Muxy workspaces by inferring project, branch, and title from the worktree path when a title is not provided.
 - `mx discover` (alias: `mx workspace discover`) automatically discovers and registers all untracked worktrees for registered projects.
 - Discovery-created workspaces run the same setup-script flow as any other new workspace.
 - Discovery validates candidate worktrees before import (`dir` exists and is a directory, path is a git worktree, and the git common-dir resolves to the same registered project root).

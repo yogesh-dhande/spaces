@@ -250,7 +250,7 @@
             - with `--restart`: if workspace is running or has runtime indicators, perform restart (stop then launch)
         - `workspace up` always focuses the workspace after launch/no-op/restart completes
         - `workspace up --tooltip [text]` optionally updates tooltip text (when text is provided) and shows tooltip overlay after focus
-        - `workspace focus` no longer accepts `--tooltip`; use `workspace tooltip` (persist-only) or `workspace up --tooltip ...` (run+focus+overlay)
+        - `workspace focus` no longer accepts `--tooltip`; use `workspace update --tooltip ...` (persist-only) or `workspace up --tooltip ...` (run+focus+overlay)
         - allocate and reserve ports for the workspace based on named port definitions. pass those as env variables to each process that is started
         - port allocation happens before setup script so named port env vars are available in setup scripts, stop scripts, process commands, and status check commands
         - each process also receives the following env vars

@@ -180,6 +180,77 @@ public final class MuxyOrchestrator {
         try store.updateWorkspaceName(id: workspace.id, name: trimmedName)
     }
 
+    public func updateWorkspaceMetadata(
+        workspaceID: String, title: String? = nil, branch: String? = nil, directoryName: String? = nil, tooltip: String?? = nil
+    ) throws {
+        let (project, workspace) = try resolveWorkspace(id: workspaceID)
+        var updatedName = workspace.name
+        var updatedBranch = workspace.branch
+        var updatedDirname = workspace.dirname
+        var updatedTooltip = workspace.tooltip
+        var didChange = false
+
+        if let title {
+            let trimmedTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmedTitle.isEmpty else { throw MuxyError.invalidArgument(message: "Workspace title is required.") }
+            guard !workspace.isDefault || trimmedTitle == workspace.name else {
+                throw MuxyError.invalidArgument(message: "Default workspace name cannot be changed.")
+            }
+            if trimmedTitle != workspace.name {
+                if let existing = try store.workspace(projectID: workspace.projectID, name: trimmedTitle), existing.id != workspace.id {
+                    throw MuxyError.workspaceAlreadyExists(project: project.name, workspace: trimmedTitle)
+                }
+                updatedName = trimmedTitle
+                didChange = true
+            }
+        }
+
+        if let branch {
+            guard project.isGitRepo else {
+                throw MuxyError.invalidArgument(message: "Branch can only be updated for git projects.")
+            }
+            let trimmedBranch = branch.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmedBranch.isEmpty else { throw MuxyError.invalidArgument(message: "Workspace branch is required.") }
+            if trimmedBranch != workspace.branch {
+                updatedBranch = trimmedBranch
+                didChange = true
+            }
+        }
+
+        if let directoryName {
+            guard project.isGitRepo else {
+                throw MuxyError.invalidArgument(message: "Directory name can only be updated for git projects.")
+            }
+            let trimmedDirectoryName = directoryName.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmedDirectoryName.isEmpty else {
+                throw MuxyError.invalidArgument(message: "Workspace directory name cannot be empty.")
+            }
+            try validateWorkspaceDirname(trimmedDirectoryName)
+            let usedDirnames = try usedWorkspaceDirnames(project: project, excludingDirname: workspace.dirname)
+            guard !usedDirnames.contains(trimmedDirectoryName) else {
+                throw MuxyError.invalidArgument(message: "Workspace directory name is already in use: \(trimmedDirectoryName)")
+            }
+            if trimmedDirectoryName != workspace.dirname {
+                updatedDirname = trimmedDirectoryName
+                didChange = true
+            }
+        }
+
+        if let tooltip {
+            if tooltip != workspace.tooltip {
+                updatedTooltip = tooltip
+                didChange = true
+            }
+        }
+
+        guard didChange else { return }
+        let updatedWorkspace = WorkspaceRecord(
+            id: workspace.id, projectID: workspace.projectID, name: updatedName, dir: workspace.dir, dirname: updatedDirname, branch: updatedBranch,
+            targetBranch: workspace.targetBranch, isDefault: workspace.isDefault, isArchived: workspace.isArchived, isRunning: workspace.isRunning,
+            lastLaunchedAt: workspace.lastLaunchedAt, tooltip: updatedTooltip)
+        try store.upsert(workspace: updatedWorkspace)
+    }
+
     public func addProject(dir: String) throws -> ProjectRecord {
         let normalizedDir = normalizePath(dir)
         var isDir: ObjCBool = false

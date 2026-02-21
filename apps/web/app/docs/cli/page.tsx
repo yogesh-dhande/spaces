@@ -270,11 +270,11 @@ mx workspace import
 # Import workspace from specific worktree path
 mx workspace import --dir /path/to/worktree
 
-# Import workspace with custom name
-mx workspace import --dir /path/to/worktree --name "my-workspace"`}</CodeBlock>
+# Import workspace with custom title and tooltip
+mx workspace import --dir /path/to/worktree --title "my-workspace" --tooltip "Working on OAuth integration"`}</CodeBlock>
         <p className="mt-2 text-sm leading-7 text-foreground-soft">
           Registers an existing git worktree as a Muxy workspace. The project must already be
-          registered. Muxy infers the workspace name from the branch name if not provided.
+          registered. Muxy infers the workspace title from the branch name if not provided.
           Port numbers are allocated and the <Cmd>setup_script</Cmd> runs immediately.
         </p>
 
@@ -291,15 +291,19 @@ mx workspace discover --project-dir /path/to/repo`}</CodeBlock>
           manual git worktree operations.
         </p>
 
-        <h3 className="mt-5 text-base font-semibold">Rename a workspace</h3>
-        <CodeBlock>{`# Rename from current workspace directory
-mx workspace rename --name "feat-auth-v2"
+        <h3 className="mt-5 text-base font-semibold">Update workspace metadata</h3>
+        <CodeBlock>{`# Update title from current workspace directory
+mx workspace update --title "feat-auth-v2"
 
-# Rename a specific workspace directory
-mx workspace rename --dir /path/to/workspace --name "fix-login-timeout"`}</CodeBlock>
+# Update branch and directory name
+mx workspace update --dir /path/to/workspace --branch fix-login-timeout --directory-name fix_login_timeout
+
+# Set or clear tooltip text
+mx workspace update --dir /path/to/workspace --tooltip "Working on OAuth integration"
+mx workspace update --dir /path/to/workspace --clear-tooltip`}</CodeBlock>
         <p className="mt-2 text-sm leading-7 text-foreground-soft">
-          Updates the workspace display name used in the sidebar, tooltip title, and workspace list output.
-          Default workspaces keep the fixed name <Cmd>default</Cmd>.
+          Updates workspace metadata without launching/stopping runtime: title, branch, directory-name metadata, and tooltip text.
+          Default workspaces keep their fixed title.
         </p>
 
         <h3 className="mt-5 text-base font-semibold">Launch a workspace</h3>
@@ -372,22 +376,7 @@ mx workspace focus --dir /path/to/workspace
 mx workspace focus --dir /path/to/workspace --window 2`}</CodeBlock>
         <p className="mt-2 text-sm leading-7 text-foreground-soft">
           Brings the workspace windows to the front so the developer can immediately resume work.
-          Tooltip updates are managed with <Cmd>mx workspace tooltip</Cmd> or <Cmd>mx workspace up --tooltip ...</Cmd>.
-        </p>
-
-        <h3 className="mt-5 text-base font-semibold">Manage workspace tooltip</h3>
-        <CodeBlock>{`# View current tooltip
-mx workspace tooltip --dir /path/to/workspace
-
-# Set or update tooltip
-mx workspace tooltip --dir /path/to/workspace --tooltip "Working on OAuth integration"
-
-# Clear tooltip
-mx workspace tooltip --dir /path/to/workspace --clear`}</CodeBlock>
-        <p className="mt-2 text-sm leading-7 text-foreground-soft">
-          Tooltips provide context about what you're working on. Press <Cmd>cmd+shift+i</Cmd> when
-          any workspace window is focused to display the tooltip as an overlay on the current screen.
-          Press the hotkey again to hide it.
+          Tooltip updates are managed with <Cmd>mx workspace update --tooltip ...</Cmd> or <Cmd>mx workspace up --tooltip ...</Cmd>.
         </p>
       </article>
 
