@@ -280,15 +280,12 @@ mx workspace import --dir /path/to/worktree --title "my-workspace" --tooltip "Wo
 
         <h3 className="mt-5 text-base font-semibold">Discover and auto-create workspaces</h3>
         <CodeBlock>{`# Discover all worktrees across all registered projects
-mx workspace discover
-
-# Discover worktrees for a specific project only
-mx workspace discover --project-dir /path/to/repo`}</CodeBlock>
+mx discover`}</CodeBlock>
         <p className="mt-2 text-sm leading-7 text-foreground-soft">
-          Reconciles git worktrees for registered projects: creates workspaces for newly discovered
-          worktrees, archives non-default workspaces whose worktrees are no longer valid, and refreshes
-          stored branch names from disk. Useful for bulk-importing existing worktrees or syncing after
-          manual git worktree operations.
+          Reconciles git worktrees for all registered projects: creates workspaces for newly
+          discovered worktrees, archives non-default workspaces whose worktrees are no longer
+          valid, and refreshes stored branch names from disk. Useful for bulk-importing existing
+          worktrees or syncing after manual git worktree operations.
         </p>
 
         <h3 className="mt-5 text-base font-semibold">Update workspace metadata</h3>

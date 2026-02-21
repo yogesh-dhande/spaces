@@ -251,7 +251,7 @@ struct CLI {
         guard args.count >= 3 else {
             throw NSError(
                 domain: "mx.cli", code: 2,
-                userInfo: [NSLocalizedDescriptionKey: "Missing workspace action. Use: workspace list|create|import|discover|update|launch|restart|up|stop|archive|focus"])
+                userInfo: [NSLocalizedDescriptionKey: "Missing workspace action. Use: workspace list|create|import|update|launch|restart|up|stop|archive|focus"])
         }
         switch args[2] {
         case "list":
@@ -295,8 +295,6 @@ struct CLI {
                 workspace = try orchestrator.store.workspace(id: workspace.id)!
             }
             print("Created workspace \(workspace.name)\t\(workspace.dir)")
-        case "discover":
-            try runDiscover(orchestrator: orchestrator)
         case "update":
             let id = try workspaceID(orchestrator: orchestrator)
             let title = optionalValue(for: "--title")
@@ -404,34 +402,20 @@ struct CLI {
     }
 
     private func runDiscover(orchestrator: MuxyOrchestrator) throws {
-        let projectDir = optionalValue(for: "--project-dir")
-        let projectID = projectDir.map { normalizePath($0) }
-        let watch = args.contains("--watch")
-        let intervalSeconds = try discoverIntervalSeconds()
-
-        repeat {
-            let workspaces = try orchestrator.scanAndCreateWorkspacesFromWorktrees(projectID: projectID)
-            if workspaces.isEmpty {
-                print("No new workspaces created")
-            } else {
-                print("Created \(workspaces.count) workspace(s):")
-                for ws in workspaces {
-                    print("\(ws.name)\t\(ws.dir)")
-                }
-            }
-            guard watch else { break }
-            Thread.sleep(forTimeInterval: TimeInterval(intervalSeconds))
-        } while true
-    }
-
-    private func discoverIntervalSeconds() throws -> Int {
-        guard let value = optionalValue(for: "--interval") else { return Int(PollingConstants.worktreeDiscoveryInterval) }
-        guard let seconds = Int(value), seconds > 0 else {
+        guard args.count == 2 else {
             throw NSError(
                 domain: "mx.cli", code: 2,
-                userInfo: [NSLocalizedDescriptionKey: "Invalid --interval '\(value)'. Must be a positive integer (seconds)."])
+                userInfo: [NSLocalizedDescriptionKey: "`mx discover` does not take any flags or arguments."])
         }
-        return seconds
+        let workspaces = try orchestrator.scanAndCreateWorkspacesFromWorktrees(projectID: nil)
+        if workspaces.isEmpty {
+            print("No new workspaces created")
+        } else {
+            print("Created \(workspaces.count) workspace(s):")
+            for ws in workspaces {
+                print("\(ws.name)\t\(ws.dir)")
+            }
+        }
     }
 
     private func runSettingsSubcommand(orchestrator: MuxyOrchestrator) throws {
@@ -651,7 +635,7 @@ struct CLI {
 
             Usage:
               mx version
-              mx discover [--project-dir <path>] [--watch] [--interval <seconds>]
+              mx discover
 
               mx settings get --editor
               mx settings get --port-range
@@ -714,7 +698,6 @@ struct CLI {
               mx workspace list --project-dir <path> [--all]
               mx workspace create --project-dir <path> --name <name> --branch <branch> [--target-branch <branch>] [--directory-name <name>] [--tooltip <text>]
               mx workspace import [--dir <path>] [--title <title>] [--tooltip <text>]
-              mx workspace discover [--project-dir <path>]
               mx workspace update [--dir <path>] [--title <title>] [--branch <branch>] [--directory-name <name>|--dirname <name>|--dir-name <name>] [--tooltip <text>|--clear-tooltip]
               mx workspace launch [--dir <path>]
               mx workspace restart [--dir <path>]
@@ -731,8 +714,7 @@ struct CLI {
               - Removing a project deletes only muxy state unless it is an muxy-cloned git repo under ~/muxy/repos (or legacy ~/muxy/projects); those managed repository directories are deleted.
               - Workspaces snapshot project processes, status checks, and browser sessions into the runtime DB on creation.
               - Project `setup_script` runs when a workspace is created/revived.
-              - `mx discover` (and `mx workspace discover`) reconciles git worktrees by creating missing workspaces, archiving workspaces whose worktrees are no longer valid, refreshing stored branch names from disk, and running the project `setup_script` for each newly created workspace.
-              - Add `--watch` to `mx discover` to keep scanning periodically (default interval: \(Int(PollingConstants.worktreeDiscoveryInterval)) seconds; override with `--interval`).
+              - `mx discover` reconciles git worktrees across all registered projects by creating missing workspaces, archiving workspaces whose worktrees are no longer valid, refreshing stored branch names from disk, and running the project `setup_script` for each newly created workspace.
               - Project/workspace `stop_script` runs whenever a workspace is stopped (including restart/archive stop phase), after automatic process termination attempts.
               - `workspace up` ensures a workspace is running and focused: it launches when stopped, does nothing when already running/stale by default, and with `--restart` runs stop then launch before focusing.
               - If a workspace directory is missing during stop, muxy still stops the workspace, skips `stop_script`, and prints a note.

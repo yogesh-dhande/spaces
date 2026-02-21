@@ -140,8 +140,7 @@ mx project browser-session list --dir /path/to/repo
 mx project browser-session remove --dir /path/to/repo --url http://localhost:3000
 
 mx workspace list --project-dir /path/to/repo --all
-mx discover [--project-dir /path/to/repo]
-mx discover --watch [--interval 30]
+mx discover
 mx workspace create --project-dir /path/to/repo --name feature-x [--branch feature-branch] [--target-branch main] [--directory-name feature_branch]
 mx workspace import [--dir /path/to/worktree] [--title feature-y] [--tooltip "Working on auth"]
 mx workspace update --dir /path/to/workspace [--title feature-y] [--branch feature-y] [--directory-name feature_y] [--tooltip "Working on auth" | --clear-tooltip]
@@ -160,7 +159,7 @@ For git projects, `workspace create` requires `--branch`; `--target-branch` defa
 `workspace up` is idempotent: it launches a stopped workspace, and otherwise does nothing by default.
 Add `--restart` to force stop+launch when runtime state is already present.
 `workspace up` always focuses the workspace, and `--tooltip [text]` displays the tooltip overlay after focus (updating tooltip text when text is provided).
-`mx discover` is equivalent to `mx workspace discover`; each scan creates missing workspaces, archives workspaces whose worktrees are no longer valid, and refreshes workspace branch names from disk. Add `--watch` to keep scanning periodically.
+`mx discover` scans all registered git projects and reconciles worktrees by creating missing workspaces, archiving workspaces whose worktrees are no longer valid, and refreshing workspace branch names from disk.
 When tooltip overlay is shown for focused workspace, it always displays workspace title as the title; when tooltip text is set, it is shown as body content.
 
 Project/workspace removal behavior:

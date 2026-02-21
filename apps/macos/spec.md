@@ -203,7 +203,7 @@
     - Run a periodic background worktree discovery pass for all git projects
         - detect valid git worktrees that do not yet have muxy workspaces
             - valid means: directory exists, path resolves as a git worktree, and git common-dir maps to the registered project
-        - create a workspace for each newly discovered worktree (same behavior as `mx discover`)
+        - create a workspace for each newly discovered worktree (same behavior as no-argument `mx discover`, which scans all projects)
         - archive non-default workspaces whose directories are no longer valid git worktrees for the project
         - refresh stored workspace branch names from the current worktree branch metadata on disk
         - run the project setup script for each workspace created by discovery
