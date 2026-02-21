@@ -1084,7 +1084,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         // --- Fields ---
         let suggestedName = (try? orchestrator.suggestedWorkspaceName(projectID: project.id)) ?? ""
         let nameField = NSTextField(string: project.isGitRepo ? "" : suggestedName)
-        nameField.placeholderString = "workspace name"
+        nameField.placeholderString = "workspace title"
         let targetBranchField = NSComboBox()
         targetBranchField.usesDataSource = false
         targetBranchField.completes = true
@@ -1120,8 +1120,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             constrainFormFieldToFillWidth(branchField, in: contentStack)
         }
 
-        contentStack.addArrangedSubview(label(text: "Workspace name"))
-        contentStack.addArrangedSubview(helpTextLabel("Display name for this workspace in the sidebar."))
+        contentStack.addArrangedSubview(label(text: "Workspace title"))
+        contentStack.addArrangedSubview(helpTextLabel("Display title for this workspace in the sidebar."))
         contentStack.addArrangedSubview(nameField)
         constrainFormFieldToFillWidth(nameField, in: contentStack)
 
@@ -1139,7 +1139,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
         let card = formSectionCard(
             icon: "plus.rectangle.on.folder", title: "Workspace",
-            subtitle: project.isGitRepo ? "Configure branch, name, and directory for your new workspace." : "Name your new workspace.",
+            subtitle: project.isGitRepo ? "Configure branch, title, and directory for your new workspace." : "Title your new workspace.",
             contentViews: [contentStack])
         stack.addArrangedSubview(card)
         constrainFormFieldToFillWidth(card, in: stack)
@@ -1536,7 +1536,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let stopScroll = scrollableTextView(stopView, height: 90)
         let browserSessionEditor = BrowserSessionEditor()
         let nameField = NSTextField(string: workspace.name)
-        nameField.placeholderString = "Workspace name"
+        nameField.placeholderString = "Workspace title"
         nameField.isEnabled = !workspace.isDefault
         let tooltipField = NSTextField(string: "")
         tooltipField.placeholderString = "optional: context about what you're working on"
@@ -1571,10 +1571,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         }
 
         let nameSubtitle = workspace.isDefault
-            ? "Default workspace name is fixed to preserve lifecycle behavior."
+            ? "Default workspace title is fixed to preserve lifecycle behavior."
             : "Displayed in the sidebar, focus tooltip title, and workspace commands."
         let nameCard = formSectionCard(
-            icon: "pencil", title: "Workspace name", subtitle: nameSubtitle, contentViews: [nameField])
+            icon: "pencil", title: "Workspace title", subtitle: nameSubtitle, contentViews: [nameField])
         contentStack.addArrangedSubview(nameCard)
         constrainFormFieldToFillWidth(nameCard, in: contentStack)
 
@@ -2433,7 +2433,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         guard let refs = AddWorkspaceFieldCache.shared.cache[sender.tag] else { return }
         do {
             let name = refs.nameField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !name.isEmpty else { throw MuxyError.invalidArgument(message: "Workspace name is required.") }
+            guard !name.isEmpty else { throw MuxyError.invalidArgument(message: "Workspace title is required.") }
             let targetBranch = refs.targetBranchField?.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
             let branch = refs.branchField?.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
             let directoryName = refs.directoryNameField?.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -3280,7 +3280,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     }
 
     private func workspaceSidebarLineCount(project: ProjectSummary, workspace _: WorkspaceSummary) -> Int {
-        var count = 1  // workspace name + status
+        var count = 1  // workspace title + status
         if project.isGitRepo { count += 3 }
 
         return count

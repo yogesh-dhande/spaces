@@ -45,6 +45,13 @@ final class StoreTests: XCTestCase {
         let store = try SQLiteStore(path: dbURL.path)
         XCTAssertEqual(try store.project(id: "legacy-project")?.name, "Legacy Project")
         XCTAssertEqual(try store.workspace(id: "legacy-workspace")?.name, "default")
+        let workspaceColumns = try readTableColumns(dbURL: dbURL, table: "workspaces")
+        XCTAssertTrue(workspaceColumns.contains("title"))
+        XCTAssertEqual(
+            try readSingleText(
+                dbURL: dbURL,
+                sql: "SELECT title FROM workspaces WHERE id = 'legacy-workspace'"),
+            "default")
 
         try store.markIgnoredWorktree(path: "/tmp/legacy-project", projectID: "legacy-project")
         XCTAssertTrue(try store.isIgnoredWorktree(path: "/tmp/legacy-project"))
@@ -137,8 +144,10 @@ final class StoreTests: XCTestCase {
 
         let projectStatusColumns = try readTableColumns(dbURL: dbURL, table: "project_status_checks")
         let workspaceStatusColumns = try readTableColumns(dbURL: dbURL, table: "workspace_status_checks")
+        let workspaceColumns = try readTableColumns(dbURL: dbURL, table: "workspaces")
         XCTAssertTrue(projectStatusColumns.contains("on_fail"))
         XCTAssertTrue(workspaceStatusColumns.contains("on_fail"))
+        XCTAssertTrue(workspaceColumns.contains("title"))
 
         let project = try XCTUnwrap(store.project(id: "legacy-project"))
         let workspaceChecks = try store.workspaceStatusChecks(workspaceID: "legacy-workspace")
@@ -377,6 +386,22 @@ final class StoreTests: XCTestCase {
         XCTAssertNil(try store.setting(key: "key"))
     }
 
+    // Tests workspace rename persists title and legacy name columns by arranging representative inputs and asserting compatibility.
+    func testUpdateWorkspaceNameUpdatesTitleAndNameColumns() throws {
+        let root = try makeTempDirectory()
+        let dbURL = root.appendingPathComponent("workspace-title.db")
+        let store = try SQLiteStore(path: dbURL.path)
+        let project = makeProjectRecord(dir: try makeTempDirectory().path)
+        let workspace = makeWorkspaceRecord(projectID: project.id, name: "feature", dir: project.dir)
+        try store.upsert(project: project)
+        try store.upsert(workspace: workspace)
+
+        try store.updateWorkspaceName(id: workspace.id, name: "renamed")
+
+        XCTAssertEqual(try readSingleText(dbURL: dbURL, sql: "SELECT name FROM workspaces WHERE id = '\(workspace.id)'"), "renamed")
+        XCTAssertEqual(try readSingleText(dbURL: dbURL, sql: "SELECT title FROM workspaces WHERE id = '\(workspace.id)'"), "renamed")
+    }
+
     // Tests project and workspace lookup and ordering by arranging representative inputs and asserting the expected result.
     func testProjectAndWorkspaceLookupAndOrdering() throws {
         let store = try makeTemporaryStore()
@@ -582,6 +607,24 @@ final class StoreTests: XCTestCase {
             throw NSError(domain: "muxy.tests", code: 5, userInfo: [NSLocalizedDescriptionKey: "Missing row for query: \(sql)"])
         }
         return Int(sqlite3_column_int(statement, 0))
+    }
+
+    private func readSingleText(dbURL: URL, sql: String) throws -> String {
+        var db: OpaquePointer?
+        guard sqlite3_open(dbURL.path, &db) == SQLITE_OK, let db else {
+            throw NSError(domain: "muxy.tests", code: 8, userInfo: [NSLocalizedDescriptionKey: "Failed opening test sqlite db"])
+        }
+        defer { sqlite3_close(db) }
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK, let statement else {
+            let message = String(cString: sqlite3_errmsg(db))
+            throw NSError(domain: "muxy.tests", code: 9, userInfo: [NSLocalizedDescriptionKey: message])
+        }
+        defer { sqlite3_finalize(statement) }
+        guard sqlite3_step(statement) == SQLITE_ROW, let raw = sqlite3_column_text(statement, 0) else {
+            throw NSError(domain: "muxy.tests", code: 10, userInfo: [NSLocalizedDescriptionKey: "Missing row for query: \(sql)"])
+        }
+        return String(cString: raw)
     }
 
     private func readTableColumns(dbURL: URL, table: String) throws -> [String] {

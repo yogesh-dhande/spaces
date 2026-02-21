@@ -43,7 +43,7 @@ Port definitions are configured at the project level and inherited by workspaces
 
 Workspaces snapshot project port definitions, processes, status checks, and browser sessions at creation time into the runtime DB.
 Updates to workspace settings apply immediately when the workspace is running (new processes start, changed commands restart, and new browser sessions open).
-Workspace settings include the workspace display name and tooltip; non-default workspace names can be edited after creation.
+Workspace settings include the workspace title and tooltip; non-default workspace titles can be edited after creation.
 `setup_script` runs when a workspace is created or revived. `stop_script` runs on stop/restart/archive after automatic process termination. If the workspace directory is missing, muxy still completes stop/archive cleanup and skips the stop script.
 Muxy periodically discovers and reconciles git worktrees for existing projects. Discovery auto-registers untracked valid worktrees (running the same `setup_script` flow for each new workspace), archives non-default workspaces whose worktrees are no longer valid, refreshes stored workspace branch names from on-disk worktrees, and will not auto-recreate workspaces you explicitly deleted from Muxy.
 
@@ -51,11 +51,11 @@ Muxy periodically discovers and reconciles git worktrees for existing projects. 
 - Two panes: projects/workspaces on the left, details on the right.
 - No dialogs for add/edit; all forms are in the right pane.
 - Right-pane forms are scrollable to avoid clipping on smaller window heights.
-- New workspace form has separate inputs for target branch, branch name, and workspace name for git projects.
+- New workspace form has separate inputs for target branch, branch name, and workspace title for git projects.
 - Target branch is the first input and shows a searchable list of branches.
 - Target branch defaults to `main`/`master` when available.
 - Branch name is required for git projects.
-- As you type branch name, workspace name is auto-populated from it by default; you can then edit workspace name to be more descriptive.
+- As you type branch name, workspace title is auto-populated from it by default; you can then edit workspace title to be more descriptive.
 - Directory name is an optional git-only input that overrides the auto-generated worktree folder name.
 - Directory name validation allows only letters, numbers, `-`, and `_` (no spaces).
 - New branches are created from the latest commit on the selected target branch.
@@ -159,7 +159,7 @@ For git projects, `workspace create` requires `--branch`; `--target-branch` defa
 Add `--restart` to force stop+launch when runtime state is already present.
 `workspace up` always focuses the workspace, and `--tooltip [text]` displays the tooltip overlay after focus (updating tooltip text when text is provided).
 `mx discover` is equivalent to `mx workspace discover`; each scan creates missing workspaces, archives workspaces whose worktrees are no longer valid, and refreshes workspace branch names from disk. Add `--watch` to keep scanning periodically.
-When tooltip overlay is shown for focused workspace, it always displays workspace name as the title; when tooltip text is set, it is shown as body content.
+When tooltip overlay is shown for focused workspace, it always displays workspace title as the title; when tooltip text is set, it is shown as body content.
 
 Project/workspace removal behavior:
 - `mx project remove --dir <path>` removes the project from Muxy. For git projects, it first removes related managed worktrees with `git worktree remove --force`, then deletes related workspace directories under `~/muxy/workspaces`.

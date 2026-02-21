@@ -49,17 +49,17 @@ The `gui` target is the reusable UI library. `MuxyApp` is the minimal executable
 GUI interaction notes:
 - Right-pane forms are hosted in a scroll view so long forms do not clip at smaller window heights.
 - The "new workspace" affordance is shown in project UI only when the project is a git repository.
-- New workspace forms use separate target-branch, branch-name, and workspace-name fields for git projects.
+- New workspace forms use separate target-branch, branch-name, and workspace-title fields for git projects.
 - Target branch is first and uses a searchable branch list.
 - Target branch defaults to `main`/`master` when available.
-- Workspace name auto-fills from branch while untouched, and can then be edited independently.
+- Workspace title auto-fills from branch while untouched, and can then be edited independently.
 - New workspace forms also include an optional git-only worktree directory-name override.
 - Directory-name overrides are validated to filesystem-safe ASCII (`A-Z`, `a-z`, `0-9`, `-`, `_`) and cannot contain spaces.
 - For git projects, branch is required when creating a workspace.
 - Newly created branches are based on the latest commit of the selected target branch.
 - If the requested branch exists only on remote, the orchestrator fetches it into `refs/remotes/origin/*` before creating the worktree from `origin/<branch>`.
 - If the requested branch exists locally, the local branch is used as-is (no implicit pull/rebase/merge in workspace creation).
-- Workspace rows use compact card styling with status + workspace name on top.
+- Workspace rows use compact card styling with status + workspace title on top.
 - Project rows in the left pane show a folder icon next to the project name.
 - Git workspace rows include ahead/behind commit counts vs the workspace target branch (the branch it was created from), merge-conflict status, and relative last-modified time (from latest tracked-file mtime) with tracked modified-file count.
 - Workspace detail metadata shows the current branch and, when present and different, appends `forked from <target branch>`.
@@ -97,7 +97,7 @@ Workspace settings:
 - Each workspace snapshots project `stop_script`, `ports` (named port definitions), `processes`, `status_checks`, and `browser_sessions` at creation.
 - Snapshots are stored in the runtime DB alongside other workspace data.
 - Edits to a running workspace reconcile processes and browser sessions immediately.
-- Non-default workspace names are editable after creation (GUI and CLI); default workspace name stays fixed to its initial value (`default` for directory projects, `main`/`master` for git-url imports).
+- Non-default workspace titles are editable after creation (GUI and CLI); default workspace title stays fixed to its initial value (`default` for directory projects, `main`/`master` for git-url imports).
 
 Workspace identification:
 - Workspaces are uniquely identified by their directory path (`dir` field).
@@ -186,6 +186,7 @@ erDiagram
   workspaces {
     TEXT id PK
     TEXT project_id
+    TEXT title
     TEXT name
     TEXT dir
     TEXT dirname

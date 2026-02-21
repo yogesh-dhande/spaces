@@ -112,10 +112,11 @@ public final class SQLiteStore {
     public func upsert(workspace: WorkspaceRecord) throws {
         try execute(
             sql: """
-                INSERT INTO workspaces(id, project_id, name, dir, dirname, branch, target_branch, is_default, is_archived, is_running, last_launched_at, tooltip)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO workspaces(id, project_id, name, title, dir, dirname, branch, target_branch, is_default, is_archived, is_running, last_launched_at, tooltip)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(id) DO UPDATE SET
                   name = excluded.name,
+                  title = excluded.title,
                   dir = excluded.dir,
                   dirname = excluded.dirname,
                   branch = excluded.branch,
@@ -127,7 +128,7 @@ public final class SQLiteStore {
                   tooltip = excluded.tooltip
                 """,
             bindings: [
-                workspace.id, workspace.projectID, workspace.name, workspace.dir, workspace.dirname ?? "", workspace.branch ?? "",
+                workspace.id, workspace.projectID, workspace.name, workspace.name, workspace.dir, workspace.dirname ?? "", workspace.branch ?? "",
                 workspace.targetBranch ?? "",
                 workspace.isDefault ? "1" : "0", workspace.isArchived ? "1" : "0", workspace.isRunning ? "1" : "0", workspace.lastLaunchedAt ?? "",
                 workspace.tooltip ?? "",
@@ -139,7 +140,7 @@ public final class SQLiteStore {
         guard
             let row = try queryRow(
                 sql: """
-                    SELECT id, project_id, name, dir, dirname, branch, target_branch, is_default, is_archived, is_running, last_launched_at, tooltip
+                    SELECT id, project_id, COALESCE(NULLIF(title, ''), name), dir, dirname, branch, target_branch, is_default, is_archived, is_running, last_launched_at, tooltip
                     FROM workspaces WHERE id = ?
                     """, bindings: [id])
         else { return nil }
@@ -150,8 +151,8 @@ public final class SQLiteStore {
         guard
             let row = try queryRow(
                 sql: """
-                    SELECT id, project_id, name, dir, dirname, branch, target_branch, is_default, is_archived, is_running, last_launched_at, tooltip
-                    FROM workspaces WHERE project_id = ? AND name = ?
+                    SELECT id, project_id, COALESCE(NULLIF(title, ''), name), dir, dirname, branch, target_branch, is_default, is_archived, is_running, last_launched_at, tooltip
+                    FROM workspaces WHERE project_id = ? AND COALESCE(NULLIF(title, ''), name) = ?
                     """, bindings: [projectID, name])
         else { return nil }
         return decodeWorkspace(row: row)
@@ -161,7 +162,7 @@ public final class SQLiteStore {
         guard
             let row = try queryRow(
                 sql: """
-                    SELECT id, project_id, name, dir, dirname, branch, target_branch, is_default, is_archived, is_running, last_launched_at, tooltip
+                    SELECT id, project_id, COALESCE(NULLIF(title, ''), name), dir, dirname, branch, target_branch, is_default, is_archived, is_running, last_launched_at, tooltip
                     FROM workspaces WHERE dir = ?
                     """, bindings: [dir])
         else { return nil }
@@ -171,10 +172,10 @@ public final class SQLiteStore {
     public func workspaces(projectID: String, includeArchived: Bool = false) throws -> [WorkspaceRecord] {
         let rows = try queryRows(
             sql: """
-                SELECT id, project_id, name, dir, dirname, branch, target_branch, is_default, is_archived, is_running, last_launched_at, tooltip
+                SELECT id, project_id, COALESCE(NULLIF(title, ''), name), dir, dirname, branch, target_branch, is_default, is_archived, is_running, last_launched_at, tooltip
                 FROM workspaces
                 WHERE project_id = ? AND (? = '1' OR is_archived = 0)
-                ORDER BY is_default DESC, name
+                ORDER BY is_default DESC, COALESCE(NULLIF(title, ''), name)
                 """, bindings: [projectID, includeArchived ? "1" : "0"])
         return rows.compactMap { decodeWorkspace(row: $0) }
     }
@@ -229,7 +230,7 @@ public final class SQLiteStore {
     }
 
     public func updateWorkspaceName(id: String, name: String) throws {
-        try execute(sql: "UPDATE workspaces SET name = ? WHERE id = ?", bindings: [name, id])
+        try execute(sql: "UPDATE workspaces SET name = ?, title = ? WHERE id = ?", bindings: [name, name, id])
     }
 
     public func setWorkspacePorts(workspaceID: String, ports: [Int], names: [String] = []) throws {
@@ -601,6 +602,7 @@ public final class SQLiteStore {
               id TEXT PRIMARY KEY,
               project_id TEXT NOT NULL,
               name TEXT NOT NULL,
+              title TEXT NOT NULL,
               dir TEXT NOT NULL,
               dirname TEXT,
               branch TEXT,
@@ -610,7 +612,8 @@ public final class SQLiteStore {
               is_running INTEGER NOT NULL,
               last_launched_at TEXT,
               tooltip TEXT,
-              UNIQUE(project_id, name)
+              UNIQUE(project_id, name),
+              UNIQUE(project_id, title)
             );
 
             CREATE TABLE IF NOT EXISTS workspace_ports (
@@ -753,6 +756,9 @@ public final class SQLiteStore {
         try ensureColumnExists(table: "workspaces", name: "branch", definition: "branch TEXT")
         try ensureColumnExists(table: "workspaces", name: "target_branch", definition: "target_branch TEXT")
         try ensureColumnExists(table: "workspaces", name: "tooltip", definition: "tooltip TEXT")
+        try ensureColumnExists(table: "workspaces", name: "title", definition: "title TEXT NOT NULL DEFAULT ''")
+        try execute(sql: "UPDATE workspaces SET title = name WHERE title = ''", bindings: [])
+        try execute(sql: "CREATE UNIQUE INDEX IF NOT EXISTS idx_workspaces_project_title_unique ON workspaces(project_id, title)", bindings: [])
         try ensureColumnExists(table: "project_browser_sessions", name: "name", definition: "name TEXT")
         try ensureColumnExists(table: "workspace_browser_sessions", name: "name", definition: "name TEXT")
         try ensureColumnExists(table: "workspace_browser_sessions", name: "extracted_target_url", definition: "extracted_target_url TEXT")
