@@ -12,7 +12,7 @@ struct CLI {
 
         let command = args[1]
 
-        if command == "version" || command == "--version" {
+        if command == "--version" {
             print("mx \(AppVersion.current)")
             return
         }
@@ -634,7 +634,7 @@ struct CLI {
             mx command line
 
             Usage:
-              mx version
+              mx --version
               mx discover
 
               mx settings get --editor

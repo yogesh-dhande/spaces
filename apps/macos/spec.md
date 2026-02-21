@@ -329,4 +329,4 @@
     - App menu shows "Check for Updates..." which reflects current update status
     - When an update is available, user can download and install from within the app
     - Update flow: download zip, extract, replace binary, relaunch
-    - CLI: `mx version` prints the current version
+    - CLI: `mx --version` prints the current version

@@ -85,7 +85,7 @@ export default function InstallationDocsPage() {
           Confirm the CLI and GUI are working:
         </p>
         <pre className="mt-3 rounded-lg bg-background-soft p-3 text-xs leading-6">
-{`mx version
+{`mx --version
 Muxy`}
         </pre>
         <p className="mt-2 text-sm leading-7 text-foreground-soft">

@@ -120,7 +120,7 @@ When an update is available, a CTA button appears at the top of the left panel. 
 
 From the CLI:
 ```bash
-mx version
+mx --version
 ```
 
 ## CLI

@@ -438,7 +438,7 @@ These constants are referenced throughout the codebase to ensure consistent poll
   - Extracts via `ditto`, replaces the running executable, and relaunches.
   - Creates a backup before replacement; restores on failure.
 - The app menu includes "Check for Updates..." which shows "Up to Date" or "Update Available: vX.Y.Z" based on the last check.
-- CLI: `mx version` prints the current version.
+- CLI: `mx --version` prints the current version.
 
 ## External Dependencies
 - macOS 14+

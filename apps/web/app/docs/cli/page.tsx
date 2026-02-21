@@ -73,8 +73,8 @@ export default function CliReferencePage() {
           <Cmd>/usr/local/bin/mx</Cmd> when you first launch the app so it is available on{" "}
           <Cmd>$PATH</Cmd> immediately.
         </p>
-        <CodeBlock>{`# Verify installation
-mx version
+<CodeBlock>{`# Verify installation
+mx --version
 `}</CodeBlock>
         <p className="mt-3 text-sm leading-7 text-foreground-soft">
           If the command is not found, open Muxy.app once — it will install the symlink.
