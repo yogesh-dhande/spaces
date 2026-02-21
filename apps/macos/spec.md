@@ -31,6 +31,7 @@
         - SQLite (`~/.muxy/muxy.db`) is the single source of truth for all model data.
             - Projects (including templates: processes, status checks, browser sessions, ports, setup/stop scripts) are stored in SQLite.
             - Workspace state and per-workspace settings overrides are stored in SQLite.
+            - SQLite access must tolerate overlapping GUI/CLI/background operations (WAL + busy-timeout/retry) to avoid transient `database is locked` errors.
             - Workspace settings are seeded from project templates on creation or when missing.
             - Schema changes use additive, non-destructive migrations; existing workspace/project data must be preserved.
             - Additive migrations must backfill newly required status-check action columns (for example `on_fail`) with safe defaults for existing rows.
@@ -138,7 +139,7 @@
                 - lifecycle actions (launch/restart/stop/archive) run off the main UI thread; disable the clicked action until completion so the GUI stays responsive during long-running automation
             - Forms
                 - In-place editors for project and workspace data
-        - when created
+            - when created
             - create a git worktree using this precedence for the supplied branch name:
                 - if the branch exists locally, create the worktree from the local branch as-is (no implicit pull/rebase/merge)
                 - else if the branch exists on origin, fetch that branch tip into a local remote-tracking ref and create the worktree from `origin/<branch>`
@@ -150,10 +151,11 @@
             - when a branch exists both locally and on origin, local branch is the source of truth for workspace creation by default
                 - rationale: avoid mutating user branches during workspace creation
                 - tradeoff: local branch may be behind remote until user syncs manually
-            - each workspace gets ports reserved based on named port definitions from the project (e.g. `FRONTEND_PORT`, `API_PORT`)
-                - Ports are allocated from a configurable base range (e.g. 20000–30000), tracked in db
-                - Ports remain reserved for a workspace until it is archived
-                - Port allocation happens before setup script so named port env vars are available in setup scripts
+                - each workspace gets ports reserved based on named port definitions from the project (e.g. `FRONTEND_PORT`, `API_PORT`)
+                    - Ports are allocated from a configurable base range (e.g. 20000–30000), tracked in db
+                    - Ports remain reserved for a workspace until it is archived
+                    - Port allocation happens before setup script so named port env vars are available in setup scripts
+                - GUI creation persists the new workspace first, shows it in the UI, then runs setup in the background (setup state transitions: `pending` -> `running` -> `succeeded`/`failed`)
             - when launched
                 - start processes defined by the workspace in their own terminal windows. keep track of these windows so they can be focused later when looping through this workspace's windows
                 - ensure that browser tabs for the browser sessions defined for the workspace are open, and if not, open them. keep track of them so they can be focused later when looping through this workspace's windows
@@ -228,7 +230,9 @@
     - When creating a non-default workspace
         - project-level plus/new-workspace actions open the New Workspace form
         - `cmd+n` opens the New Workspace form for the currently selected project/workspace
-        - when the New Workspace form is open, `cmd+n` creates immediately using generated defaults
+        - when the New Workspace form is open, `cmd+n` creates immediately using generated defaults from local cached state (workspace name + target branch fallback)
+        - git New Workspace form uses branch-first progressive disclosure; target branch/title/directory/tooltip appear after branch input is non-empty
+            - opening the form and quick-create should not block on remote branch discovery/network calls
         - for git projects, muxy uses the same auto-generated value for initial workspace title and branch name
         - for git projects, target branch defaults using this precedence: project default branch, `main`, `master`, first discovered branch
         - for git projects, directory name defaults to muxy's auto-generated unique dirname
@@ -247,6 +251,8 @@
     - When launching a workspace or ensuring workspace is running (`workspace up`)
         - launching is only valid for a stopped workspace
             - if runtime indicators or running flag already exist, launch should fail with guidance to restart instead
+            - if setup state is `pending` or `running`, launch should wait in the background for setup to finish before starting workspace runtime
+            - if setup state is `failed`, launch should fail with the setup error
         - if workspace is stopped with no runtime indicators, perform launch
         - `workspace up` behavior:
             - default: if workspace is running or has runtime indicators, do nothing

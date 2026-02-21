@@ -30,14 +30,14 @@ export const docsPageLinks: DocsPageLink[] = [
     href: "/docs/workspaces",
     title: "Workspaces",
     summary:
-      "Workspace concepts, New Workspace form flow (+ / cmd+n, and cmd+n quick-create when the form is open), inline metadata editing (header title + branch/tooltip labels with Escape/outside-click cancel), git branch rename-on-edit behavior, settings overrides, ports, env vars, switching, focus tooltip overlays, sidebar hierarchy cues, and git signals.",
+      "Workspace concepts, New Workspace form flow (+ / cmd+n, and cmd+n quick-create when the form is open), branch-first progressive disclosure in git workspace creation, local-cached default name/branch suggestions, non-blocking branch option loading for fast form display, inline metadata editing (header title + branch/tooltip labels with Escape/outside-click cancel), git branch rename-on-edit behavior, settings overrides, ports, env vars, switching, focus tooltip overlays, sidebar hierarchy cues, and git signals.",
     audience: "Developers creating and configuring workspaces within projects.",
   },
   {
     href: "/docs/workspace-lifecycle",
     title: "Workspace Lifecycle",
     summary:
-      "Create, launch, ensure-running (`workspace up` with optional `--restart`), stop, restart, archive, and restore workspace behavior, including graceful handling when worktree directories are already missing.",
+      "Create, launch, ensure-running (`workspace up` with optional `--restart`), stop, restart, archive, and restore workspace behavior, including deferred setup during GUI create and launch waiting for setup completion.",
     audience: "Developers managing multiple long-lived workstreams.",
   },
   {
@@ -79,7 +79,7 @@ export const docsPageLinks: DocsPageLink[] = [
     href: "/docs/troubleshooting",
     title: "Troubleshooting",
     summary:
-      "Common failure patterns with diagnosis and recovery playbooks, including additive database migration compatibility checks.",
+      "Common failure patterns with diagnosis and recovery playbooks, including additive database migration compatibility checks and transient SQLite lock handling guidance.",
     audience: "Anyone debugging launch, capture, process, or focus issues.",
   },
   {

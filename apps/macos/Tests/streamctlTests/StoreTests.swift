@@ -220,6 +220,18 @@ final class StoreTests: XCTestCase {
         try store.setWorkspaceStopScript(workspaceID: workspace.id, stopScript: nil)
         XCTAssertNil(try store.workspaceStopScript(workspaceID: workspace.id))
 
+        try store.setWorkspaceSetupState(
+            workspaceID: workspace.id,
+            status: .failed,
+            errorMessage: "setup failed",
+            startedAt: "start",
+            finishedAt: "end")
+        let setupState = try store.workspaceSetupState(workspaceID: workspace.id)
+        XCTAssertEqual(setupState?.status, .failed)
+        XCTAssertEqual(setupState?.errorMessage, "setup failed")
+        XCTAssertEqual(setupState?.startedAt, "start")
+        XCTAssertEqual(setupState?.finishedAt, "end")
+
         try store.releaseWorkspacePorts(workspaceID: workspace.id)
         XCTAssertTrue(try store.workspacePorts(workspaceID: workspace.id).isEmpty)
 
@@ -233,6 +245,30 @@ final class StoreTests: XCTestCase {
         try store.setWorkspacePortDefinitions(workspaceID: workspace.id, definitions: [PortDefinition(name: "DB_PORT")])
         XCTAssertEqual(try store.workspacePortDefinitions(workspaceID: workspace.id).count, 1)
         XCTAssertEqual(try store.workspacePortDefinitions(workspaceID: workspace.id)[0].name, "DB_PORT")
+    }
+
+    // Tests store write waits for transient database lock and succeeds by arranging an external immediate transaction and asserting write completion.
+    func testStoreWriteWaitsForTransientDatabaseLock() throws {
+        let root = try makeTempDirectory()
+        let dbURL = root.appendingPathComponent("busy-timeout.db")
+        let store = try SQLiteStore(path: dbURL.path)
+
+        var lockDB: OpaquePointer?
+        guard sqlite3_open(dbURL.path, &lockDB) == SQLITE_OK, let lockDB else {
+            XCTFail("Failed opening lock sqlite handle")
+            return
+        }
+        defer { sqlite3_close(lockDB) }
+
+        XCTAssertEqual(sqlite3_exec(lockDB, "BEGIN IMMEDIATE TRANSACTION;", nil, nil, nil), SQLITE_OK)
+        let unlockThread = Thread {
+            Thread.sleep(forTimeInterval: 0.2)
+            _ = sqlite3_exec(lockDB, "COMMIT;", nil, nil, nil)
+        }
+        unlockThread.start()
+
+        XCTAssertNoThrow(try store.setSetting(key: "lock-test", value: "ok"))
+        XCTAssertEqual(try store.setting(key: "lock-test"), "ok")
     }
 
     // Tests running processes status results and windows round trip by arranging representative inputs and asserting the expected result.

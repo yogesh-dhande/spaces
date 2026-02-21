@@ -4,14 +4,23 @@ import SQLite3
 public final class SQLiteStore {
     private let db: OpaquePointer
     private let schemaVersion = 6
+    private let busyTimeoutMS: Int32 = 5000
+    private let busyRetryAttempts = 10
+    private let busyRetryDelaySeconds: TimeInterval = 0.02
 
     public init(path: String) throws {
         var handle: OpaquePointer?
-        if sqlite3_open(path, &handle) != SQLITE_OK {
+        let openFlags = SQLITE_OPEN_CREATE | SQLITE_OPEN_READWRITE | SQLITE_OPEN_FULLMUTEX
+        if sqlite3_open_v2(path, &handle, openFlags, nil) != SQLITE_OK {
             throw NSError(domain: "muxy.store", code: 1, userInfo: [NSLocalizedDescriptionKey: "Failed opening sqlite db at \(path)"])
         }
         guard let handle else { throw NSError(domain: "muxy.store", code: 1, userInfo: [NSLocalizedDescriptionKey: "DB handle is nil"]) }
         db = handle
+        guard sqlite3_busy_timeout(db, busyTimeoutMS) == SQLITE_OK else {
+            let message = String(cString: sqlite3_errmsg(db))
+            throw NSError(domain: "muxy.store", code: 1, userInfo: [NSLocalizedDescriptionKey: "Failed configuring sqlite busy timeout: \(message)"])
+        }
+        try configureConnectionPragmas()
         try rebuildSchemaIfNeeded()
     }
 
@@ -355,6 +364,39 @@ public final class SQLiteStore {
         return raw.isEmpty ? nil : raw
     }
 
+    public func workspaceSetupState(workspaceID: String) throws -> WorkspaceSetupState? {
+        let rows = try queryRows(
+            sql: "SELECT setup_status, setup_error, setup_started_at, setup_finished_at FROM workspace_settings WHERE workspace_id = ?",
+            bindings: [workspaceID])
+        guard let row = rows.first, row.count >= 4 else { return nil }
+        let rawStatus = row[0].isEmpty ? WorkspaceSetupStatus.succeeded.rawValue : row[0]
+        let status = WorkspaceSetupStatus(rawValue: rawStatus) ?? .succeeded
+        let errorMessage = row[1].isEmpty ? nil : row[1]
+        let startedAt = row[2].isEmpty ? nil : row[2]
+        let finishedAt = row[3].isEmpty ? nil : row[3]
+        return WorkspaceSetupState(status: status, errorMessage: errorMessage, startedAt: startedAt, finishedAt: finishedAt)
+    }
+
+    public func setWorkspaceSetupState(
+        workspaceID: String,
+        status: WorkspaceSetupStatus,
+        errorMessage: String? = nil,
+        startedAt: String? = nil,
+        finishedAt: String? = nil
+    ) throws {
+        try execute(
+            sql: """
+                INSERT INTO workspace_settings(workspace_id, updated_at, setup_status, setup_error, setup_started_at, setup_finished_at)
+                VALUES (?, '', ?, ?, ?, ?)
+                ON CONFLICT(workspace_id) DO UPDATE SET
+                  setup_status = excluded.setup_status,
+                  setup_error = excluded.setup_error,
+                  setup_started_at = excluded.setup_started_at,
+                  setup_finished_at = excluded.setup_finished_at
+                """,
+            bindings: [workspaceID, status.rawValue, errorMessage ?? "", startedAt ?? "", finishedAt ?? ""])
+    }
+
     public func setWorkspaceStopScript(workspaceID: String, stopScript: String?) throws {
         try execute(
             sql: """
@@ -634,7 +676,11 @@ public final class SQLiteStore {
             CREATE TABLE IF NOT EXISTS workspace_settings (
               workspace_id TEXT PRIMARY KEY,
               updated_at TEXT NOT NULL,
-              stop_script TEXT
+              stop_script TEXT,
+              setup_status TEXT NOT NULL DEFAULT 'succeeded',
+              setup_error TEXT,
+              setup_started_at TEXT,
+              setup_finished_at TEXT
             );
 
             CREATE TABLE IF NOT EXISTS workspace_processes (
@@ -765,6 +811,12 @@ public final class SQLiteStore {
         try ensureColumnExists(table: "workspace_browser_sessions", name: "extracted_window_id", definition: "extracted_window_id INTEGER")
         try ensureColumnExists(
             table: "workspace_browser_sessions", name: "extracted_window_valid", definition: "extracted_window_valid INTEGER NOT NULL DEFAULT 0")
+        try ensureColumnExists(
+            table: "workspace_settings", name: "setup_status", definition: "setup_status TEXT NOT NULL DEFAULT 'succeeded'")
+        try ensureColumnExists(table: "workspace_settings", name: "setup_error", definition: "setup_error TEXT")
+        try ensureColumnExists(table: "workspace_settings", name: "setup_started_at", definition: "setup_started_at TEXT")
+        try ensureColumnExists(table: "workspace_settings", name: "setup_finished_at", definition: "setup_finished_at TEXT")
+        try execute(sql: "UPDATE workspace_settings SET setup_status = 'succeeded' WHERE COALESCE(setup_status, '') = ''", bindings: [])
         try ensureColumnExists(table: "status_results", name: "message", definition: "message TEXT")
         try ensureColumnExists(table: "status_results", name: "last_run_at", definition: "last_run_at TEXT")
         try ensureColumnExists(table: "running_processes", name: "last_output_at", definition: "last_output_at TEXT")
@@ -830,52 +882,102 @@ public final class SQLiteStore {
     }
 
     private func executeBatch(sql: String) throws {
-        if sqlite3_exec(db, sql, nil, nil, nil) != SQLITE_OK {
+        var attempts = 0
+        while true {
+            let result = sqlite3_exec(db, sql, nil, nil, nil)
+            if result == SQLITE_OK { return }
+            if isBusyOrLocked(result), attempts < busyRetryAttempts {
+                attempts += 1
+                Thread.sleep(forTimeInterval: busyRetryDelaySeconds)
+                continue
+            }
             let message = String(cString: sqlite3_errmsg(db))
             throw NSError(domain: "muxy.store", code: 2, userInfo: [NSLocalizedDescriptionKey: message])
         }
     }
 
     private func execute(sql: String, bindings: [Any]) throws {
-        var statement: OpaquePointer?
-        guard sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK, let statement else {
-            let message = String(cString: sqlite3_errmsg(db))
-            throw NSError(domain: "muxy.store", code: 3, userInfo: [NSLocalizedDescriptionKey: message])
-        }
+        let statement = try prepareStatement(sql: sql, errorCode: 3)
         defer { sqlite3_finalize(statement) }
 
         try bind(bindings, to: statement)
 
-        if sqlite3_step(statement) != SQLITE_DONE {
+        if try stepWithRetry(statement: statement) != SQLITE_DONE {
             let message = String(cString: sqlite3_errmsg(db))
             throw NSError(domain: "muxy.store", code: 4, userInfo: [NSLocalizedDescriptionKey: message])
         }
     }
 
     private func queryRow(sql: String, bindings: [Any] = []) throws -> [String]? {
-        var statement: OpaquePointer?
-        guard sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK, let statement else {
-            let message = String(cString: sqlite3_errmsg(db))
-            throw NSError(domain: "muxy.store", code: 5, userInfo: [NSLocalizedDescriptionKey: message])
-        }
+        let statement = try prepareStatement(sql: sql, errorCode: 5)
         defer { sqlite3_finalize(statement) }
         try bind(bindings, to: statement)
-        let result = sqlite3_step(statement)
-        guard result == SQLITE_ROW else { return nil }
+        let result = try stepWithRetry(statement: statement)
+        if result == SQLITE_DONE { return nil }
+        guard result == SQLITE_ROW else {
+            let message = String(cString: sqlite3_errmsg(db))
+            throw NSError(domain: "muxy.store", code: 6, userInfo: [NSLocalizedDescriptionKey: message])
+        }
         return extractRow(statement: statement)
     }
 
     private func queryRows(sql: String, bindings: [Any] = []) throws -> [[String]] {
-        var statement: OpaquePointer?
-        guard sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK, let statement else {
-            let message = String(cString: sqlite3_errmsg(db))
-            throw NSError(domain: "muxy.store", code: 7, userInfo: [NSLocalizedDescriptionKey: message])
-        }
+        let statement = try prepareStatement(sql: sql, errorCode: 7)
         defer { sqlite3_finalize(statement) }
         try bind(bindings, to: statement)
         var rows: [[String]] = []
-        while sqlite3_step(statement) == SQLITE_ROW { rows.append(extractRow(statement: statement)) }
+        while true {
+            let result = try stepWithRetry(statement: statement)
+            if result == SQLITE_ROW {
+                rows.append(extractRow(statement: statement))
+                continue
+            }
+            if result == SQLITE_DONE { break }
+            let message = String(cString: sqlite3_errmsg(db))
+            throw NSError(domain: "muxy.store", code: 8, userInfo: [NSLocalizedDescriptionKey: message])
+        }
         return rows
+    }
+
+    private func configureConnectionPragmas() throws {
+        try executeBatch(sql: "PRAGMA journal_mode=WAL;")
+        try executeBatch(sql: "PRAGMA synchronous=NORMAL;")
+        try executeBatch(sql: "PRAGMA foreign_keys=ON;")
+    }
+
+    private func prepareStatement(sql: String, errorCode: Int) throws -> OpaquePointer {
+        var attempts = 0
+        while true {
+            var statement: OpaquePointer?
+            let result = sqlite3_prepare_v2(db, sql, -1, &statement, nil)
+            if result == SQLITE_OK, let statement {
+                return statement
+            }
+            if isBusyOrLocked(result), attempts < busyRetryAttempts {
+                attempts += 1
+                Thread.sleep(forTimeInterval: busyRetryDelaySeconds)
+                continue
+            }
+            let message = String(cString: sqlite3_errmsg(db))
+            throw NSError(domain: "muxy.store", code: errorCode, userInfo: [NSLocalizedDescriptionKey: message])
+        }
+    }
+
+    private func stepWithRetry(statement: OpaquePointer) throws -> Int32 {
+        var attempts = 0
+        while true {
+            let result = sqlite3_step(statement)
+            if isBusyOrLocked(result), attempts < busyRetryAttempts {
+                attempts += 1
+                Thread.sleep(forTimeInterval: busyRetryDelaySeconds)
+                continue
+            }
+            return result
+        }
+    }
+
+    private func isBusyOrLocked(_ code: Int32) -> Bool {
+        code == SQLITE_BUSY || code == SQLITE_LOCKED
     }
 
     private func extractRow(statement: OpaquePointer) -> [String] {

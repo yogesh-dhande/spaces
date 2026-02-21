@@ -14,4 +14,6 @@ struct AddWorkspaceFieldRefs {
     let branchField: NSTextField?
     let tooltipField: NSTextField?
     let autoNameState: AddWorkspaceAutoNameState?
+    let progressiveInputViews: [NSView]
+    let createButton: NSButton
 }

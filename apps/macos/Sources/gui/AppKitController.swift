@@ -312,8 +312,18 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         case archive
     }
 
-    private struct WorkspaceLifecycleOutcome {
+    private struct WorkspaceLifecycleOutcome: Sendable {
         let notice: String?
+    }
+
+    private struct WorkspaceCreateInput: Sendable {
+        let projectID: String
+        let name: String
+        let branch: String?
+        let targetBranch: String?
+        let directoryName: String?
+        let tooltip: String?
+        let allowRemoteBranchLookup: Bool
     }
 
     nonisolated private static func refreshWorkspaceWindowsSnapshot() async -> Result<MuxyOrchestrator.RefreshResult, Error> {
@@ -353,6 +363,61 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                     try orchestrator.archiveWorkspace(workspaceID: workspaceID)
                 }
                 return .success(.init(notice: notice))
+            } catch {
+                return .failure(error)
+            }
+        }.value
+    }
+
+    nonisolated private static func createWorkspaceSnapshot(input: WorkspaceCreateInput) async -> Result<WorkspaceRecord, Error> {
+        await Task.detached(priority: .userInitiated) {
+            do {
+                let db = try DatabaseLocator.defaultPath()
+                let store = try SQLiteStore(path: db)
+                let orchestrator = MuxyOrchestrator(store: store)
+                var workspace = try orchestrator.createWorkspace(
+                    projectID: input.projectID,
+                    name: input.name,
+                    branch: input.branch,
+                    targetBranch: input.targetBranch,
+                    directoryName: input.directoryName,
+                    runSetupScript: false,
+                    allowRemoteBranchLookup: input.allowRemoteBranchLookup)
+                if let tooltip = input.tooltip {
+                    try orchestrator.updateWorkspaceTooltip(workspaceID: workspace.id, tooltip: tooltip)
+                    if let updated = try orchestrator.store.workspace(id: workspace.id) {
+                        workspace = updated
+                    }
+                }
+                return .success(workspace)
+            } catch {
+                return .failure(error)
+            }
+        }.value
+    }
+
+    nonisolated private static func runWorkspaceSetupSnapshot(workspaceID: String) async -> Result<Void, Error> {
+        await Task.detached(priority: .utility) {
+            do {
+                let db = try DatabaseLocator.defaultPath()
+                let store = try SQLiteStore(path: db)
+                let orchestrator = MuxyOrchestrator(store: store)
+                try orchestrator.runWorkspaceSetup(workspaceID: workspaceID)
+                return .success(())
+            } catch {
+                return .failure(error)
+            }
+        }.value
+    }
+
+    nonisolated private static func branchOptionsSnapshot(projectID: String) async -> Result<[String], Error> {
+        await Task.detached(priority: .utility) {
+            do {
+                let db = try DatabaseLocator.defaultPath()
+                let store = try SQLiteStore(path: db)
+                let orchestrator = MuxyOrchestrator(store: store)
+                let options = try orchestrator.gitBranchOptions(projectID: projectID, includeLiveRemoteHeads: false)
+                return .success(options)
             } catch {
                 return .failure(error)
             }
@@ -1115,14 +1180,14 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         stack.addArrangedSubview(headerSubtitle)
 
         // --- Fields ---
-        let suggestedName = (try? orchestrator.suggestedWorkspaceName(projectID: project.id)) ?? ""
+        let suggestedName = suggestedWorkspaceNameFast(projectID: project.id)
         let nameField = NSTextField(string: project.isGitRepo ? "" : suggestedName)
         nameField.placeholderString = "workspace title"
         let targetBranchField = NSComboBox()
         targetBranchField.usesDataSource = false
         targetBranchField.completes = true
         targetBranchField.numberOfVisibleItems = 10
-        let targetBranches = (try? orchestrator.gitBranchOptions(projectID: project.id)) ?? []
+        let targetBranches = project.isGitRepo ? [defaultWorkspaceTargetBranchFast(project: project)].compactMap { $0 } : []
         targetBranchField.addItems(withObjectValues: targetBranches)
         if let defaultTargetBranch = defaultWorkspaceTargetBranch(project: project, branches: targetBranches) {
             targetBranchField.stringValue = defaultTargetBranch
@@ -1141,34 +1206,48 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         contentStack.orientation = .vertical
         contentStack.alignment = .leading
         contentStack.spacing = 8
+        var progressiveInputViews: [NSView] = []
 
         if project.isGitRepo {
-            contentStack.addArrangedSubview(label(text: "Target branch"))
-            contentStack.addArrangedSubview(helpTextLabel("The existing branch your new branch will be based on."))
-            contentStack.addArrangedSubview(targetBranchField)
             contentStack.addArrangedSubview(label(text: "Branch name"))
             contentStack.addArrangedSubview(helpTextLabel("Enter an existing branch or a new branch name to create."))
             contentStack.addArrangedSubview(branchField)
-            constrainFormFieldToFillWidth(targetBranchField, in: contentStack)
             constrainFormFieldToFillWidth(branchField, in: contentStack)
+
+            let advancedInputStack = NSStackView()
+            advancedInputStack.orientation = .vertical
+            advancedInputStack.alignment = .leading
+            advancedInputStack.spacing = 8
+            advancedInputStack.addArrangedSubview(label(text: "Target branch"))
+            advancedInputStack.addArrangedSubview(helpTextLabel("The existing branch your new branch will be based on."))
+            advancedInputStack.addArrangedSubview(targetBranchField)
+            advancedInputStack.addArrangedSubview(label(text: "Workspace title"))
+            advancedInputStack.addArrangedSubview(helpTextLabel("Display title for this workspace in the sidebar."))
+            advancedInputStack.addArrangedSubview(nameField)
+            advancedInputStack.addArrangedSubview(label(text: "Directory name"))
+            advancedInputStack.addArrangedSubview(helpTextLabel("Auto-filled from branch name. Only letters, numbers, -, _ allowed."))
+            advancedInputStack.addArrangedSubview(directoryNameField)
+            advancedInputStack.addArrangedSubview(label(text: "Tooltip"))
+            advancedInputStack.addArrangedSubview(helpTextLabel("Optional context to display when viewing this workspace."))
+            advancedInputStack.addArrangedSubview(tooltipField)
+            constrainFormFieldToFillWidth(targetBranchField, in: advancedInputStack)
+            constrainFormFieldToFillWidth(nameField, in: advancedInputStack)
+            constrainFormFieldToFillWidth(directoryNameField, in: advancedInputStack)
+            constrainFormFieldToFillWidth(tooltipField, in: advancedInputStack)
+            advancedInputStack.isHidden = true
+            contentStack.addArrangedSubview(advancedInputStack)
+            progressiveInputViews = [advancedInputStack]
+        } else {
+            contentStack.addArrangedSubview(label(text: "Workspace title"))
+            contentStack.addArrangedSubview(helpTextLabel("Display title for this workspace in the sidebar."))
+            contentStack.addArrangedSubview(nameField)
+            constrainFormFieldToFillWidth(nameField, in: contentStack)
+
+            contentStack.addArrangedSubview(label(text: "Tooltip"))
+            contentStack.addArrangedSubview(helpTextLabel("Optional context to display when viewing this workspace."))
+            contentStack.addArrangedSubview(tooltipField)
+            constrainFormFieldToFillWidth(tooltipField, in: contentStack)
         }
-
-        contentStack.addArrangedSubview(label(text: "Workspace title"))
-        contentStack.addArrangedSubview(helpTextLabel("Display title for this workspace in the sidebar."))
-        contentStack.addArrangedSubview(nameField)
-        constrainFormFieldToFillWidth(nameField, in: contentStack)
-
-        if project.isGitRepo {
-            contentStack.addArrangedSubview(label(text: "Directory name"))
-            contentStack.addArrangedSubview(helpTextLabel("Auto-filled from branch name. Only letters, numbers, -, _ allowed."))
-            contentStack.addArrangedSubview(directoryNameField)
-            constrainFormFieldToFillWidth(directoryNameField, in: contentStack)
-        }
-
-        contentStack.addArrangedSubview(label(text: "Tooltip"))
-        contentStack.addArrangedSubview(helpTextLabel("Optional context to display when viewing this workspace."))
-        contentStack.addArrangedSubview(tooltipField)
-        constrainFormFieldToFillWidth(tooltipField, in: contentStack)
 
         let card = formSectionCard(
             icon: "plus.rectangle.on.folder", title: "Workspace",
@@ -1204,8 +1283,28 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         createButton.tag = storeAddWorkspaceFields(
             projectID: project.id, isGitRepo: project.isGitRepo, targetBranchField: project.isGitRepo ? targetBranchField : nil, nameField: nameField,
             directoryNameField: project.isGitRepo ? directoryNameField : nil, branchField: project.isGitRepo ? branchField : nil,
-            tooltipField: tooltipField, autoNameState: autoNameState)
+            tooltipField: tooltipField, autoNameState: autoNameState, progressiveInputViews: progressiveInputViews, createButton: createButton)
         activeAddWorkspaceFormTag = createButton.tag
+        if let refs = AddWorkspaceFieldCache.shared.cache[createButton.tag] {
+            updateAddWorkspaceProgressiveDisclosure(refs: refs, branchValue: refs.branchField?.stringValue ?? "")
+        }
+        guard project.isGitRepo else { return }
+        let formTag = createButton.tag
+        Task { @MainActor [weak self, weak targetBranchField] in
+            guard let self else { return }
+            let result = await Self.branchOptionsSnapshot(projectID: project.id)
+            guard activeAddWorkspaceFormTag == formTag else { return }
+            guard let targetBranchField else { return }
+            guard case .success(let options) = result else { return }
+            let currentValue = targetBranchField.stringValue
+            targetBranchField.removeAllItems()
+            targetBranchField.addItems(withObjectValues: options)
+            if !currentValue.isEmpty {
+                targetBranchField.stringValue = currentValue
+            } else if let defaultBranch = defaultWorkspaceTargetBranch(project: project, branches: options) {
+                targetBranchField.stringValue = defaultBranch
+            }
+        }
     }
 
     private func showWorkspaceDetail(project: ProjectSummary, workspace: WorkspaceSummary) {
@@ -2532,12 +2631,14 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
     private func storeAddWorkspaceFields(
         projectID: String, isGitRepo: Bool, targetBranchField: NSComboBox?, nameField: NSTextField, directoryNameField: NSTextField?,
-        branchField: NSTextField?, tooltipField: NSTextField?, autoNameState: AddWorkspaceAutoNameState?
+        branchField: NSTextField?, tooltipField: NSTextField?, autoNameState: AddWorkspaceAutoNameState?, progressiveInputViews: [NSView],
+        createButton: NSButton
     ) -> Int {
         let id = UUID().uuidString.hashValue
         AddWorkspaceFieldCache.shared.cache[id] = AddWorkspaceFieldRefs(
             projectID: projectID, isGitRepo: isGitRepo, targetBranchField: targetBranchField, nameField: nameField,
-            directoryNameField: directoryNameField, branchField: branchField, tooltipField: tooltipField, autoNameState: autoNameState)
+            directoryNameField: directoryNameField, branchField: branchField, tooltipField: tooltipField, autoNameState: autoNameState,
+            progressiveInputViews: progressiveInputViews, createButton: createButton)
         return id
     }
 
@@ -2611,23 +2712,44 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     }
 
     private func createWorkspaceWithDefaults(project: ProjectSummary) {
-        do {
-            let name = try orchestrator.suggestedWorkspaceName(projectID: project.id)
-            let targetBranch: String?
-            if project.isGitRepo {
-                let branchOptions = try orchestrator.gitBranchOptions(projectID: project.id)
-                targetBranch = defaultWorkspaceTargetBranch(project: project, branches: branchOptions)
-            } else {
-                targetBranch = nil
+        let name = suggestedWorkspaceNameFast(projectID: project.id)
+        guard !name.isEmpty else {
+            showError(MuxyError.invalidArgument(message: "No available workspace names remain for project \(project.name)."))
+            return
+        }
+        let targetBranch: String?
+        if project.isGitRepo {
+            targetBranch = defaultWorkspaceTargetBranchFast(project: project)
+        } else {
+            targetBranch = nil
+        }
+        let input = WorkspaceCreateInput(
+            projectID: project.id,
+            name: name,
+            branch: project.isGitRepo ? name : nil,
+            targetBranch: targetBranch,
+            directoryName: nil,
+            tooltip: nil,
+            allowRemoteBranchLookup: false)
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            let result = await Self.createWorkspaceSnapshot(input: input)
+            switch result {
+            case .success(let workspace):
+                activeAddWorkspaceFormTag = nil
+                selectedProjectID = project.id
+                selectedWorkspaceID = workspace.id
+                lastSelectedRow = -1
+                reloadData()
+                let setupResult = await Self.runWorkspaceSetupSnapshot(workspaceID: workspace.id)
+                reloadData()
+                if case .failure(let error) = setupResult {
+                    showError(error)
+                }
+            case .failure(let error):
+                showError(error)
             }
-            let workspace = try orchestrator.createWorkspace(
-                projectID: project.id, name: name, branch: project.isGitRepo ? name : nil, targetBranch: targetBranch)
-            activeAddWorkspaceFormTag = nil
-            selectedProjectID = project.id
-            selectedWorkspaceID = workspace.id
-            lastSelectedRow = -1
-            reloadData()
-        } catch { showError(error) }
+        }
     }
 
     @objc private func saveProject(_ sender: NSButton) {
@@ -2747,6 +2869,24 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         return branches.first
     }
 
+    private func defaultWorkspaceTargetBranchFast(project: ProjectSummary) -> String? {
+        if let configured = project.defaultBranch, !configured.isEmpty { return configured }
+        return "main"
+    }
+
+    private func suggestedWorkspaceNameFast(projectID: String) -> String {
+        let existingNames = Set((workspacesByProject[projectID] ?? []).map(\.name))
+        if let suggestion = MuxyOrchestrator.suggestWorkspaceName(existingNames: existingNames) { return suggestion }
+        return ""
+    }
+
+    private func updateAddWorkspaceProgressiveDisclosure(refs: AddWorkspaceFieldRefs, branchValue: String) {
+        guard refs.isGitRepo else { return }
+        let hasBranch = !branchValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        for view in refs.progressiveInputViews { view.isHidden = !hasBranch }
+        refs.createButton.isEnabled = hasBranch
+    }
+
     @objc private func createWorkspace(_ sender: NSButton) {
         guard let refs = AddWorkspaceFieldCache.shared.cache[sender.tag] else { return }
         do {
@@ -2766,13 +2906,38 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             if refs.isGitRepo, targetBranch == nil || targetBranch?.isEmpty == true {
                 throw MuxyError.invalidArgument(message: "Target branch is required for git projects.")
             }
-            let workspace = try orchestrator.createWorkspace(
-                projectID: refs.projectID, name: name, branch: branch, targetBranch: targetBranch, directoryName: resolvedDirectoryName)
-            if let resolvedTooltip {
-                try orchestrator.updateWorkspaceTooltip(workspaceID: workspace.id, tooltip: resolvedTooltip)
+            let input = WorkspaceCreateInput(
+                projectID: refs.projectID,
+                name: name,
+                branch: branch,
+                targetBranch: targetBranch,
+                directoryName: resolvedDirectoryName,
+                tooltip: resolvedTooltip,
+                allowRemoteBranchLookup: true)
+            let originalTitle = sender.title
+            sender.isEnabled = false
+            sender.title = "Creating..."
+            Task { @MainActor [weak self, weak sender] in
+                guard let self else { return }
+                let result = await Self.createWorkspaceSnapshot(input: input)
+                sender?.isEnabled = true
+                sender?.title = originalTitle
+                switch result {
+                case .success(let workspace):
+                    activeAddWorkspaceFormTag = nil
+                    selectedProjectID = refs.projectID
+                    selectedWorkspaceID = workspace.id
+                    lastSelectedRow = -1
+                    reloadData()
+                    let setupResult = await Self.runWorkspaceSetupSnapshot(workspaceID: workspace.id)
+                    reloadData()
+                    if case .failure(let error) = setupResult {
+                        showError(error)
+                    }
+                case .failure(let error):
+                    showError(error)
+                }
             }
-            activeAddWorkspaceFormTag = nil
-            reloadData()
         } catch { showError(error) }
     }
 
@@ -2785,6 +2950,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         for refs in AddWorkspaceFieldCache.shared.cache.values {
             guard refs.branchField === changedField, let autoNameState = refs.autoNameState else { continue }
             let branchValue = changedField.stringValue
+            updateAddWorkspaceProgressiveDisclosure(refs: refs, branchValue: branchValue)
             let currentName = refs.nameField.stringValue
             if currentName.isEmpty || currentName == autoNameState.lastAutoWorkspaceName {
                 refs.nameField.stringValue = branchValue

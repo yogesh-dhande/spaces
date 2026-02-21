@@ -26,7 +26,7 @@ public final class GitClient {
         return status == 0
     }
 
-    public func branchOptions(path: String) -> [String] {
+    public func branchOptions(path: String, includeLiveRemoteHeads: Bool = true) -> [String] {
         var branches = Set<String>()
         if let local = try? runGitAndCapture(["-C", path, "for-each-ref", "--format=%(refname:short)", "refs/heads"]) {
             let values = local.split(separator: "\n").map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
@@ -39,8 +39,8 @@ public final class GitClient {
                 if let stripped = trimmed.replacingPrefix("origin/"), !stripped.isEmpty { branches.insert(stripped) }
             }
         }
-        // Include live remote heads so newly created remote branches appear even before local fetch.
-        if let remoteHeads = try? runGitAndCapture(["-C", path, "ls-remote", "--heads", "origin"]) {
+        // Include live remote heads when explicitly requested so latency-sensitive UI paths can stay local-only.
+        if includeLiveRemoteHeads, let remoteHeads = try? runGitAndCapture(["-C", path, "ls-remote", "--heads", "origin"]) {
             for raw in remoteHeads.split(separator: "\n") {
                 let columns = raw.split(separator: "\t", omittingEmptySubsequences: true)
                 guard columns.count == 2 else { continue }
@@ -80,17 +80,23 @@ public final class GitClient {
             hasMergeConflicts: hasMergeConflicts)
     }
 
-    public func createWorktree(path repoPath: String, worktreePath: String, branch: String, targetBranch: String? = nil) throws {
+    public func createWorktree(
+        path repoPath: String, worktreePath: String, branch: String, targetBranch: String? = nil, allowRemoteBranchLookup: Bool = true) throws
+    {
         if branchExists(path: repoPath, branch: branch) {
             try runGitOrThrow(["-C", repoPath, "worktree", "add", worktreePath, branch])
             return
         }
-        if remoteBranchExists(path: repoPath, branch: branch) {
+        if remoteTrackingBranchExists(path: repoPath, branch: branch) {
+            try runGitOrThrow(["-C", repoPath, "worktree", "add", "-b", branch, worktreePath, "origin/\(branch)"])
+            return
+        }
+        if allowRemoteBranchLookup, remoteBranchExists(path: repoPath, branch: branch) {
             try fetchRemoteBranch(path: repoPath, branch: branch)
             try runGitOrThrow(["-C", repoPath, "worktree", "add", "-b", branch, worktreePath, "origin/\(branch)"])
             return
         }
-        if let startPoint = try resolveStartPoint(path: repoPath, targetBranch: targetBranch) {
+        if let startPoint = try resolveStartPoint(path: repoPath, targetBranch: targetBranch, allowRemoteBranchLookup: allowRemoteBranchLookup) {
             try runGitOrThrow(["-C", repoPath, "worktree", "add", "-b", branch, worktreePath, startPoint])
             return
         }
@@ -206,13 +212,14 @@ public final class GitClient {
         }
     }
 
-    private func resolveStartPoint(path: String, targetBranch: String?) throws -> String? {
+    private func resolveStartPoint(path: String, targetBranch: String?, allowRemoteBranchLookup: Bool) throws -> String? {
         guard let targetBranch = targetBranch?.trimmingCharacters(in: .whitespacesAndNewlines), !targetBranch.isEmpty else { return nil }
-        if remoteBranchExists(path: path, branch: targetBranch) {
+        if branchExists(path: path, branch: targetBranch) { return targetBranch }
+        if remoteTrackingBranchExists(path: path, branch: targetBranch) { return "origin/\(targetBranch)" }
+        if allowRemoteBranchLookup, remoteBranchExists(path: path, branch: targetBranch) {
             try fetchRemoteBranch(path: path, branch: targetBranch)
             return "origin/\(targetBranch)"
         }
-        if branchExists(path: path, branch: targetBranch) { return targetBranch }
         throw MuxyError.invalidArgument(message: "Target branch not found: \(targetBranch)")
     }
 

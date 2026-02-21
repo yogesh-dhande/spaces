@@ -52,6 +52,7 @@ GUI interaction notes:
 - Project-row plus and project-detail "New Workspace" actions open the New Workspace form.
 - `cmd+n` opens the New Workspace form for the currently selected project/workspace.
 - When the New Workspace form is already open, `cmd+n` creates a workspace immediately with generated defaults.
+- In git projects, New Workspace uses progressive disclosure: branch field first, then target/title/directory/tooltip after branch input is non-empty.
 - Branch and tooltip remain editable via inline labels in workspace detail, title remains editable in the workspace header, and all metadata remains editable via `mx workspace update`.
 - Workspace title remains in the top header (`project / workspace`) and enters edit mode on double-click.
 - Workspace detail renders inline metadata labels for branch and tooltip above lifecycle actions; double-clicking a label enters edit mode and shows per-field Save/Cancel buttons.
@@ -83,6 +84,7 @@ Project data (stored in SQLite):
 - Browser sessions include optional `name` and required URL-prefix matching at runtime.
 - Script timing:
   - `setup_script` runs when a workspace is created or revived.
+  - GUI creates persist workspace rows first, set setup state to `pending`, then run setup in a detached task (`running` -> `succeeded`/`failed`) so workspace rows appear without waiting for setup completion.
   - `stop_script` runs on stop/restart/archive stop phase after automatic process termination.
 - Process on-exit behavior:
   - Each process has an `on_exit` setting with options: `none` (default), `restart`, `notify`.
@@ -120,6 +122,7 @@ Runtime database:
 - Path: `~/.muxy/muxy.db`.
 - Schema is versioned via a `schema_version` table and upgraded in place with additive migrations (no table drops). Currently at v6.
 - Additive migrations explicitly backfill status-check `on_fail` columns for legacy DBs (`project_status_checks`, `workspace_status_checks`) with default `none`.
+- SQLite connections enable `journal_mode=WAL`, `synchronous=NORMAL`, and a busy timeout to reduce transient lock errors when GUI/CLI background tasks overlap.
 
 ```mermaid
 erDiagram
@@ -216,6 +219,10 @@ erDiagram
     TEXT workspace_id PK
     TEXT updated_at
     TEXT stop_script
+    TEXT setup_status
+    TEXT setup_error
+    TEXT setup_started_at
+    TEXT setup_finished_at
   }
 
   workspace_processes {
@@ -303,10 +310,10 @@ flowchart TD
   git -->|"yes"| dirname["Resolve dirname (override or auto-generated)"]
   dirname --> worktree["Create or reuse worktree"]
   git -->|"no"| dir["Use project dir"]
-  worktree --> ports["Allocate named ports (PortReserver)"]
-  dir --> ports
-  ports --> setup["Run setup_script (if set, with named port env vars)"]
-  setup --> persist["Persist workspace + port definitions + ports"]
+  worktree --> persist["Persist workspace + seeded settings"]
+  dir --> persist
+  persist --> ports["Allocate named ports (PortReserver)"]
+  ports --> setup["Run setup_script (sync or deferred GUI task)"]
 ```
 
 Port allocation details:
@@ -338,12 +345,14 @@ Stop or archive:
 
 Run/recovery semantics:
 - `launchWorkspace` is only for stopped workspaces. If `is_running` is set or runtime indicators already exist (`running_processes`/`windows` rows), launch fails with "use restart".
+- Launch waits for setup completion when setup state is `pending`/`running`; if setup state is `failed`, launch fails with the setup error message.
 - `restartWorkspace` is the explicit recovery path and always performs stop then launch for the same workspace.
 - `upWorkspace` is idempotent "ensure running": launch when stopped; if runtime is already present, either no-op (default) or restart when `restartIfRunning` is true.
 - Workspace lifecycle actions are guarded by a per-workspace in-flight lock so overlapping launch/stop/restart/archive actions cannot run concurrently for the same workspace.
 - GUI run controls are state-aware: show `Launch` when stopped and `Restart` when running.
 - AppKit launch/restart/stop/archive button handlers dispatch lifecycle work in detached background tasks (fresh orchestrator/store instances) so long-running automation does not block the UI event loop.
 - AppKit periodic process monitoring also runs in detached background tasks and now executes interval-based status checks for running workspaces, persisting fresh `status_results` and triggering `on_fail` actions (including restart) without requiring the run tab to be rendered.
+- Add-workspace (`cmd+n`) UX uses local branch refs and cached workspace names for immediate form display and quick-create defaults; non-blocking branch-option refresh runs in a detached task, and branch-first progressive disclosure keeps initial render minimal.
 
 Degraded runtime edge cases and handling:
 - `is_running` can drift from real OS state because users can close windows/processes manually.

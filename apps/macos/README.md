@@ -36,7 +36,7 @@ mx settings get --port-range
 
 SQLite startup migrations are additive and preserve existing data, including backfilling legacy status-check `on_fail` columns with default `none` when missing.
 
-Projects and all project templates (processes, status checks, browser sessions, port definitions, setup/stop scripts) are stored in the SQLite database. Use `mx project add` or the GUI to add projects.
+Projects and all project templates (processes, status checks, browser sessions, port definitions, setup/stop scripts) are stored in the SQLite database. SQLite connections use WAL mode and a busy timeout to reduce transient `database is locked` failures during concurrent background actions. Use `mx project add` or the GUI to add projects.
 Browser sessions support optional names (same pattern as process names) so workspace window rows can show stable labels instead of only raw URLs.
 
 Port definitions are configured at the project level and inherited by workspaces. Each named port (e.g. `FRONTEND_PORT`) is allocated a real port number from the configured `port_range`, reserved via OS sockets so no other process can claim it. Named port env vars are available in setup scripts, stop scripts, process commands, and status check commands. Workspaces can override port definitions in their settings.
@@ -44,7 +44,7 @@ Port definitions are configured at the project level and inherited by workspaces
 Workspaces snapshot project port definitions, processes, status checks, and browser sessions at creation time into the runtime DB.
 Updates to workspace settings apply immediately when the workspace is running (new processes start, changed commands restart, and new browser sessions open).
 Workspace settings include the workspace title and tooltip; non-default workspace titles can be edited after creation.
-`setup_script` runs when a workspace is created or revived. `stop_script` runs on stop/restart/archive after automatic process termination. If the workspace directory is missing, muxy still completes stop/archive cleanup and skips the stop script.
+`setup_script` runs when a workspace is created or revived. In the GUI create flow, workspace records are persisted first and setup continues in the background so new workspaces appear faster; launch waits for setup completion and surfaces setup failures. `stop_script` runs on stop/restart/archive after automatic process termination. If the workspace directory is missing, muxy still completes stop/archive cleanup and skips the stop script.
 Muxy periodically discovers and reconciles git worktrees for existing projects. Discovery auto-registers untracked valid worktrees (running the same `setup_script` flow for each new workspace), archives non-default workspaces whose worktrees are no longer valid, refreshes stored workspace branch names from on-disk worktrees, and will not auto-recreate workspaces you explicitly deleted from Muxy.
 
 ## GUI
@@ -54,6 +54,8 @@ Muxy periodically discovers and reconciles git worktrees for existing projects. 
 - New workspace `+` actions open the New Workspace form for git projects.
 - `cmd+n` opens the New Workspace form for the currently selected project/workspace.
 - On the New Workspace form, `cmd+n` quick-creates using generated defaults (suggested title/branch, auto-generated directory, default target branch).
+- `cmd+n` form-open and quick-create paths are optimized to avoid blocking remote branch lookups; branch options are loaded from local refs first and refreshed asynchronously, and suggested workspace names come from cached local workspace state.
+- For git projects, the New Workspace form starts with only the branch input visible; target branch/title/directory/tooltip are progressively revealed after branch typing begins.
 - Branch and tooltip can be edited from inline labels in workspace detail, title can be edited in the workspace header, and all metadata can be edited via `mx workspace update`.
 - Workspace title stays in the top header (`project / workspace`) and is editable there via double-click.
 - Workspace detail also shows inline branch and tooltip labels above Launch/Stop actions; double-click a label to edit and reveal small Save/Cancel controls.

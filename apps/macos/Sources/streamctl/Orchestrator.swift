@@ -51,6 +51,8 @@ public final class MuxyOrchestrator {
     private let workspacesRootDirectoryURL: URL?
     private let workspaceLifecycleLock = NSLock()
     private var workspaceLifecycleInFlight: Set<String> = []
+    private let workspaceSetupLock = NSLock()
+    private var workspaceSetupInFlight: Set<String> = []
     private let windowNavigationLock = NSLock()
     private var windowNavigationIndexByWorkspace: [String: Int] = [:]
     private let browserScanCacheLock = NSLock()
@@ -115,14 +117,18 @@ public final class MuxyOrchestrator {
     public func suggestedWorkspaceName(projectID: String) throws -> String {
         guard let project = try store.project(id: projectID) else { throw MuxyError.missingProject(dir: projectID) }
         let existingNames = Set(try store.workspaces(projectID: project.id, includeArchived: true).map(\.name))
-        for candidate in MuxyOrchestrator.workspaceFoodNames where !existingNames.contains(candidate) { return candidate }
+        if let suggestion = MuxyOrchestrator.suggestWorkspaceName(existingNames: existingNames) { return suggestion }
         throw MuxyError.invalidArgument(message: "No available workspace names remain for project \(project.name).")
     }
 
-    public func gitBranchOptions(projectID: String) throws -> [String] {
+    public static func suggestWorkspaceName(existingNames: Set<String>) -> String? {
+        workspaceFoodNames.first(where: { !existingNames.contains($0) })
+    }
+
+    public func gitBranchOptions(projectID: String, includeLiveRemoteHeads: Bool = true) throws -> [String] {
         guard let project = try store.project(id: projectID) else { throw MuxyError.missingProject(dir: projectID) }
         guard project.isGitRepo else { return [] }
-        return git.branchOptions(path: project.dir)
+        return git.branchOptions(path: project.dir, includeLiveRemoteHeads: includeLiveRemoteHeads)
     }
 
     public func workspaceGitTrackedFileActivity(workspaceID: String) throws -> GitTrackedFileActivity? {
@@ -320,7 +326,9 @@ public final class MuxyOrchestrator {
         }
     }
 
-    public func createWorkspace(projectID: String, name: String, branch: String? = nil, targetBranch: String? = nil, directoryName: String? = nil)
+    public func createWorkspace(
+        projectID: String, name: String, branch: String? = nil, targetBranch: String? = nil, directoryName: String? = nil,
+        runSetupScript: Bool = true, allowRemoteBranchLookup: Bool = true)
         throws -> WorkspaceRecord
     {
         guard let project = try store.project(id: projectID) else { throw MuxyError.missingProject(dir: projectID) }
@@ -358,7 +366,12 @@ public final class MuxyOrchestrator {
                 try FileManager.default.createDirectory(at: worktreeRoot, withIntermediateDirectories: true)
                 revivedDir = worktreeRoot.appendingPathComponent(dirname, isDirectory: true).path
                 if !FileManager.default.fileExists(atPath: revivedDir) {
-                    try git.createWorktree(path: project.dir, worktreePath: revivedDir, branch: branchName, targetBranch: resolvedTargetBranch)
+                    try git.createWorktree(
+                        path: project.dir,
+                        worktreePath: revivedDir,
+                        branch: branchName,
+                        targetBranch: resolvedTargetBranch,
+                        allowRemoteBranchLookup: allowRemoteBranchLookup)
                 }
                 revivedBranch = branchName
             } else {
@@ -371,14 +384,7 @@ public final class MuxyOrchestrator {
                 targetBranch: existing.targetBranch ?? resolvedTargetBranch, isDefault: false, isArchived: false, isRunning: false, lastLaunchedAt: nil)
             try store.upsert(workspace: revived)
             try seedWorkspaceSettings(project: project, workspace: revived)
-            let config = try store.appConfig()
-            let portDefinitions = try store.workspacePortDefinitions(workspaceID: revived.id)
-            _ = try PortAllocator(store: store).allocatePorts(workspaceID: revived.id, definitions: portDefinitions, range: config.portRange)
-            if let script = project.setupScript, !script.isEmpty {
-                let namedPorts = try store.workspacePortsNamed(workspaceID: revived.id)
-                let env = buildWorkspaceEnv(project: project, workspace: revived, namedPorts: namedPorts)
-                try runScript(applyEnvVars(script, env: env), cwd: revived.dir)
-            }
+            try initializeWorkspaceRuntime(project: project, workspace: revived, runSetupScript: runSetupScript)
             return revived
         }
         let workspaceDir: String
@@ -391,7 +397,12 @@ public final class MuxyOrchestrator {
             let worktreeRoot = try worktreeRoot(project: project)
             try FileManager.default.createDirectory(at: worktreeRoot, withIntermediateDirectories: true)
             workspaceDir = worktreeRoot.appendingPathComponent(dirname, isDirectory: true).path
-            try git.createWorktree(path: project.dir, worktreePath: workspaceDir, branch: branchName, targetBranch: resolvedTargetBranch)
+            try git.createWorktree(
+                path: project.dir,
+                worktreePath: workspaceDir,
+                branch: branchName,
+                targetBranch: resolvedTargetBranch,
+                allowRemoteBranchLookup: allowRemoteBranchLookup)
             workspaceBranch = branchName
         } else {
             workspaceDir = project.dir
@@ -403,16 +414,7 @@ public final class MuxyOrchestrator {
             targetBranch: resolvedTargetBranch, isDefault: false, isArchived: false, isRunning: false, lastLaunchedAt: nil)
         try store.upsert(workspace: workspace)
         try seedWorkspaceSettings(project: project, workspace: workspace)
-
-        let appConfig = try store.appConfig()
-        let portDefinitions = try store.workspacePortDefinitions(workspaceID: workspace.id)
-        _ = try PortAllocator(store: store).allocatePorts(workspaceID: workspace.id, definitions: portDefinitions, range: appConfig.portRange)
-
-        if let script = project.setupScript, !script.isEmpty {
-            let namedPorts = try store.workspacePortsNamed(workspaceID: workspace.id)
-            let env = buildWorkspaceEnv(project: project, workspace: workspace, namedPorts: namedPorts)
-            try runScript(applyEnvVars(script, env: env), cwd: workspaceDir)
-        }
+        try initializeWorkspaceRuntime(project: project, workspace: workspace, runSetupScript: runSetupScript)
 
         return workspace
     }
@@ -475,16 +477,7 @@ public final class MuxyOrchestrator {
             isDefault: false, isArchived: false, isRunning: false, lastLaunchedAt: nil)
         try store.upsert(workspace: workspace)
         try seedWorkspaceSettings(project: project, workspace: workspace)
-        
-        let appConfig = try store.appConfig()
-        let portDefinitions = try store.workspacePortDefinitions(workspaceID: workspace.id)
-        _ = try PortAllocator(store: store).allocatePorts(workspaceID: workspace.id, definitions: portDefinitions, range: appConfig.portRange)
-        
-        if let script = project.setupScript, !script.isEmpty {
-            let namedPorts = try store.workspacePortsNamed(workspaceID: workspace.id)
-            let env = buildWorkspaceEnv(project: project, workspace: workspace, namedPorts: namedPorts)
-            try runScript(applyEnvVars(script, env: env), cwd: workspace.dir)
-        }
+        try initializeWorkspaceRuntime(project: project, workspace: workspace, runSetupScript: true)
         
         return workspace
     }
@@ -558,17 +551,7 @@ public final class MuxyOrchestrator {
                     isDefault: false, isArchived: false, isRunning: false, lastLaunchedAt: nil)
                 try store.upsert(workspace: workspace)
                 try seedWorkspaceSettings(project: project, workspace: workspace)
-                
-                let appConfig = try store.appConfig()
-                let portDefinitions = try store.workspacePortDefinitions(workspaceID: workspace.id)
-                _ = try PortAllocator(store: store).allocatePorts(
-                    workspaceID: workspace.id, definitions: portDefinitions, range: appConfig.portRange)
-                
-                if let script = project.setupScript, !script.isEmpty {
-                    let namedPorts = try store.workspacePortsNamed(workspaceID: workspace.id)
-                    let env = buildWorkspaceEnv(project: project, workspace: workspace, namedPorts: namedPorts)
-                    try runScript(applyEnvVars(script, env: env), cwd: workspace.dir)
-                }
+                try initializeWorkspaceRuntime(project: project, workspace: workspace, runSetupScript: true)
                 
                 createdWorkspaces.append(workspace)
             }
@@ -630,6 +613,7 @@ public final class MuxyOrchestrator {
     }
 
     private func launchWorkspaceUnlocked(workspaceID: String) throws {
+        try waitForWorkspaceSetupToComplete(workspaceID: workspaceID)
         let (project, workspace) = try resolveWorkspace(id: workspaceID)
         guard !workspace.isArchived else { throw MuxyError.invalidArgument(message: "Workspace is archived.") }
         let hasTrackedRuntime = try hasTrackedRuntimeIndicators(workspaceID: workspace.id)
@@ -1794,6 +1778,19 @@ public final class MuxyOrchestrator {
         try store.touchWorkspaceSettings(workspaceID: workspace.id, updatedAt: nowISO8601())
     }
 
+    public func workspaceSetupState(workspaceID: String) throws -> WorkspaceSetupState {
+        _ = try resolveWorkspace(id: workspaceID)
+        return try store.workspaceSetupState(workspaceID: workspaceID)
+            ?? WorkspaceSetupState(status: .succeeded, errorMessage: nil, startedAt: nil, finishedAt: nil)
+    }
+
+    public func runWorkspaceSetup(workspaceID: String) throws {
+        try withWorkspaceSetupLock(workspaceID: workspaceID) {
+            let (project, workspace) = try resolveWorkspace(id: workspaceID)
+            try runWorkspaceSetup(project: project, workspace: workspace)
+        }
+    }
+
     private func loadWorkspaceSettings(project: ProjectRecord, workspace: WorkspaceRecord) throws -> WorkspaceSettings? {
         let hasSettings = try store.workspaceSettingsExists(workspaceID: workspace.id)
         if !hasSettings { try seedWorkspaceSettings(project: project, workspace: workspace) }
@@ -1807,6 +1804,90 @@ public final class MuxyOrchestrator {
     }
 
     private func runScript(_ script: String, cwd: String) throws { _ = try Shell.run(["/bin/bash", "-lc", script], cwd: cwd) }
+
+    private func initializeWorkspaceRuntime(project: ProjectRecord, workspace: WorkspaceRecord, runSetupScript: Bool) throws {
+        let appConfig = try store.appConfig()
+        let portDefinitions = try store.workspacePortDefinitions(workspaceID: workspace.id)
+        _ = try PortAllocator(store: store).allocatePorts(workspaceID: workspace.id, definitions: portDefinitions, range: appConfig.portRange)
+        if runSetupScript {
+            try runWorkspaceSetup(project: project, workspace: workspace)
+        } else {
+            try store.setWorkspaceSetupState(workspaceID: workspace.id, status: .pending, errorMessage: nil, startedAt: nil, finishedAt: nil)
+        }
+    }
+
+    private func runWorkspaceSetup(project: ProjectRecord, workspace: WorkspaceRecord) throws {
+        let setupScript = project.setupScript?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let startedAt = nowISO8601()
+        try store.setWorkspaceSetupState(workspaceID: workspace.id, status: .running, errorMessage: nil, startedAt: startedAt, finishedAt: nil)
+        guard let setupScript, !setupScript.isEmpty else {
+            try store.setWorkspaceSetupState(
+                workspaceID: workspace.id,
+                status: .succeeded,
+                errorMessage: nil,
+                startedAt: startedAt,
+                finishedAt: nowISO8601())
+            return
+        }
+        do {
+            let namedPorts = try store.workspacePortsNamed(workspaceID: workspace.id)
+            let env = buildWorkspaceEnv(project: project, workspace: workspace, namedPorts: namedPorts)
+            try runScript(applyEnvVars(setupScript, env: env), cwd: workspace.dir)
+            try store.setWorkspaceSetupState(
+                workspaceID: workspace.id,
+                status: .succeeded,
+                errorMessage: nil,
+                startedAt: startedAt,
+                finishedAt: nowISO8601())
+        } catch {
+            let message = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+            try store.setWorkspaceSetupState(
+                workspaceID: workspace.id,
+                status: .failed,
+                errorMessage: message,
+                startedAt: startedAt,
+                finishedAt: nowISO8601())
+            throw error
+        }
+    }
+
+    private func waitForWorkspaceSetupToComplete(workspaceID: String) throws {
+        let waitStartedAt = currentDate()
+        while true {
+            let setupState = try workspaceSetupState(workspaceID: workspaceID)
+            switch setupState.status {
+            case .succeeded:
+                return
+            case .failed:
+                let detail = setupState.errorMessage?.isEmpty == false ? setupState.errorMessage! : "unknown setup error"
+                throw MuxyError.invalidArgument(message: "Workspace setup failed: \(detail)")
+            case .pending, .running:
+                if currentDate().timeIntervalSince(waitStartedAt) > 900 {
+                    throw MuxyError.invalidArgument(
+                        message:
+                            "Timed out waiting for workspace setup to finish. Retry launch after setup completes or run mx workspace up --restart.")
+                }
+                Thread.sleep(forTimeInterval: 0.2)
+            }
+        }
+    }
+
+    private func withWorkspaceSetupLock<T>(workspaceID: String, operation: () throws -> T) throws -> T {
+        workspaceSetupLock.lock()
+        if workspaceSetupInFlight.contains(workspaceID) {
+            workspaceSetupLock.unlock()
+            throw MuxyError.invalidArgument(message: "Workspace setup is already in progress.")
+        }
+        workspaceSetupInFlight.insert(workspaceID)
+        workspaceSetupLock.unlock()
+
+        defer {
+            workspaceSetupLock.lock()
+            workspaceSetupInFlight.remove(workspaceID)
+            workspaceSetupLock.unlock()
+        }
+        return try operation()
+    }
 
     func buildWorkspaceEnv(project: ProjectRecord, workspace: WorkspaceRecord, namedPorts: [(port: Int, name: String)]) -> [String: String] {
         var env: [String: String] = [:]
