@@ -23,14 +23,14 @@ export const docsPageLinks: DocsPageLink[] = [
     href: "/docs/projects",
     title: "Projects",
     summary:
-      "Add and manage projects stored in the database, configure templates (processes, ports, scripts, named browser sessions), and understand default workspace creation for directory projects and git-url imports.",
+      "Add and manage projects stored in the database, start project creation with source-first input (directory picker or git URL) before advanced template settings, configure templates (processes, ports, scripts, named browser sessions), and understand default workspace creation for directory projects and git-url imports.",
     audience: "Developers setting up and managing project definitions.",
   },
   {
     href: "/docs/workspaces",
     title: "Workspaces",
     summary:
-      "Workspace concepts, New Workspace form flow (+ / cmd+n, and cmd+n quick-create when the form is open), branch-first progressive disclosure in git workspace creation, local-cached default name/branch suggestions, non-blocking branch option loading for fast form display, inline metadata editing (header title + branch/tooltip labels with Escape/outside-click cancel), git branch rename-on-edit behavior, settings overrides, ports, env vars, switching, focus tooltip overlays, sidebar hierarchy cues, and git signals.",
+      "Workspace concepts, New Workspace form flow (+ / cmd+n, visible cmd+n quick-create hint, and cmd+n quick-create when the form is open), branch-first progressive disclosure in git workspace creation, local-cached default name/branch suggestions, non-blocking branch option loading for fast form display, form shortcut hints (Return create, Escape cancel), inline metadata editing (header title + branch/tooltip labels with Escape/outside-click cancel), git branch rename-on-edit behavior, settings overrides, ports, env vars, switching, focus tooltip overlays, sidebar hierarchy cues, and git signals.",
     audience: "Developers creating and configuring workspaces within projects.",
   },
   {

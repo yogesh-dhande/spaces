@@ -77,6 +77,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     private var inlineWorkspaceLabelTagByObjectID: [ObjectIdentifier: Int] = [:]
     private var inlineWorkspaceOutsideClickMonitor: Any?
     private var activeAddWorkspaceFormTag: Int?
+    private var activeAddProjectFormTag: Int?
     private lazy var relativeDateFormatter: RelativeDateTimeFormatter = {
         let formatter = RelativeDateTimeFormatter()
         formatter.unitsStyle = .short
@@ -628,6 +629,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     private func showPlaceholder() {
         clearInlineWorkspaceFieldRefs()
         activeAddWorkspaceFormTag = nil
+        activeAddProjectFormTag = nil
         showingSettings = false
         activeShortcutCaptureSetting = nil
         for view in detailContainer.subviews { view.removeFromSuperview() }
@@ -645,6 +647,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     private func showSettingsDetail() {
         clearInlineWorkspaceFieldRefs()
         activeAddWorkspaceFormTag = nil
+        activeAddProjectFormTag = nil
         showingSettings = true
         shortcutButtonsBySetting.removeAll()
         activeShortcutCaptureSetting = nil
@@ -721,6 +724,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     private func showProjectDetail(project: ProjectSummary) {
         clearInlineWorkspaceFieldRefs()
         activeAddWorkspaceFormTag = nil
+        activeAddProjectFormTag = nil
         showingSettings = false
         activeShortcutCaptureSetting = nil
         for view in detailContainer.subviews { view.removeFromSuperview() }
@@ -943,6 +947,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     private func showAddProjectForm() {
         clearInlineWorkspaceFieldRefs()
         activeAddWorkspaceFormTag = nil
+        activeAddProjectFormTag = nil
         showingSettings = false
         for view in detailContainer.subviews { view.removeFromSuperview() }
         detailContainer.wantsLayer = true
@@ -1004,6 +1009,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         browseButton.toolTip = "Choose directory"
         let repoURLField = NSTextField(string: "")
         repoURLField.placeholderString = "https://github.com/org/repo.git"
+        repoURLField.delegate = self
 
         let setupView = makeEditableTextView()
         let stopView = makeEditableTextView()
@@ -1056,7 +1062,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let sourceContentStack = NSStackView()
         sourceContentStack.orientation = .vertical
         sourceContentStack.alignment = .leading
-        sourceContentStack.spacing = 8
+        sourceContentStack.spacing = 12
         sourceContentStack.detachesHiddenViews = true
         sourceContentStack.addArrangedSubview(sourceInputRow)
         constrainFormFieldToFillWidth(sourceInputRow, in: sourceContentStack)
@@ -1070,6 +1076,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let setupCard = formSectionCard(
             icon: "terminal", title: "Setup script", subtitle: "Runs when each new workspace is created or revived from archive.",
             contentViews: [setupScroll])
+        setupCard.isHidden = true
         stack.addArrangedSubview(setupCard)
 
         // --- Port definitions card ---
@@ -1077,29 +1084,34 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             icon: "network", title: "Port definitions",
             subtitle: "Named ports allocated per workspace. Available as env vars in scripts and commands.",
             contentViews: [portEditor.container])
+        addPortCard.isHidden = true
         stack.addArrangedSubview(addPortCard)
 
         // --- Processes card ---
         let processCard = formSectionCard(
             icon: "terminal.fill", title: "Processes", subtitle: "Define the commands that run inside your workspace.",
             contentViews: [processEditor.container])
+        processCard.isHidden = true
         stack.addArrangedSubview(processCard)
 
         // --- Browser sessions card ---
         let browserCard = formSectionCard(
             icon: "globe", title: "Browser sessions", subtitle: "Optional names with URL prefixes to open automatically.",
             contentViews: [browserSessionEditor.container])
+        browserCard.isHidden = true
         stack.addArrangedSubview(browserCard)
 
         // --- Stop script card ---
         let stopScroll = scrollableTextView(stopView, height: 90)
         let stopCard = formSectionCard(
             icon: "stop.circle", title: "Stop script", subtitle: "Seeded into workspaces and run on stop/restart/archive", contentViews: [stopScroll])
+        stopCard.isHidden = true
         stack.addArrangedSubview(stopCard)
 
         // --- Buttons ---
         let createButton = actionButton(
-            title: "Create Project", symbol: nil, tooltip: "Create project", action: #selector(createProject(_:)), primary: true)
+            title: "Create Project (Return)", symbol: nil, tooltip: "Create project (Return)", action: #selector(createProject(_:)),
+            primary: true)
         createButton.keyEquivalent = "\r"
         createButton.bezelStyle = .texturedRounded
         createButton.wantsLayer = true
@@ -1107,8 +1119,13 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         createButton.layer?.cornerRadius = 6
         let buttonTextColor = NSColor.white
         createButton.attributedTitle = NSAttributedString(
-            string: "Create Project", attributes: [.foregroundColor: buttonTextColor, .font: NSFont.systemFont(ofSize: 13, weight: .semibold)])
-        let cancelButton = actionButton(title: "Cancel", symbol: nil, tooltip: "Cancel", action: #selector(cancelProjectForm), primary: false)
+            string: "Create Project (Return)",
+            attributes: [.foregroundColor: buttonTextColor, .font: NSFont.systemFont(ofSize: 13, weight: .semibold)])
+        createButton.isEnabled = false
+        let cancelButton = actionButton(
+            title: "Cancel (Esc)", symbol: nil, tooltip: "Cancel (Esc)", action: #selector(cancelProjectForm), primary: false)
+        cancelButton.keyEquivalent = "\u{1b}"
+        cancelButton.keyEquivalentModifierMask = []
 
         let buttonRow = NSStackView()
         buttonRow.orientation = .horizontal
@@ -1132,13 +1149,16 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         createButton.tag = storeAddProjectFields(
             sourcePopup: sourcePopup, localSourceSection: localSourceSection, cloneSourceSection: cloneSourceSection, dirField: dirField,
             repoURLField: repoURLField, setupView: setupView, stopView: stopView, portEditor: portEditor, processEditor: processEditor,
-            browserSessionEditor: browserSessionEditor, browseButton: browseButton)
+            browserSessionEditor: browserSessionEditor, browseButton: browseButton,
+            progressiveInputViews: [setupCard, addPortCard, processCard, browserCard, stopCard], createButton: createButton)
+        activeAddProjectFormTag = createButton.tag
         if let refs = AddProjectFieldCache.shared.cache[createButton.tag] { updateAddProjectSourceUI(refs) }
     }
 
     private func showAddWorkspaceForm(project: ProjectSummary) {
         clearInlineWorkspaceFieldRefs()
         activeAddWorkspaceFormTag = nil
+        activeAddProjectFormTag = nil
         showingSettings = false
         for view in detailContainer.subviews { view.removeFromSuperview() }
         detailContainer.wantsLayer = true
@@ -1175,9 +1195,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let headerSubtitle = NSTextField(labelWithString: "Create a new workspace for \(project.name).")
         headerSubtitle.font = .systemFont(ofSize: 12)
         headerSubtitle.textColor = .secondaryLabelColor
+        let headerHint = helpTextLabel("Tip: Press Cmd+N to quickly create a workspace with an auto-generated name.")
 
         stack.addArrangedSubview(headerRow)
         stack.addArrangedSubview(headerSubtitle)
+        stack.addArrangedSubview(headerHint)
 
         // --- Fields ---
         let suggestedName = suggestedWorkspaceNameFast(projectID: project.id)
@@ -1205,7 +1227,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let contentStack = NSStackView()
         contentStack.orientation = .vertical
         contentStack.alignment = .leading
-        contentStack.spacing = 8
+        contentStack.spacing = 12
         var progressiveInputViews: [NSView] = []
 
         if project.isGitRepo {
@@ -1217,7 +1239,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             let advancedInputStack = NSStackView()
             advancedInputStack.orientation = .vertical
             advancedInputStack.alignment = .leading
-            advancedInputStack.spacing = 8
+            advancedInputStack.spacing = 12
             advancedInputStack.addArrangedSubview(label(text: "Target branch"))
             advancedInputStack.addArrangedSubview(helpTextLabel("The existing branch your new branch will be based on."))
             advancedInputStack.addArrangedSubview(targetBranchField)
@@ -1258,7 +1280,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
         // --- Buttons ---
         let createButton = actionButton(
-            title: "Create Workspace", symbol: nil, tooltip: "Create workspace", action: #selector(createWorkspace(_:)), primary: true)
+            title: "Create Workspace (Return)", symbol: nil, tooltip: "Create workspace (Return)", action: #selector(createWorkspace(_:)),
+            primary: true)
         createButton.keyEquivalent = "\r"
         createButton.bezelStyle = .texturedRounded
         createButton.wantsLayer = true
@@ -1266,8 +1289,12 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         createButton.layer?.cornerRadius = 6
         let buttonTextColor = NSColor.white
         createButton.attributedTitle = NSAttributedString(
-            string: "Create Workspace", attributes: [.foregroundColor: buttonTextColor, .font: NSFont.systemFont(ofSize: 13, weight: .semibold)])
-        let cancelButton = actionButton(title: "Cancel", symbol: nil, tooltip: "Cancel", action: #selector(cancelProjectForm), primary: false)
+            string: "Create Workspace (Return)",
+            attributes: [.foregroundColor: buttonTextColor, .font: NSFont.systemFont(ofSize: 13, weight: .semibold)])
+        let cancelButton = actionButton(
+            title: "Cancel (Esc)", symbol: nil, tooltip: "Cancel (Esc)", action: #selector(cancelProjectForm), primary: false)
+        cancelButton.keyEquivalent = "\u{1b}"
+        cancelButton.keyEquivalentModifierMask = []
 
         let buttonRow = NSStackView()
         buttonRow.orientation = .horizontal
@@ -1310,6 +1337,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     private func showWorkspaceDetail(project: ProjectSummary, workspace: WorkspaceSummary) {
         clearInlineWorkspaceFieldRefs()
         activeAddWorkspaceFormTag = nil
+        activeAddProjectFormTag = nil
         showingSettings = false
         activeShortcutCaptureSetting = nil
         for view in detailContainer.subviews { view.removeFromSuperview() }
@@ -2617,13 +2645,13 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     private func storeAddProjectFields(
         sourcePopup: NSPopUpButton, localSourceSection: NSStackView, cloneSourceSection: NSStackView, dirField: NSTextField,
         repoURLField: NSTextField, setupView: NSTextView, stopView: NSTextView, portEditor: PortEditor, processEditor: ProcessEditor,
-        browserSessionEditor: BrowserSessionEditor, browseButton: NSButton
+        browserSessionEditor: BrowserSessionEditor, browseButton: NSButton, progressiveInputViews: [NSView], createButton: NSButton
     ) -> Int {
         let id = UUID().uuidString.hashValue
         AddProjectFieldCache.shared.cache[id] = AddProjectFieldRefs(
             sourcePopup: sourcePopup, localSourceSection: localSourceSection, cloneSourceSection: cloneSourceSection, dirField: dirField,
-            repoURLField: repoURLField, browseButton: browseButton, setupView: setupView, stopView: stopView, portEditor: portEditor,
-            processEditor: processEditor, browserSessionEditor: browserSessionEditor)
+            repoURLField: repoURLField, browseButton: browseButton, progressiveInputViews: progressiveInputViews, createButton: createButton,
+            setupView: setupView, stopView: stopView, portEditor: portEditor, processEditor: processEditor, browserSessionEditor: browserSessionEditor)
         sourcePopup.tag = id
         browseButton.tag = id
         return id
@@ -2737,6 +2765,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             switch result {
             case .success(let workspace):
                 activeAddWorkspaceFormTag = nil
+                activeAddProjectFormTag = nil
                 selectedProjectID = project.id
                 selectedWorkspaceID = workspace.id
                 lastSelectedRow = -1
@@ -2830,6 +2859,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 project.browserSessions = refs.browserSessionEditor.currentSessions()
                 project.statusChecks = refs.processEditor.currentStatusChecks()
             }
+            activeAddProjectFormTag = nil
             reloadData()
         } catch { showError(error) }
     }
@@ -2852,6 +2882,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 refs.dirField.textColor = .labelColor
                 refs.dirField.isHidden = false
                 refs.browseButton.title = url.lastPathComponent
+                self.updateAddProjectSourceUI(refs)
             }
         }
     }
@@ -2860,6 +2891,21 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let cloneSelected = refs.sourcePopup.indexOfSelectedItem == 1
         refs.localSourceSection.isHidden = cloneSelected
         refs.cloneSourceSection.isHidden = !cloneSelected
+        updateAddProjectProgressiveDisclosure(refs)
+    }
+
+    private func updateAddProjectProgressiveDisclosure(_ refs: AddProjectFieldRefs) {
+        let hasSource = isAddProjectSourceConfigured(refs)
+        for view in refs.progressiveInputViews { view.isHidden = !hasSource }
+        refs.createButton.isEnabled = hasSource
+    }
+
+    private func isAddProjectSourceConfigured(_ refs: AddProjectFieldRefs) -> Bool {
+        if refs.sourcePopup.indexOfSelectedItem == 1 {
+            return !refs.repoURLField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        }
+        let directoryPath = refs.dirField.toolTip?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return !directoryPath.isEmpty
     }
 
     private func defaultWorkspaceTargetBranch(project: ProjectSummary, branches: [String]) -> String? {
@@ -2925,6 +2971,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 switch result {
                 case .success(let workspace):
                     activeAddWorkspaceFormTag = nil
+                    activeAddProjectFormTag = nil
                     selectedProjectID = refs.projectID
                     selectedWorkspaceID = workspace.id
                     lastSelectedRow = -1
@@ -2943,6 +2990,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
     public func controlTextDidChange(_ obj: Notification) {
         guard let changedField = obj.object as? NSTextField else { return }
+        for refs in AddProjectFieldCache.shared.cache.values {
+            guard refs.repoURLField === changedField else { continue }
+            updateAddProjectSourceUI(refs)
+            return
+        }
         if let tag = inlineWorkspaceFieldTagByObjectID[ObjectIdentifier(changedField)] {
             updateInlineWorkspaceMetadataButtons(tag: tag)
             return
@@ -3177,6 +3229,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             guard let self else { return event }
             if self.handleShortcutCaptureEvent(event: event) { return nil }
             if self.handleNewWorkspaceShortcut(event: event) { return nil }
+            if self.handleFormCancelShortcut(event: event) { return nil }
             if self.handleFocusedTextInputShortcut(event: event) { return nil }
             if self.isTextInputFocused() { return event }
             if let openTerminalShortcutSpec, matches(event: event, spec: openTerminalShortcutSpec) {
@@ -3205,6 +3258,13 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             }
             return event
         }
+    }
+
+    private func handleFormCancelShortcut(event: NSEvent) -> Bool {
+        guard event.keyCode == UInt16(kVK_Escape) else { return false }
+        guard activeAddWorkspaceFormTag != nil || activeAddProjectFormTag != nil else { return false }
+        cancelProjectForm()
+        return true
     }
 
     private func handleNewWorkspaceShortcut(event: NSEvent) -> Bool {

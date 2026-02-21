@@ -231,8 +231,11 @@
         - project-level plus/new-workspace actions open the New Workspace form
         - `cmd+n` opens the New Workspace form for the currently selected project/workspace
         - when the New Workspace form is open, `cmd+n` creates immediately using generated defaults from local cached state (workspace name + target branch fallback)
+        - New Workspace form header includes a visible `cmd+n` quick-create hint
         - git New Workspace form uses branch-first progressive disclosure; target branch/title/directory/tooltip appear after branch input is non-empty
             - opening the form and quick-create should not block on remote branch discovery/network calls
+        - New Project form uses source-first progressive disclosure; additional settings appear only after a local directory is chosen or a git URL is entered
+        - New Project and New Workspace form buttons include shortcut hints (`Return` create, `Esc` cancel), and `Esc` cancels either form
         - for git projects, muxy uses the same auto-generated value for initial workspace title and branch name
         - for git projects, target branch defaults using this precedence: project default branch, `main`, `master`, first discovered branch
         - for git projects, directory name defaults to muxy's auto-generated unique dirname

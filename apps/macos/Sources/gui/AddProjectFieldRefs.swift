@@ -7,6 +7,8 @@ struct AddProjectFieldRefs {
     let dirField: NSTextField
     let repoURLField: NSTextField
     let browseButton: NSButton
+    let progressiveInputViews: [NSView]
+    let createButton: NSButton
     let setupView: NSTextView
     let stopView: NSTextView
     let portEditor: PortEditor

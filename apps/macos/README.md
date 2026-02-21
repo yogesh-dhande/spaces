@@ -54,8 +54,11 @@ Muxy periodically discovers and reconciles git worktrees for existing projects. 
 - New workspace `+` actions open the New Workspace form for git projects.
 - `cmd+n` opens the New Workspace form for the currently selected project/workspace.
 - On the New Workspace form, `cmd+n` quick-creates using generated defaults (suggested title/branch, auto-generated directory, default target branch).
+- The New Workspace header shows a `cmd+n` hint for quick-create with generated names.
 - `cmd+n` form-open and quick-create paths are optimized to avoid blocking remote branch lookups; branch options are loaded from local refs first and refreshed asynchronously, and suggested workspace names come from cached local workspace state.
 - For git projects, the New Workspace form starts with only the branch input visible; target branch/title/directory/tooltip are progressively revealed after branch typing begins.
+- New Project starts with only source selection (directory picker or git URL); setup script, ports, processes, browser sessions, and stop script are shown after source input is provided.
+- New Project and New Workspace form actions include button shortcut hints (`Return` to create, `Esc` to cancel), and `Esc` cancels either form.
 - Branch and tooltip can be edited from inline labels in workspace detail, title can be edited in the workspace header, and all metadata can be edited via `mx workspace update`.
 - Workspace title stays in the top header (`project / workspace`) and is editable there via double-click.
 - Workspace detail also shows inline branch and tooltip labels above Launch/Stop actions; double-click a label to edit and reveal small Save/Cancel controls.
