@@ -49,6 +49,9 @@ Muxy periodically discovers and reconciles git worktrees for existing projects. 
 
 ## GUI
 - Two panes: projects/workspaces on the left, details on the right.
+- On startup, the details pane shows a loading message and spinner while initial projects/workspaces are loaded in the background.
+- Global hotkeys are available immediately at startup (before data hydration completes) so focus/show actions are not delayed.
+- Startup background reconciliation updates the sidebar via async snapshots to keep workspace switching responsive while launch tasks are still running.
 - No dialogs for add/edit; all forms are in the right pane.
 - Right-pane forms are scrollable to avoid clipping on smaller window heights.
 - New workspace `+` actions open the New Workspace form for git projects.

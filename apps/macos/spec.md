@@ -201,6 +201,9 @@
             - Window records may become stale across app restarts; muxy must re-discover windows on launch and reconcile with stored state
 - User flow
     - User installs the app
+    - On app launch, muxy shows a startup loading state in the detail pane ("Loading projects and workspaces...") while initial project/workspace/git activity data is fetched in a background task so first paint remains responsive
+    - Global focus hotkeys are registered during initial startup so showing/focusing muxy does not wait for background hydration to finish
+    - During startup reconciliation passes, sidebar refreshes must run through background snapshot loading so workspace switching stays responsive (no main-thread blocking reload path)
     - Check for required dependencies e.g. yabai. If missing, ask user to install and provide instructions or links to instructions
     - Check for required permissions e.g. accessibility. If missing, ask user to provide using deep links to settings whenever possible. Provide instructions.
     - Once the app is configured appropriately, prompt the user to create their first project

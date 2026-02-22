@@ -78,6 +78,9 @@ GUI interaction notes:
 - In the run-tab Windows list, browser rows render a two-part label: browser-session name first (when configured) plus the matched URL in secondary text.
 - Keyboard shortcut overrides for GUI actions are persisted in SQLite settings and editable in the GUI Settings view and CLI settings commands.
 - The app provides a standard Edit menu with Copy (Cmd+C) and Select All (Cmd+A) for system clipboard support in read-only text views.
+- Launch performs initial sidebar data hydration (projects/workspaces/git activity) in a detached background task; the right pane shows a spinner + status message so first render stays responsive instead of blocking the main actor.
+- Global hotkeys are registered during initial app boot (before hydration completes) so first-use focus remains immediate while startup loading continues.
+- Periodic startup reconciliation (window refresh/process monitor/worktree discovery) requests sidebar reloads through the same detached snapshot path, preventing main-thread stalls while users switch workspaces.
 
 ## Data Model
 Global preferences (stored in SQLite `settings` table):

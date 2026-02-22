@@ -5,6 +5,7 @@ node_modules/
 apps/web/out
 apps/web/.next
 .DS_Store
+*.log
 
 # Firebase Hosting - generated files (deployed, not committed)
 apps/web/public/*

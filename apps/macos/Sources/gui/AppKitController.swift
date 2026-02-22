@@ -67,6 +67,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     private var availableUpdate: UpdateInfo?
     private var tooltipWindow: NSWindow?
     private var tooltipIPCObserver: NSObjectProtocol?
+    private var didStartBackgroundServices = false
+    private var sidebarReloadTask: Task<Void, Never>?
+    private var pendingSidebarReloadRequest = false
 
     private var configCache: AppConfig?
     private let defaultSplitViewWidth: CGFloat = 360
@@ -101,23 +104,25 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             let db = try DatabaseLocator.defaultPath()
             let store = try SQLiteStore(path: db)
             orchestrator = MuxyOrchestrator(store: store)
-            configCache = try orchestrator.syncConfig()
-            loadShortcutSpecs()
         } catch {
             showError(error)
             return
         }
 
         buildWindow()
+        NSApp.activate(ignoringOtherApps: true)
         buildMainMenu()
-        reloadData()
+        loadShortcutSpecs()
         setupGlobalHotkey()
+        showLoadingPlaceholder(
+            message: "Loading projects and workspaces...",
+            detail: "Muxy is preparing your workspace data."
+        )
         setupShortcutMonitor()
         setupTooltipIPCObserver()
-        startPeriodicWorkspaceWindowRefresh()
-        startPeriodicUpdateCheck()
-        startPeriodicProcessMonitor()
-        startPeriodicWorktreeDiscovery()
+        Task { @MainActor [weak self] in
+            await self?.loadInitialSidebarData()
+        }
     }
 
     public func applicationWillTerminate(_ notification: Notification) {
@@ -126,6 +131,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         periodicProcessMonitorTask?.cancel()
         periodicWorktreeDiscoveryTask?.cancel()
         deferredHotkeySelectionRefreshTask?.cancel()
+        sidebarReloadTask?.cancel()
         teardownInlineWorkspaceOutsideClickMonitor()
         teardownGlobalHotkey()
         if let shortcutMonitor { NSEvent.removeMonitor(shortcutMonitor) }
@@ -159,7 +165,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                     let windowCountsChanged = refreshResult.trackedWindowCounts != self.lastTrackedWindowCounts
                     self.lastTrackedWindowCounts = refreshResult.trackedWindowCounts
                     if (refreshResult.didMutateDB || windowCountsChanged) && self.canReloadAfterBackgroundWorkspaceRefresh() {
-                        self.reloadData()
+                        self.requestSidebarReload()
                     }
                 case .failure(let error):
                     self.showError(error)
@@ -183,7 +189,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 switch result {
                 case .success(let didUpdate):
                     if didUpdate && self.canReloadAfterBackgroundWorkspaceRefresh() {
-                        self.reloadData()
+                        self.requestSidebarReload()
                     }
                 case .failure:
                     break
@@ -209,13 +215,13 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                     if createdCount > 0 {
                         if self.canReloadAfterBackgroundWorkspaceRefresh() {
                             self.pendingWorktreeDiscoveryReload = false
-                            self.reloadData()
+                            self.requestSidebarReload()
                         } else {
                             self.pendingWorktreeDiscoveryReload = true
                         }
                     } else if self.pendingWorktreeDiscoveryReload, self.canReloadAfterBackgroundWorkspaceRefresh() {
                         self.pendingWorktreeDiscoveryReload = false
-                        self.reloadData()
+                        self.requestSidebarReload()
                     }
                 case .failure:
                     break
@@ -327,6 +333,13 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let directoryName: String?
         let tooltip: String?
         let allowRemoteBranchLookup: Bool
+    }
+
+    private struct SidebarDataSnapshot: Sendable {
+        let config: AppConfig
+        let projects: [ProjectSummary]
+        let workspacesByProject: [String: [WorkspaceSummary]]
+        let gitActivityByWorkspaceID: [String: GitTrackedFileActivity]
     }
 
     nonisolated private static func refreshWorkspaceWindowsSnapshot() async -> Result<MuxyOrchestrator.RefreshResult, Error> {
@@ -456,6 +469,45 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         }.value
     }
 
+    nonisolated private static func initialSidebarDataSnapshot() async -> Result<SidebarDataSnapshot, Error> {
+        await Task.detached(priority: .userInitiated) {
+            do {
+                let db = try DatabaseLocator.defaultPath()
+                let store = try SQLiteStore(path: db)
+                let orchestrator = MuxyOrchestrator(store: store)
+                let config = try orchestrator.syncConfig()
+                let projects = try orchestrator.listProjects()
+                var workspacesByProject: [String: [WorkspaceSummary]] = [:]
+                var gitActivityByWorkspaceID: [String: GitTrackedFileActivity] = [:]
+                for project in projects {
+                    let workspaces = try orchestrator.listWorkspaces(projectID: project.id, includeArchived: false)
+                    workspacesByProject[project.id] = workspaces
+                    guard project.isGitRepo else { continue }
+                    for workspace in workspaces {
+                        if let activity = try orchestrator.workspaceGitTrackedFileActivity(workspaceID: workspace.id) {
+                            gitActivityByWorkspaceID[workspace.id] = activity
+                        }
+                    }
+                }
+                for (projectID, workspaces) in workspacesByProject {
+                    workspacesByProject[projectID] = workspaces.sorted { a, b in
+                        let aDate = gitActivityByWorkspaceID[a.id]?.latestTrackedFileModificationDate ?? .distantPast
+                        let bDate = gitActivityByWorkspaceID[b.id]?.latestTrackedFileModificationDate ?? .distantPast
+                        return aDate > bDate
+                    }
+                }
+                return .success(
+                    .init(
+                        config: config,
+                        projects: projects,
+                        workspacesByProject: workspacesByProject,
+                        gitActivityByWorkspaceID: gitActivityByWorkspaceID))
+            } catch {
+                return .failure(error)
+            }
+        }.value
+    }
+
     private func buildMainMenu() {
         let mainMenu = NSMenu()
 
@@ -567,15 +619,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         detailContainer.translatesAutoresizingMaskIntoConstraints = false
         detailContainer.wantsLayer = true
         detailContainer.layer?.backgroundColor = sidebarPanelBackgroundColor().cgColor
-        let placeholder = NSTextField(labelWithString: "Select a project or workspace.")
-        placeholder.font = .systemFont(ofSize: 14)
-        placeholder.textColor = .secondaryLabelColor
-        placeholder.translatesAutoresizingMaskIntoConstraints = false
-        detailContainer.addSubview(placeholder)
-        NSLayoutConstraint.activate([
-            placeholder.centerXAnchor.constraint(equalTo: detailContainer.centerXAnchor),
-            placeholder.centerYAnchor.constraint(equalTo: detailContainer.centerYAnchor),
-        ])
+        showPlaceholder()
         return detailContainer
     }
 
@@ -610,6 +654,64 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         } catch { showError(error) }
     }
 
+    private func startBackgroundServicesIfNeeded() {
+        guard !didStartBackgroundServices else { return }
+        didStartBackgroundServices = true
+        startPeriodicWorkspaceWindowRefresh()
+        startPeriodicUpdateCheck()
+        startPeriodicProcessMonitor()
+        startPeriodicWorktreeDiscovery()
+    }
+
+    private func loadInitialSidebarData() async {
+        let result = await Self.initialSidebarDataSnapshot()
+        guard !Task.isCancelled else { return }
+        switch result {
+        case .success(let snapshot):
+            applySidebarDataSnapshot(snapshot)
+            startBackgroundServicesIfNeeded()
+        case .failure(let error):
+            showError(error)
+            showPlaceholder(message: "Muxy couldn't load workspace data.")
+            startBackgroundServicesIfNeeded()
+        }
+    }
+
+    private func requestSidebarReload() {
+        if let sidebarReloadTask, !sidebarReloadTask.isCancelled {
+            pendingSidebarReloadRequest = true
+            return
+        }
+        sidebarReloadTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            let result = await Self.initialSidebarDataSnapshot()
+            guard !Task.isCancelled else { return }
+            switch result {
+            case .success(let snapshot):
+                self.applySidebarDataSnapshot(snapshot)
+            case .failure(let error):
+                self.showError(error)
+            }
+            self.sidebarReloadTask = nil
+            if self.pendingSidebarReloadRequest {
+                self.pendingSidebarReloadRequest = false
+                self.requestSidebarReload()
+            }
+        }
+    }
+
+    private func applySidebarDataSnapshot(_ snapshot: SidebarDataSnapshot) {
+        pendingWorktreeDiscoveryReload = false
+        configCache = snapshot.config
+        loadShortcutSpecs()
+        projects = snapshot.projects
+        workspacesByProject = snapshot.workspacesByProject
+        gitActivityByWorkspaceID = snapshot.gitActivityByWorkspaceID
+        outlineView.reloadData()
+        outlineView.expandItem(nil, expandChildren: true)
+        refreshSelection()
+    }
+
     private func refreshSelection() {
         if showingSettings {
             showSettingsDetail()
@@ -628,14 +730,14 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         showPlaceholder()
     }
 
-    private func showPlaceholder() {
+    private func showPlaceholder(message: String = "Select a project or workspace.") {
         clearInlineWorkspaceFieldRefs()
         activeAddWorkspaceFormTag = nil
         activeAddProjectFormTag = nil
         showingSettings = false
         activeShortcutCaptureSetting = nil
         for view in detailContainer.subviews { view.removeFromSuperview() }
-        let placeholder = NSTextField(labelWithString: "Select a project or workspace.")
+        let placeholder = NSTextField(labelWithString: message)
         placeholder.font = .systemFont(ofSize: 14)
         placeholder.textColor = .secondaryLabelColor
         placeholder.translatesAutoresizingMaskIntoConstraints = false
@@ -643,6 +745,47 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         NSLayoutConstraint.activate([
             placeholder.centerXAnchor.constraint(equalTo: detailContainer.centerXAnchor),
             placeholder.centerYAnchor.constraint(equalTo: detailContainer.centerYAnchor),
+        ])
+    }
+
+    private func showLoadingPlaceholder(message: String, detail: String?) {
+        clearInlineWorkspaceFieldRefs()
+        activeAddWorkspaceFormTag = nil
+        activeAddProjectFormTag = nil
+        showingSettings = false
+        activeShortcutCaptureSetting = nil
+        for view in detailContainer.subviews { view.removeFromSuperview() }
+
+        let stack = NSStackView()
+        stack.orientation = .vertical
+        stack.alignment = .centerX
+        stack.spacing = 10
+        stack.translatesAutoresizingMaskIntoConstraints = false
+
+        let spinner = NSProgressIndicator()
+        spinner.style = .spinning
+        spinner.controlSize = .regular
+        spinner.startAnimation(nil)
+        spinner.translatesAutoresizingMaskIntoConstraints = false
+        stack.addArrangedSubview(spinner)
+
+        let title = NSTextField(labelWithString: message)
+        title.font = .systemFont(ofSize: 14, weight: .medium)
+        title.textColor = .labelColor
+        stack.addArrangedSubview(title)
+
+        if let detail, !detail.isEmpty {
+            let detailLabel = NSTextField(labelWithString: detail)
+            detailLabel.font = .systemFont(ofSize: 12)
+            detailLabel.textColor = .secondaryLabelColor
+            detailLabel.alignment = .center
+            stack.addArrangedSubview(detailLabel)
+        }
+
+        detailContainer.addSubview(stack)
+        NSLayoutConstraint.activate([
+            stack.centerXAnchor.constraint(equalTo: detailContainer.centerXAnchor),
+            stack.centerYAnchor.constraint(equalTo: detailContainer.centerYAnchor),
         ])
     }
 
