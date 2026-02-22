@@ -320,6 +320,7 @@
         - Global hotkey (default: cmd+shift+=) focuses the app
             - If not visible in the currently focused display and space, make it visible in that display and space (that could mean unhiding it, or simply moving it from another display and space)
             - background workspace-window reconciliation runs periodically while the app is active; focus does not synchronously block on refresh
+            - hotkey toggle defers selected-workspace detail refresh to the next main-actor turn so fronting the app remains responsive
         - Open editor (global): `cmd+shift+e`, open terminal: `cmd+shift+t`, open Finder: `cmd+shift+f`
         - When muxy in open and in focus
             - Loop through running workspaces (skips any workspaces that are not launched yet)

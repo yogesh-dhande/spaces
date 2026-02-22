@@ -103,6 +103,7 @@ Muxy periodically discovers and reconciles git worktrees for existing projects. 
 Hotkeys:
 - Global focus: `cmd+shift+=`
   - Brings muxy to front and keeps current window-selection shortcuts active; workspace-window reconciliation runs on the periodic background interval
+  - Defers selected-workspace detail refresh to the next main-actor turn so focus feels immediate
 - Next running workspace: `cmd+shift+]`
 - Previous running workspace: `cmd+shift+[`
 - Focus selected workspace: `cmd+shift+return`

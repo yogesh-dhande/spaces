@@ -72,7 +72,7 @@ export const docsPageLinks: DocsPageLink[] = [
     href: "/docs/shortcuts",
     title: "Keyboard Shortcuts",
     summary:
-      "Show global and workspace-level shortcuts for fast context switching and editor launch.",
+      "Show global and workspace-level shortcuts for fast context switching and editor launch, including immediate global-focus behavior with deferred detail refresh.",
     audience: "Keyboard-first users and heavy multitaskers.",
   },
   {

@@ -58,6 +58,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     private var periodicUpdateCheckTask: Task<Void, Never>?
     private var periodicProcessMonitorTask: Task<Void, Never>?
     private var periodicWorktreeDiscoveryTask: Task<Void, Never>?
+    private var deferredHotkeySelectionRefreshTask: Task<Void, Never>?
     private var pendingWorktreeDiscoveryReload = false
     private var lastTrackedWindowCounts: [String: Int] = [:]
     private let updateChecker = UpdateChecker()
@@ -124,6 +125,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         periodicUpdateCheckTask?.cancel()
         periodicProcessMonitorTask?.cancel()
         periodicWorktreeDiscoveryTask?.cancel()
+        deferredHotkeySelectionRefreshTask?.cancel()
         teardownInlineWorkspaceOutsideClickMonitor()
         teardownGlobalHotkey()
         if let shortcutMonitor { NSEvent.removeMonitor(shortcutMonitor) }
@@ -3651,7 +3653,17 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         if window.isMiniaturized { window.deminiaturize(nil) }
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
-        if selectedWorkspaceID != nil { refreshSelection() }
+        scheduleDeferredHotkeySelectionRefresh()
+    }
+
+    private func scheduleDeferredHotkeySelectionRefresh() {
+        deferredHotkeySelectionRefreshTask?.cancel()
+        guard selectedWorkspaceID != nil else { return }
+        deferredHotkeySelectionRefreshTask = Task { @MainActor [weak self] in
+            await Task.yield()
+            guard let self, !Task.isCancelled else { return }
+            self.refreshSelection()
+        }
     }
 
     public func outlineView(_ outlineView: NSOutlineView, numberOfChildrenOfItem item: Any?) -> Int {
