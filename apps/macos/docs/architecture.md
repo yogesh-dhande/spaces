@@ -68,6 +68,10 @@ GUI interaction notes:
 - If the requested branch exists only on remote, the orchestrator fetches it into `refs/remotes/origin/*` before creating the worktree from `origin/<branch>`.
 - If the requested branch exists locally, the local branch is used as-is (no implicit pull/rebase/merge in workspace creation).
 - Workspace rows use compact card styling with status + workspace title on top.
+- Left-pane workspace status indicator semantics:
+  - Gray: workspace not running.
+  - Green: running with no exited process rows and no failed status-check result rows.
+  - Red: running with at least one exited process row or at least one failed (`red`) status-check result.
 - Project rows in the left pane show a folder icon next to the project name.
 - Git workspace rows include ahead/behind commit counts vs the workspace target branch (the branch it was created from), merge-conflict status, and relative last-modified time (from latest tracked-file mtime) with tracked modified-file count.
 - Workspace detail metadata shows the current branch and, when present and different, appends `forked from <target branch>`.

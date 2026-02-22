@@ -75,6 +75,7 @@ Muxy periodically discovers and reconciles git worktrees for existing projects. 
 - If the branch exists locally, muxy uses the local branch as-is (no implicit pull/rebase/merge during workspace creation).
 - Project rows in the left pane show a folder icon next to the project name.
 - Workspace rows in the left pane use compact cards with workspace status + name.
+- Left-pane workspace status indicator turns red when a running workspace has any exited process or failed status check result; healthy running workspaces remain green.
 - Git workspace rows also show ahead/behind commit counts relative to the workspace target branch (the branch the workspace branch was created from), merge-conflict status, and relative last-modified time (latest tracked-file mtime) with tracked modified-file count.
 - Workspace detail branch metadata shows `current-branch (forked from target-branch)` when a target branch exists and differs.
 - Workspace view includes:

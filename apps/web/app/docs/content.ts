@@ -65,7 +65,7 @@ export const docsPageLinks: DocsPageLink[] = [
     href: "/docs/status-checks",
     title: "Status Checks",
     summary:
-      "Explain periodic health checks, stale-status avoidance, and on-fail restart behavior with clean stop-before-relaunch handling.",
+      "Explain periodic health checks, stale-status avoidance, red unhealthy sidebar indicators, and on-fail restart behavior with clean stop-before-relaunch handling.",
     audience: "Developers who need fast health visibility before switching context.",
   },
   {

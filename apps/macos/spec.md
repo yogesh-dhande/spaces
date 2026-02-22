@@ -302,6 +302,8 @@
             - left pane for list of projects, with nested list of workspaces under each project
             - project rows in the left pane show a project icon next to project name
             - for each workspace in the list, show an indicator for whether the workspace is running (processes running, windows open)
+                - running and healthy uses green
+                - running with any exited process or failed status check uses red
             - workspace rows use compact cards that show workspace title and status
             - for git workspaces, rows also show ahead/behind commit counts relative to the workspace's branched-off target branch, merge-conflict status, and relative "last modified" time (latest mtime among tracked files) with tracked modified-file count
             - right pane for details about selected item

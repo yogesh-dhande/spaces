@@ -33,6 +33,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     private var projects: [ProjectSummary] = []
     private var workspacesByProject: [String: [WorkspaceSummary]] = [:]
     private var gitActivityByWorkspaceID: [String: GitTrackedFileActivity] = [:]
+    private var workspaceIndicatorStateByID: [String: SidebarWorkspaceIndicatorState] = [:]
 
     private var selectedProjectID: String?
     private var selectedWorkspaceID: String?
@@ -340,6 +341,13 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let projects: [ProjectSummary]
         let workspacesByProject: [String: [WorkspaceSummary]]
         let gitActivityByWorkspaceID: [String: GitTrackedFileActivity]
+        let workspaceIndicatorStateByID: [String: SidebarWorkspaceIndicatorState]
+    }
+
+    private enum SidebarWorkspaceIndicatorState: Sendable, Equatable {
+        case idle
+        case runningHealthy
+        case runningUnhealthy
     }
 
     nonisolated private static func refreshWorkspaceWindowsSnapshot() async -> Result<MuxyOrchestrator.RefreshResult, Error> {
@@ -479,6 +487,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 let projects = try orchestrator.listProjects()
                 var workspacesByProject: [String: [WorkspaceSummary]] = [:]
                 var gitActivityByWorkspaceID: [String: GitTrackedFileActivity] = [:]
+                var workspaceIndicatorStateByID: [String: SidebarWorkspaceIndicatorState] = [:]
                 for project in projects {
                     let workspaces = try orchestrator.listWorkspaces(projectID: project.id, includeArchived: false)
                     workspacesByProject[project.id] = workspaces
@@ -486,6 +495,27 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                     for workspace in workspaces {
                         if let activity = try orchestrator.workspaceGitTrackedFileActivity(workspaceID: workspace.id) {
                             gitActivityByWorkspaceID[workspace.id] = activity
+                        }
+                    }
+                }
+                for workspaces in workspacesByProject.values {
+                    for workspace in workspaces {
+                        let runningProcesses = try orchestrator.runningProcesses(workspaceID: workspace.id)
+                        let hasExitedProcess = runningProcesses.contains { $0.status == .exited }
+                        var hasFailedCheck = false
+                        if !hasExitedProcess {
+                            for process in runningProcesses {
+                                let results = try orchestrator.statusResults(processID: process.id)
+                                if results.contains(where: { $0.status == "red" }) {
+                                    hasFailedCheck = true
+                                    break
+                                }
+                            }
+                        }
+                        if workspace.isRunning {
+                            workspaceIndicatorStateByID[workspace.id] = (hasExitedProcess || hasFailedCheck) ? .runningUnhealthy : .runningHealthy
+                        } else {
+                            workspaceIndicatorStateByID[workspace.id] = .idle
                         }
                     }
                 }
@@ -501,7 +531,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                         config: config,
                         projects: projects,
                         workspacesByProject: workspacesByProject,
-                        gitActivityByWorkspaceID: gitActivityByWorkspaceID))
+                        gitActivityByWorkspaceID: gitActivityByWorkspaceID,
+                        workspaceIndicatorStateByID: workspaceIndicatorStateByID))
             } catch {
                 return .failure(error)
             }
@@ -631,9 +662,29 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             projects = try orchestrator.listProjects()
             workspacesByProject = [:]
             gitActivityByWorkspaceID = [:]
+            workspaceIndicatorStateByID = [:]
             for project in projects {
                 let workspaces = try orchestrator.listWorkspaces(projectID: project.id, includeArchived: false)
                 workspacesByProject[project.id] = workspaces
+                for workspace in workspaces {
+                    let runningProcesses = try orchestrator.runningProcesses(workspaceID: workspace.id)
+                    let hasExitedProcess = runningProcesses.contains { $0.status == .exited }
+                    var hasFailedCheck = false
+                    if !hasExitedProcess {
+                        for process in runningProcesses {
+                            let results = try orchestrator.statusResults(processID: process.id)
+                            if results.contains(where: { $0.status == "red" }) {
+                                hasFailedCheck = true
+                                break
+                            }
+                        }
+                    }
+                    if workspace.isRunning {
+                        workspaceIndicatorStateByID[workspace.id] = (hasExitedProcess || hasFailedCheck) ? .runningUnhealthy : .runningHealthy
+                    } else {
+                        workspaceIndicatorStateByID[workspace.id] = .idle
+                    }
+                }
                 guard project.isGitRepo else { continue }
                 for workspace in workspaces {
                     if let activity = try orchestrator.workspaceGitTrackedFileActivity(workspaceID: workspace.id) {
@@ -707,6 +758,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         projects = snapshot.projects
         workspacesByProject = snapshot.workspacesByProject
         gitActivityByWorkspaceID = snapshot.gitActivityByWorkspaceID
+        workspaceIndicatorStateByID = snapshot.workspaceIndicatorStateByID
         outlineView.reloadData()
         outlineView.expandItem(nil, expandChildren: true)
         refreshSelection()
@@ -3948,8 +4000,16 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
         let statusIcon = NSImageView()
         statusIcon.translatesAutoresizingMaskIntoConstraints = false
-        statusIcon.image = NSImage(systemSymbolName: workspace.isRunning ? "circle.fill" : "circle", accessibilityDescription: "Status")
-        statusIcon.contentTintColor = workspace.isRunning ? sidebarRunningIndicatorColor() : sidebarIdleIndicatorColor()
+        let indicatorState = workspaceIndicatorStateByID[workspace.id] ?? (workspace.isRunning ? .runningHealthy : .idle)
+        statusIcon.image = NSImage(systemSymbolName: indicatorState == .idle ? "circle" : "circle.fill", accessibilityDescription: "Status")
+        switch indicatorState {
+        case .idle:
+            statusIcon.contentTintColor = sidebarIdleIndicatorColor()
+        case .runningHealthy:
+            statusIcon.contentTintColor = sidebarRunningIndicatorColor()
+        case .runningUnhealthy:
+            statusIcon.contentTintColor = sidebarFailedIndicatorColor()
+        }
         statusIcon.widthAnchor.constraint(equalToConstant: 10).isActive = true
         statusIcon.heightAnchor.constraint(equalToConstant: 10).isActive = true
 
@@ -4077,6 +4137,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     }
 
     private func sidebarRunningIndicatorColor() -> NSColor { sidebarThemeColor(light: (13, 95, 93), dark: (61, 198, 184), alpha: 0.95) }
+
+    private func sidebarFailedIndicatorColor() -> NSColor { sidebarThemeColor(light: (186, 67, 111), dark: (255, 111, 91), alpha: 0.95) }
 
     private func sidebarIdleIndicatorColor() -> NSColor { sidebarThemeColor(light: (213, 216, 211), dark: (48, 67, 70), alpha: 0.85) }
 
