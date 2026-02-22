@@ -66,8 +66,10 @@ Muxy periodically discovers and reconciles git worktrees for existing projects. 
 - Branch and tooltip can be edited from inline labels in workspace detail, title can be edited in the workspace header, and all metadata can be edited via `mx workspace update`.
 - Workspace title stays in the top header (`project / workspace`) and is editable there via double-click.
 - Workspace detail also shows inline branch and tooltip labels above Launch/Stop actions; double-click a label to edit and reveal small Save/Cancel controls.
+- Protected `main`/`master` branch labels are read-only in workspace detail and do not enter edit mode on double-click.
+- While editing inline metadata, pressing `Return` saves.
 - While editing inline metadata, pressing `Escape` or clicking outside the inline controls cancels without saving.
-- Changing branch name from the inline editor renames the underlying git worktree branch (not metadata-only).
+- Changing branch name from the inline editor renames the underlying git worktree branch (not metadata-only), except protected `main`/`master` branches which cannot be renamed.
 - New branches are created from the latest commit on the selected target branch.
 - If the selected branch exists only on remote, muxy fetches it first and then creates the worktree from `origin/<branch>`.
 - If the branch exists locally, muxy uses the local branch as-is (no implicit pull/rebase/merge during workspace creation).
@@ -78,6 +80,7 @@ Muxy periodically discovers and reconciles git worktrees for existing projects. 
 - Workspace view includes:
   - Launch/Restart/Stop/Archive buttons
   - Launch/Restart/Stop/Archive actions run in background tasks so the UI stays responsive during long-running workspace automation
+  - Archive is optimistic in the GUI: after confirmation, the workspace row disappears immediately while stop/worktree cleanup finishes in the background
   - Open Editor/Terminal/Finder buttons (terminal windows are tracked for cycling)
   - Workspace window records are refreshed periodically in a background pass so stale closed windows are pruned without blocking interaction
   - The same refresh pass updates terminal window fallback labels (title/app) from live yabai data when that terminal window is not linked to a running process record
@@ -166,7 +169,7 @@ mx workspace focus --dir /path/to/workspace [--window 2]
 For git projects, `workspace create` requires `--branch`; `--target-branch` defaults to `main`/`master` when available.
 `workspace create --directory-name` (alias: `--dirname`) is optional for git projects and must use only letters, numbers, `-`, and `_` with no spaces.
 `workspace import` supports `--title` (preferred; `--name` also accepted for backward compatibility) and optional `--tooltip`.
-`workspace update` updates workspace metadata (`--title`, `--branch`, `--directory-name`/`--dirname`/`--dir-name`, and tooltip values). Default workspaces keep their fixed initial title (`default` for directory projects, `main`/`master` for git-url imports).
+`workspace update` updates workspace metadata (`--title`, `--branch`, `--directory-name`/`--dirname`/`--dir-name`, and tooltip values). Default workspaces keep their fixed initial title (`default` for directory projects, `main`/`master` for git-url imports). Protected `main`/`master` branches cannot be renamed.
 `workspace up` is idempotent: it launches a stopped workspace, and otherwise does nothing by default.
 Add `--restart` to force stop+launch when runtime state is already present.
 `workspace up` always focuses the workspace, and `--tooltip [text]` displays the tooltip overlay after focus (updating tooltip text when text is provided).

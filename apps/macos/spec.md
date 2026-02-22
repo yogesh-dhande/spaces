@@ -134,9 +134,13 @@
                 - Open Editor/Terminal/Finder
                 - workspace title is shown in the top header (`project / workspace`) and is editable via double-click
                 - inline labels for branch name (git) and tooltip appear above launch/restart/stop buttons; double-click a label to edit and show Save/Cancel controls
+                    - exception: protected `main`/`master` branch labels are read-only and do not enter edit mode on double-click
+                - in inline label edit mode, pressing `Enter` saves edits
                 - in inline label edit mode, pressing `Escape` or clicking outside the field controls cancels edits without saving
                 - editing branch name performs a git branch rename for the workspace worktree before persisting workspace metadata
-                - lifecycle actions (launch/restart/stop/archive) run off the main UI thread; disable the clicked action until completion so the GUI stays responsive during long-running automation
+                    - exception: renaming protected `main`/`master` branches is rejected in GUI and CLI
+                - lifecycle actions (launch/restart/stop/archive) run off the main UI thread so the GUI stays responsive during long-running automation
+                - archive in the GUI is optimistic: once confirmed, the workspace is removed from the sidebar immediately and archive cleanup continues in the background; failed archive attempts restore the workspace row on reload
             - Forms
                 - In-place editors for project and workspace data
                 - Primary form actions (create/save) use a shared high-contrast style with a darker accent fill and white text/icon treatment for consistent readability
@@ -244,6 +248,7 @@
         - for git projects, target branch defaults using this precedence: project default branch, `main`, `master`, first discovered branch
         - for git projects, directory name defaults to muxy's auto-generated unique dirname
         - users can update workspace title/branch/tooltip after creation via inline workspace-detail labels/header and can update all metadata via `mx workspace update`
+            - exception: protected `main`/`master` branch names are read-only and cannot be renamed
         - muxy creates a git worktree using this precedence for the supplied branch name:
             - if the branch exists locally, create the worktree from the local branch as-is (no implicit pull/rebase/merge)
             - else if the branch exists on origin, fetch that branch tip into a local remote-tracking ref and create the worktree from `origin/<branch>`

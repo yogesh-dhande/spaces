@@ -1575,7 +1575,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 labelText: "Branch",
                 value: branch,
                 placeholder: "Branch name",
-                isEditable: true)
+                isEditable: !isProtectedBranchName(branch))
         } else {
             inlineBranchRow = nil
         }
@@ -2031,6 +2031,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         }
     }
 
+    private func isProtectedBranchName(_ branch: String) -> Bool {
+        let normalized = branch.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        return normalized == "main" || normalized == "master"
+    }
+
     private func makeInlineWorkspaceMetadataEditRow(
         workspaceID: String,
         field: InlineWorkspaceDetailField,
@@ -2064,7 +2069,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         valueLabel.textColor = .secondaryLabelColor
         valueLabel.lineBreakMode = .byTruncatingTail
         valueLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        valueLabel.toolTip = "Double-click to edit \(labelText.lowercased())."
+        valueLabel.toolTip = isEditable
+            ? "Double-click to edit \(labelText.lowercased())."
+            : (field == .branch ? "Protected branch names main/master cannot be renamed." : "\(labelText) is not editable.")
 
         let textField = NSTextField(string: value)
         textField.placeholderString = placeholder
@@ -2111,7 +2118,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             doubleClick.numberOfClicksRequired = 2
             valueLabel.addGestureRecognizer(doubleClick)
         } else {
-            textField.toolTip = "Default workspace title is fixed."
+            textField.toolTip = field == .branch ? "Protected branch names main/master cannot be renamed." : "\(labelText) is not editable."
         }
 
         return row
@@ -2135,6 +2142,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     @objc private func beginInlineWorkspaceMetadataEdit(_ sender: NSClickGestureRecognizer) {
         guard let valueLabel = sender.view as? NSTextField else { return }
         guard let tag = inlineWorkspaceLabelTagByObjectID[ObjectIdentifier(valueLabel)] else { return }
+        if let refs = inlineWorkspaceFieldRefsByTag[tag], refs.field == .branch, isProtectedBranchName(refs.originalValue) {
+            return
+        }
         for activeTag in activeInlineWorkspaceEditTags() where activeTag != tag {
             cancelInlineWorkspaceMetadataEdit(tag: activeTag)
         }
@@ -2169,8 +2179,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         }
     }
 
-    @objc private func saveInlineWorkspaceMetadata(_ sender: NSButton) {
-        guard var refs = inlineWorkspaceFieldRefsByTag[sender.tag] else { return }
+    private func saveInlineWorkspaceMetadata(tag: Int) {
+        guard var refs = inlineWorkspaceFieldRefsByTag[tag] else { return }
         do {
             switch refs.field {
             case .title:
@@ -2188,13 +2198,17 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 refs.originalValue = tooltip ?? ""
             }
             refs.valueLabel.stringValue = inlineWorkspaceFieldDisplayValue(refs.originalValue, field: refs.field)
-            inlineWorkspaceFieldRefsByTag[sender.tag] = refs
-            endInlineWorkspaceMetadataEdit(tag: sender.tag, keepCurrentValueAsOriginal: true)
+            inlineWorkspaceFieldRefsByTag[tag] = refs
+            endInlineWorkspaceMetadataEdit(tag: tag, keepCurrentValueAsOriginal: true)
             workspaceHasUnsavedChanges = false
             reloadData()
         } catch {
             showError(error)
         }
+    }
+
+    @objc private func saveInlineWorkspaceMetadata(_ sender: NSButton) {
+        saveInlineWorkspaceMetadata(tag: sender.tag)
     }
 
     @objc private func cancelInlineWorkspaceMetadata(_ sender: NSButton) {
@@ -3147,6 +3161,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     public func control(_ control: NSControl, textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
         guard let textField = control as? NSTextField else { return false }
         guard let tag = inlineWorkspaceFieldTagByObjectID[ObjectIdentifier(textField)] else { return false }
+        if commandSelector == #selector(NSResponder.insertNewline(_:)) {
+            saveInlineWorkspaceMetadata(tag: tag)
+            return true
+        }
         if commandSelector == #selector(NSResponder.cancelOperation(_:)) {
             cancelInlineWorkspaceMetadataEdit(tag: tag)
             return true
@@ -3217,15 +3235,22 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         alert.addButton(withTitle: "Cancel")
         let response = alert.runModal()
         guard response == .alertFirstButtonReturn else { return }
-        sender.isEnabled = false
+        let didOptimisticallyArchive = optimisticallyArchiveWorkspaceInSidebar(workspaceID: id)
+        if !didOptimisticallyArchive { sender.isEnabled = false }
         Task { @MainActor [weak self, weak sender] in
             guard let self else { return }
             let result = await Self.runWorkspaceLifecycleAction(.archive, workspaceID: id)
-            sender?.isEnabled = true
             switch result {
             case .success:
-                reloadData()
+                if didOptimisticallyArchive {
+                    requestSidebarReload()
+                } else {
+                    sender?.isEnabled = true
+                    reloadData()
+                }
             case .failure(let error):
+                reloadData()
+                sender?.isEnabled = true
                 showError(error)
             }
         }
@@ -3302,6 +3327,26 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             }
         }
         return nil
+    }
+
+    private func optimisticallyArchiveWorkspaceInSidebar(workspaceID: String) -> Bool {
+        guard let (project, _) = findWorkspace(id: workspaceID) else { return false }
+        guard var workspaces = workspacesByProject[project.id] else { return false }
+        let originalCount = workspaces.count
+        workspaces.removeAll(where: { $0.id == workspaceID })
+        guard workspaces.count != originalCount else { return false }
+
+        workspacesByProject[project.id] = workspaces
+        gitActivityByWorkspaceID.removeValue(forKey: workspaceID)
+        if selectedWorkspaceID == workspaceID {
+            selectedWorkspaceID = nil
+            selectedProjectID = project.id
+            workspaceHasUnsavedChanges = false
+        }
+        outlineView.reloadData()
+        outlineView.expandItem(nil, expandChildren: true)
+        refreshSelection()
+        return true
     }
 
     private func normalizePath(_ path: String) -> String { URL(fileURLWithPath: path).resolvingSymlinksInPath().standardizedFileURL.path }

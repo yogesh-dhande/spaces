@@ -60,8 +60,10 @@ GUI interaction notes:
 - Branch and tooltip remain editable via inline labels in workspace detail, title remains editable in the workspace header, and all metadata remains editable via `mx workspace update`.
 - Workspace title remains in the top header (`project / workspace`) and enters edit mode on double-click.
 - Workspace detail renders inline metadata labels for branch and tooltip above lifecycle actions; double-clicking a label enters edit mode and shows per-field Save/Cancel buttons.
+- Protected `main`/`master` branch labels are rendered read-only in workspace detail and do not enter edit mode on double-click.
+- Inline metadata edit mode saves when pressing `Return`.
 - Inline metadata edit mode cancels without saving when pressing `Escape` or clicking outside the field controls.
-- Branch edits in workspace detail call git branch rename in the worktree (`git branch -m`) before persisting metadata.
+- Branch edits in workspace detail call git branch rename in the worktree (`git branch -m`) before persisting metadata; protected `main`/`master` branch renames are rejected in both GUI and CLI.
 - Newly created branches are based on the latest commit of the selected target branch.
 - If the requested branch exists only on remote, the orchestrator fetches it into `refs/remotes/origin/*` before creating the worktree from `origin/<branch>`.
 - If the requested branch exists locally, the local branch is used as-is (no implicit pull/rebase/merge in workspace creation).
@@ -113,7 +115,7 @@ Workspace settings:
 Workspace identification:
 - Workspaces are uniquely identified by their directory path (`dir` field).
 - CLI commands accept `--dir <path>` (defaults to current directory) to identify workspaces.
-- `mx workspace update [--dir <path>] [--title <title>] [--branch <branch>] [--directory-name <name>|--dirname <name>|--dir-name <name>] [--tooltip <text>|--clear-tooltip]` updates workspace metadata.
+- `mx workspace update [--dir <path>] [--title <title>] [--branch <branch>] [--directory-name <name>|--dirname <name>|--dir-name <name>] [--tooltip <text>|--clear-tooltip]` updates workspace metadata (except protected `main`/`master` branch renames).
 - `mx workspace up [--dir <path>] [--restart] [--tooltip [<text>]]` ensures a workspace is running and focused.
 - Default `workspace up` behavior: launch when stopped; if runtime is already present, do nothing (no restart).
 - `workspace up --restart` behavior: if runtime is already present, run stop then launch; if stopped, launch.
@@ -359,6 +361,7 @@ Run/recovery semantics:
 - Workspace lifecycle actions are guarded by a per-workspace in-flight lock so overlapping launch/stop/restart/archive actions cannot run concurrently for the same workspace.
 - GUI run controls are state-aware: show `Launch` when stopped and `Restart` when running.
 - AppKit launch/restart/stop/archive button handlers dispatch lifecycle work in detached background tasks (fresh orchestrator/store instances) so long-running automation does not block the UI event loop.
+- Archive uses optimistic UI removal in AppKit: once confirmed, the workspace row is removed from in-memory sidebar state immediately and a detached archive task reconciles persisted state; failures trigger a full sidebar reload to restore visibility.
 - AppKit periodic process monitoring also runs in detached background tasks and now executes interval-based status checks for running workspaces, persisting fresh `status_results` and triggering `on_fail` actions (including restart) without requiring the run tab to be rendered.
 - Add-workspace (`cmd+n`) UX uses local branch refs and cached workspace names for immediate form display and quick-create defaults; non-blocking branch-option refresh runs in a detached task, and branch-first progressive disclosure keeps initial render minimal.
 
