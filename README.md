@@ -20,6 +20,11 @@ scripts/lint.sh
 scripts/coverage.sh
 ```
 
+## Watch for build changes and restart the app
+```bash
+ls -1 .build/debug/Muxy | entr -r sh -c 'ts=$(date "+%Y-%m-%d %H:%M:%S"); echo "[$ts] restart" | tee -a muxy.log; exec ./.build/debug/Muxy 2>&1 | tee -a muxy.log'
+```
+
 ## Web app (from `apps/web`)
 ```bash
 npm run dev
