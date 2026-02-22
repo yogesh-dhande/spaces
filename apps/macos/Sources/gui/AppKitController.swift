@@ -83,6 +83,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     private var inlineWorkspaceOutsideClickMonitor: Any?
     private var activeAddWorkspaceFormTag: Int?
     private var activeAddProjectFormTag: Int?
+    private var operationProgressOverlay: NSVisualEffectView?
+    private var operationProgressOverlayTitleLabel: NSTextField?
+    private var operationProgressOverlayDetailLabel: NSTextField?
     private lazy var relativeDateFormatter: RelativeDateTimeFormatter = {
         let formatter = RelativeDateTimeFormatter()
         formatter.unitsStyle = .short
@@ -336,6 +339,17 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let allowRemoteBranchLookup: Bool
     }
 
+    private struct ProjectCreateInput: Sendable {
+        let gitURL: String?
+        let directoryPath: String?
+        let setupScript: String?
+        let stopScript: String?
+        let ports: [PortDefinition]
+        let processes: [ProcessTemplate]
+        let browserSessions: [BrowserSession]
+        let statusChecks: [StatusCheckDefinition]
+    }
+
     private struct SidebarDataSnapshot: Sendable {
         let config: AppConfig
         let projects: [ProjectSummary]
@@ -414,6 +428,49 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                     }
                 }
                 return .success(workspace)
+            } catch {
+                return .failure(error)
+            }
+        }.value
+    }
+
+    nonisolated private static func createProjectSnapshot(input: ProjectCreateInput) async -> Result<ProjectRecord, Error> {
+        await Task.detached(priority: .userInitiated) {
+            do {
+                let db = try DatabaseLocator.defaultPath()
+                let store = try SQLiteStore(path: db)
+                let orchestrator = MuxyOrchestrator(store: store)
+                let record: ProjectRecord
+                if let gitURL = input.gitURL {
+                    record = try orchestrator.addProject(gitURL: gitURL)
+                } else if let directoryPath = input.directoryPath {
+                    record = try orchestrator.addProject(dir: directoryPath)
+                } else {
+                    throw MuxyError.invalidArgument(message: "Project source is required.")
+                }
+                try orchestrator.updateProjectConfig(projectID: record.id) { project in
+                    project.setupScript = input.setupScript
+                    project.stopScript = input.stopScript
+                    project.ports = input.ports
+                    project.processes = input.processes
+                    project.browserSessions = input.browserSessions
+                    project.statusChecks = input.statusChecks
+                }
+                return .success(record)
+            } catch {
+                return .failure(error)
+            }
+        }.value
+    }
+
+    nonisolated private static func deleteProjectSnapshot(projectDirectory: String) async -> Result<Void, Error> {
+        await Task.detached(priority: .userInitiated) {
+            do {
+                let db = try DatabaseLocator.defaultPath()
+                let store = try SQLiteStore(path: db)
+                let orchestrator = MuxyOrchestrator(store: store)
+                try orchestrator.removeProject(dir: projectDirectory)
+                return .success(())
             } catch {
                 return .failure(error)
             }
@@ -839,6 +896,90 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             stack.centerXAnchor.constraint(equalTo: detailContainer.centerXAnchor),
             stack.centerYAnchor.constraint(equalTo: detailContainer.centerYAnchor),
         ])
+    }
+
+    private func showOperationProgressOverlay(message: String, detail: String) {
+        guard let contentView = window?.contentView else { return }
+        let overlay: NSVisualEffectView
+        let titleLabel: NSTextField
+        let detailLabel: NSTextField
+        if let existingOverlay = operationProgressOverlay,
+            let existingTitleLabel = operationProgressOverlayTitleLabel,
+            let existingDetailLabel = operationProgressOverlayDetailLabel
+        {
+            overlay = existingOverlay
+            titleLabel = existingTitleLabel
+            detailLabel = existingDetailLabel
+        } else {
+            overlay = NSVisualEffectView()
+            overlay.material = .hudWindow
+            overlay.blendingMode = .withinWindow
+            overlay.state = .active
+            overlay.wantsLayer = true
+            overlay.layer?.cornerRadius = 10
+            overlay.layer?.borderWidth = 1
+            overlay.layer?.borderColor = sidebarCardBorderColor(isSelected: false).cgColor
+            overlay.translatesAutoresizingMaskIntoConstraints = false
+
+            let stack = NSStackView()
+            stack.orientation = .horizontal
+            stack.alignment = .top
+            stack.spacing = 10
+            stack.translatesAutoresizingMaskIntoConstraints = false
+
+            let spinner = NSProgressIndicator()
+            spinner.style = .spinning
+            spinner.controlSize = .small
+            spinner.startAnimation(nil)
+            spinner.translatesAutoresizingMaskIntoConstraints = false
+            spinner.setContentHuggingPriority(.required, for: .horizontal)
+            stack.addArrangedSubview(spinner)
+
+            let labelStack = NSStackView()
+            labelStack.orientation = .vertical
+            labelStack.alignment = .leading
+            labelStack.spacing = 2
+            labelStack.translatesAutoresizingMaskIntoConstraints = false
+
+            titleLabel = NSTextField(labelWithString: "")
+            titleLabel.font = .systemFont(ofSize: 12, weight: .semibold)
+            titleLabel.textColor = .labelColor
+            titleLabel.maximumNumberOfLines = 1
+            labelStack.addArrangedSubview(titleLabel)
+
+            detailLabel = NSTextField(labelWithString: "")
+            detailLabel.font = .systemFont(ofSize: 11)
+            detailLabel.textColor = .secondaryLabelColor
+            detailLabel.maximumNumberOfLines = 2
+            labelStack.addArrangedSubview(detailLabel)
+
+            stack.addArrangedSubview(labelStack)
+            overlay.addSubview(stack)
+            contentView.addSubview(overlay)
+
+            NSLayoutConstraint.activate([
+                stack.leadingAnchor.constraint(equalTo: overlay.leadingAnchor, constant: 12),
+                stack.trailingAnchor.constraint(equalTo: overlay.trailingAnchor, constant: -12),
+                stack.topAnchor.constraint(equalTo: overlay.topAnchor, constant: 10),
+                stack.bottomAnchor.constraint(equalTo: overlay.bottomAnchor, constant: -10),
+
+                overlay.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 14),
+                overlay.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -16),
+                overlay.widthAnchor.constraint(lessThanOrEqualToConstant: 360),
+            ])
+
+            operationProgressOverlay = overlay
+            operationProgressOverlayTitleLabel = titleLabel
+            operationProgressOverlayDetailLabel = detailLabel
+        }
+
+        titleLabel.stringValue = message
+        detailLabel.stringValue = detail
+        overlay.isHidden = false
+    }
+
+    private func hideOperationProgressOverlay() {
+        operationProgressOverlay?.isHidden = true
     }
 
     private func showSettingsDetail() {
@@ -2948,8 +3089,13 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             directoryName: nil,
             tooltip: nil,
             allowRemoteBranchLookup: false)
+        showOperationProgressOverlay(
+            message: "Creating workspace...",
+            detail: "Generating defaults and creating the workspace record."
+        )
         Task { @MainActor [weak self] in
             guard let self else { return }
+            defer { hideOperationProgressOverlay() }
             let result = await Self.createWorkspaceSnapshot(input: input)
             switch result {
             case .success(let workspace):
@@ -2959,6 +3105,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 selectedWorkspaceID = workspace.id
                 lastSelectedRow = -1
                 reloadData()
+                showOperationProgressOverlay(
+                    message: "Preparing workspace...",
+                    detail: "Running setup for the new workspace."
+                )
                 let setupResult = await Self.runWorkspaceSetupSnapshot(workspaceID: workspace.id)
                 reloadData()
                 if case .failure(let error) = setupResult {
@@ -3003,12 +3153,27 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let response = alert.runModal()
         guard response == .alertFirstButtonReturn else { return }
 
-        do {
-            try orchestrator.removeProject(dir: project.dir)
-            projectHasUnsavedChanges = false
-            workspaceHasUnsavedChanges = false
-            reloadData()
-        } catch { showError(error) }
+        sender.isEnabled = false
+        showOperationProgressOverlay(
+            message: "Deleting project...",
+            detail: "Removing the project and its managed workspaces."
+        )
+        Task { @MainActor [weak self, weak sender] in
+            guard let self else { return }
+            defer {
+                sender?.isEnabled = true
+                hideOperationProgressOverlay()
+            }
+            let result = await Self.deleteProjectSnapshot(projectDirectory: project.dir)
+            switch result {
+            case .success:
+                projectHasUnsavedChanges = false
+                workspaceHasUnsavedChanges = false
+                reloadData()
+            case .failure(let error):
+                showError(error)
+            }
+        }
     }
 
     @objc private func saveWorkspace(_ sender: NSButton) {
@@ -3030,26 +3195,60 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     @objc private func createProject(_ sender: NSButton) {
         guard let refs = AddProjectFieldCache.shared.cache[sender.tag] else { return }
         do {
-            let record: ProjectRecord
+            let input: ProjectCreateInput
+            let progressDetail: String
             if refs.sourcePopup.indexOfSelectedItem == 1 {
                 let repoURL = refs.repoURLField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
                 guard !repoURL.isEmpty else { throw MuxyError.invalidArgument(message: "Git repository URL is required.") }
-                record = try orchestrator.addProject(gitURL: repoURL)
+                input = ProjectCreateInput(
+                    gitURL: repoURL,
+                    directoryPath: nil,
+                    setupScript: refs.setupView.string.isEmpty ? nil : refs.setupView.string,
+                    stopScript: refs.stopView.string.isEmpty ? nil : refs.stopView.string,
+                    ports: refs.portEditor.currentDefinitions(),
+                    processes: refs.processEditor.currentProcesses(),
+                    browserSessions: refs.browserSessionEditor.currentSessions(),
+                    statusChecks: refs.processEditor.currentStatusChecks()
+                )
+                progressDetail = "Cloning repository and applying project settings."
             } else {
                 let dir = refs.dirField.toolTip?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
                 guard !dir.isEmpty else { return }
-                record = try orchestrator.addProject(dir: dir)
+                input = ProjectCreateInput(
+                    gitURL: nil,
+                    directoryPath: dir,
+                    setupScript: refs.setupView.string.isEmpty ? nil : refs.setupView.string,
+                    stopScript: refs.stopView.string.isEmpty ? nil : refs.stopView.string,
+                    ports: refs.portEditor.currentDefinitions(),
+                    processes: refs.processEditor.currentProcesses(),
+                    browserSessions: refs.browserSessionEditor.currentSessions(),
+                    statusChecks: refs.processEditor.currentStatusChecks()
+                )
+                progressDetail = "Registering project and applying project settings."
             }
-            try orchestrator.updateProjectConfig(projectID: record.id) { project in
-                project.setupScript = refs.setupView.string.isEmpty ? nil : refs.setupView.string
-                project.stopScript = refs.stopView.string.isEmpty ? nil : refs.stopView.string
-                project.ports = refs.portEditor.currentDefinitions()
-                project.processes = refs.processEditor.currentProcesses()
-                project.browserSessions = refs.browserSessionEditor.currentSessions()
-                project.statusChecks = refs.processEditor.currentStatusChecks()
+            let originalTitle = sender.title
+            sender.isEnabled = false
+            sender.title = "Creating..."
+            showOperationProgressOverlay(
+                message: "Creating project...",
+                detail: progressDetail
+            )
+            Task { @MainActor [weak self, weak sender] in
+                guard let self else { return }
+                defer {
+                    sender?.isEnabled = true
+                    sender?.title = originalTitle
+                    hideOperationProgressOverlay()
+                }
+                let result = await Self.createProjectSnapshot(input: input)
+                switch result {
+                case .success:
+                    activeAddProjectFormTag = nil
+                    reloadData()
+                case .failure(let error):
+                    showError(error)
+                }
             }
-            activeAddProjectFormTag = nil
-            reloadData()
         } catch { showError(error) }
     }
 
@@ -3152,11 +3351,18 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             let originalTitle = sender.title
             sender.isEnabled = false
             sender.title = "Creating..."
+            showOperationProgressOverlay(
+                message: "Creating workspace...",
+                detail: "Validating fields and creating the workspace."
+            )
             Task { @MainActor [weak self, weak sender] in
                 guard let self else { return }
+                defer {
+                    sender?.isEnabled = true
+                    sender?.title = originalTitle
+                    hideOperationProgressOverlay()
+                }
                 let result = await Self.createWorkspaceSnapshot(input: input)
-                sender?.isEnabled = true
-                sender?.title = originalTitle
                 switch result {
                 case .success(let workspace):
                     activeAddWorkspaceFormTag = nil
@@ -3165,6 +3371,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                     selectedWorkspaceID = workspace.id
                     lastSelectedRow = -1
                     reloadData()
+                    showOperationProgressOverlay(
+                        message: "Preparing workspace...",
+                        detail: "Running setup for the new workspace."
+                    )
                     let setupResult = await Self.runWorkspaceSetupSnapshot(workspaceID: workspace.id)
                     reloadData()
                     if case .failure(let error) = setupResult {
@@ -3289,8 +3499,13 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         guard response == .alertFirstButtonReturn else { return }
         let didOptimisticallyArchive = optimisticallyArchiveWorkspaceInSidebar(workspaceID: id)
         if !didOptimisticallyArchive { sender.isEnabled = false }
+        showOperationProgressOverlay(
+            message: "Archiving workspace...",
+            detail: "Stopping runtime state and cleaning up workspace files."
+        )
         Task { @MainActor [weak self, weak sender] in
             guard let self else { return }
+            defer { hideOperationProgressOverlay() }
             let result = await Self.runWorkspaceLifecycleAction(.archive, workspaceID: id)
             switch result {
             case .success:

@@ -141,6 +141,7 @@
                     - exception: renaming protected `main`/`master` branches is rejected in GUI and CLI
                 - lifecycle actions (launch/restart/stop/archive) run off the main UI thread so the GUI stays responsive during long-running automation
                 - archive in the GUI is optimistic: once confirmed, the workspace is removed from the sidebar immediately and archive cleanup continues in the background; failed archive attempts restore the workspace row on reload
+                - after archive is confirmed in the GUI, show a non-blocking progress indicator with archive status text while cleanup runs
             - Forms
                 - In-place editors for project and workspace data
                 - Primary form actions (create/save) use a shared high-contrast style with a darker accent fill and white text/icon treatment for consistent readability
@@ -223,6 +224,7 @@
         - run the project setup script for each workspace created by discovery
         - do not re-add worktrees for workspaces that were explicitly deleted from muxy unless the user manually recreates/imports them
     - User creates a project by either pointing to a local dir or providing a git repository URL
+        - when project create is triggered, GUI shows a non-blocking progress indicator with context text so users get immediate feedback during registration/clone work
         - if git URL is provided, muxy clones it as a bare repo to `/Users/<username>/muxy/repos/<project_name>` where `<project_name>` is derived from the repository name
         - when removing a git project, remove related managed worktrees via `git worktree remove --force`, then delete related workspace directories under `/Users/<username>/muxy/workspaces`
         - when removing a project, delete the on-disk directory only for git repos inside `/Users/<username>/muxy/repos` (plus legacy `/Users/<username>/muxy/projects`) as app-managed clone locations
@@ -235,11 +237,14 @@
         - User optionally sets up browser sessions
             - These are used to open/track browser window tabs pointing to the specified url (start of url must match what is specified by the user)
         - User can edit workspace settings later for runtime configuration (ports, processes, stop script, browser sessions); changes are stored in the db and applied immediately if the workspace is running
+    - When deleting a project from the GUI after confirmation
+        - GUI shows a non-blocking progress indicator while project/workspace cleanup runs
     - When creating a non-default workspace
         - project-level plus/new-workspace actions open the New Workspace form
         - `cmd+n` opens the New Workspace form for the currently selected project/workspace
         - when the New Workspace form is open, `cmd+n` creates immediately using generated defaults from local cached state (workspace name + target branch fallback)
         - New Workspace form header includes a visible `cmd+n` quick-create hint
+        - after create is triggered (button or `cmd+n` quick-create), GUI shows a non-blocking progress indicator with phase text (create, then setup) so users get immediate feedback during short delays
         - git New Workspace form uses branch-first progressive disclosure; target branch/title/directory/tooltip appear after branch input is non-empty
             - opening the form and quick-create should not block on remote branch discovery/network calls
         - New Project form uses source-first progressive disclosure; additional settings appear only after a local directory is chosen or a git URL is entered

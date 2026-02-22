@@ -53,8 +53,10 @@ GUI interaction notes:
 - `cmd+n` opens the New Workspace form for the currently selected project/workspace.
 - When the New Workspace form is already open, `cmd+n` creates a workspace immediately with generated defaults.
 - The New Workspace form header includes a `cmd+n` quick-create hint.
+- Create actions in New Workspace (button and `cmd+n` quick-create) display a non-blocking progress overlay with phase text so users see immediate feedback while create/setup tasks run.
 - In git projects, New Workspace uses progressive disclosure: branch field first, then target/title/directory/tooltip after branch input is non-empty.
 - New Project also uses progressive disclosure: source selection first, then setup script/ports/processes/browser sessions/stop script after source input is present.
+- New Project create/delete actions display a non-blocking progress overlay with context text while background create/remove work runs.
 - New Project and New Workspace forms support keyboard shortcuts (`Return` for create, `Esc` for cancel); Create labels omit shortcut text while Cancel keeps `(Esc)` in the label.
 - Primary create/save actions use shared AppKit styling (single helper) with a darker accent background and white foreground text/icons for consistent contrast.
 - Branch and tooltip remain editable via inline labels in workspace detail, title remains editable in the workspace header, and all metadata remains editable via `mx workspace update`.
@@ -366,6 +368,7 @@ Run/recovery semantics:
 - GUI run controls are state-aware: show `Launch` when stopped and `Restart` when running.
 - AppKit launch/restart/stop/archive button handlers dispatch lifecycle work in detached background tasks (fresh orchestrator/store instances) so long-running automation does not block the UI event loop.
 - Archive uses optimistic UI removal in AppKit: once confirmed, the workspace row is removed from in-memory sidebar state immediately and a detached archive task reconciles persisted state; failures trigger a full sidebar reload to restore visibility.
+- AppKit shows a non-blocking progress overlay when archive starts so users see archive state while stop/worktree cleanup runs.
 - AppKit periodic process monitoring also runs in detached background tasks and now executes interval-based status checks for running workspaces, persisting fresh `status_results` and triggering `on_fail` actions (including restart) without requiring the run tab to be rendered.
 - Add-workspace (`cmd+n`) UX uses local branch refs and cached workspace names for immediate form display and quick-create defaults; non-blocking branch-option refresh runs in a detached task, and branch-first progressive disclosure keeps initial render minimal.
 

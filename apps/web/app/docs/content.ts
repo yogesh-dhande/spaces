@@ -23,21 +23,21 @@ export const docsPageLinks: DocsPageLink[] = [
     href: "/docs/projects",
     title: "Projects",
     summary:
-      "Add and manage projects stored in the database, start project creation with source-first input (directory picker or git URL) before advanced template settings, configure templates (processes, ports, scripts, named browser sessions), and understand default workspace creation for directory projects and git-url imports.",
+      "Add and manage projects stored in the database, start project creation with source-first input (directory picker or git URL) before advanced template settings, get create/delete progress overlay feedback during project operations, configure templates (processes, ports, scripts, named browser sessions), and understand default workspace creation for directory projects and git-url imports.",
     audience: "Developers setting up and managing project definitions.",
   },
   {
     href: "/docs/workspaces",
     title: "Workspaces",
     summary:
-      "Workspace concepts, New Workspace form flow (+ / cmd+n, visible cmd+n quick-create hint, and cmd+n quick-create when the form is open), branch-first progressive disclosure in git workspace creation, local-cached default name/branch suggestions, non-blocking branch option loading for fast form display, startup loading feedback for first app-open hydration, immediate startup hotkey availability, async startup reconciliation refreshes for responsive workspace switching, keyboard shortcuts (Return create, Escape cancel) with Create labels clean and Cancel labels showing (Esc), shared high-contrast primary create/save button styling, inline metadata editing (header title + branch/tooltip labels with Return save and Escape/outside-click cancel), protected main/master branch read-only behavior, git branch rename-on-edit behavior, settings overrides, ports, env vars, switching, focus tooltip overlays, sidebar hierarchy cues, and git signals.",
+      "Workspace concepts, New Workspace form flow (+ / cmd+n, visible cmd+n quick-create hint, and cmd+n quick-create when the form is open), create-progress overlay feedback for button/quick-create actions, branch-first progressive disclosure in git workspace creation, local-cached default name/branch suggestions, non-blocking branch option loading for fast form display, startup loading feedback for first app-open hydration, immediate startup hotkey availability, async startup reconciliation refreshes for responsive workspace switching, keyboard shortcuts (Return create, Escape cancel) with Create labels clean and Cancel labels showing (Esc), shared high-contrast primary create/save button styling, inline metadata editing (header title + branch/tooltip labels with Return save and Escape/outside-click cancel), protected main/master branch read-only behavior, git branch rename-on-edit behavior, settings overrides, ports, env vars, switching, focus tooltip overlays, sidebar hierarchy cues, and git signals.",
     audience: "Developers creating and configuring workspaces within projects.",
   },
   {
     href: "/docs/workspace-lifecycle",
     title: "Workspace Lifecycle",
     summary:
-      "Create, launch, ensure-running (`workspace up` with optional `--restart`), stop, restart, archive, and restore workspace behavior, including deferred setup during GUI create, launch waiting for setup completion, and optimistic archive removal in the GUI while cleanup runs in the background.",
+      "Create, launch, ensure-running (`workspace up` with optional `--restart`), stop, restart, archive, and restore workspace behavior, including deferred setup during GUI create, launch waiting for setup completion, and optimistic archive removal in the GUI with archive-progress overlay feedback while cleanup runs in the background.",
     audience: "Developers managing multiple long-lived workstreams.",
   },
   {

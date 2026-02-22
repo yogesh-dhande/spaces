@@ -58,9 +58,11 @@ Muxy periodically discovers and reconciles git worktrees for existing projects. 
 - `cmd+n` opens the New Workspace form for the currently selected project/workspace.
 - On the New Workspace form, `cmd+n` quick-creates using generated defaults (suggested title/branch, auto-generated directory, default target branch).
 - The New Workspace header shows a `cmd+n` hint for quick-create with generated names.
+- Triggering create from the button or `cmd+n` quick-create shows an in-app progress overlay with phase text so users get feedback during workspace create/setup.
 - `cmd+n` form-open and quick-create paths are optimized to avoid blocking remote branch lookups; branch options are loaded from local refs first and refreshed asynchronously, and suggested workspace names come from cached local workspace state.
 - For git projects, the New Workspace form starts with only the branch input visible; target branch/title/directory/tooltip are progressively revealed after branch typing begins.
 - New Project starts with only source selection (directory picker or git URL); setup script, ports, processes, browser sessions, and stop script are shown after source input is provided.
+- Project create/delete actions show an in-app progress overlay with context text while registration/clone/removal work runs.
 - New Project and New Workspace forms support keyboard shortcuts (`Return` to create, `Esc` to cancel); Create labels omit shortcut text while Cancel keeps `(Esc)` in the label.
 - Primary create/save actions use a shared high-contrast style (darker accent background with white text/icons) for consistent readability.
 - Branch and tooltip can be edited from inline labels in workspace detail, title can be edited in the workspace header, and all metadata can be edited via `mx workspace update`.
@@ -82,6 +84,7 @@ Muxy periodically discovers and reconciles git worktrees for existing projects. 
   - Launch/Restart/Stop/Archive buttons
   - Launch/Restart/Stop/Archive actions run in background tasks so the UI stays responsive during long-running workspace automation
   - Archive is optimistic in the GUI: after confirmation, the workspace row disappears immediately while stop/worktree cleanup finishes in the background
+  - Archive also shows an in-app progress overlay with status text while cleanup is in flight
   - Open Editor/Terminal/Finder buttons (terminal windows are tracked for cycling)
   - Workspace window records are refreshed periodically in a background pass so stale closed windows are pruned without blocking interaction
   - The same refresh pass updates terminal window fallback labels (title/app) from live yabai data when that terminal window is not linked to a running process record
