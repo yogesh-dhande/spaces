@@ -137,6 +137,11 @@ public final class MuxyOrchestrator {
         return git.trackedFileActivity(path: workspace.dir, baseBranch: workspace.targetBranch ?? project.defaultBranch)
     }
 
+    private func isProtectedBranchName(_ branch: String) -> Bool {
+        let normalized = branch.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        return normalized == "main" || normalized == "master"
+    }
+
     public func workspaceSettings(workspaceID: String) throws -> WorkspaceSettings? {
         let (project, workspace) = try resolveWorkspace(id: workspaceID)
         return try loadWorkspaceSettings(project: project, workspace: workspace)
@@ -217,6 +222,9 @@ public final class MuxyOrchestrator {
             }
             let trimmedBranch = branch.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !trimmedBranch.isEmpty else { throw MuxyError.invalidArgument(message: "Workspace branch is required.") }
+            if let currentBranch = workspace.branch, isProtectedBranchName(currentBranch), trimmedBranch != currentBranch {
+                throw MuxyError.invalidArgument(message: "Protected branches main/master cannot be renamed.")
+            }
             if trimmedBranch != workspace.branch {
                 try git.renameCurrentBranch(path: workspace.dir, to: trimmedBranch)
                 updatedBranch = trimmedBranch

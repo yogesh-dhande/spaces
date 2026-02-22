@@ -1042,6 +1042,50 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertNil(updated.tooltip)
     }
 
+    // Tests workspace metadata update rejects renaming protected main branch by arranging representative inputs and asserting the expected result.
+    func testUpdateWorkspaceMetadataRejectsRenamingProtectedMainBranch() throws {
+        let repo = try makeTempGitRepo(name: "workspace-update-main-protected")
+        let root = try makeTempDirectory()
+        let workspacesRoot = root.appendingPathComponent("workspaces", isDirectory: true)
+        let store = try makeTemporaryStore()
+        let orchestrator = MuxyOrchestrator(store: store, workspacesRootDirectory: workspacesRoot)
+        let project = try orchestrator.addProject(dir: repo.path)
+        let mainWorkspace = try XCTUnwrap(store.workspace(projectID: project.id, name: "default"))
+
+        XCTAssertEqual(mainWorkspace.branch, "main")
+        XCTAssertThrowsError(try orchestrator.updateWorkspaceMetadata(workspaceID: mainWorkspace.id, branch: "main-renamed")) { error in
+            XCTAssertTrue(error.localizedDescription.contains("Protected branches main/master cannot be renamed"))
+        }
+
+        let updated = try XCTUnwrap(store.workspace(id: mainWorkspace.id))
+        XCTAssertEqual(updated.branch, "main")
+        XCTAssertEqual(
+            try runGitAndCapture(["rev-parse", "--abbrev-ref", "HEAD"], cwd: mainWorkspace.dir).trimmingCharacters(in: .whitespacesAndNewlines),
+            "main")
+    }
+
+    // Tests workspace metadata update rejects renaming protected master branch by arranging representative inputs and asserting the expected result.
+    func testUpdateWorkspaceMetadataRejectsRenamingProtectedMasterBranch() throws {
+        let repo = try makeTempGitRepo(name: "workspace-update-master-protected", initialBranch: "master")
+        let root = try makeTempDirectory()
+        let workspacesRoot = root.appendingPathComponent("workspaces", isDirectory: true)
+        let store = try makeTemporaryStore()
+        let orchestrator = MuxyOrchestrator(store: store, workspacesRootDirectory: workspacesRoot)
+        let project = try orchestrator.addProject(dir: repo.path)
+        let masterWorkspace = try XCTUnwrap(store.workspace(projectID: project.id, name: "default"))
+
+        XCTAssertEqual(masterWorkspace.branch, "master")
+        XCTAssertThrowsError(try orchestrator.updateWorkspaceMetadata(workspaceID: masterWorkspace.id, branch: "master-renamed")) { error in
+            XCTAssertTrue(error.localizedDescription.contains("Protected branches main/master cannot be renamed"))
+        }
+
+        let updated = try XCTUnwrap(store.workspace(id: masterWorkspace.id))
+        XCTAssertEqual(updated.branch, "master")
+        XCTAssertEqual(
+            try runGitAndCapture(["rev-parse", "--abbrev-ref", "HEAD"], cwd: masterWorkspace.dir).trimmingCharacters(in: .whitespacesAndNewlines),
+            "master")
+    }
+
     // Tests open workspace editor throws when editor is not configured by arranging representative inputs and asserting the expected result.
     func testOpenWorkspaceEditorThrowsWhenEditorIsNotConfigured() throws {
         let (orchestrator, _, _, workspace, _) = try makeOrchestratorWithWorkspace()
