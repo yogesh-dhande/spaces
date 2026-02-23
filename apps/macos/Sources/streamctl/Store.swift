@@ -447,13 +447,18 @@ public final class SQLiteStore {
     public func upsert(runningProcess: RunningProcessRecord) throws {
         try execute(
             sql: """
-                INSERT INTO running_processes(id, workspace_id, template_name, command, terminal_app, window_id, pid, status, log_path, last_output_at, started_at, exited_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO running_processes(
+                  id, workspace_id, template_name, command, terminal_app, window_id, iterm_session_id, iterm_tab_index,
+                  pid, status, log_path, last_output_at, started_at, exited_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(id) DO UPDATE SET
                   template_name = excluded.template_name,
                   command = excluded.command,
                   terminal_app = excluded.terminal_app,
                   window_id = excluded.window_id,
+                  iterm_session_id = excluded.iterm_session_id,
+                  iterm_tab_index = excluded.iterm_tab_index,
                   pid = excluded.pid,
                   status = excluded.status,
                   log_path = excluded.log_path,
@@ -463,7 +468,8 @@ public final class SQLiteStore {
                 """,
             bindings: [
                 runningProcess.id, runningProcess.workspaceID, runningProcess.templateName, runningProcess.command, runningProcess.terminalApp ?? "",
-                runningProcess.windowID.map(String.init) ?? "", runningProcess.pid.map(String.init) ?? "", runningProcess.status.rawValue,
+                runningProcess.windowID.map(String.init) ?? "", runningProcess.itermSessionID ?? "",
+                runningProcess.itermTabIndex.map(String.init) ?? "", runningProcess.pid.map(String.init) ?? "", runningProcess.status.rawValue,
                 runningProcess.logPath ?? "", runningProcess.lastOutputAt ?? "", runningProcess.startedAt ?? "", runningProcess.exitedAt ?? "",
             ])
     }
@@ -471,7 +477,7 @@ public final class SQLiteStore {
     public func runningProcesses(workspaceID: String) throws -> [RunningProcessRecord] {
         let rows = try queryRows(
             sql: """
-                SELECT id, workspace_id, template_name, command, terminal_app, window_id, pid, status, log_path, last_output_at, started_at, exited_at
+                SELECT id, workspace_id, template_name, command, terminal_app, window_id, iterm_session_id, iterm_tab_index, pid, status, log_path, last_output_at, started_at, exited_at
                 FROM running_processes WHERE workspace_id = ?
                 ORDER BY started_at
                 """, bindings: [workspaceID])
@@ -513,27 +519,29 @@ public final class SQLiteStore {
     public func upsert(window: WindowRecord) throws {
         try execute(
             sql: """
-                INSERT INTO windows(id, workspace_id, app, title, target_url, window_id, role, order_index, last_seen_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO windows(id, workspace_id, app, title, target_url, window_id, iterm_session_id, iterm_tab_index, role, order_index, last_seen_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(id) DO UPDATE SET
                   app = excluded.app,
                   title = excluded.title,
                   target_url = excluded.target_url,
                   window_id = excluded.window_id,
+                  iterm_session_id = excluded.iterm_session_id,
+                  iterm_tab_index = excluded.iterm_tab_index,
                   role = excluded.role,
                   order_index = excluded.order_index,
                   last_seen_at = excluded.last_seen_at
                 """,
             bindings: [
                 window.id, window.workspaceID, window.app, window.title ?? "", window.targetURL ?? "", window.windowID.map(String.init) ?? "",
-                window.role, String(window.orderIndex), window.lastSeenAt,
+                window.itermSessionID ?? "", window.itermTabIndex.map(String.init) ?? "", window.role, String(window.orderIndex), window.lastSeenAt,
             ])
     }
 
     public func windows(workspaceID: String) throws -> [WindowRecord] {
         let rows = try queryRows(
             sql: """
-                SELECT id, workspace_id, app, title, target_url, window_id, role, order_index, last_seen_at
+                SELECT id, workspace_id, app, title, target_url, window_id, iterm_session_id, iterm_tab_index, role, order_index, last_seen_at
                 FROM windows WHERE workspace_id = ?
                 ORDER BY order_index
                 """, bindings: [workspaceID])
@@ -543,7 +551,7 @@ public final class SQLiteStore {
     public func windows(windowID: Int) throws -> [WindowRecord] {
         let rows = try queryRows(
             sql: """
-                SELECT id, workspace_id, app, title, target_url, window_id, role, order_index, last_seen_at
+                SELECT id, workspace_id, app, title, target_url, window_id, iterm_session_id, iterm_tab_index, role, order_index, last_seen_at
                 FROM windows
                 WHERE window_id = ?
                 ORDER BY last_seen_at DESC, order_index
@@ -722,6 +730,8 @@ public final class SQLiteStore {
               command TEXT NOT NULL,
               terminal_app TEXT,
               window_id INTEGER,
+              iterm_session_id TEXT,
+              iterm_tab_index INTEGER,
               pid INTEGER,
               status TEXT NOT NULL,
               log_path TEXT,
@@ -746,6 +756,8 @@ public final class SQLiteStore {
               title TEXT,
               target_url TEXT,
               window_id INTEGER,
+              iterm_session_id TEXT,
+              iterm_tab_index INTEGER,
               role TEXT NOT NULL,
               order_index INTEGER,
               last_seen_at TEXT
@@ -822,6 +834,10 @@ public final class SQLiteStore {
         try ensureColumnExists(table: "running_processes", name: "last_output_at", definition: "last_output_at TEXT")
         try ensureColumnExists(table: "running_processes", name: "started_at", definition: "started_at TEXT")
         try ensureColumnExists(table: "running_processes", name: "exited_at", definition: "exited_at TEXT")
+        try ensureColumnExists(table: "running_processes", name: "iterm_session_id", definition: "iterm_session_id TEXT")
+        try ensureColumnExists(table: "running_processes", name: "iterm_tab_index", definition: "iterm_tab_index INTEGER")
+        try ensureColumnExists(table: "windows", name: "iterm_session_id", definition: "iterm_session_id TEXT")
+        try ensureColumnExists(table: "windows", name: "iterm_tab_index", definition: "iterm_tab_index INTEGER")
     }
 
     private func ensureColumnExists(table: String, name: String, definition: String) throws {
@@ -867,18 +883,20 @@ public final class SQLiteStore {
     }
 
     private func decodeRunningProcess(row: [String]) -> RunningProcessRecord? {
-        guard row.count >= 12 else { return nil }
+        guard row.count >= 14 else { return nil }
         return RunningProcessRecord(
             id: row[0], workspaceID: row[1], templateName: row[2], command: row[3], terminalApp: row[4].isEmpty ? nil : row[4], windowID: Int(row[5]),
-            pid: Int(row[6]), status: RunningProcessState(rawValue: row[7]) ?? .running, logPath: row[8].isEmpty ? nil : row[8],
-            lastOutputAt: row[9].isEmpty ? nil : row[9], startedAt: row[10].isEmpty ? nil : row[10], exitedAt: row[11].isEmpty ? nil : row[11])
+            itermSessionID: row[6].isEmpty ? nil : row[6], itermTabIndex: Int(row[7]), pid: Int(row[8]),
+            status: RunningProcessState(rawValue: row[9]) ?? .running, logPath: row[10].isEmpty ? nil : row[10],
+            lastOutputAt: row[11].isEmpty ? nil : row[11], startedAt: row[12].isEmpty ? nil : row[12], exitedAt: row[13].isEmpty ? nil : row[13])
     }
 
     private func decodeWindow(row: [String]) -> WindowRecord? {
-        guard row.count >= 9 else { return nil }
+        guard row.count >= 11 else { return nil }
         return WindowRecord(
             id: row[0], workspaceID: row[1], app: row[2], title: row[3].isEmpty ? nil : row[3], targetURL: row[4].isEmpty ? nil : row[4],
-            windowID: Int(row[5]), role: row[6], orderIndex: Int(row[7]) ?? 0, lastSeenAt: row[8])
+            windowID: Int(row[5]), itermSessionID: row[6].isEmpty ? nil : row[6], itermTabIndex: Int(row[7]),
+            role: row[8], orderIndex: Int(row[9]) ?? 0, lastSeenAt: row[10])
     }
 
     private func executeBatch(sql: String) throws {

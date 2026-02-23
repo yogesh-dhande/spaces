@@ -88,6 +88,8 @@ Muxy periodically discovers and reconciles git worktrees for existing projects. 
   - Open Editor/Terminal/Finder buttons (terminal windows are tracked for cycling)
   - Workspace window records are refreshed periodically in a background pass so stale closed windows are pruned without blocking interaction
   - The same refresh pass updates terminal window fallback labels (title/app) from live yabai data when that terminal window is not linked to a running process record
+  - Terminal focus prefers stored iTerm2 session/tab metadata (AppleScript) before generic window focus so cycling lands on the correct tab when available
+  - Stop/cleanup closes process-backed iTerm terminals by stored session/tab first (preserving unrelated tabs in the same window when possible) and avoids `yabai` window-close for those process-backed terminal windows
   - Launch/Restart can extract one matching tab per browser session into a dedicated Chrome window and persist extracted-window mappings for faster focus
   - Browser focus tries extracted-window `yabai` focus first; stale mappings are invalidated and fallback continues via indexed tab focus + URL matching (without automatic re-extraction)
   - Launch/Restart reuses existing matching Chrome tabs and tracks all matches instead of opening duplicate tabs when matches already exist

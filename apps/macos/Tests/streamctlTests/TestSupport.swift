@@ -30,9 +30,15 @@ func makeWorkspaceRecord(id: String = UUID().uuidString, projectID: String, name
 class MockIterm2Adapter: Iterm2Adapter {
     var openWindowAndRunCallCount = 0
     var runInWindowCallCount = 0
+    var focusSessionOrTabCallCount = 0
     var lastCommand: String?
     var lastWindowID: Int?
+    var lastFocusedSessionID: String?
+    var lastFocusedTabIndex: Int?
     var nextWindowID: Int = 9999
+    var nextSessionID: String? = "mock-session"
+    var nextTabIndex: Int? = 1
+    var focusSessionOrTabResult = true
     
     override func openWindowAndRun(command: String) throws -> ItermWindowInfo {
         openWindowAndRunCallCount += 1
@@ -40,7 +46,7 @@ class MockIterm2Adapter: Iterm2Adapter {
         let windowID = nextWindowID
         nextWindowID += 1
         // Don't actually open a terminal window - just return the window info
-        return ItermWindowInfo(id: windowID)
+        return ItermWindowInfo(id: windowID, sessionID: nextSessionID, tabIndex: nextTabIndex)
     }
     
     override func runInWindow(id: Int, command: String) throws {
@@ -52,5 +58,19 @@ class MockIterm2Adapter: Iterm2Adapter {
     override func isAvailable() -> Bool {
         return true
     }
-}
 
+    override func focusSessionOrTab(preferredSessionID: String?, tabIndex: Int?, windowID: Int?) throws -> Bool {
+        focusSessionOrTabCallCount += 1
+        lastFocusedSessionID = preferredSessionID
+        lastFocusedTabIndex = tabIndex
+        lastWindowID = windowID
+        return focusSessionOrTabResult
+    }
+
+    override func closeSessionOrTab(preferredSessionID: String?, tabIndex: Int?, windowID: Int?) throws -> Bool {
+        lastFocusedSessionID = preferredSessionID
+        lastFocusedTabIndex = tabIndex
+        lastWindowID = windowID
+        return true
+    }
+}

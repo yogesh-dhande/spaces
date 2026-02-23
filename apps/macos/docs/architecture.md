@@ -8,9 +8,9 @@ Key invariants:
 - Global preferences (`editor`, `port_range`) are stored in the SQLite `settings` table.
 - Workspace settings are stored in SQLite and seeded from project templates; per-workspace overrides are preserved.
 - SQLite stores runtime state; schema is versioned and migrated in place with additive/non-destructive changes (currently v6).
-- yabai is the source of truth for window IDs and focus.
+- yabai is the source of truth for window IDs and generic cross-app window focus.
 - Stream capture must happen before a stream is shown or focused.
-- Avoid window-level automation outside yabai.
+- Avoid window-level automation outside yabai, except iTerm2 tab/session selection via iTerm2 AppleScript for terminal-tab focus.
 - Local key monitors must not override standard text-edit shortcuts while an input has focus.
 
 Test execution:
@@ -280,6 +280,8 @@ erDiagram
     TEXT command
     TEXT terminal_app
     INTEGER window_id
+    TEXT iterm_session_id
+    INTEGER iterm_tab_index
     INTEGER pid
     TEXT status
     TEXT log_path
@@ -387,6 +389,8 @@ Degraded runtime edge cases and handling:
 - Live browser rows are ordered deterministically by browser-session prefix order and then tab URL so `cmd+<n>` shortcut indices stay aligned with the on-screen list even as Chrome window z-order changes.
 - Window cycling tracks a workspace-local navigation pointer, and Chrome row resolution uses the frontmost active tab URL with prefix checks to keep next/previous stable.
 - Window cycling order is role-grouped for consistency: all browser tabs first, then terminal windows, then other window roles. Relative navigation prefers the remembered workspace-local index once cycling begins.
+- Terminal focus prefers iTerm2 AppleScript session selection (with stored session ID and tab-index fallback) before generic window focus, so workspace cycling lands on the correct iTerm tab when metadata is available.
+- Workspace stop/reconcile closes process-backed iTerm terminals via iTerm2 session/tab metadata first and skips the later `yabai` window-close pass for those same terminal window IDs to avoid closing unrelated tabs in shared iTerm windows.
 - Global next/previous shortcut routing resolves focused Chrome windows by `(window_id + active tab URL prefix)` so one reused Chrome window can be safely tracked by multiple workspaces without selecting the wrong workspace.
 - Optional diagnostics: `DEBUG=1` logs browser tab scan count/match/elapsed and browser focus-path timing, including indexed verification, cache hit/miss, refresh, and fallback decisions.
 - Performance benchmarking: `OrchestratorTests.testBenchmarkChromeIndexedTabFocusVsYabaiWindowFocusForExtractedTabs` uses calibrated delays (~52ms tab-index focus + ~38ms active-tab verify vs ~42ms extracted-window yabai focus) and currently reports break-even at about 15 switches after extraction setup.

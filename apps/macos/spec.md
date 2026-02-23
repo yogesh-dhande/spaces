@@ -18,7 +18,7 @@
     - GUI should be a thin wrapper written in AppKit that calls code written in swift in a separate module. This is critical to make it easy to port the GUI to a different tech stack later (e.g. tauri)
     - Prefer automation using applescript, followed by shell commands whenever possible
     - Prefer AppleScript if the app exposes a stable scripting dictionary (Chrome, iTerm2)
-    - Use yabai only for window IDs, space/display resolution, or when AppleScript fails
+    - Use yabai only for window IDs, space/display resolution, or when AppleScript fails (except iTerm2 tab/session focus may use AppleScript session/tab identifiers directly)
     - Ok to have yabai will be a required dependency
     - Avoid yabai SIP
     - Show useful messages and hints to the user for a smooth UX
@@ -164,6 +164,8 @@
                 - GUI creation persists the new workspace first, shows it in the UI, then runs setup in the background (setup state transitions: `pending` -> `running` -> `succeeded`/`failed`)
             - when launched
                 - start processes defined by the workspace in their own terminal windows. keep track of these windows so they can be focused later when looping through this workspace's windows
+                - persist iTerm2 session/tab metadata for process-backed terminals so focus can prefer the original session and fall back to the tab
+                - when stopping, close process-backed iTerm terminals by session/tab when possible instead of always closing the full iTerm window
                 - ensure that browser tabs for the browser sessions defined for the workspace are open, and if not, open them. keep track of them so they can be focused later when looping through this workspace's windows
             - user can open the workspace in the preferred editor, a terminal window, or Finder from the GUI; terminal windows are captured and tracked for window cycling
             - when updated while running

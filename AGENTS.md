@@ -9,7 +9,7 @@
 
 ## Contributor Contract
 - Use yabai as the single source of truth for window IDs.
-- Avoid window-level automation outside yabai.
+- Avoid window-level automation outside yabai, except iTerm2 tab/session selection via iTerm2 AppleScript when focusing the correct terminal tab within iTerm2.
 - Any project setting related to workspace creation and used during workspace launch must be overridable per workspace after creation.
 - Anything configurable via the GUI must also be configurable via the CLI (`mx`). Keep the two in sync.
 

@@ -1190,6 +1190,39 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertEqual(focusedIDs, ["101"])
     }
 
+    // Tests focus workspace window prefers i term session/tab focus for terminal windows by arranging representative inputs and asserting the expected result.
+    func testFocusWorkspaceWindowPrefersItermSessionFocusForTerminal() throws {
+        let (orchestrator, store, _, workspace, root) = try makeOrchestratorWithWorkspace()
+        let yabaiFocusLog = root.appendingPathComponent("terminal-yabai-focus.log")
+        let itermFocusLog = root.appendingPathComponent("terminal-iterm-focus.log")
+
+        try store.upsert(
+            window: WindowRecord(
+                id: UUID().uuidString, workspaceID: workspace.id, app: "iTerm2", title: "api", windowID: 101, role: "terminal", orderIndex: 0,
+                lastSeenAt: "now"))
+        try store.upsert(
+            runningProcess: RunningProcessRecord(
+                id: UUID().uuidString, workspaceID: workspace.id, templateName: "api", command: "npm run api", terminalApp: "iTerm2",
+                windowID: 101, itermSessionID: "session-101", itermTabIndex: 1, pid: 1234, status: .running, logPath: nil, lastOutputAt: nil,
+                startedAt: "now", exitedAt: nil))
+
+        try withMockCommands(["yabai": Self.orchestratorYabaiMockScript, "osascript": Self.orchestratorOsaScriptMock]) {
+            try withEnv(name: "YABAI_FOCUS_LOG_FILE", value: yabaiFocusLog.path) {
+                try withEnv(name: "MOCK_ITERM_FOCUS_LOG_FILE", value: itermFocusLog.path) {
+                    try orchestrator.focusWorkspaceWindow(workspaceID: workspace.id, index: 1)
+                }
+            }
+        }
+
+        XCTAssertEqual(try orchestrator.activeWorkspaceID(), workspace.id)
+        let itermFocusEntry = try String(contentsOf: itermFocusLog).trimmingCharacters(in: .whitespacesAndNewlines)
+        XCTAssertEqual(itermFocusEntry, "session-101|1|101")
+        if FileManager.default.fileExists(atPath: yabaiFocusLog.path) {
+            let yabaiFocusEntries = try String(contentsOf: yabaiFocusLog).trimmingCharacters(in: .whitespacesAndNewlines)
+            XCTAssertTrue(yabaiFocusEntries.isEmpty)
+        }
+    }
+
     // Tests focus window navigation uses relative order and wraps by arranging representative inputs and asserting the expected result.
     func testFocusWindowNavigationUsesRelativeOrderAndWraps() throws {
         let (orchestrator, store, _, workspace, root) = try makeOrchestratorWithWorkspace()
@@ -2282,9 +2315,39 @@ final class OrchestratorTests: XCTestCase {
 
         let closedWindowIDs = (try? String(contentsOf: closeLog).split(separator: "\n").map(String.init)) ?? []
         XCTAssertFalse(closedWindowIDs.contains("202"))
-        XCTAssertTrue(closedWindowIDs.contains("501"))
+        XCTAssertFalse(closedWindowIDs.contains("501"))
         let closedTabs = try String(contentsOf: chromeCloseLog)
         XCTAssertTrue(closedTabs.contains("http://localhost:3001"))
+    }
+
+    // Tests stop workspace closes process-backed i term terminal by session/tab without yabai-closing the whole window by arranging representative inputs and asserting the expected result.
+    func testStopWorkspaceDoesNotYabaiCloseProcessBackedItermWindow() throws {
+        let (orchestrator, store, _, workspace, root) = try makeOrchestratorWithWorkspace()
+        let yabaiCloseLog = root.appendingPathComponent("stop-yabai-close.log")
+        let itermCloseLog = root.appendingPathComponent("stop-iterm-close.log")
+        try store.updateWorkspaceRunning(id: workspace.id, isRunning: true, launchedAt: "now")
+        try store.upsert(
+            window: WindowRecord(
+                id: UUID().uuidString, workspaceID: workspace.id, app: "iTerm2", title: "api", windowID: 501, role: "terminal", orderIndex: 0,
+                lastSeenAt: "now"))
+        try store.upsert(
+            runningProcess: RunningProcessRecord(
+                id: UUID().uuidString, workspaceID: workspace.id, templateName: "api", command: "npm run api", terminalApp: "iTerm2", windowID: 501,
+                itermSessionID: "session-501", itermTabIndex: 1, pid: nil, status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now",
+                exitedAt: nil))
+
+        try withMockCommands(["yabai": Self.orchestratorYabaiMockScript, "osascript": Self.orchestratorOsaScriptMock]) {
+            try withEnv(name: "YABAI_CLOSE_LOG_FILE", value: yabaiCloseLog.path) {
+                try withEnv(name: "MOCK_ITERM_CLOSE_LOG_FILE", value: itermCloseLog.path) {
+                    try orchestrator.stopWorkspace(workspaceID: workspace.id)
+                }
+            }
+        }
+
+        let itermEvents = (try? String(contentsOf: itermCloseLog)) ?? ""
+        XCTAssertTrue(itermEvents.contains("iterm-close 501"))
+        let yabaiClosedWindowIDs = (try? String(contentsOf: yabaiCloseLog).split(separator: "\n").map(String.init)) ?? []
+        XCTAssertFalse(yabaiClosedWindowIDs.contains("501"))
     }
 
     // Tests stop workspace closes all live detected browser session tabs by arranging representative inputs and asserting the expected result.
@@ -2317,7 +2380,7 @@ final class OrchestratorTests: XCTestCase {
         let closedWindowIDs = (try? String(contentsOf: closeLog).split(separator: "\n").map(String.init)) ?? []
         XCTAssertFalse(closedWindowIDs.contains("202"))
         XCTAssertFalse(closedWindowIDs.contains("303"))
-        XCTAssertTrue(closedWindowIDs.contains("501"))
+        XCTAssertFalse(closedWindowIDs.contains("501"))
         let closedTabs = try String(contentsOf: chromeCloseLog)
         XCTAssertTrue(closedTabs.contains("http://localhost:3001/"))
         XCTAssertTrue(closedTabs.contains("http://localhost:3001/login?redirect=/account"))
@@ -2707,11 +2770,28 @@ final class OrchestratorTests: XCTestCase {
               rest="$first"
             fi
             echo "$rest" > "$MOCK_ITERM_WINDOW_IDS_FILE"
-            echo "$first"
+            echo "${first}|session-${first}|1"
             exit 0
           fi
-          echo "${MOCK_ITERM_WINDOW_ID:-701}"
+          wid="${MOCK_ITERM_WINDOW_ID:-701}"
+          echo "${wid}|session-${wid}|1"
           exit 0
+        fi
+
+        if [[ "$script" == *'set targetSessionID to'* && "$script" == *'tell application "iTerm2"'* ]]; then
+          if [[ "$script" != *'activate'* && "$script" != *'set current window to w'* ]]; then
+            # closeSessionOrTab scripts are handled by the close logger branch below
+            :
+          else
+          if [[ -n "${MOCK_ITERM_FOCUS_LOG_FILE:-}" ]]; then
+            session_id="$(printf '%s\n' "$script" | awk -F'set targetSessionID to \"' 'NF>1 { sub(/\".*/, "", $2); print $2; exit }')"
+            tab_index="$(printf '%s\n' "$script" | grep -Eo 'set targetTabIndex to -?[0-9]+' | awk '{print $4}' | head -n1)"
+            window_id="$(printf '%s\n' "$script" | grep -Eo 'set targetWindowID to -?[0-9]+' | awk '{print $4}' | head -n1)"
+            echo "${session_id}|${tab_index}|${window_id}" >> "$MOCK_ITERM_FOCUS_LOG_FILE"
+          fi
+          echo "${MOCK_ITERM_FOCUS_RESULT:-session}"
+          exit 0
+          fi
         fi
 
         if [[ "$script" == *'tell application "Google Chrome" to version'* ]]; then
@@ -2841,12 +2921,18 @@ final class OrchestratorTests: XCTestCase {
           exit 0
         fi
 
-        if [[ "$script" == *'close w'* ]]; then
-          close_window_id="$(printf '%s\n' "$script" | grep -Eo 'if id of w is [0-9]+ then' | awk '{print $6}' | head -n1)"
-          if [[ -n "${MOCK_ITERM_CLOSE_LOG_FILE:-}" ]]; then
-            echo "iterm-close ${close_window_id:-unknown}" >> "$MOCK_ITERM_CLOSE_LOG_FILE"
+        if [[ "$script" == *'close s'* || "$script" == *'close t'* || "$script" == *'close w'* ]]; then
+          close_window_id="$(printf '%s\n' "$script" | grep -Eo 'set targetWindowID to -?[0-9]+' | awk '{print $4}' | head -n1)"
+          if [[ -z "$close_window_id" ]]; then
+            close_window_id="$(printf '%s\n' "$script" | grep -Eo 'if id of w is [0-9]+ then' | awk '{print $6}' | head -n1)"
           fi
-          echo ""
+          close_kind="window"
+          if [[ "$script" == *'close s'* ]]; then close_kind="session"; fi
+          if [[ "$script" == *'close t'* ]]; then close_kind="tab"; fi
+          if [[ -n "${MOCK_ITERM_CLOSE_LOG_FILE:-}" ]]; then
+            echo "iterm-close ${close_window_id:-unknown} ${close_kind}" >> "$MOCK_ITERM_CLOSE_LOG_FILE"
+          fi
+          echo "${close_kind}"
           exit 0
         fi
 

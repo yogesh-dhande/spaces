@@ -40,6 +40,11 @@ public final class MuxyOrchestrator {
         let scanResult: BrowserWindowScanResult
     }
 
+    private struct ItermTerminalSessionMetadata {
+        let sessionID: String
+        let tabIndex: Int?
+    }
+
     public let store: SQLiteStore
     private let git: GitClient
     private let yabai: YabaiAdapter
@@ -57,6 +62,8 @@ public final class MuxyOrchestrator {
     private var windowNavigationIndexByWorkspace: [String: Int] = [:]
     private let browserScanCacheLock = NSLock()
     private var browserWindowScanCacheByWorkspace: [String: BrowserWindowScanCacheEntry] = [:]
+    private let itermTerminalSessionLock = NSLock()
+    private var itermTerminalSessionByWorkspaceAndWindowID: [String: ItermTerminalSessionMetadata] = [:]
 
     public init(
         store: SQLiteStore, projectsRootDirectory: URL? = nil, workspacesRootDirectory: URL? = nil,
@@ -717,13 +724,30 @@ public final class MuxyOrchestrator {
                 skippedStopScriptBecauseWorkspaceDirectoryMissing = true
             }
         }
-        for process in processes { if let windowID = process.windowID, process.terminalApp == "iTerm2" { _ = try? iterm.closeWindow(id: windowID) } }
-        var closedWindowIDs = Set<Int>()
+        var processTerminalWindowIDs = Set<Int>()
+        var closedProcessTerminalWindowIDs = Set<Int>()
+        for process in processes where process.terminalApp == "iTerm2" {
+            let didClose = (try? closeTrackedItermTerminalContainer(process)) ?? false
+            if let windowID = process.windowID {
+                processTerminalWindowIDs.insert(windowID)
+                if didClose { closedProcessTerminalWindowIDs.insert(windowID) }
+            }
+        }
+        var closedWindowIDs = closedProcessTerminalWindowIDs
         for window in windows {
             if window.role == "browser" {
                 closeTrackedBrowserTab(window)
                 continue
             }
+            if window.role == "terminal", window.app == "iTerm2", let id = window.windowID {
+                if closedWindowIDs.contains(id) { continue }
+                if !processTerminalWindowIDs.contains(id) {
+                    _ = try? closeTrackedItermTerminalWindow(workspaceID: workspace.id, windowID: id)
+                }
+                closedWindowIDs.insert(id)
+                continue
+            }
+            if window.role == "terminal", let id = window.windowID, processTerminalWindowIDs.contains(id) { continue }
             if let id = window.windowID, !closedWindowIDs.contains(id) {
                 closedWindowIDs.insert(id)
                 _ = try? yabai.closeWindow(id: id)
@@ -731,6 +755,7 @@ public final class MuxyOrchestrator {
         }
         try store.deleteRunningProcesses(workspaceID: workspace.id)
         try store.deleteWindows(workspaceID: workspace.id)
+        clearItermTerminalSessionMetadata(workspaceID: workspace.id)
         try store.updateWorkspaceRunning(id: workspace.id, isRunning: false, launchedAt: workspace.lastLaunchedAt)
         setWindowNavigationIndex(nil, workspaceID: workspace.id)
         return WorkspaceStopOutcome(skippedStopScriptBecauseWorkspaceDirectoryMissing: skippedStopScriptBecauseWorkspaceDirectoryMissing)
@@ -801,6 +826,7 @@ public final class MuxyOrchestrator {
                         let updatedProcess = RunningProcessRecord(
                             id: process.id, workspaceID: process.workspaceID, templateName: process.templateName,
                             command: process.command, terminalApp: process.terminalApp, windowID: process.windowID,
+                            itermSessionID: process.itermSessionID, itermTabIndex: process.itermTabIndex,
                             pid: process.pid, status: .exited, logPath: process.logPath,
                             lastOutputAt: process.lastOutputAt, startedAt: process.startedAt,
                             exitedAt: nowISO8601()
@@ -933,6 +959,7 @@ public final class MuxyOrchestrator {
         let updatedProcess = RunningProcessRecord(
             id: process.id, workspaceID: process.workspaceID, templateName: process.templateName,
             command: process.command, terminalApp: process.terminalApp, windowID: process.windowID,
+            itermSessionID: process.itermSessionID, itermTabIndex: process.itermTabIndex,
             pid: process.pid, status: .exited, logPath: process.logPath,
             lastOutputAt: process.lastOutputAt, startedAt: process.startedAt,
             exitedAt: nowISO8601()
@@ -1000,6 +1027,7 @@ public final class MuxyOrchestrator {
             let restartedProcess = RunningProcessRecord(
                 id: process.id, workspaceID: process.workspaceID, templateName: process.templateName,
                 command: process.command, terminalApp: process.terminalApp, windowID: windowID,
+                itermSessionID: process.itermSessionID, itermTabIndex: process.itermTabIndex,
                 pid: newPID, status: .running, logPath: process.logPath,
                 lastOutputAt: nil, startedAt: nowISO8601(), exitedAt: nil
             )
@@ -1016,9 +1044,14 @@ public final class MuxyOrchestrator {
             let restartedProcess = RunningProcessRecord(
                 id: process.id, workspaceID: process.workspaceID, templateName: process.templateName,
                 command: process.command, terminalApp: "iTerm2", windowID: windowID,
+                itermSessionID: windowInfo.sessionID, itermTabIndex: windowInfo.tabIndex,
                 pid: newPID, status: .running, logPath: process.logPath,
                 lastOutputAt: nil, startedAt: nowISO8601(), exitedAt: nil
             )
+            if windowID > 0 {
+                setItermTerminalSessionMetadata(
+                    workspaceID: process.workspaceID, windowID: windowID, sessionID: windowInfo.sessionID, tabIndex: windowInfo.tabIndex)
+            }
             try store.upsert(runningProcess: restartedProcess)
         }
     }
@@ -1079,7 +1112,8 @@ public final class MuxyOrchestrator {
             guard window.title != refreshedTitle || window.app != refreshedApp else { continue }
             let refreshedWindow = WindowRecord(
                 id: window.id, workspaceID: window.workspaceID, app: refreshedApp, title: refreshedTitle, targetURL: window.targetURL,
-                windowID: windowID, role: window.role, orderIndex: window.orderIndex, lastSeenAt: window.lastSeenAt)
+                windowID: windowID, itermSessionID: window.itermSessionID, itermTabIndex: window.itermTabIndex,
+                role: window.role, orderIndex: window.orderIndex, lastSeenAt: window.lastSeenAt)
             try store.upsert(window: refreshedWindow)
             refreshedCount += 1
         }
@@ -1121,8 +1155,16 @@ public final class MuxyOrchestrator {
         guard iterm.isAvailable() else { throw MuxyError.dependencyMissing(message: "iTerm2 is required to open terminal windows.") }
         let snapshot = try yabai.listWindows()
         let escapedDir = workspace.dir.replacingOccurrences(of: "\"", with: "\\\"")
-        _ = try iterm.openWindowAndRun(command: "cd \"\(escapedDir)\"")
+        let window = try iterm.openWindowAndRun(command: "cd \"\(escapedDir)\"")
+        if let focused = try yabai.focusedWindow(), focused.app == "iTerm2" {
+            setItermTerminalSessionMetadata(
+                workspaceID: workspace.id, windowID: focused.id, sessionID: window.sessionID, tabIndex: window.tabIndex)
+        }
         try attachNewWindows(snapshot: snapshot, workspaceID: workspace.id, role: "terminal", appName: "iTerm2", orderOffset: 200)
+        if let focused = try yabai.focusedWindow(), focused.app == "iTerm2" {
+            try persistItermTerminalWindowMetadata(
+                workspaceID: workspace.id, windowID: focused.id, sessionID: window.sessionID, tabIndex: window.tabIndex)
+        }
     }
 
     public func focusWorkspace(workspaceID: String) throws {
@@ -1261,6 +1303,14 @@ public final class MuxyOrchestrator {
     private func focusTrackedWindow(_ window: WindowRecord, workspaceID: String) -> Bool {
         let focusStartedAt = currentDate()
         var focusPath = "yabai"
+        if window.role == "terminal", let trackedWindowID = window.windowID, window.app == "iTerm2" {
+            let focusedIterm = (try? focusItermTerminalWindow(workspaceID: workspaceID, trackedWindowID: trackedWindowID)) ?? false
+            if focusedIterm {
+                logBrowserFocus(
+                    "workspace=\(workspaceID) path=iterm window=\(trackedWindowID) elapsed_ms=\(elapsedMS(since: focusStartedAt))")
+                return true
+            }
+        }
         if window.role == "browser", let targetURL = window.targetURL, chrome.isAvailable() {
             let extractedOutcome = (try? focusExtractedBrowserWindow(workspaceID: workspaceID, targetURL: targetURL)) ?? .notMapped
             if extractedOutcome == .focused {
@@ -1316,6 +1366,88 @@ public final class MuxyOrchestrator {
         logBrowserFocus(
             "workspace=\(workspaceID) path=yabai window=\(id) success=\(focused ? "1" : "0") elapsed_ms=\(elapsedMS(since: focusStartedAt))")
         return focused
+    }
+
+    private func focusItermTerminalWindow(workspaceID: String, trackedWindowID: Int) throws -> Bool {
+        let runningProcess = try store.runningProcesses(workspaceID: workspaceID).first {
+            $0.terminalApp == "iTerm2" && $0.windowID == trackedWindowID
+        }
+        let trackedWindow = try store.windows(workspaceID: workspaceID).first {
+            $0.role == "terminal" && $0.app == "iTerm2" && $0.windowID == trackedWindowID
+        }
+        let fallbackMetadata = itermTerminalSessionMetadata(workspaceID: workspaceID, windowID: trackedWindowID)
+        return try iterm.focusSessionOrTab(
+            preferredSessionID: runningProcess?.itermSessionID ?? trackedWindow?.itermSessionID ?? fallbackMetadata?.sessionID,
+            tabIndex: runningProcess?.itermTabIndex ?? trackedWindow?.itermTabIndex ?? fallbackMetadata?.tabIndex,
+            windowID: trackedWindowID)
+    }
+
+    private func closeTrackedItermTerminalContainer(_ process: RunningProcessRecord) throws -> Bool {
+        guard process.terminalApp == "iTerm2" else { return false }
+        let closedSessionOrTab = (try? iterm.closeSessionOrTab(
+            preferredSessionID: process.itermSessionID,
+            tabIndex: process.itermTabIndex,
+            windowID: process.windowID)) ?? false
+        if closedSessionOrTab { return true }
+        guard let windowID = process.windowID else { return false }
+        let didCloseSingleton = (try? iterm.closeWindowIfSingleton(id: windowID)) ?? false
+        return didCloseSingleton
+    }
+
+    private func closeTrackedItermTerminalWindow(workspaceID: String, windowID: Int) throws -> Bool {
+        let trackedWindow = try store.windows(workspaceID: workspaceID).first {
+            $0.role == "terminal" && $0.app == "iTerm2" && $0.windowID == windowID
+        }
+        if let preferredSessionID = trackedWindow?.itermSessionID,
+            let closedSessionOrTab = try? iterm.closeSessionOrTab(
+                preferredSessionID: preferredSessionID,
+                tabIndex: trackedWindow?.itermTabIndex,
+                windowID: windowID),
+            closedSessionOrTab
+        {
+            return true
+        }
+        if let metadata = itermTerminalSessionMetadata(workspaceID: workspaceID, windowID: windowID) {
+            let closedSessionOrTab = (try? iterm.closeSessionOrTab(
+                preferredSessionID: metadata.sessionID,
+                tabIndex: metadata.tabIndex,
+                windowID: windowID)) ?? false
+            if closedSessionOrTab { return true }
+        }
+        let didCloseSingleton = (try? iterm.closeWindowIfSingleton(id: windowID)) ?? false
+        return didCloseSingleton
+    }
+
+    private func setItermTerminalSessionMetadata(workspaceID: String, windowID: Int, sessionID: String?, tabIndex: Int?) {
+        guard let sessionID, !sessionID.isEmpty else { return }
+        let key = "\(workspaceID):\(windowID)"
+        itermTerminalSessionLock.lock()
+        itermTerminalSessionByWorkspaceAndWindowID[key] = ItermTerminalSessionMetadata(sessionID: sessionID, tabIndex: tabIndex)
+        itermTerminalSessionLock.unlock()
+    }
+
+    private func itermTerminalSessionMetadata(workspaceID: String, windowID: Int) -> ItermTerminalSessionMetadata? {
+        let key = "\(workspaceID):\(windowID)"
+        itermTerminalSessionLock.lock()
+        defer { itermTerminalSessionLock.unlock() }
+        return itermTerminalSessionByWorkspaceAndWindowID[key]
+    }
+
+    private func clearItermTerminalSessionMetadata(workspaceID: String) {
+        itermTerminalSessionLock.lock()
+        itermTerminalSessionByWorkspaceAndWindowID = itermTerminalSessionByWorkspaceAndWindowID.filter { !$0.key.hasPrefix("\(workspaceID):") }
+        itermTerminalSessionLock.unlock()
+    }
+
+    private func persistItermTerminalWindowMetadata(workspaceID: String, windowID: Int, sessionID: String?, tabIndex: Int?) throws {
+        guard let sessionID, !sessionID.isEmpty else { return }
+        let windows = try store.windows(workspaceID: workspaceID)
+        guard let existing = windows.first(where: { $0.role == "terminal" && $0.app == "iTerm2" && $0.windowID == windowID }) else { return }
+        let updated = WindowRecord(
+            id: existing.id, workspaceID: existing.workspaceID, app: existing.app, title: existing.title, targetURL: existing.targetURL,
+            windowID: existing.windowID, itermSessionID: sessionID, itermTabIndex: tabIndex,
+            role: existing.role, orderIndex: existing.orderIndex, lastSeenAt: nowISO8601())
+        try store.upsert(window: updated)
     }
 
     private func trackedWindows(workspaceID: String) throws -> [WindowRecord] {
@@ -1979,14 +2111,15 @@ public final class MuxyOrchestrator {
 
         for process in toStop {
             if let pid = resolvedRuntimePID(for: process) { terminateProcessGroup(pid: pid) }
-            if let windowID = process.windowID, process.terminalApp == "iTerm2" { _ = try? iterm.closeWindow(id: windowID) }
+            if process.terminalApp == "iTerm2" { _ = try? closeTrackedItermTerminalContainer(process) }
             try store.deleteRunningProcess(id: process.id)
         }
 
         for (desired, process) in toRelabel {
             let updated = RunningProcessRecord(
                 id: process.id, workspaceID: workspace.id, templateName: desired.desiredKey, command: process.command,
-                terminalApp: process.terminalApp, windowID: process.windowID, pid: process.pid, status: process.status, logPath: process.logPath,
+                terminalApp: process.terminalApp, windowID: process.windowID, itermSessionID: process.itermSessionID,
+                itermTabIndex: process.itermTabIndex, pid: process.pid, status: process.status, logPath: process.logPath,
                 lastOutputAt: process.lastOutputAt, startedAt: process.startedAt, exitedAt: process.exitedAt)
             try store.upsert(runningProcess: updated)
         }
@@ -2004,7 +2137,8 @@ public final class MuxyOrchestrator {
                 let pid = try? Int(String(contentsOfFile: pidFile).trimmingCharacters(in: .whitespacesAndNewlines))
                 let updated = RunningProcessRecord(
                     id: process.id, workspaceID: workspace.id, templateName: desired.desiredKey, command: desired.template.command,
-                    terminalApp: "iTerm2", windowID: windowID, pid: pid, status: .running, logPath: logFile, lastOutputAt: nil,
+                    terminalApp: "iTerm2", windowID: windowID, itermSessionID: process.itermSessionID,
+                    itermTabIndex: process.itermTabIndex, pid: pid, status: .running, logPath: logFile, lastOutputAt: nil,
                     startedAt: nowISO8601(), exitedAt: nil)
                 try store.upsert(runningProcess: updated)
             } else {
@@ -2016,8 +2150,13 @@ public final class MuxyOrchestrator {
                 let pid = try? Int(String(contentsOfFile: pidFile).trimmingCharacters(in: .whitespacesAndNewlines))
                 let updated = RunningProcessRecord(
                     id: process.id, workspaceID: workspace.id, templateName: desired.desiredKey, command: desired.template.command,
-                    terminalApp: "iTerm2", windowID: resolvedWindowID, pid: pid, status: .running, logPath: logFile, lastOutputAt: nil,
+                    terminalApp: "iTerm2", windowID: resolvedWindowID, itermSessionID: window.sessionID, itermTabIndex: window.tabIndex, pid: pid,
+                    status: .running, logPath: logFile, lastOutputAt: nil,
                     startedAt: nowISO8601(), exitedAt: nil)
+                if let resolvedWindowID, resolvedWindowID > 0 {
+                    setItermTerminalSessionMetadata(
+                        workspaceID: workspace.id, windowID: resolvedWindowID, sessionID: window.sessionID, tabIndex: window.tabIndex)
+                }
                 try store.upsert(runningProcess: updated)
                 try upsertCapturedTerminalWindows(captured, existingWindowIDs: &existingWindowIDs, terminalCount: &terminalCount)
             }
@@ -2035,8 +2174,13 @@ public final class MuxyOrchestrator {
             let pid = try? Int(String(contentsOfFile: pidFile).trimmingCharacters(in: .whitespacesAndNewlines))
             let record = RunningProcessRecord(
                 id: UUID().uuidString, workspaceID: workspace.id, templateName: desired.desiredKey, command: desired.template.command,
-                terminalApp: "iTerm2", windowID: resolvedWindowID, pid: pid, status: .running, logPath: logFile, lastOutputAt: nil,
+                terminalApp: "iTerm2", windowID: resolvedWindowID, itermSessionID: window.sessionID, itermTabIndex: window.tabIndex, pid: pid,
+                status: .running, logPath: logFile, lastOutputAt: nil,
                 startedAt: nowISO8601(), exitedAt: nil)
+            if let resolvedWindowID, resolvedWindowID > 0 {
+                setItermTerminalSessionMetadata(
+                    workspaceID: workspace.id, windowID: resolvedWindowID, sessionID: window.sessionID, tabIndex: window.tabIndex)
+            }
             try store.upsert(runningProcess: record)
             try upsertCapturedTerminalWindows(captured, existingWindowIDs: &existingWindowIDs, terminalCount: &terminalCount)
         }
@@ -2217,8 +2361,13 @@ public final class MuxyOrchestrator {
             let pid = try? Int(String(contentsOfFile: pidFile).trimmingCharacters(in: .whitespacesAndNewlines))
             let running = RunningProcessRecord(
                 id: UUID().uuidString, workspaceID: workspace.id, templateName: name, command: template.command, terminalApp: "iTerm2",
-                windowID: window.id >= 0 ? window.id : fallbackWindowID, pid: pid, status: .running, logPath: logFile, lastOutputAt: nil,
+                windowID: window.id >= 0 ? window.id : fallbackWindowID, itermSessionID: window.sessionID, itermTabIndex: window.tabIndex, pid: pid,
+                status: .running, logPath: logFile, lastOutputAt: nil,
                 startedAt: nowISO8601(), exitedAt: nil)
+            if let resolvedWindowID = (window.id >= 0 ? window.id : fallbackWindowID), resolvedWindowID > 0 {
+                setItermTerminalSessionMetadata(
+                    workspaceID: workspace.id, windowID: resolvedWindowID, sessionID: window.sessionID, tabIndex: window.tabIndex)
+            }
             try store.upsert(runningProcess: running)
         }
 
@@ -2395,7 +2544,15 @@ public final class MuxyOrchestrator {
     }
 
     private func resolvedRuntimePID(for process: RunningProcessRecord) -> Int? {
-        if let pid = process.pid, pid > 0 { return pid }
+        if let pid = process.pid, pid > 0 {
+            if isProcessAlive(pid: pid) { return pid }
+            guard process.terminalApp == "iTerm2" else { return pid }
+            guard let pidFile = try? processRuntimePaths(workspaceID: process.workspaceID, name: process.templateName).pidFile else {
+                return pid
+            }
+            if let runtimePID = runtimePID(fromFile: pidFile), runtimePID > 0, isProcessAlive(pid: runtimePID) { return runtimePID }
+            return pid
+        }
         guard process.terminalApp == "iTerm2" else { return nil }
         guard let pidFile = try? processRuntimePaths(workspaceID: process.workspaceID, name: process.templateName).pidFile else { return nil }
         return runtimePID(fromFile: pidFile)

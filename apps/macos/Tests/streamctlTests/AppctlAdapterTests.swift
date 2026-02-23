@@ -106,8 +106,12 @@ final class AppctlAdapterTests: XCTestCase {
             XCTAssertTrue(iterm.isAvailable())
             let window = try iterm.openWindowAndRun(command: "echo \"hi\"")
             XCTAssertEqual(window.id, 77)
+            XCTAssertEqual(window.sessionID, "session-77")
+            XCTAssertEqual(window.tabIndex, 2)
             XCTAssertNoThrow(try iterm.runInWindow(id: 77, command: "pwd"))
             XCTAssertNoThrow(try iterm.closeWindow(id: 77))
+            XCTAssertTrue(try iterm.closeSessionOrTab(preferredSessionID: "session-77", tabIndex: 2, windowID: 77))
+            XCTAssertTrue(try iterm.focusSessionOrTab(preferredSessionID: "session-77", tabIndex: 2, windowID: 77))
         }
     }
 
@@ -287,7 +291,16 @@ final class AppctlAdapterTests: XCTestCase {
         fi
 
         if [[ "$script" == *'create window with default profile'* ]]; then
-          echo "77"
+          echo "77|session-77|2"
+          exit 0
+        fi
+
+        if [[ "$script" == *'set targetSessionID to'* && "$script" == *'tell application "iTerm2"'* ]]; then
+          if [[ "$script" == *'activate'* || "$script" == *'set current window to w'* ]]; then
+            echo "session"
+          else
+            echo "session"
+          fi
           exit 0
         fi
 
