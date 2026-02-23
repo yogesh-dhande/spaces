@@ -465,12 +465,15 @@ struct CLI {
             } else if args.contains("--gui-open-settings-shortcut") {
                 let current = try orchestrator.guiOpenSettingsShortcut()
                 print("gui-open-settings-shortcut\t\(current)")
+            } else if args.contains("--iterm-focus-pulse-color") {
+                let (r, g, b) = try orchestrator.itermFocusPulseColor()
+                print("iterm-focus-pulse-color\t\(r),\(g),\(b)")
             } else {
                 throw NSError(
                     domain: "mx.cli", code: 2,
                     userInfo: [
                         NSLocalizedDescriptionKey:
-                            "Missing setting flag. Use: settings get --editor|--port-range|--gui-hotkey|--gui-next-shortcut|--gui-prev-shortcut|--gui-show-shortcut|--gui-add-project-shortcut|--gui-add-workspace-shortcut|--gui-reload-shortcut|--gui-open-editor-shortcut|--gui-open-terminal-shortcut|--gui-open-finder-shortcut|--gui-open-settings-shortcut"
+                            "Missing setting flag. Use: settings get --editor|--port-range|--gui-hotkey|--gui-next-shortcut|--gui-prev-shortcut|--gui-show-shortcut|--gui-add-project-shortcut|--gui-add-workspace-shortcut|--gui-reload-shortcut|--gui-open-editor-shortcut|--gui-open-terminal-shortcut|--gui-open-finder-shortcut|--gui-open-settings-shortcut|--iterm-focus-pulse-color"
                     ])
             }
 
@@ -536,12 +539,21 @@ struct CLI {
                 let spec = try HotkeySpec.parse(raw)
                 try orchestrator.setGUIOpenSettingsShortcut(spec.normalized)
                 print("Updated gui-open-settings-shortcut\t\(spec.normalized)")
+            } else if let raw = optionalValue(for: "--iterm-focus-pulse-color") {
+                let parts = raw.split(separator: ",").compactMap { Int($0.trimmingCharacters(in: .whitespaces)) }
+                guard parts.count == 3, parts.allSatisfy({ $0 >= 0 && $0 <= 255 }) else {
+                    throw NSError(
+                        domain: "mx.cli", code: 2,
+                        userInfo: [NSLocalizedDescriptionKey: "Invalid color: \(raw). Format: r,g,b with values 0–255 e.g. 0,128,255"])
+                }
+                try orchestrator.setItermFocusPulseColor(r: parts[0], g: parts[1], b: parts[2])
+                print("Updated iterm-focus-pulse-color\t\(parts[0]),\(parts[1]),\(parts[2])")
             } else {
                 throw NSError(
                     domain: "mx.cli", code: 2,
                     userInfo: [
                         NSLocalizedDescriptionKey:
-                            "Missing setting flag/value. Use: settings set --editor <value>|--port-range <start>-<end>|--gui-hotkey <spec>|--gui-next-shortcut <spec>|--gui-prev-shortcut <spec>|--gui-show-shortcut <spec>|--gui-add-project-shortcut <spec>|--gui-add-workspace-shortcut <spec>|--gui-reload-shortcut <spec>|--gui-open-editor-shortcut <spec>|--gui-open-terminal-shortcut <spec>|--gui-open-finder-shortcut <spec>|--gui-open-settings-shortcut <spec>"
+                            "Missing setting flag/value. Use: settings set --editor <value>|--port-range <start>-<end>|--gui-hotkey <spec>|--gui-next-shortcut <spec>|--gui-prev-shortcut <spec>|--gui-show-shortcut <spec>|--gui-add-project-shortcut <spec>|--gui-add-workspace-shortcut <spec>|--gui-reload-shortcut <spec>|--gui-open-editor-shortcut <spec>|--gui-open-terminal-shortcut <spec>|--gui-open-finder-shortcut <spec>|--gui-open-settings-shortcut <spec>|--iterm-focus-pulse-color <r,g,b>"
                     ])
             }
 
@@ -579,6 +591,9 @@ struct CLI {
             } else if args.contains("--gui-open-settings-shortcut") {
                 try orchestrator.setGUIOpenSettingsShortcut(nil)
                 print("Reset gui-open-settings-shortcut\t\(SettingsKey.defaultGUIOpenSettingsShortcut)")
+            } else if args.contains("--iterm-focus-pulse-color") {
+                try orchestrator.setItermFocusPulseColor(r: 255, g: 195, b: 0)
+                print("Reset iterm-focus-pulse-color\t\(SettingsKey.defaultItermFocusPulseColor)")
             } else if args.contains("--editor") {
                 _ = try orchestrator.updateEditorPreference(nil)
                 print("Reset editor\tnone")
@@ -590,7 +605,7 @@ struct CLI {
                     domain: "mx.cli", code: 2,
                     userInfo: [
                         NSLocalizedDescriptionKey:
-                            "Missing setting flag. Use: settings reset --editor|--port-range|--gui-hotkey|--gui-next-shortcut|--gui-prev-shortcut|--gui-show-shortcut|--gui-add-project-shortcut|--gui-add-workspace-shortcut|--gui-reload-shortcut|--gui-open-editor-shortcut|--gui-open-terminal-shortcut|--gui-open-finder-shortcut|--gui-open-settings-shortcut"
+                            "Missing setting flag. Use: settings reset --editor|--port-range|--gui-hotkey|--gui-next-shortcut|--gui-prev-shortcut|--gui-show-shortcut|--gui-add-project-shortcut|--gui-add-workspace-shortcut|--gui-reload-shortcut|--gui-open-editor-shortcut|--gui-open-terminal-shortcut|--gui-open-finder-shortcut|--gui-open-settings-shortcut|--iterm-focus-pulse-color"
                     ])
             }
 
@@ -650,6 +665,7 @@ struct CLI {
               mx settings get --gui-open-terminal-shortcut
               mx settings get --gui-open-finder-shortcut
               mx settings get --gui-open-settings-shortcut
+              mx settings get --iterm-focus-pulse-color
               mx settings set --editor none|vscode|cursor|windsurf|vim
               mx settings set --port-range <start>-<end>
               mx settings set --gui-hotkey <spec>
@@ -676,6 +692,8 @@ struct CLI {
               mx settings reset --gui-open-terminal-shortcut
               mx settings reset --gui-open-finder-shortcut
               mx settings reset --gui-open-settings-shortcut
+              mx settings set --iterm-focus-pulse-color <r,g,b>
+              mx settings reset --iterm-focus-pulse-color
 
               mx project list
               mx project add --dir <path>

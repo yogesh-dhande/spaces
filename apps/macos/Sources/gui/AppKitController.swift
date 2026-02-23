@@ -396,6 +396,15 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         case runningUnhealthy
     }
 
+    /// Holds a click closure and serves as the NSGestureRecognizer target for clickable row views.
+    private final class ClickTarget: NSObject {
+        let action: () -> Void
+        init(_ action: @escaping () -> Void) { self.action = action }
+        @objc func clicked(_ sender: NSGestureRecognizer) { action() }
+    }
+
+    private static var clickTargetAssocKey: UInt8 = 0
+
     nonisolated private static func refreshWorkspaceWindowsSnapshot() async -> Result<MuxyOrchestrator.RefreshResult, Error> {
         await Task.detached(priority: .utility) {
             do {
@@ -1034,7 +1043,14 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                         dashboardWindowFocusMap[shortcutCounter] = (workspaceID: group.workspaceID, windowListIndex: wli)
                     }
                     shortcutCounter += 1
-                    let card = dashboardWindowCard(entry: entry, shortcut: shortcut)
+                    let cardAction: (() -> Void)? = entry.windowListIndex.map { wli in
+                        let wid = group.workspaceID
+                        return { [weak self] in
+                            guard let self else { return }
+                            do { try self.orchestrator.focusWorkspaceWindow(workspaceID: wid, index: wli) } catch {}
+                        }
+                    }
+                    let card = dashboardWindowCard(entry: entry, shortcut: shortcut, action: cardAction)
                     itemsStack.addArrangedSubview(card)
                     constrainFormFieldToFillWidth(card, in: itemsStack)
                 }
@@ -1048,11 +1064,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     }
 
     /// Builds a window card with all status check sub-rows below it, identical to the workspace Run tab layout.
-    private func dashboardWindowCard(entry: DashboardAttentionEntry, shortcut: String) -> NSView {
+    private func dashboardWindowCard(entry: DashboardAttentionEntry, shortcut: String, action: (() -> Void)? = nil) -> NSView {
         let mainRow = windowRow(
             icon: entry.icon, iconColor: entry.iconColor,
             label: entry.label, detail: entry.detail,
-            shortcut: shortcut, processStatus: entry.processStatus)
+            shortcut: shortcut, processStatus: entry.processStatus, action: action)
 
         guard !entry.statusChecks.isEmpty else { return mainRow }
 
@@ -1449,6 +1465,25 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             stack.addArrangedSubview(row)
             constrainFormFieldToFillWidth(row, in: stack)
         }
+
+        // --- iTerm2 focus pulse color ---
+        stack.addArrangedSubview(label(text: "iTerm2 focus pulse color"))
+        let pulseColorNote = NSTextField(
+            labelWithString: "Background color briefly pulsed when an iTerm2 window is focused. Default: amber (65535, 50000, 0).")
+        pulseColorNote.font = .systemFont(ofSize: 11)
+        pulseColorNote.textColor = .secondaryLabelColor
+        pulseColorNote.maximumNumberOfLines = 0
+        pulseColorNote.lineBreakMode = .byWordWrapping
+        stack.addArrangedSubview(pulseColorNote)
+
+        let (pulseR, pulseG, pulseB) = (try? orchestrator.itermFocusPulseColor()) ?? (r: 255, g: 195, b: 0)
+        let colorWell = NSColorWell()
+        colorWell.color = NSColor(
+            red: CGFloat(pulseR) / 255, green: CGFloat(pulseG) / 255, blue: CGFloat(pulseB) / 255, alpha: 1)
+        colorWell.translatesAutoresizingMaskIntoConstraints = false
+        colorWell.target = self
+        colorWell.action = #selector(itermPulseColorChanged(_:))
+        stack.addArrangedSubview(colorWell)
 
         showScrollableDetailStack(stack)
     }
@@ -2373,9 +2408,15 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                     iconName = "chevron.left.forwardslash.chevron.right"
                     iconColor = .systemPurple
                 }
+                let windowIndex = idx + 1
+                let workspaceID = workspace.id
                 let row = windowRow(
                     icon: iconName, iconColor: iconColor, label: windowLabel, detail: windowDetail,
-                    shortcut: "CMD+\(idx + 1)", processStatus: linkedProcess?.status)
+                    shortcut: "CMD+\(windowIndex)", processStatus: linkedProcess?.status,
+                    action: { [weak self] in
+                        guard let self else { return }
+                        do { try self.orchestrator.focusWorkspaceWindow(workspaceID: workspaceID, index: windowIndex) } catch {}
+                    })
                 windowsStack.addArrangedSubview(row)
                 constrainFormFieldToFillWidth(row, in: windowsStack)
 
@@ -2846,7 +2887,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         return label
     }
 
-    private func windowRow(icon: String, iconColor: NSColor, label: String, detail: String? = nil, shortcut: String, processStatus: RunningProcessState? = nil) -> NSView {
+    private func windowRow(
+        icon: String, iconColor: NSColor, label: String, detail: String? = nil, shortcut: String,
+        processStatus: RunningProcessState? = nil, action: (() -> Void)? = nil
+    ) -> NSView {
         let row = NSStackView()
         row.orientation = .horizontal
         row.alignment = .centerY
@@ -2855,6 +2899,12 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         row.layer?.cornerRadius = 6
         row.layer?.backgroundColor = NSColor.quaternaryLabelColor.cgColor
         row.edgeInsets = NSEdgeInsets(top: 6, left: 8, bottom: 6, right: 8)
+        if let action {
+            let target = ClickTarget(action)
+            let recognizer = NSClickGestureRecognizer(target: target, action: #selector(ClickTarget.clicked(_:)))
+            row.addGestureRecognizer(recognizer)
+            objc_setAssociatedObject(row, &Self.clickTargetAssocKey, target, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
+        }
 
         let iconView = NSImageView()
         iconView.image = NSImage(systemSymbolName: icon, accessibilityDescription: nil)
@@ -3497,6 +3547,14 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         guard let preference = sender.selectedItem?.representedObject as? EditorPreference else { return }
         if configCache?.editor == preference { return }
         do { configCache = try orchestrator.updateEditorPreference(preference) } catch { showError(error) }
+    }
+
+    @objc private func itermPulseColorChanged(_ sender: NSColorWell) {
+        guard let rgb = sender.color.usingColorSpace(.deviceRGB) else { return }
+        let r = Int((rgb.redComponent * 255).rounded())
+        let g = Int((rgb.greenComponent * 255).rounded())
+        let b = Int((rgb.blueComponent * 255).rounded())
+        do { try orchestrator.setItermFocusPulseColor(r: r, g: g, b: b) } catch { showError(error) }
     }
 
     @objc private func addProject() { showAddProjectForm() }

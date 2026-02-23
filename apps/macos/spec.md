@@ -36,11 +36,12 @@
             - Workspace settings are seeded from project templates on creation or when missing.
             - Schema changes use additive, non-destructive migrations; existing workspace/project data must be preserved.
             - Additive migrations must backfill newly required status-check action columns (for example `on_fail`) with safe defaults for existing rows.
-        - Global preferences (`editor`, `port_range`) are stored in the SQLite `settings` table.
+        - Global preferences (`editor`, `port_range`, `iterm_focus_pulse_color`) are stored in the SQLite `settings` table.
             - Old YAML files (`~/.muxy/config.yaml`) with `editor`/`port_range`/`projects:` are automatically migrated to SQLite once on first launch. The YAML file is no longer written or read after migration.
     - User preferences
         - editor: enum - None, VS Code, Cursor, Windsurf, Vim - if specified, used to open an editor at workspace launch
             - GUI settings only surface installed VS Code, Cursor, or Windsurf
+        - iterm_focus_pulse_color: RGB (0–255 per channel, default `255,195,0` amber); the iTerm2 session background color is briefly pulsed to this color and back when an iTerm2 window is focused. Configurable via GUI Settings color well or `mx settings set --iterm-focus-pulse-color <r,g,b>`.
     - Project
         - fields
             - dir: str, path of the project folder, name can be inferred from it for display in the UI
@@ -325,6 +326,7 @@
                             - Show running processes and status (based on status checks)
                             - Show list of windows associated with the workspace
                                 - show keyboard shortcut hints for each so user can quickly focus a window if desired. generate these shortcut hints dynamically (e.g. cmd+1)
+                                - window cards are clickable: clicking a card focuses that window (same effect as the CMD+N shortcut)
                                 - for browser rows, show browser-session name and matching URL together (name first, URL second)
                                 - for non-browser rows, show titles and application name
                         - second

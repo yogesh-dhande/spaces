@@ -75,4 +75,14 @@ class MockIterm2Adapter: Iterm2Adapter {
         if let sid = preferredSessionID { closedSessionIDs.append(sid) }
         return true
     }
+
+    var pulseCallCount = 0
+    var lastPulsedWindowID: Int?
+    var lastPulseColor: (r: Int, g: Int, b: Int)?
+
+    override func pulseBackground(windowID: Int, pulseColor: (r: Int, g: Int, b: Int)) throws {
+        pulseCallCount += 1
+        lastPulsedWindowID = windowID
+        lastPulseColor = pulseColor
+    }
 }

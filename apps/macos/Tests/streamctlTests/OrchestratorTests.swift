@@ -3451,4 +3451,106 @@ final class OrchestratorTests: XCTestCase {
         let project2Workspaces = try store.workspaces(projectID: project2.id, includeArchived: false)
         XCTAssertEqual(project2Workspaces.count, 2)
     }
+
+    // Tests iterm focus pulse color returns default when not set by arranging representative inputs and asserting the expected result.
+    func testItermFocusPulseColorReturnsDefaultWhenNotSet() throws {
+        let (orchestrator, _, _, _, _) = try makeOrchestratorWithWorkspace()
+        let (r, g, b) = try orchestrator.itermFocusPulseColor()
+        XCTAssertEqual(r, 255)
+        XCTAssertEqual(g, 195)
+        XCTAssertEqual(b, 0)
+    }
+
+    // Tests iterm focus pulse color round trips by arranging representative inputs and asserting the expected result.
+    func testItermFocusPulseColorRoundTrip() throws {
+        let (orchestrator, _, _, _, _) = try makeOrchestratorWithWorkspace()
+        try orchestrator.setItermFocusPulseColor(r: 10, g: 128, b: 200)
+        let (r, g, b) = try orchestrator.itermFocusPulseColor()
+        XCTAssertEqual(r, 10)
+        XCTAssertEqual(g, 128)
+        XCTAssertEqual(b, 200)
+    }
+
+    // Tests iterm focus pulse color clamps values to 0-255 by arranging representative inputs and asserting the expected result.
+    func testItermFocusPulseColorClampsValues() throws {
+        let (orchestrator, _, _, _, _) = try makeOrchestratorWithWorkspace()
+        try orchestrator.setItermFocusPulseColor(r: -10, g: 300, b: 128)
+        let (r, g, b) = try orchestrator.itermFocusPulseColor()
+        XCTAssertEqual(r, 0)
+        XCTAssertEqual(g, 255)
+        XCTAssertEqual(b, 128)
+    }
+
+    // Tests focus iterm window triggers background pulse by arranging representative inputs and asserting the expected result.
+    func testFocusItermWindowTriggersBackgroundPulse() throws {
+        let store = try makeTemporaryStore()
+        let mockIterm = MockIterm2Adapter()
+        let orchestrator = MuxyOrchestrator(store: store, iterm: mockIterm)
+
+        let root = try makeTempDirectory()
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
+
+        try store.upsert(
+            window: WindowRecord(
+                id: UUID().uuidString, workspaceID: workspace.id, app: "iTerm2", title: "api", windowID: 555, role: "terminal",
+                orderIndex: 0, lastSeenAt: "now"))
+        try store.upsert(
+            runningProcess: RunningProcessRecord(
+                id: UUID().uuidString, workspaceID: workspace.id, templateName: "api", command: "npm run api",
+                terminalApp: "iTerm2", windowID: 555, itermSessionID: "session-555", itermTabIndex: 1,
+                pid: 1234, status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil))
+
+        try orchestrator.focusWorkspaceWindow(workspaceID: workspace.id, index: 1)
+
+        // Pulse is dispatched asynchronously; allow the Task to run.
+        let deadline = Date().addingTimeInterval(2)
+        while mockIterm.pulseCallCount == 0, Date() < deadline {
+            RunLoop.current.run(until: Date().addingTimeInterval(0.05))
+        }
+
+        XCTAssertEqual(mockIterm.pulseCallCount, 1)
+        XCTAssertEqual(mockIterm.lastPulsedWindowID, 555)
+        XCTAssertEqual(mockIterm.lastPulseColor?.r, 255)
+        XCTAssertEqual(mockIterm.lastPulseColor?.g, 195)
+        XCTAssertEqual(mockIterm.lastPulseColor?.b, 0)
+    }
+
+    // Tests focus iterm window uses configured pulse color by arranging representative inputs and asserting the expected result.
+    func testFocusItermWindowUsesConfiguredPulseColor() throws {
+        let store = try makeTemporaryStore()
+        let mockIterm = MockIterm2Adapter()
+        let orchestrator = MuxyOrchestrator(store: store, iterm: mockIterm)
+
+        let root = try makeTempDirectory()
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
+
+        try orchestrator.setItermFocusPulseColor(r: 0, g: 100, b: 200)
+        try store.upsert(
+            window: WindowRecord(
+                id: UUID().uuidString, workspaceID: workspace.id, app: "iTerm2", title: "api", windowID: 556, role: "terminal",
+                orderIndex: 0, lastSeenAt: "now"))
+        try store.upsert(
+            runningProcess: RunningProcessRecord(
+                id: UUID().uuidString, workspaceID: workspace.id, templateName: "api", command: "npm run api",
+                terminalApp: "iTerm2", windowID: 556, itermSessionID: "session-556", itermTabIndex: 1,
+                pid: 1234, status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil))
+
+        try orchestrator.focusWorkspaceWindow(workspaceID: workspace.id, index: 1)
+
+        let deadline = Date().addingTimeInterval(2)
+        while mockIterm.pulseCallCount == 0, Date() < deadline {
+            RunLoop.current.run(until: Date().addingTimeInterval(0.05))
+        }
+
+        XCTAssertEqual(mockIterm.pulseCallCount, 1)
+        XCTAssertEqual(mockIterm.lastPulseColor?.r, 0)
+        XCTAssertEqual(mockIterm.lastPulseColor?.g, 100)
+        XCTAssertEqual(mockIterm.lastPulseColor?.b, 200)
+    }
 }

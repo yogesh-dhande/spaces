@@ -1308,6 +1308,9 @@ public final class MuxyOrchestrator {
             if focusedIterm {
                 logBrowserFocus(
                     "workspace=\(workspaceID) path=iterm window=\(trackedWindowID) elapsed_ms=\(elapsedMS(since: focusStartedAt))")
+                let pulseColor = (try? itermFocusPulseColor()) ?? (r: 255, g: 195, b: 0)
+                let capturedIterm = iterm
+                Task.detached { try? capturedIterm.pulseBackground(windowID: trackedWindowID, pulseColor: pulseColor) }
                 return true
             }
         }
@@ -1766,6 +1769,18 @@ public final class MuxyOrchestrator {
     }
 
     public func setGUITooltipShortcut(_ raw: String?) throws { try store.setSetting(key: SettingsKey.guiTooltipShortcut, value: raw) }
+
+    public func itermFocusPulseColor() throws -> (r: Int, g: Int, b: Int) {
+        let raw = (try? store.setting(key: SettingsKey.itermFocusPulseColor)) ?? SettingsKey.defaultItermFocusPulseColor
+        let parts = raw.split(separator: ",").compactMap { Int($0.trimmingCharacters(in: .whitespaces)) }
+        guard parts.count == 3 else { return (r: 0, g: 0, b: 0) }
+        return (r: parts[0], g: parts[1], b: parts[2])
+    }
+
+    public func setItermFocusPulseColor(r: Int, g: Int, b: Int) throws {
+        let clamped = (r: max(0, min(255, r)), g: max(0, min(255, g)), b: max(0, min(255, b)))
+        try store.setSetting(key: SettingsKey.itermFocusPulseColor, value: "\(clamped.r),\(clamped.g),\(clamped.b)")
+    }
 
     public func activeWorkspaceID() throws -> String? { try store.setting(key: "active_workspace_id") }
 

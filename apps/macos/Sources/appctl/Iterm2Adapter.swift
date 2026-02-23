@@ -1,6 +1,6 @@
 import Foundation
 
-open class Iterm2Adapter {
+open class Iterm2Adapter: @unchecked Sendable {
     public init() {}
 
     open func isAvailable() -> Bool { (try? AppleScript.run("tell application \"iTerm2\" to version")) != nil }
@@ -115,6 +115,30 @@ open class Iterm2Adapter {
             """
         let output = try AppleScript.run(script)
         return !output.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    /// Pulses the background color of the given iTerm2 window to `pulseColor` (0–255 per channel) and back.
+    open func pulseBackground(windowID: Int, pulseColor: (r: Int, g: Int, b: Int)) throws {
+        // iTerm2 AppleScript uses 16-bit color values (0–65535); convert from 8-bit.
+        let r = pulseColor.r * 257
+        let g = pulseColor.g * 257
+        let b = pulseColor.b * 257
+        let script = """
+            tell application "iTerm2"
+              repeat with w in windows
+                if id of w is \(windowID) then
+                  tell current session of w
+                    set c to background color
+                    set background color to {\(r), \(g), \(b)}
+                    delay 0.3
+                    set background color to c
+                  end tell
+                  exit repeat
+                end if
+              end repeat
+            end tell
+            """
+        _ = try? AppleScript.run(script)
     }
 
     open func focusSessionOrTab(preferredSessionID: String?, tabIndex: Int?, windowID: Int?) throws -> Bool {

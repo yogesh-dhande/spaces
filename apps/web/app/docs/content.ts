@@ -44,7 +44,7 @@ export const docsPageLinks: DocsPageLink[] = [
     href: "/docs/window-management",
     title: "Window Management",
     summary:
-      "Capture and restore windows using yabai IDs with deterministic switching, plus iTerm2 session-aware terminal tab focus/cleanup and refresh-based terminal fallback title updates.",
+      "Capture and restore windows using yabai IDs with deterministic switching, plus iTerm2 session-aware terminal tab focus/cleanup, refresh-based terminal fallback title updates, clickable window cards in the Run tab and Dashboard, and a configurable iTerm2 focus pulse color (amber by default) to visually confirm which window was focused.",
     audience: "Users optimizing context switching and keyboard navigation.",
   },
   {

@@ -84,6 +84,7 @@ GUI interaction notes:
 - Browser sessions are editable via `BrowserSessionEditor` (`name` + URL prefix rows) in project detail, add-project form, and workspace settings.
 - The run tab displays status check results as indented sub-rows under each process with colored dots (green/red) instead of inline badge text.
 - In the run-tab Windows list, browser rows render a two-part label: browser-session name first (when configured) plus the matched URL in secondary text.
+- Window cards in the Run tab and Dashboard are clickable: clicking a card calls `focusWorkspaceWindow` for that window, equivalent to the `CMD+N` keyboard shortcut.
 - Keyboard shortcut overrides for GUI actions are persisted in SQLite settings and editable in the GUI Settings view and CLI settings commands.
 - The app provides a standard Edit menu with Copy (Cmd+C) and Select All (Cmd+A) for system clipboard support in read-only text views.
 - Launch performs initial sidebar data hydration (projects/workspaces/git activity) in a detached background task; the right pane shows a spinner + status message so first render stays responsive instead of blocking the main actor.
@@ -105,8 +106,10 @@ GUI interaction notes:
 
 ## Data Model
 Global preferences (stored in SQLite `settings` table):
-- Keys: `app_editor` (optional), `app_port_range_start`, `app_port_range_end`.
+- Keys: `app_editor` (optional), `app_port_range_start`, `app_port_range_end`, `iterm_focus_pulse_color`.
 - Default port range: 20000–30000.
+- `iterm_focus_pulse_color`: RGB string `"r,g,b"` (0–255 per channel) used as the pulse color when an iTerm2 window is focused. Default: `"255,195,0"` (amber, ≈ AppleScript `{65535, 50000, 0}`). Editable via the GUI Settings view color well or `mx settings set --iterm-focus-pulse-color <r,g,b>`.
+- When an iTerm2 terminal window is successfully focused, `Iterm2Adapter.pulseBackground` briefly sets the session's background color to the configured pulse color then restores it (via AppleScript `delay 0.3`), dispatched as a detached background task so it does not block the focus call.
 - The GUI Settings view and `mx settings set` write `editor` and `port_range`.
 Project data (stored in SQLite):
 - Fields: `dir`, `setup_script`, `stop_script`, `ports` (named port definitions), `processes`, `status_checks`, `browser_sessions`.

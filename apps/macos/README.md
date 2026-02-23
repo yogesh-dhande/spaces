@@ -24,6 +24,7 @@ It manages projects, workspaces, processes, and window sets so you can move betw
 Global preferences are stored in the DB and configurable via `mx settings set` or the GUI Settings (⌘,):
 - `editor`: preferred editor for `mx workspace open-editor` (`none`, `vscode`, `cursor`, `windsurf`, `vim`)
 - `port_range`: range for workspace port allocation (default `20000-30000`)
+- `iterm_focus_pulse_color`: RGB background pulse color for iTerm2 window focus (format `r,g,b`, values 0–255, default `255,195,0` which is amber). Configurable in GUI Settings via a color well or via `mx settings set --iterm-focus-pulse-color <r,g,b>`.
 
 ```
 mx settings set --editor vscode
