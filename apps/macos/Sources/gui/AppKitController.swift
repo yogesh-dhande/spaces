@@ -2891,20 +2891,21 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         icon: String, iconColor: NSColor, label: String, detail: String? = nil, shortcut: String,
         processStatus: RunningProcessState? = nil, action: (() -> Void)? = nil
     ) -> NSView {
+        let container = ClickableRowView(isInteractive: action != nil)
+
+        if let action {
+            let target = ClickTarget(action)
+            let recognizer = NSClickGestureRecognizer(target: target, action: #selector(ClickTarget.clicked(_:)))
+            container.addGestureRecognizer(recognizer)
+            objc_setAssociatedObject(container, &Self.clickTargetAssocKey, target, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
+        }
+
         let row = NSStackView()
         row.orientation = .horizontal
         row.alignment = .centerY
         row.spacing = 8
-        row.wantsLayer = true
-        row.layer?.cornerRadius = 6
-        row.layer?.backgroundColor = NSColor.quaternaryLabelColor.cgColor
+        row.translatesAutoresizingMaskIntoConstraints = false
         row.edgeInsets = NSEdgeInsets(top: 6, left: 8, bottom: 6, right: 8)
-        if let action {
-            let target = ClickTarget(action)
-            let recognizer = NSClickGestureRecognizer(target: target, action: #selector(ClickTarget.clicked(_:)))
-            row.addGestureRecognizer(recognizer)
-            objc_setAssociatedObject(row, &Self.clickTargetAssocKey, target, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
-        }
 
         let iconView = NSImageView()
         iconView.image = NSImage(systemSymbolName: icon, accessibilityDescription: nil)
@@ -2972,7 +2973,15 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         row.addArrangedSubview(iconView)
         row.addArrangedSubview(labelField)
         row.addArrangedSubview(detailField)
-        return row
+
+        container.addSubview(row)
+        NSLayoutConstraint.activate([
+            row.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+            row.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+            row.topAnchor.constraint(equalTo: container.topAnchor),
+            row.bottomAnchor.constraint(equalTo: container.bottomAnchor),
+        ])
+        return container
     }
 
     private func processRow(icon: String, iconColor: NSColor, name: String, command: String, shortcut: String) -> NSView {
