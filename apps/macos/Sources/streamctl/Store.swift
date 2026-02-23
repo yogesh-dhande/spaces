@@ -311,12 +311,12 @@ public final class SQLiteStore {
         for (index, check) in checks.enumerated() {
             try execute(
                 sql: """
-                    INSERT INTO workspace_status_checks(id, workspace_id, name, process, command, interval, timeout, on_fail, order_index)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    INSERT INTO workspace_status_checks(id, workspace_id, name, process, command, interval, timeout, on_exit, on_fail, order_index)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                 bindings: [
                     UUID().uuidString, workspaceID, check.name ?? "", check.process, check.command, String(check.interval), String(check.timeout),
-                    check.onFail.rawValue, String(index),
+                    "none", check.onFail.rawValue, String(index),
                 ])
         }
     }
@@ -708,7 +708,8 @@ public final class SQLiteStore {
               command TEXT NOT NULL,
               interval INTEGER NOT NULL,
               timeout INTEGER NOT NULL,
-              on_fail TEXT NOT NULL,
+              on_exit TEXT NOT NULL DEFAULT 'none',
+              on_fail TEXT NOT NULL DEFAULT 'none',
               order_index INTEGER NOT NULL
             );
 
@@ -808,6 +809,7 @@ public final class SQLiteStore {
         try ensureColumnExists(table: "project_processes", name: "on_exit", definition: "on_exit TEXT NOT NULL DEFAULT 'none'")
         try ensureColumnExists(table: "project_status_checks", name: "on_fail", definition: "on_fail TEXT NOT NULL DEFAULT 'none'")
         try ensureColumnExists(table: "workspace_processes", name: "on_exit", definition: "on_exit TEXT NOT NULL DEFAULT 'none'")
+        try ensureColumnExists(table: "workspace_status_checks", name: "on_exit", definition: "on_exit TEXT NOT NULL DEFAULT 'none'")
         try ensureColumnExists(table: "workspace_status_checks", name: "on_fail", definition: "on_fail TEXT NOT NULL DEFAULT 'none'")
         try ensureColumnExists(table: "workspace_ports", name: "port_name", definition: "port_name TEXT NOT NULL DEFAULT ''")
         try ensureColumnExists(table: "workspaces", name: "dirname", definition: "dirname TEXT")

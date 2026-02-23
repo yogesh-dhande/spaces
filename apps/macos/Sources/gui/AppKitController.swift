@@ -1907,9 +1907,14 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             for process in processes { if let wid = process.windowID { map[wid] = process } }
             return map
         }()
+        var statusResultsByProcessID: [String: [StatusResult]] = [:]
+        for process in processes {
+            statusResultsByProcessID[process.id] = (try? orchestrator.statusResults(processID: process.id)) ?? []
+        }
         let windowsStack = NSStackView()
         windowsStack.orientation = .vertical
         windowsStack.spacing = 4
+        var matchedProcessIDs: Set<String> = []
         if windows.isEmpty {
             let emptyLabel = NSTextField(labelWithString: "No captured windows")
             emptyLabel.font = .systemFont(ofSize: 11)
@@ -1923,6 +1928,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 let windowDetail: String?
                 let iconName: String
                 let iconColor: NSColor
+                var linkedProcess: RunningProcessRecord? = nil
                 switch win.role {
                 case "browser":
                     if let sessionName = browserSessionDisplayName(for: win.targetURL, sessions: configuredBrowserSessions),
@@ -1938,11 +1944,14 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                     iconColor = .systemBlue
                 case "terminal":
                     if let wid = win.windowID, let process = processByWindowID[wid] {
-                        windowLabel = process.command
+                        linkedProcess = process
+                        windowLabel = process.templateName
+                        windowDetail = process.command
+                        matchedProcessIDs.insert(process.id)
                     } else {
                         windowLabel = win.title ?? win.app
+                        windowDetail = nil
                     }
-                    windowDetail = nil
                     iconName = "terminal"
                     iconColor = .systemGreen
                 default:
@@ -1952,9 +1961,20 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                     iconColor = .systemPurple
                 }
                 let row = windowRow(
-                    icon: iconName, iconColor: iconColor, label: windowLabel, detail: windowDetail, shortcut: "CMD+\(idx + 1)")
+                    icon: iconName, iconColor: iconColor, label: windowLabel, detail: windowDetail,
+                    shortcut: "CMD+\(idx + 1)", processStatus: linkedProcess?.status)
                 windowsStack.addArrangedSubview(row)
                 constrainFormFieldToFillWidth(row, in: windowsStack)
+
+                if let process = linkedProcess {
+                    let checks = statusResultsByProcessID[process.id] ?? []
+                    for check in checks {
+                        let checkColor: NSColor = check.status == "green" ? .systemGreen : .systemRed
+                        let checkRow = statusCheckSubRow(name: check.checkName, color: checkColor, status: check.status)
+                        windowsStack.addArrangedSubview(checkRow)
+                        constrainFormFieldToFillWidth(checkRow, in: windowsStack)
+                    }
+                }
             }
         }
         let windowsHeader = sectionHeader(icon: "macwindow.on.rectangle", title: "Windows")
@@ -1963,24 +1983,13 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         container.addArrangedSubview(windowsStack)
         constrainFormFieldToFillWidth(windowsStack, in: container)
 
-        // --- Processes card ---
-        var results: [StatusResult] = []
-        for process in processes {
-            let processResults = (try? orchestrator.statusResults(processID: process.id)) ?? []
-            results.append(contentsOf: processResults)
-        }
-        let processesStack = NSStackView()
-        processesStack.orientation = .vertical
-        processesStack.spacing = 4
-        if processes.isEmpty {
-            let emptyLabel = NSTextField(labelWithString: "No running processes")
-            emptyLabel.font = .systemFont(ofSize: 11)
-            emptyLabel.textColor = .tertiaryLabelColor
-            emptyLabel.alignment = .left
-            processesStack.alignment = .leading
-            processesStack.addArrangedSubview(emptyLabel)
-        } else {
-            for process in processes {
+        // --- Orphaned processes (no linked window) ---
+        let orphanedProcesses = processes.filter { !matchedProcessIDs.contains($0.id) }
+        if !orphanedProcesses.isEmpty {
+            let processesStack = NSStackView()
+            processesStack.orientation = .vertical
+            processesStack.spacing = 4
+            for process in orphanedProcesses {
                 let statusIcon: String
                 let statusColor: NSColor
                 switch process.status {
@@ -1998,7 +2007,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 processesStack.addArrangedSubview(row)
                 constrainFormFieldToFillWidth(row, in: processesStack)
 
-                let checks = results.filter { $0.processID == process.id }
+                let checks = statusResultsByProcessID[process.id] ?? []
                 for check in checks {
                     let checkColor: NSColor = check.status == "green" ? .systemGreen : .systemRed
                     let checkRow = statusCheckSubRow(name: check.checkName, color: checkColor, status: check.status)
@@ -2006,12 +2015,12 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                     constrainFormFieldToFillWidth(checkRow, in: processesStack)
                 }
             }
+            let processesHeader = sectionHeader(icon: "terminal.fill", title: "Processes")
+            container.addArrangedSubview(processesHeader)
+            constrainFormFieldToFillWidth(processesHeader, in: container)
+            container.addArrangedSubview(processesStack)
+            constrainFormFieldToFillWidth(processesStack, in: container)
         }
-        let processesHeader = sectionHeader(icon: "terminal.fill", title: "Processes")
-        container.addArrangedSubview(processesHeader)
-        constrainFormFieldToFillWidth(processesHeader, in: container)
-        container.addArrangedSubview(processesStack)
-        constrainFormFieldToFillWidth(processesStack, in: container)
 
         // (quick actions moved above Windows section)
 
@@ -2424,7 +2433,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         return label
     }
 
-    private func windowRow(icon: String, iconColor: NSColor, label: String, detail: String? = nil, shortcut: String) -> NSView {
+    private func windowRow(icon: String, iconColor: NSColor, label: String, detail: String? = nil, shortcut: String, processStatus: RunningProcessState? = nil) -> NSView {
         let row = NSStackView()
         row.orientation = .horizontal
         row.alignment = .centerY
@@ -2460,6 +2469,41 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         badge.textColor = .secondaryLabelColor
         badge.setContentHuggingPriority(.required, for: .horizontal)
         badge.setContentCompressionResistancePriority(.required, for: .horizontal)
+
+        // Status dot (or fixed-width spacer) always placed before badge so CMD+N hints align
+        if let processStatus {
+            let statusIconName: String
+            let statusColor: NSColor
+            switch processStatus {
+            case .running:
+                statusIconName = "circle.fill"
+                statusColor = .systemGreen
+            case .exited:
+                statusIconName = "circle"
+                statusColor = .systemRed
+            case .idle:
+                statusIconName = "circle"
+                statusColor = .tertiaryLabelColor
+            }
+            let statusDot = NSImageView()
+            statusDot.image = NSImage(systemSymbolName: statusIconName, accessibilityDescription: processStatus.rawValue)
+            statusDot.contentTintColor = statusColor
+            statusDot.translatesAutoresizingMaskIntoConstraints = false
+            NSLayoutConstraint.activate([
+                statusDot.widthAnchor.constraint(equalToConstant: 8),
+                statusDot.heightAnchor.constraint(equalToConstant: 8)
+            ])
+            statusDot.setContentHuggingPriority(.required, for: .horizontal)
+            statusDot.setContentCompressionResistancePriority(.required, for: .horizontal)
+            row.addArrangedSubview(statusDot)
+        } else {
+            let spacer = NSView()
+            spacer.translatesAutoresizingMaskIntoConstraints = false
+            spacer.widthAnchor.constraint(equalToConstant: 8).isActive = true
+            spacer.setContentHuggingPriority(.required, for: .horizontal)
+            spacer.setContentCompressionResistancePriority(.required, for: .horizontal)
+            row.addArrangedSubview(spacer)
+        }
 
         row.addArrangedSubview(badge)
         row.addArrangedSubview(iconView)
