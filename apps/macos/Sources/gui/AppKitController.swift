@@ -31,7 +31,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let detail: String?
         let shortcut: String
         let processStatus: RunningProcessState
-        let failedChecks: [StatusResult]
+        /// All status checks for this process (green and red), matching Run tab display.
+        let statusChecks: [StatusResult]
         let eventDate: Date?
         /// 1-based index in the workspace's full window list; nil for orphaned processes (no captured window).
         let windowListIndex: Int?
@@ -838,8 +839,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 for (idx, win) in windows.enumerated() {
                     guard let wid = win.windowID, let process = processByWindowID[wid] else { continue }
                     matchedProcessIDs.insert(process.id)
-                    let failedChecks = (statusResultsByProcessID[process.id] ?? []).filter { $0.status == "red" }
-                    guard process.status == .exited || !failedChecks.isEmpty else { continue }
+                    let allChecks = statusResultsByProcessID[process.id] ?? []
+                    let hasFailedCheck = allChecks.contains { $0.status == "red" }
+                    guard process.status == .exited || hasFailedCheck else { continue }
                     let icon: String
                     let iconColor: NSColor
                     let label: String
@@ -866,27 +868,30 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                         label = win.title ?? win.app
                         detail = nil
                     }
+                    let redChecks = allChecks.filter { $0.status == "red" }
                     let eventDate: Date? = process.status == .exited
                         ? process.exitedAt.flatMap { iso8601Formatter.date(from: $0) }
-                        : failedChecks.compactMap { $0.lastRunAt.flatMap { iso8601Formatter.date(from: $0) } }.max()
+                        : redChecks.compactMap { $0.lastRunAt.flatMap { iso8601Formatter.date(from: $0) } }.max()
                     items.append(DashboardAttentionEntry(
                         icon: icon, iconColor: iconColor, label: label, detail: detail,
                         shortcut: "", processStatus: process.status,
-                        failedChecks: failedChecks, eventDate: eventDate, windowListIndex: idx + 1))
+                        statusChecks: allChecks, eventDate: eventDate, windowListIndex: idx + 1))
                 }
 
                 // Orphaned process entries (no captured window)
                 for process in processes where !matchedProcessIDs.contains(process.id) {
-                    let failedChecks = (statusResultsByProcessID[process.id] ?? []).filter { $0.status == "red" }
-                    guard process.status == .exited || !failedChecks.isEmpty else { continue }
+                    let allChecks = statusResultsByProcessID[process.id] ?? []
+                    let hasFailedCheck = allChecks.contains { $0.status == "red" }
+                    guard process.status == .exited || hasFailedCheck else { continue }
+                    let redChecks = allChecks.filter { $0.status == "red" }
                     let eventDate: Date? = process.status == .exited
                         ? process.exitedAt.flatMap { iso8601Formatter.date(from: $0) }
-                        : failedChecks.compactMap { $0.lastRunAt.flatMap { iso8601Formatter.date(from: $0) } }.max()
+                        : redChecks.compactMap { $0.lastRunAt.flatMap { iso8601Formatter.date(from: $0) } }.max()
                     items.append(DashboardAttentionEntry(
                         icon: "terminal", iconColor: .systemGreen,
                         label: process.templateName, detail: process.command,
                         shortcut: "", processStatus: process.status,
-                        failedChecks: failedChecks, eventDate: eventDate, windowListIndex: nil))
+                        statusChecks: allChecks, eventDate: eventDate, windowListIndex: nil))
                 }
 
                 guard !items.isEmpty else { continue }
@@ -1041,68 +1046,31 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         showScrollableDetailStack(stack)
     }
 
-    /// Builds a single card view for a dashboard attention entry.
-    /// If the entry has failed status checks, they are rendered as sub-rows inside the same card.
+    /// Builds a window card with all status check sub-rows below it, identical to the workspace Run tab layout.
     private func dashboardWindowCard(entry: DashboardAttentionEntry, shortcut: String) -> NSView {
         let mainRow = windowRow(
             icon: entry.icon, iconColor: entry.iconColor,
             label: entry.label, detail: entry.detail,
             shortcut: shortcut, processStatus: entry.processStatus)
 
-        guard !entry.failedChecks.isEmpty else { return mainRow }
+        guard !entry.statusChecks.isEmpty else { return mainRow }
 
-        // Clear the individual row background so the outer card provides it.
-        mainRow.layer?.backgroundColor = NSColor.clear.cgColor
+        let container = NSStackView()
+        container.orientation = .vertical
+        container.spacing = 4
+        container.translatesAutoresizingMaskIntoConstraints = false
 
-        let card = NSStackView()
-        card.orientation = .vertical
-        card.spacing = 0
-        card.wantsLayer = true
-        card.layer?.cornerRadius = 6
-        card.layer?.backgroundColor = NSColor.quaternaryLabelColor.cgColor
-        card.translatesAutoresizingMaskIntoConstraints = false
+        container.addArrangedSubview(mainRow)
+        constrainFormFieldToFillWidth(mainRow, in: container)
 
-        card.addArrangedSubview(mainRow)
-        constrainFormFieldToFillWidth(mainRow, in: card)
-
-        for check in entry.failedChecks {
-            let sep = NSView()
-            sep.wantsLayer = true
-            sep.layer?.backgroundColor = NSColor.separatorColor.withAlphaComponent(0.5).cgColor
-            sep.translatesAutoresizingMaskIntoConstraints = false
-            sep.heightAnchor.constraint(equalToConstant: 0.5).isActive = true
-            card.addArrangedSubview(sep)
-            constrainFormFieldToFillWidth(sep, in: card)
-
-            let checkRow = NSStackView()
-            checkRow.orientation = .horizontal
-            checkRow.alignment = .centerY
-            checkRow.spacing = 6
-            checkRow.edgeInsets = NSEdgeInsets(top: 4, left: 26, bottom: 4, right: 8)
-
-            let dot = NSImageView()
-            dot.image = NSImage(systemSymbolName: "circle.fill", accessibilityDescription: check.status)
-            dot.contentTintColor = check.status == "green" ? .systemGreen : .systemRed
-            dot.translatesAutoresizingMaskIntoConstraints = false
-            NSLayoutConstraint.activate([
-                dot.widthAnchor.constraint(equalToConstant: 7),
-                dot.heightAnchor.constraint(equalToConstant: 7),
-            ])
-            dot.setContentHuggingPriority(.required, for: .horizontal)
-            dot.setContentCompressionResistancePriority(.required, for: .horizontal)
-
-            let nameLabel = NSTextField(labelWithString: check.checkName)
-            nameLabel.font = .systemFont(ofSize: 11)
-            nameLabel.textColor = .secondaryLabelColor
-            nameLabel.lineBreakMode = .byTruncatingTail
-
-            checkRow.addArrangedSubview(dot)
-            checkRow.addArrangedSubview(nameLabel)
-            card.addArrangedSubview(checkRow)
-            constrainFormFieldToFillWidth(checkRow, in: card)
+        for check in entry.statusChecks {
+            let checkColor: NSColor = check.status == "green" ? .systemGreen : .systemRed
+            let checkRow = statusCheckSubRow(name: check.checkName, color: checkColor, status: check.status)
+            container.addArrangedSubview(checkRow)
+            constrainFormFieldToFillWidth(checkRow, in: container)
         }
 
-        return card
+        return container
     }
 
     private func makeRightPane() -> NSView {
