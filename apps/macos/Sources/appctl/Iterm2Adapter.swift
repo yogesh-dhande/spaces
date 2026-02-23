@@ -56,25 +56,6 @@ open class Iterm2Adapter {
         _ = try AppleScript.run(script)
     }
 
-    open func closeWindowIfSingleton(id: Int) throws -> Bool {
-        let script = """
-            tell application "iTerm2"
-              repeat with w in windows
-                if id of w is \(id) then
-                  if (count of tabs of w) is not 1 then return ""
-                  set onlyTab to item 1 of tabs of w
-                  if (count of sessions of onlyTab) is not 1 then return ""
-                  close w
-                  return "window"
-                end if
-              end repeat
-              return ""
-            end tell
-            """
-        let output = try AppleScript.run(script)
-        return !output.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-    }
-
     open func closeSessionOrTab(preferredSessionID: String?, tabIndex: Int?, windowID: Int?) throws -> Bool {
         let escapedSessionID = (preferredSessionID ?? "").replacingOccurrences(of: "\"", with: "\\\"")
         let targetTabIndex = tabIndex ?? -1
@@ -90,26 +71,14 @@ open class Iterm2Adapter {
                   repeat with t in tabs of w
                     repeat with s in sessions of t
                       if (id of s as string) is targetSessionID then
-                        tell w to select
-                        select t
-                        set closeFailed to false
+                        -- Do not select window/tab before close: `tell w to select`
+                        -- reorders the window list and invalidates the index-based
+                        -- s reference, causing the wrong session to be closed.
                         try
                           close s
                         on error
-                          set closeFailed to true
-                        end try
-                        repeat with w2 in windows
-                          repeat with t2 in tabs of w2
-                            repeat with s2 in sessions of t2
-                              if (id of s2 as string) is targetSessionID then
-                                return ""
-                              end if
-                            end repeat
-                          end repeat
-                        end repeat
-                        if closeFailed then
                           return ""
-                        end if
+                        end try
                         return "session"
                       end if
                     end repeat

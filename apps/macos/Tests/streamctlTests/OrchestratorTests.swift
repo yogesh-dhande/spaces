@@ -2350,6 +2350,41 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertFalse(yabaiClosedWindowIDs.contains("501"))
     }
 
+    func testStopWorkspaceDoesNotCallCloseWindowIfSingletonWhenSessionCloseSucceeds() throws {
+        let root = try makeTempDirectory()
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let store = try makeTemporaryStore()
+        let mockIterm = MockIterm2Adapter()
+        let orchestrator = MuxyOrchestrator(store: store, iterm: mockIterm)
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
+        try store.updateWorkspaceRunning(id: workspace.id, isRunning: true, launchedAt: "now")
+
+        // Process window (window 501) with session
+        try store.upsert(
+            window: WindowRecord(
+                id: UUID().uuidString, workspaceID: workspace.id, app: "iTerm2", title: "npm run dev", windowID: 501,
+                itermSessionID: "session-proc", itermTabIndex: 1, role: "terminal", orderIndex: 0, lastSeenAt: "now"))
+        try store.upsert(
+            runningProcess: RunningProcessRecord(
+                id: UUID().uuidString, workspaceID: workspace.id, templateName: "api", command: "npm run dev", terminalApp: "iTerm2", windowID: 501,
+                itermSessionID: "session-proc", itermTabIndex: 1, pid: nil, status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now",
+                exitedAt: nil))
+
+        // Tracked terminal window (window 502) opened via "Open Terminal" with a valid session
+        try store.upsert(
+            window: WindowRecord(
+                id: UUID().uuidString, workspaceID: workspace.id, app: "iTerm2", title: "-zsh", windowID: 502,
+                itermSessionID: "session-term", itermTabIndex: 1, role: "terminal", orderIndex: 1, lastSeenAt: "now"))
+
+        try orchestrator.stopWorkspace(workspaceID: workspace.id)
+
+        // closeSessionOrTab should have been called for both sessions
+        XCTAssertTrue(mockIterm.closedSessionIDs.contains("session-proc"))
+        XCTAssertTrue(mockIterm.closedSessionIDs.contains("session-term"))
+    }
+
     // Tests stop workspace closes all live detected browser session tabs by arranging representative inputs and asserting the expected result.
     func testStopWorkspaceClosesAllLiveDetectedBrowserSessionTabs() throws {
         let (orchestrator, store, _, workspace, root) = try makeOrchestratorWithWorkspace()

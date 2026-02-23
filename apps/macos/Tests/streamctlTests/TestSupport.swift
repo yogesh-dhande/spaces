@@ -39,6 +39,7 @@ class MockIterm2Adapter: Iterm2Adapter {
     var nextSessionID: String? = "mock-session"
     var nextTabIndex: Int? = 1
     var focusSessionOrTabResult = true
+    var closedSessionIDs: [String] = []
     
     override func openWindowAndRun(command: String) throws -> ItermWindowInfo {
         openWindowAndRunCallCount += 1
@@ -71,6 +72,7 @@ class MockIterm2Adapter: Iterm2Adapter {
         lastFocusedSessionID = preferredSessionID
         lastFocusedTabIndex = tabIndex
         lastWindowID = windowID
+        if let sid = preferredSessionID { closedSessionIDs.append(sid) }
         return true
     }
 }

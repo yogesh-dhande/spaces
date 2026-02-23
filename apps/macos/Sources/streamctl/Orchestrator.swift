@@ -1384,14 +1384,10 @@ public final class MuxyOrchestrator {
 
     private func closeTrackedItermTerminalContainer(_ process: RunningProcessRecord) throws -> Bool {
         guard process.terminalApp == "iTerm2" else { return false }
-        let closedSessionOrTab = (try? iterm.closeSessionOrTab(
+        return (try? iterm.closeSessionOrTab(
             preferredSessionID: process.itermSessionID,
             tabIndex: process.itermTabIndex,
             windowID: process.windowID)) ?? false
-        if closedSessionOrTab { return true }
-        guard let windowID = process.windowID else { return false }
-        let didCloseSingleton = (try? iterm.closeWindowIfSingleton(id: windowID)) ?? false
-        return didCloseSingleton
     }
 
     private func closeTrackedItermTerminalWindow(workspaceID: String, windowID: Int) throws -> Bool {
@@ -1414,8 +1410,7 @@ public final class MuxyOrchestrator {
                 windowID: windowID)) ?? false
             if closedSessionOrTab { return true }
         }
-        let didCloseSingleton = (try? iterm.closeWindowIfSingleton(id: windowID)) ?? false
-        return didCloseSingleton
+        return false
     }
 
     private func setItermTerminalSessionMetadata(workspaceID: String, windowID: Int, sessionID: String?, tabIndex: Int?) {
