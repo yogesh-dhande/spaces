@@ -719,6 +719,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         outlineView.style = .sourceList
         outlineView.selectionHighlightStyle = .none
         outlineView.backgroundColor = .clear
+        outlineView.indentationPerLevel = 0
         outlineView.delegate = self
         outlineView.dataSource = self
 
@@ -2162,7 +2163,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         // --- Inline editable metadata ---
         let inlineBranchRow: NSView?
         if project.isGitRepo, let branch = workspace.branch {
-            inlineBranchRow = makeInlineWorkspaceMetadataEditRow(
+            let branchRow = makeInlineWorkspaceMetadataEditRow(
                 workspaceID: workspace.id,
                 field: .branch,
                 icon: "arrow.triangle.branch",
@@ -2170,6 +2171,17 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 value: branch,
                 placeholder: "Branch name",
                 isEditable: !isProtectedBranchName(branch))
+            let activity =
+                gitActivityByWorkspaceID[workspace.id] ?? GitTrackedFileActivity(latestTrackedFileModificationDate: nil, modifiedTrackedFileCount: 0)
+            if let branchStack = branchRow as? NSStackView {
+                let countLabel = NSTextField(labelWithString: "↑\(activity.aheadCount) ↓\(activity.behindCount)")
+                countLabel.font = .monospacedDigitSystemFont(ofSize: 11, weight: .regular)
+                countLabel.textColor = .secondaryLabelColor
+                countLabel.setContentHuggingPriority(.required, for: .horizontal)
+                countLabel.setContentCompressionResistancePriority(.required, for: .horizontal)
+                branchStack.addArrangedSubview(countLabel)
+            }
+            inlineBranchRow = branchRow
         } else {
             inlineBranchRow = nil
         }
@@ -4630,7 +4642,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         cell.addSubview(icon)
         cell.addSubview(accessoryStack)
         NSLayoutConstraint.activate([
-            icon.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 6), icon.centerYAnchor.constraint(equalTo: cell.centerYAnchor),
+            icon.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 12), icon.centerYAnchor.constraint(equalTo: cell.centerYAnchor),
             icon.widthAnchor.constraint(equalToConstant: 10), icon.heightAnchor.constraint(equalToConstant: 10),
             text.leadingAnchor.constraint(equalTo: icon.trailingAnchor, constant: 6),
             text.trailingAnchor.constraint(lessThanOrEqualTo: accessoryStack.leadingAnchor, constant: -6),
@@ -4700,10 +4712,52 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         if project.isGitRepo {
             let activity =
                 gitActivityByWorkspaceID[workspace.id] ?? GitTrackedFileActivity(latestTrackedFileModificationDate: nil, modifiedTrackedFileCount: 0)
-            contentStack.addArrangedSubview(sidebarMetadataRow(symbol: "arrow.left.arrow.right", text: gitAheadBehindSummaryLabel(activity), isSelected: isSelected))
+
+            let activityRow = NSView()
+            activityRow.translatesAutoresizingMaskIntoConstraints = false
+
+            let clockIcon = NSImageView()
+            clockIcon.image = NSImage(systemSymbolName: "clock", accessibilityDescription: nil)
+            clockIcon.contentTintColor = sidebarMetadataTextColor(isSelected: isSelected)
+            clockIcon.translatesAutoresizingMaskIntoConstraints = false
+
+            let activityLabel = NSTextField(labelWithString: gitActivitySummaryLabel(activity))
+            activityLabel.font = .systemFont(ofSize: 11)
+            activityLabel.textColor = sidebarMetadataTextColor(isSelected: isSelected)
+            activityLabel.lineBreakMode = .byTruncatingTail
+            activityLabel.translatesAutoresizingMaskIntoConstraints = false
+
             let conflictSymbol = activity.hasMergeConflicts ? "exclamationmark.triangle.fill" : "checkmark.circle"
-            contentStack.addArrangedSubview(sidebarMetadataRow(symbol: conflictSymbol, text: gitConflictSummaryLabel(activity), isSelected: isSelected))
-            contentStack.addArrangedSubview(sidebarMetadataRow(symbol: "clock", text: gitActivitySummaryLabel(activity), isSelected: isSelected))
+            let conflictColor: NSColor = activity.hasMergeConflicts ? sidebarFailedIndicatorColor() : sidebarMetadataTextColor(isSelected: isSelected)
+            let conflictIcon = NSImageView()
+            conflictIcon.image = NSImage(systemSymbolName: conflictSymbol, accessibilityDescription: nil)
+            conflictIcon.contentTintColor = conflictColor
+            conflictIcon.translatesAutoresizingMaskIntoConstraints = false
+
+            activityRow.addSubview(clockIcon)
+            activityRow.addSubview(activityLabel)
+            activityRow.addSubview(conflictIcon)
+
+            NSLayoutConstraint.activate([
+                clockIcon.leadingAnchor.constraint(equalTo: activityRow.leadingAnchor),
+                clockIcon.centerYAnchor.constraint(equalTo: activityRow.centerYAnchor),
+                clockIcon.widthAnchor.constraint(equalToConstant: 10),
+                clockIcon.heightAnchor.constraint(equalToConstant: 10),
+
+                activityLabel.leadingAnchor.constraint(equalTo: clockIcon.trailingAnchor, constant: 4),
+                activityLabel.centerYAnchor.constraint(equalTo: activityRow.centerYAnchor),
+                activityLabel.trailingAnchor.constraint(lessThanOrEqualTo: conflictIcon.leadingAnchor, constant: -4),
+
+                conflictIcon.trailingAnchor.constraint(equalTo: activityRow.trailingAnchor),
+                conflictIcon.centerYAnchor.constraint(equalTo: activityRow.centerYAnchor),
+                conflictIcon.widthAnchor.constraint(equalToConstant: 10),
+                conflictIcon.heightAnchor.constraint(equalToConstant: 10),
+
+                activityRow.heightAnchor.constraint(equalToConstant: 14),
+            ])
+
+            contentStack.addArrangedSubview(activityRow)
+            activityRow.trailingAnchor.constraint(equalTo: contentStack.trailingAnchor).isActive = true
         }
 
         cardView.addSubview(contentStack)
@@ -4713,7 +4767,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             cardView.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 4),
             cardView.trailingAnchor.constraint(equalTo: cell.trailingAnchor, constant: -4),
             cardView.topAnchor.constraint(equalTo: cell.topAnchor, constant: 2),
-            cardView.bottomAnchor.constraint(equalTo: cell.bottomAnchor, constant: -2),
+            cardView.bottomAnchor.constraint(equalTo: cell.bottomAnchor, constant: -4),
 
             contentStack.leadingAnchor.constraint(equalTo: cardView.leadingAnchor, constant: 10),
             contentStack.trailingAnchor.constraint(equalTo: cardView.trailingAnchor, constant: -10),
@@ -4724,7 +4778,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         return cell
     }
 
-    private func sidebarMetadataRow(symbol: String, text: String, isSelected: Bool) -> NSStackView {
+    private func sidebarMetadataRow(
+        symbol: String, text: String, isSelected: Bool,
+        trailingSymbol: String? = nil, trailingColor: NSColor? = nil
+    ) -> NSStackView {
         let row = NSStackView()
         row.orientation = .horizontal
         row.alignment = .centerY
@@ -4745,12 +4802,23 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
         row.addArrangedSubview(icon)
         row.addArrangedSubview(label)
+
+        if let trailingSymbol {
+            let trailingIcon = NSImageView()
+            trailingIcon.image = NSImage(systemSymbolName: trailingSymbol, accessibilityDescription: nil)
+            trailingIcon.contentTintColor = trailingColor ?? sidebarMetadataTextColor(isSelected: isSelected)
+            trailingIcon.translatesAutoresizingMaskIntoConstraints = false
+            trailingIcon.widthAnchor.constraint(equalToConstant: 10).isActive = true
+            trailingIcon.heightAnchor.constraint(equalToConstant: 10).isActive = true
+            row.addArrangedSubview(trailingIcon)
+        }
+
         return row
     }
 
     private func gitActivitySummaryLabel(_ activity: GitTrackedFileActivity) -> String {
         let modifiedLabel =
-            if activity.modifiedTrackedFileCount == 1 { "1 file modified" } else { "\(activity.modifiedTrackedFileCount) files modified" }
+            if activity.modifiedTrackedFileCount == 1 { "1 uncommitted file" } else { "\(activity.modifiedTrackedFileCount) uncommitted files" }
 
         guard let latestModificationDate = activity.latestTrackedFileModificationDate else { return "No tracked files • \(modifiedLabel)" }
 
@@ -4758,28 +4826,16 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         return "\(relativeDate) • \(modifiedLabel)"
     }
 
-    private func gitAheadBehindSummaryLabel(_ activity: GitTrackedFileActivity) -> String {
-        let divergenceLabel = "\(activity.aheadCount) ahead • \(activity.behindCount) behind"
-        if let baseBranch = activity.comparedBaseBranch, !baseBranch.isEmpty { return "\(divergenceLabel) vs \(baseBranch)" }
-        return divergenceLabel
-    }
-
-    private func gitConflictSummaryLabel(_ activity: GitTrackedFileActivity) -> String {
-        if activity.hasMergeConflicts { return "Merge conflicts present" }
-        return "No merge conflicts"
-    }
-
     private func workspaceSidebarLineCount(project: ProjectSummary, workspace _: WorkspaceSummary) -> Int {
         var count = 1  // workspace title + status
-        if project.isGitRepo { count += 3 }
-
+        if project.isGitRepo { count += 1 }  // activity
         return count
     }
 
     public func outlineView(_ outlineView: NSOutlineView, heightOfRowByItem item: Any) -> CGFloat {
         if case .workspace(let project, let workspace) = item as? OutlineItem {
             let lineCount = workspaceSidebarLineCount(project: project, workspace: workspace)
-            return max(52, CGFloat(22 + (lineCount * 16)))
+            return max(52, CGFloat(22 + (lineCount * 18)))
         }
         return 24
     }
