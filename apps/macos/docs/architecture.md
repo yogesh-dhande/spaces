@@ -331,6 +331,19 @@ erDiagram
     TEXT value
   }
 
+  agent_windows {
+    TEXT id PK
+    TEXT workspace_id
+    TEXT provider
+    TEXT label
+    TEXT iterm_session_id
+    TEXT codex_thread_id
+    INTEGER window_id
+    TEXT status
+    TEXT created_at
+    TEXT updated_at
+  }
+
   schema_version {
     INTEGER version
   }
@@ -420,6 +433,20 @@ Degraded runtime edge cases and handling:
 - UI data is reloaded after successful periodic refresh passes only when the user is not actively editing text fields (to avoid interrupting unsaved form edits).
 - The GUI also runs periodic worktree discovery (`scanAndCreateWorkspacesFromWorktrees`) in a detached utility task using `PollingConstants.worktreeDiscoveryInterval`; newly discovered worktrees are registered as workspaces and trigger project setup scripts.
 - `refreshAllWorkspaceWindows` returns a `RefreshResult` containing `didMutateDB` (whether windows were pruned or workspace running flags changed) and `trackedWindowCounts` (per-workspace tracked window counts including live browser scan results); the GUI compares both against the previous snapshot and skips `reloadData()` entirely when nothing changed, avoiding unnecessary UI rebuilds.
+
+Agent window lifecycle:
+- Coding agents (Claude Code CLI in iTerm2, OpenAI Codex Desktop) register themselves with Muxy by calling `mx agent hook --type init|start|waiting|done [--dir <path>] [--provider iterm2|codex]`.
+- Provider is auto-detected from env vars: `__CFBundleIdentifier=com.openai.codex` → Codex; otherwise → iTerm2.
+- `ITERM_SESSION_ID` is captured for iTerm2 agent focus/close; `CODEX_THREAD_ID` is captured for Codex deep-link focus.
+- Agent records are stored in `agent_windows` table; one record per iTerm2 session, at most one per workspace for Codex.
+- Status transitions: `idle` → `spinning` (active) → `waiting` (human review requested, red dot) → `done` (finished, green dot).
+- Agent windows appear in the Run tab Windows section with a spinner (spinning), red dot (waiting), or green dot (done) status indicator.
+- Waiting agent windows trigger the workspace indicator to show `runningUnhealthy` (orange dot) in the sidebar.
+- Agent windows surfaced as Dashboard attention items when status is `waiting` or `done`.
+- Clicking an agent window row focuses the agent's iTerm2 session or opens the Codex thread deep-link.
+- On workspace stop, all iTerm2 agent sessions for that workspace are closed via AppleScript; all agent window records are deleted.
+- Stale iTerm2 agent sessions are pruned during the periodic process monitoring cycle using `Iterm2Adapter.listSessionIDs()`.
+- The CLI fires a `muxy.ipc.agent-hook-fired` distributed notification after each hook call; the GUI observes this to refresh the Dashboard badge and current selection without a full reload.
 
 ## Window Capture and Focus
 ```mermaid

@@ -357,6 +357,21 @@
                             - Note that muxy does not move windows. User choses when and where to move windows. muxy simply moves focus to the window wherever it is on display/space
         - If the most recently focused window belongs to a mx workspace, forward: `cmd+shift+]` or backward: `cmd+shift+[`  keyboard shortcuts loop through windows belonging to that workspace
         - When a text input is focused, default text-edit shortcuts (copy/cut/paste/select-all/undo/redo) must keep working and should not be intercepted by app-level hotkey handling
+- Agent Hook (`mx agent hook`)
+    - Coding agents (Claude Code CLI, OpenAI Codex Desktop) call `mx agent hook --type <type>` to register lifecycle events with Muxy.
+    - Hook types: `init` (agent started), `start` (task running), `waiting` (needs human review), `done` (task finished).
+    - Provider is auto-detected from environment:
+        - `__CFBundleIdentifier=com.openai.codex` → Codex provider.
+        - All others (iTerm2, Claude Code CLI) → iTerm2 provider.
+        - Can be overridden with `--provider iterm2|codex`.
+    - iTerm2 sessions: `ITERM_SESSION_ID` captured for focus/close; Codex: `CODEX_THREAD_ID` captured for deep-link focus.
+    - At most one Codex agent record per workspace; multiple iTerm2 sessions per workspace allowed.
+    - Status values: `idle`, `spinning` (active, spinner animation), `waiting` (red dot, triggers workspace unhealthy indicator), `done` (green dot).
+    - Agent windows appear in the Run tab Windows section with the appropriate status indicator.
+    - Agent windows with `waiting` or `done` status appear on the Dashboard as attention items.
+    - Clicking an agent entry focuses the agent's iTerm2 session or opens `codex://threads/<id>`.
+    - On workspace stop, all iTerm2 agent sessions are closed; agent records are deleted.
+
 - Auto-Update
     - `AppVersion.current` is the single source of truth for the version string (in `streamctl`)
     - App checks for updates on launch and every 4 hours for new versions

@@ -30,12 +30,15 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let label: String
         let detail: String?
         let shortcut: String
-        let processStatus: RunningProcessState
+        let processStatus: RunningProcessState?
+        let agentStatus: AgentWindowStatus?
         /// All status checks for this process (green and red), matching Run tab display.
         let statusChecks: [StatusResult]
         let eventDate: Date?
         /// 1-based index in the workspace's full window list; nil for orphaned processes (no captured window).
         let windowListIndex: Int?
+        /// Non-nil for agent window entries.
+        let agentWindowRecord: AgentWindowRecord?
     }
 
     private struct DashboardGroup {
@@ -90,6 +93,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     private var availableUpdate: UpdateInfo?
     private var tooltipWindow: NSWindow?
     private var tooltipIPCObserver: NSObjectProtocol?
+    private var agentHookIPCObserver: NSObjectProtocol?
     private var didStartBackgroundServices = false
     private var sidebarReloadTask: Task<Void, Never>?
     private var pendingSidebarReloadRequest = false
@@ -123,6 +127,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     private var showingDashboard = false
     /// Maps sequential CMD+N shortcut numbers (1-9) to (workspaceID, 1-based window list index) for the current dashboard view.
     private var dashboardWindowFocusMap: [Int: (workspaceID: String, windowListIndex: Int)] = [:]
+    /// Maps sequential CMD+N shortcut numbers (1-9) to agent window records for agent entries in the dashboard view.
+    private var dashboardAgentFocusMap: [Int: AgentWindowRecord] = [:]
 
     private lazy var hotkeyHandlerProc: EventHandlerUPP = { _, event, userData in
         guard let userData else { return noErr }
@@ -156,6 +162,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         )
         setupShortcutMonitor()
         setupTooltipIPCObserver()
+        setupAgentHookIPCObserver()
         Task { @MainActor [weak self] in
             await self?.loadInitialSidebarData()
         }
@@ -175,6 +182,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             DistributedNotificationCenter.default().removeObserver(tooltipIPCObserver)
             self.tooltipIPCObserver = nil
         }
+        if let agentHookIPCObserver {
+            DistributedNotificationCenter.default().removeObserver(agentHookIPCObserver)
+            self.agentHookIPCObserver = nil
+        }
     }
 
     private func setupTooltipIPCObserver() {
@@ -185,6 +196,19 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         ) { [weak self] _ in
             Task { @MainActor [weak self] in
                 self?.refreshTooltipOverlay()
+            }
+        }
+    }
+
+    private func setupAgentHookIPCObserver() {
+        agentHookIPCObserver = DistributedNotificationCenter.default().addObserver(
+            forName: IPCNotification.agentHookFired,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.updateDashboardSidebarBadge()
+                self?.refreshSelection()
             }
         }
     }
@@ -611,7 +635,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                             }
                         }
                         if workspace.isRunning {
-                            workspaceIndicatorStateByID[workspace.id] = (hasExitedProcess || hasFailedCheck) ? .runningUnhealthy : .runningHealthy
+                            let agentWindowsList = (try? orchestrator.agentWindows(workspaceID: workspace.id)) ?? []
+                            let hasWaitingAgentWindow = agentWindowsList.contains { $0.status == .waiting }
+                            workspaceIndicatorStateByID[workspace.id] = (hasExitedProcess || hasFailedCheck || hasWaitingAgentWindow) ? .runningUnhealthy : .runningHealthy
                         } else {
                             workspaceIndicatorStateByID[workspace.id] = .idle
                         }
@@ -884,8 +910,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                         : redChecks.compactMap { $0.lastRunAt.flatMap { iso8601Formatter.date(from: $0) } }.max()
                     items.append(DashboardAttentionEntry(
                         icon: icon, iconColor: iconColor, label: label, detail: detail,
-                        shortcut: "", processStatus: process.status,
-                        statusChecks: allChecks, eventDate: eventDate, windowListIndex: idx + 1))
+                        shortcut: "", processStatus: process.status, agentStatus: nil,
+                        statusChecks: allChecks, eventDate: eventDate, windowListIndex: idx + 1,
+                        agentWindowRecord: nil))
                 }
 
                 // Orphaned process entries (no captured window)
@@ -900,8 +927,23 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                     items.append(DashboardAttentionEntry(
                         icon: "terminal", iconColor: .systemGreen,
                         label: process.templateName, detail: process.command,
-                        shortcut: "", processStatus: process.status,
-                        statusChecks: allChecks, eventDate: eventDate, windowListIndex: nil))
+                        shortcut: "", processStatus: process.status, agentStatus: nil,
+                        statusChecks: allChecks, eventDate: eventDate, windowListIndex: nil,
+                        agentWindowRecord: nil))
+                }
+
+                // Agent window attention items (waiting or done)
+                let agentWindowsList = (try? orchestrator.agentWindows(workspaceID: workspace.id)) ?? []
+                for agentWin in agentWindowsList where agentWin.status == .waiting || agentWin.status == .done {
+                    let agentLabel = agentWin.label ?? (agentWin.provider == .codex ? "Codex Agent" : "Claude Code Agent")
+                    let agentIcon = agentWin.provider == .codex ? "wand.and.stars" : "cpu.fill"
+                    let agentIconColor: NSColor = agentWin.status == .done ? .systemGreen : .systemOrange
+                    let eventDate = ISO8601DateFormatter().date(from: agentWin.updatedAt)
+                    items.append(DashboardAttentionEntry(
+                        icon: agentIcon, iconColor: agentIconColor, label: agentLabel, detail: nil,
+                        shortcut: "", processStatus: nil, agentStatus: agentWin.status,
+                        statusChecks: [], eventDate: eventDate, windowListIndex: nil,
+                        agentWindowRecord: agentWin))
                 }
 
                 guard !items.isEmpty else { continue }
@@ -936,6 +978,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         selectedProjectID = nil
         selectedWorkspaceID = nil
         dashboardWindowFocusMap = [:]
+        dashboardAgentFocusMap = [:]
         outlineView.deselectAll(nil)
         // Reload only the previously-selected workspace row to clear its selection styling;
         // avoid full reloadData() which would reset expand/collapse state.
@@ -1041,14 +1084,25 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                     let shortcut = shortcutCounter <= 9 ? "CMD+\(shortcutCounter)" : ""
                     if shortcutCounter <= 9, let wli = entry.windowListIndex {
                         dashboardWindowFocusMap[shortcutCounter] = (workspaceID: group.workspaceID, windowListIndex: wli)
+                    } else if shortcutCounter <= 9, let agentRecord = entry.agentWindowRecord {
+                        dashboardAgentFocusMap[shortcutCounter] = agentRecord
                     }
                     shortcutCounter += 1
-                    let cardAction: (() -> Void)? = entry.windowListIndex.map { wli in
+                    let cardAction: (() -> Void)?
+                    if let wli = entry.windowListIndex {
                         let wid = group.workspaceID
-                        return { [weak self] in
+                        cardAction = { [weak self] in
                             guard let self else { return }
                             do { try self.orchestrator.focusWorkspaceWindow(workspaceID: wid, index: wli) } catch {}
                         }
+                    } else if let agentRecord = entry.agentWindowRecord {
+                        let rec = agentRecord
+                        cardAction = { [weak self] in
+                            guard let self else { return }
+                            try? self.orchestrator.focusAgentWindow(rec)
+                        }
+                    } else {
+                        cardAction = nil
                     }
                     let card = dashboardWindowCard(entry: entry, shortcut: shortcut, action: cardAction)
                     itemsStack.addArrangedSubview(card)
@@ -1068,7 +1122,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let mainRow = windowRow(
             icon: entry.icon, iconColor: entry.iconColor,
             label: entry.label, detail: entry.detail,
-            shortcut: shortcut, processStatus: entry.processStatus, action: action)
+            shortcut: shortcut, processStatus: entry.processStatus, agentStatus: entry.agentStatus, action: action)
 
         guard !entry.statusChecks.isEmpty else { return mainRow }
 
@@ -1124,7 +1178,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                         }
                     }
                     if workspace.isRunning {
-                        workspaceIndicatorStateByID[workspace.id] = (hasExitedProcess || hasFailedCheck) ? .runningUnhealthy : .runningHealthy
+                        let agentWindowsList = (try? orchestrator.agentWindows(workspaceID: workspace.id)) ?? []
+                        let hasWaitingAgentWindow = agentWindowsList.contains { $0.status == .waiting }
+                        workspaceIndicatorStateByID[workspace.id] = (hasExitedProcess || hasFailedCheck || hasWaitingAgentWindow) ? .runningUnhealthy : .runningHealthy
                     } else {
                         workspaceIndicatorStateByID[workspace.id] = .idle
                     }
@@ -2359,11 +2415,15 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         for process in processes {
             statusResultsByProcessID[process.id] = (try? orchestrator.statusResults(processID: process.id)) ?? []
         }
+        let agentWindowsForRunTab = (try? orchestrator.agentWindows(workspaceID: workspace.id)) ?? []
+        // Build a set of yabai window IDs claimed by agent records so they can be moved to the Agents section.
+        let agentYabaiWindowIDs: Set<Int> = Set(agentWindowsForRunTab.compactMap { $0.yabaiWindowID })
         let windowsStack = NSStackView()
         windowsStack.orientation = .vertical
         windowsStack.spacing = 4
         var matchedProcessIDs: Set<String> = []
-        if windows.isEmpty {
+        let nonAgentWindows = windows.filter { $0.windowID == nil || !agentYabaiWindowIDs.contains($0.windowID!) }
+        if nonAgentWindows.isEmpty {
             let emptyLabel = NSTextField(labelWithString: "No captured windows")
             emptyLabel.font = .systemFont(ofSize: 11)
             emptyLabel.textColor = .tertiaryLabelColor
@@ -2371,7 +2431,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             windowsStack.alignment = .leading
             windowsStack.addArrangedSubview(emptyLabel)
         } else {
+            // Use the original 1-based index in the full windows array so CMD+N matches focusWorkspaceWindow(index:).
             for (idx, win) in windows.enumerated() {
+                guard win.windowID == nil || !agentYabaiWindowIDs.contains(win.windowID!) else { continue }
                 let windowLabel: String
                 let windowDetail: String?
                 let iconName: String
@@ -2436,6 +2498,49 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         constrainFormFieldToFillWidth(windowsHeader, in: container)
         container.addArrangedSubview(windowsStack)
         constrainFormFieldToFillWidth(windowsStack, in: container)
+
+        // --- Coding Agents section ---
+        if !agentWindowsForRunTab.isEmpty {
+            // Build lookup: yabai window ID → captured window record for agent rows
+            let linkedWindowByYabaiID: [Int: WindowRecord] = Dictionary(
+                uniqueKeysWithValues: windows.compactMap { w in
+                    guard let wid = w.windowID, agentYabaiWindowIDs.contains(wid) else { return nil }
+                    return (wid, w)
+                })
+            let agentsStack = NSStackView()
+            agentsStack.orientation = .vertical
+            agentsStack.spacing = 4
+            for (agentIdx, agentWin) in agentWindowsForRunTab.enumerated() {
+                let agentIcon = agentWin.provider == .codex ? "wand.and.stars" : "cpu.fill"
+                let agentColor: NSColor = agentWin.status == .done ? .systemGreen : agentWin.status == .waiting ? .systemOrange : .secondaryLabelColor
+                // Use linked window title when available; fall back to generic label
+                let linkedWin = agentWin.yabaiWindowID.flatMap { linkedWindowByYabaiID[$0] }
+                let agentLabel = agentWin.label ?? linkedWin?.title ?? linkedWin?.app ?? (agentWin.provider == .codex ? "Codex" : "Claude Code")
+                let agentDetail = linkedWin != nil ? (agentWin.provider == .codex ? "Codex" : "Claude Code") : nil
+                // If linked to a captured yabai window, use its original 1-based position so CMD+N matches.
+                let agentShortcutNum: Int
+                if let yabaiWID = agentWin.yabaiWindowID, let origIdx = windows.firstIndex(where: { $0.windowID == yabaiWID }) {
+                    agentShortcutNum = origIdx + 1
+                } else {
+                    agentShortcutNum = windows.count + agentIdx + 1
+                }
+                let rec = agentWin
+                let row = windowRow(
+                    icon: agentIcon, iconColor: agentColor, label: agentLabel, detail: agentDetail, shortcut: "CMD+\(agentShortcutNum)",
+                    agentStatus: agentWin.status,
+                    action: { [weak self] in
+                        guard let self else { return }
+                        try? self.orchestrator.focusAgentWindow(rec)
+                    })
+                agentsStack.addArrangedSubview(row)
+                constrainFormFieldToFillWidth(row, in: agentsStack)
+            }
+            let agentsHeader = sectionHeader(icon: "cpu.fill", title: "Coding Agents")
+            container.addArrangedSubview(agentsHeader)
+            constrainFormFieldToFillWidth(agentsHeader, in: container)
+            container.addArrangedSubview(agentsStack)
+            constrainFormFieldToFillWidth(agentsStack, in: container)
+        }
 
         // --- Orphaned processes (no linked window) ---
         let orphanedProcesses = processes.filter { !matchedProcessIDs.contains($0.id) }
@@ -2889,7 +2994,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
     private func windowRow(
         icon: String, iconColor: NSColor, label: String, detail: String? = nil, shortcut: String,
-        processStatus: RunningProcessState? = nil, action: (() -> Void)? = nil
+        processStatus: RunningProcessState? = nil, agentStatus: AgentWindowStatus? = nil, action: (() -> Void)? = nil
     ) -> NSView {
         let container = ClickableRowView(isInteractive: action != nil)
 
@@ -2934,8 +3039,48 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         badge.setContentHuggingPriority(.required, for: .horizontal)
         badge.setContentCompressionResistancePriority(.required, for: .horizontal)
 
-        // Status dot (or fixed-width spacer) always placed before badge so CMD+N hints align
-        if let processStatus {
+        // Status indicator (spinner/dot/spacer) always placed before badge so CMD+N hints align
+        if let agentStatus {
+            if agentStatus == .spinning {
+                let spinner = NSProgressIndicator()
+                spinner.style = .spinning
+                spinner.controlSize = .mini
+                spinner.translatesAutoresizingMaskIntoConstraints = false
+                NSLayoutConstraint.activate([
+                    spinner.widthAnchor.constraint(equalToConstant: 10),
+                    spinner.heightAnchor.constraint(equalToConstant: 10)
+                ])
+                spinner.setContentHuggingPriority(.required, for: .horizontal)
+                spinner.setContentCompressionResistancePriority(.required, for: .horizontal)
+                spinner.startAnimation(nil)
+                row.addArrangedSubview(spinner)
+            } else {
+                let statusIconName: String
+                let statusColor: NSColor
+                switch agentStatus {
+                case .waiting:
+                    statusIconName = "circle"
+                    statusColor = .systemRed
+                case .done:
+                    statusIconName = "circle.fill"
+                    statusColor = .systemGreen
+                default:
+                    statusIconName = "circle"
+                    statusColor = .tertiaryLabelColor
+                }
+                let statusDot = NSImageView()
+                statusDot.image = NSImage(systemSymbolName: statusIconName, accessibilityDescription: agentStatus.rawValue)
+                statusDot.contentTintColor = statusColor
+                statusDot.translatesAutoresizingMaskIntoConstraints = false
+                NSLayoutConstraint.activate([
+                    statusDot.widthAnchor.constraint(equalToConstant: 8),
+                    statusDot.heightAnchor.constraint(equalToConstant: 8)
+                ])
+                statusDot.setContentHuggingPriority(.required, for: .horizontal)
+                statusDot.setContentCompressionResistancePriority(.required, for: .horizontal)
+                row.addArrangedSubview(statusDot)
+            }
+        } else if let processStatus {
             let statusIconName: String
             let statusColor: NSColor
             switch processStatus {
@@ -4586,6 +4731,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         if showingDashboard {
             if let target = dashboardWindowFocusMap[index] {
                 do { try orchestrator.focusWorkspaceWindow(workspaceID: target.workspaceID, index: target.windowListIndex) } catch { showError(error) }
+            } else if let agentRecord = dashboardAgentFocusMap[index] {
+                try? orchestrator.focusAgentWindow(agentRecord)
             }
             return
         }

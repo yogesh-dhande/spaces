@@ -112,6 +112,7 @@ Muxy periodically discovers and reconciles git worktrees for existing projects. 
   - Process restarts (status-check failure or `on_exit=restart`) terminate and wait for the tracked runtime PID before relaunch; if a clean stop does not finish in time, muxy restarts in a new terminal window instead of queueing in the busy one
   - Processes with status check results shown as indented sub-rows (colored dots)
   - Status checks run in periodic background monitoring for running workspaces (respecting each check interval), so health rows and on-fail restarts update even when the run tab is not open
+  - Agent window rows show coding agent sessions (Claude Code, Codex) with a spinner (active), red dot (waiting for review), or green dot (done); clicking focuses the agent session
   - Windows list with shortcut hints
   - Env vars/ports tab
   - Workspace settings tab
@@ -177,6 +178,12 @@ mx workspace up --dir /path/to/workspace [--restart] [--tooltip "Working on auth
 mx workspace stop --dir /path/to/workspace
 mx workspace archive --dir /path/to/workspace
 mx workspace focus --dir /path/to/workspace [--window 2]
+
+# Agent lifecycle hooks (called by coding agents to report status)
+mx agent hook --type init    [--dir /path/to/workspace] [--provider iterm2|codex]
+mx agent hook --type start   [--dir /path/to/workspace]
+mx agent hook --type waiting [--dir /path/to/workspace]
+mx agent hook --type done    [--dir /path/to/workspace]
 ```
 
 For git projects, `workspace create` requires `--branch`; `--target-branch` defaults to `main`/`master` when available.

@@ -13,9 +13,9 @@
 - Any project setting related to workspace creation and used during workspace launch must be overridable per workspace after creation.
 - Anything configurable via the GUI must also be configurable via the CLI (`mx`). Keep the two in sync.
 
-## Worktree Workflow
-- Use the Muxy CLI `mx` to enhance user experience when working with worktrees.
-- Whenever working on a worktree, ensure a Muxy workspace is created for the worktree by running `mx workspace import --name [text]` from the worktree directory.
+## Coding Agent Workflow
+- Use the Muxy CLI `mx` to enhance user experience with coding agents.
+- Always start by ensuring a Muxy workspace exists by running `mx workspace import --name [text]` from the project root directory.
 - When code changes are ready for user review, always run `mx workspace up --tooltip [text]` to ensure the Muxy workspace is running and set a tooltip to provide sufficient context for the user about what is being worked on and the changes
 
 ## Data & Paths

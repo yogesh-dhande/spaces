@@ -1,4 +1,5 @@
 import Foundation
+import appctl
 import streamctl
 
 struct CLI {
@@ -28,6 +29,7 @@ struct CLI {
         case "project": try runProjectSubcommand(orchestrator: orchestrator)
         case "workspace": try runWorkspaceSubcommand(orchestrator: orchestrator)
         case "discover": try runDiscover(orchestrator: orchestrator)
+        case "agent": try runAgentSubcommand(orchestrator: orchestrator)
         default: printHelp()
         }
     }
@@ -632,6 +634,99 @@ struct CLI {
         return candidate
     }
 
+    private func runAgentSubcommand(orchestrator: MuxyOrchestrator) throws {
+        guard args.count >= 3, args[2] == "hook" else {
+            throw NSError(
+                domain: "mx.cli", code: 2,
+                userInfo: [NSLocalizedDescriptionKey: "Missing agent action. Use: agent hook --type init|start|waiting|done [--dir <path>] [--provider iterm2|codex]"])
+        }
+        let hookType = try value(for: "--type")
+        let dir = optionalValue(for: "--dir") ?? FileManager.default.currentDirectoryPath
+        let providerArg = optionalValue(for: "--provider")
+
+        let env = ProcessInfo.processInfo.environment
+        let bundleID = env["__CFBundleIdentifier"] ?? ""
+        let provider: AgentProvider
+        if let p = providerArg {
+            guard let parsed = AgentProvider(rawValue: p) else {
+                throw NSError(domain: "mx.cli", code: 2, userInfo: [NSLocalizedDescriptionKey: "Unknown provider '\(p)'. Use: iterm2|codex"])
+            }
+            provider = parsed
+        } else if bundleID == "com.openai.codex" {
+            provider = .codex
+        } else {
+            // iTerm2, Claude Code CLI (CLAUDE_CODE_ENTRYPOINT=cli), or any other terminal → iTerm2
+            provider = .iterm2
+        }
+
+        // ITERM_SESSION_ID has format "wNtNpN:UUID"; extract just the UUID for consistent matching
+        // against AppleScript's `id of session`, which returns only the UUID.
+        let rawItermSessionID = provider == .iterm2 ? env["ITERM_SESSION_ID"] : nil
+        let itermSessionID = rawItermSessionID.map { raw -> String in
+            guard let colonIdx = raw.lastIndex(of: ":") else { return raw }
+            return String(raw[raw.index(after: colonIdx)...])
+        }
+        let codexThreadID = provider == .codex ? env["CODEX_THREAD_ID"] : nil
+
+        // Capture the yabai window ID of the window hosting this agent session.
+        let yabaiWindowID: Int? = {
+            guard let json = try? Shell.runAndCapture(["yabai", "-m", "query", "--windows", "--window"]), let data = json.data(using: .utf8),
+                let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any], let id = obj["id"] as? Int
+            else { return nil }
+            return id
+        }()
+
+        let normalizedDir = normalizePath(dir)
+
+        func ensureWorkspace() throws -> String {
+            if let ws = try orchestrator.store.workspace(dir: normalizedDir) { return ws.id }
+            let ws = try orchestrator.createWorkspaceFromWorktree(worktreePath: normalizedDir)
+            return ws.id
+        }
+
+        switch hookType {
+        case "init":
+            let wsID = try ensureWorkspace()
+            try orchestrator.registerAgentWindow(
+                workspaceID: wsID, provider: provider, itermSessionID: itermSessionID, codexThreadID: codexThreadID, yabaiWindowID: yabaiWindowID,
+                status: .idle)
+            print("Agent init: workspace=\(wsID)")
+            fireAgentHookNotification()
+
+        case "start":
+            let wsID = try ensureWorkspace()
+            try orchestrator.updateAgentWindowStatus(
+                workspaceID: wsID, provider: provider, itermSessionID: itermSessionID, codexThreadID: codexThreadID, yabaiWindowID: yabaiWindowID,
+                status: .spinning)
+            print("Agent start: workspace=\(wsID)")
+            fireAgentHookNotification()
+
+        case "waiting":
+            let wsID = try ensureWorkspace()
+            try orchestrator.updateAgentWindowStatus(
+                workspaceID: wsID, provider: provider, itermSessionID: itermSessionID, codexThreadID: codexThreadID, yabaiWindowID: yabaiWindowID,
+                status: .waiting)
+            print("Agent waiting: workspace=\(wsID)")
+            fireAgentHookNotification()
+
+        case "done":
+            let wsID = try ensureWorkspace()
+            try orchestrator.updateAgentWindowStatus(
+                workspaceID: wsID, provider: provider, itermSessionID: itermSessionID, codexThreadID: codexThreadID, yabaiWindowID: yabaiWindowID,
+                status: .done)
+            print("Agent done: workspace=\(wsID)")
+            fireAgentHookNotification()
+
+        default:
+            throw NSError(domain: "mx.cli", code: 2, userInfo: [NSLocalizedDescriptionKey: "Unknown hook type '\(hookType)'. Use: init|start|waiting|done"])
+        }
+    }
+
+    private func fireAgentHookNotification() {
+        DistributedNotificationCenter.default().postNotificationName(
+            IPCNotification.agentHookFired, object: nil, userInfo: nil, options: [.deliverImmediately])
+    }
+
     private func requestTooltipOverlayDisplay() {
         DistributedNotificationCenter.default().postNotificationName(
             IPCNotification.showTooltipOverlay,
@@ -723,6 +818,8 @@ struct CLI {
               mx workspace stop [--dir <path>]
               mx workspace archive [--dir <path>]
               mx workspace focus [--dir <path>] [--window <index>]
+
+              mx agent hook --type init|start|waiting|done [--dir <path>] [--provider iterm2|codex]
 
             Notes:
               - All settings are stored in ~/.muxy/muxy.db.

@@ -141,6 +141,26 @@ open class Iterm2Adapter: @unchecked Sendable {
         _ = try? AppleScript.run(script)
     }
 
+    open func listSessionIDs() throws -> Set<String> {
+        let script = """
+            tell application "iTerm2"
+              set sessionIDs to {}
+              repeat with w in windows
+                repeat with t in tabs of w
+                  repeat with s in sessions of t
+                    set end of sessionIDs to (id of s as string)
+                  end repeat
+                end repeat
+              end repeat
+              set AppleScript's text item delimiters to "\n"
+              return sessionIDs as string
+            end tell
+            """
+        let output = try AppleScript.run(script)
+        let ids = output.split(separator: "\n", omittingEmptySubsequences: true).map(String.init)
+        return Set(ids)
+    }
+
     open func focusSessionOrTab(preferredSessionID: String?, tabIndex: Int?, windowID: Int?) throws -> Bool {
         let escapedSessionID = (preferredSessionID ?? "").replacingOccurrences(of: "\"", with: "\\\"")
         let targetTabIndex = tabIndex ?? -1

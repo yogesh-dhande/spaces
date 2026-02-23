@@ -40,6 +40,7 @@ class MockIterm2Adapter: Iterm2Adapter {
     var nextTabIndex: Int? = 1
     var focusSessionOrTabResult = true
     var closedSessionIDs: [String] = []
+    var stubbedSessionIDs: Set<String> = []
     
     override func openWindowAndRun(command: String) throws -> ItermWindowInfo {
         openWindowAndRunCallCount += 1
@@ -84,5 +85,9 @@ class MockIterm2Adapter: Iterm2Adapter {
         pulseCallCount += 1
         lastPulsedWindowID = windowID
         lastPulseColor = pulseColor
+    }
+
+    override func listSessionIDs() throws -> Set<String> {
+        stubbedSessionIDs
     }
 }

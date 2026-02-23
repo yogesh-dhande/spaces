@@ -753,6 +753,12 @@ public final class MuxyOrchestrator {
                 _ = try? yabai.closeWindow(id: id)
             }
         }
+        // Close iTerm2 agent sessions
+        let agentWindowsList = (try? store.agentWindows(workspaceID: workspace.id)) ?? []
+        for agentWin in agentWindowsList where agentWin.provider == .iterm2 {
+            _ = try? iterm.closeSessionOrTab(preferredSessionID: agentWin.itermSessionID, tabIndex: nil, windowID: agentWin.windowID)
+        }
+        try store.deleteAgentWindows(workspaceID: workspace.id)
         try store.deleteRunningProcesses(workspaceID: workspace.id)
         try store.deleteWindows(workspaceID: workspace.id)
         clearItermTerminalSessionMetadata(workspaceID: workspace.id)
@@ -841,6 +847,32 @@ public final class MuxyOrchestrator {
             }
         }
         
+        // Prune stale iTerm2 agent sessions
+        var aliveItermSessionIDs: Set<String>? = nil
+        for project in allProjects {
+            let workspaces = try store.workspaces(projectID: project.id, includeArchived: false)
+            for workspace in workspaces {
+                let agentWindowsList = (try? store.agentWindows(workspaceID: workspace.id)) ?? []
+                let itermAgents = agentWindowsList.filter { $0.provider == .iterm2 }
+                guard !itermAgents.isEmpty else { continue }
+                if aliveItermSessionIDs == nil {
+                    // Leave nil on failure so the guard below skips pruning this cycle.
+                    aliveItermSessionIDs = try? iterm.listSessionIDs()
+                }
+                guard let aliveIDs = aliveItermSessionIDs else { continue }
+                for agent in itermAgents {
+                    guard let sid = agent.itermSessionID else {
+                        try? store.deleteAgentWindow(id: agent.id)
+                        continue
+                    }
+                    if !aliveIDs.contains(sid) {
+                        try? store.deleteAgentWindow(id: agent.id)
+                        didUpdate = true
+                    }
+                }
+            }
+        }
+
         return didUpdate
     }
 
@@ -2800,6 +2832,101 @@ public final class MuxyOrchestrator {
         let lastSegment = raw.split(separator: "/").last.map(String.init) ?? raw
         if lastSegment.hasSuffix(".git") { return String(lastSegment.dropLast(4)) }
         return lastSegment
+    }
+
+    // MARK: - Agent Windows
+
+    public func agentWindows(workspaceID: String) throws -> [AgentWindowRecord] { try store.agentWindows(workspaceID: workspaceID) }
+
+    @discardableResult public func registerAgentWindow(
+        workspaceID: String, provider: AgentProvider, label: String? = nil, itermSessionID: String? = nil, codexThreadID: String? = nil,
+        yabaiWindowID: Int? = nil, status: AgentWindowStatus = .idle
+    ) throws -> AgentWindowRecord {
+        let now = nowISO8601()
+
+        switch provider {
+        case .codex:
+            // Only one Codex agent record per workspace
+            try store.deleteAgentWindowsByProvider(workspaceID: workspaceID, provider: .codex)
+            let record = AgentWindowRecord(
+                id: UUID().uuidString, workspaceID: workspaceID, provider: .codex, label: label, itermSessionID: nil, codexThreadID: codexThreadID,
+                windowID: nil, yabaiWindowID: yabaiWindowID, status: status, createdAt: now, updatedAt: now)
+            try store.upsertAgentWindow(record)
+            return record
+
+        case .iterm2:
+            // Prune stale sessions before creating
+            if let sessionID = itermSessionID {
+                // Update existing record if same session
+                if let existing = try store.agentWindow(workspaceID: workspaceID, itermSessionID: sessionID) {
+                    let updated = AgentWindowRecord(
+                        id: existing.id, workspaceID: existing.workspaceID, provider: existing.provider, label: label ?? existing.label,
+                        itermSessionID: existing.itermSessionID, codexThreadID: existing.codexThreadID, windowID: existing.windowID,
+                        yabaiWindowID: yabaiWindowID ?? existing.yabaiWindowID, status: status, createdAt: existing.createdAt, updatedAt: now)
+                    try store.upsertAgentWindow(updated)
+                    return updated
+                }
+            }
+            // Prune stale iTerm2 sessions
+            if let aliveIDs = try? iterm.listSessionIDs() {
+                let existingRecords = try store.agentWindowsByProvider(workspaceID: workspaceID, provider: .iterm2)
+                for stale in existingRecords {
+                    guard let sid = stale.itermSessionID else {
+                        try store.deleteAgentWindow(id: stale.id)
+                        continue
+                    }
+                    if !aliveIDs.contains(sid) { try store.deleteAgentWindow(id: stale.id) }
+                }
+            }
+            let record = AgentWindowRecord(
+                id: UUID().uuidString, workspaceID: workspaceID, provider: .iterm2, label: label, itermSessionID: itermSessionID, codexThreadID: nil,
+                windowID: nil, yabaiWindowID: yabaiWindowID, status: status, createdAt: now, updatedAt: now)
+            try store.upsertAgentWindow(record)
+            return record
+        }
+    }
+
+    @discardableResult public func updateAgentWindowStatus(
+        workspaceID: String, provider: AgentProvider, itermSessionID: String? = nil, codexThreadID: String? = nil, yabaiWindowID: Int? = nil,
+        status: AgentWindowStatus
+    ) throws -> AgentWindowRecord {
+        let now = nowISO8601()
+        // Find existing record
+        var existing: AgentWindowRecord?
+        if provider == .iterm2, let sessionID = itermSessionID {
+            existing = try store.agentWindow(workspaceID: workspaceID, itermSessionID: sessionID)
+        } else if provider == .codex, let threadID = codexThreadID {
+            existing = try store.agentWindow(workspaceID: workspaceID, codexThreadID: threadID)
+        } else if provider == .codex {
+            existing = try store.agentWindowsByProvider(workspaceID: workspaceID, provider: .codex).first
+        }
+        if let existing {
+            try store.updateAgentWindowStatus(id: existing.id, status: status, updatedAt: now)
+            return AgentWindowRecord(
+                id: existing.id, workspaceID: existing.workspaceID, provider: existing.provider, label: existing.label,
+                itermSessionID: existing.itermSessionID, codexThreadID: existing.codexThreadID, windowID: existing.windowID,
+                yabaiWindowID: existing.yabaiWindowID, status: status, createdAt: existing.createdAt, updatedAt: now)
+        }
+        // Not found: register new
+        return try registerAgentWindow(
+            workspaceID: workspaceID, provider: provider, label: nil, itermSessionID: itermSessionID, codexThreadID: codexThreadID,
+            yabaiWindowID: yabaiWindowID, status: status)
+    }
+
+    public func focusAgentWindow(_ record: AgentWindowRecord) throws {
+        switch record.provider {
+        case .iterm2:
+            let focused = (try? iterm.focusSessionOrTab(
+                preferredSessionID: record.itermSessionID, tabIndex: nil, windowID: record.windowID)) ?? false
+            if focused, let windowID = record.windowID ?? record.yabaiWindowID {
+                let color = (try? itermFocusPulseColor()) ?? (r: 255, g: 195, b: 0)
+                try? iterm.pulseBackground(windowID: windowID, pulseColor: color)
+            }
+        case .codex:
+            if let threadID = record.codexThreadID {
+                try Shell.run(["open", "codex://threads/\(threadID)"])
+            }
+        }
     }
 
     private func safeFilename(_ raw: String) -> String {

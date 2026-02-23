@@ -600,6 +600,107 @@ public final class SQLiteStore {
         try setSetting(key: SettingsKey.appPortRangeEnd, value: String(config.portRange.end))
     }
 
+    // MARK: - Agent Windows
+
+    public func upsertAgentWindow(_ record: AgentWindowRecord) throws {
+        try execute(
+            sql: """
+                INSERT INTO agent_windows(id, workspace_id, provider, label, iterm_session_id, codex_thread_id, window_id, status, created_at, updated_at, yabai_window_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                  workspace_id = excluded.workspace_id,
+                  provider = excluded.provider,
+                  label = excluded.label,
+                  iterm_session_id = excluded.iterm_session_id,
+                  codex_thread_id = excluded.codex_thread_id,
+                  window_id = excluded.window_id,
+                  status = excluded.status,
+                  updated_at = excluded.updated_at,
+                  yabai_window_id = excluded.yabai_window_id
+                """,
+            bindings: [
+                record.id, record.workspaceID, record.provider.rawValue, record.label ?? "",
+                record.itermSessionID ?? "", record.codexThreadID ?? "",
+                record.windowID.map(String.init) ?? "", record.status.rawValue,
+                record.createdAt, record.updatedAt,
+                record.yabaiWindowID.map(String.init) ?? "",
+            ])
+    }
+
+    public func agentWindows(workspaceID: String) throws -> [AgentWindowRecord] {
+        let rows = try queryRows(
+            sql: """
+                SELECT id, workspace_id, provider, label, iterm_session_id, codex_thread_id, window_id, status, created_at, updated_at, yabai_window_id
+                FROM agent_windows WHERE workspace_id = ?
+                ORDER BY created_at
+                """, bindings: [workspaceID])
+        return rows.compactMap { decodeAgentWindow(row: $0) }
+    }
+
+    public func agentWindow(workspaceID: String, itermSessionID: String) throws -> AgentWindowRecord? {
+        guard let row = try queryRow(
+            sql: """
+                SELECT id, workspace_id, provider, label, iterm_session_id, codex_thread_id, window_id, status, created_at, updated_at, yabai_window_id
+                FROM agent_windows WHERE workspace_id = ? AND iterm_session_id = ?
+                """, bindings: [workspaceID, itermSessionID])
+        else { return nil }
+        return decodeAgentWindow(row: row)
+    }
+
+    public func agentWindow(workspaceID: String, codexThreadID: String) throws -> AgentWindowRecord? {
+        guard let row = try queryRow(
+            sql: """
+                SELECT id, workspace_id, provider, label, iterm_session_id, codex_thread_id, window_id, status, created_at, updated_at, yabai_window_id
+                FROM agent_windows WHERE workspace_id = ? AND codex_thread_id = ?
+                """, bindings: [workspaceID, codexThreadID])
+        else { return nil }
+        return decodeAgentWindow(row: row)
+    }
+
+    public func agentWindowsByProvider(workspaceID: String, provider: AgentProvider) throws -> [AgentWindowRecord] {
+        let rows = try queryRows(
+            sql: """
+                SELECT id, workspace_id, provider, label, iterm_session_id, codex_thread_id, window_id, status, created_at, updated_at, yabai_window_id
+                FROM agent_windows WHERE workspace_id = ? AND provider = ?
+                ORDER BY created_at
+                """, bindings: [workspaceID, provider.rawValue])
+        return rows.compactMap { decodeAgentWindow(row: $0) }
+    }
+
+    public func updateAgentWindowStatus(id: String, status: AgentWindowStatus, updatedAt: String) throws {
+        try execute(
+            sql: "UPDATE agent_windows SET status = ?, updated_at = ? WHERE id = ?",
+            bindings: [status.rawValue, updatedAt, id])
+    }
+
+    public func deleteAgentWindows(workspaceID: String) throws {
+        try execute(sql: "DELETE FROM agent_windows WHERE workspace_id = ?", bindings: [workspaceID])
+    }
+
+    public func deleteAgentWindow(id: String) throws {
+        try execute(sql: "DELETE FROM agent_windows WHERE id = ?", bindings: [id])
+    }
+
+    public func deleteAgentWindowsByProvider(workspaceID: String, provider: AgentProvider) throws {
+        try execute(sql: "DELETE FROM agent_windows WHERE workspace_id = ? AND provider = ?", bindings: [workspaceID, provider.rawValue])
+    }
+
+    private func decodeAgentWindow(row: [String]) -> AgentWindowRecord? {
+        guard row.count >= 10 else { return nil }
+        guard let provider = AgentProvider(rawValue: row[2]) else { return nil }
+        let status = AgentWindowStatus(rawValue: row[7]) ?? .idle
+        let yabaiWindowID = row.count > 10 ? (row[10].isEmpty ? nil : Int(row[10])) : nil
+        return AgentWindowRecord(
+            id: row[0], workspaceID: row[1], provider: provider,
+            label: row[3].isEmpty ? nil : row[3],
+            itermSessionID: row[4].isEmpty ? nil : row[4],
+            codexThreadID: row[5].isEmpty ? nil : row[5],
+            windowID: row[6].isEmpty ? nil : Int(row[6]),
+            yabaiWindowID: yabaiWindowID,
+            status: status,
+            createdAt: row[8], updatedAt: row[9])
+    }
+
     private func createSchema() throws {
         let sql = """
             CREATE TABLE IF NOT EXISTS projects (
@@ -774,6 +875,20 @@ public final class SQLiteStore {
               project_id TEXT NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS agent_windows (
+              id TEXT PRIMARY KEY,
+              workspace_id TEXT NOT NULL,
+              provider TEXT NOT NULL,
+              label TEXT,
+              iterm_session_id TEXT,
+              codex_thread_id TEXT,
+              window_id INTEGER,
+              status TEXT NOT NULL DEFAULT 'idle',
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL,
+              yabai_window_id INTEGER
+            );
+
             CREATE TABLE IF NOT EXISTS schema_version (
               version INTEGER NOT NULL
             );
@@ -840,6 +955,7 @@ public final class SQLiteStore {
         try ensureColumnExists(table: "running_processes", name: "iterm_tab_index", definition: "iterm_tab_index INTEGER")
         try ensureColumnExists(table: "windows", name: "iterm_session_id", definition: "iterm_session_id TEXT")
         try ensureColumnExists(table: "windows", name: "iterm_tab_index", definition: "iterm_tab_index INTEGER")
+        try ensureColumnExists(table: "agent_windows", name: "yabai_window_id", definition: "yabai_window_id INTEGER")
     }
 
     private func ensureColumnExists(table: String, name: String, definition: String) throws {
