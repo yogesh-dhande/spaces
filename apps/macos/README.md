@@ -75,6 +75,12 @@ Muxy periodically discovers and reconciles git worktrees for existing projects. 
 - New branches are created from the latest commit on the selected target branch.
 - If the selected branch exists only on remote, muxy fetches it first and then creates the worktree from `origin/<branch>`.
 - If the branch exists locally, muxy uses the local branch as-is (no implicit pull/rebase/merge during workspace creation).
+- The left panel shows a **Dashboard** row pinned above the Projects section.
+  - Clicking it opens the dashboard detail in the right pane, showing attention items (exited processes and failing status checks) across all running workspaces.
+  - Items are grouped by workspace (`project / workspace` header), sorted most-recent-first by event timestamp.
+  - Uses the same window-row and status-check-sub-row UI as the Run tab; keyboard shortcut badges are renumbered sequentially (CMD+1, CMD+2…) across all items to avoid duplicates.
+  - A red count badge appears on the Dashboard row when there are attention items; hidden when all workspaces are healthy.
+  - An empty-state message is shown in the detail when there is nothing requiring attention.
 - Project rows in the left pane show a folder icon next to the project name.
 - Workspace rows in the left pane use compact cards with workspace status + name.
 - Left-pane workspace status indicator turns red when a running workspace has any exited process or failed status check result; healthy running workspaces remain green.

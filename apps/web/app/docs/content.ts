@@ -69,6 +69,13 @@ export const docsPageLinks: DocsPageLink[] = [
     audience: "Developers who need fast health visibility before switching context.",
   },
   {
+    href: "/docs/dashboard",
+    title: "Dashboard",
+    summary:
+      "A Dashboard row at the top of the left panel opens an attention-items view in the right pane. It shows exited processes and failing status checks across all running workspaces, grouped by workspace and sorted most-recent-first. Items use the same window-row and status-check UI as the Run tab; shortcut badges are renumbered sequentially across the full view to avoid duplicates. A red count badge on the row updates automatically; an empty-state is shown when all workspaces are healthy.",
+    audience: "Developers monitoring multiple concurrent workspaces who need a single place to spot failures.",
+  },
+  {
     href: "/docs/shortcuts",
     title: "Keyboard Shortcuts",
     summary:

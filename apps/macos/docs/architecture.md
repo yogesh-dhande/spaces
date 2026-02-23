@@ -87,6 +87,19 @@ GUI interaction notes:
 - Keyboard shortcut overrides for GUI actions are persisted in SQLite settings and editable in the GUI Settings view and CLI settings commands.
 - The app provides a standard Edit menu with Copy (Cmd+C) and Select All (Cmd+A) for system clipboard support in read-only text views.
 - Launch performs initial sidebar data hydration (projects/workspaces/git activity) in a detached background task; the right pane shows a spinner + status message so first render stays responsive instead of blocking the main actor.
+- The left pane includes a **Dashboard** sidebar row pinned above the Projects section header.
+  - Clicking the Dashboard row opens the dashboard detail in the right pane (same navigation model as selecting a project or workspace).
+  - The row shows a red count badge when there are attention items; the badge is hidden when the count is zero.
+  - The dashboard detail shows attention items: processes that have exited or have failing (`red`) status checks, across all running workspaces.
+  - Attention items are grouped by workspace (showing `project / workspace` as the group header).
+  - Items within each group are sorted by most recent event timestamp (exited-at for exited processes; most-recent failed check run-at for check failures), most recent first; groups are sorted by their most-recent item.
+  - Each attention entry uses the same `windowRow` / `statusCheckSubRow` UI elements as the Run tab.
+  - Keyboard shortcut badges are renumbered sequentially (`CMD+1`, `CMD+2`, …) across all items in the entire dashboard view (not per-workspace) to avoid duplicates.
+  - An empty-state view (`checkmark.circle.fill`) is shown when all running workspaces are healthy.
+  - The dashboard row appearance updates to reflect the selected state; selecting any project or workspace deselects the Dashboard row and restores normal workspace card styling.
+  - When the dashboard is open, all workspace cards in the left pane are rendered without selected styling (`outlineView.reloadData()` is called when entering dashboard mode to ensure this).
+  - `CMD+Shift+D` opens the dashboard from anywhere in the app; a `⌘⇧D` hint is shown inline on the dashboard row.
+  - `CMD+1`…`CMD+9` in the dashboard focus the corresponding attention-item window. Shortcut numbers are renumbered sequentially across all groups; a `dashboardWindowFocusMap` built at render time maps each number to `(workspaceID, 1-based window list index)` so `focusWorkspaceWindow` can be called with the correct workspace and window.
 - Global hotkeys are registered during initial app boot (before hydration completes) so first-use focus remains immediate while startup loading continues.
 - Periodic startup reconciliation (window refresh/process monitor/worktree discovery) requests sidebar reloads through the same detached snapshot path, preventing main-thread stalls while users switch workspaces.
 

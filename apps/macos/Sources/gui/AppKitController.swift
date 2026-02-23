@@ -24,6 +24,27 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         var isEditing: Bool
     }
 
+    private struct DashboardAttentionEntry {
+        let icon: String
+        let iconColor: NSColor
+        let label: String
+        let detail: String?
+        let shortcut: String
+        let processStatus: RunningProcessState
+        let failedChecks: [StatusResult]
+        let eventDate: Date?
+        /// 1-based index in the workspace's full window list; nil for orphaned processes (no captured window).
+        let windowListIndex: Int?
+    }
+
+    private struct DashboardGroup {
+        let projectName: String
+        let workspaceID: String
+        let workspaceName: String
+        let items: [DashboardAttentionEntry]
+        var latestDate: Date? { items.compactMap(\.eventDate).max() }
+    }
+
     private var window: NSWindow!
     private var splitView: NSSplitView?
     private let outlineView = NSOutlineView()
@@ -91,6 +112,16 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         formatter.unitsStyle = .short
         return formatter
     }()
+
+    private lazy var iso8601Formatter: ISO8601DateFormatter = ISO8601DateFormatter()
+
+    // Dashboard sidebar row
+    private var dashboardRowView: NSView?
+    private var dashboardRowStack: NSStackView?
+    private var dashboardRowBadge: NSTextField?
+    private var showingDashboard = false
+    /// Maps sequential CMD+N shortcut numbers (1-9) to (workspaceID, 1-based window list index) for the current dashboard view.
+    private var dashboardWindowFocusMap: [Int: (workspaceID: String, windowListIndex: Int)] = [:]
 
     private lazy var hotkeyHandlerProc: EventHandlerUPP = { _, event, userData in
         guard let userData else { return noErr }
@@ -660,6 +691,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         container.wantsLayer = true
         container.layer?.backgroundColor = sidebarPanelBackgroundColor().cgColor
 
+        let dashboardRow = makeDashboardSidebarRow()
+        dashboardRow.translatesAutoresizingMaskIntoConstraints = false
+        dashboardRowView = dashboardRow
+
         let sectionHeader = sidebarSectionHeader(
             title: "Projects",
             actions: [
@@ -667,6 +702,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 (symbol: "gearshape", tooltip: "Settings", action: #selector(showSettings)),
                 (symbol: "arrow.clockwise", tooltip: "Reload", action: #selector(reloadTapped)),
             ])
+        sectionHeader.translatesAutoresizingMaskIntoConstraints = false
 
         let scroll = NSScrollView()
         scroll.translatesAutoresizingMaskIntoConstraints = false
@@ -687,20 +723,386 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
         scroll.documentView = outlineView
 
+        container.addSubview(dashboardRow)
         container.addSubview(sectionHeader)
         container.addSubview(scroll)
 
         NSLayoutConstraint.activate([
+            dashboardRow.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 4),
+            dashboardRow.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -4),
+            dashboardRow.topAnchor.constraint(equalTo: container.topAnchor, constant: 8),
+
             sectionHeader.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 12),
             sectionHeader.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -12),
-            sectionHeader.topAnchor.constraint(equalTo: container.topAnchor, constant: 12),
+            sectionHeader.topAnchor.constraint(equalTo: dashboardRow.bottomAnchor, constant: 10),
 
-            scroll.leadingAnchor.constraint(equalTo: container.leadingAnchor), scroll.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+            scroll.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+            scroll.trailingAnchor.constraint(equalTo: container.trailingAnchor),
             scroll.topAnchor.constraint(equalTo: sectionHeader.bottomAnchor, constant: 6),
             scroll.bottomAnchor.constraint(equalTo: container.bottomAnchor),
         ])
 
         return container
+    }
+
+    private func makeDashboardSidebarRow() -> NSView {
+        let row = NSView()
+
+        let titleLabel = NSTextField(labelWithString: "Dashboard")
+        titleLabel.font = .systemFont(ofSize: 12, weight: .medium)
+        titleLabel.textColor = .labelColor
+
+        let hintLabel = NSTextField(labelWithString: "CMD+SHIFT+D")
+        hintLabel.font = .systemFont(ofSize: 10, weight: .regular)
+        hintLabel.textColor = .tertiaryLabelColor
+        hintLabel.setContentHuggingPriority(.required, for: .horizontal)
+
+        let badge = NSTextField(labelWithString: "")
+        badge.font = .monospacedSystemFont(ofSize: 10, weight: .bold)
+        badge.textColor = .white
+        badge.alignment = .center
+        badge.wantsLayer = true
+        badge.layer?.backgroundColor = sidebarFailedIndicatorColor().cgColor
+        badge.layer?.cornerRadius = 7
+        badge.isBordered = false
+        badge.isEditable = false
+        badge.drawsBackground = false
+        badge.isHidden = true
+        badge.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([badge.widthAnchor.constraint(greaterThanOrEqualToConstant: 18), badge.heightAnchor.constraint(equalToConstant: 14)])
+        dashboardRowBadge = badge
+
+        let stack = NSStackView()
+        stack.orientation = .horizontal
+        stack.alignment = .centerY
+        stack.spacing = 6
+        stack.edgeInsets = NSEdgeInsets(top: 7, left: 8, bottom: 7, right: 8)
+        stack.wantsLayer = true
+        stack.layer?.cornerRadius = 8
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        stack.addArrangedSubview(titleLabel)
+        stack.addArrangedSubview(hintLabel)
+        stack.addArrangedSubview(NSView())  // spacer
+        stack.addArrangedSubview(badge)
+        dashboardRowStack = stack
+
+        row.addSubview(stack)
+        NSLayoutConstraint.activate([
+            stack.leadingAnchor.constraint(equalTo: row.leadingAnchor),
+            stack.trailingAnchor.constraint(equalTo: row.trailingAnchor),
+            stack.topAnchor.constraint(equalTo: row.topAnchor),
+            stack.bottomAnchor.constraint(equalTo: row.bottomAnchor),
+        ])
+
+        let click = NSClickGestureRecognizer(target: self, action: #selector(dashboardRowClicked))
+        row.addGestureRecognizer(click)
+        return row
+    }
+
+    @objc private func dashboardRowClicked() {
+        showDashboardDetail()
+    }
+
+    private func updateDashboardRowAppearance() {
+        guard let stack = dashboardRowStack else { return }
+        if showingDashboard {
+            stack.layer?.backgroundColor = sidebarSelectedCardBackgroundColor().cgColor
+        } else {
+            stack.layer?.backgroundColor = NSColor.clear.cgColor
+        }
+    }
+
+    // MARK: - Dashboard content
+
+    private func buildDashboardGroups() -> [DashboardGroup] {
+        var groups: [DashboardGroup] = []
+        for project in projects {
+            let workspaces = workspacesByProject[project.id] ?? []
+            for workspace in workspaces {
+                guard workspace.isRunning else { continue }
+                let processes = (try? orchestrator.runningProcesses(workspaceID: workspace.id)) ?? []
+                let windows = (try? orchestrator.windows(workspaceID: workspace.id)) ?? []
+                let configuredSessions: [BrowserSession] = {
+                    if let settings = try? orchestrator.workspaceSettings(workspaceID: workspace.id) { return settings.browserSessions }
+                    return []
+                }()
+                var processByWindowID: [Int: RunningProcessRecord] = [:]
+                for process in processes { if let wid = process.windowID { processByWindowID[wid] = process } }
+                var statusResultsByProcessID: [String: [StatusResult]] = [:]
+                for process in processes { statusResultsByProcessID[process.id] = (try? orchestrator.statusResults(processID: process.id)) ?? [] }
+
+                var items: [DashboardAttentionEntry] = []
+                var matchedProcessIDs: Set<String> = []
+
+                // Window-linked entries (shortcut placeholder "" — renumbered in the view)
+                for (idx, win) in windows.enumerated() {
+                    guard let wid = win.windowID, let process = processByWindowID[wid] else { continue }
+                    matchedProcessIDs.insert(process.id)
+                    let failedChecks = (statusResultsByProcessID[process.id] ?? []).filter { $0.status == "red" }
+                    guard process.status == .exited || !failedChecks.isEmpty else { continue }
+                    let icon: String
+                    let iconColor: NSColor
+                    let label: String
+                    let detail: String?
+                    switch win.role {
+                    case "browser":
+                        icon = "globe"
+                        iconColor = .systemBlue
+                        if let name = browserSessionDisplayName(for: win.targetURL, sessions: configuredSessions), let url = win.targetURL {
+                            label = name
+                            detail = url
+                        } else {
+                            label = win.targetURL ?? win.title ?? win.app
+                            detail = nil
+                        }
+                    case "terminal":
+                        icon = "terminal"
+                        iconColor = .systemGreen
+                        label = process.templateName
+                        detail = process.command
+                    default:
+                        icon = "chevron.left.forwardslash.chevron.right"
+                        iconColor = .systemPurple
+                        label = win.title ?? win.app
+                        detail = nil
+                    }
+                    let eventDate: Date? = process.status == .exited
+                        ? process.exitedAt.flatMap { iso8601Formatter.date(from: $0) }
+                        : failedChecks.compactMap { $0.lastRunAt.flatMap { iso8601Formatter.date(from: $0) } }.max()
+                    items.append(DashboardAttentionEntry(
+                        icon: icon, iconColor: iconColor, label: label, detail: detail,
+                        shortcut: "", processStatus: process.status,
+                        failedChecks: failedChecks, eventDate: eventDate, windowListIndex: idx + 1))
+                }
+
+                // Orphaned process entries (no captured window)
+                for process in processes where !matchedProcessIDs.contains(process.id) {
+                    let failedChecks = (statusResultsByProcessID[process.id] ?? []).filter { $0.status == "red" }
+                    guard process.status == .exited || !failedChecks.isEmpty else { continue }
+                    let eventDate: Date? = process.status == .exited
+                        ? process.exitedAt.flatMap { iso8601Formatter.date(from: $0) }
+                        : failedChecks.compactMap { $0.lastRunAt.flatMap { iso8601Formatter.date(from: $0) } }.max()
+                    items.append(DashboardAttentionEntry(
+                        icon: "terminal", iconColor: .systemGreen,
+                        label: process.templateName, detail: process.command,
+                        shortcut: "", processStatus: process.status,
+                        failedChecks: failedChecks, eventDate: eventDate, windowListIndex: nil))
+                }
+
+                guard !items.isEmpty else { continue }
+
+                items.sort {
+                    switch ($0.eventDate, $1.eventDate) {
+                    case (let a?, let b?): return a > b
+                    case (nil, _): return false
+                    case (_, nil): return true
+                    }
+                }
+                groups.append(DashboardGroup(projectName: project.name, workspaceID: workspace.id, workspaceName: workspace.name, items: items))
+            }
+        }
+        groups.sort {
+            switch ($0.latestDate, $1.latestDate) {
+            case (let a?, let b?): return a > b
+            case (nil, _): return false
+            case (_, nil): return true
+            }
+        }
+        return groups
+    }
+
+    private func showDashboardDetail() {
+        clearInlineWorkspaceFieldRefs()
+        activeAddWorkspaceFormTag = nil
+        activeAddProjectFormTag = nil
+        showingSettings = false
+        showingDashboard = true
+        let previousWorkspaceID = selectedWorkspaceID
+        selectedProjectID = nil
+        selectedWorkspaceID = nil
+        dashboardWindowFocusMap = [:]
+        outlineView.deselectAll(nil)
+        // Reload only the previously-selected workspace row to clear its selection styling;
+        // avoid full reloadData() which would reset expand/collapse state.
+        refreshSidebarSelectionRows(previousWorkspaceID: previousWorkspaceID, currentWorkspaceID: nil)
+        updateDashboardRowAppearance()
+
+        for view in detailContainer.subviews { view.removeFromSuperview() }
+        detailContainer.wantsLayer = true
+        detailContainer.layer?.backgroundColor = sidebarPanelBackgroundColor().cgColor
+
+        let groups = buildDashboardGroups()
+        let stack = NSStackView()
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 14
+        stack.translatesAutoresizingMaskIntoConstraints = false
+
+        // Header
+        let accentColor = sidebarThemeColor(light: (13, 95, 93), dark: (61, 198, 184))
+        let headerTitle = NSTextField(labelWithString: "Dashboard")
+        headerTitle.font = .systemFont(ofSize: 20, weight: .semibold)
+        headerTitle.textColor = sidebarPrimaryTextColor(isSelected: false, isArchived: false)
+
+        let headerRow = NSStackView()
+        headerRow.orientation = .horizontal
+        headerRow.alignment = .centerY
+        headerRow.spacing = 8
+        headerRow.addArrangedSubview(headerTitle)
+
+        stack.addArrangedSubview(headerRow)
+        constrainFormFieldToFillWidth(headerRow, in: stack)
+
+        if groups.isEmpty {
+            let sep = NSView()
+            sep.translatesAutoresizingMaskIntoConstraints = false
+            sep.wantsLayer = true
+            sep.layer?.backgroundColor = sidebarCardBorderColor(isSelected: false).cgColor
+            sep.heightAnchor.constraint(equalToConstant: 1).isActive = true
+            stack.addArrangedSubview(sep)
+            constrainFormFieldToFillWidth(sep, in: stack)
+
+            let icon = NSImageView()
+            icon.image = NSImage(systemSymbolName: "checkmark.circle.fill", accessibilityDescription: "All clear")
+            icon.contentTintColor = sidebarRunningIndicatorColor()
+            icon.translatesAutoresizingMaskIntoConstraints = false
+            NSLayoutConstraint.activate([icon.widthAnchor.constraint(equalToConstant: 28), icon.heightAnchor.constraint(equalToConstant: 28)])
+            let emptyTitle = NSTextField(labelWithString: "No attention required")
+            emptyTitle.font = .systemFont(ofSize: 13, weight: .medium)
+            emptyTitle.textColor = .labelColor
+            let emptyDetail = NSTextField(labelWithString: "All running workspaces are healthy.")
+            emptyDetail.font = .systemFont(ofSize: 11)
+            emptyDetail.textColor = .secondaryLabelColor
+            let emptyStack = NSStackView()
+            emptyStack.orientation = .vertical
+            emptyStack.alignment = .centerX
+            emptyStack.spacing = 6
+            emptyStack.translatesAutoresizingMaskIntoConstraints = false
+            emptyStack.addArrangedSubview(icon)
+            emptyStack.addArrangedSubview(emptyTitle)
+            emptyStack.addArrangedSubview(emptyDetail)
+            stack.addArrangedSubview(emptyStack)
+            constrainFormFieldToFillWidth(emptyStack, in: stack)
+        } else {
+            // Sequential CMD+N counter across all groups and items
+            var shortcutCounter = 1
+
+            for group in groups {
+                // Workspace group header
+                let groupHeaderStack = NSStackView()
+                groupHeaderStack.orientation = .horizontal
+                groupHeaderStack.alignment = .centerY
+                groupHeaderStack.spacing = 4
+                groupHeaderStack.translatesAutoresizingMaskIntoConstraints = false
+
+                let projectLabel = NSTextField(labelWithString: group.projectName)
+                projectLabel.font = .systemFont(ofSize: 12, weight: .semibold)
+                projectLabel.textColor = .secondaryLabelColor
+                projectLabel.setContentHuggingPriority(.required, for: .horizontal)
+
+                let slashLabel = NSTextField(labelWithString: "/")
+                slashLabel.font = .systemFont(ofSize: 12)
+                slashLabel.textColor = .tertiaryLabelColor
+                slashLabel.setContentHuggingPriority(.required, for: .horizontal)
+
+                let workspaceLabel = NSTextField(labelWithString: group.workspaceName)
+                workspaceLabel.font = .systemFont(ofSize: 12, weight: .semibold)
+                workspaceLabel.textColor = accentColor
+                workspaceLabel.lineBreakMode = .byTruncatingTail
+                workspaceLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+
+                groupHeaderStack.addArrangedSubview(projectLabel)
+                groupHeaderStack.addArrangedSubview(slashLabel)
+                groupHeaderStack.addArrangedSubview(workspaceLabel)
+                stack.addArrangedSubview(groupHeaderStack)
+                constrainFormFieldToFillWidth(groupHeaderStack, in: stack)
+
+                let itemsStack = NSStackView()
+                itemsStack.orientation = .vertical
+                itemsStack.spacing = 4
+                itemsStack.translatesAutoresizingMaskIntoConstraints = false
+
+                for entry in group.items {
+                    let shortcut = shortcutCounter <= 9 ? "CMD+\(shortcutCounter)" : ""
+                    if shortcutCounter <= 9, let wli = entry.windowListIndex {
+                        dashboardWindowFocusMap[shortcutCounter] = (workspaceID: group.workspaceID, windowListIndex: wli)
+                    }
+                    shortcutCounter += 1
+                    let card = dashboardWindowCard(entry: entry, shortcut: shortcut)
+                    itemsStack.addArrangedSubview(card)
+                    constrainFormFieldToFillWidth(card, in: itemsStack)
+                }
+
+                stack.addArrangedSubview(itemsStack)
+                constrainFormFieldToFillWidth(itemsStack, in: stack)
+            }
+        }
+
+        showScrollableDetailStack(stack)
+    }
+
+    /// Builds a single card view for a dashboard attention entry.
+    /// If the entry has failed status checks, they are rendered as sub-rows inside the same card.
+    private func dashboardWindowCard(entry: DashboardAttentionEntry, shortcut: String) -> NSView {
+        let mainRow = windowRow(
+            icon: entry.icon, iconColor: entry.iconColor,
+            label: entry.label, detail: entry.detail,
+            shortcut: shortcut, processStatus: entry.processStatus)
+
+        guard !entry.failedChecks.isEmpty else { return mainRow }
+
+        // Clear the individual row background so the outer card provides it.
+        mainRow.layer?.backgroundColor = NSColor.clear.cgColor
+
+        let card = NSStackView()
+        card.orientation = .vertical
+        card.spacing = 0
+        card.wantsLayer = true
+        card.layer?.cornerRadius = 6
+        card.layer?.backgroundColor = NSColor.quaternaryLabelColor.cgColor
+        card.translatesAutoresizingMaskIntoConstraints = false
+
+        card.addArrangedSubview(mainRow)
+        constrainFormFieldToFillWidth(mainRow, in: card)
+
+        for check in entry.failedChecks {
+            let sep = NSView()
+            sep.wantsLayer = true
+            sep.layer?.backgroundColor = NSColor.separatorColor.withAlphaComponent(0.5).cgColor
+            sep.translatesAutoresizingMaskIntoConstraints = false
+            sep.heightAnchor.constraint(equalToConstant: 0.5).isActive = true
+            card.addArrangedSubview(sep)
+            constrainFormFieldToFillWidth(sep, in: card)
+
+            let checkRow = NSStackView()
+            checkRow.orientation = .horizontal
+            checkRow.alignment = .centerY
+            checkRow.spacing = 6
+            checkRow.edgeInsets = NSEdgeInsets(top: 4, left: 26, bottom: 4, right: 8)
+
+            let dot = NSImageView()
+            dot.image = NSImage(systemSymbolName: "circle.fill", accessibilityDescription: check.status)
+            dot.contentTintColor = check.status == "green" ? .systemGreen : .systemRed
+            dot.translatesAutoresizingMaskIntoConstraints = false
+            NSLayoutConstraint.activate([
+                dot.widthAnchor.constraint(equalToConstant: 7),
+                dot.heightAnchor.constraint(equalToConstant: 7),
+            ])
+            dot.setContentHuggingPriority(.required, for: .horizontal)
+            dot.setContentCompressionResistancePriority(.required, for: .horizontal)
+
+            let nameLabel = NSTextField(labelWithString: check.checkName)
+            nameLabel.font = .systemFont(ofSize: 11)
+            nameLabel.textColor = .secondaryLabelColor
+            nameLabel.lineBreakMode = .byTruncatingTail
+
+            checkRow.addArrangedSubview(dot)
+            checkRow.addArrangedSubview(nameLabel)
+            card.addArrangedSubview(checkRow)
+            constrainFormFieldToFillWidth(checkRow, in: card)
+        }
+
+        return card
     }
 
     private func makeRightPane() -> NSView {
@@ -759,6 +1161,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             outlineView.reloadData()
             outlineView.expandItem(nil, expandChildren: true)
             refreshSelection()
+            updateDashboardSidebarBadge()
         } catch { showError(error) }
     }
 
@@ -819,9 +1222,25 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         outlineView.reloadData()
         outlineView.expandItem(nil, expandChildren: true)
         refreshSelection()
+        updateDashboardSidebarBadge()
+        if showingDashboard { showDashboardDetail() }
+    }
+
+    /// Update the Dashboard sidebar row badge with the current attention item count.
+    private func updateDashboardSidebarBadge() {
+        let groups = buildDashboardGroups()
+        let totalCount = groups.reduce(0) { $0 + $1.items.count }
+        if let badge = dashboardRowBadge {
+            badge.stringValue = "\(totalCount)"
+            badge.isHidden = totalCount == 0
+        }
     }
 
     private func refreshSelection() {
+        if showingDashboard {
+            showDashboardDetail()
+            return
+        }
         if showingSettings {
             showSettingsDetail()
             return
@@ -844,6 +1263,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         activeAddWorkspaceFormTag = nil
         activeAddProjectFormTag = nil
         showingSettings = false
+        showingDashboard = false
+        updateDashboardRowAppearance()
         activeShortcutCaptureSetting = nil
         for view in detailContainer.subviews { view.removeFromSuperview() }
         let placeholder = NSTextField(labelWithString: message)
@@ -862,6 +1283,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         activeAddWorkspaceFormTag = nil
         activeAddProjectFormTag = nil
         showingSettings = false
+        showingDashboard = false
+        updateDashboardRowAppearance()
         activeShortcutCaptureSetting = nil
         for view in detailContainer.subviews { view.removeFromSuperview() }
 
@@ -987,6 +1410,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         activeAddWorkspaceFormTag = nil
         activeAddProjectFormTag = nil
         showingSettings = true
+        showingDashboard = false
+        updateDashboardRowAppearance()
         shortcutButtonsBySetting.removeAll()
         activeShortcutCaptureSetting = nil
         for view in detailContainer.subviews { view.removeFromSuperview() }
@@ -1064,6 +1489,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         activeAddWorkspaceFormTag = nil
         activeAddProjectFormTag = nil
         showingSettings = false
+        showingDashboard = false
+        updateDashboardRowAppearance()
         activeShortcutCaptureSetting = nil
         for view in detailContainer.subviews { view.removeFromSuperview() }
         detailContainer.wantsLayer = true
@@ -1276,6 +1703,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         activeAddWorkspaceFormTag = nil
         activeAddProjectFormTag = nil
         showingSettings = false
+        showingDashboard = false
+        updateDashboardRowAppearance()
         for view in detailContainer.subviews { view.removeFromSuperview() }
         detailContainer.wantsLayer = true
         detailContainer.layer?.backgroundColor = sidebarPanelBackgroundColor().cgColor
@@ -1479,6 +1908,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         activeAddWorkspaceFormTag = nil
         activeAddProjectFormTag = nil
         showingSettings = false
+        showingDashboard = false
+        updateDashboardRowAppearance()
         for view in detailContainer.subviews { view.removeFromSuperview() }
         detailContainer.wantsLayer = true
         detailContainer.layer?.backgroundColor = sidebarPanelBackgroundColor().cgColor
@@ -1650,6 +2081,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         activeAddWorkspaceFormTag = nil
         activeAddProjectFormTag = nil
         showingSettings = false
+        showingDashboard = false
+        updateDashboardRowAppearance()
         activeShortcutCaptureSetting = nil
         for view in detailContainer.subviews { view.removeFromSuperview() }
         detailContainer.wantsLayer = true
@@ -3709,6 +4142,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             if self.handleShortcutCaptureEvent(event: event) { return nil }
             if self.handleNewWorkspaceShortcut(event: event) { return nil }
             if self.handleFormCancelShortcut(event: event) { return nil }
+            if self.handleDashboardShortcut(event: event) { return nil }
             if self.handleFocusedTextInputShortcut(event: event) { return nil }
             if self.isTextInputFocused() { return event }
             if let openTerminalShortcutSpec, matches(event: event, spec: openTerminalShortcutSpec) {
@@ -3743,6 +4177,14 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         guard event.keyCode == UInt16(kVK_Escape) else { return false }
         guard activeAddWorkspaceFormTag != nil || activeAddProjectFormTag != nil else { return false }
         cancelProjectForm()
+        return true
+    }
+
+    private func handleDashboardShortcut(event: NSEvent) -> Bool {
+        let flags = event.modifierFlags.intersection([.command, .shift, .option, .control])
+        let key = event.charactersIgnoringModifiers?.lowercased() ?? ""
+        guard flags == [.command, .shift], key == "d" else { return false }
+        showDashboardDetail()
         return true
     }
 
@@ -4094,6 +4536,12 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     }
 
     private func focusWindowShortcut(index: Int) {
+        if showingDashboard {
+            if let target = dashboardWindowFocusMap[index] {
+                do { try orchestrator.focusWorkspaceWindow(workspaceID: target.workspaceID, index: target.windowListIndex) } catch { showError(error) }
+            }
+            return
+        }
         guard let selectedWorkspaceID else { return }
         do { try orchestrator.focusWorkspaceWindow(workspaceID: selectedWorkspaceID, index: index) } catch { showError(error) }
     }
@@ -4431,7 +4879,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             selectedProjectID = nil
             selectedWorkspaceID = nil
             showingSettings = false
-            showPlaceholder()
+            // Don't replace the detail pane if we're navigating to the dashboard;
+            // showDashboardDetail() called deselectAll() intentionally.
+            if !showingDashboard {
+                showPlaceholder()
+            }
             refreshSidebarSelectionRows(previousWorkspaceID: previousWorkspaceID, currentWorkspaceID: selectedWorkspaceID)
             return
         }
