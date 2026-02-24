@@ -2529,10 +2529,18 @@ public final class MuxyOrchestrator {
         return "bash -lc '\(singleQuoted)'"
     }
 
-    private func applyEnvVars(_ input: String, env: [String: String]) -> String {
+    func applyEnvVars(_ input: String, env: [String: String]) -> String {
         var output = input
         for (key, value) in env { output = output.replacingOccurrences(of: "$\(key)", with: value) }
         return output
+    }
+
+    /// Resolves `$VAR` references in a command string using the env vars for the given workspace.
+    public func resolveEnvVars(in command: String, workspaceID: String) throws -> String {
+        let (project, workspace) = try resolveWorkspace(id: workspaceID)
+        let namedPorts = try store.workspacePortsNamed(workspaceID: workspaceID)
+        let env = buildWorkspaceEnv(project: project, workspace: workspace, namedPorts: namedPorts)
+        return applyEnvVars(command, env: env)
     }
 
     private func runCommandWithTimeout(command: String, cwd: String, timeout: Int, env: [String: String]) throws -> CommandOutcome {

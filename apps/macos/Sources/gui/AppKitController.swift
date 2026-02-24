@@ -2323,7 +2323,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         tabs.tabViewType = .topTabsBezelBorder
         let runTab = NSTabViewItem(identifier: "run")
         runTab.label = "Run"
-        runTab.view = workspaceRunView(workspace: workspace)
+        runTab.view = workspaceRunView(project: project, workspace: workspace)
         let envTab = NSTabViewItem(identifier: "env")
         envTab.label = "Env"
         envTab.view = workspaceEnvView(project: project, workspace: workspace)
@@ -2355,12 +2355,16 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         detailContainer.layoutSubtreeIfNeeded()
     }
 
-    private func workspaceRunView(workspace: WorkspaceSummary) -> NSView {
+    private func workspaceRunView(project: ProjectSummary, workspace: WorkspaceSummary) -> NSView {
         let container = NSStackView()
         container.orientation = .vertical
         container.alignment = .leading
         container.spacing = 14
         container.translatesAutoresizingMaskIntoConstraints = false
+
+        let resolveCommand: (String) -> String = { [weak self] cmd in
+            (try? self?.orchestrator.resolveEnvVars(in: cmd, workspaceID: workspace.id)) ?? cmd
+        }
 
         // --- Quick actions ---
         let openEditorButton = actionButton(
@@ -2456,7 +2460,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                     if let wid = win.windowID, let process = processByWindowID[wid] {
                         linkedProcess = process
                         windowLabel = process.templateName
-                        windowDetail = process.command
+                        windowDetail = resolveCommand(process.command)
                         matchedProcessIDs.insert(process.id)
                     } else {
                         windowLabel = win.title ?? win.app
@@ -2563,7 +2567,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                     statusIcon = "circle"
                     statusColor = .tertiaryLabelColor
                 }
-                let row = processRow(icon: statusIcon, iconColor: statusColor, name: process.templateName, command: process.command, shortcut: process.status.rawValue)
+                let row = processRow(icon: statusIcon, iconColor: statusColor, name: process.templateName, command: resolveCommand(process.command), shortcut: process.status.rawValue)
                 processesStack.addArrangedSubview(row)
                 constrainFormFieldToFillWidth(row, in: processesStack)
 

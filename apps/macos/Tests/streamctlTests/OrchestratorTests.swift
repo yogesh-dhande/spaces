@@ -3603,4 +3603,96 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertEqual(mockIterm.lastPulseColor?.g, 100)
         XCTAssertEqual(mockIterm.lastPulseColor?.b, 200)
     }
+
+    // MARK: - resolveEnvVars
+
+    // Tests applyEnvVars substitutes a single named variable.
+    func testApplyEnvVarsSubstitutesSingleVar() {
+        let orchestrator = MuxyOrchestrator(store: try! makeTemporaryStore())
+        let result = orchestrator.applyEnvVars("PORT=$FRONTEND_PORT npm run dev", env: ["FRONTEND_PORT": "20002"])
+        XCTAssertEqual(result, "PORT=20002 npm run dev")
+    }
+
+    // Tests applyEnvVars substitutes multiple variables in one command.
+    func testApplyEnvVarsSubstitutesMultipleVars() {
+        let orchestrator = MuxyOrchestrator(store: try! makeTemporaryStore())
+        let result = orchestrator.applyEnvVars(
+            "PORT=$FRONTEND_PORT BACKEND=$BACKEND_PORT node server.js",
+            env: ["FRONTEND_PORT": "3000", "BACKEND_PORT": "4000"])
+        XCTAssertEqual(result, "PORT=3000 BACKEND=4000 node server.js")
+    }
+
+    // Tests applyEnvVars leaves unknown variables unchanged.
+    func testApplyEnvVarsLeavesUnknownVarsUnchanged() {
+        let orchestrator = MuxyOrchestrator(store: try! makeTemporaryStore())
+        let result = orchestrator.applyEnvVars("PORT=$UNKNOWN npm start", env: ["FRONTEND_PORT": "3000"])
+        XCTAssertEqual(result, "PORT=$UNKNOWN npm start")
+    }
+
+    // Tests applyEnvVars returns command unchanged when env is empty.
+    func testApplyEnvVarsEmptyEnvReturnsCommandUnchanged() {
+        let orchestrator = MuxyOrchestrator(store: try! makeTemporaryStore())
+        let result = orchestrator.applyEnvVars("PORT=$FRONTEND_PORT npm run dev", env: [:])
+        XCTAssertEqual(result, "PORT=$FRONTEND_PORT npm run dev")
+    }
+
+    // Tests resolveEnvVars replaces named port variable with allocated port number.
+    func testResolveEnvVarsReplacesNamedPortVar() throws {
+        let store = try makeTemporaryStore()
+        let orchestrator = MuxyOrchestrator(store: store)
+
+        let project = makeProjectRecord(dir: "/projects/myapp")
+        try store.upsert(project: project)
+        let workspace = makeWorkspaceRecord(projectID: project.id, name: "dev", dir: "/workspaces/myapp/dev")
+        try store.upsert(workspace: workspace)
+        try store.setWorkspacePorts(workspaceID: workspace.id, ports: [20002], names: ["FRONTEND_PORT"])
+
+        let resolved = try orchestrator.resolveEnvVars(in: "PORT=$FRONTEND_PORT npm run dev", workspaceID: workspace.id)
+        XCTAssertEqual(resolved, "PORT=20002 npm run dev")
+    }
+
+    // Tests resolveEnvVars resolves multiple named ports.
+    func testResolveEnvVarsResolvesMultipleNamedPorts() throws {
+        let store = try makeTemporaryStore()
+        let orchestrator = MuxyOrchestrator(store: store)
+
+        let project = makeProjectRecord(dir: "/projects/myapp")
+        try store.upsert(project: project)
+        let workspace = makeWorkspaceRecord(projectID: project.id, name: "dev", dir: "/workspaces/myapp/dev")
+        try store.upsert(workspace: workspace)
+        try store.setWorkspacePorts(workspaceID: workspace.id, ports: [3000, 4000], names: ["FRONTEND_PORT", "BACKEND_PORT"])
+
+        let resolved = try orchestrator.resolveEnvVars(
+            in: "FRONTEND=$FRONTEND_PORT BACKEND=$BACKEND_PORT node app.js",
+            workspaceID: workspace.id)
+        XCTAssertEqual(resolved, "FRONTEND=3000 BACKEND=4000 node app.js")
+    }
+
+    // Tests resolveEnvVars leaves command unchanged when no ports are allocated.
+    func testResolveEnvVarsNoPorts() throws {
+        let store = try makeTemporaryStore()
+        let orchestrator = MuxyOrchestrator(store: store)
+
+        let project = makeProjectRecord(dir: "/projects/myapp")
+        try store.upsert(project: project)
+        let workspace = makeWorkspaceRecord(projectID: project.id, name: "dev", dir: "/workspaces/myapp/dev")
+        try store.upsert(workspace: workspace)
+
+        let resolved = try orchestrator.resolveEnvVars(in: "npm start", workspaceID: workspace.id)
+        XCTAssertEqual(resolved, "npm start")
+    }
+
+    // Tests resolveEnvVars injects MUXY_WORKSPACE_DIR into command.
+    func testResolveEnvVarsInjectsWorkspaceDir() throws {
+        let store = try makeTemporaryStore()
+        let orchestrator = MuxyOrchestrator(store: store)
+
+        let project = makeProjectRecord(dir: "/projects/myapp")
+        try store.upsert(project: project)
+        let workspace = makeWorkspaceRecord(projectID: project.id, name: "dev", dir: "/workspaces/myapp/dev")
+        try store.upsert(workspace: workspace)
+
+        let resolved = try orchestrator.resolveEnvVars(in: "cd $MUXY_WORKSPACE_DIR && npm start", workspaceID: workspace.id)
+        XCTAssertEqual(resolved, "cd /workspaces/myapp/dev && npm start")
+    }
 }
