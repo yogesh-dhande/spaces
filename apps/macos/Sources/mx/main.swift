@@ -635,10 +635,10 @@ struct CLI {
     }
 
     private func runAgentSubcommand(orchestrator: MuxyOrchestrator) throws {
-        guard args.count >= 3, args[2] == "hook" else {
+        guard args.count >= 3, args[2] == "event" else {
             throw NSError(
                 domain: "mx.cli", code: 2,
-                userInfo: [NSLocalizedDescriptionKey: "Missing agent action. Use: agent hook --type init|start|waiting|done [--dir <path>] [--provider iterm2|codex]"])
+                userInfo: [NSLocalizedDescriptionKey: "Missing agent action. Use: agent event --type init|start|waiting|done [--dir <path>] [--provider iterm2|codex]"])
         }
         let hookType = try value(for: "--type")
         let dir = optionalValue(for: "--dir") ?? FileManager.default.currentDirectoryPath
@@ -691,7 +691,7 @@ struct CLI {
                 workspaceID: wsID, provider: provider, itermSessionID: itermSessionID, codexThreadID: codexThreadID, yabaiWindowID: yabaiWindowID,
                 status: .idle)
             print("Agent init: workspace=\(wsID)")
-            fireAgentHookNotification()
+            fireAgentEventNotification()
 
         case "start":
             let wsID = try ensureWorkspace()
@@ -699,7 +699,7 @@ struct CLI {
                 workspaceID: wsID, provider: provider, itermSessionID: itermSessionID, codexThreadID: codexThreadID, yabaiWindowID: yabaiWindowID,
                 status: .spinning)
             print("Agent start: workspace=\(wsID)")
-            fireAgentHookNotification()
+            fireAgentEventNotification()
 
         case "waiting":
             let wsID = try ensureWorkspace()
@@ -707,7 +707,7 @@ struct CLI {
                 workspaceID: wsID, provider: provider, itermSessionID: itermSessionID, codexThreadID: codexThreadID, yabaiWindowID: yabaiWindowID,
                 status: .waiting)
             print("Agent waiting: workspace=\(wsID)")
-            fireAgentHookNotification()
+            fireAgentEventNotification()
 
         case "done":
             let wsID = try ensureWorkspace()
@@ -715,16 +715,16 @@ struct CLI {
                 workspaceID: wsID, provider: provider, itermSessionID: itermSessionID, codexThreadID: codexThreadID, yabaiWindowID: yabaiWindowID,
                 status: .done)
             print("Agent done: workspace=\(wsID)")
-            fireAgentHookNotification()
+            fireAgentEventNotification()
 
         default:
-            throw NSError(domain: "mx.cli", code: 2, userInfo: [NSLocalizedDescriptionKey: "Unknown hook type '\(hookType)'. Use: init|start|waiting|done"])
+            throw NSError(domain: "mx.cli", code: 2, userInfo: [NSLocalizedDescriptionKey: "Unknown event type '\(hookType)'. Use: init|start|waiting|done"])
         }
     }
 
-    private func fireAgentHookNotification() {
+    private func fireAgentEventNotification() {
         DistributedNotificationCenter.default().postNotificationName(
-            IPCNotification.agentHookFired, object: nil, userInfo: nil, options: [.deliverImmediately])
+            IPCNotification.agentEventFired, object: nil, userInfo: nil, options: [.deliverImmediately])
     }
 
     private func requestTooltipOverlayDisplay() {
@@ -819,7 +819,7 @@ struct CLI {
               mx workspace archive [--dir <path>]
               mx workspace focus [--dir <path>] [--window <index>]
 
-              mx agent hook --type init|start|waiting|done [--dir <path>] [--provider iterm2|codex]
+              mx agent event --type init|start|waiting|done [--dir <path>] [--provider iterm2|codex]
 
             Notes:
               - All settings are stored in ~/.muxy/muxy.db.

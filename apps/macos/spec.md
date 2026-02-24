@@ -357,8 +357,8 @@
                             - Note that muxy does not move windows. User choses when and where to move windows. muxy simply moves focus to the window wherever it is on display/space
         - If the most recently focused window belongs to a mx workspace, forward: `cmd+shift+]` or backward: `cmd+shift+[`  keyboard shortcuts loop through windows belonging to that workspace
         - When a text input is focused, default text-edit shortcuts (copy/cut/paste/select-all/undo/redo) must keep working and should not be intercepted by app-level hotkey handling
-- Agent Hook (`mx agent hook`)
-    - Coding agents (Claude Code CLI, OpenAI Codex Desktop) call `mx agent hook --type <type>` to register lifecycle events with Muxy.
+- Agent Event (`mx agent event`)
+    - Coding agents (Claude Code CLI, OpenAI Codex Desktop) call `mx agent event --type <type>` to register lifecycle events with Muxy.
     - Hook types: `init` (agent started), `start` (task running), `waiting` (needs human review), `done` (task finished).
     - Provider is auto-detected from environment:
         - `__CFBundleIdentifier=com.openai.codex` → Codex provider.

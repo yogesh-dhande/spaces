@@ -179,11 +179,11 @@ mx workspace stop --dir /path/to/workspace
 mx workspace archive --dir /path/to/workspace
 mx workspace focus --dir /path/to/workspace [--window 2]
 
-# Agent lifecycle hooks (called by coding agents to report status)
-mx agent hook --type init    [--dir /path/to/workspace] [--provider iterm2|codex]
-mx agent hook --type start   [--dir /path/to/workspace]
-mx agent hook --type waiting [--dir /path/to/workspace]
-mx agent hook --type done    [--dir /path/to/workspace]
+# Agent lifecycle events (called by coding agents to report status)
+mx agent event --type init    [--dir /path/to/workspace] [--provider iterm2|codex]
+mx agent event --type start   [--dir /path/to/workspace]
+mx agent event --type waiting [--dir /path/to/workspace]
+mx agent event --type done    [--dir /path/to/workspace]
 ```
 
 For git projects, `workspace create` requires `--branch`; `--target-branch` defaults to `main`/`master` when available.

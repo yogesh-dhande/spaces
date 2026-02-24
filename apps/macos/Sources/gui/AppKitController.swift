@@ -93,7 +93,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     private var availableUpdate: UpdateInfo?
     private var tooltipWindow: NSWindow?
     private var tooltipIPCObserver: NSObjectProtocol?
-    private var agentHookIPCObserver: NSObjectProtocol?
+    private var agentEventIPCObserver: NSObjectProtocol?
     private var didStartBackgroundServices = false
     private var sidebarReloadTask: Task<Void, Never>?
     private var pendingSidebarReloadRequest = false
@@ -162,7 +162,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         )
         setupShortcutMonitor()
         setupTooltipIPCObserver()
-        setupAgentHookIPCObserver()
+        setupAgentEventIPCObserver()
         Task { @MainActor [weak self] in
             await self?.loadInitialSidebarData()
         }
@@ -182,9 +182,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             DistributedNotificationCenter.default().removeObserver(tooltipIPCObserver)
             self.tooltipIPCObserver = nil
         }
-        if let agentHookIPCObserver {
-            DistributedNotificationCenter.default().removeObserver(agentHookIPCObserver)
-            self.agentHookIPCObserver = nil
+        if let agentEventIPCObserver {
+            DistributedNotificationCenter.default().removeObserver(agentEventIPCObserver)
+            self.agentEventIPCObserver = nil
         }
     }
 
@@ -200,9 +200,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         }
     }
 
-    private func setupAgentHookIPCObserver() {
-        agentHookIPCObserver = DistributedNotificationCenter.default().addObserver(
-            forName: IPCNotification.agentHookFired,
+    private func setupAgentEventIPCObserver() {
+        agentEventIPCObserver = DistributedNotificationCenter.default().addObserver(
+            forName: IPCNotification.agentEventFired,
             object: nil,
             queue: .main
         ) { [weak self] _ in
