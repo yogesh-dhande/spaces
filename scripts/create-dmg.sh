@@ -35,6 +35,9 @@ chmod +x "$app_bundle/Contents/MacOS/Muxy"
 # Copy Info.plist
 cp apps/macos/Sources/Muxy/Info.plist "$app_bundle/Contents/Info.plist"
 
+# Copy app icon
+cp apps/macos/Sources/Muxy/AppIcon.icns "$app_bundle/Contents/Resources/AppIcon.icns"
+
 # Create CLI installer package
 cli_installer="$staging/Install mx CLI"
 cat > "$cli_installer" << 'EOF'

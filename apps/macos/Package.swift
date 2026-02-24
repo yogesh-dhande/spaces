@@ -32,6 +32,7 @@ let package = Package(
                 .product(name: "Sparkle", package: "Sparkle")
             ],
             exclude: ["Info.plist"],
+            resources: [.copy("AppIcon.icns")],
             linkerSettings: [
                 .unsafeFlags([
                     "-Xlinker", "-sectcreate",
