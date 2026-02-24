@@ -847,7 +847,38 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertEqual(updated?.status, .exited)
         XCTAssertNotNil(updated?.exitedAt)
     }
-    
+
+    // Tests that status check results are marked as red when a process exits, so they don't stay green.
+    func testCheckAndUpdateProcessStatusesMarksStatusResultsAsFailedOnExit() throws {
+        let root = try makeTempDirectory()
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let store = try makeTemporaryStore()
+        let orchestrator = MuxyOrchestrator(store: store)
+
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
+
+        // Create a dead process with a previously-green status result
+        let deadProcess = RunningProcessRecord(
+            id: UUID().uuidString, workspaceID: workspace.id, templateName: "api", command: "npm start",
+            terminalApp: "iTerm2", windowID: 123, pid: 99999, status: .running, logPath: nil,
+            lastOutputAt: nil, startedAt: ISO8601DateFormatter().string(from: Date().addingTimeInterval(-20)), exitedAt: nil)
+        try store.upsert(runningProcess: deadProcess)
+
+        // Simulate a previously-passing status check result
+        let greenResult = StatusResult(processID: deadProcess.id, checkName: "health", status: "green", message: nil, lastRunAt: ISO8601DateFormatter().string(from: Date()))
+        try store.upsert(statusResult: greenResult)
+
+        let didUpdate = try orchestrator.checkAndUpdateProcessStatuses()
+
+        XCTAssertTrue(didUpdate)
+        let results = try store.statusResults(processID: deadProcess.id)
+        XCTAssertEqual(results.count, 1)
+        // Status result must be red after process exit — not stale green
+        XCTAssertEqual(results.first?.status, "red")
+    }
+
     // Tests check and update process statuses skips newly started processes by arranging representative inputs and asserting the expected result.
     func testCheckAndUpdateProcessStatusesSkipsNewlyStartedProcesses() throws {
         let root = try makeTempDirectory()

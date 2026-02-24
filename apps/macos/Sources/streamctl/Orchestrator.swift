@@ -841,8 +841,10 @@ public final class MuxyOrchestrator {
                             exitedAt: nowISO8601()
                         )
                         try store.upsert(runningProcess: updatedProcess)
+                        // Mark status check results as failed so they reflect the process exit.
+                        try store.markStatusResultsAsFailed(processID: process.id)
                         didUpdate = true
-                        
+
                         // Handle on-exit behavior for the process
                         try handleProcessExit(workspaceID: workspace.id, process: updatedProcess, project: project, workspace: workspace)
                     }

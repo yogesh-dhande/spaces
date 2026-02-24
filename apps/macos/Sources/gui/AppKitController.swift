@@ -2485,7 +2485,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 if let process = linkedProcess {
                     let checks = statusResultsByProcessID[process.id] ?? []
                     for check in checks {
-                        let checkColor: NSColor = check.status == "green" ? .systemGreen : .systemRed
+                        let isHealthy = check.status == "green" && process.status != .exited
+                        let checkColor: NSColor = isHealthy ? .systemGreen : .systemRed
                         let checkRow = statusCheckSubRow(name: check.checkName, color: checkColor, status: check.status)
                         windowsStack.addArrangedSubview(checkRow)
                         constrainFormFieldToFillWidth(checkRow, in: windowsStack)
@@ -2568,7 +2569,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
                 let checks = statusResultsByProcessID[process.id] ?? []
                 for check in checks {
-                    let checkColor: NSColor = check.status == "green" ? .systemGreen : .systemRed
+                    let isHealthy = check.status == "green" && process.status != .exited
+                    let checkColor: NSColor = isHealthy ? .systemGreen : .systemRed
                     let checkRow = statusCheckSubRow(name: check.checkName, color: checkColor, status: check.status)
                     processesStack.addArrangedSubview(checkRow)
                     constrainFormFieldToFillWidth(checkRow, in: processesStack)

@@ -506,6 +506,10 @@ public final class SQLiteStore {
             bindings: [statusResult.processID, statusResult.checkName, statusResult.status, statusResult.message ?? "", statusResult.lastRunAt ?? ""])
     }
 
+    public func markStatusResultsAsFailed(processID: String) throws {
+        try execute(sql: "UPDATE status_results SET status = 'red', message = 'Process exited' WHERE process_id = ?", bindings: [processID])
+    }
+
     public func statusResults(processID: String) throws -> [StatusResult] {
         let rows = try queryRows(
             sql: "SELECT process_id, check_name, status, message, last_run_at FROM status_results WHERE process_id = ?", bindings: [processID])
