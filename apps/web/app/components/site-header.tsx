@@ -3,8 +3,8 @@ import Link from "next/link";
 import MuxyLogo from "../muxy.svg";
 
 const navItems = [
-  { href: "/#problem", label: "Problem" },
-  { href: "/#solution", label: "Solution" },
+  { href: "/#features", label: "Features" },
+  { href: "/#faq", label: "FAQ" },
   { href: "/docs", label: "Docs" },
   {
     href: "/releases/latest",

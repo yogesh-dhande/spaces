@@ -112,9 +112,9 @@ export default function HomePage() {
           id="problem"
           className="rounded-3xl border border-line bg-surface/86 p-7 backdrop-blur-sm md:p-8"
         >
-          <h2 className="mt-3 text-2xl font-semibold tracking-tight">
+          <h3 className="mt-3 text-2xl font-semibold tracking-tight">
             Development is no longer about typing code.
-          </h2>
+          </h3>
           <p>
              It's about managing context.
           </p>
@@ -127,9 +127,9 @@ export default function HomePage() {
 
         {/* ── Problem: The Friction ── */}
         <section className="rounded-3xl border border-line bg-surface/86 p-7 backdrop-blur-sm md:p-8">
-          <h2 className="mt-3 text-2xl font-semibold tracking-tight">
+          <h3 className="mt-3 text-2xl font-semibold tracking-tight">
             Context gets scattered, then lost
-          </h2>
+          </h3>
           <div className="mt-5 max-w-3xl space-y-4 text-sm leading-6 text-foreground-soft md:text-base md:leading-7">
             <p>
               A single feature ends up scattered across terminal tabs, editor
@@ -148,9 +148,9 @@ export default function HomePage() {
         </section>
 
         <section className="rounded-3xl border border-line bg-surface/86 p-7 backdrop-blur-sm md:p-8">
-          <h2 className="mt-3 text-2xl font-semibold tracking-tight">
+          <h3 className="mt-3 text-2xl font-semibold tracking-tight">
             Meanwhile, small frictions compound
-          </h2>
+          </h3>
           <div className="mt-5 max-w-3xl space-y-4 text-sm leading-6 text-foreground-soft md:text-base md:leading-7">
             <ul className="ml-5 space-y-1.5 text-sm leading-6">
               <li>• Port collisions quietly break local flows</li>
@@ -164,8 +164,8 @@ export default function HomePage() {
           </div>
         </section>
 
-        <section className="rounded-3xl border border-line bg-surface/86 p-7 backdrop-blur-sm md:p-8">
-          <h2 className="mt-3 text-2xl font-semibold tracking-tight">
+        <section className="mt-8 md:mt-16">
+          <h2 className="mt-3 text-3xl md:text-4xl font-semibold tracking-tight">
             Introducing Muxy
           </h2>
           <div className="mt-5 max-w-3xl space-y-4 text-sm leading-6 text-foreground-soft md:text-base md:leading-7">
@@ -176,16 +176,6 @@ export default function HomePage() {
               Switch between branches and tasks instantly—without port collisions or lost context.
             </p>
           </div>
-        </section>
-
-        {/* ── Problem: Visualized ── */}
-        <section className="rounded-3xl border border-line bg-surface/86 p-7 backdrop-blur-sm md:p-8">
-          <p className="font-mono text-xs uppercase tracking-[0.16em] text-foreground-soft">
-            Side by Side
-          </p>
-          <h2 className="mt-3 text-2xl font-semibold tracking-tight">
-            Where time actually goes
-          </h2>
           <div className="mt-6">
             <ProblemSimulation />
           </div>
@@ -194,7 +184,7 @@ export default function HomePage() {
         {/* ── How It Works ── */}
         <section
           id="solution"
-          className="rounded-3xl border border-line bg-surface/86 p-7 backdrop-blur-sm md:p-8"
+          className="my-8 md:my-16 rounded-3xl border border-line bg-surface/86 p-7 backdrop-blur-sm md:p-8"
         >
           <p className="font-mono text-xs uppercase tracking-[0.16em] text-foreground-soft">
             How It Works
@@ -238,7 +228,7 @@ export default function HomePage() {
         </section>
 
         {/* ── App Preview ── */}
-        <section className="rounded-3xl border border-line bg-surface/86 p-7 backdrop-blur-sm md:p-8">
+        <section className="rounded-3xl my-8 md:my-16 ">
           <p className="font-mono text-xs uppercase tracking-[0.16em] text-foreground-soft">
             In Action
           </p>
@@ -254,13 +244,16 @@ export default function HomePage() {
         </section>
 
         {/* ── Features ── */}
-        <section className="rounded-3xl border border-line bg-surface/86 p-7 backdrop-blur-sm md:p-8">
+        <section id="features" className="my-8 md:my-16 rounded-3xl border border-line bg-surface/86 p-7 backdrop-blur-sm md:p-8">
           <p className="font-mono text-xs uppercase tracking-[0.16em] text-foreground-soft">
             Key Features
           </p>
           <h2 className="mt-3 text-3xl font-semibold tracking-tight">
             Built for parallel streams of work
           </h2>
+          <p className="mt-3 max-w-3xl text-sm leading-6 text-foreground-soft md:text-base md:leading-7">
+            Muxy manages repos, worktrees, ports, processes, and windows. So you can focus on your work.
+          </p>
           <div className="mt-6 grid gap-4 md:grid-cols-2">
             {keyFeatures.map((feature) => (
               <article
@@ -278,12 +271,126 @@ export default function HomePage() {
           </div>
         </section>
 
+        {/* ── FAQ ── */}
+        <section
+          id="faq"
+          className="my-8 md:my-16 rounded-3xl backdrop-blur-sm"
+        >
+          <p className="font-mono text-xs uppercase tracking-[0.16em] text-foreground-soft">
+            FAQ
+          </p>
+          <h2 className="mt-3 text-3xl font-semibold tracking-tight">
+            Common questions
+          </h2>
+          <div className="mt-6 space-y-2">
+
+            <details className="group rounded-xl border border-line bg-surface/75">
+              <summary className="flex cursor-pointer select-none list-none items-center justify-between px-4 py-3.5 text-sm font-semibold text-foreground">
+                How much does it cost?
+                <span aria-hidden className="ml-3 shrink-0 text-foreground-soft transition-transform duration-200 group-open:rotate-180">▾</span>
+              </summary>
+              <div className="border-t border-line px-4 pb-4 pt-3 text-sm leading-7 text-foreground-soft">
+                Muxy is free!
+              </div>
+            </details>
+
+            <details className="group rounded-xl border border-line bg-surface/75">
+              <summary className="flex cursor-pointer select-none list-none items-center justify-between px-4 py-3.5 text-sm font-semibold text-foreground">
+                What are the system requirements?
+                <span aria-hidden className="ml-3 shrink-0 text-foreground-soft transition-transform duration-200 group-open:rotate-180">▾</span>
+              </summary>
+              <div className="border-t border-line px-4 pb-4 pt-3 text-sm leading-7 text-foreground-soft">
+                <ul className="ml-4 list-disc space-y-1">
+                  <li>macOS 14 Sonoma or later</li>
+                  <li><a href="https://github.com/koekeishiya/yabai" className="text-accent hover:underline">yabai</a> — an open-source window manager used for window tracking and focus switching</li>
+                  <li><a href="https://iterm2.com" className="text-accent hover:underline">iTerm2</a></li>
+                </ul>
+              </div>
+            </details>
+
+            <details className="group rounded-xl border border-line bg-surface/75">
+              <summary className="flex cursor-pointer select-none list-none items-center justify-between px-4 py-3.5 text-sm font-semibold text-foreground">
+                What is yabai? Why does it need accessibility permissions?
+                <span aria-hidden className="ml-3 shrink-0 text-foreground-soft transition-transform duration-200 group-open:rotate-180">▾</span>
+              </summary>
+              <div className="border-t border-line px-4 pb-4 pt-3 text-sm leading-7 text-foreground-soft">
+                <a href="https://github.com/koekeishiya/yabai" className="text-accent hover:underline">yabai</a> is an open-source macOS window management utility. Muxy uses it to bring the right window to the front when you switch workspaces.
+                macOS requires accessibility permissions before any app can programmatically control windows on behalf of other processes — yabai uses this to perform focus switching on Muxy&apos;s behalf.
+              </div>
+            </details>
+
+            <details className="group rounded-xl border border-line bg-surface/75">
+              <summary className="flex cursor-pointer select-none list-none items-center justify-between px-4 py-3.5 text-sm font-semibold text-foreground">
+                Can I use it with CLI coding agents like Claude Code or Codex CLI?
+                <span aria-hidden className="ml-3 shrink-0 text-foreground-soft transition-transform duration-200 group-open:rotate-180">▾</span>
+              </summary>
+              <div className="border-t border-line px-4 pb-4 pt-3 text-sm leading-7 text-foreground-soft">
+                Yes. Open a terminal inside any workspace with{" "}
+                <kbd className="inline-flex items-center rounded border border-line bg-surface px-1.5 py-0.5 font-mono text-xs leading-none">⌘⇧T</kbd>{" "}
+                and start your agent as normal. The terminal window is automatically attached to the workspace so you can jump back to it with keyboard shortcuts at any time.
+                To let the agent set workspace tooltips and signal its status, add the{" "}
+                <Link href="/docs/cli" className="text-accent hover:underline">Muxy agent instructions</Link>{" "}
+                to your project&apos;s AGENTS.md. See the{" "}
+                <Link href="/docs/guides" className="text-accent hover:underline">cookbook guides</Link>{" "}
+                for step-by-step setup.
+              </div>
+            </details>
+
+            <details className="group rounded-xl border border-line bg-surface/75">
+              <summary className="flex cursor-pointer select-none list-none items-center justify-between px-4 py-3.5 text-sm font-semibold text-foreground">
+                Can I use it with the Codex app?
+                <span aria-hidden className="ml-3 shrink-0 text-foreground-soft transition-transform duration-200 group-open:rotate-180">▾</span>
+              </summary>
+              <div className="border-t border-line px-4 pb-4 pt-3 text-sm leading-7 text-foreground-soft">
+                Yes. Muxy works alongside the Codex app — it automatically imports Codex worktrees as workspaces. See the{" "}
+                <Link href="/docs/guides" className="text-accent hover:underline">cookbook guides</Link>{" "}
+                for a detailed walkthrough.
+              </div>
+            </details>
+
+            <details className="group rounded-xl border border-line bg-surface/75">
+              <summary className="flex cursor-pointer select-none list-none items-center justify-between px-4 py-3.5 text-sm font-semibold text-foreground">
+                Can I use it with Conductor?
+                <span aria-hidden className="ml-3 shrink-0 text-foreground-soft transition-transform duration-200 group-open:rotate-180">▾</span>
+              </summary>
+              <div className="border-t border-line px-4 pb-4 pt-3 text-sm leading-7 text-foreground-soft">
+                Yes. You can use Conductor to create worktrees and write code. Muxy will automatically import them as workspaces so you can manage windows and context with Muxy. 
+                We recommend using Muxy setup scripts and processes to configure workspaces and leaving Conductor setup and run scripts empty. See the{" "}
+                <Link href="/docs/guides" className="text-accent hover:underline">cookbook guides</Link>{" "}
+                for a detailed walkthrough.
+              </div>
+            </details>
+
+            <details className="group rounded-xl border border-line bg-surface/75">
+              <summary className="flex cursor-pointer select-none list-none items-center justify-between px-4 py-3.5 text-sm font-semibold text-foreground">
+                Do you collect any data?
+                <span aria-hidden className="ml-3 shrink-0 text-foreground-soft transition-transform duration-200 group-open:rotate-180">▾</span>
+              </summary>
+              <div className="border-t border-line px-4 pb-4 pt-3 text-sm leading-7 text-foreground-soft">
+                No. Muxy is a native desktop app that runs entirely on your Mac. It does not send any data back to Muxy or any third party.
+              </div>
+            </details>
+
+            <details className="group rounded-xl border border-line bg-surface/75">
+              <summary className="flex cursor-pointer select-none list-none items-center justify-between px-4 py-3.5 text-sm font-semibold text-foreground">
+                Where do I send bug reports?
+                <span aria-hidden className="ml-3 shrink-0 text-foreground-soft transition-transform duration-200 group-open:rotate-180">▾</span>
+              </summary>
+              <div className="border-t border-line px-4 pb-4 pt-3 text-sm leading-7 text-foreground-soft">
+                Email <a href="mailto:support@muxy.dev" className="text-accent hover:underline">support@muxy.dev</a>.
+              </div>
+            </details>
+
+          </div>
+        </section>
+
         {/* ── CTA ── */}
         <section className="rounded-3xl border border-line bg-surface/88 p-8 text-center backdrop-blur-sm md:p-10">
           <h2 className="text-3xl font-semibold tracking-tight">
-            Fewer context resets. More real building.
+            Build faster with Muxy
           </h2>
           <p className="mx-auto mt-3 max-w-3xl text-sm leading-7 text-foreground-soft md:text-base">
+            Muxy helps you build faster by managing context and reducing chaos.
           </p>
           <div className="mt-6 flex flex-wrap justify-center gap-3">
             <Link

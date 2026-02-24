@@ -59,7 +59,7 @@ function statusLabel(status: WorkspaceItem["status"]) {
 
 export function AppHeroPreview() {
   return (
-    <div className="max-w-2xl mx-auto app-hero-preview rounded-2xl bg-surface p-3 shadow-[0_22px_45px_-34px_color-mix(in_oklab,var(--ink)_45%,transparent)]">
+    <div className="app-hero-preview rounded-2xl bg-surface p-3 shadow-[0_22px_45px_-34px_color-mix(in_oklab,var(--ink)_45%,transparent)]">
       <div className="app-hero-stage">
         <div className="app-hero-scene app-hero-scene-app">
           <div className="app-hero-topbar">
@@ -201,7 +201,9 @@ function WorkspaceState({ workspace, windows }: WorkspaceStateProps) {
       <div className="app-state-window-list">
         {windows.map((item, i) => (
           <div key={`${workspace.id}-${item.label}`} className="app-window-row">
-            <span className={`app-window-kind app-window-kind-${item.kind}`}>
+            <span className="text-[0.4rem] font-mono text-foreground-soft/90 px-2">CMD+{i + 1}</span>
+            <div className="flex justify-start items-center">
+              <span className={`app-window-kind app-window-kind-${item.kind}`}>
               {item.kind === "browser" && (
                 <svg viewBox="0 0 16 16" width="14" height="14" aria-label="Browser">
                   <circle cx="8" cy="8" r="6.5" fill="none" stroke="currentColor" strokeWidth="1.2" />
@@ -224,9 +226,7 @@ function WorkspaceState({ workspace, windows }: WorkspaceStateProps) {
                 </svg>
               )}
             </span>
-            <div className="flex justify-between items-center">
               <p className="app-window-label">{item.label}</p>
-              <p className="text-[0.4rem] font-mono text-foreground-soft/90 px-2">CMD+{i + 1}</p>
             </div>
           </div>
         ))}

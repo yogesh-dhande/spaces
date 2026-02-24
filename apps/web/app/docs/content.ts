@@ -90,13 +90,6 @@ export const docsPageLinks: DocsPageLink[] = [
     audience: "Anyone debugging launch, capture, process, or focus issues.",
   },
   {
-    href: "/docs/faq",
-    title: "FAQ",
-    summary:
-      "Answer common workflow questions and clarify boundaries and non-goals.",
-    audience: "Teams evaluating fit and defining internal usage conventions.",
-  },
-  {
     href: "/docs/guides",
     title: "Cookbook Guides",
     summary:
@@ -126,7 +119,6 @@ export const docsPublishingOrder = [
   "Browser Sessions",
   "Keyboard Shortcuts",
   "Troubleshooting",
-  "FAQ",
   "Cookbook Guides",
   "CLI Reference",
 ];
