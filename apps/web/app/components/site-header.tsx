@@ -1,4 +1,6 @@
+import Image from "next/image";
 import Link from "next/link";
+import MuxyLogo from "../muxy.svg";
 
 const navItems = [
   { href: "/#problem", label: "Problem" },
@@ -16,9 +18,10 @@ export function SiteHeader() {
     <header className="mx-auto flex w-full max-w-6xl items-center justify-between px-6 py-6">
       <Link
         href="/"
-        className="rounded-full border border-line bg-surface px-4 py-2 text-sm font-semibold tracking-wide shadow-[0_1px_0_0_color-mix(in_oklab,var(--line)_68%,transparent)] transition-colors hover:border-accent"
+        className="flex items-center gap-2 rounded-full border border-line bg-surface px-4 py-2 text-sm font-semibold tracking-wide shadow-[0_1px_0_0_color-mix(in_oklab,var(--line)_68%,transparent)] transition-colors hover:border-accent"
       >
-        Muxy
+        <Image src={MuxyLogo} alt="" width={24} height={24} />
+        <div>Muxy</div>
       </Link>
       <nav className="flex items-center gap-1 rounded-full border border-line bg-surface/75 p-1 text-sm text-foreground-soft backdrop-blur-sm">
         {navItems.map((item) =>

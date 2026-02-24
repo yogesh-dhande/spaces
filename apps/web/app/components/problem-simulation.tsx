@@ -4,17 +4,17 @@ type FlowStep = {
 };
 
 const beforeSteps: FlowStep[] = [
-  { title: "Find UI Tab", text: "Track down the browser tab for the right project." },
-  { title: "Find Editor", text: "Locate the matching editor window and repo tab." },
+  { title: "Find UI Tab", text: "Track down the browser tab for the right feature/project." },
+  { title: "Find Editor", text: "Locate the matching editor window." },
   { title: "Find Agent", text: "Figure out which terminal/agent session made the change." },
-  { title: "Fix Ports", text: "Resolve :3000 collisions and re-check redirects." },
+  { title: "Port Collisions", text: "Resolve :3000 collisions and update port references for relatedservices." },
 ];
 
 const afterSteps: FlowStep[] = [
   { title: "Open Workspace", text: "Jump straight to the workspace for this feature." },
-  { title: "Open Window", text: "Bring up its browser/editor/terminal from one place." },
+  { title: "Open Window", text: "Bring up its browser/editor/terminal/agent with a keyboard shortcut." },
   { title: "Cycle Fast", text: "Switch within that workspace using keyboard shortcuts." },
-  { title: "Stay Stable", text: "Use workspace-owned ports and env without drift." },
+  { title: "Stable Ports", text: "Use workspace-owned ports and env without drift." },
 ];
 
 export function ProblemSimulation() {
@@ -23,13 +23,13 @@ export function ProblemSimulation() {
       <div className="mt-4 grid gap-4 md:grid-cols-2">
         <FlowColumn
           tone="before"
-          title="Without Workspace-First Navigation"
+          title="Without Muxy"
           steps={beforeSteps}
-          outcome="Result: context hunt before real progress."
+          outcome="Result: context hunt before real progress begins."
         />
         <FlowColumn
           tone="after"
-          title="With Muxy Workspaces"
+          title="With Muxy"
           steps={afterSteps}
           outcome="Result: stay within context, faster development loop."
         />
@@ -62,7 +62,7 @@ function FlowColumn({ tone, title, steps, outcome }: FlowColumnProps) {
         {steps.map((step, index) => (
           <li
             key={step.title}
-            className="flex items-start gap-2 rounded-lg border border-line/80 bg-surface/75 p-2.5"
+            className="flex items-start gap-2 rounded-lg p-2.5"
           >
             <span
               className={`mt-0.5 inline-flex min-w-7 items-center justify-center rounded-full border px-1.5 py-0.5 text-[0.62rem] font-mono tracking-[0.08em] ${badgeClass}`}
