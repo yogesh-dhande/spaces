@@ -42,7 +42,7 @@ class MockIterm2Adapter: Iterm2Adapter {
     var closedSessionIDs: [String] = []
     var stubbedSessionIDs: Set<String> = []
     
-    override func openWindowAndRun(command: String) throws -> ItermWindowInfo {
+    override func openWindowAndRun(command: String, background: Bool = false) throws -> ItermWindowInfo {
         openWindowAndRunCallCount += 1
         lastCommand = command
         let windowID = nextWindowID

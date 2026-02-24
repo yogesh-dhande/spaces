@@ -353,12 +353,15 @@ struct CLI {
         case "up":
             let id = try workspaceID(orchestrator: orchestrator)
             let shouldRestartIfRunning = args.contains("--restart")
+            let shouldFocus = args.contains("--focus")
             let tooltipFlagPresent = args.contains("--tooltip")
             if let tooltip = optionalValueAllowingMissingValue(for: "--tooltip") {
                 try orchestrator.updateWorkspaceTooltip(workspaceID: id, tooltip: tooltip)
             }
-            try orchestrator.upWorkspace(workspaceID: id, restartIfRunning: shouldRestartIfRunning)
-            try orchestrator.focusWorkspace(workspaceID: id)
+            try orchestrator.upWorkspace(workspaceID: id, restartIfRunning: shouldRestartIfRunning, background: !shouldFocus)
+            if shouldFocus {
+                try orchestrator.focusWorkspace(workspaceID: id)
+            }
             print("Workspace is running \(id)")
             if tooltipFlagPresent {
                 requestTooltipOverlayDisplay()
@@ -814,7 +817,7 @@ struct CLI {
               mx workspace update [--dir <path>] [--title <title>] [--branch <branch>] [--directory-name <name>|--dirname <name>|--dir-name <name>] [--tooltip <text>|--clear-tooltip]
               mx workspace launch [--dir <path>]
               mx workspace restart [--dir <path>]
-              mx workspace up [--dir <path>] [--restart] [--tooltip [<text>]]
+              mx workspace up [--dir <path>] [--restart] [--focus] [--tooltip [<text>]]
               mx workspace stop [--dir <path>]
               mx workspace archive [--dir <path>]
               mx workspace focus [--dir <path>] [--window <index>]
@@ -832,7 +835,7 @@ struct CLI {
               - Launch waits for pending/running setup to complete and fails with the setup error if setup failed.
               - `mx discover` reconciles git worktrees across all registered projects by creating missing workspaces, archiving workspaces whose worktrees are no longer valid, refreshing stored branch names from disk, and running the project `setup_script` for each newly created workspace.
               - Project/workspace `stop_script` runs whenever a workspace is stopped (including restart/archive stop phase), after automatic process termination attempts.
-              - `workspace up` ensures a workspace is running and focused: it launches when stopped, does nothing when already running/stale by default, and with `--restart` runs stop then launch before focusing.
+              - `workspace up` ensures a workspace and all its processes are running: launches when stopped; when already running, restarts any exited processes. Windows open without activating the app. Add `--restart` to force a full stop+launch. Add `--focus` to bring the workspace to the foreground after.
               - If a workspace directory is missing during stop, muxy still stops the workspace, skips `stop_script`, and prints a note.
               - For git projects, `workspace create` requires `--branch`; `--target-branch` defaults to main/master if available.
               - `workspace create --directory-name` (or `--dirname`) overrides the auto-generated git worktree directory name; allowed characters are letters, numbers, '-', and '_', with no spaces.

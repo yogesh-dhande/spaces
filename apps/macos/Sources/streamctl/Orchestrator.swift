@@ -611,7 +611,7 @@ public final class MuxyOrchestrator {
         }
     }
 
-    public func upWorkspace(workspaceID: String, restartIfRunning: Bool = false) throws {
+    public func upWorkspace(workspaceID: String, restartIfRunning: Bool = false, background: Bool = false) throws {
         try withWorkspaceLifecycleLock(workspaceID: workspaceID) {
             let (_, workspace) = try resolveWorkspace(id: workspaceID)
             guard !workspace.isArchived else { throw MuxyError.invalidArgument(message: "Workspace is archived.") }
@@ -619,15 +619,17 @@ public final class MuxyOrchestrator {
             if workspace.isRunning || hasTrackedRuntime {
                 if restartIfRunning {
                     _ = try stopWorkspaceUnlocked(workspaceID: workspaceID)
-                    try launchWorkspaceUnlocked(workspaceID: workspaceID)
+                    try launchWorkspaceUnlocked(workspaceID: workspaceID, background: background)
+                } else {
+                    try restartExitedProcesses(workspaceID: workspaceID, background: background)
                 }
                 return
             }
-            try launchWorkspaceUnlocked(workspaceID: workspaceID)
+            try launchWorkspaceUnlocked(workspaceID: workspaceID, background: background)
         }
     }
 
-    private func launchWorkspaceUnlocked(workspaceID: String) throws {
+    private func launchWorkspaceUnlocked(workspaceID: String, background: Bool = false) throws {
         try waitForWorkspaceSetupToComplete(workspaceID: workspaceID)
         let (project, workspace) = try resolveWorkspace(id: workspaceID)
         guard !workspace.isArchived else { throw MuxyError.invalidArgument(message: "Workspace is archived.") }
@@ -651,7 +653,7 @@ public final class MuxyOrchestrator {
         var windowSnapshot = try yabai.listWindows()
 
         if let config {
-            try launchProcesses(workspace: workspace, templates: config.processes, env: env)
+            try launchProcesses(workspace: workspace, templates: config.processes, env: env, background: background)
             let capturedTerminals = try captureNewWindows(
                 snapshot: windowSnapshot, role: "terminal", appName: "iTerm2", workspaceID: workspace.id, orderOffset: 200)
             newWindows.append(contentsOf: capturedTerminals)
@@ -660,7 +662,8 @@ public final class MuxyOrchestrator {
             windowSnapshot = try yabai.listWindows()
 
             let browserSessionResult = try ensureBrowserSessions(
-                project: project, workspace: workspace, sessions: config.browserSessions, env: env, extractOnAttach: true)
+                project: project, workspace: workspace, sessions: config.browserSessions, env: env, extractOnAttach: true,
+                background: background)
             try store.setWorkspaceBrowserSessions(workspaceID: workspace.id, sessions: browserSessionResult.sessions)
             newWindows.append(contentsOf: browserSessionResult.windows)
             newWindows.append(
@@ -1038,7 +1041,14 @@ public final class MuxyOrchestrator {
         }
     }
     
-    private func restartProcessInTerminal(workspaceID: String, process: RunningProcessRecord) throws {
+    private func restartExitedProcesses(workspaceID: String, background: Bool) throws {
+        let processes = try store.runningProcesses(workspaceID: workspaceID)
+        for process in processes where process.status == .exited {
+            try restartProcessInTerminal(workspaceID: workspaceID, process: process, background: background)
+        }
+    }
+
+    private func restartProcessInTerminal(workspaceID: String, process: RunningProcessRecord, background: Bool = false) throws {
         let (project, workspace) = try resolveWorkspace(id: workspaceID)
         let namedPorts = try store.workspacePortsNamed(workspaceID: workspaceID)
         let env = buildWorkspaceEnv(project: project, workspace: workspace, namedPorts: namedPorts)
@@ -1067,7 +1077,7 @@ public final class MuxyOrchestrator {
         } else {
             // Fallback: create new terminal window when there is no reusable window or shutdown did not complete.
             fputs("muxy: Creating new terminal window for process '\(process.templateName)'\n", stderr)
-            let windowInfo = try iterm.openWindowAndRun(command: command)
+            let windowInfo = try iterm.openWindowAndRun(command: command, background: background)
             let windowID = windowInfo.id
             
             // Read the new PID from the PID file and update the process record
@@ -2377,7 +2387,7 @@ public final class MuxyOrchestrator {
         }
     }
 
-    private func launchProcesses(workspace: WorkspaceRecord, templates: [ProcessTemplate], env: [String: String]) throws {
+    private func launchProcesses(workspace: WorkspaceRecord, templates: [ProcessTemplate], env: [String: String], background: Bool = false) throws {
         guard !templates.isEmpty else {
             try store.deleteRunningProcesses(workspaceID: workspace.id)
             return
@@ -2395,7 +2405,7 @@ public final class MuxyOrchestrator {
             let pidFile = workspaceRuntime.appendingPathComponent("\(safeFilename(name)).pid").path
             let command = shellCommand(base: template.command, cwd: workspace.dir, env: env, logFile: logFile, pidFile: pidFile)
             let snapshot = try yabai.listWindows()
-            let window = try iterm.openWindowAndRun(command: command)
+            let window = try iterm.openWindowAndRun(command: command, background: background)
             let fallbackWindowID = try captureNewWindows(
                 snapshot: snapshot, role: "terminal", appName: "iTerm2", workspaceID: workspace.id, orderOffset: 200
             ).first?.windowID
@@ -2416,7 +2426,8 @@ public final class MuxyOrchestrator {
     }
 
     private func ensureBrowserSessions(
-        project: ProjectRecord, workspace: WorkspaceRecord, sessions: [BrowserSession], env: [String: String], extractOnAttach: Bool
+        project: ProjectRecord, workspace: WorkspaceRecord, sessions: [BrowserSession], env: [String: String], extractOnAttach: Bool,
+        background: Bool = false
     ) throws -> (windows: [WindowRecord], sessions: [BrowserSession])
     {
         _ = project
@@ -2430,7 +2441,7 @@ public final class MuxyOrchestrator {
             var matches = try chrome.windowMatches(forURLPrefix: resolvedSession.prefix)
             let foundExistingTab = !matches.isEmpty
             if matches.isEmpty {
-                _ = try chrome.openWindow(url: resolvedSession.prefix)
+                _ = try chrome.openWindow(url: resolvedSession.prefix, background: background)
                 matches = try chrome.windowMatches(forURLPrefix: resolvedSession.prefix)
             }
             if extractOnAttach, foundExistingTab,

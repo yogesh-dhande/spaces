@@ -278,8 +278,8 @@
         - `workspace up` behavior:
             - default: if workspace is running or has runtime indicators, do nothing
             - with `--restart`: if workspace is running or has runtime indicators, perform restart (stop then launch)
-        - `workspace up` always focuses the workspace after launch/no-op/restart completes
-        - `workspace up --tooltip [text]` optionally updates tooltip text (when text is provided) and shows tooltip overlay after focus
+        - `workspace up` ensures all processes are running: launches the workspace when stopped; when already running, restarts any exited processes in the background. Add `--restart` to force a full stop+launch. Add `--focus` to bring the workspace to the foreground after.
+        - `workspace up --tooltip [text]` optionally updates tooltip text (when text is provided) and shows tooltip overlay (focus not required for overlay)
         - `workspace focus` no longer accepts `--tooltip`; use `workspace update --tooltip ...` (persist-only) or `workspace up --tooltip ...` (run+focus+overlay)
         - allocate and reserve ports for the workspace based on named port definitions. pass those as env variables to each process that is started
         - port allocation happens before setup script so named port env vars are available in setup scripts, stop scripts, process commands, and status check commands

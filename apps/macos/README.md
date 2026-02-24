@@ -174,7 +174,7 @@ mx workspace import [--dir /path/to/worktree] [--title feature-y] [--tooltip "Wo
 mx workspace update --dir /path/to/workspace [--title feature-y] [--branch feature-y] [--directory-name feature_y] [--tooltip "Working on auth" | --clear-tooltip]
 mx workspace launch --dir /path/to/workspace
 mx workspace restart --dir /path/to/workspace
-mx workspace up --dir /path/to/workspace [--restart] [--tooltip "Working on auth flows"]
+mx workspace up --dir /path/to/workspace [--restart] [--focus] [--tooltip "Working on auth flows"]
 mx workspace stop --dir /path/to/workspace
 mx workspace archive --dir /path/to/workspace
 mx workspace focus --dir /path/to/workspace [--window 2]
@@ -192,7 +192,7 @@ For git projects, `workspace create` requires `--branch`; `--target-branch` defa
 `workspace update` updates workspace metadata (`--title`, `--branch`, `--directory-name`/`--dirname`/`--dir-name`, and tooltip values). Default workspaces keep their fixed initial title (`default` for directory projects, `main`/`master` for git-url imports). Protected `main`/`master` branches cannot be renamed.
 `workspace up` is idempotent: it launches a stopped workspace, and otherwise does nothing by default.
 Add `--restart` to force stop+launch when runtime state is already present.
-`workspace up` always focuses the workspace, and `--tooltip [text]` displays the tooltip overlay after focus (updating tooltip text when text is provided).
+`workspace up` ensures the workspace and all its processes are running. When stopped, it launches in the background. When already running, it restarts any exited processes in the background without touching healthy ones. Add `--restart` to force a full stop+launch. Add `--focus` to bring the workspace to the foreground. `--tooltip [text]` displays the tooltip overlay (updating tooltip text when text is provided).
 `mx discover` scans all registered git projects and reconciles worktrees by creating missing workspaces, archiving workspaces whose worktrees are no longer valid, and refreshing workspace branch names from disk.
 When tooltip overlay is shown for focused workspace, it always displays workspace title as the title; when tooltip text is set, it is shown as body content.
 

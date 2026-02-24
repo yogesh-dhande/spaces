@@ -2504,7 +2504,7 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertTrue(try orchestrator.runningProcesses(workspaceID: workspace.id).isEmpty)
     }
 
-    // Tests up workspace does nothing when runtime indicators exist and restart is disabled by arranging representative inputs and asserting the expected result.
+    // Tests up workspace does nothing to running processes when runtime indicators exist and restart is disabled by arranging representative inputs and asserting the expected result.
     func testUpWorkspaceDoesNothingWhenRuntimeIndicatorsExistByDefault() throws {
         let (orchestrator, store, _, workspace, _) = try makeOrchestratorWithWorkspace()
         try store.upsert(
@@ -2518,6 +2518,25 @@ final class OrchestratorTests: XCTestCase {
 
         XCTAssertEqual(try store.workspace(id: workspace.id)?.isRunning, false)
         XCTAssertEqual(try orchestrator.runningProcesses(workspaceID: workspace.id).count, 1)
+    }
+
+    // Tests up workspace restarts exited processes when workspace is running by arranging representative inputs and asserting the expected result.
+    func testUpWorkspaceRestartsExitedProcessesWhenRunning() throws {
+        let (orchestrator, store, _, workspace, _) = try makeOrchestratorWithWorkspace()
+        try store.updateWorkspaceRunning(id: workspace.id, isRunning: true, launchedAt: "now")
+        try store.upsert(
+            runningProcess: RunningProcessRecord(
+                id: UUID().uuidString, workspaceID: workspace.id, templateName: "web", command: "echo web", terminalApp: "iTerm2", windowID: nil,
+                pid: nil, status: .exited, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: "now"))
+
+        try withMockCommands(["yabai": Self.orchestratorYabaiMockScript, "osascript": Self.orchestratorOsaScriptMock]) {
+            try orchestrator.upWorkspace(workspaceID: workspace.id)
+        }
+
+        let processes = try orchestrator.runningProcesses(workspaceID: workspace.id)
+        XCTAssertEqual(processes.count, 1)
+        XCTAssertEqual(processes.first?.status, .running)
+        XCTAssertEqual(processes.first?.templateName, "web")
     }
 
     // Tests up workspace restarts when runtime indicators exist and restart is enabled by arranging representative inputs and asserting the expected result.

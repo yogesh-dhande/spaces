@@ -5,11 +5,12 @@ open class Iterm2Adapter: @unchecked Sendable {
 
     open func isAvailable() -> Bool { (try? AppleScript.run("tell application \"iTerm2\" to version")) != nil }
 
-    open func openWindowAndRun(command: String) throws -> ItermWindowInfo {
+    open func openWindowAndRun(command: String, background: Bool = false) throws -> ItermWindowInfo {
         let escaped = command.replacingOccurrences(of: "\"", with: "\\\"")
+        let activateLine = background ? "" : "activate"
         let script = """
             tell application "iTerm2"
-              activate
+              \(activateLine)
               set newWindow to (create window with default profile)
               tell current session of newWindow
                 write text "\(escaped)"

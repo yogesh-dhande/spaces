@@ -5,11 +5,12 @@ public final class ChromeAdapter {
 
     public func isAvailable() -> Bool { (try? AppleScript.run("tell application \"Google Chrome\" to version")) != nil }
 
-    public func openWindow(url: String) throws -> Int {
+    public func openWindow(url: String, background: Bool = false) throws -> Int {
         let escaped = url.replacingOccurrences(of: "\"", with: "\\\"")
+        let activateLine = background ? "" : "activate"
         let script = """
             tell application "Google Chrome"
-              activate
+              \(activateLine)
               set newWindow to make new window
               set URL of active tab of newWindow to "\(escaped)"
               return id of newWindow

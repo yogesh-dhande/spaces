@@ -37,7 +37,7 @@ export const docsPageLinks: DocsPageLink[] = [
     href: "/docs/workspace-lifecycle",
     title: "Workspace Lifecycle",
     summary:
-      "Create, launch, ensure-running (`workspace up` with optional `--restart`), stop, restart, archive, and restore workspace behavior, including deferred setup during GUI create, launch waiting for setup completion, and optimistic archive removal in the GUI with archive-progress overlay feedback while cleanup runs in the background.",
+      "Create, launch, ensure-running (`workspace up` with optional `--restart` and `--focus`), stop, restart, archive, and restore workspace behavior, including deferred setup during GUI create, launch waiting for setup completion, and optimistic archive removal in the GUI with archive-progress overlay feedback while cleanup runs in the background.",
     audience: "Developers managing multiple long-lived workstreams.",
   },
   {
