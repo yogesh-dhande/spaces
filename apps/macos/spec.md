@@ -9,7 +9,7 @@
         - windows management for workspace - quickly switch to the correct set of windows for feature in mind
         - reduce overhead of context switching
         - notifications for when things are ready for human eyes (e.g. coding agent is idle or server process has exited) so time is not wasted
-        - dashboard showing all attention items (exited processes, failed status checks) across all running workspaces so issues are visible at a glance without navigating each workspace
+        - dashboard showing all attention items (exited processes, failed status checks across running workspaces, plus coding-agent `waiting`/`done` items even when the workspace is stopped) so issues are visible at a glance without navigating each workspace
 - Non-goals
     - muxy does **not** manage window geometry or tiling (delegated to user/yabai)
     - muxy does **not** attempt to restore exact tab ordering inside browsers

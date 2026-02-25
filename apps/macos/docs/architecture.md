@@ -92,12 +92,12 @@ GUI interaction notes:
 - The left pane includes a **Dashboard** sidebar row pinned above the Projects section header.
   - Clicking the Dashboard row opens the dashboard detail in the right pane (same navigation model as selecting a project or workspace).
   - The row shows a red count badge when there are attention items; the badge is hidden when the count is zero.
-  - The dashboard detail shows attention items: processes that have exited or have failing (`failed`) status checks, across all running workspaces.
+  - The dashboard detail shows attention items: processes that have exited or have failing (`failed`) status checks across running workspaces, plus agent windows in `waiting`/`done` status even when their workspace is not currently running.
   - Attention items are grouped by workspace (showing `project / workspace` as the group header).
   - Items within each group are sorted by most recent event timestamp (exited-at for exited processes; most-recent failed check run-at for check failures), most recent first; groups are sorted by their most-recent item.
   - Each attention entry uses the same `windowRow` / `statusCheckSubRow` UI elements as the Run tab.
   - Keyboard shortcut badges are renumbered sequentially (`CMD+1`, `CMD+2`, …) across all items in the entire dashboard view (not per-workspace) to avoid duplicates.
-  - An empty-state view (`checkmark.circle.fill`) is shown when all running workspaces are healthy.
+  - An empty-state view (`checkmark.circle.fill`) is shown when there are no dashboard attention items.
   - The dashboard row appearance updates to reflect the selected state; selecting any project or workspace deselects the Dashboard row and restores normal workspace card styling.
   - When the dashboard is open, all workspace cards in the left pane are rendered without selected styling (`outlineView.reloadData()` is called when entering dashboard mode to ensure this).
   - `CMD+Shift+D` opens the dashboard from anywhere in the app; a `⌘⇧D` hint is shown inline on the dashboard row.

@@ -62,7 +62,7 @@ export const docsPageLinks: DocsPageLink[] = [
     href: "/docs/dashboard",
     title: "Dashboard",
     summary:
-      "See every failing process and unhealthy check across all running workspaces in one place.",
+      "See failing processes/checks from running workspaces plus waiting/done coding agents, even when a workspace is stopped.",
   },
   {
     href: "/docs/shortcuts",

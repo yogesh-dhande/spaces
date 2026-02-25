@@ -77,7 +77,7 @@ Muxy periodically discovers and reconciles git worktrees for existing projects. 
 - If the selected branch exists only on remote, muxy fetches it first and then creates the worktree from `origin/<branch>`.
 - If the branch exists locally, muxy uses the local branch as-is (no implicit pull/rebase/merge during workspace creation).
 - The left panel shows a **Dashboard** row pinned above the Projects section.
-  - Clicking it opens the dashboard detail in the right pane, showing attention items (exited processes and failing status checks) across all running workspaces.
+  - Clicking it opens the dashboard detail in the right pane, showing attention items (exited processes and failing status checks) across running workspaces, plus coding-agent items in `waiting`/`done` status even if their workspace is not currently running.
   - Items are grouped by workspace (`project / workspace` header), sorted most-recent-first by event timestamp.
   - Uses the same window-row and status-check-sub-row UI as the Run tab; keyboard shortcut badges are renumbered sequentially (CMD+1, CMD+2…) across all items to avoid duplicates.
   - A red count badge appears on the Dashboard row when there are attention items; hidden when all workspaces are healthy.

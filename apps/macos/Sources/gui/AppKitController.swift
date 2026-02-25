@@ -858,10 +858,14 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         for project in projects {
             let workspaces = workspacesByProject[project.id] ?? []
             for workspace in workspaces {
-                guard workspace.isRunning else { continue }
-                let processes = (try? orchestrator.runningProcesses(workspaceID: workspace.id)) ?? []
-                let windows = (try? orchestrator.windows(workspaceID: workspace.id)) ?? []
+                let agentWindowsList = (try? orchestrator.agentWindows(workspaceID: workspace.id)) ?? []
+                let attentionAgentWindows = agentWindowsList.filter { $0.status == .waiting || $0.status == .done }
+                guard workspace.isRunning || !attentionAgentWindows.isEmpty else { continue }
+
+                let processes = workspace.isRunning ? ((try? orchestrator.runningProcesses(workspaceID: workspace.id)) ?? []) : []
+                let windows = workspace.isRunning ? ((try? orchestrator.windows(workspaceID: workspace.id)) ?? []) : []
                 let configuredSessions: [BrowserSession] = {
+                    guard workspace.isRunning else { return [] }
                     if let settings = try? orchestrator.workspaceSettings(workspaceID: workspace.id) { return settings.browserSessions }
                     return []
                 }()
@@ -935,8 +939,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 }
 
                 // Agent window attention items (waiting or done)
-                let agentWindowsList = (try? orchestrator.agentWindows(workspaceID: workspace.id)) ?? []
-                for agentWin in agentWindowsList where agentWin.status == .waiting || agentWin.status == .done {
+                for agentWin in attentionAgentWindows {
                     let agentLabel = agentWin.label ?? (agentWin.provider == .codex ? "Codex Agent" : "Claude Code Agent")
                     let agentIcon = agentWin.provider == .codex ? "wand.and.stars" : "cpu.fill"
                     let agentIconColor: NSColor = agentWin.status == .done ? .systemGreen : .systemOrange
