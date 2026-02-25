@@ -86,6 +86,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     private var periodicUpdateCheckTask: Task<Void, Never>?
     private var periodicProcessMonitorTask: Task<Void, Never>?
     private var periodicWorktreeDiscoveryTask: Task<Void, Never>?
+    private var periodicSidebarMetadataRefreshTask: Task<Void, Never>?
     private var deferredHotkeySelectionRefreshTask: Task<Void, Never>?
     private var pendingWorktreeDiscoveryReload = false
     private var lastTrackedWindowCounts: [String: Int] = [:]
@@ -175,6 +176,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         periodicUpdateCheckTask?.cancel()
         periodicProcessMonitorTask?.cancel()
         periodicWorktreeDiscoveryTask?.cancel()
+        periodicSidebarMetadataRefreshTask?.cancel()
         deferredHotkeySelectionRefreshTask?.cancel()
         sidebarReloadTask?.cancel()
         teardownInlineWorkspaceOutsideClickMonitor()
@@ -293,6 +295,24 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 } catch {
                     break
                 }
+            }
+        }
+    }
+
+    private func startPeriodicSidebarMetadataRefresh() {
+        periodicSidebarMetadataRefreshTask?.cancel()
+        periodicSidebarMetadataRefreshTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            while !Task.isCancelled {
+                do {
+                    try await Task.sleep(for: .seconds(PollingConstants.sidebarMetadataRefreshInterval))
+                } catch {
+                    break
+                }
+                if Task.isCancelled { break }
+                guard self.canReloadAfterBackgroundWorkspaceRefresh() else { continue }
+                // Catch external CLI edits (for example title/tooltip changes) that do not trigger other poller reloads.
+                self.requestSidebarReload()
             }
         }
     }
@@ -729,17 +749,16 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         container.wantsLayer = true
         container.layer?.backgroundColor = sidebarPanelBackgroundColor().cgColor
 
+        let topBarRow = makeSidebarTopBarRow()
+        topBarRow.translatesAutoresizingMaskIntoConstraints = false
+
         let dashboardRow = makeDashboardSidebarRow()
         dashboardRow.translatesAutoresizingMaskIntoConstraints = false
         dashboardRowView = dashboardRow
 
         let sectionHeader = sidebarSectionHeader(
             title: "Projects",
-            actions: [
-                (symbol: "plus", tooltip: "New project", action: #selector(addProject)),
-                (symbol: "gearshape", tooltip: "Settings", action: #selector(showSettings)),
-                (symbol: "arrow.clockwise", tooltip: "Reload", action: #selector(reloadTapped)),
-            ])
+            actions: [(symbol: "plus", tooltip: "New project", action: #selector(addProject))])
         sectionHeader.translatesAutoresizingMaskIntoConstraints = false
 
         let scroll = NSScrollView()
@@ -762,14 +781,19 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
         scroll.documentView = outlineView
 
+        container.addSubview(topBarRow)
         container.addSubview(dashboardRow)
         container.addSubview(sectionHeader)
         container.addSubview(scroll)
 
         NSLayoutConstraint.activate([
+            topBarRow.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 4),
+            topBarRow.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -4),
+            topBarRow.topAnchor.constraint(equalTo: container.topAnchor, constant: 8),
+
             dashboardRow.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 4),
             dashboardRow.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -4),
-            dashboardRow.topAnchor.constraint(equalTo: container.topAnchor, constant: 8),
+            dashboardRow.topAnchor.constraint(equalTo: topBarRow.bottomAnchor, constant: 8),
 
             sectionHeader.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 12),
             sectionHeader.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -12),
@@ -782,6 +806,49 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         ])
 
         return container
+    }
+
+    private func makeSidebarTopBarRow() -> NSView {
+        let row = NSView()
+
+        let iconView = NSImageView()
+        if let appIcon = NSApp.applicationIconImage.copy() as? NSImage {
+            appIcon.size = NSSize(width: 18, height: 18)
+            iconView.image = appIcon
+        } else {
+            iconView.image = NSImage(systemSymbolName: "square.grid.2x2.fill", accessibilityDescription: "Muxy")
+            iconView.contentTintColor = sidebarRunningIndicatorColor()
+        }
+        iconView.translatesAutoresizingMaskIntoConstraints = false
+        iconView.setContentHuggingPriority(.required, for: .horizontal)
+        iconView.setContentCompressionResistancePriority(.required, for: .horizontal)
+        NSLayoutConstraint.activate([
+            iconView.widthAnchor.constraint(equalToConstant: 18),
+            iconView.heightAnchor.constraint(equalToConstant: 18),
+        ])
+
+        let settingsButton = sidebarRowIconButton(symbol: "gearshape", tooltip: "User settings", action: #selector(showSettings))
+        let reloadButton = sidebarRowIconButton(symbol: "arrow.clockwise", tooltip: "Reload", action: #selector(reloadTapped))
+
+        let stack = NSStackView()
+        stack.orientation = .horizontal
+        stack.alignment = .centerY
+        stack.spacing = 8
+        stack.edgeInsets = NSEdgeInsets(top: 6, left: 8, bottom: 6, right: 8)
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        stack.addArrangedSubview(iconView)
+        stack.addArrangedSubview(NSView())
+        stack.addArrangedSubview(settingsButton)
+        stack.addArrangedSubview(reloadButton)
+
+        row.addSubview(stack)
+        NSLayoutConstraint.activate([
+            stack.leadingAnchor.constraint(equalTo: row.leadingAnchor),
+            stack.trailingAnchor.constraint(equalTo: row.trailingAnchor),
+            stack.topAnchor.constraint(equalTo: row.topAnchor),
+            stack.bottomAnchor.constraint(equalTo: row.bottomAnchor),
+        ])
+        return row
     }
 
     private func makeDashboardSidebarRow() -> NSView {
@@ -1218,6 +1285,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         startPeriodicUpdateCheck()
         startPeriodicProcessMonitor()
         startPeriodicWorktreeDiscovery()
+        startPeriodicSidebarMetadataRefresh()
     }
 
     private func loadInitialSidebarData() async {

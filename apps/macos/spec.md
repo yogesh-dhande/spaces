@@ -335,11 +335,13 @@
                     - Workspace settings for processes, status checks, and browser sessions
                 - settings view for global preferences (preferred editor from installed VS Code, Cursor, or Windsurf)
     - Do not open dialogs when showing forms (e.g. adding a project or worktree, or updating keybindings). Prefer to show them in the existing window (right pane) by replacing content of the main pane like in a web app. This is done for UX since it is easy to lose track of open dialogs.
+    - Left sidebar chrome includes a compact utility row above Dashboard with the app icon plus Settings and Reload actions; the Projects section header keeps only the add-project (`+`) action.
     - Keyboard shortcuts
         - User can override default keybindings
         - Global hotkey (default: cmd+shift+=) focuses the app
             - If not visible in the currently focused display and space, make it visible in that display and space (that could mean unhiding it, or simply moving it from another display and space)
             - background workspace-window reconciliation runs periodically while the app is active; focus does not synchronously block on refresh
+            - sidebar/project-workspace metadata also reloads periodically via the same async snapshot path as the Reload button so external CLI edits (for example title/tooltip changes) appear without a manual click when the user is not editing fields
             - hotkey toggle defers selected-workspace detail refresh to the next main-actor turn so fronting the app remains responsive
         - Open editor (global): `cmd+shift+e`, open terminal: `cmd+shift+t`, open Finder: `cmd+shift+f`
         - When muxy in open and in focus

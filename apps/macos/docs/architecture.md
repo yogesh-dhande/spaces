@@ -90,6 +90,7 @@ GUI interaction notes:
 - The app provides a standard Edit menu with Copy (Cmd+C) and Select All (Cmd+A) for system clipboard support in read-only text views.
 - Launch performs initial sidebar data hydration (projects/workspaces/git activity) in a detached background task; the right pane shows a spinner + status message so first render stays responsive instead of blocking the main actor.
 - The left pane includes a **Dashboard** sidebar row pinned above the Projects section header.
+- The left pane also includes a compact utility row above Dashboard with the app icon on the left and Settings/Reload buttons on the right; the Projects header retains only the add-project action.
   - Clicking the Dashboard row opens the dashboard detail in the right pane (same navigation model as selecting a project or workspace).
   - The row shows a red count badge when there are attention items; the badge is hidden when the count is zero.
   - The dashboard detail shows attention items: processes that have exited or have failing (`failed`) status checks across running workspaces, plus agent windows in `waiting`/`done` status even when their workspace is not currently running.
@@ -434,6 +435,7 @@ Degraded runtime edge cases and handling:
 - The GUI starts a periodic detached utility-priority refresh loop (`refreshAllWorkspaceWindows`) so non-archived workspace window rows are reconciled in the background on a fixed interval (`PollingConstants.workspaceWindowRefreshInterval`).
 - Each background refresh pass uses a fresh orchestrator/store instance for thread-safe off-main reconciliation and keeps AppKit interaction responsive while refresh is in-flight.
 - UI data is reloaded after successful periodic refresh passes only when the user is not actively editing text fields (to avoid interrupting unsaved form edits).
+- The GUI also runs a periodic main-actor sidebar metadata refresh loop using the same detached snapshot loader as the manual Reload button, so external CLI DB edits (for example project/workspace title changes) appear without requiring a click.
 - The GUI also runs periodic worktree discovery (`scanAndCreateWorkspacesFromWorktrees`) in a detached utility task using `PollingConstants.worktreeDiscoveryInterval`; newly discovered worktrees are registered as workspaces and trigger project setup scripts.
 - `refreshAllWorkspaceWindows` returns a `RefreshResult` containing `didMutateDB` (whether windows were pruned or workspace running flags changed) and `trackedWindowCounts` (per-workspace tracked window counts including live browser scan results); the GUI compares both against the previous snapshot and skips `reloadData()` entirely when nothing changed, avoiding unnecessary UI rebuilds.
 
@@ -492,8 +494,11 @@ All periodic polling intervals are centralized in `PollingConstants.swift` for e
   - Controls how frequently the GUI background discovery pass scans git projects for new unmanaged worktrees
   - New worktrees discovered in this pass are registered as workspaces and run project setup scripts
 
-- **Process monitor interval**: `processStatusCheckInterval` = 5 seconds
+- **Process monitor interval**: `processStatusCheckInterval` = 10 seconds
   - Controls how frequently the periodic background process monitor checks process state and due status checks
+
+- **Sidebar metadata refresh interval**: `sidebarMetadataRefreshInterval` = 30 seconds
+  - Controls how frequently the GUI performs a full sidebar snapshot reload (equivalent data path to the Reload button) to pick up external CLI metadata edits when no other poller-triggered reload occurs
 
 - **Status check default interval**: `statusCheckDefaultInterval` = 60 seconds
   - Default interval between status check executions for process health monitoring

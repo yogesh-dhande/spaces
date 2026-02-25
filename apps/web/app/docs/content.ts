@@ -26,7 +26,7 @@ export const docsPageLinks: DocsPageLink[] = [
     href: "/docs/workspaces",
     title: "Workspaces",
     summary:
-      "Create, name, and switch between isolated streams of work, each with its own windows, branch, and settings.",
+      "Create, name, and switch between isolated streams of work, each with its own windows, branch, and settings, with GUI sidebar metadata periodically syncing CLI edits.",
   },
   {
     href: "/docs/workspace-lifecycle",
@@ -68,7 +68,7 @@ export const docsPageLinks: DocsPageLink[] = [
     href: "/docs/shortcuts",
     title: "Keyboard Shortcuts",
     summary:
-      "Jump between workspaces and trigger common actions, including the global workspace tooltip toggle, without lifting your hands from the keyboard.",
+      "Jump between workspaces and trigger common actions, including the global workspace tooltip toggle, without lifting your hands from the keyboard; sidebar utility controls keep settings/reload one click away.",
   },
   {
     href: "/docs/troubleshooting",

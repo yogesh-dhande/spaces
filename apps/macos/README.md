@@ -53,6 +53,7 @@ Muxy periodically discovers and reconciles git worktrees for existing projects. 
 - On startup, the details pane shows a loading message and spinner while initial projects/workspaces are loaded in the background.
 - Global hotkeys are available immediately at startup (before data hydration completes) so focus/show actions are not delayed.
 - Startup background reconciliation updates the sidebar via async snapshots to keep workspace switching responsive while launch tasks are still running.
+- Left sidebar includes a compact top utility row (Muxy app icon + settings/reload actions) above the Dashboard row; the Projects header keeps only the add-project action.
 - No dialogs for add/edit; all forms are in the right pane.
 - Right-pane forms are scrollable to avoid clipping on smaller window heights.
 - New workspace `+` actions open the New Workspace form for git projects.
@@ -95,6 +96,7 @@ Muxy periodically discovers and reconciles git worktrees for existing projects. 
   - Open Editor/Terminal/Finder buttons (terminal windows are tracked for cycling)
   - Workspace window records are refreshed periodically in a background pass so stale closed windows are pruned without blocking interaction
   - The same refresh pass updates terminal window fallback labels (title/app) from live yabai data when that terminal window is not linked to a running process record
+  - The sidebar also performs a periodic metadata reload (same snapshot path as the Reload button) so CLI edits like workspace/project title changes appear without manual refresh, unless the user is actively editing form fields
   - Terminal focus prefers stored iTerm2 session/tab metadata (AppleScript) before generic window focus so cycling lands on the correct tab when available
   - Stop/cleanup closes process-backed iTerm terminals by stored session/tab first (preserving unrelated tabs in the same window when possible) and avoids `yabai` window-close for those process-backed terminal windows
   - Launch/Restart can extract one matching tab per browser session into a dedicated Chrome window and persist extracted-window mappings for faster focus
