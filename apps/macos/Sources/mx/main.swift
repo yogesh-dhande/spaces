@@ -470,9 +470,6 @@ struct CLI {
             } else if args.contains("--gui-prev-shortcut") {
                 let current = try orchestrator.guiPreviousShortcut()
                 print("gui-prev-shortcut\t\(current)")
-            } else if args.contains("--gui-show-shortcut") {
-                let current = try orchestrator.guiShowShortcut()
-                print("gui-show-shortcut\t\(current)")
             } else if args.contains("--gui-add-project-shortcut") {
                 let current = try orchestrator.guiAddProjectShortcut()
                 print("gui-add-project-shortcut\t\(current)")
@@ -505,7 +502,7 @@ struct CLI {
                     domain: "mx.cli", code: 2,
                     userInfo: [
                         NSLocalizedDescriptionKey:
-                            "Missing setting flag. Use: settings get --editor|--port-range|--gui-hotkey|--gui-next-shortcut|--gui-prev-shortcut|--gui-show-shortcut|--gui-add-project-shortcut|--gui-add-workspace-shortcut|--gui-reload-shortcut|--gui-open-editor-shortcut|--gui-open-terminal-shortcut|--gui-open-finder-shortcut|--gui-open-settings-shortcut|--iterm-focus-pulse-color|--iterm-focus-pulse-enabled"
+                            "Missing setting flag. Use: settings get --editor|--port-range|--gui-hotkey|--gui-next-shortcut|--gui-prev-shortcut|--gui-add-project-shortcut|--gui-add-workspace-shortcut|--gui-reload-shortcut|--gui-open-editor-shortcut|--gui-open-terminal-shortcut|--gui-open-finder-shortcut|--gui-open-settings-shortcut|--iterm-focus-pulse-color|--iterm-focus-pulse-enabled"
                     ])
             }
 
@@ -539,10 +536,6 @@ struct CLI {
                 let spec = try HotkeySpec.parse(raw)
                 try orchestrator.setGUIPreviousShortcut(spec.normalized)
                 print("Updated gui-prev-shortcut\t\(spec.normalized)")
-            } else if let raw = optionalValue(for: "--gui-show-shortcut") {
-                let spec = try HotkeySpec.parse(raw)
-                try orchestrator.setGUIShowShortcut(spec.normalized)
-                print("Updated gui-show-shortcut\t\(spec.normalized)")
             } else if let raw = optionalValue(for: "--gui-add-project-shortcut") {
                 let spec = try HotkeySpec.parse(raw)
                 try orchestrator.setGUIAddProjectShortcut(spec.normalized)
@@ -593,7 +586,7 @@ struct CLI {
                     domain: "mx.cli", code: 2,
                     userInfo: [
                         NSLocalizedDescriptionKey:
-                            "Missing setting flag/value. Use: settings set --editor <value>|--port-range <start>-<end>|--gui-hotkey <spec>|--gui-next-shortcut <spec>|--gui-prev-shortcut <spec>|--gui-show-shortcut <spec>|--gui-add-project-shortcut <spec>|--gui-add-workspace-shortcut <spec>|--gui-reload-shortcut <spec>|--gui-open-editor-shortcut <spec>|--gui-open-terminal-shortcut <spec>|--gui-open-finder-shortcut <spec>|--gui-open-settings-shortcut <spec>|--iterm-focus-pulse-color <r,g,b>|--iterm-focus-pulse-enabled <0|1>"
+                            "Missing setting flag/value. Use: settings set --editor <value>|--port-range <start>-<end>|--gui-hotkey <spec>|--gui-next-shortcut <spec>|--gui-prev-shortcut <spec>|--gui-add-project-shortcut <spec>|--gui-add-workspace-shortcut <spec>|--gui-reload-shortcut <spec>|--gui-open-editor-shortcut <spec>|--gui-open-terminal-shortcut <spec>|--gui-open-finder-shortcut <spec>|--gui-open-settings-shortcut <spec>|--iterm-focus-pulse-color <r,g,b>|--iterm-focus-pulse-enabled <0|1>"
                     ])
             }
 
@@ -607,9 +600,6 @@ struct CLI {
             } else if args.contains("--gui-prev-shortcut") {
                 try orchestrator.setGUIPreviousShortcut(nil)
                 print("Reset gui-prev-shortcut\t\(SettingsKey.defaultGUIPreviousShortcut)")
-            } else if args.contains("--gui-show-shortcut") {
-                try orchestrator.setGUIShowShortcut(nil)
-                print("Reset gui-show-shortcut\t\(SettingsKey.defaultGUIShowShortcut)")
             } else if args.contains("--gui-add-project-shortcut") {
                 try orchestrator.setGUIAddProjectShortcut(nil)
                 print("Reset gui-add-project-shortcut\t\(SettingsKey.defaultGUIAddProjectShortcut)")
@@ -649,7 +639,7 @@ struct CLI {
                     domain: "mx.cli", code: 2,
                     userInfo: [
                         NSLocalizedDescriptionKey:
-                            "Missing setting flag. Use: settings reset --editor|--port-range|--gui-hotkey|--gui-next-shortcut|--gui-prev-shortcut|--gui-show-shortcut|--gui-add-project-shortcut|--gui-add-workspace-shortcut|--gui-reload-shortcut|--gui-open-editor-shortcut|--gui-open-terminal-shortcut|--gui-open-finder-shortcut|--gui-open-settings-shortcut|--iterm-focus-pulse-color|--iterm-focus-pulse-enabled"
+                            "Missing setting flag. Use: settings reset --editor|--port-range|--gui-hotkey|--gui-next-shortcut|--gui-prev-shortcut|--gui-add-project-shortcut|--gui-add-workspace-shortcut|--gui-reload-shortcut|--gui-open-editor-shortcut|--gui-open-terminal-shortcut|--gui-open-finder-shortcut|--gui-open-settings-shortcut|--iterm-focus-pulse-color|--iterm-focus-pulse-enabled"
                     ])
             }
 
@@ -880,7 +870,6 @@ struct CLI {
               mx settings get --gui-hotkey
               mx settings get --gui-next-shortcut
               mx settings get --gui-prev-shortcut
-              mx settings get --gui-show-shortcut
               mx settings get --gui-add-project-shortcut
               mx settings get --gui-add-workspace-shortcut
               mx settings get --gui-reload-shortcut
@@ -894,7 +883,6 @@ struct CLI {
               mx settings set --gui-hotkey <spec>
               mx settings set --gui-next-shortcut <spec>
               mx settings set --gui-prev-shortcut <spec>
-              mx settings set --gui-show-shortcut <spec>
               mx settings set --gui-add-project-shortcut <spec>
               mx settings set --gui-add-workspace-shortcut <spec>
               mx settings set --gui-reload-shortcut <spec>
@@ -907,7 +895,6 @@ struct CLI {
               mx settings reset --gui-hotkey
               mx settings reset --gui-next-shortcut
               mx settings reset --gui-prev-shortcut
-              mx settings reset --gui-show-shortcut
               mx settings reset --gui-add-project-shortcut
               mx settings reset --gui-add-workspace-shortcut
               mx settings reset --gui-reload-shortcut

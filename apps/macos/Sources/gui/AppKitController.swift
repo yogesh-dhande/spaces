@@ -53,6 +53,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     private var splitView: NSSplitView?
     private let outlineView = NSOutlineView()
     private let detailContainer = NSView()
+    private weak var workspaceShortcutFooterRowView: NSStackView?
+    private var workspaceShortcutFooterLabels: [NSTextField] = []
 
     private var orchestrator: MuxyOrchestrator!
     private var projects: [ProjectSummary] = []
@@ -73,7 +75,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     private var shortcutMonitor: Any?
     private var nextShortcutSpec: HotkeySpec?
     private var previousShortcutSpec: HotkeySpec?
-    private var activateShortcutSpec: HotkeySpec?
     private var openEditorShortcutSpec: HotkeySpec?
     private var openTerminalShortcutSpec: HotkeySpec?
     private var openFinderShortcutSpec: HotkeySpec?
@@ -734,11 +735,28 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         splitView.setHoldingPriority(.defaultHigh, forSubviewAt: 0)
         splitView.setHoldingPriority(.defaultLow, forSubviewAt: 1)
         let content = NSView()
+        content.translatesAutoresizingMaskIntoConstraints = false
+        let footerSeparator = NSBox()
+        footerSeparator.boxType = .separator
+        footerSeparator.translatesAutoresizingMaskIntoConstraints = false
+        let footerRow = workspaceDetailShortcutFooterRow()
+        footerRow.translatesAutoresizingMaskIntoConstraints = false
         content.addSubview(splitView)
+        content.addSubview(footerSeparator)
+        content.addSubview(footerRow)
         NSLayoutConstraint.activate([
             splitView.leadingAnchor.constraint(equalTo: content.leadingAnchor), splitView.trailingAnchor.constraint(equalTo: content.trailingAnchor),
-            splitView.topAnchor.constraint(equalTo: content.topAnchor), splitView.bottomAnchor.constraint(equalTo: content.bottomAnchor),
+            splitView.topAnchor.constraint(equalTo: content.topAnchor),
+            splitView.bottomAnchor.constraint(equalTo: footerSeparator.topAnchor),
+            footerSeparator.leadingAnchor.constraint(equalTo: content.leadingAnchor),
+            footerSeparator.trailingAnchor.constraint(equalTo: content.trailingAnchor),
+            footerSeparator.bottomAnchor.constraint(equalTo: footerRow.topAnchor),
+            footerRow.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 16),
+            footerRow.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -16),
+            footerRow.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -6),
+            footerRow.heightAnchor.constraint(equalToConstant: 28),
         ])
+        refreshWorkspaceShortcutFooterRow()
         window.contentView = content
         window.makeKeyAndOrderFront(nil)
     }
@@ -2287,6 +2305,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         headerRow.addArrangedSubview(workspaceTitleField)
         headerRow.addArrangedSubview(titleSaveButton)
         headerRow.addArrangedSubview(titleCancelButton)
+        headerRow.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
 
         if !workspace.isDefault {
             let tag = UUID().uuidString.hashValue
@@ -2398,12 +2417,22 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             archiveButton.image = baseImage.withSymbolConfiguration(config)
         }
 
-        let buttonRow = NSStackView()
-        buttonRow.orientation = .horizontal
-        buttonRow.spacing = 8
-        buttonRow.addArrangedSubview(launchOrRestartButton)
-        buttonRow.addArrangedSubview(stopButton)
-        buttonRow.addArrangedSubview(NSView())
+        let topActionRow = NSStackView()
+        topActionRow.orientation = .horizontal
+        topActionRow.alignment = .centerY
+        topActionRow.spacing = 8
+        topActionRow.addArrangedSubview(launchOrRestartButton)
+        topActionRow.addArrangedSubview(stopButton)
+        topActionRow.setContentHuggingPriority(.required, for: .horizontal)
+        topActionRow.setContentCompressionResistancePriority(.required, for: .horizontal)
+
+        let headerAndActionsRow = NSStackView()
+        headerAndActionsRow.orientation = .horizontal
+        headerAndActionsRow.alignment = .centerY
+        headerAndActionsRow.spacing = 12
+        headerAndActionsRow.addArrangedSubview(headerRow)
+        headerAndActionsRow.addArrangedSubview(NSView())
+        headerAndActionsRow.addArrangedSubview(topActionRow)
 
         // --- Tabs ---
         let tabs = NSTabView()
@@ -2422,22 +2451,23 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         tabs.addTabViewItem(envTab)
         tabs.addTabViewItem(settingsTab)
 
-        stack.addArrangedSubview(headerRow)
+        stack.addArrangedSubview(headerAndActionsRow)
         for row in metadataRows { stack.addArrangedSubview(row) }
         if let inlineBranchRow { stack.addArrangedSubview(inlineBranchRow) }
         stack.addArrangedSubview(inlineTooltipRow)
-        stack.addArrangedSubview(buttonRow)
         stack.addArrangedSubview(tabs)
         stack.addArrangedSubview(archiveButton)
+        stack.setCustomSpacing(16, after: headerAndActionsRow)
         if let inlineBranchRow { constrainFormFieldToFillWidth(inlineBranchRow, in: stack) }
         constrainFormFieldToFillWidth(inlineTooltipRow, in: stack)
-        constrainFormFieldToFillWidth(buttonRow, in: stack)
-
+        constrainFormFieldToFillWidth(headerAndActionsRow, in: stack)
         detailContainer.addSubview(stack)
         NSLayoutConstraint.activate([
             stack.leadingAnchor.constraint(equalTo: detailContainer.leadingAnchor, constant: 20),
             stack.trailingAnchor.constraint(equalTo: detailContainer.trailingAnchor, constant: -20),
-            stack.topAnchor.constraint(equalTo: detailContainer.topAnchor, constant: 20), tabs.heightAnchor.constraint(equalToConstant: 460),
+            stack.topAnchor.constraint(equalTo: detailContainer.topAnchor, constant: 20),
+            stack.bottomAnchor.constraint(lessThanOrEqualTo: detailContainer.bottomAnchor, constant: -20),
+            tabs.heightAnchor.constraint(equalToConstant: 460),
             tabs.widthAnchor.constraint(equalTo: stack.widthAnchor),
         ])
         detailContainer.layoutSubtreeIfNeeded()
@@ -3481,14 +3511,68 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         return displayShortcut(spec)
     }
 
-    private func displayShortcut(_ spec: HotkeySpec) -> String {
+    private func workspaceDetailShortcutFooterRow() -> NSStackView {
+        let row = NSStackView()
+        row.orientation = .horizontal
+        row.alignment = .centerY
+        row.spacing = 10
+        workspaceShortcutFooterRowView = row
+        workspaceShortcutFooterLabels = []
+
+        for index in workspaceDetailShortcutFooterSegments().indices {
+            if index > 0 {
+                let separator = NSTextField(labelWithString: "•")
+                separator.font = .systemFont(ofSize: 11, weight: .medium)
+                separator.textColor = .tertiaryLabelColor
+                row.addArrangedSubview(separator)
+            }
+
+            let label = NSTextField(labelWithString: "")
+            label.font = .systemFont(ofSize: 11, weight: .regular)
+            label.textColor = .secondaryLabelColor
+            label.lineBreakMode = .byTruncatingTail
+            label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+            workspaceShortcutFooterLabels.append(label)
+            row.addArrangedSubview(label)
+        }
+
+        row.addArrangedSubview(NSView())
+        return row
+    }
+
+    private func refreshWorkspaceShortcutFooterRow() {
+        let segments = workspaceDetailShortcutFooterSegments()
+        guard workspaceShortcutFooterLabels.count == segments.count else { return }
+        for (index, label) in workspaceShortcutFooterLabels.enumerated() {
+            label.stringValue = segments[index]
+        }
+        workspaceShortcutFooterRowView?.needsLayout = true
+    }
+
+    private func workspaceDetailShortcutFooterSegments() -> [String] {
+        [
+            "Next \(footerShortcutHint(for: .guiNextShortcut))",
+            "Previous \(footerShortcutHint(for: .guiPreviousShortcut))",
+            "Settings \(footerShortcutHint(for: .guiOpenSettingsShortcut))",
+            "Toggle tooltip \(footerShortcutHint(for: .guiTooltipShortcut))",
+        ]
+    }
+
+    private func footerShortcutHint(for setting: ShortcutSetting) -> String {
+        guard let spec = shortcutSpec(for: setting) else { return setting.defaultSpec }
+        return displayShortcut(spec, separator: " ")
+    }
+
+    private func displayShortcut(_ spec: HotkeySpec) -> String { displayShortcut(spec, separator: "") }
+
+    private func displayShortcut(_ spec: HotkeySpec, separator: String) -> String {
         var parts: [String] = []
         if spec.modifiers.contains(.cmd) { parts.append("⌘") }
         if spec.modifiers.contains(.shift) { parts.append("⇧") }
         if spec.modifiers.contains(.alt) { parts.append("⌥") }
         if spec.modifiers.contains(.ctrl) { parts.append("⌃") }
         parts.append(displayShortcutKey(spec.key))
-        return parts.joined()
+        return parts.joined(separator: separator)
     }
 
     private func displayShortcutKey(_ key: String) -> String {
@@ -4523,10 +4607,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 self.selectPreviousRunningWorkspace()
                 return nil
             }
-            if let activateShortcutSpec, matches(event: event, spec: activateShortcutSpec) {
-                self.focusSelectedWorkspace()
-                return nil
-            }
             return event
         }
     }
@@ -4803,12 +4883,12 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         toggleShortcutSpec = loadShortcutSpec(setting: .guiHotkey)
         nextShortcutSpec = loadShortcutSpec(setting: .guiNextShortcut)
         previousShortcutSpec = loadShortcutSpec(setting: .guiPreviousShortcut)
-        activateShortcutSpec = loadShortcutSpec(setting: .guiShowShortcut)
         openEditorShortcutSpec = loadShortcutSpec(setting: .guiOpenEditorShortcut)
         openTerminalShortcutSpec = loadShortcutSpec(setting: .guiOpenTerminalShortcut)
         openFinderShortcutSpec = loadShortcutSpec(setting: .guiOpenFinderShortcut)
         openSettingsShortcutSpec = loadShortcutSpec(setting: .guiOpenSettingsShortcut)
         tooltipShortcutSpec = loadShortcutSpec(setting: .guiTooltipShortcut)
+        refreshWorkspaceShortcutFooterRow()
     }
 
     private func loadShortcutSpec(setting: ShortcutSetting) -> HotkeySpec? {
@@ -4855,7 +4935,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         case .guiHotkey: return toggleShortcutSpec
         case .guiNextShortcut: return nextShortcutSpec
         case .guiPreviousShortcut: return previousShortcutSpec
-        case .guiShowShortcut: return activateShortcutSpec
+        case .guiShowShortcut: return nil
         case .guiAddProjectShortcut: return nil
         case .guiAddWorkspaceShortcut: return nil
         case .guiReloadShortcut: return nil

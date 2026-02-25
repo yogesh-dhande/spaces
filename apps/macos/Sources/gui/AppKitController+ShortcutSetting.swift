@@ -34,7 +34,7 @@ extension AppKitController {
         }
 
         static let settingsPanelCases: [ShortcutSetting] = [
-            .guiHotkey, .guiNextShortcut, .guiPreviousShortcut, .guiShowShortcut, .guiOpenEditorShortcut, .guiOpenTerminalShortcut,
+            .guiHotkey, .guiNextShortcut, .guiPreviousShortcut, .guiOpenEditorShortcut, .guiOpenTerminalShortcut,
             .guiOpenFinderShortcut, .guiOpenSettingsShortcut, .guiTooltipShortcut,
         ]
 

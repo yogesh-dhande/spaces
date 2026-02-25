@@ -61,7 +61,8 @@ GUI interaction notes:
 - Primary create/save actions use shared AppKit styling (single helper) with a darker accent background and white foreground text/icons for consistent contrast.
 - Branch and tooltip remain editable via inline labels in workspace detail, title remains editable in the workspace header, and all metadata remains editable via `mx workspace update`.
 - Workspace title remains in the top header (`project / workspace`) and enters edit mode on double-click.
-- Workspace detail renders inline metadata labels for branch and tooltip above lifecycle actions; double-clicking a label enters edit mode and shows per-field Save/Cancel buttons.
+- Workspace detail renders inline metadata labels for branch and tooltip below the header actions; double-clicking a label enters edit mode and shows per-field Save/Cancel buttons.
+- Workspace detail header keeps Launch/Restart and Stop actions right-aligned, and the app window includes a fixed full-width footer row showing effective shortcut hints for next/previous workspace, Settings, and tooltip toggle using current user overrides.
 - Protected `main`/`master` branch labels are rendered read-only in workspace detail and do not enter edit mode on double-click.
 - Inline metadata edit mode saves when pressing `Return`.
 - Inline metadata edit mode cancels without saving when pressing `Escape` or clicking outside the field controls.
@@ -86,7 +87,7 @@ GUI interaction notes:
 - In the run-tab Windows list, browser rows render a two-part label: browser-session name first (when configured) plus the matched URL in secondary text.
 - In the run-tab Windows list, terminal rows are rendered per running process session (one row per iTerm2 tab/session), so multiple workspace processes in the same iTerm2 window still appear as separate rows.
 - Window cards in the Run tab and Dashboard are clickable: clicking a card calls `focusWorkspaceWindow` for that window, equivalent to the `CMD+N` keyboard shortcut.
-- Keyboard shortcut overrides for GUI actions are persisted in SQLite settings and editable in the GUI Settings view and CLI settings commands.
+- Keyboard shortcut overrides for supported GUI actions are persisted in SQLite settings and editable in the GUI Settings view and CLI settings commands.
 - Tooltip overlay includes a footer hint showing the effective tooltip-toggle shortcut (`gui_tooltip_shortcut`, default `cmd+shift+i`) using the user override when configured.
 - The app provides a standard Edit menu with Copy (Cmd+C) and Select All (Cmd+A) for system clipboard support in read-only text views.
 - Launch performs initial sidebar data hydration (projects/workspaces/git activity) in a detached background task; the right pane shows a spinner + status message so first render stays responsive instead of blocking the main actor.

@@ -130,11 +130,12 @@ Hotkeys:
   - Defers selected-workspace detail refresh to the next main-actor turn so focus feels immediate
 - Next running workspace: `cmd+shift+]`
 - Previous running workspace: `cmd+shift+[`
-- Focus selected workspace: `cmd+shift+return`
 - Open editor (global): `cmd+shift+e` (opens editor for the workspace owning the focused workspace window)
 - Open terminal: `cmd+shift+t`
 - Open Finder: `cmd+shift+f`
 - Focus workspace window 1-9: `cmd+1` through `cmd+9`
+
+The app includes a full-width footer hint row that shows the effective shortcuts for Next/Previous, Settings, and Toggle Tooltip (including user overrides).
 
 When text input is focused in the GUI, standard editing shortcuts (including `cmd+v`) are handled normally.
 
