@@ -2,7 +2,6 @@ export type DocsPageLink = {
   href: string;
   title: string;
   summary: string;
-  audience: string;
 };
 
 export const docsPageLinks: DocsPageLink[] = [
@@ -10,100 +9,84 @@ export const docsPageLinks: DocsPageLink[] = [
     href: "/docs/installation",
     title: "Installation & Setup",
     summary:
-      "Download Muxy, install dependencies, configure permissions, and verify your setup.",
-    audience: "New users installing muxy for the first time.",
+      "Get Muxy installed, permissions configured, and your environment verified.",
   },
   {
     href: "/docs/getting-started",
     title: "Getting Started",
-    summary: "Install requirements, connect a project, and launch a first workspace.",
-    audience: "New users onboarding muxy for the first time.",
+    summary: "Connect your first project and launch a workspace in under five minutes.",
   },
   {
     href: "/docs/projects",
     title: "Projects",
     summary:
-      "Add and manage projects stored in the database, start project creation with source-first input (directory picker or git URL) before advanced template settings, get create/delete progress overlay feedback during project operations, configure templates (processes, ports, scripts, named browser sessions), and understand default workspace creation for directory projects and git-url imports.",
-    audience: "Developers setting up and managing project definitions.",
+      "Configure a codebase once so every workspace you create starts with the same processes, ports, and browser tabs.",
   },
   {
     href: "/docs/workspaces",
     title: "Workspaces",
     summary:
-      "Workspace concepts, New Workspace form flow (+ / cmd+n, visible cmd+n quick-create hint, and cmd+n quick-create when the form is open), create-progress overlay feedback for button/quick-create actions, branch-first progressive disclosure in git workspace creation, local-cached default name/branch suggestions, non-blocking branch option loading for fast form display, startup loading feedback for first app-open hydration, immediate startup hotkey availability, async startup reconciliation refreshes for responsive workspace switching, keyboard shortcuts (Return create, Escape cancel) with Create labels clean and Cancel labels showing (Esc), shared high-contrast primary create/save button styling, inline metadata editing (header title + branch/tooltip labels with Return save and Escape/outside-click cancel), protected main/master branch read-only behavior, git branch rename-on-edit behavior, settings overrides, ports, env vars, switching, focus tooltip overlays, sidebar hierarchy cues, and git signals.",
-    audience: "Developers creating and configuring workspaces within projects.",
+      "Create, name, and switch between isolated streams of work, each with its own windows, branch, and settings.",
   },
   {
     href: "/docs/workspace-lifecycle",
     title: "Workspace Lifecycle",
     summary:
-      "Create, launch, ensure-running (`workspace up` with optional `--restart` and `--focus`), stop, restart, archive, and restore workspace behavior, including deferred setup during GUI create, launch waiting for setup completion, and optimistic archive removal in the GUI with archive-progress overlay feedback while cleanup runs in the background.",
-    audience: "Developers managing multiple long-lived workstreams.",
+      "Launch, stop, restart, and archive workspaces—including automated bring-up from the CLI and AI agents.",
   },
   {
     href: "/docs/window-management",
     title: "Window Management",
     summary:
-      "Capture and restore windows using yabai IDs with deterministic switching, plus iTerm2 session-aware terminal tab focus/cleanup, refresh-based terminal fallback title updates, clickable window cards in the Run tab and Dashboard, and a configurable iTerm2 focus pulse color (amber by default) to visually confirm which window was focused.",
-    audience: "Users optimizing context switching and keyboard navigation.",
+      "Capture the windows you need and switch your full context instantly with a single shortcut.",
   },
   {
     href: "/docs/processes",
     title: "Processes",
     summary:
-      "Configure process commands, runtime policies, logs, and restart behavior.",
-    audience: "Teams running app servers, workers, and coding agents per workspace.",
+      "Run app servers, workers, and AI agents alongside each workspace so they start and stop together.",
   },
   {
     href: "/docs/browser-sessions",
     title: "Browser Sessions",
     summary:
-      "Bind named URL sessions to workspace context so local routes and references reopen together.",
-    audience: "Frontend and full-stack workflows that keep many task tabs open.",
+      "Tie browser tabs to a workspace so your local routes and references reopen together every time.",
   },
   {
     href: "/docs/status-checks",
     title: "Status Checks",
     summary:
-      "Explain periodic health checks, stale-status avoidance, red unhealthy sidebar indicators, and on-fail restart behavior with clean stop-before-relaunch handling.",
-    audience: "Developers who need fast health visibility before switching context.",
+      "Get instant red/green health feedback on running processes before you switch context.",
   },
   {
     href: "/docs/dashboard",
     title: "Dashboard",
     summary:
-      "A Dashboard row at the top of the left panel opens an attention-items view in the right pane. It shows exited processes and failing status checks across all running workspaces, grouped by workspace and sorted most-recent-first. Items use the same window-row and status-check UI as the Run tab; shortcut badges are renumbered sequentially across the full view to avoid duplicates. A red count badge on the row updates automatically; an empty-state is shown when all workspaces are healthy.",
-    audience: "Developers monitoring multiple concurrent workspaces who need a single place to spot failures.",
+      "See every failing process and unhealthy check across all running workspaces in one place.",
   },
   {
     href: "/docs/shortcuts",
     title: "Keyboard Shortcuts",
     summary:
-      "Show global and workspace-level shortcuts for fast context switching and editor launch, including immediate global-focus behavior with deferred detail refresh.",
-    audience: "Keyboard-first users and heavy multitaskers.",
+      "Jump between workspaces and trigger common actions without lifting your hands from the keyboard.",
   },
   {
     href: "/docs/troubleshooting",
     title: "Troubleshooting",
     summary:
-      "Common failure patterns with diagnosis and recovery playbooks, including additive database migration compatibility checks and transient SQLite lock handling guidance.",
-    audience: "Anyone debugging launch, capture, process, or focus issues.",
+      "Fix common launch, capture, process, and focus issues with step-by-step recovery playbooks.",
   },
   {
     href: "/docs/guides",
     title: "Cookbook Guides",
     summary:
-      "End-to-end project setup recipes for common stacks you can copy and adapt.",
-    audience:
-      "Developers looking for ready-made configuration examples for real-world projects.",
+      "Copy-and-adapt project setup recipes for common stacks.",
   },
   {
     href: "/docs/cli",
     title: "CLI Reference",
     summary:
-      "Complete mx command reference for managing projects, workspaces, config, settings, and worktree reconciliation (create missing, archive stale, refresh branches) from scripts and AI agent pipelines, plus contributor-focused automation hooks.",
-    audience:
-      "AI coding agents and developers who drive Muxy from the terminal or automated workflows.",
+      "Drive every Muxy action from the terminal or automate workspace management from scripts and AI pipelines.",
   },
 ];
 
