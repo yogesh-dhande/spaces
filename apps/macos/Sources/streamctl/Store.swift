@@ -571,6 +571,19 @@ public final class SQLiteStore {
         return row?.first
     }
 
+    public func workspaceIDForAgentWindow(yabaiWindowID: Int) throws -> String? {
+        let row = try queryRow(
+            sql: """
+                SELECT workspace_id
+                FROM agent_windows
+                WHERE yabai_window_id = ? OR window_id = ?
+                ORDER BY updated_at DESC
+                LIMIT 1
+                """,
+            bindings: [String(yabaiWindowID), String(yabaiWindowID)])
+        return row?.first
+    }
+
     public func deleteWindows(workspaceID: String) throws { try execute(sql: "DELETE FROM windows WHERE workspace_id = ?", bindings: [workspaceID]) }
 
     public func deleteWindow(id: String) throws { try execute(sql: "DELETE FROM windows WHERE id = ?", bindings: [id]) }

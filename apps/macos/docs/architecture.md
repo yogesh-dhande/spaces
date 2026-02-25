@@ -86,6 +86,7 @@ GUI interaction notes:
 - In the run-tab Windows list, browser rows render a two-part label: browser-session name first (when configured) plus the matched URL in secondary text.
 - Window cards in the Run tab and Dashboard are clickable: clicking a card calls `focusWorkspaceWindow` for that window, equivalent to the `CMD+N` keyboard shortcut.
 - Keyboard shortcut overrides for GUI actions are persisted in SQLite settings and editable in the GUI Settings view and CLI settings commands.
+- Tooltip overlay includes a footer hint showing the effective tooltip-toggle shortcut (`gui_tooltip_shortcut`, default `cmd+shift+i`) using the user override when configured.
 - The app provides a standard Edit menu with Copy (Cmd+C) and Select All (Cmd+A) for system clipboard support in read-only text views.
 - Launch performs initial sidebar data hydration (projects/workspaces/git activity) in a detached background task; the right pane shows a spinner + status message so first render stays responsive instead of blocking the main actor.
 - The left pane includes a **Dashboard** sidebar row pinned above the Projects section header.
@@ -143,6 +144,7 @@ Workspace identification:
 - `workspace up --force-restart` behavior: if runtime is already present, run stop then full launch in background; if stopped, launch in background.
 - `workspace up --focus` brings the workspace to the foreground after launch/no-op/restart completes.
 - `workspace up --tooltip [<text>]` optionally updates tooltip text when provided and displays the tooltip overlay.
+- The global tooltip shortcut resolves focused workspace windows using tracked workspace windows first, then agent-window yabai IDs so Codex/iTerm agent windows can still toggle tooltip overlay.
 - `mx workspace focus` focuses the workspace window set; `--window <index>` focuses a specific tracked window.
 - `mx workspace import [--dir <path>] [--title <title>] [--tooltip <text>]` registers existing git worktrees as Muxy workspaces by inferring project, branch, and title from the worktree path when a title is not provided.
 - `mx discover` automatically discovers and registers all untracked worktrees for registered projects.

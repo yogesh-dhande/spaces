@@ -1250,7 +1250,8 @@ public final class MuxyOrchestrator {
     public func workspaceIDForFocusedWindow() throws -> String? {
         guard let focused = try yabai.focusedWindow() else { return nil }
         if focused.app == "Google Chrome", let workspaceID = try focusedChromeWorkspaceID(windowID: focused.id) { return workspaceID }
-        return try store.workspaceID(windowID: focused.id)
+        if let workspaceID = try store.workspaceID(windowID: focused.id) { return workspaceID }
+        return try store.workspaceIDForAgentWindow(yabaiWindowID: focused.id)
     }
 
     private func focusedChromeWorkspaceID(windowID: Int) throws -> String? {

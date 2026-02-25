@@ -4577,6 +4577,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         guard let workspace = try? orchestrator.store.workspace(id: focusedWorkspaceID) else { return }
         let tooltip = workspace.tooltip?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         let hasTooltipBody = !tooltip.isEmpty
+        let toggleHint = "Press \(shortcutHint(for: .guiTooltipShortcut)) to hide"
 
         guard let screen = NSScreen.main else { return }
         let screenFrame = screen.frame
@@ -4595,10 +4596,18 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         bodyField.lineBreakMode = .byWordWrapping
         bodyField.maximumNumberOfLines = 0
 
+        let hintField = NSTextField(labelWithString: toggleHint)
+        hintField.font = .systemFont(ofSize: 12, weight: .medium)
+        hintField.textColor = NSColor.white.withAlphaComponent(0.75)
+        hintField.alignment = .center
+        hintField.lineBreakMode = .byTruncatingTail
+        hintField.maximumNumberOfLines = 1
+
         let maxWidth: CGFloat = 640
         let horizontalPadding: CGFloat = 40
         let verticalPadding: CGFloat = 32
         let titleToBodySpacing: CGFloat = 12
+        let bodyToHintSpacing: CGFloat = 14
 
         titleField.preferredMaxLayoutWidth = maxWidth - horizontalPadding * 2
         titleField.sizeToFit()
@@ -4608,13 +4617,16 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         } else {
             bodyField.frame = .zero
         }
+        hintField.preferredMaxLayoutWidth = maxWidth - horizontalPadding * 2
+        hintField.sizeToFit()
 
-        let contentWidth = max(titleField.frame.width, bodyField.frame.width) + horizontalPadding * 2
+        let contentWidth = max(titleField.frame.width, bodyField.frame.width, hintField.frame.width) + horizontalPadding * 2
         let contentHeight: CGFloat
         if hasTooltipBody {
-            contentHeight = titleField.frame.height + titleToBodySpacing + bodyField.frame.height + verticalPadding * 2
+            contentHeight =
+                titleField.frame.height + titleToBodySpacing + bodyField.frame.height + bodyToHintSpacing + hintField.frame.height + verticalPadding * 2
         } else {
-            contentHeight = titleField.frame.height + verticalPadding * 2
+            contentHeight = titleField.frame.height + bodyToHintSpacing + hintField.frame.height + verticalPadding * 2
         }
         let contentView = NSView(frame: NSRect(x: 0, y: 0, width: contentWidth, height: contentHeight))
         contentView.wantsLayer = true
@@ -4623,22 +4635,26 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
         let titleX = (contentWidth - titleField.frame.width) / 2
         let bodyX = (contentWidth - bodyField.frame.width) / 2
-        let bodyY = verticalPadding
+        let hintX = (contentWidth - hintField.frame.width) / 2
+        let hintY = verticalPadding
+        let bodyY = hintY + hintField.frame.height + bodyToHintSpacing
         let titleY: CGFloat
         if hasTooltipBody {
             titleY = bodyY + bodyField.frame.height + titleToBodySpacing
         } else {
-            titleY = verticalPadding
+            titleY = bodyY
         }
 
         titleField.frame.origin = NSPoint(x: titleX, y: titleY)
         if hasTooltipBody {
             bodyField.frame.origin = NSPoint(x: bodyX, y: bodyY)
         }
+        hintField.frame.origin = NSPoint(x: hintX, y: hintY)
         contentView.addSubview(titleField)
         if hasTooltipBody {
             contentView.addSubview(bodyField)
         }
+        contentView.addSubview(hintField)
 
         let windowWidth = contentView.frame.width
         let windowHeight = contentView.frame.height

@@ -194,7 +194,8 @@ For git projects, `workspace create` requires `--branch`; `--target-branch` defa
 Add `--force-restart` to force stop+launch when runtime state is already present.
 `workspace up` ensures the workspace and all its processes are running. When stopped, it launches in the background. When already running, it restarts any exited processes in the background without touching healthy ones. Add `--force-restart` to force a full stop+launch. Add `--focus` to bring the workspace to the foreground. `--tooltip [text]` displays the tooltip overlay (updating tooltip text when text is provided).
 `mx discover` scans all registered git projects and reconciles worktrees by creating missing workspaces, archiving workspaces whose worktrees are no longer valid, and refreshing workspace branch names from disk.
-When tooltip overlay is shown for focused workspace, it always displays workspace title as the title; when tooltip text is set, it is shown as body content.
+When tooltip overlay is shown for focused workspace, it always displays workspace title as the title; when tooltip text is set, it is shown as body content. The overlay also shows the effective tooltip-toggle shortcut (default `cmd+shift+i`, or your custom override).
+The global tooltip shortcut resolves focused tracked workspace windows and agent windows, so you can toggle the overlay from a focused coding-agent/iTerm workspace window even if the workspace is not currently marked running.
 
 Project/workspace removal behavior:
 - `mx project remove --dir <path>` removes the project from Muxy. For git projects, it first removes related managed worktrees with `git worktree remove --force`, then deletes related workspace directories under `~/muxy/workspaces`.

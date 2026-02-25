@@ -326,6 +326,31 @@ final class StoreTests: XCTestCase {
         XCTAssertTrue(try store.windows(workspaceID: workspace.id).isEmpty)
     }
 
+    // Tests agent-window yabai lookup resolves a workspace by arranging a stored agent window and asserting the lookup result.
+    func testWorkspaceIDForAgentWindowResolvesByYabaiWindowID() throws {
+        let store = try makeTemporaryStore()
+        let project = makeProjectRecord(dir: try makeTempDirectory().path)
+        let workspace = makeWorkspaceRecord(projectID: project.id, name: "feature-agent", dir: project.dir)
+        try store.upsert(project: project)
+        try store.upsert(workspace: workspace)
+
+        try store.upsertAgentWindow(
+            AgentWindowRecord(
+                id: UUID().uuidString,
+                workspaceID: workspace.id,
+                provider: .codex,
+                label: "Codex",
+                itermSessionID: nil,
+                codexThreadID: "thread-123",
+                windowID: nil,
+                yabaiWindowID: 4242,
+                status: .spinning,
+                createdAt: "2026-02-25T00:00:00Z",
+                updatedAt: "2026-02-25T00:00:01Z"))
+
+        XCTAssertEqual(try store.workspaceIDForAgentWindow(yabaiWindowID: 4242), workspace.id)
+    }
+
     // Tests delete workspace removes dependent rows by arranging representative inputs and asserting the expected result.
     func testDeleteWorkspaceRemovesDependentRows() throws {
         let store = try makeTemporaryStore()

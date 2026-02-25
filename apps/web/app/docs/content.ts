@@ -68,7 +68,7 @@ export const docsPageLinks: DocsPageLink[] = [
     href: "/docs/shortcuts",
     title: "Keyboard Shortcuts",
     summary:
-      "Jump between workspaces and trigger common actions without lifting your hands from the keyboard.",
+      "Jump between workspaces and trigger common actions, including the global workspace tooltip toggle, without lifting your hands from the keyboard.",
   },
   {
     href: "/docs/troubleshooting",
