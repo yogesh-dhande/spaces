@@ -1883,6 +1883,28 @@ final class OrchestratorTests: XCTestCase {
         }
     }
 
+    // Tests launch workspace opens missing browser sessions as tabs in one Chrome window by arranging representative inputs and asserting the expected result.
+    func testLaunchWorkspaceOpensMissingBrowserSessionsAsTabsInSharedChromeWindow() throws {
+        let (orchestrator, store, _, workspace, root) = try makeOrchestratorWithWorkspace()
+        let chromeOpenLog = root.appendingPathComponent("chrome-open-shared-window.log")
+        try store.setWorkspaceBrowserSessions(
+            workspaceID: workspace.id,
+            sessions: [BrowserSession(url: "http://localhost:3001"), BrowserSession(url: "http://localhost:8000/admin")])
+
+        try withMockCommands(["yabai": Self.orchestratorYabaiMockScript, "osascript": Self.orchestratorOsaScriptMock]) {
+            try withEnv(name: "MOCK_CHROME_OPEN_LOG_FILE", value: chromeOpenLog.path) {
+                try withEnv(name: "MOCK_CHROME_FOCUS_RESULT", value: "0") {
+                    try orchestrator.launchWorkspace(workspaceID: workspace.id)
+                }
+            }
+        }
+
+        let openLog = try String(contentsOf: chromeOpenLog)
+        XCTAssertEqual(openLog.components(separatedBy: "set URL of active tab of newWindow").count - 1, 1)
+        XCTAssertEqual(openLog.components(separatedBy: "make new tab at end of tabs of w").count - 1, 1)
+        XCTAssertTrue(openLog.contains("set requestedWindowID to \"88\""))
+    }
+
     // Tests launch workspace extracts browser session into dedicated window and persists mapping by arranging representative inputs and asserting the expected result.
     func testLaunchWorkspaceExtractsBrowserSessionIntoDedicatedWindowAndPersistsMapping() throws {
         let (orchestrator, store, _, workspace, root) = try makeOrchestratorWithWorkspace()
@@ -3285,6 +3307,14 @@ final class OrchestratorTests: XCTestCase {
             echo "$script" >> "$MOCK_CHROME_OPEN_LOG_FILE"
           fi
           echo "88"
+          exit 0
+        fi
+
+        if [[ "$script" == *'make new tab at end of tabs of w with properties {URL:'* ]]; then
+          if [[ -n "${MOCK_CHROME_OPEN_LOG_FILE:-}" ]]; then
+            echo "$script" >> "$MOCK_CHROME_OPEN_LOG_FILE"
+          fi
+          echo "${MOCK_CHROME_OPEN_TAB_RESULT:-1}"
           exit 0
         fi
 

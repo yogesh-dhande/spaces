@@ -20,6 +20,43 @@ public final class ChromeAdapter {
         return Int(output.trimmingCharacters(in: .whitespacesAndNewlines)) ?? -1
     }
 
+    public func openTab(windowID: Int, url: String, background: Bool = false) throws -> Bool {
+        let escaped = url.replacingOccurrences(of: "\"", with: "\\\"")
+        let script: String
+        if background {
+            script = """
+                tell application "Google Chrome"
+                  set requestedWindowID to "\(windowID)"
+                  repeat with w in windows
+                    if (id of w as string) is requestedWindowID then
+                      make new tab at end of tabs of w with properties {URL:"\(escaped)"}
+                      return "1"
+                    end if
+                  end repeat
+                end tell
+                return "0"
+                """
+        } else {
+            script = """
+                tell application "Google Chrome"
+                  set requestedWindowID to "\(windowID)"
+                  repeat with w in windows
+                    if (id of w as string) is requestedWindowID then
+                      make new tab at end of tabs of w with properties {URL:"\(escaped)"}
+                      set active tab index of w to (count of tabs of w)
+                      set index of w to 1
+                      activate
+                      return "1"
+                    end if
+                  end repeat
+                end tell
+                return "0"
+                """
+        }
+        let output = try AppleScript.run(script).trimmingCharacters(in: .whitespacesAndNewlines)
+        return output == "1"
+    }
+
     public func windowMatches(forURLPrefix prefix: String) throws -> [ChromeWindowMatch] { try queryTabs(urlPrefix: prefix) }
 
     public func allTabs() throws -> [ChromeWindowMatch] { try queryTabs(urlPrefix: nil) }

@@ -2529,12 +2529,31 @@ public final class MuxyOrchestrator {
         var attached: [WindowRecord] = []
         var refreshedSessions = sessions
         var seenKeys = Set<String>()
+        var sharedOpenedChromeWindowID: Int?
         for resolvedSession in resolvedSessions {
             var matches = try chrome.windowMatches(forURLPrefix: resolvedSession.prefix)
             let foundExistingTab = !matches.isEmpty
             if matches.isEmpty {
-                _ = try chrome.openWindow(url: resolvedSession.prefix, background: background)
+                if let targetChromeWindowID = sharedOpenedChromeWindowID {
+                    let openedTab = try chrome.openTab(windowID: targetChromeWindowID, url: resolvedSession.prefix, background: background)
+                    if !openedTab {
+                        let openedWindowID = try chrome.openWindow(url: resolvedSession.prefix, background: background)
+                        if openedWindowID > 0 {
+                            sharedOpenedChromeWindowID = openedWindowID
+                        } else {
+                            sharedOpenedChromeWindowID = nil
+                        }
+                    }
+                } else {
+                    let openedWindowID = try chrome.openWindow(url: resolvedSession.prefix, background: background)
+                    if openedWindowID > 0 {
+                        sharedOpenedChromeWindowID = openedWindowID
+                    }
+                }
                 matches = try chrome.windowMatches(forURLPrefix: resolvedSession.prefix)
+                if !matches.isEmpty, !foundExistingTab, sharedOpenedChromeWindowID == nil {
+                    sharedOpenedChromeWindowID = matches.first?.windowID
+                }
             }
             if extractOnAttach, foundExistingTab,
                 let extractedWindowID = try extractSessionWindowIfNeeded(

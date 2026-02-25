@@ -105,7 +105,7 @@
             - Project templates stored in SQLite (`project_browser_sessions`)
             - Workspace copies stored in SQLite (`workspace_browser_sessions`) and editable per workspace
             - the url should be specified using named port vars made available to the workspace e.g. `$FRONTEND_PORT`. at runtime, it is decoded based on the actual values of these variables
-            - user can add multiple browser sessions to each project, each will be opened a new window when the workspace is launched e.g. localhost:3000, localhost:3000/blog
+            - user can add multiple browser sessions to each project; on workspace launch, missing sessions open in Chrome and newly created sessions are grouped into a shared Chrome window as separate tabs when possible (while tracking each matched tab as its own workspace row) e.g. localhost:3000, localhost:3000/blog
     - PortDefinition
         - fields
             - name: str, the env var name for this port (e.g. `FRONTEND_PORT`, `API_PORT`). Must be a valid shell identifier.

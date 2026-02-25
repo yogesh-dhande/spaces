@@ -103,6 +103,7 @@ Muxy periodically discovers and reconciles git worktrees for existing projects. 
   - Launch/Restart can extract one matching tab per browser session into a dedicated Chrome window and persist extracted-window mappings for faster focus
   - Browser focus tries extracted-window `yabai` focus first; stale mappings are invalidated and fallback continues via indexed tab focus + URL matching (without automatic re-extraction)
   - Launch/Restart reuses existing matching Chrome tabs and tracks all matches instead of opening duplicate tabs when matches already exist
+  - When multiple browser sessions are missing at launch/restart, muxy opens them as separate tabs in one newly created Chrome window when possible (while still listing each matched tab as its own browser row)
   - Stop/Restart/browser-session updates close tracked Chrome tabs only and never close full Chrome windows
   - If a workspace directory is missing during stop, muxy still stops the workspace and shows an informational message that stop-script execution was skipped
   - Workspace window list/navigation rebuilds browser rows from Chrome tabs with a 10-second debounce (per workspace/prefix set) and includes tabs whose URLs start with configured browser session URLs (deduped by window+tab URL)

@@ -50,7 +50,7 @@ export const docsPageLinks: DocsPageLink[] = [
     href: "/docs/browser-sessions",
     title: "Browser Sessions",
     summary:
-      "Tie browser tabs to a workspace so your local routes and references reopen together every time.",
+      "Tie browser tabs to a workspace so local routes and references reopen together, with missing sessions launched as tabs in a shared Chrome window when possible.",
   },
   {
     href: "/docs/status-checks",

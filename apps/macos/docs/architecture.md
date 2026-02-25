@@ -414,6 +414,7 @@ Degraded runtime edge cases and handling:
 - Restart is the user-visible "bring everything back" action for partial or stale runtime state.
 - Chrome session discovery and focus are URL-prefix based end-to-end; title-based fallback matching is intentionally avoided to prevent binding sessions to the wrong tab.
 - On launch/restart, muxy reuses existing Chrome tabs whose URLs match configured browser-session prefixes and tracks all matching tabs for workspace cycling.
+- When launch/restart needs to create multiple missing browser sessions, muxy groups those newly opened sessions into one Chrome window as separate tabs when possible, but runtime tracking/focus still treats matching tabs as independent browser rows even if users later move tabs across windows.
 - On launch/restart, muxy may extract one matching tab per browser session into a dedicated Chrome window and persist that extracted mapping (`extracted_target_url`, `extracted_window_id`, `extracted_window_valid`).
 - Browser windows store an optional `target_url`; when focusing browser entries, muxy uses AppleScript to activate the matching tab (including when multiple tracked targets share one Chrome window) before falling back to raw window focus.
 - Browser focus first attempts extracted-window `yabai` focus when a valid extracted mapping exists; if the window is missing or active-tab verification fails, the mapping is marked stale (`extracted_window_valid=0`) and focus falls back to indexed-tab/URL-prefix paths without automatic re-extraction.
