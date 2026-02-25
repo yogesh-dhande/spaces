@@ -119,7 +119,7 @@
     - Workspace
         - fields
             - project: Project
-            - title: str, persisted in DB as `workspaces.title` (legacy `workspaces.name` remains for compatibility), defaults to an auto-generated workspace name for one-click GUI creation; user can edit later
+            - title: str, persisted in DB as `workspaces.title`, defaults to an auto-generated workspace name for one-click GUI creation; user can edit later
                 - for default workspaces created from directory projects, use `default` as the name
                 - for default workspaces created from git-url imports, use `main`/`master` as the name
                 - default workspace title remains fixed to its initial value; non-default workspaces can be renamed later

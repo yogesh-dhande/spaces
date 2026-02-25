@@ -44,7 +44,7 @@ Port definitions are configured at the project level and inherited by workspaces
 
 Workspaces snapshot project port definitions, processes, status checks, and browser sessions at creation time into the runtime DB.
 Updates to workspace settings apply immediately when the workspace is running (new processes start, changed commands restart, and new browser sessions open).
-Workspace settings include the workspace title and tooltip; non-default workspace titles can be edited after creation.
+Workspace settings include the workspace title and tooltip. Workspace labels are stored in `workspaces.title`, and default-workspace behavior is determined by `is_default` (not by the title value).
 `setup_script` runs when a workspace is created or revived. In the GUI create flow, workspace records are persisted first and setup continues in the background so new workspaces appear faster; launch waits for setup completion and surfaces setup failures. `stop_script` runs on stop/restart/archive after automatic process termination. If the workspace directory is missing, muxy still completes stop/archive cleanup and skips the stop script.
 Muxy periodically discovers and reconciles git worktrees for existing projects. Discovery auto-registers untracked valid worktrees (running the same `setup_script` flow for each new workspace), archives non-default workspaces whose worktrees are no longer valid, refreshes stored workspace branch names from on-disk worktrees, and will not auto-recreate workspaces you explicitly deleted from Muxy.
 

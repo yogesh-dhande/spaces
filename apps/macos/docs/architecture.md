@@ -134,7 +134,7 @@ Workspace settings:
 - Each workspace snapshots project `stop_script`, `ports` (named port definitions), `processes`, `status_checks`, and `browser_sessions` at creation.
 - Snapshots are stored in the runtime DB alongside other workspace data.
 - Edits to a running workspace reconcile processes and browser sessions immediately.
-- Non-default workspace titles are editable after creation (GUI and CLI); default workspace title stays fixed to its initial value (`default` for directory projects, `main`/`master` for git-url imports).
+- Workspace default semantics are stored on `is_default`; workspace titles are stored in `workspaces.title` and can be updated without changing default status.
 
 Workspace identification:
 - Workspaces are uniquely identified by their directory path (`dir` field).

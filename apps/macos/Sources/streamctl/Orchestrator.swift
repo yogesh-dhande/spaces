@@ -216,7 +216,7 @@ public final class MuxyOrchestrator {
                     throw MuxyError.workspaceAlreadyExists(project: project.name, workspace: trimmedTitle)
                 }
                 if workspace.isDefault {
-                    // Default workspaces allow display title overrides while preserving the canonical name.
+                    // Default workspaces allow title overrides while default semantics remain on isDefault.
                     try store.updateWorkspaceTitle(id: workspace.id, title: trimmedTitle)
                 } else {
                     updatedName = trimmedTitle

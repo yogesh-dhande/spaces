@@ -447,8 +447,8 @@ final class StoreTests: XCTestCase {
         XCTAssertNil(try store.setting(key: "key"))
     }
 
-    // Tests workspace rename persists title and legacy name columns by arranging representative inputs and asserting compatibility.
-    func testUpdateWorkspaceNameUpdatesTitleAndNameColumns() throws {
+    // Tests workspace rename persists the workspace title column by arranging representative inputs and asserting the expected result.
+    func testUpdateWorkspaceNameUpdatesTitleColumn() throws {
         let root = try makeTempDirectory()
         let dbURL = root.appendingPathComponent("workspace-title.db")
         let store = try SQLiteStore(path: dbURL.path)
@@ -459,7 +459,6 @@ final class StoreTests: XCTestCase {
 
         try store.updateWorkspaceName(id: workspace.id, name: "renamed")
 
-        XCTAssertEqual(try readSingleText(dbURL: dbURL, sql: "SELECT name FROM workspaces WHERE id = '\(workspace.id)'"), "renamed")
         XCTAssertEqual(try readSingleText(dbURL: dbURL, sql: "SELECT title FROM workspaces WHERE id = '\(workspace.id)'"), "renamed")
     }
 
