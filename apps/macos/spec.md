@@ -165,13 +165,13 @@
                     - Port allocation happens before setup script so named port env vars are available in setup scripts
                 - GUI creation persists the new workspace first, shows it in the UI, then runs setup in the background (setup state transitions: `pending` -> `running` -> `succeeded`/`failed`)
             - when launched
-                - start processes defined by the workspace in their own terminal windows. keep track of these windows so they can be focused later when looping through this workspace's windows
+                - start processes defined by the workspace in iTerm2 using one shared window when possible (one tab/session per process). keep track of process sessions so they can be focused later even when multiple processes share the same iTerm2 window
                 - persist iTerm2 session/tab metadata for process-backed terminals so focus can prefer the original session and fall back to the tab
                 - when stopping, close process-backed iTerm terminals by session/tab when possible instead of always closing the full iTerm window
                 - ensure that browser tabs for the browser sessions defined for the workspace are open, and if not, open them. keep track of them so they can be focused later when looping through this workspace's windows
-            - user can open the workspace in the preferred editor, a terminal window, or Finder from the GUI; terminal windows are captured and tracked for window cycling
+            - user can open the workspace in the preferred editor, a terminal window, or Finder from the GUI; Open Terminal opens a new tab in an existing tracked workspace iTerm2 window when available (otherwise creates a new window), and terminal windows are captured/tracked for window cycling
             - when updated while running
-                - start newly added processes in new terminals
+                - start newly added processes as new iTerm2 tabs in an existing workspace process window when possible (otherwise create a new terminal window)
                 - restart processes whose commands change in the same terminal window
                 - open newly added browser sessions immediately
             - when stopped
@@ -205,7 +205,7 @@
             - application manages these
             - stored in db so that application restart does not lose pointer to existing windows open on mac; if identifying windows on the fly is robust and fast, then these may be stored in memory instead
             - Automatically identify any chrome windows that have matching BrowserSessions open (browser url starts with BrowserSession.url) and attach those to the related workspace. User may open additional tabs or windows. all of them should be automatically identified and tracked
-            - when looping through windows, the order should be browser windows and then terminal windows in the order in which processes are defined
+            - when looping through windows, the order should be browser windows and then terminal windows; the Run tab should show one terminal row per process session (even when multiple rows share the same iTerm2 window)
             - when GUI is focused, cmd+1 through cmd+9 focus the corresponding workspace window
             - Window records may become stale across app restarts; muxy must re-discover windows on launch and reconcile with stored state
 - User flow

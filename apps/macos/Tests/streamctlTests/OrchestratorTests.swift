@@ -1218,6 +1218,34 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertEqual(try store.workspace(id: workspace.id)?.isRunning, true)
     }
 
+    // Tests open workspace terminal opens a new tab in an existing tracked iTerm2 workspace window.
+    func testOpenWorkspaceTerminalReusesTrackedItermWindowAsTabTarget() throws {
+        let store = try makeTemporaryStore()
+        let mockIterm = MockIterm2Adapter()
+        let orchestrator = MuxyOrchestrator(store: store, iterm: mockIterm)
+
+        let root = try makeTempDirectory()
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
+
+        try store.upsert(
+            window: WindowRecord(
+                id: UUID().uuidString, workspaceID: workspace.id, app: "iTerm2", title: "shell", windowID: 777, role: "terminal",
+                orderIndex: 200, lastSeenAt: "now"))
+
+        try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) {
+            try withEnv(name: "YABAI_FOCUSED_ID", value: "777") {
+                try withEnv(name: "YABAI_FOCUSED_APP", value: "iTerm2") { try orchestrator.openWorkspaceTerminal(workspaceID: workspace.id) }
+            }
+        }
+
+        XCTAssertEqual(mockIterm.openWindowAndRunCallCount, 0)
+        XCTAssertEqual(mockIterm.openTabInWindowAndRunCallCount, 1)
+        XCTAssertEqual(mockIterm.openedTabWindowIDs, [777])
+    }
+
     // Tests open workspace terminal throws when i term is unavailable by arranging representative inputs and asserting the expected result.
     func testOpenWorkspaceTerminalThrowsWhenITermIsUnavailable() throws {
         let (orchestrator, _, _, workspace, _) = try makeOrchestratorWithWorkspace()
@@ -1289,6 +1317,41 @@ final class OrchestratorTests: XCTestCase {
             let yabaiFocusEntries = try String(contentsOf: yabaiFocusLog).trimmingCharacters(in: .whitespacesAndNewlines)
             XCTAssertTrue(yabaiFocusEntries.isEmpty)
         }
+    }
+
+    // Tests focusing a workspace process targets the process's iTerm2 session when multiple processes share a window.
+    func testFocusWorkspaceProcessTargetsSpecificSharedWindowSession() throws {
+        let store = try makeTemporaryStore()
+        let mockIterm = MockIterm2Adapter()
+        let orchestrator = MuxyOrchestrator(store: store, iterm: mockIterm)
+
+        let root = try makeTempDirectory()
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
+
+        try store.upsert(
+            window: WindowRecord(
+                id: UUID().uuidString, workspaceID: workspace.id, app: "iTerm2", title: "shared", windowID: 555, role: "terminal",
+                orderIndex: 200, lastSeenAt: "now"))
+        let first = RunningProcessRecord(
+            id: UUID().uuidString, workspaceID: workspace.id, templateName: "api", command: "npm run api",
+            terminalApp: "iTerm2", windowID: 555, itermSessionID: "session-a", itermTabIndex: 1,
+            pid: nil, status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil)
+        let second = RunningProcessRecord(
+            id: UUID().uuidString, workspaceID: workspace.id, templateName: "web", command: "npm run web",
+            terminalApp: "iTerm2", windowID: 555, itermSessionID: "session-b", itermTabIndex: 2,
+            pid: nil, status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil)
+        try store.upsert(runningProcess: first)
+        try store.upsert(runningProcess: second)
+
+        try orchestrator.focusWorkspaceProcess(workspaceID: workspace.id, processID: second.id)
+
+        XCTAssertEqual(mockIterm.focusSessionOrTabCallCount, 1)
+        XCTAssertEqual(mockIterm.lastWindowID, 555)
+        XCTAssertEqual(mockIterm.lastFocusedSessionID, "session-b")
+        XCTAssertEqual(mockIterm.lastFocusedTabIndex, 2)
     }
 
     // Tests focus window navigation uses relative order and wraps by arranging representative inputs and asserting the expected result.
@@ -1736,22 +1799,22 @@ final class OrchestratorTests: XCTestCase {
         }
     }
 
-    // Tests launch workspace tracks all terminal windows from running processes by arranging representative inputs and asserting the expected result.
+    // Tests launch workspace tracks terminal windows from running processes when multiple processes share one iTerm2 window.
     func testLaunchWorkspaceTracksAllTerminalWindowsFromRunningProcesses() throws {
         let (orchestrator, store, _, workspace, root) = try makeOrchestratorWithWorkspace()
         let itermWindowIDsFile = root.appendingPathComponent("iterm-window-ids.txt")
         let runtimeDir = root.appendingPathComponent("runtime", isDirectory: true)
-        try "701,702".write(to: itermWindowIDsFile, atomically: true, encoding: .utf8)
+        try "701".write(to: itermWindowIDsFile, atomically: true, encoding: .utf8)
 
         try store.setWorkspaceProcesses(
             workspaceID: workspace.id,
             processes: [ProcessTemplate(name: "one", command: "echo one"), ProcessTemplate(name: "two", command: "echo two")])
 
         let windowsJSON =
-            "[{\"id\":701,\"pid\":71,\"app\":\"iTerm2\",\"title\":\"one\",\"space\":1,\"display\":1,\"is-sticky\":false,\"is-hidden\":false,\"is-visible\":true,\"is-native-fullscreen\":false},{\"id\":702,\"pid\":72,\"app\":\"iTerm2\",\"title\":\"two\",\"space\":1,\"display\":1,\"is-sticky\":false,\"is-hidden\":false,\"is-visible\":true,\"is-native-fullscreen\":false}]"
+            "[{\"id\":701,\"pid\":71,\"app\":\"iTerm2\",\"title\":\"one\",\"space\":1,\"display\":1,\"is-sticky\":false,\"is-hidden\":false,\"is-visible\":true,\"is-native-fullscreen\":false}]"
 
         // Mocked dependencies: iTerm window creation IDs and yabai window snapshots.
-        // Why: ensure launch records all terminal windows even when snapshot-diff capture misses them.
+        // Why: ensure launch still records the shared terminal window from running-process metadata when snapshot-diff capture misses it.
         // Remaining risk: real timing differences between iTerm and yabai updates may still need tuning.
         try withMockCommands(["yabai": Self.orchestratorYabaiMockScript, "osascript": Self.orchestratorOsaScriptMock]) {
             try withEnv(name: "MUXY_RUNTIME_DIR", value: runtimeDir.path) {
@@ -1762,8 +1825,8 @@ final class OrchestratorTests: XCTestCase {
         }
 
         let terminalWindows = try orchestrator.windows(workspaceID: workspace.id).filter { $0.role == "terminal" }
-        XCTAssertEqual(terminalWindows.count, 2)
-        XCTAssertEqual(Set(terminalWindows.compactMap(\.windowID)), Set([701, 702]))
+        XCTAssertEqual(terminalWindows.count, 1)
+        XCTAssertEqual(Set(terminalWindows.compactMap(\.windowID)), Set([701]))
     }
 
     // Tests launch workspace does not auto open editor by arranging representative inputs and asserting the expected result.
@@ -2572,6 +2635,39 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertTrue(try orchestrator.runningProcesses(workspaceID: workspace.id).isEmpty)
     }
 
+    // Tests up workspace launches multiple configured processes in one iTerm2 window using separate tabs.
+    func testUpWorkspaceLaunchesMultipleProcessesInSharedItermWindow() throws {
+        let store = try makeTemporaryStore()
+        let mockIterm = MockIterm2Adapter()
+        let orchestrator = MuxyOrchestrator(store: store, iterm: mockIterm)
+
+        let root = try makeTempDirectory()
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
+
+        try orchestrator.updateWorkspaceSettings(workspaceID: workspace.id) { settings in
+            settings.processes = [
+                ProcessTemplate(name: "api", command: "echo api"),
+                ProcessTemplate(name: "web", command: "echo web"),
+            ]
+        }
+
+        try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) {
+            try orchestrator.upWorkspace(workspaceID: workspace.id)
+        }
+
+        XCTAssertEqual(mockIterm.openWindowAndRunCallCount, 1)
+        XCTAssertEqual(mockIterm.openTabInWindowAndRunCallCount, 1)
+        XCTAssertEqual(mockIterm.openedTabWindowIDs, [9999])
+
+        let running = try orchestrator.runningProcesses(workspaceID: workspace.id)
+        XCTAssertEqual(running.count, 2)
+        XCTAssertEqual(Set(running.compactMap(\.windowID)).count, 1)
+        XCTAssertEqual(Set(running.compactMap(\.itermSessionID)).count, 2)
+    }
+
     // Tests up workspace does nothing to running processes when runtime indicators exist and restart is disabled by arranging representative inputs and asserting the expected result.
     func testUpWorkspaceDoesNothingWhenRuntimeIndicatorsExistByDefault() throws {
         let (orchestrator, store, _, workspace, _) = try makeOrchestratorWithWorkspace()
@@ -3008,6 +3104,23 @@ final class OrchestratorTests: XCTestCase {
             exit 1
           fi
           echo "3.5.0"
+          exit 0
+        fi
+
+        if [[ "$script" == *'create tab with default profile'* ]]; then
+          wid="$(printf '%s\n' "$script" | grep -Eo 'if id of w is [0-9]+' | awk '{print $6}' | head -n1)"
+          if [[ -z "$wid" ]]; then
+            wid="${MOCK_ITERM_WINDOW_ID:-701}"
+          fi
+          if [[ -n "${MOCK_ITERM_TAB_COUNTER_FILE:-}" ]]; then
+            current="$(cat "$MOCK_ITERM_TAB_COUNTER_FILE" 2>/dev/null)"
+            if [[ -z "$current" ]]; then current=1; fi
+            next=$((current + 1))
+            echo "$next" > "$MOCK_ITERM_TAB_COUNTER_FILE"
+            echo "${wid}|session-${wid}-tab-${next}|${next}"
+            exit 0
+          fi
+          echo "${wid}|session-${wid}-tab-2|2"
           exit 0
         fi
 

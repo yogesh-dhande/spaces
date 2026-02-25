@@ -29,10 +29,12 @@ func makeWorkspaceRecord(id: String = UUID().uuidString, projectID: String, name
 // Mock iTerm2 adapter for testing that doesn't open actual terminal windows
 class MockIterm2Adapter: Iterm2Adapter {
     var openWindowAndRunCallCount = 0
+    var openTabInWindowAndRunCallCount = 0
     var runInWindowCallCount = 0
     var focusSessionOrTabCallCount = 0
     var lastCommand: String?
     var lastWindowID: Int?
+    var openedTabWindowIDs: [Int] = []
     var lastFocusedSessionID: String?
     var lastFocusedTabIndex: Int?
     var nextWindowID: Int = 9999
@@ -49,6 +51,16 @@ class MockIterm2Adapter: Iterm2Adapter {
         nextWindowID += 1
         // Don't actually open a terminal window - just return the window info
         return ItermWindowInfo(id: windowID, sessionID: nextSessionID, tabIndex: nextTabIndex)
+    }
+
+    override func openTabInWindowAndRun(windowID: Int, command: String, background: Bool = false) throws -> ItermWindowInfo {
+        openTabInWindowAndRunCallCount += 1
+        openedTabWindowIDs.append(windowID)
+        lastCommand = command
+        lastWindowID = windowID
+        let tabIndex = (nextTabIndex ?? 1) + openTabInWindowAndRunCallCount
+        let sessionID = nextSessionID.map { "\($0)-tab-\(openTabInWindowAndRunCallCount)" }
+        return ItermWindowInfo(id: windowID, sessionID: sessionID, tabIndex: tabIndex)
     }
     
     override func runInWindow(id: Int, command: String) throws {

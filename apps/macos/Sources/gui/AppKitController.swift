@@ -2498,9 +2498,20 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             }
             return []
         }()
-        let processByWindowID: [Int: RunningProcessRecord] = {
-            var map: [Int: RunningProcessRecord] = [:]
-            for process in processes { if let wid = process.windowID { map[wid] = process } }
+        let processesByWindowID: [Int: [RunningProcessRecord]] = {
+            var map: [Int: [RunningProcessRecord]] = [:]
+            for process in processes {
+                guard let wid = process.windowID else { continue }
+                map[wid, default: []].append(process)
+            }
+            for (wid, list) in map {
+                map[wid] = list.sorted { lhs, rhs in
+                    let lhsTab = lhs.itermTabIndex ?? Int.max
+                    let rhsTab = rhs.itermTabIndex ?? Int.max
+                    if lhsTab != rhsTab { return lhsTab < rhsTab }
+                    return lhs.templateName.localizedStandardCompare(rhs.templateName) == .orderedAscending
+                }
+            }
             return map
         }()
         var statusResultsByProcessID: [String: [StatusResult]] = [:]
@@ -2514,8 +2525,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         windowsStack.orientation = .vertical
         windowsStack.spacing = 4
         var matchedProcessIDs: Set<String> = []
-        let nonAgentWindows = windows.filter { $0.windowID == nil || !agentYabaiWindowIDs.contains($0.windowID!) }
-        if nonAgentWindows.isEmpty {
+        var windowsSectionRowCount = 0
+        var shortcutCounter = 1
+        if windows.isEmpty {
             let emptyLabel = NSTextField(labelWithString: "No captured windows")
             emptyLabel.font = .systemFont(ofSize: 11)
             emptyLabel.textColor = .tertiaryLabelColor
@@ -2525,12 +2537,14 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         } else {
             // Use the original 1-based index in the full windows array so CMD+N matches focusWorkspaceWindow(index:).
             for (idx, win) in windows.enumerated() {
-                guard win.windowID == nil || !agentYabaiWindowIDs.contains(win.windowID!) else { continue }
+                let windowProcesses = (win.role == "terminal" ? (win.windowID.flatMap { processesByWindowID[$0] }) : nil) ?? []
+                let isAgentClaimedWindow = win.windowID != nil && agentYabaiWindowIDs.contains(win.windowID!)
+                if isAgentClaimedWindow && (win.role != "terminal" || windowProcesses.isEmpty) { continue }
                 let windowLabel: String
                 let windowDetail: String?
                 let iconName: String
                 let iconColor: NSColor
-                var linkedProcess: RunningProcessRecord? = nil
+                let linkedProcess: RunningProcessRecord? = nil
                 switch win.role {
                 case "browser":
                     if let sessionName = browserSessionDisplayName(for: win.targetURL, sessions: configuredBrowserSessions),
@@ -2545,15 +2559,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                     iconName = "globe"
                     iconColor = .systemBlue
                 case "terminal":
-                    if let wid = win.windowID, let process = processByWindowID[wid] {
-                        linkedProcess = process
-                        windowLabel = process.templateName
-                        windowDetail = resolveCommand(process.command)
-                        matchedProcessIDs.insert(process.id)
-                    } else {
-                        windowLabel = win.title ?? win.app
-                        windowDetail = nil
-                    }
+                    windowLabel = win.title ?? win.app
+                    windowDetail = nil
                     iconName = "terminal"
                     iconColor = .systemGreen
                 default:
@@ -2564,26 +2571,71 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 }
                 let windowIndex = idx + 1
                 let workspaceID = workspace.id
-                let row = windowRow(
-                    icon: iconName, iconColor: iconColor, label: windowLabel, detail: windowDetail,
-                    shortcut: "CMD+\(windowIndex)", processStatus: linkedProcess?.status,
-                    action: { [weak self] in
-                        guard let self else { return }
-                        do { try self.orchestrator.focusWorkspaceWindow(workspaceID: workspaceID, index: windowIndex) } catch {}
-                    })
-                windowsStack.addArrangedSubview(row)
-                constrainFormFieldToFillWidth(row, in: windowsStack)
+                if win.role == "terminal", !windowProcesses.isEmpty {
+                    for process in windowProcesses {
+                        matchedProcessIDs.insert(process.id)
+                        let rowShortcut = "CMD+\(shortcutCounter)"
+                        shortcutCounter += 1
+                        windowsSectionRowCount += 1
+                        let rowAction: (() -> Void) = { [weak self] in
+                            guard let self else { return }
+                            do {
+                                try self.orchestrator.focusWorkspaceProcess(workspaceID: workspaceID, processID: process.id)
+                            } catch {}
+                        }
+                        let row = windowRow(
+                            icon: iconName,
+                            iconColor: iconColor,
+                            label: process.templateName,
+                            detail: resolveCommand(process.command),
+                            shortcut: rowShortcut,
+                            processStatus: process.status,
+                            action: rowAction)
+                        windowsStack.addArrangedSubview(row)
+                        constrainFormFieldToFillWidth(row, in: windowsStack)
 
-                if let process = linkedProcess {
-                    let checks = statusResultsByProcessID[process.id] ?? []
-                    for check in checks {
-                        let isHealthy = check.status == .passed && process.status != .exited
-                        let checkColor: NSColor = isHealthy ? .systemGreen : .systemRed
-                        let checkRow = statusCheckSubRow(name: check.checkName, color: checkColor, status: check.status)
-                        windowsStack.addArrangedSubview(checkRow)
-                        constrainFormFieldToFillWidth(checkRow, in: windowsStack)
+                        let checks = statusResultsByProcessID[process.id] ?? []
+                        for check in checks {
+                            let isHealthy = check.status == .passed && process.status != .exited
+                            let checkColor: NSColor = isHealthy ? .systemGreen : .systemRed
+                            let checkRow = statusCheckSubRow(name: check.checkName, color: checkColor, status: check.status)
+                            windowsStack.addArrangedSubview(checkRow)
+                            constrainFormFieldToFillWidth(checkRow, in: windowsStack)
+                        }
+                    }
+                } else {
+                    let rowShortcut = "CMD+\(shortcutCounter)"
+                    shortcutCounter += 1
+                    windowsSectionRowCount += 1
+                    let row = windowRow(
+                        icon: iconName, iconColor: iconColor, label: windowLabel, detail: windowDetail,
+                        shortcut: rowShortcut, processStatus: linkedProcess?.status,
+                        action: { [weak self] in
+                            guard let self else { return }
+                            do { try self.orchestrator.focusWorkspaceWindow(workspaceID: workspaceID, index: windowIndex) } catch {}
+                        })
+                    windowsStack.addArrangedSubview(row)
+                    constrainFormFieldToFillWidth(row, in: windowsStack)
+
+                    if let process = linkedProcess {
+                        let checks = statusResultsByProcessID[process.id] ?? []
+                        for check in checks {
+                            let isHealthy = check.status == .passed && process.status != .exited
+                            let checkColor: NSColor = isHealthy ? .systemGreen : .systemRed
+                            let checkRow = statusCheckSubRow(name: check.checkName, color: checkColor, status: check.status)
+                            windowsStack.addArrangedSubview(checkRow)
+                            constrainFormFieldToFillWidth(checkRow, in: windowsStack)
+                        }
                     }
                 }
+            }
+            if windowsSectionRowCount == 0 {
+                let emptyLabel = NSTextField(labelWithString: "No captured windows")
+                emptyLabel.font = .systemFont(ofSize: 11)
+                emptyLabel.textColor = .tertiaryLabelColor
+                emptyLabel.alignment = .left
+                windowsStack.alignment = .leading
+                windowsStack.addArrangedSubview(emptyLabel)
             }
         }
         let windowsHeader = sectionHeader(icon: "macwindow.on.rectangle", title: "Windows")
@@ -2603,20 +2655,15 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             let agentsStack = NSStackView()
             agentsStack.orientation = .vertical
             agentsStack.spacing = 4
-            for (agentIdx, agentWin) in agentWindowsForRunTab.enumerated() {
+            for agentWin in agentWindowsForRunTab {
                 let agentIcon = agentWin.provider == .codex ? "wand.and.stars" : "cpu.fill"
                 let agentColor: NSColor = agentWin.status == .done ? .systemGreen : agentWin.status == .waiting ? .systemOrange : .secondaryLabelColor
                 // Provider name shown first; window title (or custom label) shown as secondary detail
                 let linkedWin = agentWin.yabaiWindowID.flatMap { linkedWindowByYabaiID[$0] }
                 let agentLabel = agentWin.label ?? (agentWin.provider == .codex ? "Codex App" : "Claude Code CLI")
                 let agentDetail = linkedWin?.title ?? linkedWin?.app
-                // If linked to a captured yabai window, use its original 1-based position so CMD+N matches.
-                let agentShortcutNum: Int
-                if let yabaiWID = agentWin.yabaiWindowID, let origIdx = windows.firstIndex(where: { $0.windowID == yabaiWID }) {
-                    agentShortcutNum = origIdx + 1
-                } else {
-                    agentShortcutNum = windows.count + agentIdx + 1
-                }
+                let agentShortcutNum = shortcutCounter
+                shortcutCounter += 1
                 let rec = agentWin
                 let row = windowRow(
                     icon: agentIcon, iconColor: agentColor, label: agentLabel, detail: agentDetail, shortcut: "CMD+\(agentShortcutNum)",
@@ -4873,27 +4920,63 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             return
         }
         guard let selectedWorkspaceID else { return }
-        // Compute the target live so the shortcut reflects the current window/agent list
-        // even after restarts that change the tracked-windows set.
         let windows = (try? orchestrator.windows(workspaceID: selectedWorkspaceID)) ?? []
+        let processes = (try? orchestrator.runningProcesses(workspaceID: selectedWorkspaceID)) ?? []
         let agentWindows = (try? orchestrator.agentWindows(workspaceID: selectedWorkspaceID)) ?? []
-        let agentYabaiWindowIDs: Set<Int> = Set(agentWindows.compactMap { $0.yabaiWindowID })
-        // Check if the index maps to an agent window using the same numbering as the display.
-        for (agentIdx, agentWin) in agentWindows.enumerated() {
-            let agentShortcutNum: Int
-            if let yabaiWID = agentWin.yabaiWindowID, let origIdx = windows.firstIndex(where: { $0.windowID == yabaiWID }) {
-                agentShortcutNum = origIdx + 1
-            } else {
-                agentShortcutNum = windows.count + agentIdx + 1
+        let processesByWindowID: [Int: [RunningProcessRecord]] = {
+            var map: [Int: [RunningProcessRecord]] = [:]
+            for process in processes {
+                guard let wid = process.windowID else { continue }
+                map[wid, default: []].append(process)
             }
-            if agentShortcutNum == index {
+            for (wid, list) in map {
+                map[wid] = list.sorted { lhs, rhs in
+                    let lhsTab = lhs.itermTabIndex ?? Int.max
+                    let rhsTab = rhs.itermTabIndex ?? Int.max
+                    if lhsTab != rhsTab { return lhsTab < rhsTab }
+                    return lhs.templateName.localizedStandardCompare(rhs.templateName) == .orderedAscending
+                }
+            }
+            return map
+        }()
+        let agentYabaiWindowIDs: Set<Int> = Set(agentWindows.compactMap { $0.yabaiWindowID })
+        var shortcutCounter = 1
+        for (windowIdx, window) in windows.enumerated() {
+            let windowListIndex = windowIdx + 1
+            let windowProcesses = (window.role == "terminal" ? (window.windowID.flatMap { processesByWindowID[$0] }) : nil) ?? []
+            let isAgentClaimedWindow = window.windowID != nil && agentYabaiWindowIDs.contains(window.windowID!)
+            if isAgentClaimedWindow && (window.role != "terminal" || windowProcesses.isEmpty) { continue }
+            if window.role == "terminal", !windowProcesses.isEmpty {
+                for process in windowProcesses {
+                    if shortcutCounter == index {
+                        do {
+                            try orchestrator.focusWorkspaceProcess(workspaceID: selectedWorkspaceID, processID: process.id)
+                        } catch {
+                            showError(error)
+                        }
+                        return
+                    }
+                    shortcutCounter += 1
+                }
+            } else {
+                if shortcutCounter == index {
+                    do {
+                        try orchestrator.focusWorkspaceWindow(workspaceID: selectedWorkspaceID, index: windowListIndex)
+                    } catch {
+                        showError(error)
+                    }
+                    return
+                }
+                shortcutCounter += 1
+            }
+        }
+        for agentWin in agentWindows {
+            if shortcutCounter == index {
                 try? orchestrator.focusAgentWindow(agentWin)
                 return
             }
+            shortcutCounter += 1
         }
-        // Check that the index points to a non-agent workspace window.
-        guard index >= 1, index <= windows.count, !agentYabaiWindowIDs.contains(windows[index - 1].windowID ?? -1) else { return }
-        do { try orchestrator.focusWorkspaceWindow(workspaceID: selectedWorkspaceID, index: index) } catch { showError(error) }
     }
 
     private func windowShortcutIndex(for event: NSEvent) -> Int? {

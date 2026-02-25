@@ -44,7 +44,7 @@ export const docsPageLinks: DocsPageLink[] = [
     href: "/docs/processes",
     title: "Processes",
     summary:
-      "Run app servers, workers, and AI agents alongside each workspace so they start and stop together.",
+      "Run app servers, workers, and AI agents alongside each workspace so they start and stop together, with iTerm2 launching one tab/session per process in a shared workspace window when possible.",
   },
   {
     href: "/docs/browser-sessions",

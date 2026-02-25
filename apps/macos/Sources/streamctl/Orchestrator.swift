@@ -1215,7 +1215,12 @@ public final class MuxyOrchestrator {
         guard iterm.isAvailable() else { throw MuxyError.dependencyMissing(message: "iTerm2 is required to open terminal windows.") }
         let snapshot = try yabai.listWindows()
         let escapedDir = workspace.dir.replacingOccurrences(of: "\"", with: "\\\"")
-        let window = try iterm.openWindowAndRun(command: "cd \"\(escapedDir)\"")
+        let window: ItermWindowInfo
+        if let targetWindowID = try preferredWorkspaceItermWindowID(workspaceID: workspace.id) {
+            window = try iterm.openTabInWindowAndRun(windowID: targetWindowID, command: "cd \"\(escapedDir)\"")
+        } else {
+            window = try iterm.openWindowAndRun(command: "cd \"\(escapedDir)\"")
+        }
         if let focused = try yabai.focusedWindow(), focused.app == "iTerm2" {
             setItermTerminalSessionMetadata(
                 workspaceID: workspace.id, windowID: focused.id, sessionID: window.sessionID, tabIndex: window.tabIndex)
@@ -1253,6 +1258,24 @@ public final class MuxyOrchestrator {
         let ok = focusTrackedWindow(windows[targetIndex], workspaceID: workspaceID)
         if ok {
             setWindowNavigationIndex(targetIndex, workspaceID: workspaceID)
+            try setActiveWorkspace(id: workspaceID)
+        }
+    }
+
+    public func focusWorkspaceProcess(workspaceID: String, processID: String) throws {
+        guard let process = try store.runningProcesses(workspaceID: workspaceID).first(where: { $0.id == processID }) else { return }
+        guard process.terminalApp == "iTerm2", let trackedWindowID = process.windowID else { return }
+        let ok = try focusItermTerminalWindow(
+            workspaceID: workspaceID,
+            trackedWindowID: trackedWindowID,
+            preferredSessionID: process.itermSessionID,
+            preferredTabIndex: process.itermTabIndex)
+        if ok {
+            if (try? itermFocusPulseEnabled()) ?? SettingsKey.defaultItermFocusPulseEnabled {
+                let pulseColor = (try? itermFocusPulseColor()) ?? (r: 46, g: 41, b: 14)
+                let capturedIterm = iterm
+                Task.detached { try? capturedIterm.pulseBackground(windowID: trackedWindowID, pulseColor: pulseColor) }
+            }
             try setActiveWorkspace(id: workspaceID)
         }
     }
@@ -1438,7 +1461,12 @@ public final class MuxyOrchestrator {
         return focused
     }
 
-    private func focusItermTerminalWindow(workspaceID: String, trackedWindowID: Int) throws -> Bool {
+    private func focusItermTerminalWindow(
+        workspaceID: String,
+        trackedWindowID: Int,
+        preferredSessionID: String? = nil,
+        preferredTabIndex: Int? = nil
+    ) throws -> Bool {
         let runningProcess = try store.runningProcesses(workspaceID: workspaceID).first {
             $0.terminalApp == "iTerm2" && $0.windowID == trackedWindowID
         }
@@ -1447,9 +1475,28 @@ public final class MuxyOrchestrator {
         }
         let fallbackMetadata = itermTerminalSessionMetadata(workspaceID: workspaceID, windowID: trackedWindowID)
         return try iterm.focusSessionOrTab(
-            preferredSessionID: runningProcess?.itermSessionID ?? trackedWindow?.itermSessionID ?? fallbackMetadata?.sessionID,
-            tabIndex: runningProcess?.itermTabIndex ?? trackedWindow?.itermTabIndex ?? fallbackMetadata?.tabIndex,
+            preferredSessionID: preferredSessionID ?? runningProcess?.itermSessionID ?? trackedWindow?.itermSessionID ?? fallbackMetadata?.sessionID,
+            tabIndex: preferredTabIndex ?? runningProcess?.itermTabIndex ?? trackedWindow?.itermTabIndex ?? fallbackMetadata?.tabIndex,
             windowID: trackedWindowID)
+    }
+
+    private func preferredWorkspaceItermWindowID(workspaceID: String) throws -> Int? {
+        let trackedTerminalWindowIDs = Set(
+            try store.windows(workspaceID: workspaceID)
+                .filter { $0.role == "terminal" && $0.app == "iTerm2" }
+                .compactMap(\.windowID))
+        if trackedTerminalWindowIDs.isEmpty { return nil }
+        if let focused = try yabai.focusedWindow(),
+            focused.app == "iTerm2",
+            trackedTerminalWindowIDs.contains(focused.id)
+        {
+            return focused.id
+        }
+        let runningProcessWindow = try store.runningProcesses(workspaceID: workspaceID).first {
+            $0.terminalApp == "iTerm2" && $0.windowID != nil
+        }?.windowID
+        if let runningProcessWindow { return runningProcessWindow }
+        return trackedTerminalWindowIDs.sorted().first
     }
 
     private func closeTrackedItermTerminalContainer(_ process: RunningProcessRecord) throws -> Bool {
@@ -2434,24 +2481,34 @@ public final class MuxyOrchestrator {
 
         try store.deleteRunningProcesses(workspaceID: workspace.id)
 
+        var sharedItermWindowID: Int?
         for template in templates {
             let name = template.name ?? template.command
             let logFile = workspaceRuntime.appendingPathComponent("\(safeFilename(name)).log").path
             let pidFile = workspaceRuntime.appendingPathComponent("\(safeFilename(name)).pid").path
             let command = shellCommand(base: template.command, cwd: workspace.dir, env: env, logFile: logFile, pidFile: pidFile)
             let snapshot = try yabai.listWindows()
-            let window = try iterm.openWindowAndRun(command: command, background: background)
+            let window: ItermWindowInfo
+            if let existingWindowID = sharedItermWindowID {
+                window = try iterm.openTabInWindowAndRun(windowID: existingWindowID, command: command, background: background)
+            } else {
+                window = try iterm.openWindowAndRun(command: command, background: background)
+            }
             let fallbackWindowID = try captureNewWindows(
                 snapshot: snapshot, role: "terminal", appName: "iTerm2", workspaceID: workspace.id, orderOffset: 200
             ).first?.windowID
+            let resolvedWindowID = window.id >= 0 ? window.id : fallbackWindowID
+            if let resolvedWindowID {
+                sharedItermWindowID = resolvedWindowID
+            }
 
             let pid = try? Int(String(contentsOfFile: pidFile).trimmingCharacters(in: .whitespacesAndNewlines))
             let running = RunningProcessRecord(
                 id: UUID().uuidString, workspaceID: workspace.id, templateName: name, command: template.command, terminalApp: "iTerm2",
-                windowID: window.id >= 0 ? window.id : fallbackWindowID, itermSessionID: window.sessionID, itermTabIndex: window.tabIndex, pid: pid,
+                windowID: resolvedWindowID, itermSessionID: window.sessionID, itermTabIndex: window.tabIndex, pid: pid,
                 status: .running, logPath: logFile, lastOutputAt: nil,
                 startedAt: nowISO8601(), exitedAt: nil)
-            if let resolvedWindowID = (window.id >= 0 ? window.id : fallbackWindowID), resolvedWindowID > 0 {
+            if let resolvedWindowID, resolvedWindowID > 0 {
                 setItermTerminalSessionMetadata(
                     workspaceID: workspace.id, windowID: resolvedWindowID, sessionID: window.sessionID, tabIndex: window.tabIndex)
             }

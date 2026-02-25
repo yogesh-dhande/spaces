@@ -84,6 +84,7 @@ GUI interaction notes:
 - Browser sessions are editable via `BrowserSessionEditor` (`name` + URL prefix rows) in project detail, add-project form, and workspace settings.
 - The run tab displays status check results as indented sub-rows under each process with colored dots (passed=green/failed=red) instead of inline badge text.
 - In the run-tab Windows list, browser rows render a two-part label: browser-session name first (when configured) plus the matched URL in secondary text.
+- In the run-tab Windows list, terminal rows are rendered per running process session (one row per iTerm2 tab/session), so multiple workspace processes in the same iTerm2 window still appear as separate rows.
 - Window cards in the Run tab and Dashboard are clickable: clicking a card calls `focusWorkspaceWindow` for that window, equivalent to the `CMD+N` keyboard shortcut.
 - Keyboard shortcut overrides for GUI actions are persisted in SQLite settings and editable in the GUI Settings view and CLI settings commands.
 - Tooltip overlay includes a footer hint showing the effective tooltip-toggle shortcut (`gui_tooltip_shortcut`, default `cmd+shift+i`) using the user override when configured.
@@ -396,6 +397,7 @@ Stop or archive:
 
 Run/recovery semantics:
 - `launchWorkspace` is only for stopped workspaces. If `is_running` is set or runtime indicators already exist (`running_processes`/`windows` rows), launch fails with "use restart".
+- `launchProcesses` opens the first workspace process in a new iTerm2 window, then opens additional workspace processes as tabs in that same iTerm2 window (capturing/persisting per-session metadata for focus/close).
 - Launch waits for setup completion when setup state is `pending`/`running`; if setup state is `failed`, launch fails with the setup error message.
 - `restartWorkspace` is the explicit recovery path and always performs stop then launch for the same workspace.
 - `upWorkspace` is idempotent "ensure running": launch when stopped; if runtime is already present, either no-op (default) or restart when `restartIfRunning` is true.
@@ -423,6 +425,7 @@ Degraded runtime edge cases and handling:
 - Window cycling tracks a workspace-local navigation pointer, and Chrome row resolution uses the frontmost active tab URL with prefix checks to keep next/previous stable.
 - Window cycling order is role-grouped for consistency: all browser tabs first, then terminal windows, then other window roles. Relative navigation prefers the remembered workspace-local index once cycling begins.
 - Terminal focus prefers iTerm2 AppleScript session selection (with stored session ID and tab-index fallback) before generic window focus, so workspace cycling lands on the correct iTerm tab when metadata is available.
+- GUI "Open Terminal" reuses a tracked workspace iTerm2 window when available by opening a new tab in that window; it falls back to creating a new iTerm2 window when no tracked workspace terminal exists.
 - Workspace stop/reconcile closes process-backed iTerm terminals via iTerm2 session/tab metadata first and skips the later `yabai` window-close pass for those same terminal window IDs to avoid closing unrelated tabs in shared iTerm windows.
 - The `closeSessionOrTab` AppleScript must not select the target window (`tell w to select`) before closing a session. Window selection reorders iTerm2's window list, which invalidates the index-based loop reference (`s`) and causes the wrong session to be closed. The close operates directly on the matched session reference without prior focus changes. If session close fails, the window is left open rather than risk closing unrelated tabs.
 - Global next/previous shortcut routing resolves focused Chrome windows by `(window_id + active tab URL prefix)` so one reused Chrome window can be safely tracked by multiple workspaces without selecting the wrong workspace.

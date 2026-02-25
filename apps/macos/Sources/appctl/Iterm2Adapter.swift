@@ -28,6 +28,45 @@ open class Iterm2Adapter: @unchecked Sendable {
         return ItermWindowInfo(id: windowID, sessionID: sessionID, tabIndex: tabIndex)
     }
 
+    open func openTabInWindowAndRun(windowID: Int, command: String, background: Bool = false) throws -> ItermWindowInfo {
+        let escaped = command.replacingOccurrences(of: "\"", with: "\\\"")
+        let activateLine = background ? "" : "activate"
+        let script = """
+            tell application "iTerm2"
+              \(activateLine)
+              repeat with w in windows
+                if id of w is \(windowID) then
+                  tell w
+                    create tab with default profile
+                    tell current session
+                      write text "\(escaped)"
+                    end tell
+                    set tabCounter to 0
+                    repeat with t in tabs
+                      set tabCounter to tabCounter + 1
+                      if t is current tab then
+                        return (id of w as string) & "|" & (id of current session as string) & "|" & (tabCounter as string)
+                      end if
+                    end repeat
+                    return (id of w as string) & "|" & (id of current session as string) & "|"
+                  end tell
+                end if
+              end repeat
+              return ""
+            end tell
+            """
+        let output = try AppleScript.run(script)
+        let trimmed = output.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            throw NSError(domain: "muxy.iterm2", code: 1, userInfo: [NSLocalizedDescriptionKey: "iTerm2 window \(windowID) not found"])
+        }
+        let parts = trimmed.split(separator: "|", omittingEmptySubsequences: false).map(String.init)
+        let resolvedWindowID = Int(parts.first ?? trimmed) ?? windowID
+        let sessionID = parts.count > 1 && !parts[1].isEmpty ? parts[1] : nil
+        let tabIndex = parts.count > 2 ? Int(parts[2]) : nil
+        return ItermWindowInfo(id: resolvedWindowID, sessionID: sessionID, tabIndex: tabIndex)
+    }
+
     open func runInWindow(id: Int, command: String) throws {
         let escaped = command.replacingOccurrences(of: "\"", with: "\\\"")
         let script = """
