@@ -3652,9 +3652,9 @@ final class OrchestratorTests: XCTestCase {
     func testItermFocusPulseColorReturnsDefaultWhenNotSet() throws {
         let (orchestrator, _, _, _, _) = try makeOrchestratorWithWorkspace()
         let (r, g, b) = try orchestrator.itermFocusPulseColor()
-        XCTAssertEqual(r, 255)
-        XCTAssertEqual(g, 195)
-        XCTAssertEqual(b, 0)
+        XCTAssertEqual(r, 46)
+        XCTAssertEqual(g, 41)
+        XCTAssertEqual(b, 14)
     }
 
     // Tests iterm focus pulse color round trips by arranging representative inputs and asserting the expected result.
@@ -3709,9 +3709,9 @@ final class OrchestratorTests: XCTestCase {
 
         XCTAssertEqual(mockIterm.pulseCallCount, 1)
         XCTAssertEqual(mockIterm.lastPulsedWindowID, 555)
-        XCTAssertEqual(mockIterm.lastPulseColor?.r, 255)
-        XCTAssertEqual(mockIterm.lastPulseColor?.g, 195)
-        XCTAssertEqual(mockIterm.lastPulseColor?.b, 0)
+        XCTAssertEqual(mockIterm.lastPulseColor?.r, 46)
+        XCTAssertEqual(mockIterm.lastPulseColor?.g, 41)
+        XCTAssertEqual(mockIterm.lastPulseColor?.b, 14)
     }
 
     // Tests focus iterm window uses configured pulse color by arranging representative inputs and asserting the expected result.
@@ -3748,6 +3748,52 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertEqual(mockIterm.lastPulseColor?.r, 0)
         XCTAssertEqual(mockIterm.lastPulseColor?.g, 100)
         XCTAssertEqual(mockIterm.lastPulseColor?.b, 200)
+    }
+
+    // Tests iterm focus pulse enabled returns true by default when not set.
+    func testItermFocusPulseEnabledDefaultsToTrue() throws {
+        let (orchestrator, _, _, _, _) = try makeOrchestratorWithWorkspace()
+        let enabled = try orchestrator.itermFocusPulseEnabled()
+        XCTAssertTrue(enabled)
+    }
+
+    // Tests iterm focus pulse enabled round-trips false.
+    func testItermFocusPulseEnabledRoundTripFalse() throws {
+        let (orchestrator, _, _, _, _) = try makeOrchestratorWithWorkspace()
+        try orchestrator.setItermFocusPulseEnabled(false)
+        let enabled = try orchestrator.itermFocusPulseEnabled()
+        XCTAssertFalse(enabled)
+    }
+
+    // Tests iterm focus pulse is skipped when disabled.
+    func testFocusItermWindowSkipsPulseWhenDisabled() throws {
+        let store = try makeTemporaryStore()
+        let mockIterm = MockIterm2Adapter()
+        let orchestrator = MuxyOrchestrator(store: store, iterm: mockIterm)
+
+        let root = try makeTempDirectory()
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
+
+        try orchestrator.setItermFocusPulseEnabled(false)
+        try store.upsert(
+            window: WindowRecord(
+                id: UUID().uuidString, workspaceID: workspace.id, app: "iTerm2", title: "api", windowID: 557, role: "terminal",
+                orderIndex: 0, lastSeenAt: "now"))
+        try store.upsert(
+            runningProcess: RunningProcessRecord(
+                id: UUID().uuidString, workspaceID: workspace.id, templateName: "api", command: "npm run api",
+                terminalApp: "iTerm2", windowID: 557, itermSessionID: "session-557", itermTabIndex: 1,
+                pid: 1234, status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil))
+
+        try orchestrator.focusWorkspaceWindow(workspaceID: workspace.id, index: 1)
+
+        // Allow any async pulse Task to run.
+        RunLoop.current.run(until: Date().addingTimeInterval(0.2))
+
+        XCTAssertEqual(mockIterm.pulseCallCount, 0)
     }
 
     // MARK: - resolveEnvVars

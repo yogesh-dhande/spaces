@@ -1358,9 +1358,11 @@ public final class MuxyOrchestrator {
             if focusedIterm {
                 logBrowserFocus(
                     "workspace=\(workspaceID) path=iterm window=\(trackedWindowID) elapsed_ms=\(elapsedMS(since: focusStartedAt))")
-                let pulseColor = (try? itermFocusPulseColor()) ?? (r: 255, g: 195, b: 0)
-                let capturedIterm = iterm
-                Task.detached { try? capturedIterm.pulseBackground(windowID: trackedWindowID, pulseColor: pulseColor) }
+                if (try? itermFocusPulseEnabled()) ?? SettingsKey.defaultItermFocusPulseEnabled {
+                    let pulseColor = (try? itermFocusPulseColor()) ?? (r: 46, g: 41, b: 14)
+                    let capturedIterm = iterm
+                    Task.detached { try? capturedIterm.pulseBackground(windowID: trackedWindowID, pulseColor: pulseColor) }
+                }
                 return true
             }
         }
@@ -1830,6 +1832,16 @@ public final class MuxyOrchestrator {
     public func setItermFocusPulseColor(r: Int, g: Int, b: Int) throws {
         let clamped = (r: max(0, min(255, r)), g: max(0, min(255, g)), b: max(0, min(255, b)))
         try store.setSetting(key: SettingsKey.itermFocusPulseColor, value: "\(clamped.r),\(clamped.g),\(clamped.b)")
+    }
+
+    public func itermFocusPulseEnabled() throws -> Bool {
+        let raw = try? store.setting(key: SettingsKey.itermFocusPulseEnabled)
+        guard let raw else { return SettingsKey.defaultItermFocusPulseEnabled }
+        return raw != "0"
+    }
+
+    public func setItermFocusPulseEnabled(_ enabled: Bool) throws {
+        try store.setSetting(key: SettingsKey.itermFocusPulseEnabled, value: enabled ? "1" : "0")
     }
 
     public func activeWorkspaceID() throws -> String? { try store.setting(key: "active_workspace_id") }
@@ -2945,8 +2957,9 @@ public final class MuxyOrchestrator {
         case .iterm2:
             let focused = (try? iterm.focusSessionOrTab(
                 preferredSessionID: record.itermSessionID, tabIndex: nil, windowID: record.windowID)) ?? false
-            if focused, let windowID = record.windowID ?? record.yabaiWindowID {
-                let color = (try? itermFocusPulseColor()) ?? (r: 255, g: 195, b: 0)
+            if focused, let windowID = record.windowID ?? record.yabaiWindowID,
+               (try? itermFocusPulseEnabled()) ?? SettingsKey.defaultItermFocusPulseEnabled {
+                let color = (try? itermFocusPulseColor()) ?? (r: 46, g: 41, b: 14)
                 try? iterm.pulseBackground(windowID: windowID, pulseColor: color)
             }
         case .codex:

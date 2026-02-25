@@ -77,9 +77,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     private var openEditorShortcutSpec: HotkeySpec?
     private var openTerminalShortcutSpec: HotkeySpec?
     private var openFinderShortcutSpec: HotkeySpec?
+    private var openSettingsShortcutSpec: HotkeySpec?
     private var tooltipShortcutSpec: HotkeySpec?
     private var shortcutButtonsBySetting: [String: NSButton] = [:]
     private var activeShortcutCaptureSetting: ShortcutSetting?
+    private weak var pulseColorWell: NSColorWell?
     private var periodicWorkspaceRefreshTask: Task<Void, Never>?
     private var periodicUpdateCheckTask: Task<Void, Never>?
     private var periodicProcessMonitorTask: Task<Void, Never>?
@@ -1522,24 +1524,40 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             constrainFormFieldToFillWidth(row, in: stack)
         }
 
-        // --- iTerm2 focus pulse color ---
-        stack.addArrangedSubview(label(text: "iTerm2 focus pulse color"))
+        // --- iTerm2 focus pulse ---
+        stack.addArrangedSubview(label(text: "iTerm2 focus pulse"))
         let pulseColorNote = NSTextField(
-            labelWithString: "Background color briefly pulsed when an iTerm2 window is focused. Default: amber (65535, 50000, 0).")
+            labelWithString: "Briefly changes the iTerm2 background color when a terminal window is focused. Default color: \(SettingsKey.defaultItermFocusPulseColor).")
         pulseColorNote.font = .systemFont(ofSize: 11)
         pulseColorNote.textColor = .secondaryLabelColor
         pulseColorNote.maximumNumberOfLines = 0
         pulseColorNote.lineBreakMode = .byWordWrapping
         stack.addArrangedSubview(pulseColorNote)
 
-        let (pulseR, pulseG, pulseB) = (try? orchestrator.itermFocusPulseColor()) ?? (r: 255, g: 195, b: 0)
+        let pulseEnabledCheckbox = NSButton(checkboxWithTitle: "Enable focus pulse", target: self, action: #selector(itermPulseEnabledChanged(_:)))
+        pulseEnabledCheckbox.state = ((try? orchestrator.itermFocusPulseEnabled()) ?? SettingsKey.defaultItermFocusPulseEnabled) ? .on : .off
+        stack.addArrangedSubview(pulseEnabledCheckbox)
+
+        let (pulseR, pulseG, pulseB) = (try? orchestrator.itermFocusPulseColor()) ?? (r: 46, g: 41, b: 14)
         let colorWell = NSColorWell()
         colorWell.color = NSColor(
             red: CGFloat(pulseR) / 255, green: CGFloat(pulseG) / 255, blue: CGFloat(pulseB) / 255, alpha: 1)
         colorWell.translatesAutoresizingMaskIntoConstraints = false
         colorWell.target = self
         colorWell.action = #selector(itermPulseColorChanged(_:))
-        stack.addArrangedSubview(colorWell)
+        pulseColorWell = colorWell
+
+        let resetColorButton = actionButton(
+            title: "Reset", symbol: nil, tooltip: "Reset to default color (\(SettingsKey.defaultItermFocusPulseColor))",
+            action: #selector(resetItermPulseColor(_:)), primary: false)
+
+        let colorRow = NSStackView()
+        colorRow.orientation = .horizontal
+        colorRow.alignment = .centerY
+        colorRow.spacing = 8
+        colorRow.addArrangedSubview(colorWell)
+        colorRow.addArrangedSubview(resetColorButton)
+        stack.addArrangedSubview(colorRow)
 
         showScrollableDetailStack(stack)
     }
@@ -3710,6 +3728,20 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         do { configCache = try orchestrator.updateEditorPreference(preference) } catch { showError(error) }
     }
 
+    @objc private func itermPulseEnabledChanged(_ sender: NSButton) {
+        do { try orchestrator.setItermFocusPulseEnabled(sender.state == .on) } catch { showError(error) }
+    }
+
+    @objc private func resetItermPulseColor(_ sender: NSButton) {
+        let parts = SettingsKey.defaultItermFocusPulseColor.split(separator: ",").compactMap { Int($0) }
+        guard parts.count == 3 else { return }
+        do {
+            try orchestrator.setItermFocusPulseColor(r: parts[0], g: parts[1], b: parts[2])
+            pulseColorWell?.color = NSColor(
+                red: CGFloat(parts[0]) / 255, green: CGFloat(parts[1]) / 255, blue: CGFloat(parts[2]) / 255, alpha: 1)
+        } catch { showError(error) }
+    }
+
     @objc private func itermPulseColorChanged(_ sender: NSColorWell) {
         guard let rgb = sender.color.usingColorSpace(.deviceRGB) else { return }
         let r = Int((rgb.redComponent * 255).rounded())
@@ -4342,6 +4374,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             if self.handleNewWorkspaceShortcut(event: event) { return nil }
             if self.handleFormCancelShortcut(event: event) { return nil }
             if self.handleDashboardShortcut(event: event) { return nil }
+            if let openSettingsShortcutSpec, matches(event: event, spec: openSettingsShortcutSpec) {
+                self.showSettings()
+                return nil
+            }
             if self.handleFocusedTextInputShortcut(event: event) { return nil }
             if self.isTextInputFocused() { return event }
             if let openTerminalShortcutSpec, matches(event: event, spec: openTerminalShortcutSpec) {
@@ -4632,6 +4668,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         openEditorShortcutSpec = loadShortcutSpec(setting: .guiOpenEditorShortcut)
         openTerminalShortcutSpec = loadShortcutSpec(setting: .guiOpenTerminalShortcut)
         openFinderShortcutSpec = loadShortcutSpec(setting: .guiOpenFinderShortcut)
+        openSettingsShortcutSpec = loadShortcutSpec(setting: .guiOpenSettingsShortcut)
         tooltipShortcutSpec = loadShortcutSpec(setting: .guiTooltipShortcut)
     }
 
@@ -4686,7 +4723,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         case .guiOpenEditorShortcut: return openEditorShortcutSpec
         case .guiOpenTerminalShortcut: return openTerminalShortcutSpec
         case .guiOpenFinderShortcut: return openFinderShortcutSpec
-        case .guiOpenSettingsShortcut: return nil
+        case .guiOpenSettingsShortcut: return openSettingsShortcutSpec
         case .guiTooltipShortcut: return tooltipShortcutSpec
         }
     }

@@ -29,6 +29,8 @@ public enum SettingsKey {
     public static let guiTooltipShortcut = "gui_tooltip_shortcut"
     public static let defaultGUITooltipShortcut = "cmd+shift+i"
     public static let itermFocusPulseColor = "iterm_focus_pulse_color"
-    /// Default iTerm2 focus pulse color: amber (~65535, 50000, 0 in AppleScript 16-bit = 255, 195, 0 in 8-bit RGB).
-    public static let defaultItermFocusPulseColor = "255,195,0"
+    /// Default iTerm2 focus pulse color (8-bit RGB).
+    public static let defaultItermFocusPulseColor = "46,41,14"
+    public static let itermFocusPulseEnabled = "iterm_focus_pulse_enabled"
+    public static let defaultItermFocusPulseEnabled = true
 }
