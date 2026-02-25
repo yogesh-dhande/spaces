@@ -2518,10 +2518,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             for (agentIdx, agentWin) in agentWindowsForRunTab.enumerated() {
                 let agentIcon = agentWin.provider == .codex ? "wand.and.stars" : "cpu.fill"
                 let agentColor: NSColor = agentWin.status == .done ? .systemGreen : agentWin.status == .waiting ? .systemOrange : .secondaryLabelColor
-                // Use linked window title when available; fall back to generic label
+                // Provider name shown first; window title (or custom label) shown as secondary detail
                 let linkedWin = agentWin.yabaiWindowID.flatMap { linkedWindowByYabaiID[$0] }
-                let agentLabel = agentWin.label ?? linkedWin?.title ?? linkedWin?.app ?? (agentWin.provider == .codex ? "Codex" : "Claude Code")
-                let agentDetail = linkedWin != nil ? (agentWin.provider == .codex ? "Codex" : "Claude Code") : nil
+                let providerName = agentWin.provider == .codex ? "Codex" : "Claude Code"
+                let agentLabel = providerName
+                let agentDetail = agentWin.label ?? linkedWin?.title ?? linkedWin?.app
                 // If linked to a captured yabai window, use its original 1-based position so CMD+N matches.
                 let agentShortcutNum: Int
                 if let yabaiWID = agentWin.yabaiWindowID, let origIdx = windows.firstIndex(where: { $0.windowID == yabaiWID }) {
