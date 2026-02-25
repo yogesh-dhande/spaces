@@ -1181,6 +1181,20 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertEqual(terminalWindows.first?.windowID, 777)
     }
 
+    // Tests that opening a terminal for a not-running workspace marks it as running so the UI shows Restart instead of Launch.
+    func testOpenWorkspaceTerminalMarksWorkspaceAsRunning() throws {
+        let (orchestrator, store, _, workspace, _) = try makeOrchestratorWithWorkspace()
+        XCTAssertEqual(workspace.isRunning, false)
+
+        try withMockCommands(["yabai": Self.orchestratorYabaiMockScript, "osascript": Self.orchestratorOsaScriptMock]) {
+            try withEnv(name: "YABAI_FOCUSED_ID", value: "777") {
+                try withEnv(name: "YABAI_FOCUSED_APP", value: "iTerm2") { try orchestrator.openWorkspaceTerminal(workspaceID: workspace.id) }
+            }
+        }
+
+        XCTAssertEqual(try store.workspace(id: workspace.id)?.isRunning, true)
+    }
+
     // Tests open workspace terminal throws when i term is unavailable by arranging representative inputs and asserting the expected result.
     func testOpenWorkspaceTerminalThrowsWhenITermIsUnavailable() throws {
         let (orchestrator, _, _, workspace, _) = try makeOrchestratorWithWorkspace()

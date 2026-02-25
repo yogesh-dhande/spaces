@@ -1218,6 +1218,10 @@ public final class MuxyOrchestrator {
             try persistItermTerminalWindowMetadata(
                 workspaceID: workspace.id, windowID: focused.id, sessionID: window.sessionID, tabIndex: window.tabIndex)
         }
+        if !workspace.isRunning {
+            let launchedAt = workspace.lastLaunchedAt ?? nowISO8601()
+            try store.updateWorkspaceRunning(id: workspace.id, isRunning: true, launchedAt: launchedAt)
+        }
     }
 
     public func focusWorkspace(workspaceID: String) throws {
