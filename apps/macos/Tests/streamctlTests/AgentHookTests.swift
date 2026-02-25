@@ -100,8 +100,8 @@ final class AgentHookTests: XCTestCase {
         XCTAssertEqual(allRecords[0].status, .done)
     }
 
-    // Tests stopWorkspaceUnlocked closes iTerm2 agent sessions.
-    func testStopWorkspaceClosesItermAgentSessions() throws {
+    // Tests stopWorkspace preserves iTerm2 agent sessions and their DB records.
+    func testStopWorkspacePreservesItermAgentSessions() throws {
         let store = try makeTemporaryStore()
         let mockIterm = MockIterm2Adapter()
         mockIterm.stubbedSessionIDs = ["agent-session"]
@@ -118,12 +118,12 @@ final class AgentHookTests: XCTestCase {
         // Stop workspace
         _ = try orchestrator.stopWorkspace(workspaceID: workspace.id)
 
-        // Agent session should have been closed
-        XCTAssertTrue(mockIterm.closedSessionIDs.contains("agent-session"))
+        // Agent session should not be closed — coding agent sessions survive workspace stop.
+        XCTAssertFalse(mockIterm.closedSessionIDs.contains("agent-session"))
 
-        // Agent window records should be deleted
+        // Agent window records should be preserved
         let remaining = try store.agentWindows(workspaceID: workspace.id)
-        XCTAssertTrue(remaining.isEmpty)
+        XCTAssertEqual(remaining.count, 1)
     }
 
     // Tests agentWindows returns correct records.

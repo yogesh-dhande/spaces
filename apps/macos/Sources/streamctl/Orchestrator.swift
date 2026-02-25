@@ -606,7 +606,7 @@ public final class MuxyOrchestrator {
 
     public func restartWorkspace(workspaceID: String) throws {
         try withWorkspaceLifecycleLock(workspaceID: workspaceID) {
-            _ = try stopWorkspaceUnlocked(workspaceID: workspaceID, preserveAgentWindows: true)
+            _ = try stopWorkspaceUnlocked(workspaceID: workspaceID)
             try launchWorkspaceUnlocked(workspaceID: workspaceID)
         }
     }
@@ -618,7 +618,7 @@ public final class MuxyOrchestrator {
             let hasTrackedRuntime = try hasTrackedRuntimeIndicators(workspaceID: workspace.id)
             if workspace.isRunning || hasTrackedRuntime {
                 if restartIfRunning {
-                    _ = try stopWorkspaceUnlocked(workspaceID: workspaceID, preserveAgentWindows: true)
+                    _ = try stopWorkspaceUnlocked(workspaceID: workspaceID)
                     try launchWorkspaceUnlocked(workspaceID: workspaceID, background: background)
                 } else {
                     try restartExitedProcesses(workspaceID: workspaceID, background: background)
@@ -703,7 +703,7 @@ public final class MuxyOrchestrator {
         try withWorkspaceLifecycleLock(workspaceID: workspaceID) { try stopWorkspaceUnlocked(workspaceID: workspaceID) }
     }
 
-    private func stopWorkspaceUnlocked(workspaceID: String, preserveAgentWindows: Bool = false) throws -> WorkspaceStopOutcome {
+    private func stopWorkspaceUnlocked(workspaceID: String) throws -> WorkspaceStopOutcome {
         let (project, workspace) = try resolveWorkspace(id: workspaceID)
         let windows = try trackedWindows(workspaceID: workspace.id)
         let namedPorts = try store.workspacePortsNamed(workspaceID: workspace.id)
@@ -727,10 +727,9 @@ public final class MuxyOrchestrator {
                 skippedStopScriptBecauseWorkspaceDirectoryMissing = true
             }
         }
-        // Collect agent iTerm2 session IDs so those specific sessions are skipped when preserving agent windows.
+        // Always preserve coding agent sessions: collect their iTerm2 session IDs to skip when closing windows.
         let agentWindowsList = (try? store.agentWindows(workspaceID: workspace.id)) ?? []
-        let agentItermSessionIDs: Set<String> = preserveAgentWindows
-            ? Set(agentWindowsList.compactMap { $0.itermSessionID }) : []
+        let agentItermSessionIDs = Set(agentWindowsList.compactMap { $0.itermSessionID })
         var processTerminalWindowIDs = Set<Int>()
         var closedProcessTerminalWindowIDs = Set<Int>()
         for process in processes where process.terminalApp == "iTerm2" {
@@ -749,7 +748,7 @@ public final class MuxyOrchestrator {
             if window.role == "terminal", window.app == "iTerm2", let id = window.windowID {
                 if closedWindowIDs.contains(id) { continue }
                 if !processTerminalWindowIDs.contains(id) {
-                    // Skip closing this specific session if it belongs to an agent being preserved.
+                    // Skip closing this specific session if it belongs to a coding agent.
                     let isAgentSession = window.itermSessionID.map({ agentItermSessionIDs.contains($0) }) == true
                     if !isAgentSession {
                         _ = try? closeTrackedItermTerminalWindow(workspaceID: workspace.id, windowID: id)
@@ -763,13 +762,6 @@ public final class MuxyOrchestrator {
                 closedWindowIDs.insert(id)
                 _ = try? yabai.closeWindow(id: id)
             }
-        }
-        // Close iTerm2 agent sessions
-        if !preserveAgentWindows {
-            for agentWin in agentWindowsList where agentWin.provider == .iterm2 {
-                _ = try? iterm.closeSessionOrTab(preferredSessionID: agentWin.itermSessionID, tabIndex: nil, windowID: agentWin.windowID)
-            }
-            try store.deleteAgentWindows(workspaceID: workspace.id)
         }
         try store.deleteRunningProcesses(workspaceID: workspace.id)
         try store.deleteWindows(workspaceID: workspace.id)
@@ -787,6 +779,7 @@ public final class MuxyOrchestrator {
         let (project, workspace) = try resolveWorkspace(id: workspaceID)
         guard !workspace.isDefault else { throw MuxyError.invalidArgument(message: "Default workspace cannot be archived.") }
         _ = try stopWorkspaceUnlocked(workspaceID: workspaceID)
+        try store.deleteAgentWindows(workspaceID: workspaceID)
         if project.isGitRepo {
             do { try git.removeWorktree(path: project.dir, worktreePath: workspace.dir) } catch { if !isMissingWorktreeError(error) { throw error } }
         }

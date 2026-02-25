@@ -2703,6 +2703,35 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertFalse(mockIterm.closedSessionIDs.contains("agent-session-2"), "Agent iTerm2 session should not be closed during up --restart")
     }
 
+    // Tests stopWorkspace preserves coding agent sessions by arranging a running workspace with an iterm2 agent window and asserting the record and session survive an explicit stop.
+    func testStopWorkspacePreservesAgentSessions() throws {
+        let root = try makeTempDirectory()
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let store = try makeTemporaryStore()
+        let mockIterm = MockIterm2Adapter()
+        let orchestrator = MuxyOrchestrator(store: store, iterm: mockIterm)
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
+        try store.updateWorkspaceRunning(id: workspace.id, isRunning: true, launchedAt: "now")
+        let agentRecord = AgentWindowRecord(
+            id: UUID().uuidString, workspaceID: workspace.id, provider: .iterm2, label: "Claude Code",
+            itermSessionID: "agent-session-stop", codexThreadID: nil, windowID: nil,
+            yabaiWindowID: nil, status: .spinning, createdAt: "now", updatedAt: "now")
+        try store.upsertAgentWindow(agentRecord)
+
+        // Why: explicit stop should not close or delete coding agent sessions so they survive for the next launch.
+        // Remaining risk: the live iTerm2 session is not exercised; only mock call recording and DB state are asserted.
+        try withMockCommands(["yabai": Self.orchestratorYabaiMockScript, "osascript": Self.orchestratorOsaScriptMock]) {
+            try orchestrator.stopWorkspace(workspaceID: workspace.id)
+        }
+
+        let remaining = try store.agentWindows(workspaceID: workspace.id)
+        XCTAssertEqual(remaining.count, 1, "Agent window record should be preserved after explicit stop")
+        XCTAssertEqual(remaining.first?.id, agentRecord.id)
+        XCTAssertFalse(mockIterm.closedSessionIDs.contains("agent-session-stop"), "Agent iTerm2 session should not be closed during explicit stop")
+    }
+
     // Tests update workspace settings removing browser sessions closes tabs without closing chrome window by arranging representative inputs and asserting the expected result.
     func testUpdateWorkspaceSettingsRemovingBrowserSessionsClosesTabsWithoutClosingChromeWindow() throws {
         let (orchestrator, store, _, workspace, root) = try makeOrchestratorWithWorkspace()
