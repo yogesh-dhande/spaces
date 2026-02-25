@@ -696,10 +696,16 @@ struct CLI {
             provider = parsed
         } else if bundleID == "com.openai.codex" {
             provider = .codex
+        } else if bundleID == "com.googlecode.iterm2" {
+            provider = .iterm2
+        } else if hasKnownCodingAgentMarkers(env: env) {
+            print("Ignoring agent event: unsupported terminal host '\(bundleID.isEmpty ? "unknown" : bundleID)' for detected coding agent env.")
+            return
         } else {
-            // iTerm2, Claude Code CLI (CLAUDE_CODE_ENTRYPOINT=cli), or any other terminal → iTerm2
+            // Manual/non-agent invocation from an unsupported terminal still defaults to iTerm2 semantics.
             provider = .iterm2
         }
+        let label = inferredAgentLabel(env: env, provider: provider)
 
         // ITERM_SESSION_ID has format "wNtNpN:UUID"; extract just the UUID for consistent matching
         // against AppleScript's `id of session`, which returns only the UUID.
@@ -730,7 +736,8 @@ struct CLI {
         case "init":
             let wsID = try ensureWorkspace()
             try orchestrator.registerAgentWindow(
-                workspaceID: wsID, provider: provider, itermSessionID: itermSessionID, codexThreadID: codexThreadID, yabaiWindowID: yabaiWindowID,
+                workspaceID: wsID, provider: provider, label: label, itermSessionID: itermSessionID, codexThreadID: codexThreadID,
+                yabaiWindowID: yabaiWindowID,
                 status: .idle)
             print("Agent init: workspace=\(wsID)")
             fireAgentEventNotification()
@@ -738,7 +745,8 @@ struct CLI {
         case "start":
             let wsID = try ensureWorkspace()
             try orchestrator.updateAgentWindowStatus(
-                workspaceID: wsID, provider: provider, itermSessionID: itermSessionID, codexThreadID: codexThreadID, yabaiWindowID: yabaiWindowID,
+                workspaceID: wsID, provider: provider, itermSessionID: itermSessionID, codexThreadID: codexThreadID,
+                yabaiWindowID: yabaiWindowID, label: label,
                 status: .spinning)
             print("Agent start: workspace=\(wsID)")
             fireAgentEventNotification()
@@ -746,7 +754,8 @@ struct CLI {
         case "waiting":
             let wsID = try ensureWorkspace()
             try orchestrator.updateAgentWindowStatus(
-                workspaceID: wsID, provider: provider, itermSessionID: itermSessionID, codexThreadID: codexThreadID, yabaiWindowID: yabaiWindowID,
+                workspaceID: wsID, provider: provider, itermSessionID: itermSessionID, codexThreadID: codexThreadID,
+                yabaiWindowID: yabaiWindowID, label: label,
                 status: .waiting)
             print("Agent waiting: workspace=\(wsID)")
             fireAgentEventNotification()
@@ -754,7 +763,8 @@ struct CLI {
         case "done":
             let wsID = try ensureWorkspace()
             try orchestrator.updateAgentWindowStatus(
-                workspaceID: wsID, provider: provider, itermSessionID: itermSessionID, codexThreadID: codexThreadID, yabaiWindowID: yabaiWindowID,
+                workspaceID: wsID, provider: provider, itermSessionID: itermSessionID, codexThreadID: codexThreadID,
+                yabaiWindowID: yabaiWindowID, label: label,
                 status: .done)
             print("Agent done: workspace=\(wsID)")
             fireAgentEventNotification()
@@ -762,7 +772,8 @@ struct CLI {
         case "stop":
             let wsID = try ensureWorkspace()
             try orchestrator.updateAgentWindowStatus(
-                workspaceID: wsID, provider: provider, itermSessionID: itermSessionID, codexThreadID: codexThreadID, yabaiWindowID: yabaiWindowID,
+                workspaceID: wsID, provider: provider, itermSessionID: itermSessionID, codexThreadID: codexThreadID,
+                yabaiWindowID: yabaiWindowID, label: label,
                 status: .done)
             print("Agent stop: workspace=\(wsID)")
             fireAgentEventNotification()
@@ -781,16 +792,48 @@ struct CLI {
     /// or nil if the environment cannot be identified as a coding agent.
     private func inferCodingAgentProvider() -> AgentProvider? {
         let env = ProcessInfo.processInfo.environment
-        if env["__CFBundleIdentifier"] == "com.openai.codex" { return .codex }
-        if env["CLAUDE_CODE_ENTRYPOINT"] != nil { return .iterm2 }
+        let bundleID = env["__CFBundleIdentifier"] ?? ""
+        if bundleID == "com.openai.codex" { return .codex }
+        if bundleID == "com.googlecode.iterm2", env["CODEX_THREAD_ID"] != nil { return .iterm2 }
+        if bundleID == "com.googlecode.iterm2", env["CLAUDE_CODE_ENTRYPOINT"] != nil { return .iterm2 }
         return nil
+    }
+
+    private func hasKnownCodingAgentMarkers(env: [String: String]) -> Bool {
+        env["CODEX_THREAD_ID"] != nil || env["CLAUDE_CODE_ENTRYPOINT"] != nil
+    }
+
+    private func inferredAgentLabel(env: [String: String], provider: AgentProvider) -> String? {
+        let bundleID = env["__CFBundleIdentifier"] ?? ""
+        switch provider {
+        case .codex:
+            return "Codex App"
+        case .iterm2:
+            if bundleID == "com.googlecode.iterm2", env["CODEX_THREAD_ID"] != nil {
+                return "Codex CLI"
+            }
+            if bundleID == "com.googlecode.iterm2", env["CLAUDE_CODE_ENTRYPOINT"] != nil {
+                return "Claude Code CLI"
+            }
+            return nil
+        }
     }
 
     /// Fires an agent event for the given workspace and status, using the current environment's session identifiers.
     private func fireAgentEvent(orchestrator: MuxyOrchestrator, workspaceID: String, status: AgentWindowStatus) throws {
         let env = ProcessInfo.processInfo.environment
         let bundleID = env["__CFBundleIdentifier"] ?? ""
-        let provider: AgentProvider = bundleID == "com.openai.codex" ? .codex : .iterm2
+        let provider: AgentProvider
+        if bundleID == "com.openai.codex" {
+            provider = .codex
+        } else if bundleID == "com.googlecode.iterm2" {
+            provider = .iterm2
+        } else if hasKnownCodingAgentMarkers(env: env) {
+            return
+        } else {
+            provider = .iterm2
+        }
+        let label = inferredAgentLabel(env: env, provider: provider)
         let rawItermSessionID = provider == .iterm2 ? env["ITERM_SESSION_ID"] : nil
         let itermSessionID = rawItermSessionID.map { raw -> String in
             guard let colonIdx = raw.lastIndex(of: ":") else { return raw }
@@ -808,7 +851,7 @@ struct CLI {
         try orchestrator.updateAgentWindowStatus(
             workspaceID: workspaceID, provider: provider,
             itermSessionID: itermSessionID, codexThreadID: codexThreadID,
-            yabaiWindowID: yabaiWindowID, status: status)
+            yabaiWindowID: yabaiWindowID, label: label, status: status)
         fireAgentEventNotification()
     }
 

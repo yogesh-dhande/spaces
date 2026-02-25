@@ -440,12 +440,13 @@ Degraded runtime edge cases and handling:
 - `refreshAllWorkspaceWindows` returns a `RefreshResult` containing `didMutateDB` (whether windows were pruned or workspace running flags changed) and `trackedWindowCounts` (per-workspace tracked window counts including live browser scan results); the GUI compares both against the previous snapshot and skips `reloadData()` entirely when nothing changed, avoiding unnecessary UI rebuilds.
 
 Agent window lifecycle:
-- Coding agents (Claude Code CLI in iTerm2, OpenAI Codex Desktop) register themselves with Muxy by calling `mx agent event --type init|start|waiting|done [--dir <path>] [--provider iterm2|codex]`.
-- Provider is auto-detected from env vars: `__CFBundleIdentifier=com.openai.codex` → Codex; otherwise → iTerm2.
+- Coding agents (Claude Code CLI in iTerm2, Codex CLI in iTerm2, OpenAI Codex Desktop) register themselves with Muxy by calling `mx agent event --type init|start|waiting|done [--dir <path>] [--provider iterm2|codex]`.
+- Provider is auto-detected from env vars only for supported hosts: `__CFBundleIdentifier=com.openai.codex` → Codex App provider; Codex CLI in iTerm2 (`CODEX_THREAD_ID` + `__CFBundleIdentifier=com.googlecode.iterm2`) and Claude Code CLI in iTerm2 (`CLAUDE_CODE_ENTRYPOINT` + `__CFBundleIdentifier=com.googlecode.iterm2`) → iTerm2. Coding-agent env markers from other terminal apps are ignored.
 - `ITERM_SESSION_ID` is captured for iTerm2 agent focus/close; `CODEX_THREAD_ID` is captured for Codex deep-link focus.
 - Agent records are stored in `agent_windows` table; one record per iTerm2 session, at most one per workspace for Codex.
 - Status transitions: `idle` → `spinning` (active) → `waiting` (human review requested, red dot) → `done` (finished, green dot).
 - Agent windows appear in the Run tab Windows section with a spinner (spinning), red dot (waiting), or green dot (done) status indicator.
+- Agent row labels are environment-specific (`Codex App`, `Codex CLI`, `Claude Code CLI`) so focus routes match the host window type.
 - Waiting agent windows trigger the workspace indicator to show `runningUnhealthy` (orange dot) in the sidebar.
 - Agent windows surfaced as Dashboard attention items when status is `waiting` or `done`.
 - Clicking an agent window row focuses the agent's iTerm2 session or opens the Codex thread deep-link.

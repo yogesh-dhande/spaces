@@ -361,16 +361,17 @@
         - Global tooltip toggle resolves focused workspace/agent windows, so a focused coding-agent terminal window can toggle the workspace tooltip even if the workspace is not currently marked running
         - When a text input is focused, default text-edit shortcuts (copy/cut/paste/select-all/undo/redo) must keep working and should not be intercepted by app-level hotkey handling
 - Agent Event (`mx agent event`)
-    - Coding agents (Claude Code CLI, OpenAI Codex Desktop) call `mx agent event --type <type>` to register lifecycle events with Muxy.
+    - Coding agents (Claude Code CLI, Codex CLI in iTerm2, OpenAI Codex Desktop) call `mx agent event --type <type>` to register lifecycle events with Muxy.
     - Hook types: `init` (agent started), `start` (task running), `waiting` (needs human review), `done` (task finished).
     - Provider is auto-detected from environment:
-        - `__CFBundleIdentifier=com.openai.codex` → Codex provider.
-        - All others (iTerm2, Claude Code CLI) → iTerm2 provider.
+        - `__CFBundleIdentifier=com.openai.codex` → Codex App provider.
+        - Codex CLI in iTerm2 (`CODEX_THREAD_ID` with `__CFBundleIdentifier=com.googlecode.iterm2`) and Claude Code CLI in iTerm2 (`CLAUDE_CODE_ENTRYPOINT` with `__CFBundleIdentifier=com.googlecode.iterm2`) → iTerm2 provider.
+        - Coding-agent env markers from unsupported terminal apps are ignored (no auto-registration).
         - Can be overridden with `--provider iterm2|codex`.
     - iTerm2 sessions: `ITERM_SESSION_ID` captured for focus/close; Codex: `CODEX_THREAD_ID` captured for deep-link focus.
     - At most one Codex agent record per workspace; multiple iTerm2 sessions per workspace allowed.
     - Status values: `idle`, `spinning` (active, spinner animation), `waiting` (red dot, triggers workspace unhealthy indicator), `done` (green dot).
-    - Agent windows appear in the Run tab Windows section with the appropriate status indicator.
+    - Agent windows appear in the Run tab Windows section with the appropriate status indicator and environment-specific labels (`Codex App`, `Codex CLI`, `Claude Code CLI`).
     - Agent windows with `waiting` or `done` status appear on the Dashboard as attention items.
     - Clicking an agent entry focuses the agent's iTerm2 session or opens `codex://threads/<id>`.
     - On workspace stop, all iTerm2 agent sessions are closed; agent records are deleted.

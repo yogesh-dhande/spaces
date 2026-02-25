@@ -1007,7 +1007,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
                 // Agent window attention items (waiting or done)
                 for agentWin in attentionAgentWindows {
-                    let agentLabel = agentWin.label ?? (agentWin.provider == .codex ? "Codex Agent" : "Claude Code Agent")
+                    let agentLabel = agentWin.label ?? (agentWin.provider == .codex ? "Codex App" : "Claude Code CLI")
                     let agentIcon = agentWin.provider == .codex ? "wand.and.stars" : "cpu.fill"
                     let agentIconColor: NSColor = agentWin.status == .done ? .systemGreen : .systemOrange
                     let eventDate = ISO8601DateFormatter().date(from: agentWin.updatedAt)
@@ -2608,9 +2608,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 let agentColor: NSColor = agentWin.status == .done ? .systemGreen : agentWin.status == .waiting ? .systemOrange : .secondaryLabelColor
                 // Provider name shown first; window title (or custom label) shown as secondary detail
                 let linkedWin = agentWin.yabaiWindowID.flatMap { linkedWindowByYabaiID[$0] }
-                let providerName = agentWin.provider == .codex ? "Codex" : "Claude Code"
-                let agentLabel = providerName
-                let agentDetail = agentWin.label ?? linkedWin?.title ?? linkedWin?.app
+                let agentLabel = agentWin.label ?? (agentWin.provider == .codex ? "Codex App" : "Claude Code CLI")
+                let agentDetail = linkedWin?.title ?? linkedWin?.app
                 // If linked to a captured yabai window, use its original 1-based position so CMD+N matches.
                 let agentShortcutNum: Int
                 if let yabaiWID = agentWin.yabaiWindowID, let origIdx = windows.firstIndex(where: { $0.windowID == yabaiWID }) {

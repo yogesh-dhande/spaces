@@ -100,6 +100,26 @@ final class AgentHookTests: XCTestCase {
         XCTAssertEqual(allRecords[0].status, .done)
     }
 
+    // Tests updateAgentWindowStatus can persist/update display label metadata for an existing agent row.
+    func testUpdateAgentWindowStatusUpdatesExistingLabel() throws {
+        let store = try makeTemporaryStore()
+        let mockIterm = MockIterm2Adapter()
+        mockIterm.stubbedSessionIDs = ["session-1"]
+        let orchestrator = MuxyOrchestrator(store: store, iterm: mockIterm)
+        let (_, workspace) = try makeProjectAndWorkspace(store: store)
+
+        try orchestrator.registerAgentWindow(
+            workspaceID: workspace.id, provider: .iterm2, label: "Claude Code CLI", itermSessionID: "session-1", status: .idle)
+
+        let updated = try orchestrator.updateAgentWindowStatus(
+            workspaceID: workspace.id, provider: .iterm2, itermSessionID: "session-1", label: "Codex CLI", status: .spinning)
+
+        XCTAssertEqual(updated.label, "Codex CLI")
+
+        let allRecords = try store.agentWindows(workspaceID: workspace.id)
+        XCTAssertEqual(allRecords[0].label, "Codex CLI")
+    }
+
     // Tests stopWorkspace preserves iTerm2 agent sessions and their DB records.
     func testStopWorkspacePreservesItermAgentSessions() throws {
         let store = try makeTemporaryStore()
@@ -175,14 +195,54 @@ final class AgentHookTests: XCTestCase {
 
     // Tests inferCodingAgentProvider logic: returns iterm2 when CLAUDE_CODE_ENTRYPOINT is set.
     func testInferCodingAgentProviderReturnsiterm2ForClaudeCode() {
+        let env: [String: String] = ["__CFBundleIdentifier": "com.googlecode.iterm2", "CLAUDE_CODE_ENTRYPOINT": "cli"]
+        let bundleID = env["__CFBundleIdentifier"] ?? ""
+        let claudeEntrypoint = env["CLAUDE_CODE_ENTRYPOINT"]
+        let provider: AgentProvider?
+        if bundleID == "com.openai.codex" { provider = .codex }
+        else if bundleID == "com.googlecode.iterm2", env["CODEX_THREAD_ID"] != nil { provider = .iterm2 }
+        else if claudeEntrypoint != nil { provider = .iterm2 }
+        else { provider = nil }
+        XCTAssertEqual(provider, .iterm2)
+    }
+
+    // Tests inferCodingAgentProvider logic: returns iterm2 for Codex CLI shell env (so focus goes to terminal session).
+    func testInferCodingAgentProviderReturnsIterm2ForCodexCLI() {
+        let env: [String: String] = ["__CFBundleIdentifier": "com.googlecode.iterm2", "CODEX_THREAD_ID": "thread-123"]
+        let bundleID = env["__CFBundleIdentifier"] ?? ""
+        let claudeEntrypoint = env["CLAUDE_CODE_ENTRYPOINT"]
+        let provider: AgentProvider?
+        if bundleID == "com.openai.codex" { provider = .codex }
+        else if bundleID == "com.googlecode.iterm2", env["CODEX_THREAD_ID"] != nil { provider = .iterm2 }
+        else if claudeEntrypoint != nil { provider = .iterm2 }
+        else { provider = nil }
+        XCTAssertEqual(provider, .iterm2)
+    }
+
+    // Tests CODEX_THREAD_ID alone is not enough unless running under iTerm2 bundle.
+    func testInferCodingAgentProviderDoesNotTreatNonItermCodexThreadAsCLI() {
+        let env: [String: String] = ["CODEX_THREAD_ID": "thread-123"]
+        let bundleID = env["__CFBundleIdentifier"] ?? ""
+        let claudeEntrypoint = env["CLAUDE_CODE_ENTRYPOINT"]
+        let provider: AgentProvider?
+        if bundleID == "com.openai.codex" { provider = .codex }
+        else if bundleID == "com.googlecode.iterm2", env["CODEX_THREAD_ID"] != nil { provider = .iterm2 }
+        else if claudeEntrypoint != nil { provider = .iterm2 }
+        else { provider = nil }
+        XCTAssertNil(provider)
+    }
+
+    // Tests unsupported terminal hosts with Claude env markers are ignored (not auto-detected as iTerm2).
+    func testInferCodingAgentProviderDoesNotTreatNonItermClaudeAsCLI() {
         let env: [String: String] = ["CLAUDE_CODE_ENTRYPOINT": "cli"]
         let bundleID = env["__CFBundleIdentifier"] ?? ""
         let claudeEntrypoint = env["CLAUDE_CODE_ENTRYPOINT"]
         let provider: AgentProvider?
         if bundleID == "com.openai.codex" { provider = .codex }
-        else if claudeEntrypoint != nil { provider = .iterm2 }
+        else if bundleID == "com.googlecode.iterm2", env["CODEX_THREAD_ID"] != nil { provider = .iterm2 }
+        else if bundleID == "com.googlecode.iterm2", claudeEntrypoint != nil { provider = .iterm2 }
         else { provider = nil }
-        XCTAssertEqual(provider, .iterm2)
+        XCTAssertNil(provider)
     }
 
     // Tests that agent event "stop" type sets status to done (same as "done").

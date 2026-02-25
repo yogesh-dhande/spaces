@@ -2942,7 +2942,7 @@ public final class MuxyOrchestrator {
 
     @discardableResult public func updateAgentWindowStatus(
         workspaceID: String, provider: AgentProvider, itermSessionID: String? = nil, codexThreadID: String? = nil, yabaiWindowID: Int? = nil,
-        status: AgentWindowStatus
+        label: String? = nil, status: AgentWindowStatus
     ) throws -> AgentWindowRecord {
         let now = nowISO8601()
         // Find existing record
@@ -2955,15 +2955,16 @@ public final class MuxyOrchestrator {
             existing = try store.agentWindowsByProvider(workspaceID: workspaceID, provider: .codex).first
         }
         if let existing {
-            try store.updateAgentWindowStatus(id: existing.id, status: status, updatedAt: now)
-            return AgentWindowRecord(
-                id: existing.id, workspaceID: existing.workspaceID, provider: existing.provider, label: existing.label,
+            let updated = AgentWindowRecord(
+                id: existing.id, workspaceID: existing.workspaceID, provider: existing.provider, label: label ?? existing.label,
                 itermSessionID: existing.itermSessionID, codexThreadID: existing.codexThreadID, windowID: existing.windowID,
-                yabaiWindowID: existing.yabaiWindowID, status: status, createdAt: existing.createdAt, updatedAt: now)
+                yabaiWindowID: yabaiWindowID ?? existing.yabaiWindowID, status: status, createdAt: existing.createdAt, updatedAt: now)
+            try store.upsertAgentWindow(updated)
+            return updated
         }
         // Not found: register new
         return try registerAgentWindow(
-            workspaceID: workspaceID, provider: provider, label: nil, itermSessionID: itermSessionID, codexThreadID: codexThreadID,
+            workspaceID: workspaceID, provider: provider, label: label, itermSessionID: itermSessionID, codexThreadID: codexThreadID,
             yabaiWindowID: yabaiWindowID, status: status)
     }
 

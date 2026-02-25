@@ -114,7 +114,7 @@ Muxy periodically discovers and reconciles git worktrees for existing projects. 
   - Process restarts (status-check failure or `on_exit=restart`) terminate and wait for the tracked runtime PID before relaunch; if a clean stop does not finish in time, muxy restarts in a new terminal window instead of queueing in the busy one
   - Processes with status check results shown as indented sub-rows (colored dots)
   - Status checks run in periodic background monitoring for running workspaces (respecting each check interval), so health rows and on-fail restarts update even when the run tab is not open
-  - Agent window rows show coding agent sessions (Claude Code, Codex) with a spinner (active), red dot (waiting for review), or green dot (done); clicking focuses the agent session
+  - Agent window rows show coding agent sessions (`Claude Code CLI`, `Codex CLI`, `Codex App`) with a spinner (active), red dot (waiting for review), or green dot (done); clicking focuses the agent session
   - Windows list with shortcut hints
   - Env vars/ports tab
   - Workspace settings tab
@@ -187,6 +187,8 @@ mx agent event --type start   [--dir /path/to/workspace]
 mx agent event --type waiting [--dir /path/to/workspace]
 mx agent event --type done    [--dir /path/to/workspace]
 ```
+
+Provider auto-detection uses environment context only for supported hosts: `__CFBundleIdentifier=com.openai.codex` maps to the Codex desktop app, while Claude Code / Codex CLI in iTerm2 (`__CFBundleIdentifier=com.googlecode.iterm2` with `CLAUDE_CODE_ENTRYPOINT` or `CODEX_THREAD_ID`) map to iTerm2 so Muxy focuses the terminal session directly. Coding-agent env markers from unsupported terminal apps are ignored.
 
 For git projects, `workspace create` requires `--branch`; `--target-branch` defaults to `main`/`master` when available.
 `workspace create --directory-name` (alias: `--dirname`) is optional for git projects and must use only letters, numbers, `-`, and `_` with no spaces.

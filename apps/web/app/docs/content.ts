@@ -86,7 +86,7 @@ export const docsPageLinks: DocsPageLink[] = [
     href: "/docs/cli",
     title: "CLI Reference",
     summary:
-      "Drive every Muxy action from the terminal or automate workspace management from scripts and AI pipelines.",
+      "Drive every Muxy action from the terminal or automate workspace management from scripts and AI pipelines, including Claude Code and Codex CLI session hooks.",
   },
 ];
 
