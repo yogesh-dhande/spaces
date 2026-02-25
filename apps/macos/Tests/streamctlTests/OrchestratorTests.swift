@@ -2586,6 +2586,109 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertTrue(try orchestrator.runningProcesses(workspaceID: workspace.id).isEmpty)
     }
 
+    // Tests restart workspace preserves agent windows by arranging a running workspace with an iterm2 agent window and asserting the record and session survive the restart.
+    func testRestartWorkspacePreservesAgentWindows() throws {
+        let root = try makeTempDirectory()
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let store = try makeTemporaryStore()
+        let mockIterm = MockIterm2Adapter()
+        let orchestrator = MuxyOrchestrator(store: store, iterm: mockIterm)
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
+        try store.updateWorkspaceRunning(id: workspace.id, isRunning: true, launchedAt: "now")
+        // Agent runs in the same iTerm2 session as the tracked workspace terminal window (common case:
+        // user ran `claude` from within the workspace terminal tab).
+        try store.upsert(
+            window: WindowRecord(
+                id: UUID().uuidString, workspaceID: workspace.id, app: "iTerm2", title: "claude",
+                windowID: 501, itermSessionID: "agent-session-1", itermTabIndex: 1,
+                role: "terminal", orderIndex: 0, lastSeenAt: "now"))
+        let agentRecord = AgentWindowRecord(
+            id: UUID().uuidString, workspaceID: workspace.id, provider: .iterm2, label: "Claude Code",
+            itermSessionID: "agent-session-1", codexThreadID: nil, windowID: nil,
+            yabaiWindowID: 501, status: .spinning, createdAt: "now", updatedAt: "now")
+        try store.upsertAgentWindow(agentRecord)
+
+        // Mocked dependencies: yabai and osascript for stop/launch phases.
+        // Why: verify restart does not close the iTerm2 session that hosts the coding agent, even when
+        // that session is also tracked as a workspace terminal window.
+        // Remaining risk: the agent session itself is not verified live in iTerm2, only the DB record and mock call list.
+        try withMockCommands(["yabai": Self.orchestratorYabaiMockScript, "osascript": Self.orchestratorOsaScriptMock]) {
+            try orchestrator.restartWorkspace(workspaceID: workspace.id)
+        }
+
+        let remaining = try store.agentWindows(workspaceID: workspace.id)
+        XCTAssertEqual(remaining.count, 1, "Agent window record should be preserved after restart")
+        XCTAssertEqual(remaining.first?.id, agentRecord.id)
+        XCTAssertFalse(mockIterm.closedSessionIDs.contains("agent-session-1"), "Agent iTerm2 session should not be closed during restart")
+    }
+
+    // Tests restart workspace closes non-agent sessions in the same window while preserving the agent session.
+    func testRestartWorkspaceClosesNonAgentSessionInSameWindow() throws {
+        let root = try makeTempDirectory()
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let store = try makeTemporaryStore()
+        let mockIterm = MockIterm2Adapter()
+        let orchestrator = MuxyOrchestrator(store: store, iterm: mockIterm)
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
+        try store.updateWorkspaceRunning(id: workspace.id, isRunning: true, launchedAt: "now")
+        // Workspace terminal tab (session A) is a different tab in the same window as the agent (session B).
+        try store.upsert(
+            window: WindowRecord(
+                id: UUID().uuidString, workspaceID: workspace.id, app: "iTerm2", title: "shell",
+                windowID: 501, itermSessionID: "workspace-session-A", itermTabIndex: 0,
+                role: "terminal", orderIndex: 0, lastSeenAt: "now"))
+        let agentRecord = AgentWindowRecord(
+            id: UUID().uuidString, workspaceID: workspace.id, provider: .iterm2, label: "Claude Code",
+            itermSessionID: "agent-session-B", codexThreadID: nil, windowID: nil,
+            yabaiWindowID: 501, status: .spinning, createdAt: "now", updatedAt: "now")
+        try store.upsertAgentWindow(agentRecord)
+
+        // Mocked dependencies: yabai and osascript for stop/launch phases.
+        // Why: verify that only the workspace session is closed and not the agent session when they share the same window.
+        // Remaining risk: iTerm2's actual per-session close behaviour is not exercised; only mock call recording is asserted.
+        try withMockCommands(["yabai": Self.orchestratorYabaiMockScript, "osascript": Self.orchestratorOsaScriptMock]) {
+            try orchestrator.restartWorkspace(workspaceID: workspace.id)
+        }
+
+        XCTAssertTrue(mockIterm.closedSessionIDs.contains("workspace-session-A"), "Non-agent workspace session should be closed during restart")
+        XCTAssertFalse(mockIterm.closedSessionIDs.contains("agent-session-B"), "Agent session should not be closed during restart")
+        XCTAssertEqual(try store.agentWindows(workspaceID: workspace.id).count, 1)
+    }
+
+    // Tests up workspace with restart enabled preserves agent windows by arranging a running workspace with an iterm2 agent window and asserting the record and session survive the restart.
+    func testUpWorkspaceWithRestartPreservesAgentWindows() throws {
+        let root = try makeTempDirectory()
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let store = try makeTemporaryStore()
+        let mockIterm = MockIterm2Adapter()
+        let orchestrator = MuxyOrchestrator(store: store, iterm: mockIterm)
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
+        try store.updateWorkspaceRunning(id: workspace.id, isRunning: true, launchedAt: "now")
+        let agentRecord = AgentWindowRecord(
+            id: UUID().uuidString, workspaceID: workspace.id, provider: .iterm2, label: "Claude Code",
+            itermSessionID: "agent-session-2", codexThreadID: nil, windowID: nil,
+            status: .spinning, createdAt: "now", updatedAt: "now")
+        try store.upsertAgentWindow(agentRecord)
+
+        // Mocked dependencies: yabai and osascript for stop/launch phases.
+        // Why: verify upWorkspace(restartIfRunning: true) does not close or delete iterm2 agent window records.
+        // Remaining risk: the agent session itself is not verified live in iTerm2, only the DB record and mock call list.
+        try withMockCommands(["yabai": Self.orchestratorYabaiMockScript, "osascript": Self.orchestratorOsaScriptMock]) {
+            try orchestrator.upWorkspace(workspaceID: workspace.id, restartIfRunning: true)
+        }
+
+        let remaining = try store.agentWindows(workspaceID: workspace.id)
+        XCTAssertEqual(remaining.count, 1, "Agent window record should be preserved after up --restart")
+        XCTAssertEqual(remaining.first?.id, agentRecord.id)
+        XCTAssertFalse(mockIterm.closedSessionIDs.contains("agent-session-2"), "Agent iTerm2 session should not be closed during up --restart")
+    }
+
     // Tests update workspace settings removing browser sessions closes tabs without closing chrome window by arranging representative inputs and asserting the expected result.
     func testUpdateWorkspaceSettingsRemovingBrowserSessionsClosesTabsWithoutClosingChromeWindow() throws {
         let (orchestrator, store, _, workspace, root) = try makeOrchestratorWithWorkspace()

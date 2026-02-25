@@ -4743,6 +4743,26 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             return
         }
         guard let selectedWorkspaceID else { return }
+        // Compute the target live so the shortcut reflects the current window/agent list
+        // even after restarts that change the tracked-windows set.
+        let windows = (try? orchestrator.windows(workspaceID: selectedWorkspaceID)) ?? []
+        let agentWindows = (try? orchestrator.agentWindows(workspaceID: selectedWorkspaceID)) ?? []
+        let agentYabaiWindowIDs: Set<Int> = Set(agentWindows.compactMap { $0.yabaiWindowID })
+        // Check if the index maps to an agent window using the same numbering as the display.
+        for (agentIdx, agentWin) in agentWindows.enumerated() {
+            let agentShortcutNum: Int
+            if let yabaiWID = agentWin.yabaiWindowID, let origIdx = windows.firstIndex(where: { $0.windowID == yabaiWID }) {
+                agentShortcutNum = origIdx + 1
+            } else {
+                agentShortcutNum = windows.count + agentIdx + 1
+            }
+            if agentShortcutNum == index {
+                try? orchestrator.focusAgentWindow(agentWin)
+                return
+            }
+        }
+        // Check that the index points to a non-agent workspace window.
+        guard index >= 1, index <= windows.count, !agentYabaiWindowIDs.contains(windows[index - 1].windowID ?? -1) else { return }
         do { try orchestrator.focusWorkspaceWindow(workspaceID: selectedWorkspaceID, index: index) } catch { showError(error) }
     }
 
