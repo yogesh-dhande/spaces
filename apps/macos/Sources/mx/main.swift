@@ -261,7 +261,8 @@ struct CLI {
             let projectID = normalizePath(projectDir)
             let workspaces = try orchestrator.listWorkspaces(projectID: projectID, includeArchived: args.contains("--all"))
             for ws in workspaces {
-                let flags = [ws.isDefault ? "default" : nil, ws.isRunning ? "running" : nil, ws.isArchived ? "archived" : nil].compactMap { $0 }
+                let flags = [ws.isDefault ? "default" : nil, ws.isRunning ? "running" : nil, ws.isArchived ? "archived" : nil, !ws.isActive ? "inactive" : nil]
+                    .compactMap { $0 }
                     .joined(separator: ",")
                 print("\(ws.name)\t\(ws.dir)\t\(flags)")
             }
@@ -332,6 +333,13 @@ struct CLI {
             }
             let directoryName = directoryNameFlag ?? dirnameFlag ?? dirNameFlag
             let shouldClearTooltip = args.contains("--clear-tooltip") || args.contains("--clear")
+            let activateFlag = args.contains("--active")
+            let deactivateFlag = args.contains("--inactive")
+            if activateFlag && deactivateFlag {
+                throw NSError(
+                    domain: "mx.cli", code: 2,
+                    userInfo: [NSLocalizedDescriptionKey: "Use either --active or --inactive, but not both."])
+            }
             let tooltipValue = optionalValueAllowingMissingValue(for: "--tooltip")
             if args.contains("--tooltip"), tooltipValue == nil {
                 throw NSError(
@@ -351,13 +359,17 @@ struct CLI {
             } else {
                 tooltipUpdate = nil
             }
-            guard title != nil || branch != nil || directoryName != nil || tooltipUpdate != nil else {
+            let activeUpdate = activateFlag ? true : (deactivateFlag ? false : nil)
+            guard title != nil || branch != nil || directoryName != nil || tooltipUpdate != nil || activeUpdate != nil else {
                 throw NSError(
                     domain: "mx.cli", code: 2,
-                    userInfo: [NSLocalizedDescriptionKey: "No updates provided. Use one or more of --title, --branch, --directory-name/--dirname/--dir-name, --tooltip, or --clear-tooltip."])
+                    userInfo: [NSLocalizedDescriptionKey: "No updates provided. Use one or more of --title, --branch, --directory-name/--dirname/--dir-name, --tooltip, --clear-tooltip, --active, or --inactive."])
             }
             try orchestrator.updateWorkspaceMetadata(
                 workspaceID: id, title: title, branch: branch, directoryName: directoryName, tooltip: tooltipUpdate)
+            if let activeUpdate {
+                try orchestrator.updateWorkspaceActive(workspaceID: id, isActive: activeUpdate)
+            }
             guard let updated = try orchestrator.store.workspace(id: id) else {
                 throw NSError(domain: "mx.cli", code: 2, userInfo: [NSLocalizedDescriptionKey: "Workspace not found for id \(id)"])
             }
@@ -926,7 +938,7 @@ struct CLI {
               mx workspace list --project-dir <path> [--all]
               mx workspace create --project-dir <path> --name <name> --branch <branch> [--target-branch <branch>] [--directory-name <name>] [--tooltip <text>]
               mx workspace import [--dir <path>] [--title <title>] [--tooltip <text>]
-              mx workspace update [--dir <path>] [--title <title>] [--branch <branch>] [--directory-name <name>|--dirname <name>|--dir-name <name>] [--tooltip <text>|--clear-tooltip]
+              mx workspace update [--dir <path>] [--title <title>] [--branch <branch>] [--directory-name <name>|--dirname <name>|--dir-name <name>] [--tooltip <text>|--clear-tooltip] [--active|--inactive]
               mx workspace launch [--dir <path>]
               mx workspace restart [--dir <path>]
               mx workspace up [--dir <path>] [--force-restart] [--focus] [--tooltip [<text>]]
@@ -951,7 +963,7 @@ struct CLI {
               - If a workspace directory is missing during stop, muxy still stops the workspace, skips `stop_script`, and prints a note.
               - For git projects, `workspace create` requires `--branch`; `--target-branch` defaults to main/master if available.
               - `workspace create --directory-name` (or `--dirname`) overrides the auto-generated git worktree directory name; allowed characters are letters, numbers, '-', and '_', with no spaces.
-              - `workspace update` updates workspace metadata (`--title`, `--branch`, `--directory-name`/`--dirname`/`--dir-name`, `--tooltip`); protected `main`/`master` branches cannot be renamed.
+              - `workspace update` updates workspace metadata (`--title`, `--branch`, `--directory-name`/`--dirname`/`--dir-name`, `--tooltip`) and visibility state (`--active`/`--inactive`); protected `main`/`master` branches cannot be renamed.
               - Default workspace title cannot be changed.
               - Archiving a non-git workspace never deletes the project directory.
               - Workspaces reserve PORT0-PORT9 from the configured port range.

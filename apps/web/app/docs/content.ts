@@ -26,7 +26,7 @@ export const docsPageLinks: DocsPageLink[] = [
     href: "/docs/workspaces",
     title: "Workspaces",
     summary:
-      "Create, name, and switch between isolated streams of work, each with its own windows, branch, and settings, with GUI sidebar metadata periodically syncing CLI edits.",
+      "Create, name, activate/deactivate, and switch between isolated streams of work, each with its own windows, branch, and settings, with GUI sidebar metadata periodically syncing CLI edits.",
   },
   {
     href: "/docs/workspace-lifecycle",
@@ -38,7 +38,7 @@ export const docsPageLinks: DocsPageLink[] = [
     href: "/docs/window-management",
     title: "Window Management",
     summary:
-      "Capture the windows you need and switch your full context instantly with a single shortcut.",
+      "Capture the windows you need and switch context quickly, with workspace cycling separated from explicit window focus shortcuts.",
   },
   {
     href: "/docs/processes",

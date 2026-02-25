@@ -44,7 +44,7 @@ Port definitions are configured at the project level and inherited by workspaces
 
 Workspaces snapshot project port definitions, processes, status checks, and browser sessions at creation time into the runtime DB.
 Updates to workspace settings apply immediately when the workspace is running (new processes start, changed commands restart, and new browser sessions open).
-Workspace settings include the workspace title and tooltip. Workspace labels are stored in `workspaces.title`, and default-workspace behavior is determined by `is_default` (not by the title value).
+Workspace settings include the workspace title and tooltip. Workspace labels are stored in `workspaces.title`, default-workspace behavior is determined by `is_default` (not by the title value), and sidebar visibility defaults are stored via workspace active/inactive state (`workspaces.is_active`).
 `setup_script` runs when a workspace is created or revived. In the GUI create flow, workspace records are persisted first and setup continues in the background so new workspaces appear faster; launch waits for setup completion and surfaces setup failures. `stop_script` runs on stop/restart/archive after automatic process termination. If the workspace directory is missing, muxy still completes stop/archive cleanup and skips the stop script.
 Muxy periodically discovers and reconciles git worktrees for existing projects. Discovery auto-registers untracked valid worktrees (running the same `setup_script` flow for each new workspace), archives non-default workspaces whose worktrees are no longer valid, refreshes stored workspace branch names from on-disk worktrees, and will not auto-recreate workspaces you explicitly deleted from Muxy.
 
@@ -53,7 +53,7 @@ Muxy periodically discovers and reconciles git worktrees for existing projects. 
 - On startup, the details pane shows a loading message and spinner while initial projects/workspaces are loaded in the background.
 - Global hotkeys are available immediately at startup (before data hydration completes) so focus/show actions are not delayed.
 - Startup background reconciliation updates the sidebar via async snapshots to keep workspace switching responsive while launch tasks are still running.
-- Left sidebar includes a compact top utility row (Muxy app icon + settings/reload actions) above the Dashboard row; the Projects header keeps only the add-project action.
+- Left sidebar includes a compact top utility row (Muxy app icon + settings/reload actions) above the Dashboard row; the Projects header includes add-project plus a toggle to show/hide inactive workspaces (inactive workspaces are hidden by default on launch).
 - No dialogs for add/edit; all forms are in the right pane.
 - Right-pane forms are scrollable to avoid clipping on smaller window heights.
 - New workspace `+` actions open the New Workspace form for git projects.
@@ -89,7 +89,7 @@ Muxy periodically discovers and reconciles git worktrees for existing projects. 
 - Git workspace rows also show ahead/behind commit counts relative to the workspace target branch (the branch the workspace branch was created from), merge-conflict status, and relative last-modified time (latest tracked-file mtime) with tracked modified-file count.
 - Workspace detail branch metadata shows `current-branch (forked from target-branch)` when a target branch exists and differs.
 - Workspace view includes:
-  - Launch/Restart/Stop/Archive buttons
+  - Launch/Restart/Stop/Activate-or-Deactivate/Archive buttons
   - Launch/Restart/Stop/Archive actions run in background tasks so the UI stays responsive during long-running workspace automation
   - Archive is optimistic in the GUI: after confirmation, the workspace row disappears immediately while stop/worktree cleanup finishes in the background
   - Archive also shows an in-app progress overlay with status text while cleanup is in flight
@@ -128,8 +128,8 @@ Hotkeys:
 - Global focus: `cmd+shift+=`
   - Brings muxy to front and keeps current window-selection shortcuts active; workspace-window reconciliation runs on the periodic background interval
   - Defers selected-workspace detail refresh to the next main-actor turn so focus feels immediate
-- Next running workspace: `cmd+shift+]`
-- Previous running workspace: `cmd+shift+[`
+- Next visible workspace: `cmd+shift+]` (cycles sidebar-visible workspaces and keeps Muxy focused)
+- Previous visible workspace: `cmd+shift+[` (cycles sidebar-visible workspaces and keeps Muxy focused)
 - Open editor (global): `cmd+shift+e` (opens editor for the workspace owning the focused workspace window)
 - Open terminal: `cmd+shift+t`
 - Open Finder: `cmd+shift+f`
@@ -176,7 +176,7 @@ mx workspace list --project-dir /path/to/repo --all
 mx discover
 mx workspace create --project-dir /path/to/repo --name feature-x [--branch feature-branch] [--target-branch main] [--directory-name feature_branch]
 mx workspace import [--dir /path/to/worktree] [--title feature-y] [--tooltip "Working on auth"]
-mx workspace update --dir /path/to/workspace [--title feature-y] [--branch feature-y] [--directory-name feature_y] [--tooltip "Working on auth" | --clear-tooltip]
+mx workspace update --dir /path/to/workspace [--title feature-y] [--branch feature-y] [--directory-name feature_y] [--tooltip "Working on auth" | --clear-tooltip] [--active | --inactive]
 mx workspace launch --dir /path/to/workspace
 mx workspace restart --dir /path/to/workspace
 mx workspace up --dir /path/to/workspace [--force-restart] [--focus] [--tooltip "Working on auth flows"]
@@ -196,7 +196,7 @@ Provider auto-detection uses environment context only for supported hosts: `__CF
 For git projects, `workspace create` requires `--branch`; `--target-branch` defaults to `main`/`master` when available.
 `workspace create --directory-name` (alias: `--dirname`) is optional for git projects and must use only letters, numbers, `-`, and `_` with no spaces.
 `workspace import` supports `--title` (preferred; `--name` also accepted for backward compatibility) and optional `--tooltip`.
-`workspace update` updates workspace metadata (`--title`, `--branch`, `--directory-name`/`--dirname`/`--dir-name`, and tooltip values). Default workspaces keep their fixed initial title (`default` for directory projects, `main`/`master` for git-url imports). Protected `main`/`master` branches cannot be renamed.
+`workspace update` updates workspace metadata (`--title`, `--branch`, `--directory-name`/`--dirname`/`--dir-name`, and tooltip values) plus sidebar visibility default state (`--active` / `--inactive`). Default workspaces keep their fixed initial title (`default` for directory projects, `main`/`master` for git-url imports). Protected `main`/`master` branches cannot be renamed.
 `workspace up` is idempotent: it launches a stopped workspace, and otherwise does nothing by default.
 Add `--force-restart` to force stop+launch when runtime state is already present.
 `workspace up` ensures the workspace and all its processes are running. When stopped, it launches in the background. When already running, it restarts any exited processes in the background without touching healthy ones. Add `--force-restart` to force a full stop+launch. Add `--focus` to bring the workspace to the foreground. `--tooltip [text]` displays the tooltip overlay (updating tooltip text when text is provided).

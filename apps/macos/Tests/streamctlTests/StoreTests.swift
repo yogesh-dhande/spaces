@@ -155,6 +155,52 @@ final class StoreTests: XCTestCase {
         XCTAssertEqual(workspaceChecks.first?.onFail, OnFailAction.none)
     }
 
+    // Tests workspace active state persists and migrations backfill active column by arranging representative inputs and asserting defaults and updates.
+    func testWorkspaceActiveStatePersistsAndBackfills() throws {
+        let root = try makeTempDirectory()
+        let dbURL = root.appendingPathComponent("workspace-active-state.db")
+        try runSQLiteExec(
+            dbURL: dbURL,
+            sql: """
+                CREATE TABLE projects (
+                  id TEXT PRIMARY KEY,
+                  name TEXT NOT NULL,
+                  dir TEXT NOT NULL UNIQUE,
+                  is_git INTEGER NOT NULL,
+                  default_branch TEXT
+                );
+                CREATE TABLE workspaces (
+                  id TEXT PRIMARY KEY,
+                  project_id TEXT NOT NULL,
+                  title TEXT NOT NULL,
+                  dir TEXT NOT NULL,
+                  dirname TEXT,
+                  branch TEXT,
+                  target_branch TEXT,
+                  is_default INTEGER NOT NULL,
+                  is_archived INTEGER NOT NULL,
+                  is_running INTEGER NOT NULL,
+                  last_launched_at TEXT,
+                  tooltip TEXT,
+                  UNIQUE(project_id, title)
+                );
+                CREATE TABLE schema_version (version INTEGER NOT NULL);
+                INSERT INTO projects(id, name, dir, is_git, default_branch)
+                VALUES ('p1', 'Project', '/tmp/project', 0, '');
+                INSERT INTO workspaces(id, project_id, title, dir, dirname, branch, target_branch, is_default, is_archived, is_running, last_launched_at, tooltip)
+                VALUES ('w1', 'p1', 'feature', '/tmp/project/feature', '', '', '', 0, 0, 0, '', '');
+                INSERT INTO schema_version(version) VALUES (6);
+                """)
+
+        let store = try SQLiteStore(path: dbURL.path)
+        let migrated = try XCTUnwrap(store.workspace(id: "w1"))
+        XCTAssertTrue(migrated.isActive)
+
+        try store.updateWorkspaceActive(id: "w1", isActive: false)
+        let updated = try XCTUnwrap(store.workspace(id: "w1"))
+        XCTAssertFalse(updated.isActive)
+    }
+
     // Tests workspace collections round trip and replacement by arranging representative inputs and asserting the expected result.
     func testWorkspaceCollectionsRoundTripAndReplacement() throws {
         let store = try makeTemporaryStore()

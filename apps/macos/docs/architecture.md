@@ -62,7 +62,7 @@ GUI interaction notes:
 - Branch and tooltip remain editable via inline labels in workspace detail, title remains editable in the workspace header, and all metadata remains editable via `mx workspace update`.
 - Workspace title remains in the top header (`project / workspace`) and enters edit mode on double-click.
 - Workspace detail renders inline metadata labels for branch and tooltip below the header actions; double-clicking a label enters edit mode and shows per-field Save/Cancel buttons.
-- Workspace detail header keeps Launch/Restart and Stop actions right-aligned, and the app window includes a fixed full-width footer row showing effective shortcut hints for next/previous workspace, Settings, and tooltip toggle using current user overrides.
+- Workspace detail header keeps Launch/Restart, Stop, and Activate/Deactivate actions right-aligned, and the app window includes a fixed full-width footer row showing effective shortcut hints for next/previous workspace, Settings, and tooltip toggle using current user overrides.
 - Protected `main`/`master` branch labels are rendered read-only in workspace detail and do not enter edit mode on double-click.
 - Inline metadata edit mode saves when pressing `Return`.
 - Inline metadata edit mode cancels without saving when pressing `Escape` or clicking outside the field controls.
@@ -79,6 +79,7 @@ GUI interaction notes:
 - Git workspace rows include ahead/behind commit counts vs the workspace target branch (the branch it was created from), merge-conflict status, and relative last-modified time (from latest tracked-file mtime) with tracked modified-file count.
 - Workspace detail metadata shows the current branch and, when present and different, appends `forked from <target branch>`.
 - Window focus shortcuts in the GUI use `cmd+1` through `cmd+9`.
+- When Muxy is focused, next/previous workspace shortcuts change only sidebar selection (no automatic workspace-window focus) and cycle across all sidebar-visible workspaces, including stopped workspaces.
 - Global focus hotkey activation (`cmd+shift+=`) prioritizes immediate app fronting and defers selected-workspace detail refresh to the next main-actor turn.
 - Port definitions are editable via `PortEditor` in the project detail view, the add-project form, and workspace settings.
 - Status checks are configured inline under each process in the `ProcessEditor` rather than in a separate form section; the process name is implicit from the parent row.
@@ -92,7 +93,7 @@ GUI interaction notes:
 - The app provides a standard Edit menu with Copy (Cmd+C) and Select All (Cmd+A) for system clipboard support in read-only text views.
 - Launch performs initial sidebar data hydration (projects/workspaces/git activity) in a detached background task; the right pane shows a spinner + status message so first render stays responsive instead of blocking the main actor.
 - The left pane includes a **Dashboard** sidebar row pinned above the Projects section header.
-- The left pane also includes a compact utility row above Dashboard with the app icon on the left and Settings/Reload buttons on the right; the Projects header retains only the add-project action.
+- The left pane also includes a compact utility row above Dashboard with the app icon on the left and Settings/Reload buttons on the right; the Projects header includes add-project plus a show/hide inactive-workspaces toggle (inactive workspaces are hidden by default on launch).
   - Clicking the Dashboard row opens the dashboard detail in the right pane (same navigation model as selecting a project or workspace).
   - The row shows a red count badge when there are attention items; the badge is hidden when the count is zero.
   - The dashboard detail shows attention items: processes that have exited or have failing (`failed`) status checks across running workspaces, plus agent windows in `waiting`/`done` status even when their workspace is not currently running.
@@ -136,12 +137,12 @@ Workspace settings:
 - Each workspace snapshots project `stop_script`, `ports` (named port definitions), `processes`, `status_checks`, and `browser_sessions` at creation.
 - Snapshots are stored in the runtime DB alongside other workspace data.
 - Edits to a running workspace reconcile processes and browser sessions immediately.
-- Workspace default semantics are stored on `is_default`; workspace titles are stored in `workspaces.title` and can be updated without changing default status.
+- Workspace default semantics are stored on `is_default`; workspace titles are stored in `workspaces.title` and can be updated without changing default status; sidebar visibility defaults are stored on `workspaces.is_active`.
 
 Workspace identification:
 - Workspaces are uniquely identified by their directory path (`dir` field).
 - CLI commands accept `--dir <path>` (defaults to current directory) to identify workspaces.
-- `mx workspace update [--dir <path>] [--title <title>] [--branch <branch>] [--directory-name <name>|--dirname <name>|--dir-name <name>] [--tooltip <text>|--clear-tooltip]` updates workspace metadata (except protected `main`/`master` branch renames).
+- `mx workspace update [--dir <path>] [--title <title>] [--branch <branch>] [--directory-name <name>|--dirname <name>|--dir-name <name>] [--tooltip <text>|--clear-tooltip] [--active|--inactive]` updates workspace metadata and persisted sidebar visibility state (except protected `main`/`master` branch renames).
 - `mx workspace up [--dir <path>] [--force-restart] [--focus] [--tooltip [<text>]]` ensures a workspace is running.
 - Default `workspace up` behavior: launch in background when stopped; if runtime is already present, restart any exited processes in the background without touching running ones.
 - `workspace up --force-restart` behavior: if runtime is already present, run stop then full launch in background; if stopped, launch in background.

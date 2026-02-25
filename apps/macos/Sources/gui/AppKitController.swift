@@ -55,6 +55,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     private let detailContainer = NSView()
     private weak var workspaceShortcutFooterRowView: NSStackView?
     private var workspaceShortcutFooterLabels: [NSTextField] = []
+    private weak var showInactiveWorkspacesButton: NSButton?
 
     private var orchestrator: MuxyOrchestrator!
     private var projects: [ProjectSummary] = []
@@ -68,6 +69,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     private var projectHasUnsavedChanges = false
     private var workspaceHasUnsavedChanges = false
     private var showingSettings = false
+    private var showInactiveWorkspaces = false
 
     private var hotkeyHandler: EventHandlerRef?
     private var hotkeyRefs: [UInt32: EventHotKeyRef] = [:]
@@ -776,8 +778,12 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
         let sectionHeader = sidebarSectionHeader(
             title: "Projects",
-            actions: [(symbol: "plus", tooltip: "New project", action: #selector(addProject))])
+            actions: [
+                (symbol: showInactiveWorkspaces ? "eye.slash" : "eye", tooltip: showInactiveWorkspaces ? "Hide inactive workspaces" : "Show inactive workspaces", action: #selector(toggleInactiveWorkspaceVisibility)),
+                (symbol: "plus", tooltip: "New project", action: #selector(addProject)),
+            ])
         sectionHeader.translatesAutoresizingMaskIntoConstraints = false
+        refreshInactiveVisibilityButton()
 
         let scroll = NSScrollView()
         scroll.translatesAutoresizingMaskIntoConstraints = false
@@ -1379,6 +1385,13 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         }
         if let selectedWorkspaceID {
             if let (project, workspace) = findWorkspace(id: selectedWorkspaceID) {
+                if !isWorkspaceVisible(workspace) {
+                    self.selectedWorkspaceID = nil
+                    self.selectedProjectID = project.id
+                    workspaceHasUnsavedChanges = false
+                    showProjectDetail(project: project)
+                    return
+                }
                 showWorkspaceDetail(project: project, workspace: workspace)
                 return
             }
@@ -1599,7 +1612,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         stack.addArrangedSubview(label(text: "Keyboard shortcuts"))
         let shortcutsNote = NSTextField(
             labelWithString:
-                "Click a shortcut, then press the key combination you want. Next/Previous cycle running workspaces when muxy is focused, and cycle workspace windows when a workspace window is focused."
+                "Click a shortcut, then press the key combination you want. Next/Previous cycle visible workspaces when Muxy is focused, and cycle workspace windows when a workspace window is focused."
         )
         shortcutsNote.font = .systemFont(ofSize: 11)
         shortcutsNote.textColor = .secondaryLabelColor
@@ -2405,6 +2418,13 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         launchOrRestartButton.identifier = NSUserInterfaceItemIdentifier(workspace.id)
         let stopButton = actionButton(title: "Stop", symbol: "stop.circle", tooltip: "Stop", action: #selector(stopWorkspace(_:)), primary: false)
         stopButton.identifier = NSUserInterfaceItemIdentifier(workspace.id)
+        let activeToggleButton = actionButton(
+            title: workspace.isActive ? "Deactivate" : "Activate",
+            symbol: workspace.isActive ? "eye.slash" : "eye",
+            tooltip: workspace.isActive ? "Hide this workspace from the sidebar by default" : "Show this workspace in the sidebar by default",
+            action: #selector(toggleWorkspaceActive(_:)),
+            primary: false)
+        activeToggleButton.identifier = NSUserInterfaceItemIdentifier(workspace.id)
         let archiveButton = actionButton(
             title: "Archive", symbol: "archivebox", tooltip: "Archive", action: #selector(archiveWorkspace(_:)), primary: false)
         archiveButton.identifier = NSUserInterfaceItemIdentifier(workspace.id)
@@ -2423,6 +2443,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         topActionRow.spacing = 8
         topActionRow.addArrangedSubview(launchOrRestartButton)
         topActionRow.addArrangedSubview(stopButton)
+        topActionRow.addArrangedSubview(activeToggleButton)
         topActionRow.setContentHuggingPriority(.required, for: .horizontal)
         topActionRow.setContentCompressionResistancePriority(.required, for: .horizontal)
 
@@ -3681,10 +3702,23 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         stack.addArrangedSubview(label)
         stack.addArrangedSubview(NSView())
         for action in actions {
-            stack.addArrangedSubview(sidebarRowIconButton(symbol: action.symbol, tooltip: action.tooltip, action: action.action))
+            let button = sidebarRowIconButton(symbol: action.symbol, tooltip: action.tooltip, action: action.action)
+            if action.action == #selector(toggleInactiveWorkspaceVisibility) {
+                showInactiveWorkspacesButton = button
+            }
+            stack.addArrangedSubview(button)
         }
 
         return stack
+    }
+
+    private func refreshInactiveVisibilityButton() {
+        guard let button = showInactiveWorkspacesButton else { return }
+        let symbol = showInactiveWorkspaces ? "eye.slash" : "eye"
+        let tooltip = showInactiveWorkspaces ? "Hide inactive workspaces" : "Show inactive workspaces"
+        button.image = NSImage(systemSymbolName: symbol, accessibilityDescription: tooltip)?.withSymbolConfiguration(
+            .init(pointSize: 12, weight: .semibold))
+        button.toolTip = tooltip
     }
 
     private func sidebarRowIconButton(symbol: String, tooltip: String, action: Selector) -> NSButton {
@@ -4344,6 +4378,19 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
     @objc private func cancelProjectForm() { refreshSelection() }
 
+    @objc private func toggleInactiveWorkspaceVisibility() {
+        showInactiveWorkspaces.toggle()
+        refreshInactiveVisibilityButton()
+        outlineView.reloadData()
+        outlineView.expandItem(nil, expandChildren: true)
+        if let selectedWorkspaceID, let (_, workspace) = findWorkspace(id: selectedWorkspaceID), !isWorkspaceVisible(workspace) {
+            self.selectedWorkspaceID = nil
+            workspaceHasUnsavedChanges = false
+            outlineView.deselectAll(nil)
+        }
+        refreshSelection()
+    }
+
     @objc private func launchWorkspace(_ sender: NSButton) {
         guard let id = sender.identifier?.rawValue else { return }
         sender.isEnabled = false
@@ -4388,6 +4435,50 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 reloadData()
                 if let notice = outcome.notice { showInfoMessage(title: "Workspace Stopped", message: notice) }
             case .failure(let error):
+                showError(error)
+            }
+        }
+    }
+
+    @objc private func toggleWorkspaceActive(_ sender: NSButton) {
+        guard let id = sender.identifier?.rawValue else { return }
+        guard let (_, workspace) = findWorkspace(id: id) else { return }
+        let targetIsActive = !workspace.isActive
+        if !targetIsActive, workspace.isRunning {
+            let alert = NSAlert()
+            alert.alertStyle = .warning
+            alert.messageText = "Deactivate workspace?"
+            alert.informativeText =
+                "“\(workspace.name)” is currently running. Deactivating it will stop the workspace first, then hide it from the sidebar by default."
+            alert.addButton(withTitle: "Stop and Deactivate")
+            alert.addButton(withTitle: "Cancel")
+            let response = alert.runModal()
+            guard response == .alertFirstButtonReturn else { return }
+        }
+        sender.isEnabled = false
+        Task { @MainActor [weak self, weak sender] in
+            guard let self else { return }
+            if !targetIsActive, workspace.isRunning {
+                let stopResult = await Self.runWorkspaceLifecycleAction(.stop, workspaceID: id)
+                switch stopResult {
+                case .success(let outcome):
+                    if let notice = outcome.notice { showInfoMessage(title: "Workspace Stopped", message: notice) }
+                case .failure(let error):
+                    sender?.isEnabled = true
+                    showError(error)
+                    return
+                }
+            }
+            do {
+                try orchestrator.updateWorkspaceActive(workspaceID: id, isActive: targetIsActive)
+                sender?.isEnabled = true
+                if !targetIsActive, !showInactiveWorkspaces, selectedWorkspaceID == id {
+                    selectedWorkspaceID = nil
+                    workspaceHasUnsavedChanges = false
+                }
+                reloadData()
+            } catch {
+                sender?.isEnabled = true
                 showError(error)
             }
         }
@@ -4511,6 +4602,14 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         return nil
     }
 
+    private func isWorkspaceVisible(_ workspace: WorkspaceSummary) -> Bool {
+        !workspace.isArchived && (showInactiveWorkspaces || workspace.isActive)
+    }
+
+    private func visibleWorkspaces(projectID: String) -> [WorkspaceSummary] {
+        (workspacesByProject[projectID] ?? []).filter { isWorkspaceVisible($0) }
+    }
+
     private func optimisticallyArchiveWorkspaceInSidebar(workspaceID: String) -> Bool {
         guard let (project, _) = findWorkspace(id: workspaceID) else { return false }
         guard var workspaces = workspacesByProject[project.id] else { return false }
@@ -4600,11 +4699,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 return nil
             }
             if let nextShortcutSpec, matches(event: event, spec: nextShortcutSpec) {
-                self.selectNextRunningWorkspace()
+                self.selectNextVisibleWorkspace()
                 return nil
             }
             if let previousShortcutSpec, matches(event: event, spec: previousShortcutSpec) {
-                self.selectPreviousRunningWorkspace()
+                self.selectPreviousVisibleWorkspace()
                 return nil
             }
             return event
@@ -4735,8 +4834,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         guard let hotkey = GlobalHotkey(rawValue: id) else { return }
         switch hotkey {
         case .toggle: toggleWindowFromHotkey()
-        case .next: if NSApp.isActive { selectNextRunningWorkspace() } else { focusGlobalWindowNavigation(direction: 1) }
-        case .previous: if NSApp.isActive { selectPreviousRunningWorkspace() } else { focusGlobalWindowNavigation(direction: -1) }
+        case .next: if NSApp.isActive { selectNextVisibleWorkspace() } else { focusGlobalWindowNavigation(direction: 1) }
+        case .previous: if NSApp.isActive { selectPreviousVisibleWorkspace() } else { focusGlobalWindowNavigation(direction: -1) }
         case .tooltip: toggleTooltipDisplay()
         case .openEditor: openGlobalEditorFromHotkey()
         }
@@ -4963,25 +5062,25 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         return result
     }
 
-    private func selectNextRunningWorkspace() {
-        let running = allRunningWorkspaces()
-        guard !running.isEmpty else { return }
-        if let selectedWorkspaceID, let idx = running.firstIndex(where: { $0.id == selectedWorkspaceID }) {
-            let next = running[(idx + 1) % running.count]
+    private func selectNextVisibleWorkspace() {
+        let visible = allVisibleWorkspacesForCycling()
+        guard !visible.isEmpty else { return }
+        if let selectedWorkspaceID, let idx = visible.firstIndex(where: { $0.id == selectedWorkspaceID }) {
+            let next = visible[(idx + 1) % visible.count]
             selectWorkspace(next)
         } else {
-            selectWorkspace(running[0])
+            selectWorkspace(visible[0])
         }
     }
 
-    private func selectPreviousRunningWorkspace() {
-        let running = allRunningWorkspaces()
-        guard !running.isEmpty else { return }
-        if let selectedWorkspaceID, let idx = running.firstIndex(where: { $0.id == selectedWorkspaceID }) {
-            let prev = running[(idx - 1 + running.count) % running.count]
+    private func selectPreviousVisibleWorkspace() {
+        let visible = allVisibleWorkspacesForCycling()
+        guard !visible.isEmpty else { return }
+        if let selectedWorkspaceID, let idx = visible.firstIndex(where: { $0.id == selectedWorkspaceID }) {
+            let prev = visible[(idx - 1 + visible.count) % visible.count]
             selectWorkspace(prev)
         } else {
-            selectWorkspace(running[0])
+            selectWorkspace(visible[0])
         }
     }
 
@@ -5099,11 +5198,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         return nil
     }
 
-    private func allRunningWorkspaces() -> [WorkspaceSummary] {
+    private func allVisibleWorkspacesForCycling() -> [WorkspaceSummary] {
         var list: [WorkspaceSummary] = []
         for project in projects {
             let workspaces = workspacesByProject[project.id] ?? []
-            list.append(contentsOf: workspaces.filter { $0.isRunning && !$0.isArchived })
+            list.append(contentsOf: workspaces.filter { isWorkspaceVisible($0) })
         }
         return list
     }
@@ -5128,7 +5227,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
     public func outlineView(_ outlineView: NSOutlineView, numberOfChildrenOfItem item: Any?) -> Int {
         if item == nil { return projects.count }
-        if case .project(let project) = item as? OutlineItem { return workspacesByProject[project.id]?.count ?? 0 }
+        if case .project(let project) = item as? OutlineItem { return visibleWorkspaces(projectID: project.id).count }
         return 0
     }
 
@@ -5140,9 +5239,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     public func outlineView(_ outlineView: NSOutlineView, child index: Int, ofItem item: Any?) -> Any {
         if item == nil { return OutlineItem.project(projects[index]) }
         if case .project(let project) = item as? OutlineItem {
+            let visible = visibleWorkspaces(projectID: project.id)
             let workspace =
-                workspacesByProject[project.id]?[index]
-                ?? WorkspaceSummary(id: "", name: "", branch: nil, targetBranch: nil, dir: "", isRunning: false, isArchived: false, isDefault: false)
+                (index >= 0 && index < visible.count ? visible[index] : nil)
+                ?? WorkspaceSummary(id: "", name: "", branch: nil, targetBranch: nil, dir: "", isRunning: false, isArchived: false, isActive: true, isDefault: false)
             return OutlineItem.workspace(project, workspace)
         }
         return OutlineItem.project(projects[0])

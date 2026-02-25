@@ -1096,6 +1096,23 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertNil(updated.tooltip)
     }
 
+    // Tests workspace active state can be toggled independently of runtime state by arranging representative inputs and asserting persistence.
+    func testUpdateWorkspaceActivePersistsState() throws {
+        let root = try makeTempDirectory()
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let store = try makeTemporaryStore()
+        let orchestrator = MuxyOrchestrator(store: store)
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
+
+        try orchestrator.updateWorkspaceActive(workspaceID: workspace.id, isActive: false)
+        XCTAssertFalse(try XCTUnwrap(store.workspace(id: workspace.id)).isActive)
+
+        try orchestrator.updateWorkspaceActive(workspaceID: workspace.id, isActive: true)
+        XCTAssertTrue(try XCTUnwrap(store.workspace(id: workspace.id)).isActive)
+    }
+
     // Tests workspace metadata update rejects renaming protected main branch by arranging representative inputs and asserting the expected result.
     func testUpdateWorkspaceMetadataRejectsRenamingProtectedMainBranch() throws {
         let repo = try makeTempGitRepo(name: "workspace-update-main-protected")
