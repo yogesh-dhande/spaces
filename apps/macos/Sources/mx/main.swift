@@ -291,12 +291,33 @@ struct CLI {
             let dir = optionalValue(for: "--dir") ?? FileManager.default.currentDirectoryPath
             let title = optionalValue(for: "--title") ?? optionalValue(for: "--name")
             let tooltip = optionalValue(for: "--tooltip")
-            var workspace = try orchestrator.createWorkspaceFromWorktree(worktreePath: dir, name: title)
-            if let tooltip {
-                try orchestrator.updateWorkspaceMetadata(workspaceID: workspace.id, tooltip: .some(tooltip))
-                workspace = try orchestrator.store.workspace(id: workspace.id)!
+            let normalizedImportDir = normalizePath(dir)
+            let workspace: WorkspaceRecord
+            if let existing = try orchestrator.store.workspace(dir: normalizedImportDir), !existing.isArchived {
+                // Workspace already exists — update tooltip if provided; title update is skipped for default workspaces
+                let titleUpdate = existing.isDefault ? nil : title
+                if titleUpdate != nil || tooltip != nil {
+                    try orchestrator.updateWorkspaceMetadata(
+                        workspaceID: existing.id,
+                        title: titleUpdate,
+                        tooltip: tooltip != nil ? .some(tooltip) : nil
+                    )
+                }
+                workspace = try orchestrator.store.workspace(id: existing.id) ?? existing
+                print("Workspace already exists: \(workspace.name)\t\(workspace.dir)")
+            } else {
+                var created = try orchestrator.createWorkspaceFromWorktree(worktreePath: dir, name: title)
+                if let tooltip {
+                    try orchestrator.updateWorkspaceMetadata(workspaceID: created.id, tooltip: .some(tooltip))
+                    created = try orchestrator.store.workspace(id: created.id)!
+                }
+                workspace = created
+                print("Created workspace \(workspace.name)\t\(workspace.dir)")
             }
-            print("Created workspace \(workspace.name)\t\(workspace.dir)")
+            if let _ = inferCodingAgentProvider() {
+                try fireAgentEvent(orchestrator: orchestrator, workspaceID: workspace.id, status: .spinning)
+                print("Agent start: workspace=\(workspace.id)")
+            }
         case "update":
             let id = try workspaceID(orchestrator: orchestrator)
             let title = optionalValue(for: "--title")
@@ -365,6 +386,10 @@ struct CLI {
             print("Workspace is running \(id)")
             if tooltipFlagPresent {
                 requestTooltipOverlayDisplay()
+            }
+            if let _ = inferCodingAgentProvider() {
+                try fireAgentEvent(orchestrator: orchestrator, workspaceID: id, status: .done)
+                print("Agent stop: workspace=\(id)")
             }
         case "stop":
             let id = try workspaceID(orchestrator: orchestrator)
@@ -656,7 +681,7 @@ struct CLI {
         guard args.count >= 3, args[2] == "event" else {
             throw NSError(
                 domain: "mx.cli", code: 2,
-                userInfo: [NSLocalizedDescriptionKey: "Missing agent action. Use: agent event --type init|start|waiting|done [--dir <path>] [--provider iterm2|codex]"])
+                userInfo: [NSLocalizedDescriptionKey: "Missing agent action. Use: agent event --type init|start|waiting|done|stop [--dir <path>] [--provider iterm2|codex]"])
         }
         let hookType = try value(for: "--type")
         let dir = optionalValue(for: "--dir") ?? FileManager.default.currentDirectoryPath
@@ -735,14 +760,57 @@ struct CLI {
             print("Agent done: workspace=\(wsID)")
             fireAgentEventNotification()
 
+        case "stop":
+            let wsID = try ensureWorkspace()
+            try orchestrator.updateAgentWindowStatus(
+                workspaceID: wsID, provider: provider, itermSessionID: itermSessionID, codexThreadID: codexThreadID, yabaiWindowID: yabaiWindowID,
+                status: .done)
+            print("Agent stop: workspace=\(wsID)")
+            fireAgentEventNotification()
+
         default:
-            throw NSError(domain: "mx.cli", code: 2, userInfo: [NSLocalizedDescriptionKey: "Unknown event type '\(hookType)'. Use: init|start|waiting|done"])
+            throw NSError(domain: "mx.cli", code: 2, userInfo: [NSLocalizedDescriptionKey: "Unknown event type '\(hookType)'. Use: init|start|waiting|done|stop"])
         }
     }
 
     private func fireAgentEventNotification() {
         DistributedNotificationCenter.default().postNotificationName(
             IPCNotification.agentEventFired, object: nil, userInfo: nil, options: [.deliverImmediately])
+    }
+
+    /// Returns the inferred AgentProvider if the process is running inside a known coding agent environment,
+    /// or nil if the environment cannot be identified as a coding agent.
+    private func inferCodingAgentProvider() -> AgentProvider? {
+        let env = ProcessInfo.processInfo.environment
+        if env["__CFBundleIdentifier"] == "com.openai.codex" { return .codex }
+        if env["CLAUDE_CODE_ENTRYPOINT"] != nil { return .iterm2 }
+        return nil
+    }
+
+    /// Fires an agent event for the given workspace and status, using the current environment's session identifiers.
+    private func fireAgentEvent(orchestrator: MuxyOrchestrator, workspaceID: String, status: AgentWindowStatus) throws {
+        let env = ProcessInfo.processInfo.environment
+        let bundleID = env["__CFBundleIdentifier"] ?? ""
+        let provider: AgentProvider = bundleID == "com.openai.codex" ? .codex : .iterm2
+        let rawItermSessionID = provider == .iterm2 ? env["ITERM_SESSION_ID"] : nil
+        let itermSessionID = rawItermSessionID.map { raw -> String in
+            guard let colonIdx = raw.lastIndex(of: ":") else { return raw }
+            return String(raw[raw.index(after: colonIdx)...])
+        }
+        let codexThreadID = provider == .codex ? env["CODEX_THREAD_ID"] : nil
+        let yabaiWindowID: Int? = {
+            guard let json = try? Shell.runAndCapture(["yabai", "-m", "query", "--windows", "--window"]),
+                  let data = json.data(using: .utf8),
+                  let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let id = obj["id"] as? Int
+            else { return nil }
+            return id
+        }()
+        try orchestrator.updateAgentWindowStatus(
+            workspaceID: workspaceID, provider: provider,
+            itermSessionID: itermSessionID, codexThreadID: codexThreadID,
+            yabaiWindowID: yabaiWindowID, status: status)
+        fireAgentEventNotification()
     }
 
     private func requestTooltipOverlayDisplay() {
@@ -837,7 +905,7 @@ struct CLI {
               mx workspace archive [--dir <path>]
               mx workspace focus [--dir <path>] [--window <index>]
 
-              mx agent event --type init|start|waiting|done [--dir <path>] [--provider iterm2|codex]
+              mx agent event --type init|start|waiting|done|stop [--dir <path>] [--provider iterm2|codex]
 
             Notes:
               - All settings are stored in ~/.muxy/muxy.db.

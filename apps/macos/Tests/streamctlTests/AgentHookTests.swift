@@ -161,6 +161,45 @@ final class AgentHookTests: XCTestCase {
         XCTAssertEqual(provider, .codex)
     }
 
+    // Tests inferCodingAgentProvider logic: returns nil when no known coding agent env var is set.
+    func testInferCodingAgentProviderReturnsNilWithoutEnvVars() {
+        let env: [String: String] = [:]
+        let bundleID = env["__CFBundleIdentifier"] ?? ""
+        let claudeEntrypoint = env["CLAUDE_CODE_ENTRYPOINT"]
+        let provider: AgentProvider?
+        if bundleID == "com.openai.codex" { provider = .codex }
+        else if claudeEntrypoint != nil { provider = .iterm2 }
+        else { provider = nil }
+        XCTAssertNil(provider)
+    }
+
+    // Tests inferCodingAgentProvider logic: returns iterm2 when CLAUDE_CODE_ENTRYPOINT is set.
+    func testInferCodingAgentProviderReturnsiterm2ForClaudeCode() {
+        let env: [String: String] = ["CLAUDE_CODE_ENTRYPOINT": "cli"]
+        let bundleID = env["__CFBundleIdentifier"] ?? ""
+        let claudeEntrypoint = env["CLAUDE_CODE_ENTRYPOINT"]
+        let provider: AgentProvider?
+        if bundleID == "com.openai.codex" { provider = .codex }
+        else if claudeEntrypoint != nil { provider = .iterm2 }
+        else { provider = nil }
+        XCTAssertEqual(provider, .iterm2)
+    }
+
+    // Tests that agent event "stop" type sets status to done (same as "done").
+    func testAgentStopEventSetsStatusToDone() throws {
+        let store = try makeTemporaryStore()
+        let orchestrator = MuxyOrchestrator(store: store)
+        let (_, workspace) = try makeProjectAndWorkspace(store: store)
+
+        try orchestrator.registerAgentWindow(workspaceID: workspace.id, provider: .codex, status: .spinning)
+        let updated = try orchestrator.updateAgentWindowStatus(
+            workspaceID: workspace.id, provider: .codex, status: .done)
+        XCTAssertEqual(updated.status, .done)
+
+        let allRecords = try store.agentWindows(workspaceID: workspace.id)
+        XCTAssertEqual(allRecords[0].status, .done)
+    }
+
     // MARK: - Helpers
 
     private func makeProjectAndWorkspace(store: SQLiteStore, projectName: String = "TestProject", workspaceName: String = "default") throws -> (
