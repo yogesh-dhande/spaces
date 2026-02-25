@@ -2698,9 +2698,9 @@ final class OrchestratorTests: XCTestCase {
         }
 
         let remaining = try store.agentWindows(workspaceID: workspace.id)
-        XCTAssertEqual(remaining.count, 1, "Agent window record should be preserved after up --restart")
+        XCTAssertEqual(remaining.count, 1, "Agent window record should be preserved after up --force-restart")
         XCTAssertEqual(remaining.first?.id, agentRecord.id)
-        XCTAssertFalse(mockIterm.closedSessionIDs.contains("agent-session-2"), "Agent iTerm2 session should not be closed during up --restart")
+        XCTAssertFalse(mockIterm.closedSessionIDs.contains("agent-session-2"), "Agent iTerm2 session should not be closed during up --force-restart")
     }
 
     // Tests stopWorkspace preserves coding agent sessions by arranging a running workspace with an iterm2 agent window and asserting the record and session survive an explicit stop.

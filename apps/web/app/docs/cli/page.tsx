@@ -340,13 +340,13 @@ mx workspace up
 mx workspace up --dir /path/to/workspace
 
 # Ensure running and force restart if already running/stale
-mx workspace up --dir /path/to/workspace --restart
+mx workspace up --dir /path/to/workspace --force-restart
 
 # Ensure running, focus, and show tooltip overlay
 mx workspace up --dir /path/to/workspace --tooltip "Reviewing auth callback"`}</CodeBlock>
         <p className="mt-2 text-sm leading-7 text-foreground-soft">
           Idempotent run command: launches when stopped. If already running (or runtime indicators exist),
-          it does nothing by default; pass <Cmd>--restart</Cmd> to run stop then launch. In all cases,
+          it does nothing by default; pass <Cmd>--force-restart</Cmd> to run stop then launch. In all cases,
           Muxy focuses the workspace once running. With <Cmd>--tooltip [text]</Cmd>, Muxy shows the tooltip
           overlay after focus and updates tooltip text when text is provided.
         </p>

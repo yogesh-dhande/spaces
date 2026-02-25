@@ -71,7 +71,7 @@ export default function WorkspaceLifecycleDocsPage() {
         </ul>
         <p className="mt-3 text-sm leading-7 text-foreground-soft">
           Use <code>mx workspace up</code> for idempotent automation: it launches stopped workspaces and
-          otherwise does nothing by default. Add <code>--restart</code> to force stop then launch when
+          otherwise does nothing by default. Add <code>--force-restart</code> to force stop then launch when
           runtime state is already present.
         </p>
       </article>

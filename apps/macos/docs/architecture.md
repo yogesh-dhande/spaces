@@ -138,9 +138,9 @@ Workspace identification:
 - Workspaces are uniquely identified by their directory path (`dir` field).
 - CLI commands accept `--dir <path>` (defaults to current directory) to identify workspaces.
 - `mx workspace update [--dir <path>] [--title <title>] [--branch <branch>] [--directory-name <name>|--dirname <name>|--dir-name <name>] [--tooltip <text>|--clear-tooltip]` updates workspace metadata (except protected `main`/`master` branch renames).
-- `mx workspace up [--dir <path>] [--restart] [--focus] [--tooltip [<text>]]` ensures a workspace is running.
+- `mx workspace up [--dir <path>] [--force-restart] [--focus] [--tooltip [<text>]]` ensures a workspace is running.
 - Default `workspace up` behavior: launch in background when stopped; if runtime is already present, restart any exited processes in the background without touching running ones.
-- `workspace up --restart` behavior: if runtime is already present, run stop then full launch in background; if stopped, launch in background.
+- `workspace up --force-restart` behavior: if runtime is already present, run stop then full launch in background; if stopped, launch in background.
 - `workspace up --focus` brings the workspace to the foreground after launch/no-op/restart completes.
 - `workspace up --tooltip [<text>]` optionally updates tooltip text when provided and displays the tooltip overlay.
 - `mx workspace focus` focuses the workspace window set; `--window <index>` focuses a specific tracked window.
