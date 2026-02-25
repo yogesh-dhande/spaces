@@ -211,14 +211,16 @@ public final class MuxyOrchestrator {
         if let title {
             let trimmedTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !trimmedTitle.isEmpty else { throw MuxyError.invalidArgument(message: "Workspace title is required.") }
-            guard !workspace.isDefault || trimmedTitle == workspace.name else {
-                throw MuxyError.invalidArgument(message: "Default workspace name cannot be changed.")
-            }
             if trimmedTitle != workspace.name {
                 if let existing = try store.workspace(projectID: workspace.projectID, name: trimmedTitle), existing.id != workspace.id {
                     throw MuxyError.workspaceAlreadyExists(project: project.name, workspace: trimmedTitle)
                 }
-                updatedName = trimmedTitle
+                if workspace.isDefault {
+                    // Default workspaces allow display title overrides while preserving the canonical name.
+                    try store.updateWorkspaceTitle(id: workspace.id, title: trimmedTitle)
+                } else {
+                    updatedName = trimmedTitle
+                }
                 didChange = true
             }
         }
@@ -266,6 +268,18 @@ public final class MuxyOrchestrator {
         }
 
         guard didChange else { return }
+        if workspace.isDefault {
+            if updatedBranch != workspace.branch {
+                try store.updateWorkspaceBranch(id: workspace.id, branch: updatedBranch)
+            }
+            if updatedDirname != workspace.dirname {
+                try store.updateWorkspaceDirname(id: workspace.id, dirname: updatedDirname)
+            }
+            if updatedTooltip != workspace.tooltip {
+                try store.updateWorkspaceTooltip(id: workspace.id, tooltip: updatedTooltip)
+            }
+            return
+        }
         let updatedWorkspace = WorkspaceRecord(
             id: workspace.id, projectID: workspace.projectID, name: updatedName, dir: workspace.dir, dirname: updatedDirname, branch: updatedBranch,
             targetBranch: workspace.targetBranch, isDefault: workspace.isDefault, isArchived: workspace.isArchived, isRunning: workspace.isRunning,

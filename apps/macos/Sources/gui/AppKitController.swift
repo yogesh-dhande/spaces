@@ -2321,7 +2321,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let archiveButton = actionButton(
             title: "Archive", symbol: "archivebox", tooltip: "Archive", action: #selector(archiveWorkspace(_:)), primary: false)
         archiveButton.identifier = NSUserInterfaceItemIdentifier(workspace.id)
-        archiveButton.isEnabled = !workspace.isDefault
         let muted = NSColor.systemRed.withAlphaComponent(0.6)
         let redTitle = NSMutableAttributedString(
             string: "Archive", attributes: [.foregroundColor: muted, .font: archiveButton.font ?? NSFont.systemFont(ofSize: 13)])
@@ -4199,6 +4198,13 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     @objc private func archiveWorkspace(_ sender: NSButton) {
         guard let id = sender.identifier?.rawValue else { return }
         let workspace = workspacesByProject.values.flatMap({ $0 }).first(where: { $0.id == id })
+        if workspace?.isDefault == true {
+            showInfoMessage(
+                title: "Default Workspace",
+                message: "Default workspaces cannot be archived. Delete the project instead to remove all of its workspaces."
+            )
+            return
+        }
         let alert = NSAlert()
         alert.alertStyle = .warning
         alert.messageText = "Archive workspace?"

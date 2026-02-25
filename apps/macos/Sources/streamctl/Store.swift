@@ -238,6 +238,18 @@ public final class SQLiteStore {
         try execute(sql: "UPDATE workspaces SET tooltip = ? WHERE id = ?", bindings: [tooltip ?? "", id])
     }
 
+    public func updateWorkspaceTitle(id: String, title: String) throws {
+        try execute(sql: "UPDATE workspaces SET title = ? WHERE id = ?", bindings: [title, id])
+    }
+
+    public func updateWorkspaceBranch(id: String, branch: String?) throws {
+        try execute(sql: "UPDATE workspaces SET branch = ? WHERE id = ?", bindings: [branch ?? "", id])
+    }
+
+    public func updateWorkspaceDirname(id: String, dirname: String?) throws {
+        try execute(sql: "UPDATE workspaces SET dirname = ? WHERE id = ?", bindings: [dirname ?? "", id])
+    }
+
     public func updateWorkspaceName(id: String, name: String) throws {
         try execute(sql: "UPDATE workspaces SET name = ?, title = ? WHERE id = ?", bindings: [name, name, id])
     }

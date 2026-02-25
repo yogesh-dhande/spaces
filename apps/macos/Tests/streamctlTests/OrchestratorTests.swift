@@ -1056,6 +1056,29 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertFalse(branches.split(separator: "\n").contains("feature-start"))
     }
 
+    // Tests default workspace metadata update allows title override while preserving default protections by arranging representative inputs and asserting the expected result.
+    func testUpdateWorkspaceMetadataAllowsDefaultWorkspaceTitleOverride() throws {
+        let root = try makeTempDirectory()
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let store = try makeTemporaryStore()
+        let orchestrator = MuxyOrchestrator(store: store)
+
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        let defaultWorkspace = try XCTUnwrap(store.workspace(projectID: project.id, name: "default"))
+
+        try orchestrator.updateWorkspaceMetadata(workspaceID: defaultWorkspace.id, title: "Codex Task", tooltip: .some("Imported from agent"))
+
+        let updated = try XCTUnwrap(store.workspace(id: defaultWorkspace.id))
+        XCTAssertEqual(updated.name, "Codex Task")
+        XCTAssertEqual(updated.tooltip, "Imported from agent")
+        XCTAssertTrue(updated.isDefault)
+
+        XCTAssertThrowsError(try orchestrator.archiveWorkspace(workspaceID: defaultWorkspace.id)) { error in
+            XCTAssertTrue(error.localizedDescription.contains("Default workspace cannot be archived"))
+        }
+    }
+
     // Tests workspace metadata update can clear tooltip by arranging representative inputs and asserting the expected result.
     func testUpdateWorkspaceMetadataClearsTooltip() throws {
         let root = try makeTempDirectory()

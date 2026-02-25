@@ -294,12 +294,11 @@ struct CLI {
             let normalizedImportDir = normalizePath(dir)
             let workspace: WorkspaceRecord
             if let existing = try orchestrator.store.workspace(dir: normalizedImportDir), !existing.isArchived {
-                // Workspace already exists — update tooltip if provided; title update is skipped for default workspaces
-                let titleUpdate = existing.isDefault ? nil : title
-                if titleUpdate != nil || tooltip != nil {
+                // Workspace already exists — update title/tooltip in place.
+                if title != nil || tooltip != nil {
                     try orchestrator.updateWorkspaceMetadata(
                         workspaceID: existing.id,
-                        title: titleUpdate,
+                        title: title,
                         tooltip: tooltip != nil ? .some(tooltip) : nil
                     )
                 }
