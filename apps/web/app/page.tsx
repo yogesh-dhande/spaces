@@ -79,21 +79,20 @@ export default function HomePage() {
         <section className="grid gap-7 rounded-3xl border border-line bg-surface/90 p-7 shadow-[0_24px_48px_-34px_color-mix(in_oklab,var(--ink)_45%,transparent)] backdrop-blur-sm md:grid-cols-[1.1fr_0.9fr] md:p-9">
           <div className="space-y-5">
             <p className="inline-flex rounded-full border border-line bg-background-soft px-3 py-1 font-mono text-[0.68rem] uppercase tracking-[0.14em] text-foreground-soft">
-              Parallel Development, Managed
+              Build faster with Muxy
             </p>
-            <h1 className="max-w-2xl text-2xl font-semibold leading-tight tracking-tight md:text-4xl">
-              Stop Hunting for Tabs.<br />Start Building Features.
+            <h1 className="max-w-2xl text-2xl font-semibold leading-tight tracking-tight md:text-3xl lg:text-4xl">
+              Instant context switching <br /> for faster development.
             </h1>
             <p className="max-w-2xl text-base leading-7 text-foreground-soft md:text-lg">
-              Muxy reduces the hidden tax of parallel work: context
-              hunting, app hopping, port conflicts, and accidental interruptions.
+              A MacOS app designed to reduce context hunting, app hopping, port conflicts, and accidental interruptions.
             </p>
             <div className="flex flex-wrap gap-3">
               <Link
                 href="/releases/latest"
                 className="btn-primary rounded-full px-5 py-2.5 text-sm font-semibold transition-colors cursor-pointer"
               >
-                Download (it's free!)
+                Download
               </Link>
               <Link
                 href="#solution"
@@ -113,16 +112,21 @@ export default function HomePage() {
           className="rounded-3xl border border-line bg-surface/86 p-7 backdrop-blur-sm md:p-8"
         >
           <h3 className="mt-3 text-2xl font-semibold tracking-tight">
-            Development is no longer about typing code.
+            Speed is no longer about typing code faster
           </h3>
-          <p>
-             It's about managing context.
+          <p className="mt-1 max-w-3xl text-sm leading-6 text-foreground-soft md:text-base md:leading-7">
+            It's about managing context effectively
           </p>
-          <ul className="mt-5 max-w-3xl space-y-4 text-sm leading-6 text-foreground-soft md:text-base md:leading-7">
-            <li >"Where is the tab for the checkout page?"</li>
-            <li>"Port 3000 is already in use."</li>
-            <li>"Which terminal is running the job queue again?"</li>
-          </ul>
+          <div className="my-4 max-w-3xl space-y-4 text-sm leading-6 text-foreground-soft md:text-base md:leading-7">
+            <ul className="ml-4 list-disc space-y-1.5 text-sm leading-6">
+              <li>"Where is the tab for the checkout page?"</li>
+              <li>"Port 3000 is already in use."</li>
+              <li>"Which terminal is running the dev server again?"</li>
+            </ul>
+          </div>
+          <p className="font-medium text-foreground">
+            Our tools were not built for how we work today.
+          </p>
         </section>
 
         {/* ── Problem: The Friction ── */}
@@ -139,10 +143,13 @@ export default function HomePage() {
             <p>
               Switching apps often lands you on the wrong window. Tracing a UI
               bug becomes a reverse lookup exercise: from page → repo →
-              terminal → agent.
+              terminal → agent. 
             </p>
             <p>
-              What was I working on again?
+              What was I working on again? 
+            </p>
+            <p className="font-medium text-foreground">
+              Working on multiple projects is challenging. Worktrees make the problem worse.
             </p>
           </div>
         </section>
@@ -151,11 +158,14 @@ export default function HomePage() {
           <h3 className="mt-3 text-2xl font-semibold tracking-tight">
             Meanwhile, small frictions compound
           </h3>
+          
           <div className="mt-5 max-w-3xl space-y-4 text-sm leading-6 text-foreground-soft md:text-base md:leading-7">
-            <ul className="ml-5 space-y-1.5 text-sm leading-6">
-              <li>• Port collisions quietly break local flows</li>
-              <li>• Context switching erodes focus</li>
-              <li>• Active work disappears into window chaos</li>
+            <ul className="ml-4 list-disc space-y-1.5 text-sm leading-6">
+              <li>Port collisions quietly break local flows</li>
+              <li>Active work disappears into window chaos</li>
+              <li>Context switching erodes focus</li>
+              <li>Wrong processes get killed accidentally</li>
+              <li>Prompt is sent to the wrong coding agent</li>
             </ul>
             <p className="font-medium text-foreground">
               The more parallel your workflow becomes, the more your environment
@@ -170,10 +180,10 @@ export default function HomePage() {
           </h2>
           <div className="mt-5 max-w-3xl space-y-4 text-sm leading-6 text-foreground-soft md:text-base md:leading-7">
             <p className="text-foreground">
-              Muxy organizes your terminals, browser tabs, and editors into worktree and project-specific workspaces.
+              Muxy organizes your browser tabs, coding agents, code editors, terminals, and processes into logical workspaces.
             </p>
             <p className="text-foreground">
-              Switch between branches and tasks instantly—without port collisions or lost context.
+              Switch between projects and tasks instantly—without port collisions or lost context.
             </p>
           </div>
           <div className="mt-6">
@@ -211,7 +221,7 @@ export default function HomePage() {
                 02 Jump
               </p>
               <p className="mt-2 text-sm leading-6 text-foreground-soft">
-                Open the right browser, editor, or terminal window for that
+                Open the right browser tab, coding agent, code editor, or terminal window for that
                 workspace instantly with a keyboard shortcut.
               </p>
             </article>
@@ -280,7 +290,7 @@ export default function HomePage() {
             FAQ
           </p>
           <h2 className="mt-3 text-3xl font-semibold tracking-tight">
-            Common questions
+            You may be wondering
           </h2>
           <div className="mt-6 space-y-2">
 
@@ -363,6 +373,19 @@ export default function HomePage() {
 
             <details className="group rounded-xl border border-line bg-surface/75">
               <summary className="flex cursor-pointer select-none list-none items-center justify-between px-4 py-3.5 text-sm font-semibold text-foreground">
+                I only work on one project at a time. How will Muxy help me?
+                <span aria-hidden className="ml-3 shrink-0 text-foreground-soft transition-transform duration-200 group-open:rotate-180">▾</span>
+              </summary>
+              <div className="border-t border-line px-4 pb-4 pt-3 text-sm leading-7 text-foreground-soft">
+                <ul className="ml-4 list-disc">
+                  <li>Muxy is still helpful in managing windows, monitoring processes, quickly spinning up or down projects</li>
+                  <li>You can leave other projects open and running without them getting in the way of the project you are focusing on.</li>
+                </ul>
+              </div>
+            </details>
+
+            <details className="group rounded-xl border border-line bg-surface/75">
+              <summary className="flex cursor-pointer select-none list-none items-center justify-between px-4 py-3.5 text-sm font-semibold text-foreground">
                 Do you collect any data?
                 <span aria-hidden className="ml-3 shrink-0 text-foreground-soft transition-transform duration-200 group-open:rotate-180">▾</span>
               </summary>
@@ -378,6 +401,16 @@ export default function HomePage() {
               </summary>
               <div className="border-t border-line px-4 pb-4 pt-3 text-sm leading-7 text-foreground-soft">
                 Email <a href="mailto:support@muxy.dev" className="text-accent hover:underline">support@muxy.dev</a>.
+              </div>
+            </details>
+
+            <details className="group rounded-xl border border-line bg-surface/75">
+              <summary className="flex cursor-pointer select-none list-none items-center justify-between px-4 py-3.5 text-sm font-semibold text-foreground">
+                What does muxy mean?
+                <span aria-hidden className="ml-3 shrink-0 text-foreground-soft transition-transform duration-200 group-open:rotate-180">▾</span>
+              </summary>
+              <div className="border-t border-line px-4 pb-4 pt-3 text-sm leading-7 text-foreground-soft">
+                Multiplex your work? Or something like that. I needed a name and a domain. You know how it goes.
               </div>
             </details>
 
