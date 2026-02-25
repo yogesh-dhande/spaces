@@ -628,7 +628,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                         if !hasExitedProcess {
                             for process in runningProcesses {
                                 let results = try orchestrator.statusResults(processID: process.id)
-                                if results.contains(where: { $0.status == "red" }) {
+                                if results.contains(where: { $0.status == .failed }) {
                                     hasFailedCheck = true
                                     break
                                 }
@@ -876,7 +876,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                     guard let wid = win.windowID, let process = processByWindowID[wid] else { continue }
                     matchedProcessIDs.insert(process.id)
                     let allChecks = statusResultsByProcessID[process.id] ?? []
-                    let hasFailedCheck = allChecks.contains { $0.status == "red" }
+                    let hasFailedCheck = allChecks.contains { $0.status == .failed }
                     guard process.status == .exited || hasFailedCheck else { continue }
                     let icon: String
                     let iconColor: NSColor
@@ -904,7 +904,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                         label = win.title ?? win.app
                         detail = nil
                     }
-                    let redChecks = allChecks.filter { $0.status == "red" }
+                    let redChecks = allChecks.filter { $0.status == .failed }
                     let eventDate: Date? = process.status == .exited
                         ? process.exitedAt.flatMap { iso8601Formatter.date(from: $0) }
                         : redChecks.compactMap { $0.lastRunAt.flatMap { iso8601Formatter.date(from: $0) } }.max()
@@ -918,9 +918,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 // Orphaned process entries (no captured window)
                 for process in processes where !matchedProcessIDs.contains(process.id) {
                     let allChecks = statusResultsByProcessID[process.id] ?? []
-                    let hasFailedCheck = allChecks.contains { $0.status == "red" }
+                    let hasFailedCheck = allChecks.contains { $0.status == .failed }
                     guard process.status == .exited || hasFailedCheck else { continue }
-                    let redChecks = allChecks.filter { $0.status == "red" }
+                    let redChecks = allChecks.filter { $0.status == .failed }
                     let eventDate: Date? = process.status == .exited
                         ? process.exitedAt.flatMap { iso8601Formatter.date(from: $0) }
                         : redChecks.compactMap { $0.lastRunAt.flatMap { iso8601Formatter.date(from: $0) } }.max()
@@ -1135,7 +1135,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         constrainFormFieldToFillWidth(mainRow, in: container)
 
         for check in entry.statusChecks {
-            let checkColor: NSColor = check.status == "green" ? .systemGreen : .systemRed
+            let checkColor: NSColor = check.status == .passed ? .systemGreen : .systemRed
             let checkRow = statusCheckSubRow(name: check.checkName, color: checkColor, status: check.status)
             container.addArrangedSubview(checkRow)
             constrainFormFieldToFillWidth(checkRow, in: container)
@@ -1171,7 +1171,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                     if !hasExitedProcess {
                         for process in runningProcesses {
                             let results = try orchestrator.statusResults(processID: process.id)
-                            if results.contains(where: { $0.status == "red" }) {
+                            if results.contains(where: { $0.status == .failed }) {
                                 hasFailedCheck = true
                                 break
                             }
@@ -2489,7 +2489,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 if let process = linkedProcess {
                     let checks = statusResultsByProcessID[process.id] ?? []
                     for check in checks {
-                        let isHealthy = check.status == "green" && process.status != .exited
+                        let isHealthy = check.status == .passed && process.status != .exited
                         let checkColor: NSColor = isHealthy ? .systemGreen : .systemRed
                         let checkRow = statusCheckSubRow(name: check.checkName, color: checkColor, status: check.status)
                         windowsStack.addArrangedSubview(checkRow)
@@ -2574,7 +2574,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
                 let checks = statusResultsByProcessID[process.id] ?? []
                 for check in checks {
-                    let isHealthy = check.status == "green" && process.status != .exited
+                    let isHealthy = check.status == .passed && process.status != .exited
                     let checkColor: NSColor = isHealthy ? .systemGreen : .systemRed
                     let checkRow = statusCheckSubRow(name: check.checkName, color: checkColor, status: check.status)
                     processesStack.addArrangedSubview(checkRow)
@@ -3178,7 +3178,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         return row
     }
 
-    private func statusCheckSubRow(name: String, color: NSColor, status: String) -> NSView {
+    private func statusCheckSubRow(name: String, color: NSColor, status: StatusCheckStatus) -> NSView {
         let row = NSStackView()
         row.orientation = .horizontal
         row.alignment = .centerY
@@ -3191,7 +3191,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         arrow.setContentHuggingPriority(.required, for: .horizontal)
 
         let dot = NSImageView()
-        dot.image = NSImage(systemSymbolName: "circle.fill", accessibilityDescription: status)
+        dot.image = NSImage(systemSymbolName: "circle.fill", accessibilityDescription: status.rawValue)
         dot.contentTintColor = color
         dot.setContentHuggingPriority(.required, for: .horizontal)
         dot.translatesAutoresizingMaskIntoConstraints = false

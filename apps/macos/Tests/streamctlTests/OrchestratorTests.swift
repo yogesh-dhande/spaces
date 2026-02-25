@@ -585,8 +585,8 @@ final class OrchestratorTests: XCTestCase {
 
         XCTAssertEqual(results.count, 2)
         let byName = Dictionary(uniqueKeysWithValues: results.map { ($0.checkName, $0.status) })
-        XCTAssertEqual(byName["api"], "green")
-        XCTAssertEqual(byName["failing"], "red")
+        XCTAssertEqual(byName["api"], .passed)
+        XCTAssertEqual(byName["failing"], .failed)
 
         let persisted = try orchestrator.statusResults(processID: runningProcess.id)
         XCTAssertEqual(persisted.count, 2)
@@ -654,7 +654,7 @@ final class OrchestratorTests: XCTestCase {
         let persisted = try orchestrator.statusResults(processID: runningProcess.id)
         XCTAssertEqual(persisted.count, 1)
         XCTAssertEqual(persisted.first?.checkName, "health")
-        XCTAssertEqual(persisted.first?.status, "green")
+        XCTAssertEqual(persisted.first?.status, .passed)
     }
 
     // Tests status check on fail none does nothing by arranging representative inputs and asserting the expected result.
@@ -681,7 +681,7 @@ final class OrchestratorTests: XCTestCase {
         let results = try orchestrator.runStatusChecks(workspaceID: workspace.id)
 
         XCTAssertEqual(results.count, 1)
-        XCTAssertEqual(results.first?.status, "red")
+        XCTAssertEqual(results.first?.status, .failed)
         
         // Process should still be running (no restart)
         let currentProcess = try store.runningProcesses(workspaceID: workspace.id).first!
@@ -713,7 +713,7 @@ final class OrchestratorTests: XCTestCase {
         let results = try orchestrator.runStatusChecks(workspaceID: workspace.id)
 
         XCTAssertEqual(results.count, 1)
-        XCTAssertEqual(results.first?.status, "red")
+        XCTAssertEqual(results.first?.status, .failed)
         
         // Process should still be running (no restart)
         let currentProcess = try store.runningProcesses(workspaceID: workspace.id).first!
@@ -760,7 +760,7 @@ final class OrchestratorTests: XCTestCase {
         let results = try orchestrator.runStatusChecks(workspaceID: workspace.id)
 
         XCTAssertEqual(results.count, 1)
-        XCTAssertEqual(results.first?.status, "red")
+        XCTAssertEqual(results.first?.status, .failed)
         
         // Verify iTerm2 was called to run in existing window (not create new one)
         XCTAssertEqual(mockIterm.openWindowAndRunCallCount, 0)
@@ -867,7 +867,7 @@ final class OrchestratorTests: XCTestCase {
         try store.upsert(runningProcess: deadProcess)
 
         // Simulate a previously-passing status check result
-        let greenResult = StatusResult(processID: deadProcess.id, checkName: "health", status: "green", message: nil, lastRunAt: ISO8601DateFormatter().string(from: Date()))
+        let greenResult = StatusResult(processID: deadProcess.id, checkName: "health", status: .passed, message: nil, lastRunAt: ISO8601DateFormatter().string(from: Date()))
         try store.upsert(statusResult: greenResult)
 
         let didUpdate = try orchestrator.checkAndUpdateProcessStatuses()
@@ -876,7 +876,7 @@ final class OrchestratorTests: XCTestCase {
         let results = try store.statusResults(processID: deadProcess.id)
         XCTAssertEqual(results.count, 1)
         // Status result must be red after process exit — not stale green
-        XCTAssertEqual(results.first?.status, "red")
+        XCTAssertEqual(results.first?.status, .failed)
     }
 
     // Tests check and update process statuses skips newly started processes by arranging representative inputs and asserting the expected result.

@@ -56,7 +56,7 @@ export const docsPageLinks: DocsPageLink[] = [
     href: "/docs/status-checks",
     title: "Status Checks",
     summary:
-      "Get instant red/green health feedback on running processes before you switch context.",
+      "Get instant passed/failed health feedback on running processes before you switch context.",
   },
   {
     href: "/docs/dashboard",

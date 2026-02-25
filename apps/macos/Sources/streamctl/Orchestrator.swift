@@ -917,7 +917,7 @@ public final class MuxyOrchestrator {
 
                 let resolvedCommand = applyEnvVars(check.command, env: env)
                 let outcome = try runCommandWithTimeout(command: resolvedCommand, cwd: workspace.dir, timeout: check.timeout, env: env)
-                let status = outcome.exitCode == 0 ? "green" : "red"
+                let status: StatusCheckStatus = outcome.exitCode == 0 ? .passed : .failed
                 let result = StatusResult(
                     processID: process.id, checkName: checkName, status: status, message: outcome.output.isEmpty ? nil : outcome.output,
                     lastRunAt: nowISO8601())

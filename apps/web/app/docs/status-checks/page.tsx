@@ -11,7 +11,7 @@ export default function StatusChecksDocsPage() {
   return (
     <DocsShell
       title="Status Checks"
-      description="Status checks run shell commands against running workspace processes and show green/red status indicators in the UI."
+      description="Status checks run shell commands against running workspace processes and show passed/failed status indicators in the UI."
       pagePath="/docs/status-checks"
     >
       <article className="rounded-2xl border border-line bg-surface/82 p-5 backdrop-blur-sm">
@@ -37,7 +37,7 @@ export default function StatusChecksDocsPage() {
         <h2 className="text-xl font-semibold tracking-tight">GUI Configuration</h2>
         <ul className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
           <li>• In Workspace Settings, each status check row includes an <code>On Fail</code> selector.</li>
-          <li>• <code>none</code>: store failed (red) status only.</li>
+          <li>• <code>none</code>: store failed status only.</li>
           <li>• <code>notify</code>: store failed status and send a desktop notification.</li>
           <li>• <code>restart</code>: store failed status and restart the linked process.</li>
         </ul>
@@ -46,8 +46,8 @@ export default function StatusChecksDocsPage() {
       <article className="rounded-2xl border border-line bg-surface/82 p-5 backdrop-blur-sm">
         <h2 className="text-xl font-semibold tracking-tight">Status Output</h2>
         <ul className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
-          <li>• Successful check: green status indicator.</li>
-          <li>• Failed check or timeout: red status indicator.</li>
+          <li>• Successful check: passed status indicator (shown green in UI).</li>
+          <li>• Failed check or timeout: failed status indicator (shown red in UI).</li>
           <li>• Check output is available for inspection.</li>
           <li>• Process rows in the Run tab display check summaries.</li>
         </ul>
@@ -72,7 +72,7 @@ export default function StatusChecksDocsPage() {
         />
         <ScreenshotFrame
           title="Run Tab Status Summary"
-          caption="Running process rows with green/red check results."
+          caption="Running process rows with passed/failed check results."
         />
       </article>
     </DocsShell>

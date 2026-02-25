@@ -300,13 +300,13 @@ final class StoreTests: XCTestCase {
         XCTAssertNil(processes[0].windowID)
 
         try store.upsert(
-            statusResult: StatusResult(processID: processID, checkName: "health", status: "green", message: "ok", lastRunAt: "2026-01-01T00:00:00Z"))
+            statusResult: StatusResult(processID: processID, checkName: "health", status: .passed, message: "ok", lastRunAt: "2026-01-01T00:00:00Z"))
         try store.upsert(
-            statusResult: StatusResult(processID: processID, checkName: "health", status: "red", message: "failed", lastRunAt: "2026-01-01T00:02:00Z")
+            statusResult: StatusResult(processID: processID, checkName: "health", status: .failed, message: "failed", lastRunAt: "2026-01-01T00:02:00Z")
         )
         let results = try store.statusResults(processID: processID)
         XCTAssertEqual(results.count, 1)
-        XCTAssertEqual(results[0].status, "red")
+        XCTAssertEqual(results[0].status, .failed)
         XCTAssertEqual(results[0].message, "failed")
 
         let firstWindow = WindowRecord(
@@ -346,7 +346,7 @@ final class StoreTests: XCTestCase {
             runningProcess: RunningProcessRecord(
                 id: processID, workspaceID: workspace.id, templateName: "one", command: "echo one", terminalApp: nil, windowID: nil, pid: nil,
                 status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil))
-        try store.upsert(statusResult: StatusResult(processID: processID, checkName: "health", status: "green", message: nil, lastRunAt: "now"))
+        try store.upsert(statusResult: StatusResult(processID: processID, checkName: "health", status: .passed, message: nil, lastRunAt: "now"))
         try store.upsert(
             window: WindowRecord(
                 id: UUID().uuidString, workspaceID: workspace.id, app: "iTerm2", title: "term", windowID: 77, role: "terminal", orderIndex: 0,
@@ -485,7 +485,7 @@ final class StoreTests: XCTestCase {
             runningProcess: RunningProcessRecord(
                 id: secondID, workspaceID: workspace.id, templateName: "second", command: "echo second", terminalApp: nil, windowID: nil, pid: nil,
                 status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil))
-        try store.upsert(statusResult: StatusResult(processID: firstID, checkName: "first", status: "green", message: nil, lastRunAt: nil))
+        try store.upsert(statusResult: StatusResult(processID: firstID, checkName: "first", status: .passed, message: nil, lastRunAt: nil))
 
         try store.deleteRunningProcess(id: firstID)
         XCTAssertTrue(try store.statusResults(processID: firstID).isEmpty)

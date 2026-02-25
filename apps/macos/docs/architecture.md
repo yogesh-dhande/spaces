@@ -73,7 +73,7 @@ GUI interaction notes:
 - Left-pane workspace status indicator semantics:
   - Gray: workspace not running.
   - Green: running with no exited process rows and no failed status-check result rows.
-  - Red: running with at least one exited process row or at least one failed (`red`) status-check result.
+  - Red: running with at least one exited process row or at least one failed (`failed`) status-check result.
 - Project rows in the left pane show a folder icon next to the project name.
 - Git workspace rows include ahead/behind commit counts vs the workspace target branch (the branch it was created from), merge-conflict status, and relative last-modified time (from latest tracked-file mtime) with tracked modified-file count.
 - Workspace detail metadata shows the current branch and, when present and different, appends `forked from <target branch>`.
@@ -82,7 +82,7 @@ GUI interaction notes:
 - Port definitions are editable via `PortEditor` in the project detail view, the add-project form, and workspace settings.
 - Status checks are configured inline under each process in the `ProcessEditor` rather than in a separate form section; the process name is implicit from the parent row.
 - Browser sessions are editable via `BrowserSessionEditor` (`name` + URL prefix rows) in project detail, add-project form, and workspace settings.
-- The run tab displays status check results as indented sub-rows under each process with colored dots (green/red) instead of inline badge text.
+- The run tab displays status check results as indented sub-rows under each process with colored dots (passed=green/failed=red) instead of inline badge text.
 - In the run-tab Windows list, browser rows render a two-part label: browser-session name first (when configured) plus the matched URL in secondary text.
 - Window cards in the Run tab and Dashboard are clickable: clicking a card calls `focusWorkspaceWindow` for that window, equivalent to the `CMD+N` keyboard shortcut.
 - Keyboard shortcut overrides for GUI actions are persisted in SQLite settings and editable in the GUI Settings view and CLI settings commands.
@@ -91,7 +91,7 @@ GUI interaction notes:
 - The left pane includes a **Dashboard** sidebar row pinned above the Projects section header.
   - Clicking the Dashboard row opens the dashboard detail in the right pane (same navigation model as selecting a project or workspace).
   - The row shows a red count badge when there are attention items; the badge is hidden when the count is zero.
-  - The dashboard detail shows attention items: processes that have exited or have failing (`red`) status checks, across all running workspaces.
+  - The dashboard detail shows attention items: processes that have exited or have failing (`failed`) status checks, across all running workspaces.
   - Attention items are grouped by workspace (showing `project / workspace` as the group header).
   - Items within each group are sorted by most recent event timestamp (exited-at for exited processes; most-recent failed check run-at for check failures), most recent first; groups are sorted by their most-recent item.
   - Each attention entry uses the same `windowRow` / `statusCheckSubRow` UI elements as the Run tab.

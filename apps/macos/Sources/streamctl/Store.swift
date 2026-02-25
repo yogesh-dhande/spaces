@@ -503,11 +503,11 @@ public final class SQLiteStore {
                   message = excluded.message,
                   last_run_at = excluded.last_run_at
                 """,
-            bindings: [statusResult.processID, statusResult.checkName, statusResult.status, statusResult.message ?? "", statusResult.lastRunAt ?? ""])
+            bindings: [statusResult.processID, statusResult.checkName, statusResult.status.rawValue, statusResult.message ?? "", statusResult.lastRunAt ?? ""])
     }
 
     public func markStatusResultsAsFailed(processID: String) throws {
-        try execute(sql: "UPDATE status_results SET status = 'red', message = 'Process exited' WHERE process_id = ?", bindings: [processID])
+        try execute(sql: "UPDATE status_results SET status = '\(StatusCheckStatus.failed.rawValue)', message = 'Process exited' WHERE process_id = ?", bindings: [processID])
     }
 
     public func statusResults(processID: String) throws -> [StatusResult] {
@@ -515,7 +515,9 @@ public final class SQLiteStore {
             sql: "SELECT process_id, check_name, status, message, last_run_at FROM status_results WHERE process_id = ?", bindings: [processID])
         return rows.map { row in
             StatusResult(
-                processID: row[0], checkName: row[1], status: row[2], message: row[3].isEmpty ? nil : row[3], lastRunAt: row[4].isEmpty ? nil : row[4]
+                processID: row[0], checkName: row[1],
+                status: StatusCheckStatus(rawValue: row[2]) ?? .failed,
+                message: row[3].isEmpty ? nil : row[3], lastRunAt: row[4].isEmpty ? nil : row[4]
             )
         }
     }
@@ -960,6 +962,9 @@ public final class SQLiteStore {
         try ensureColumnExists(table: "windows", name: "iterm_session_id", definition: "iterm_session_id TEXT")
         try ensureColumnExists(table: "windows", name: "iterm_tab_index", definition: "iterm_tab_index INTEGER")
         try ensureColumnExists(table: "agent_windows", name: "yabai_window_id", definition: "yabai_window_id INTEGER")
+        // Migrate legacy color-based status values to semantic names
+        try execute(sql: "UPDATE status_results SET status = 'passed' WHERE status = 'green'", bindings: [])
+        try execute(sql: "UPDATE status_results SET status = 'failed' WHERE status = 'red'", bindings: [])
     }
 
     private func ensureColumnExists(table: String, name: String, definition: String) throws {

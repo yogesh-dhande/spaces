@@ -56,7 +56,7 @@ struct StatusCheckTests {
         let results = try orchestrator.runStatusChecks(workspaceID: workspace.id)
         
         #expect(results.count == 1)
-        #expect(results.first?.status == "red")
+        #expect(results.first?.status == .failed)
         #expect(results.first?.checkName == "docker-container-health")
         
         // Verify iTerm2 was called to run in existing window (not create new one)
@@ -111,7 +111,7 @@ struct StatusCheckTests {
         let results = try orchestrator.runStatusChecks(workspaceID: workspace.id)
         
         #expect(results.count == 1)
-        #expect(results.first?.status == "green")
+        #expect(results.first?.status == .passed)
         #expect(results.first?.checkName == "docker-container-health")
         
         let currentProcess = try store.runningProcesses(workspaceID: workspace.id).first!
@@ -158,7 +158,7 @@ struct StatusCheckTests {
         let results = try orchestrator.runStatusChecks(workspaceID: workspace.id)
         
         #expect(results.count == 1)
-        #expect(results.first?.status == "green") // This is the bug - should be red!
+        #expect(results.first?.status == .passed) // This is the bug - should be red!
         #expect(results.first?.checkName == "incorrect-docker-check")
         
         let currentProcess = try store.runningProcesses(workspaceID: workspace.id).first!
@@ -214,7 +214,7 @@ struct StatusCheckTests {
 
         let results = try orchestrator.runStatusChecks(workspaceID: workspace.id)
         #expect(results.count == 1)
-        #expect(results.first?.status == "red")
+        #expect(results.first?.status == .failed)
         #expect(mockIterm.runInWindowCallCount == 1)
         let currentProcesses = try store.runningProcesses(workspaceID: workspace.id)
         #expect(currentProcesses.count == 1)
