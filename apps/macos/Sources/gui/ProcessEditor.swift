@@ -51,9 +51,7 @@ import streamctl
         addRow(with: nil, checks: [])
     }
 
-    func setProcesses(_ processes: [ProcessTemplate]) {
-        setProcessesWithChecks(processes, statusChecks: [])
-    }
+    func setProcesses(_ processes: [ProcessTemplate]) { setProcessesWithChecks(processes, statusChecks: []) }
 
     func setProcessesWithChecks(_ processes: [ProcessTemplate], statusChecks: [StatusCheckDefinition]) {
         for row in rows { row.remove() }
@@ -141,7 +139,6 @@ import streamctl
 
             nameField.placeholderString = "name"
             commandField.placeholderString = "command"
-            
             onExitPopup.addItems(withTitles: ProcessExitAction.allCases.map { $0.rawValue })
             onExitPopup.controlSize = .small
             onExitPopup.font = .systemFont(ofSize: 11)
@@ -195,19 +192,16 @@ import streamctl
             checksHeader.addArrangedSubview(arrow)
             checksHeader.addArrangedSubview(checksLabel)
             checksHeader.addArrangedSubview(addCheckButton)
-            
             // Status check field header — uses same fixed widths as StatusCheckRowRefs
             checksFieldHeader.orientation = .horizontal
             checksFieldHeader.spacing = 4
             checksFieldHeader.alignment = .centerY
             checksFieldHeader.distribution = .fill
-            
             let nameLabel = makeFieldHeader("Name")
             let commandLabel = makeFieldHeader("Command")
             let intervalLabel = makeFieldHeader("Interval (s)")
             let timeoutLabel = makeFieldHeader("Timeout (s)")
             let onFailLabel = makeFieldHeader("On Fail")
-            
             checksFieldHeader.addArrangedSubview(nameLabel)
             checksFieldHeader.addArrangedSubview(commandLabel)
             checksFieldHeader.addArrangedSubview(intervalLabel)
@@ -217,7 +211,6 @@ import streamctl
             let btnSpacer = NSView()
             btnSpacer.setContentHuggingPriority(.required, for: .horizontal)
             checksFieldHeader.addArrangedSubview(btnSpacer)
-            
             nameLabel.widthAnchor.constraint(equalToConstant: 80).isActive = true
             intervalLabel.widthAnchor.constraint(equalToConstant: 70).isActive = true
             timeoutLabel.widthAnchor.constraint(equalToConstant: 70).isActive = true
@@ -264,8 +257,10 @@ import streamctl
             checkRows.compactMap { row in
                 let name = row.nameField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
                 let command = row.commandField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-                let interval = Int(row.intervalField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)) ?? PollingConstants.statusCheckDefaultInterval
-                let timeout = Int(row.timeoutField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)) ?? PollingConstants.statusCheckDefaultTimeout
+                let interval =
+                    Int(row.intervalField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)) ?? PollingConstants.statusCheckDefaultInterval
+                let timeout =
+                    Int(row.timeoutField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)) ?? PollingConstants.statusCheckDefaultTimeout
                 let onFail = OnFailAction(rawValue: row.onExitPopup.titleOfSelectedItem ?? "") ?? .none
                 guard !command.isEmpty else { return nil }
                 return StatusCheckDefinition(
@@ -279,14 +274,15 @@ import streamctl
         }
 
         @objc private func removeRow() { onRemove?() }
-        
         @objc private func changedPopup() { onChange?() }
 
-        @objc private func addCheckRow() { addCheck(with: nil); updateChecksFieldHeaderVisibility(); onChange?() }
-
-        private func updateChecksFieldHeaderVisibility() {
-            checksFieldHeader.isHidden = checkRows.isEmpty
+        @objc private func addCheckRow() {
+            addCheck(with: nil)
+            updateChecksFieldHeaderVisibility()
+            onChange?()
         }
+
+        private func updateChecksFieldHeaderVisibility() { checksFieldHeader.isHidden = checkRows.isEmpty }
 
         private func addCheck(with check: StatusCheckDefinition?) {
             let row = StatusCheckRowRefs()

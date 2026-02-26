@@ -55,12 +55,8 @@ public final class GitClient {
     public func trackedFileActivity(path: String, baseBranch: String? = nil) -> GitTrackedFileActivity {
         guard isRepo(path: path) else {
             return GitTrackedFileActivity(
-                latestTrackedFileModificationDate: nil,
-                modifiedTrackedFileCount: 0,
-                aheadCount: 0,
-                behindCount: 0,
-                comparedBaseBranch: baseBranch?.trimmingCharacters(in: .whitespacesAndNewlines),
-                hasMergeConflicts: false)
+                latestTrackedFileModificationDate: nil, modifiedTrackedFileCount: 0, aheadCount: 0, behindCount: 0,
+                comparedBaseBranch: baseBranch?.trimmingCharacters(in: .whitespacesAndNewlines), hasMergeConflicts: false)
         }
 
         let trackedPaths = trackedFilePaths(path: path)
@@ -72,17 +68,13 @@ public final class GitClient {
         let comparedBaseBranch = displayBranchName(forRef: comparisonBaseRef)
 
         return GitTrackedFileActivity(
-            latestTrackedFileModificationDate: latestModificationDate,
-            modifiedTrackedFileCount: modifiedTrackedFileCount,
-            aheadCount: aheadCount,
-            behindCount: behindCount,
-            comparedBaseBranch: comparedBaseBranch,
-            hasMergeConflicts: hasMergeConflicts)
+            latestTrackedFileModificationDate: latestModificationDate, modifiedTrackedFileCount: modifiedTrackedFileCount, aheadCount: aheadCount,
+            behindCount: behindCount, comparedBaseBranch: comparedBaseBranch, hasMergeConflicts: hasMergeConflicts)
     }
 
     public func createWorktree(
-        path repoPath: String, worktreePath: String, branch: String, targetBranch: String? = nil, allowRemoteBranchLookup: Bool = true) throws
-    {
+        path repoPath: String, worktreePath: String, branch: String, targetBranch: String? = nil, allowRemoteBranchLookup: Bool = true
+    ) throws {
         if branchExists(path: repoPath, branch: branch) {
             try runGitOrThrow(["-C", repoPath, "worktree", "add", worktreePath, branch])
             return
@@ -115,36 +107,24 @@ public final class GitClient {
     private func parseWorktreeList(_ output: String) -> [WorktreeInfo] {
         var worktrees: [WorktreeInfo] = []
         var currentWorktree: [String: String] = [:]
-        
         for line in output.split(separator: "\n", omittingEmptySubsequences: false) {
             let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
             if trimmed.isEmpty {
                 if let path = currentWorktree["worktree"] {
-                    worktrees.append(WorktreeInfo(
-                        path: path,
-                        head: currentWorktree["HEAD"],
-                        branch: currentWorktree["branch"]
-                    ))
+                    worktrees.append(WorktreeInfo(path: path, head: currentWorktree["HEAD"], branch: currentWorktree["branch"]))
                 }
                 currentWorktree = [:]
                 continue
             }
-            
             if let spaceIndex = trimmed.firstIndex(of: " ") {
                 let key = String(trimmed[..<spaceIndex])
                 let value = String(trimmed[trimmed.index(after: spaceIndex)...])
                 currentWorktree[key] = value
             }
         }
-        
         if let path = currentWorktree["worktree"] {
-            worktrees.append(WorktreeInfo(
-                path: path,
-                head: currentWorktree["HEAD"],
-                branch: currentWorktree["branch"]
-            ))
+            worktrees.append(WorktreeInfo(path: path, head: currentWorktree["HEAD"], branch: currentWorktree["branch"]))
         }
-        
         return worktrees
     }
 
@@ -163,9 +143,7 @@ public final class GitClient {
         guard !trimmedBranch.isEmpty else { throw MuxyError.invalidArgument(message: "Workspace branch is required.") }
         let currentOutput = try runGitAndCapture(["-C", worktreePath, "rev-parse", "--abbrev-ref", "HEAD"])
         let currentBranch = currentOutput.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard currentBranch != "HEAD" else {
-            throw MuxyError.invalidArgument(message: "Cannot rename branch for detached HEAD worktree.")
-        }
+        guard currentBranch != "HEAD" else { throw MuxyError.invalidArgument(message: "Cannot rename branch for detached HEAD worktree.") }
         guard currentBranch != trimmedBranch else { return }
         try runGitOrThrow(["-C", worktreePath, "branch", "-m", trimmedBranch])
     }
@@ -273,9 +251,7 @@ public final class GitClient {
 
     private func aheadBehindCounts(path: String, baseRef: String?) -> (aheadCount: Int, behindCount: Int) {
         guard let baseRef else { return (0, 0) }
-        guard let output = try? runGitAndCapture(["-C", path, "rev-list", "--left-right", "--count", "\(baseRef)...HEAD"]) else {
-            return (0, 0)
-        }
+        guard let output = try? runGitAndCapture(["-C", path, "rev-list", "--left-right", "--count", "\(baseRef)...HEAD"]) else { return (0, 0) }
         let values = output.split(whereSeparator: \.isWhitespace)
         guard values.count >= 2, let behindCount = Int(values[0]), let aheadCount = Int(values[1]) else { return (0, 0) }
         return (aheadCount, behindCount)

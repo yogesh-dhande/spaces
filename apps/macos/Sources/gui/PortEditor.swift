@@ -51,9 +51,7 @@ import streamctl
         let row = PortRowRefs()
         rows.append(row)
         rowsStack.addArrangedSubview(row.container)
-        if let definition {
-            row.nameField.stringValue = definition.name
-        }
+        if let definition { row.nameField.stringValue = definition.name }
         row.onChange = { [weak self] in self?.onDirty?() }
         row.onRemove = { [weak self, weak row] in
             guard let self, let row else { return }

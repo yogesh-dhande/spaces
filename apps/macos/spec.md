@@ -174,7 +174,7 @@
                 - persist iTerm2 session/tab metadata for process-backed terminals so focus can prefer the original session and fall back to the tab
                 - when stopping, close process-backed iTerm terminals by session/tab when possible instead of always closing the full iTerm window
                 - ensure that browser tabs for the browser sessions defined for the workspace are open, and if not, open them. keep track of them so they can be focused later when looping through this workspace's windows
-            - user can open the workspace in the preferred editor, a terminal window, or Finder from the GUI; Open Terminal opens a new tab in an existing tracked workspace iTerm2 window when available (otherwise creates a new window), and terminal windows are captured/tracked for window cycling
+            - user can open the workspace in the preferred editor, a terminal window, or Finder from the GUI; Open Terminal opens a new tab in an existing tracked workspace iTerm2 window when available (otherwise creates a new window), and terminal windows are captured/tracked for workspace window management
             - when updated while running
                 - start newly added processes as new iTerm2 tabs in an existing workspace process window when possible (otherwise create a new terminal window)
                 - restart processes whose commands change in the same terminal window
@@ -297,19 +297,17 @@
             - browser tracking should preserve target session URL so focus actions can activate the matching tab (not just the window)
             - browser session mapping/focus must rely on URL matching, not window-title matching
             - browser cleanup must close matching tabs only; never close an entire browser window
-            - if matching tabs already exist, reuse them and include all URL-prefix matches in workspace window cycling instead of opening duplicates
+            - if matching tabs already exist, reuse them and include all URL-prefix matches in the workspace window list instead of opening duplicates
             - during launch/restart only, extract one matching tab per browser session into a dedicated Chrome window and persist the extracted `window_id` **only when reusing existing tabs** (not when creating new windows for new sessions)
             - during focus, try extracted-window `yabai` focus first; if focus fails or active tab URL verification fails, mark mapping stale (`is_valid=false`) and fall back to indexed tab focus and URL-based focus (no automatic re-extraction during fallback)
-            - when multiple workspaces track tabs in the same Chrome window, global next/previous shortcuts must resolve the workspace by window id plus active tab URL match (not window id alone)
             - workspace window listing/navigation should rebuild browser rows from Chrome tabs with a configurable debounce interval (default: 10 seconds, see `PollingConstants.browserWindowScanDebounceInterval`) per workspace/prefix set, and include tabs where tab URL starts with any browser session URL
             - during background workspace-window refresh, terminal rows that are not linked to any running process should refresh their stored title/app metadata from live yabai window state
-            - if a tab matches multiple browser session URLs, include it once in the cycle/list (dedupe by window + tab URL)
-            - browser tab ordering in the list/cycle should be deterministic: browser session definition order first, then tab URL
+            - if a tab matches multiple browser session URLs, include it once in the list (dedupe by window + tab URL)
+            - browser tab ordering in the list should be deterministic: browser session definition order first, then tab URL
             - when browser rows come from a live scan, tab focus should target cached tab index first, then verify the focused active tab URL belongs to the workspace; refresh the live scan once if it does not, then fall back to URL matching if still stale
             - window-scoped Chrome focus/close AppleScript checks should compare window id as string for reliable matching against Chrome's window-id type
             - benchmark target for real-world parity: indexed tab focus path includes ~52ms tab-index focus + ~38ms active-tab verification delays, while extracted-window focus path models ~42ms `yabai` focus delay
             - window display order in GUI should be browser session tabs first, then terminal windows, then other windows
-            - after cycling begins, next/previous should continue from remembered cycle position for deterministic traversal
 - GUI
     - Layout
         - Two panes
@@ -350,17 +348,15 @@
             - hotkey toggle defers selected-workspace detail refresh to the next main-actor turn so fronting the app remains responsive
         - Open editor (global): `cmd+shift+e`, open terminal: `cmd+shift+t`, open Finder: `cmd+shift+f`
         - When muxy in open and in focus
-            - Loop through running workspaces (skips any workspaces that are not launched yet)
+            - Loop through sidebar-visible workspaces (includes stopped and inactive-visible ones)
                 - forward: `cmd+shift+]`
                 - backward: `cmd+shift+[`
-                - When a workspace is selected
-                    - plus-button/new-workspace affordances create a workspace in one click and are shown in project UI only when the project is a git repository
-                    - list of windows in the right pane belonging to the workspace get dynamically assigned keyboard shortcuts of the form  `cmd+<number>` and shown as hints next to the title so the user can quickly switch to that window by hitting the appropriate keys e.g. `cmd+2`
-                        - since these are autogenerated, they can not be set to custom keys by the user
-                    - when tooltip overlay is displayed for the focused workspace, it always shows workspace title as title, shows tooltip text as body content when present, and includes a footer hint with the effective tooltip-toggle shortcut (default `cmd+shift+i`, or user override)
-                    - subsequent forward: `cmd+shift+]` or backward: `cmd+shift+[` keystrokes (when muxy is not in focus) loop through windows for the active workspace
-                        - Note that muxy does not move windows. User choses when and where to move windows. muxy simply moves focus to the window wherever it is on display/space
-        - If the most recently focused window belongs to a mx workspace, forward: `cmd+shift+]` or backward: `cmd+shift+[`  keyboard shortcuts loop through windows belonging to that workspace
+            - When a workspace is selected
+                - plus-button/new-workspace affordances create a workspace in one click and are shown in project UI only when the project is a git repository
+                - list of windows in the right pane belonging to the workspace get dynamically assigned keyboard shortcuts of the form  `cmd+<number>` and shown as hints next to the title so the user can quickly switch to that window by hitting the appropriate keys e.g. `cmd+2`
+                    - since these are autogenerated, they can not be set to custom keys by the user
+                - when tooltip overlay is displayed for the focused workspace, it always shows workspace title as title, shows tooltip text as body content when present, and includes a footer hint with the effective tooltip-toggle shortcut (default `cmd+shift+i`, or user override)
+                    - Note that muxy does not move windows. User choses when and where to move windows. muxy simply moves focus to the window wherever it is on display/space
         - Global tooltip toggle resolves focused workspace/agent windows, so a focused coding-agent terminal window can toggle the workspace tooltip even if the workspace is not currently marked running
         - When a text input is focused, default text-edit shortcuts (copy/cut/paste/select-all/undo/redo) must keep working and should not be intercepted by app-level hotkey handling
 - Agent Event (`mx agent event`)

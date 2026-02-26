@@ -79,7 +79,7 @@ GUI interaction notes:
 - Git workspace rows include ahead/behind commit counts vs the workspace target branch (the branch it was created from), merge-conflict status, and relative last-modified time (from latest tracked-file mtime) with tracked modified-file count.
 - Workspace detail metadata shows the current branch and, when present and different, appends `forked from <target branch>`.
 - Window focus shortcuts in the GUI use `cmd+1` through `cmd+9`.
-- When Muxy is focused, next/previous workspace shortcuts change only sidebar selection (no automatic workspace-window focus) and cycle across all sidebar-visible workspaces, including stopped workspaces.
+- When Muxy is focused, next/previous workspace shortcuts (`cmd+shift+]` / `cmd+shift+[`) change only sidebar selection and cycle across all sidebar-visible workspaces, including stopped workspaces.
 - Global focus hotkey activation (`cmd+shift+=`) prioritizes immediate app fronting and defers selected-workspace detail refresh to the next main-actor turn.
 - Port definitions are editable via `PortEditor` in the project detail view, the add-project form, and workspace settings.
 - Status checks are configured inline under each process in the `ProcessEditor` rather than in a separate form section; the process name is implicit from the parent row.
@@ -415,27 +415,24 @@ Degraded runtime edge cases and handling:
 - `is_running` can drift from real OS state because users can close windows/processes manually.
 - Restart is the user-visible "bring everything back" action for partial or stale runtime state.
 - Chrome session discovery and focus are URL-prefix based end-to-end; title-based fallback matching is intentionally avoided to prevent binding sessions to the wrong tab.
-- On launch/restart, muxy reuses existing Chrome tabs whose URLs match configured browser-session prefixes and tracks all matching tabs for workspace cycling.
+- On launch/restart, muxy reuses existing Chrome tabs whose URLs match configured browser-session prefixes and tracks all matching tabs for the workspace window list.
 - When launch/restart needs to create multiple missing browser sessions, muxy groups those newly opened sessions into one Chrome window as separate tabs when possible, but runtime tracking/focus still treats matching tabs as independent browser rows even if users later move tabs across windows.
 - On launch/restart, muxy may extract one matching tab per browser session into a dedicated Chrome window and persist that extracted mapping (`extracted_target_url`, `extracted_window_id`, `extracted_window_valid`).
 - Browser windows store an optional `target_url`; when focusing browser entries, muxy uses AppleScript to activate the matching tab (including when multiple tracked targets share one Chrome window) before falling back to raw window focus.
 - Browser focus first attempts extracted-window `yabai` focus when a valid extracted mapping exists; if the window is missing or active-tab verification fails, the mapping is marked stale (`extracted_window_valid=0`) and focus falls back to indexed-tab/URL-prefix paths without automatic re-extraction.
-- If a Chrome window is tracked both as targeted browser tabs and as an untargeted browser row, untargeted rows are filtered from workspace window navigation/listing to keep forward/backward traversal deterministic.
+- If a Chrome window is tracked both as targeted browser tabs and as an untargeted browser row, untargeted rows are filtered from workspace window navigation/listing.
 - Workspace window navigation/listing rebuilds browser rows from live Chrome tab scans with a configurable debounce interval (default: 10 seconds, see `PollingConstants.browserWindowScanDebounceInterval`) per `(workspace_id, resolved browser-session prefixes)` key, including every tab whose URL starts with any configured browser-session URL (deduplicated by `window_id + tab URL`); tabs with missing URLs are skipped.
 - Browser focus for live-scanned rows targets cached `(window_id + tab_index)` first, then verifies the focused active tab URL against workspace prefixes, refreshes the live scan once on mismatch, and falls back to URL matching if needed.
 - Window-scoped Chrome AppleScript operations compare `window_id` as string for reliable tab focus/close matching.
 - Live browser rows are ordered deterministically by browser-session prefix order and then tab URL so `cmd+<n>` shortcut indices stay aligned with the on-screen list even as Chrome window z-order changes.
-- Window cycling tracks a workspace-local navigation pointer, and Chrome row resolution uses the frontmost active tab URL with prefix checks to keep next/previous stable.
-- Window cycling order is role-grouped for consistency: all browser tabs first, then terminal windows, then other window roles. Relative navigation prefers the remembered workspace-local index once cycling begins.
-- Terminal focus prefers iTerm2 AppleScript session selection (with stored session ID and tab-index fallback) before generic window focus, so workspace cycling lands on the correct iTerm tab when metadata is available.
+- Terminal focus prefers iTerm2 AppleScript session selection (with stored session ID and tab-index fallback) before generic window focus so the correct iTerm tab is activated when metadata is available.
 - GUI "Open Terminal" reuses a tracked workspace iTerm2 window when available by opening a new tab in that window; it falls back to creating a new iTerm2 window when no tracked workspace terminal exists.
 - Workspace stop/reconcile closes process-backed iTerm terminals via iTerm2 session/tab metadata first and skips the later `yabai` window-close pass for those same terminal window IDs to avoid closing unrelated tabs in shared iTerm windows.
 - The `closeSessionOrTab` AppleScript must not select the target window (`tell w to select`) before closing a session. Window selection reorders iTerm2's window list, which invalidates the index-based loop reference (`s`) and causes the wrong session to be closed. The close operates directly on the matched session reference without prior focus changes. If session close fails, the window is left open rather than risk closing unrelated tabs.
-- Global next/previous shortcut routing resolves focused Chrome windows by `(window_id + active tab URL prefix)` so one reused Chrome window can be safely tracked by multiple workspaces without selecting the wrong workspace.
 - Optional diagnostics: `DEBUG=1` logs browser tab scan count/match/elapsed and browser focus-path timing, including indexed verification, cache hit/miss, refresh, and fallback decisions.
 - Performance benchmarking: `OrchestratorTests.testBenchmarkChromeIndexedTabFocusVsYabaiWindowFocusForExtractedTabs` uses calibrated delays (~52ms tab-index focus + ~38ms active-tab verify vs ~42ms extracted-window yabai focus) and currently reports break-even at about 15 switches after extraction setup.
 - Terminal capture uses both yabai snapshot-diff and running-process window IDs to avoid dropping terminals when window discovery lags.
-- Editor launch is user-invoked (GUI action or global shortcut) and is not tracked in workspace window cycling.
+- Editor launch is user-invoked via GUI action or global shortcut.
 - Window IDs can become stale across app/desktop changes; stale rows are pruned during reconciliation paths.
 - Background refresh also re-reads live yabai title/app metadata for terminal rows that are not currently owned by any running process record, so fallback terminal labels remain current.
 - The GUI starts a periodic detached utility-priority refresh loop (`refreshAllWorkspaceWindows`) so non-archived workspace window rows are reconciled in the background on a fixed interval (`PollingConstants.workspaceWindowRefreshInterval`).
@@ -485,7 +482,7 @@ sequenceDiagram
 ```
 
 Terminal windows opened from the GUI (Open Terminal) are captured via yabai and stored in the
-windows table so they participate in workspace window cycling.
+windows table for workspace window management.
 
 ## Polling Constants
 All periodic polling intervals are centralized in `PollingConstants.swift` for easy configuration:

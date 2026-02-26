@@ -58,17 +58,16 @@ public final class MuxyOrchestrator {
     private var workspaceLifecycleInFlight: Set<String> = []
     private let workspaceSetupLock = NSLock()
     private var workspaceSetupInFlight: Set<String> = []
-    private let windowNavigationLock = NSLock()
-    private var windowNavigationIndexByWorkspace: [String: Int] = [:]
     private let browserScanCacheLock = NSLock()
     private var browserWindowScanCacheByWorkspace: [String: BrowserWindowScanCacheEntry] = [:]
     private let itermTerminalSessionLock = NSLock()
     private var itermTerminalSessionByWorkspaceAndWindowID: [String: ItermTerminalSessionMetadata] = [:]
 
     public init(
-        store: SQLiteStore, projectsRootDirectory: URL? = nil, workspacesRootDirectory: URL? = nil,
-        git: GitClient = .init(), yabai: YabaiAdapter = .init(), iterm: Iterm2Adapter = .init(), chrome: ChromeAdapter = .init(),
-        browserWindowScanDebounceInterval: TimeInterval = PollingConstants.browserWindowScanDebounceInterval, currentDate: @escaping () -> Date = Date.init
+        store: SQLiteStore, projectsRootDirectory: URL? = nil, workspacesRootDirectory: URL? = nil, git: GitClient = .init(),
+        yabai: YabaiAdapter = .init(), iterm: Iterm2Adapter = .init(), chrome: ChromeAdapter = .init(),
+        browserWindowScanDebounceInterval: TimeInterval = PollingConstants.browserWindowScanDebounceInterval,
+        currentDate: @escaping () -> Date = Date.init
     ) {
         self.store = store
         projectsRootDirectoryURL = projectsRootDirectory
@@ -82,9 +81,7 @@ public final class MuxyOrchestrator {
         if ProcessInfo.processInfo.environment["DEBUG"] == "1" { fputs("muxy: DEBUG=1 enabled (browser scan/focus profiling active)\n", stderr) }
     }
 
-    @discardableResult public func syncConfig() throws -> AppConfig {
-        return try store.appConfig()
-    }
+    @discardableResult public func syncConfig() throws -> AppConfig { return try store.appConfig() }
 
     public func appConfig() throws -> AppConfig { try store.appConfig() }
 
@@ -101,9 +98,7 @@ public final class MuxyOrchestrator {
         }
     }
 
-    public func project(id: String) throws -> ProjectRecord? {
-        try store.project(id: id)
-    }
+    public func project(id: String) throws -> ProjectRecord? { try store.project(id: id) }
 
     @discardableResult public func updateEditorPreference(_ editor: EditorPreference?) throws -> AppConfig {
         var config = try store.appConfig()
@@ -232,9 +227,7 @@ public final class MuxyOrchestrator {
         }
 
         if let branch {
-            guard project.isGitRepo else {
-                throw MuxyError.invalidArgument(message: "Branch can only be updated for git projects.")
-            }
+            guard project.isGitRepo else { throw MuxyError.invalidArgument(message: "Branch can only be updated for git projects.") }
             let trimmedBranch = branch.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !trimmedBranch.isEmpty else { throw MuxyError.invalidArgument(message: "Workspace branch is required.") }
             if let currentBranch = workspace.branch, isProtectedBranchName(currentBranch), trimmedBranch != currentBranch {
@@ -248,13 +241,9 @@ public final class MuxyOrchestrator {
         }
 
         if let directoryName {
-            guard project.isGitRepo else {
-                throw MuxyError.invalidArgument(message: "Directory name can only be updated for git projects.")
-            }
+            guard project.isGitRepo else { throw MuxyError.invalidArgument(message: "Directory name can only be updated for git projects.") }
             let trimmedDirectoryName = directoryName.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !trimmedDirectoryName.isEmpty else {
-                throw MuxyError.invalidArgument(message: "Workspace directory name cannot be empty.")
-            }
+            guard !trimmedDirectoryName.isEmpty else { throw MuxyError.invalidArgument(message: "Workspace directory name cannot be empty.") }
             try validateWorkspaceDirname(trimmedDirectoryName)
             let usedDirnames = try usedWorkspaceDirnames(project: project, excludingDirname: workspace.dirname)
             guard !usedDirnames.contains(trimmedDirectoryName) else {
@@ -275,22 +264,15 @@ public final class MuxyOrchestrator {
 
         guard didChange else { return }
         if workspace.isDefault {
-            if updatedBranch != workspace.branch {
-                try store.updateWorkspaceBranch(id: workspace.id, branch: updatedBranch)
-            }
-            if updatedDirname != workspace.dirname {
-                try store.updateWorkspaceDirname(id: workspace.id, dirname: updatedDirname)
-            }
-            if updatedTooltip != workspace.tooltip {
-                try store.updateWorkspaceTooltip(id: workspace.id, tooltip: updatedTooltip)
-            }
+            if updatedBranch != workspace.branch { try store.updateWorkspaceBranch(id: workspace.id, branch: updatedBranch) }
+            if updatedDirname != workspace.dirname { try store.updateWorkspaceDirname(id: workspace.id, dirname: updatedDirname) }
+            if updatedTooltip != workspace.tooltip { try store.updateWorkspaceTooltip(id: workspace.id, tooltip: updatedTooltip) }
             return
         }
         let updatedWorkspace = WorkspaceRecord(
             id: workspace.id, projectID: workspace.projectID, name: updatedName, dir: workspace.dir, dirname: updatedDirname, branch: updatedBranch,
             targetBranch: workspace.targetBranch, isDefault: workspace.isDefault, isArchived: workspace.isArchived, isActive: workspace.isActive,
-            isRunning: workspace.isRunning,
-            lastLaunchedAt: workspace.lastLaunchedAt, tooltip: updatedTooltip)
+            isRunning: workspace.isRunning, lastLaunchedAt: workspace.lastLaunchedAt, tooltip: updatedTooltip)
         try store.upsert(workspace: updatedWorkspace)
     }
 
@@ -300,9 +282,7 @@ public final class MuxyOrchestrator {
         guard FileManager.default.fileExists(atPath: normalizedDir, isDirectory: &isDir), isDir.boolValue else {
             throw MuxyError.invalidArgument(message: "Project directory not found: \(normalizedDir)")
         }
-        if try store.project(dir: normalizedDir) != nil {
-            throw MuxyError.projectAlreadyExists(dir: normalizedDir)
-        }
+        if try store.project(dir: normalizedDir) != nil { throw MuxyError.projectAlreadyExists(dir: normalizedDir) }
         let record = try normalizeDir(normalizedDir)
         try store.upsert(project: record)
         try ensureDefaultWorkspace(for: record)
@@ -317,9 +297,7 @@ public final class MuxyOrchestrator {
         let destination = repositoriesRootDirectory().appending(path: projectDirname, directoryHint: .isDirectory)
         let normalizedDestination = normalizePath(destination.path)
 
-        if try store.project(dir: normalizedDestination) != nil {
-            throw MuxyError.projectAlreadyExists(dir: normalizedDestination)
-        }
+        if try store.project(dir: normalizedDestination) != nil { throw MuxyError.projectAlreadyExists(dir: normalizedDestination) }
         if FileManager.default.fileExists(atPath: destination.path) {
             throw MuxyError.invalidArgument(message: "Project directory already exists: \(normalizedDestination)")
         }
@@ -336,15 +314,12 @@ public final class MuxyOrchestrator {
 
     public func updateProjectConfig(projectID: String, update: (inout ProjectRecord) -> Void) throws {
         let normalizedID = normalizePath(projectID)
-        guard var record = try store.project(id: normalizedID) else {
-            throw MuxyError.missingProject(dir: normalizedID)
-        }
+        guard var record = try store.project(id: normalizedID) else { throw MuxyError.missingProject(dir: normalizedID) }
         let previousRecord = record
         update(&record)
         record = ProjectRecord(
-            id: normalizedID, name: record.name, dir: record.dir, isGitRepo: record.isGitRepo,
-            defaultBranch: record.defaultBranch, setupScript: record.setupScript, stopScript: record.stopScript,
-            ports: record.ports, processes: record.processes,
+            id: normalizedID, name: record.name, dir: record.dir, isGitRepo: record.isGitRepo, defaultBranch: record.defaultBranch,
+            setupScript: record.setupScript, stopScript: record.stopScript, ports: record.ports, processes: record.processes,
             statusChecks: record.statusChecks, browserSessions: record.browserSessions)
         try store.upsert(project: record)
         try ensureDefaultWorkspace(for: record)
@@ -364,9 +339,8 @@ public final class MuxyOrchestrator {
 
     public func createWorkspace(
         projectID: String, name: String, branch: String? = nil, targetBranch: String? = nil, directoryName: String? = nil,
-        runSetupScript: Bool = true, allowRemoteBranchLookup: Bool = true)
-        throws -> WorkspaceRecord
-    {
+        runSetupScript: Bool = true, allowRemoteBranchLookup: Bool = true
+    ) throws -> WorkspaceRecord {
         guard let project = try store.project(id: projectID) else { throw MuxyError.missingProject(dir: projectID) }
         let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedName.isEmpty else { throw MuxyError.invalidArgument(message: "Workspace name is required.") }
@@ -393,9 +367,7 @@ public final class MuxyOrchestrator {
             let revivedDirname: String?
             let revivedBranch: String?
             if project.isGitRepo {
-                guard let branchName = resolvedBranch else {
-                    throw MuxyError.invalidArgument(message: "Branch name is required for git projects.")
-                }
+                guard let branchName = resolvedBranch else { throw MuxyError.invalidArgument(message: "Branch name is required for git projects.") }
                 let dirname = try makeWorkspaceDirname(project: project, existingDirname: existing.dirname, requestedDirname: trimmedDirectoryName)
                 revivedDirname = dirname
                 let worktreeRoot = try worktreeRoot(project: project)
@@ -403,10 +375,7 @@ public final class MuxyOrchestrator {
                 revivedDir = worktreeRoot.appendingPathComponent(dirname, isDirectory: true).path
                 if !FileManager.default.fileExists(atPath: revivedDir) {
                     try git.createWorktree(
-                        path: project.dir,
-                        worktreePath: revivedDir,
-                        branch: branchName,
-                        targetBranch: resolvedTargetBranch,
+                        path: project.dir, worktreePath: revivedDir, branch: branchName, targetBranch: resolvedTargetBranch,
                         allowRemoteBranchLookup: allowRemoteBranchLookup)
                 }
                 revivedBranch = branchName
@@ -435,10 +404,7 @@ public final class MuxyOrchestrator {
             try FileManager.default.createDirectory(at: worktreeRoot, withIntermediateDirectories: true)
             workspaceDir = worktreeRoot.appendingPathComponent(dirname, isDirectory: true).path
             try git.createWorktree(
-                path: project.dir,
-                worktreePath: workspaceDir,
-                branch: branchName,
-                targetBranch: resolvedTargetBranch,
+                path: project.dir, worktreePath: workspaceDir, branch: branchName, targetBranch: resolvedTargetBranch,
                 allowRemoteBranchLookup: allowRemoteBranchLookup)
             workspaceBranch = branchName
         } else {
@@ -472,19 +438,15 @@ public final class MuxyOrchestrator {
         guard git.isRepo(path: normalizedWorktreePath) else {
             throw MuxyError.invalidArgument(message: "Path is not a git repository: \(normalizedWorktreePath)")
         }
-        
         let gitCommonDirOutput = try git.runGitAndCapture(["-C", normalizedWorktreePath, "rev-parse", "--git-common-dir"])
         let gitCommonDir = gitCommonDirOutput.trimmingCharacters(in: .whitespacesAndNewlines)
-        let gitCommonDirURL = URL(fileURLWithPath: gitCommonDir, relativeTo: URL(fileURLWithPath: normalizedWorktreePath))
-            .standardized
+        let gitCommonDirURL = URL(fileURLWithPath: gitCommonDir, relativeTo: URL(fileURLWithPath: normalizedWorktreePath)).standardized
         let gitRoot = gitCommonDirURL.deletingLastPathComponent().path
         let projectID = normalizePath(gitRoot)
-        
         guard let project = try store.project(id: projectID) else {
             throw MuxyError.invalidArgument(
                 message: "Project not found for git root: \(gitRoot). Add the project first using: mx project add --dir \(gitRoot)")
         }
-        
         if let existing = try store.workspace(dir: normalizedWorktreePath) {
             if existing.isArchived {
                 throw MuxyError.invalidArgument(
@@ -492,54 +454,42 @@ public final class MuxyOrchestrator {
             }
             throw MuxyError.invalidArgument(message: "Workspace already exists: \(existing.name)")
         }
-        
         let branchOutput = try git.runGitAndCapture(["-C", normalizedWorktreePath, "rev-parse", "--abbrev-ref", "HEAD"])
         let branch = branchOutput.trimmingCharacters(in: .whitespacesAndNewlines)
-        
         let inferredName: String
         if let providedName = name?.trimmingCharacters(in: .whitespacesAndNewlines), !providedName.isEmpty {
             inferredName = providedName
         } else {
             inferredName = branch
         }
-        
         if let existing = try store.workspace(projectID: projectID, name: inferredName), !existing.isArchived {
             throw MuxyError.workspaceAlreadyExists(project: project.name, workspace: inferredName)
         }
-        
         let dirname = URL(fileURLWithPath: normalizedWorktreePath).lastPathComponent
-        
         let workspace = WorkspaceRecord(
             id: UUID().uuidString, projectID: project.id, name: inferredName, dir: normalizedWorktreePath, dirname: dirname, branch: branch,
             isDefault: false, isArchived: false, isRunning: false, lastLaunchedAt: nil)
         try store.upsert(workspace: workspace)
         try seedWorkspaceSettings(project: project, workspace: workspace)
         try initializeWorkspaceRuntime(project: project, workspace: workspace, runSetupScript: true)
-        
         return workspace
     }
 
     public func scanAndCreateWorkspacesFromWorktrees(projectID: String? = nil) throws -> [WorkspaceRecord] {
         let projects: [ProjectRecord]
         if let projectID {
-            guard let project = try store.project(id: projectID) else {
-                throw MuxyError.missingProject(dir: projectID)
-            }
+            guard let project = try store.project(id: projectID) else { throw MuxyError.missingProject(dir: projectID) }
             projects = [project]
         } else {
             projects = try store.projects()
         }
-        
         var createdWorkspaces: [WorkspaceRecord] = []
-        
         for project in projects where project.isGitRepo {
             let worktrees = try git.listWorktrees(path: project.dir)
             var discoverableWorktreeByPath: [String: WorktreeInfo] = [:]
             for worktree in worktrees {
                 let normalizedPath = normalizePath(worktree.path)
-                guard isDiscoverableWorktreePath(project: project, path: normalizedPath) else {
-                    continue
-                }
+                guard isDiscoverableWorktreePath(project: project, path: normalizedPath) else { continue }
                 discoverableWorktreeByPath[normalizedPath] = worktree
             }
 
@@ -549,51 +499,34 @@ public final class MuxyOrchestrator {
                 if let worktree = discoverableWorktreeByPath[normalizedWorkspacePath], workspace.branch != worktree.branchName {
                     let updatedWorkspace = WorkspaceRecord(
                         id: workspace.id, projectID: workspace.projectID, name: workspace.name, dir: workspace.dir, dirname: workspace.dirname,
-                        branch: worktree.branchName, targetBranch: workspace.targetBranch, isDefault: workspace.isDefault, isArchived: workspace.isArchived,
-                        isActive: workspace.isActive, isRunning: workspace.isRunning, lastLaunchedAt: workspace.lastLaunchedAt, tooltip: workspace.tooltip)
+                        branch: worktree.branchName, targetBranch: workspace.targetBranch, isDefault: workspace.isDefault,
+                        isArchived: workspace.isArchived, isActive: workspace.isActive, isRunning: workspace.isRunning,
+                        lastLaunchedAt: workspace.lastLaunchedAt, tooltip: workspace.tooltip)
                     try store.upsert(workspace: updatedWorkspace)
                 }
 
-                guard !workspace.isArchived, !workspace.isDefault else {
-                    continue
-                }
-                guard discoverableWorktreeByPath[normalizedWorkspacePath] == nil else {
-                    continue
-                }
+                guard !workspace.isArchived, !workspace.isDefault else { continue }
+                guard discoverableWorktreeByPath[normalizedWorkspacePath] == nil else { continue }
                 try archiveWorkspaceBecauseWorktreeIsInvalid(workspaceID: workspace.id)
             }
-            
             for worktree in worktrees {
                 let normalizedPath = normalizePath(worktree.path)
 
-                guard isDiscoverableWorktreePath(project: project, path: normalizedPath) else {
-                    continue
-                }
+                guard isDiscoverableWorktreePath(project: project, path: normalizedPath) else { continue }
 
-                if try store.isIgnoredWorktree(path: normalizedPath) {
-                    continue
-                }
-                
-                if let _ = try store.workspace(dir: normalizedPath) {
-                    continue
-                }
-                
-                guard let branchName = worktree.branchName else {
-                    continue
-                }
-                
+                if try store.isIgnoredWorktree(path: normalizedPath) { continue }
+                if (try store.workspace(dir: normalizedPath)) != nil { continue }
+                guard let branchName = worktree.branchName else { continue }
                 let workspace = WorkspaceRecord(
                     id: UUID().uuidString, projectID: project.id, name: branchName, dir: normalizedPath,
-                    dirname: URL(fileURLWithPath: normalizedPath).lastPathComponent, branch: branchName,
-                    isDefault: false, isArchived: false, isRunning: false, lastLaunchedAt: nil)
+                    dirname: URL(fileURLWithPath: normalizedPath).lastPathComponent, branch: branchName, isDefault: false, isArchived: false,
+                    isRunning: false, lastLaunchedAt: nil)
                 try store.upsert(workspace: workspace)
                 try seedWorkspaceSettings(project: project, workspace: workspace)
                 try initializeWorkspaceRuntime(project: project, workspace: workspace, runSetupScript: true)
-                
                 createdWorkspaces.append(workspace)
             }
         }
-        
         return createdWorkspaces
     }
 
@@ -607,9 +540,7 @@ public final class MuxyOrchestrator {
 
     private func isDiscoverableWorktreePath(project: ProjectRecord, path: String) -> Bool {
         var isDirectory = ObjCBool(false)
-        guard FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory), isDirectory.boolValue else {
-            return false
-        }
+        guard FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory), isDirectory.boolValue else { return false }
         guard git.isRepo(path: path) else { return false }
         do {
             let gitCommonDirOutput = try git.runGitAndCapture(["-C", path, "rev-parse", "--git-common-dir"])
@@ -617,9 +548,7 @@ public final class MuxyOrchestrator {
             let gitCommonDirURL = URL(fileURLWithPath: gitCommonDir, relativeTo: URL(fileURLWithPath: path)).standardized
             let gitRoot = normalizePath(gitCommonDirURL.deletingLastPathComponent().path)
             return gitRoot == project.id
-        } catch {
-            return false
-        }
+        } catch { return false }
     }
 
     public func launchWorkspace(workspaceID: String) throws {
@@ -684,8 +613,7 @@ public final class MuxyOrchestrator {
             windowSnapshot = try yabai.listWindows()
 
             let browserSessionResult = try ensureBrowserSessions(
-                project: project, workspace: workspace, sessions: config.browserSessions, env: env, extractOnAttach: true,
-                background: background)
+                project: project, workspace: workspace, sessions: config.browserSessions, env: env, extractOnAttach: true, background: background)
             try store.setWorkspaceBrowserSessions(workspaceID: workspace.id, sessions: browserSessionResult.sessions)
             newWindows.append(contentsOf: browserSessionResult.windows)
             newWindows.append(
@@ -718,7 +646,6 @@ public final class MuxyOrchestrator {
         }
 
         try store.updateWorkspaceRunning(id: workspace.id, isRunning: true, launchedAt: nowISO8601())
-        setWindowNavigationIndex(nil, workspaceID: workspace.id)
     }
 
     @discardableResult public func stopWorkspace(workspaceID: String) throws -> WorkspaceStopOutcome {
@@ -736,14 +663,8 @@ public final class MuxyOrchestrator {
         for process in processes { if let pid = resolvedRuntimePID(for: process) { terminateProcessGroup(pid: pid) } }
         if let script = settings?.stopScript?.trimmingCharacters(in: .whitespacesAndNewlines), !script.isEmpty {
             if directoryExists(at: workspace.dir) {
-                do {
-                    try runScript(applyEnvVars(script, env: env), cwd: workspace.dir)
-                } catch {
-                    if isMissingDirectoryError(error) {
-                        skippedStopScriptBecauseWorkspaceDirectoryMissing = true
-                    } else {
-                        throw error
-                    }
+                do { try runScript(applyEnvVars(script, env: env), cwd: workspace.dir) } catch {
+                    if isMissingDirectoryError(error) { skippedStopScriptBecauseWorkspaceDirectoryMissing = true } else { throw error }
                 }
             } else {
                 skippedStopScriptBecauseWorkspaceDirectoryMissing = true
@@ -772,9 +693,7 @@ public final class MuxyOrchestrator {
                 if !processTerminalWindowIDs.contains(id) {
                     // Skip closing this specific session if it belongs to a coding agent.
                     let isAgentSession = window.itermSessionID.map({ agentItermSessionIDs.contains($0) }) == true
-                    if !isAgentSession {
-                        _ = try? closeTrackedItermTerminalWindow(workspaceID: workspace.id, windowID: id)
-                    }
+                    if !isAgentSession { _ = try? closeTrackedItermTerminalWindow(workspaceID: workspace.id, windowID: id) }
                 }
                 closedWindowIDs.insert(id)
                 continue
@@ -789,7 +708,6 @@ public final class MuxyOrchestrator {
         try store.deleteWindows(workspaceID: workspace.id)
         clearItermTerminalSessionMetadata(workspaceID: workspace.id)
         try store.updateWorkspaceRunning(id: workspace.id, isRunning: false, launchedAt: workspace.lastLaunchedAt)
-        setWindowNavigationIndex(nil, workspaceID: workspace.id)
         return WorkspaceStopOutcome(skippedStopScriptBecauseWorkspaceDirectoryMissing: skippedStopScriptBecauseWorkspaceDirectoryMissing)
     }
 
@@ -833,37 +751,26 @@ public final class MuxyOrchestrator {
     }
 
     public func runningProcesses(workspaceID: String) throws -> [RunningProcessRecord] { try store.runningProcesses(workspaceID: workspaceID) }
-    
     public func checkAndUpdateProcessStatuses() throws -> Bool {
         var didUpdate = false
         let allProjects = try store.projects()
         let now = currentDate()
-        
         for project in allProjects {
             let workspaces = try store.workspaces(projectID: project.id, includeArchived: false)
-            
             for workspace in workspaces {
                 let processes = try store.runningProcesses(workspaceID: workspace.id)
-                
                 for process in processes where process.status == .running {
                     if let startedAtStr = process.startedAt, let startedAt = ISO8601DateFormatter().date(from: startedAtStr) {
                         let secondsSinceStart = now.timeIntervalSince(startedAt)
-                        if secondsSinceStart < 10.0 {
-                            continue
-                        }
+                        if secondsSinceStart < 10.0 { continue }
                     }
-                    
                     guard let pid = resolvedRuntimePID(for: process) else { continue }
-                    
                     if !isProcessAlive(pid: pid) {
                         let updatedProcess = RunningProcessRecord(
-                            id: process.id, workspaceID: process.workspaceID, templateName: process.templateName,
-                            command: process.command, terminalApp: process.terminalApp, windowID: process.windowID,
-                            itermSessionID: process.itermSessionID, itermTabIndex: process.itermTabIndex,
-                            pid: process.pid, status: .exited, logPath: process.logPath,
-                            lastOutputAt: process.lastOutputAt, startedAt: process.startedAt,
-                            exitedAt: nowISO8601()
-                        )
+                            id: process.id, workspaceID: process.workspaceID, templateName: process.templateName, command: process.command,
+                            terminalApp: process.terminalApp, windowID: process.windowID, itermSessionID: process.itermSessionID,
+                            itermTabIndex: process.itermTabIndex, pid: process.pid, status: .exited, logPath: process.logPath,
+                            lastOutputAt: process.lastOutputAt, startedAt: process.startedAt, exitedAt: nowISO8601())
                         try store.upsert(runningProcess: updatedProcess)
                         // Mark status check results as failed so they reflect the process exit.
                         try store.markStatusResultsAsFailed(processID: process.id)
@@ -875,7 +782,6 @@ public final class MuxyOrchestrator {
                 }
             }
         }
-        
         // Prune stale iTerm2 agent sessions
         var aliveItermSessionIDs: Set<String>? = nil
         for project in allProjects {
@@ -907,9 +813,7 @@ public final class MuxyOrchestrator {
 
     public func runStatusChecks(workspaceID: String, dueOnly: Bool = false, now: Date = Date()) throws -> [StatusResult] {
         let (project, workspace) = try resolveWorkspace(id: workspaceID)
-        guard let config = try loadWorkspaceSettings(project: project, workspace: workspace) else {
-            return []
-        }
+        guard let config = try loadWorkspaceSettings(project: project, workspace: workspace) else { return [] }
         let processes = try store.runningProcesses(workspaceID: workspaceID)
         let checksByProcessID = Dictionary(grouping: config.statusChecks, by: \.process)
         let namedPorts = try store.workspacePortsNamed(workspaceID: workspaceID)
@@ -921,11 +825,8 @@ public final class MuxyOrchestrator {
             let existingResults = Dictionary(uniqueKeysWithValues: try store.statusResults(processID: process.id).map { ($0.checkName, $0) })
             for check in checks {
                 let checkName = check.name ?? check.process
-                if dueOnly,
-                    let existing = existingResults[checkName],
-                    let lastRunAt = existing.lastRunAt,
-                    let lastRunDate = iso8601.date(from: lastRunAt),
-                    now.timeIntervalSince(lastRunDate) < TimeInterval(max(check.interval, 1))
+                if dueOnly, let existing = existingResults[checkName], let lastRunAt = existing.lastRunAt,
+                    let lastRunDate = iso8601.date(from: lastRunAt), now.timeIntervalSince(lastRunDate) < TimeInterval(max(check.interval, 1))
                 {
                     continue
                 }
@@ -940,9 +841,7 @@ public final class MuxyOrchestrator {
                 results.append(result)
 
                 // Handle onFail behavior for failed status checks
-                if outcome.exitCode != 0 {
-                    try handleStatusCheckFailure(workspaceID: workspaceID, process: process, check: check, result: result)
-                }
+                if outcome.exitCode != 0 { try handleStatusCheckFailure(workspaceID: workspaceID, process: process, check: check, result: result) }
             }
         }
         return results
@@ -960,113 +859,70 @@ public final class MuxyOrchestrator {
         }
         return didRunChecks
     }
-    
     private func deliverNotification(title: String, body: String, subtitle: String? = nil) {
-        guard NSClassFromString("XCTest") == nil else {
-            return
-        }
-        
+        guard NSClassFromString("XCTest") == nil else { return }
         let content = UNMutableNotificationContent()
         content.title = title
         content.body = body
-        if let subtitle {
-            content.subtitle = subtitle
-        }
+        if let subtitle { content.subtitle = subtitle }
         let request = UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil)
-        
         let center = UNUserNotificationCenter.current()
         center.requestAuthorization(options: [.alert, .sound]) { granted, error in
             if granted {
-                center.add(request) { error in
-                    if let error {
-                        fputs("muxy: Failed to deliver notification: \(error.localizedDescription)\n", stderr)
-                    }
+                center.add(request) { error in if let error { fputs("muxy: Failed to deliver notification: \(error.localizedDescription)\n", stderr) }
                 }
             }
         }
     }
-    
-    private func handleStatusCheckFailure(workspaceID: String, process: RunningProcessRecord, check: StatusCheckDefinition, result: StatusResult) throws {
+    private func handleStatusCheckFailure(workspaceID: String, process: RunningProcessRecord, check: StatusCheckDefinition, result: StatusResult)
+        throws
+    {
         switch check.onFail {
         case .none:
             // Do nothing - just log the failure
             break
-            
         case .notify:
             deliverNotification(
-                title: "Status Check Failed",
-                body: "Process '\(process.templateName)' check '\(result.checkName)' failed",
-                subtitle: result.message
-            )
-            
+                title: "Status Check Failed", body: "Process '\(process.templateName)' check '\(result.checkName)' failed", subtitle: result.message)
         case .restart:
             // Restart the process
             try restartFailedProcess(workspaceID: workspaceID, process: process, check: check, result: result)
         }
     }
-    
     private func restartFailedProcess(workspaceID: String, process: RunningProcessRecord, check: StatusCheckDefinition, result: StatusResult) throws {
         // Log the restart attempt
         fputs("muxy: Restarting process '\(process.templateName)' due to failed status check '\(result.checkName)'\n", stderr)
-        
         // Show notification about restart
         deliverNotification(
-            title: "Process Restarting",
-            body: "Process '\(process.templateName)' is being restarted due to failed status check",
-            subtitle: result.message.map { "Reason: \($0)" }
-        )
+            title: "Process Restarting", body: "Process '\(process.templateName)' is being restarted due to failed status check",
+            subtitle: result.message.map { "Reason: \($0)" })
 
         // Mark the process as exited in the database
         let updatedProcess = RunningProcessRecord(
-            id: process.id, workspaceID: process.workspaceID, templateName: process.templateName,
-            command: process.command, terminalApp: process.terminalApp, windowID: process.windowID,
-            itermSessionID: process.itermSessionID, itermTabIndex: process.itermTabIndex,
-            pid: process.pid, status: .exited, logPath: process.logPath,
-            lastOutputAt: process.lastOutputAt, startedAt: process.startedAt,
-            exitedAt: nowISO8601()
-        )
+            id: process.id, workspaceID: process.workspaceID, templateName: process.templateName, command: process.command,
+            terminalApp: process.terminalApp, windowID: process.windowID, itermSessionID: process.itermSessionID,
+            itermTabIndex: process.itermTabIndex, pid: process.pid, status: .exited, logPath: process.logPath, lastOutputAt: process.lastOutputAt,
+            startedAt: process.startedAt, exitedAt: nowISO8601())
         try store.upsert(runningProcess: updatedProcess)
-        
         // Restart the process in a new terminal
         try restartProcessInTerminal(workspaceID: workspaceID, process: process)
     }
-    
     private func handleProcessExit(workspaceID: String, process: RunningProcessRecord, project: ProjectRecord, workspace: WorkspaceRecord) throws {
         // Find the process template to get the on-exit behavior
-        guard let config = try loadWorkspaceSettings(project: project, workspace: workspace) else {
-            return
-        }
-        
-        guard let processTemplate = config.processes.first(where: { ($0.name ?? $0.command) == process.templateName }) else {
-            return
-        }
-        
+        guard let config = try loadWorkspaceSettings(project: project, workspace: workspace) else { return }
+        guard let processTemplate = config.processes.first(where: { ($0.name ?? $0.command) == process.templateName }) else { return }
         switch processTemplate.onExit {
         case .none:
             // Do nothing - just log the exit
             break
-            
-        case .notify:
-            deliverNotification(
-                title: "Process Exited",
-                body: "Process '\(process.templateName)' has exited",
-                subtitle: nil
-            )
-            
+        case .notify: deliverNotification(title: "Process Exited", body: "Process '\(process.templateName)' has exited", subtitle: nil)
         case .restart:
             // Restart the process
             fputs("muxy: Restarting process '\(process.templateName)' due to exit\n", stderr)
-            
-            deliverNotification(
-                title: "Process Restarting",
-                body: "Process '\(process.templateName)' is being restarted",
-                subtitle: nil
-            )
-            
+            deliverNotification(title: "Process Restarting", body: "Process '\(process.templateName)' is being restarted", subtitle: nil)
             try restartProcessInTerminal(workspaceID: workspaceID, process: process)
         }
     }
-    
     private func restartExitedProcesses(workspaceID: String, background: Bool) throws {
         let processes = try store.runningProcesses(workspaceID: workspaceID)
         for process in processes where process.status == .exited {
@@ -1079,43 +935,31 @@ public final class MuxyOrchestrator {
         let namedPorts = try store.workspacePortsNamed(workspaceID: workspaceID)
         let env = buildWorkspaceEnv(project: project, workspace: workspace, namedPorts: namedPorts)
         let didTerminate = terminateProcessForRestart(process)
-        
         // Prepare the command with proper environment and PID tracking
         let (logFile, pidFile) = try processRuntimePaths(workspaceID: workspace.id, name: process.templateName)
         let command = shellCommand(base: process.command, cwd: workspace.dir, env: env, logFile: logFile, pidFile: pidFile)
-        
         if didTerminate, let windowID = process.windowID, process.terminalApp == "iTerm2" {
             // Reuse existing terminal window
             fputs("muxy: Restarting process '\(process.templateName)' in existing terminal window \(windowID)\n", stderr)
             try iterm.runInWindow(id: windowID, command: command)
-            
             // Read the new PID from the PID file and update the process record
             let newPID = try? Int(String(contentsOfFile: pidFile).trimmingCharacters(in: .whitespacesAndNewlines))
-            
             let restartedProcess = RunningProcessRecord(
-                id: process.id, workspaceID: process.workspaceID, templateName: process.templateName,
-                command: process.command, terminalApp: process.terminalApp, windowID: windowID,
-                itermSessionID: process.itermSessionID, itermTabIndex: process.itermTabIndex,
-                pid: newPID, status: .running, logPath: process.logPath,
-                lastOutputAt: nil, startedAt: nowISO8601(), exitedAt: nil
-            )
+                id: process.id, workspaceID: process.workspaceID, templateName: process.templateName, command: process.command,
+                terminalApp: process.terminalApp, windowID: windowID, itermSessionID: process.itermSessionID, itermTabIndex: process.itermTabIndex,
+                pid: newPID, status: .running, logPath: process.logPath, lastOutputAt: nil, startedAt: nowISO8601(), exitedAt: nil)
             try store.upsert(runningProcess: restartedProcess)
         } else {
             // Fallback: create new terminal window when there is no reusable window or shutdown did not complete.
             fputs("muxy: Creating new terminal window for process '\(process.templateName)'\n", stderr)
             let windowInfo = try iterm.openWindowAndRun(command: command, background: background)
             let windowID = windowInfo.id
-            
             // Read the new PID from the PID file and update the process record
             let newPID = try? Int(String(contentsOfFile: pidFile).trimmingCharacters(in: .whitespacesAndNewlines))
-            
             let restartedProcess = RunningProcessRecord(
-                id: process.id, workspaceID: process.workspaceID, templateName: process.templateName,
-                command: process.command, terminalApp: "iTerm2", windowID: windowID,
-                itermSessionID: windowInfo.sessionID, itermTabIndex: windowInfo.tabIndex,
-                pid: newPID, status: .running, logPath: process.logPath,
-                lastOutputAt: nil, startedAt: nowISO8601(), exitedAt: nil
-            )
+                id: process.id, workspaceID: process.workspaceID, templateName: process.templateName, command: process.command, terminalApp: "iTerm2",
+                windowID: windowID, itermSessionID: windowInfo.sessionID, itermTabIndex: windowInfo.tabIndex, pid: newPID, status: .running,
+                logPath: process.logPath, lastOutputAt: nil, startedAt: nowISO8601(), exitedAt: nil)
             if windowID > 0 {
                 setItermTerminalSessionMetadata(
                     workspaceID: process.workspaceID, windowID: windowID, sessionID: windowInfo.sessionID, tabIndex: windowInfo.tabIndex)
@@ -1129,10 +973,7 @@ public final class MuxyOrchestrator {
         terminateProcessGroup(pid: pid)
         waitForProcessExit(pid: pid, timeout: 10.0)
         guard isProcessAlive(pid: pid) else { return true }
-        fputs(
-            "muxy: Process '\(process.templateName)' with pid \(pid) did not exit in time; restart will use a new terminal window\n",
-            stderr
-        )
+        fputs("muxy: Process '\(process.templateName)' with pid \(pid) did not exit in time; restart will use a new terminal window\n", stderr)
         return false
     }
 
@@ -1145,8 +986,7 @@ public final class MuxyOrchestrator {
         public let trackedWindowCounts: [String: Int]
     }
 
-    @discardableResult
-    public func refreshWorkspaceWindows(workspaceID: String) throws -> Bool {
+    @discardableResult public func refreshWorkspaceWindows(workspaceID: String) throws -> Bool {
         _ = try trackedWindows(workspaceID: workspaceID)
         let refreshedTerminalTitles = try refreshUnmanagedTerminalWindowTitles(workspaceID: workspaceID)
         let pruned = try pruneMissingWindows(workspaceID: workspaceID)
@@ -1155,14 +995,12 @@ public final class MuxyOrchestrator {
         let hasRuntimeIndicators = try hasTrackedRuntimeIndicators(workspaceID: workspaceID)
         if !hasRuntimeIndicators {
             try store.updateWorkspaceRunning(id: workspaceID, isRunning: false, launchedAt: workspace.lastLaunchedAt)
-            setWindowNavigationIndex(nil, workspaceID: workspaceID)
             didMutate = true
         }
         return didMutate
     }
 
-    @discardableResult
-    private func refreshUnmanagedTerminalWindowTitles(workspaceID: String) throws -> Int {
+    @discardableResult private func refreshUnmanagedTerminalWindowTitles(workspaceID: String) throws -> Int {
         let windows = try store.windows(workspaceID: workspaceID)
         let processWindowIDs = Set(try store.runningProcesses(workspaceID: workspaceID).compactMap(\.windowID))
         let terminalWindowsToRefresh = windows.filter { window in
@@ -1180,8 +1018,8 @@ public final class MuxyOrchestrator {
             guard window.title != refreshedTitle || window.app != refreshedApp else { continue }
             let refreshedWindow = WindowRecord(
                 id: window.id, workspaceID: window.workspaceID, app: refreshedApp, title: refreshedTitle, targetURL: window.targetURL,
-                windowID: windowID, itermSessionID: window.itermSessionID, itermTabIndex: window.itermTabIndex,
-                role: window.role, orderIndex: window.orderIndex, lastSeenAt: window.lastSeenAt)
+                windowID: windowID, itermSessionID: window.itermSessionID, itermTabIndex: window.itermTabIndex, role: window.role,
+                orderIndex: window.orderIndex, lastSeenAt: window.lastSeenAt)
             try store.upsert(window: refreshedWindow)
             refreshedCount += 1
         }
@@ -1230,8 +1068,7 @@ public final class MuxyOrchestrator {
             window = try iterm.openWindowAndRun(command: "cd \"\(escapedDir)\"")
         }
         if let focused = try yabai.focusedWindow(), focused.app == "iTerm2" {
-            setItermTerminalSessionMetadata(
-                workspaceID: workspace.id, windowID: focused.id, sessionID: window.sessionID, tabIndex: window.tabIndex)
+            setItermTerminalSessionMetadata(workspaceID: workspace.id, windowID: focused.id, sessionID: window.sessionID, tabIndex: window.tabIndex)
         }
         try attachNewWindows(snapshot: snapshot, workspaceID: workspace.id, role: "terminal", appName: "iTerm2", orderOffset: 200)
         if let focused = try yabai.focusedWindow(), focused.app == "iTerm2" {
@@ -1247,11 +1084,10 @@ public final class MuxyOrchestrator {
     public func focusWorkspace(workspaceID: String) throws {
         let windows = try trackedWindows(workspaceID: workspaceID)
         var focused = false
-        for (idx, window) in windows.enumerated() {
+        for window in windows {
             let ok = focusTrackedWindow(window, workspaceID: workspaceID)
             if ok {
                 focused = true
-                setWindowNavigationIndex(idx, workspaceID: workspaceID)
                 break
             }
         }
@@ -1264,19 +1100,14 @@ public final class MuxyOrchestrator {
         guard index <= windows.count else { return }
         let targetIndex = index - 1
         let ok = focusTrackedWindow(windows[targetIndex], workspaceID: workspaceID)
-        if ok {
-            setWindowNavigationIndex(targetIndex, workspaceID: workspaceID)
-            try setActiveWorkspace(id: workspaceID)
-        }
+        if ok { try setActiveWorkspace(id: workspaceID) }
     }
 
     public func focusWorkspaceProcess(workspaceID: String, processID: String) throws {
         guard let process = try store.runningProcesses(workspaceID: workspaceID).first(where: { $0.id == processID }) else { return }
         guard process.terminalApp == "iTerm2", let trackedWindowID = process.windowID else { return }
         let ok = try focusItermTerminalWindow(
-            workspaceID: workspaceID,
-            trackedWindowID: trackedWindowID,
-            preferredSessionID: process.itermSessionID,
+            workspaceID: workspaceID, trackedWindowID: trackedWindowID, preferredSessionID: process.itermSessionID,
             preferredTabIndex: process.itermTabIndex)
         if ok {
             if (try? itermFocusPulseEnabled()) ?? SettingsKey.defaultItermFocusPulseEnabled {
@@ -1287,10 +1118,6 @@ public final class MuxyOrchestrator {
             try setActiveWorkspace(id: workspaceID)
         }
     }
-
-    public func focusNextWindow(workspaceID: String) throws { try focusWindowRelative(workspaceID: workspaceID, delta: 1) }
-
-    public func focusPreviousWindow(workspaceID: String) throws { try focusWindowRelative(workspaceID: workspaceID, delta: -1) }
 
     public func workspaceIDForFocusedWindow() throws -> String? {
         guard let focused = try yabai.focusedWindow() else { return nil }
@@ -1321,89 +1148,13 @@ public final class MuxyOrchestrator {
         return candidates.max(by: { lhs, rhs in lhs.lastSeenAt < rhs.lastSeenAt })?.workspaceID
     }
 
-    private func focusWindowRelative(workspaceID: String, delta: Int) throws {
-        let windows = try trackedWindows(workspaceID: workspaceID)
-        guard !windows.isEmpty else { return }
-        let rememberedIndex = windowNavigationIndex(workspaceID: workspaceID)
-        let currentIndex: Int?
-        if let rememberedIndex, rememberedIndex >= 0, rememberedIndex < windows.count {
-            currentIndex = rememberedIndex
-        } else {
-            currentIndex = try currentFocusedWindowIndex(windows: windows)
-        }
-        let targetIndex: Int
-        if let currentIndex {
-            targetIndex = (currentIndex + delta + windows.count) % windows.count
-        } else if delta > 0 {
-            targetIndex = 0
-        } else {
-            targetIndex = windows.count - 1
-        }
-        let ok = focusTrackedWindow(windows[targetIndex], workspaceID: workspaceID)
-        if ok {
-            setWindowNavigationIndex(targetIndex, workspaceID: workspaceID)
-            try setActiveWorkspace(id: workspaceID)
-        }
-    }
-
-    private func currentFocusedWindowIndex(windows: [WindowRecord]) throws -> Int? {
-        if let focused = try yabai.focusedWindow() {
-            let candidates = windows.enumerated().filter { $0.element.windowID == focused.id }
-            if !candidates.isEmpty {
-                if candidates.count == 1 { return candidates[0].offset }
-                if focused.app == "Google Chrome", chrome.isAvailable(), let activeURL = (try? chrome.frontmostActiveTabURL()) ?? nil {
-                    if let tabMatch = candidates.max(by: { lhs, rhs in
-                        browserTabMatchPriority(activeURL: activeURL, targetURL: lhs.element.targetURL)
-                            < browserTabMatchPriority(activeURL: activeURL, targetURL: rhs.element.targetURL)
-                    }), browserTabMatchPriority(activeURL: activeURL, targetURL: tabMatch.element.targetURL) > 0 {
-                        return tabMatch.offset
-                    }
-                }
-                return candidates[0].offset
-            }
-            if focused.app == "Google Chrome", chrome.isAvailable(), let activeURL = (try? chrome.frontmostActiveTabURL()) ?? nil {
-                if let tabMatch = windows.enumerated().max(by: { lhs, rhs in
-                    browserTabMatchPriority(activeURL: activeURL, targetURL: lhs.element.targetURL)
-                        < browserTabMatchPriority(activeURL: activeURL, targetURL: rhs.element.targetURL)
-                }), tabMatch.element.role == "browser", browserTabMatchPriority(activeURL: activeURL, targetURL: tabMatch.element.targetURL) > 0 {
-                    return tabMatch.offset
-                }
-            }
-        }
-        return nil
-    }
-
-    private func browserTabMatchPriority(activeURL: String, targetURL: String?) -> Int {
-        guard let targetURL else { return 0 }
-        if activeURL == targetURL { return 2 }
-        if activeURL.hasPrefix(targetURL) { return 1 }
-        return 0
-    }
-
-    private func windowNavigationIndex(workspaceID: String) -> Int? {
-        windowNavigationLock.lock()
-        defer { windowNavigationLock.unlock() }
-        return windowNavigationIndexByWorkspace[workspaceID]
-    }
-
-    private func setWindowNavigationIndex(_ index: Int?, workspaceID: String) {
-        windowNavigationLock.lock()
-        if let index {
-            windowNavigationIndexByWorkspace[workspaceID] = index
-        } else {
-            windowNavigationIndexByWorkspace.removeValue(forKey: workspaceID)
-        }
-        windowNavigationLock.unlock()
-    }
-
     private func focusTrackedWindow(_ window: WindowRecord, workspaceID: String) -> Bool {
         let focusStartedAt = currentDate()
         var focusPath = "yabai"
         if window.role == "terminal", let trackedWindowID = window.windowID, window.app == "iTerm2" {
             let focusedIterm = (try? focusItermTerminalWindow(workspaceID: workspaceID, trackedWindowID: trackedWindowID)) ?? false
             if focusedIterm {
-                logBrowserFocus(
-                    "workspace=\(workspaceID) path=iterm window=\(trackedWindowID) elapsed_ms=\(elapsedMS(since: focusStartedAt))")
+                logBrowserFocus("workspace=\(workspaceID) path=iterm window=\(trackedWindowID) elapsed_ms=\(elapsedMS(since: focusStartedAt))")
                 if (try? itermFocusPulseEnabled()) ?? SettingsKey.defaultItermFocusPulseEnabled {
                     let pulseColor = (try? itermFocusPulseColor()) ?? (r: 46, g: 41, b: 14)
                     let capturedIterm = iterm
@@ -1416,8 +1167,7 @@ public final class MuxyOrchestrator {
             let extractedOutcome = (try? focusExtractedBrowserWindow(workspaceID: workspaceID, targetURL: targetURL)) ?? .notMapped
             if extractedOutcome == .focused {
                 focusPath = "extracted"
-                logBrowserFocus(
-                    "workspace=\(workspaceID) path=\(focusPath) target=\(targetURL) elapsed_ms=\(elapsedMS(since: focusStartedAt))")
+                logBrowserFocus("workspace=\(workspaceID) path=\(focusPath) target=\(targetURL) elapsed_ms=\(elapsedMS(since: focusStartedAt))")
                 return true
             }
             if let trackedWindowID = window.windowID {
@@ -1469,12 +1219,9 @@ public final class MuxyOrchestrator {
         return focused
     }
 
-    private func focusItermTerminalWindow(
-        workspaceID: String,
-        trackedWindowID: Int,
-        preferredSessionID: String? = nil,
-        preferredTabIndex: Int? = nil
-    ) throws -> Bool {
+    private func focusItermTerminalWindow(workspaceID: String, trackedWindowID: Int, preferredSessionID: String? = nil, preferredTabIndex: Int? = nil)
+        throws -> Bool
+    {
         let runningProcess = try store.runningProcesses(workspaceID: workspaceID).first {
             $0.terminalApp == "iTerm2" && $0.windowID == trackedWindowID
         }
@@ -1490,29 +1237,19 @@ public final class MuxyOrchestrator {
 
     private func preferredWorkspaceItermWindowID(workspaceID: String) throws -> Int? {
         let trackedTerminalWindowIDs = Set(
-            try store.windows(workspaceID: workspaceID)
-                .filter { $0.role == "terminal" && $0.app == "iTerm2" }
-                .compactMap(\.windowID))
+            try store.windows(workspaceID: workspaceID).filter { $0.role == "terminal" && $0.app == "iTerm2" }.compactMap(\.windowID))
         if trackedTerminalWindowIDs.isEmpty { return nil }
-        if let focused = try yabai.focusedWindow(),
-            focused.app == "iTerm2",
-            trackedTerminalWindowIDs.contains(focused.id)
-        {
-            return focused.id
-        }
-        let runningProcessWindow = try store.runningProcesses(workspaceID: workspaceID).first {
-            $0.terminalApp == "iTerm2" && $0.windowID != nil
-        }?.windowID
+        if let focused = try yabai.focusedWindow(), focused.app == "iTerm2", trackedTerminalWindowIDs.contains(focused.id) { return focused.id }
+        let runningProcessWindow = try store.runningProcesses(workspaceID: workspaceID).first { $0.terminalApp == "iTerm2" && $0.windowID != nil }?
+            .windowID
         if let runningProcessWindow { return runningProcessWindow }
         return trackedTerminalWindowIDs.sorted().first
     }
 
     private func closeTrackedItermTerminalContainer(_ process: RunningProcessRecord) throws -> Bool {
         guard process.terminalApp == "iTerm2" else { return false }
-        return (try? iterm.closeSessionOrTab(
-            preferredSessionID: process.itermSessionID,
-            tabIndex: process.itermTabIndex,
-            windowID: process.windowID)) ?? false
+        return (try? iterm.closeSessionOrTab(preferredSessionID: process.itermSessionID, tabIndex: process.itermTabIndex, windowID: process.windowID))
+            ?? false
     }
 
     private func closeTrackedItermTerminalWindow(workspaceID: String, windowID: Int) throws -> Bool {
@@ -1521,18 +1258,13 @@ public final class MuxyOrchestrator {
         }
         if let preferredSessionID = trackedWindow?.itermSessionID,
             let closedSessionOrTab = try? iterm.closeSessionOrTab(
-                preferredSessionID: preferredSessionID,
-                tabIndex: trackedWindow?.itermTabIndex,
-                windowID: windowID),
-            closedSessionOrTab
+                preferredSessionID: preferredSessionID, tabIndex: trackedWindow?.itermTabIndex, windowID: windowID), closedSessionOrTab
         {
             return true
         }
         if let metadata = itermTerminalSessionMetadata(workspaceID: workspaceID, windowID: windowID) {
-            let closedSessionOrTab = (try? iterm.closeSessionOrTab(
-                preferredSessionID: metadata.sessionID,
-                tabIndex: metadata.tabIndex,
-                windowID: windowID)) ?? false
+            let closedSessionOrTab =
+                (try? iterm.closeSessionOrTab(preferredSessionID: metadata.sessionID, tabIndex: metadata.tabIndex, windowID: windowID)) ?? false
             if closedSessionOrTab { return true }
         }
         return false
@@ -1565,8 +1297,8 @@ public final class MuxyOrchestrator {
         guard let existing = windows.first(where: { $0.role == "terminal" && $0.app == "iTerm2" && $0.windowID == windowID }) else { return }
         let updated = WindowRecord(
             id: existing.id, workspaceID: existing.workspaceID, app: existing.app, title: existing.title, targetURL: existing.targetURL,
-            windowID: existing.windowID, itermSessionID: sessionID, itermTabIndex: tabIndex,
-            role: existing.role, orderIndex: existing.orderIndex, lastSeenAt: nowISO8601())
+            windowID: existing.windowID, itermSessionID: sessionID, itermTabIndex: tabIndex, role: existing.role, orderIndex: existing.orderIndex,
+            lastSeenAt: nowISO8601())
         try store.upsert(window: updated)
     }
 
@@ -1606,8 +1338,7 @@ public final class MuxyOrchestrator {
     private func extractSessionWindowIfNeeded(
         session: ResolvedBrowserSession, matches: [ChromeWindowMatch], refreshedSessions: inout [BrowserSession]
     ) throws -> Int? {
-        if let extractedWindow = session.session.extractedWindow,
-            extractedWindow.isValid,
+        if let extractedWindow = session.session.extractedWindow, extractedWindow.isValid,
             matches.contains(where: { $0.windowID == extractedWindow.windowID })
         {
             refreshedSessions[session.index].extractedWindow = ExtractedBrowserWindowMapping(
@@ -1629,12 +1360,8 @@ public final class MuxyOrchestrator {
         let resolvedSessions = resolveBrowserSessions(sessions, env: env)
         guard !resolvedSessions.isEmpty else { return .notMapped }
 
-        guard
-            let matchedSession = resolvedSessions
-                .filter({ targetURL.hasPrefix($0.prefix) })
-                .max(by: { $0.prefix.count < $1.prefix.count }),
-            let extractedWindow = sessions[matchedSession.index].extractedWindow,
-            extractedWindow.isValid
+        guard let matchedSession = resolvedSessions.filter({ targetURL.hasPrefix($0.prefix) }).max(by: { $0.prefix.count < $1.prefix.count }),
+            let extractedWindow = sessions[matchedSession.index].extractedWindow, extractedWindow.isValid
         else { return .notMapped }
 
         let focused = try yabai.focusWindow(id: extractedWindow.windowID)
@@ -1801,9 +1528,7 @@ public final class MuxyOrchestrator {
         }
         if debugLoggingEnabled() {
             let elapsedMS = Int(Date().timeIntervalSince(scanStartedAt) * 1000)
-            fputs(
-                "muxy: browser scan workspace=\(workspaceID) tabs=\(tabs.count) matches=\(browserWindows.count) elapsed_ms=\(elapsedMS)\n",
-                stderr)
+            fputs("muxy: browser scan workspace=\(workspaceID) tabs=\(tabs.count) matches=\(browserWindows.count) elapsed_ms=\(elapsedMS)\n", stderr)
         }
         return BrowserWindowScanResult(windows: browserWindows, tabIndexByWindowAndURL: tabIndexByWindowAndURL)
     }
@@ -1831,16 +1556,6 @@ public final class MuxyOrchestrator {
     public func guiHotkey() throws -> String { try store.setting(key: SettingsKey.guiHotkey) ?? SettingsKey.defaultGUIHotkey }
 
     public func setGUIHotkey(_ raw: String?) throws { try store.setSetting(key: SettingsKey.guiHotkey, value: raw) }
-
-    public func guiNextShortcut() throws -> String { try store.setting(key: SettingsKey.guiNextShortcut) ?? SettingsKey.defaultGUINextShortcut }
-
-    public func setGUINextShortcut(_ raw: String?) throws { try store.setSetting(key: SettingsKey.guiNextShortcut, value: raw) }
-
-    public func guiPreviousShortcut() throws -> String {
-        try store.setting(key: SettingsKey.guiPreviousShortcut) ?? SettingsKey.defaultGUIPreviousShortcut
-    }
-
-    public func setGUIPreviousShortcut(_ raw: String?) throws { try store.setSetting(key: SettingsKey.guiPreviousShortcut, value: raw) }
 
     public func guiShowShortcut() throws -> String { try store.setting(key: SettingsKey.guiShowShortcut) ?? SettingsKey.defaultGUIShowShortcut }
 
@@ -1885,6 +1600,16 @@ public final class MuxyOrchestrator {
     }
 
     public func setGUIOpenSettingsShortcut(_ raw: String?) throws { try store.setSetting(key: SettingsKey.guiOpenSettingsShortcut, value: raw) }
+
+    public func guiNextShortcut() throws -> String { try store.setting(key: SettingsKey.guiNextShortcut) ?? SettingsKey.defaultGUINextShortcut }
+
+    public func setGUINextShortcut(_ raw: String?) throws { try store.setSetting(key: SettingsKey.guiNextShortcut, value: raw) }
+
+    public func guiPreviousShortcut() throws -> String {
+        try store.setting(key: SettingsKey.guiPreviousShortcut) ?? SettingsKey.defaultGUIPreviousShortcut
+    }
+
+    public func setGUIPreviousShortcut(_ raw: String?) throws { try store.setSetting(key: SettingsKey.guiPreviousShortcut, value: raw) }
 
     public func guiTooltipShortcut() throws -> String {
         try store.setting(key: SettingsKey.guiTooltipShortcut) ?? SettingsKey.defaultGUITooltipShortcut
@@ -1935,8 +1660,7 @@ public final class MuxyOrchestrator {
                 let revived = WorkspaceRecord(
                     id: existing.id, projectID: project.id, name: existing.name, dir: existing.dir, dirname: existing.dirname,
                     branch: existing.branch, targetBranch: existing.targetBranch, isDefault: true, isArchived: false, isActive: existing.isActive,
-                    isRunning: existing.isRunning,
-                    lastLaunchedAt: existing.lastLaunchedAt)
+                    isRunning: existing.isRunning, lastLaunchedAt: existing.lastLaunchedAt)
                 try store.upsert(workspace: revived)
             }
             return
@@ -1957,8 +1681,7 @@ public final class MuxyOrchestrator {
                 let revived = WorkspaceRecord(
                     id: existing.id, projectID: project.id, name: existing.name, dir: existing.dir, dirname: existing.dirname,
                     branch: existing.branch, targetBranch: existing.targetBranch, isDefault: true, isArchived: false, isActive: existing.isActive,
-                    isRunning: existing.isRunning,
-                    lastLaunchedAt: existing.lastLaunchedAt)
+                    isRunning: existing.isRunning, lastLaunchedAt: existing.lastLaunchedAt)
                 try store.upsert(workspace: revived)
             }
             return
@@ -1970,8 +1693,8 @@ public final class MuxyOrchestrator {
         try git.createWorktree(path: project.dir, worktreePath: workspaceDir, branch: branch, targetBranch: branch)
 
         let workspace = WorkspaceRecord(
-            id: UUID().uuidString, projectID: project.id, name: branch, dir: workspaceDir, dirname: branch, branch: branch,
-            targetBranch: branch, isDefault: true, isArchived: false, isRunning: false, lastLaunchedAt: nil)
+            id: UUID().uuidString, projectID: project.id, name: branch, dir: workspaceDir, dirname: branch, branch: branch, targetBranch: branch,
+            isDefault: true, isArchived: false, isRunning: false, lastLaunchedAt: nil)
         try store.upsert(workspace: workspace)
         try seedWorkspaceSettings(project: project, workspace: workspace)
         let appConfig = try store.appConfig()
@@ -2106,11 +1829,7 @@ public final class MuxyOrchestrator {
         try store.setWorkspaceSetupState(workspaceID: workspace.id, status: .running, errorMessage: nil, startedAt: startedAt, finishedAt: nil)
         guard let setupScript, !setupScript.isEmpty else {
             try store.setWorkspaceSetupState(
-                workspaceID: workspace.id,
-                status: .succeeded,
-                errorMessage: nil,
-                startedAt: startedAt,
-                finishedAt: nowISO8601())
+                workspaceID: workspace.id, status: .succeeded, errorMessage: nil, startedAt: startedAt, finishedAt: nowISO8601())
             return
         }
         do {
@@ -2118,19 +1837,11 @@ public final class MuxyOrchestrator {
             let env = buildWorkspaceEnv(project: project, workspace: workspace, namedPorts: namedPorts)
             try runScript(applyEnvVars(setupScript, env: env), cwd: workspace.dir)
             try store.setWorkspaceSetupState(
-                workspaceID: workspace.id,
-                status: .succeeded,
-                errorMessage: nil,
-                startedAt: startedAt,
-                finishedAt: nowISO8601())
+                workspaceID: workspace.id, status: .succeeded, errorMessage: nil, startedAt: startedAt, finishedAt: nowISO8601())
         } catch {
             let message = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
             try store.setWorkspaceSetupState(
-                workspaceID: workspace.id,
-                status: .failed,
-                errorMessage: message,
-                startedAt: startedAt,
-                finishedAt: nowISO8601())
+                workspaceID: workspace.id, status: .failed, errorMessage: message, startedAt: startedAt, finishedAt: nowISO8601())
             throw error
         }
     }
@@ -2140,8 +1851,7 @@ public final class MuxyOrchestrator {
         while true {
             let setupState = try workspaceSetupState(workspaceID: workspaceID)
             switch setupState.status {
-            case .succeeded:
-                return
+            case .succeeded: return
             case .failed:
                 let detail = setupState.errorMessage?.isEmpty == false ? setupState.errorMessage! : "unknown setup error"
                 throw MuxyError.invalidArgument(message: "Workspace setup failed: \(detail)")
@@ -2149,7 +1859,8 @@ public final class MuxyOrchestrator {
                 if currentDate().timeIntervalSince(waitStartedAt) > 900 {
                     throw MuxyError.invalidArgument(
                         message:
-                            "Timed out waiting for workspace setup to finish. Retry launch after setup completes or run mx workspace up --force-restart.")
+                            "Timed out waiting for workspace setup to finish. Retry launch after setup completes or run mx workspace up --force-restart."
+                    )
                 }
                 Thread.sleep(forTimeInterval: 0.2)
             }
@@ -2281,9 +1992,8 @@ public final class MuxyOrchestrator {
                 let pid = try? Int(String(contentsOfFile: pidFile).trimmingCharacters(in: .whitespacesAndNewlines))
                 let updated = RunningProcessRecord(
                     id: process.id, workspaceID: workspace.id, templateName: desired.desiredKey, command: desired.template.command,
-                    terminalApp: "iTerm2", windowID: windowID, itermSessionID: process.itermSessionID,
-                    itermTabIndex: process.itermTabIndex, pid: pid, status: .running, logPath: logFile, lastOutputAt: nil,
-                    startedAt: nowISO8601(), exitedAt: nil)
+                    terminalApp: "iTerm2", windowID: windowID, itermSessionID: process.itermSessionID, itermTabIndex: process.itermTabIndex, pid: pid,
+                    status: .running, logPath: logFile, lastOutputAt: nil, startedAt: nowISO8601(), exitedAt: nil)
                 try store.upsert(runningProcess: updated)
             } else {
                 let snapshot = try yabai.listWindows()
@@ -2295,8 +2005,7 @@ public final class MuxyOrchestrator {
                 let updated = RunningProcessRecord(
                     id: process.id, workspaceID: workspace.id, templateName: desired.desiredKey, command: desired.template.command,
                     terminalApp: "iTerm2", windowID: resolvedWindowID, itermSessionID: window.sessionID, itermTabIndex: window.tabIndex, pid: pid,
-                    status: .running, logPath: logFile, lastOutputAt: nil,
-                    startedAt: nowISO8601(), exitedAt: nil)
+                    status: .running, logPath: logFile, lastOutputAt: nil, startedAt: nowISO8601(), exitedAt: nil)
                 if let resolvedWindowID, resolvedWindowID > 0 {
                     setItermTerminalSessionMetadata(
                         workspaceID: workspace.id, windowID: resolvedWindowID, sessionID: window.sessionID, tabIndex: window.tabIndex)
@@ -2319,8 +2028,7 @@ public final class MuxyOrchestrator {
             let record = RunningProcessRecord(
                 id: UUID().uuidString, workspaceID: workspace.id, templateName: desired.desiredKey, command: desired.template.command,
                 terminalApp: "iTerm2", windowID: resolvedWindowID, itermSessionID: window.sessionID, itermTabIndex: window.tabIndex, pid: pid,
-                status: .running, logPath: logFile, lastOutputAt: nil,
-                startedAt: nowISO8601(), exitedAt: nil)
+                status: .running, logPath: logFile, lastOutputAt: nil, startedAt: nowISO8601(), exitedAt: nil)
             if let resolvedWindowID, resolvedWindowID > 0 {
                 setItermTerminalSessionMetadata(
                     workspaceID: workspace.id, windowID: resolvedWindowID, sessionID: window.sessionID, tabIndex: window.tabIndex)
@@ -2381,8 +2089,7 @@ public final class MuxyOrchestrator {
         }
     }
 
-    @discardableResult
-    private func pruneMissingWindows(workspaceID: String) throws -> Int {
+    @discardableResult private func pruneMissingWindows(workspaceID: String) throws -> Int {
         let existingIDs = Set(try yabai.listWindows().map(\.id))
         let windows = try store.windows(workspaceID: workspaceID)
         var pruned = 0
@@ -2508,16 +2215,13 @@ public final class MuxyOrchestrator {
                 snapshot: snapshot, role: "terminal", appName: "iTerm2", workspaceID: workspace.id, orderOffset: 200
             ).first?.windowID
             let resolvedWindowID = window.id >= 0 ? window.id : fallbackWindowID
-            if let resolvedWindowID {
-                sharedItermWindowID = resolvedWindowID
-            }
+            if let resolvedWindowID { sharedItermWindowID = resolvedWindowID }
 
             let pid = try? Int(String(contentsOfFile: pidFile).trimmingCharacters(in: .whitespacesAndNewlines))
             let running = RunningProcessRecord(
                 id: UUID().uuidString, workspaceID: workspace.id, templateName: name, command: template.command, terminalApp: "iTerm2",
-                windowID: resolvedWindowID, itermSessionID: window.sessionID, itermTabIndex: window.tabIndex, pid: pid,
-                status: .running, logPath: logFile, lastOutputAt: nil,
-                startedAt: nowISO8601(), exitedAt: nil)
+                windowID: resolvedWindowID, itermSessionID: window.sessionID, itermTabIndex: window.tabIndex, pid: pid, status: .running,
+                logPath: logFile, lastOutputAt: nil, startedAt: nowISO8601(), exitedAt: nil)
             if let resolvedWindowID, resolvedWindowID > 0 {
                 setItermTerminalSessionMetadata(
                     workspaceID: workspace.id, windowID: resolvedWindowID, sessionID: window.sessionID, tabIndex: window.tabIndex)
@@ -2530,8 +2234,7 @@ public final class MuxyOrchestrator {
     private func ensureBrowserSessions(
         project: ProjectRecord, workspace: WorkspaceRecord, sessions: [BrowserSession], env: [String: String], extractOnAttach: Bool,
         background: Bool = false
-    ) throws -> (windows: [WindowRecord], sessions: [BrowserSession])
-    {
+    ) throws -> (windows: [WindowRecord], sessions: [BrowserSession]) {
         _ = project
         guard !sessions.isEmpty else { return ([], []) }
         guard chrome.isAvailable() else { throw MuxyError.dependencyMissing(message: "Google Chrome is required for browser sessions.") }
@@ -2548,31 +2251,21 @@ public final class MuxyOrchestrator {
                     let openedTab = try chrome.openTab(windowID: targetChromeWindowID, url: resolvedSession.prefix, background: background)
                     if !openedTab {
                         let openedWindowID = try chrome.openWindow(url: resolvedSession.prefix, background: background)
-                        if openedWindowID > 0 {
-                            sharedOpenedChromeWindowID = openedWindowID
-                        } else {
-                            sharedOpenedChromeWindowID = nil
-                        }
+                        if openedWindowID > 0 { sharedOpenedChromeWindowID = openedWindowID } else { sharedOpenedChromeWindowID = nil }
                     }
                 } else {
                     let openedWindowID = try chrome.openWindow(url: resolvedSession.prefix, background: background)
-                    if openedWindowID > 0 {
-                        sharedOpenedChromeWindowID = openedWindowID
-                    }
+                    if openedWindowID > 0 { sharedOpenedChromeWindowID = openedWindowID }
                 }
                 matches = try chrome.windowMatches(forURLPrefix: resolvedSession.prefix)
-                if !matches.isEmpty, !foundExistingTab, sharedOpenedChromeWindowID == nil {
-                    sharedOpenedChromeWindowID = matches.first?.windowID
-                }
+                if !matches.isEmpty, !foundExistingTab, sharedOpenedChromeWindowID == nil { sharedOpenedChromeWindowID = matches.first?.windowID }
             }
             if extractOnAttach, foundExistingTab,
                 let extractedWindowID = try extractSessionWindowIfNeeded(
                     session: resolvedSession, matches: matches, refreshedSessions: &refreshedSessions)
             {
                 let extractedMatches = try chrome.windowMatches(forURLPrefix: resolvedSession.prefix).filter { $0.windowID == extractedWindowID }
-                if !extractedMatches.isEmpty {
-                    matches = extractedMatches
-                }
+                if !extractedMatches.isEmpty { matches = extractedMatches }
             }
             for match in matches {
                 let key = "browser:\(match.windowID):\(match.url)"
@@ -2584,14 +2277,15 @@ public final class MuxyOrchestrator {
                         windowID: match.windowID, role: "browser", orderIndex: attached.count, lastSeenAt: nowISO8601()))
             }
             if !matches.isEmpty { continue }
-            if (try? chrome.focusTab(forURLPrefix: resolvedSession.prefix)) ?? false, let focused = try? yabai.focusedWindow(), focused.app == "Google Chrome" {
+            if (try? chrome.focusTab(forURLPrefix: resolvedSession.prefix)) ?? false, let focused = try? yabai.focusedWindow(),
+                focused.app == "Google Chrome"
+            {
                 let key = "browser:\(focused.id):\(resolvedSession.prefix)"
                 if seenKeys.contains(key) { continue }
                 seenKeys.insert(key)
                 attached.append(
                     WindowRecord(
-                        id: UUID().uuidString, workspaceID: workspace.id, app: focused.app, title: focused.title,
-                        targetURL: resolvedSession.prefix,
+                        id: UUID().uuidString, workspaceID: workspace.id, app: focused.app, title: focused.title, targetURL: resolvedSession.prefix,
                         windowID: focused.id, role: "browser", orderIndex: attached.count, lastSeenAt: nowISO8601()))
             }
         }
@@ -2600,9 +2294,7 @@ public final class MuxyOrchestrator {
 
     private func captureNewWindows(snapshot: [YabaiWindow], role: String, appName: String, workspaceID: String, orderOffset: Int) throws
         -> [WindowRecord]
-    {
-        try captureNewWindows(snapshot: snapshot, role: role, appNames: [appName], workspaceID: workspaceID, orderOffset: orderOffset)
-    }
+    { try captureNewWindows(snapshot: snapshot, role: role, appNames: [appName], workspaceID: workspaceID, orderOffset: orderOffset) }
 
     private func captureNewWindows(snapshot: [YabaiWindow], role: String, appNames: Set<String>, workspaceID: String, orderOffset: Int) throws
         -> [WindowRecord]
@@ -2634,14 +2326,10 @@ public final class MuxyOrchestrator {
         let safeCwd = cwd
         let safeLog = logFile
         let safePid = pidFile
-        
         // Write shell PID and keep shell alive with wait
         // isProcessAlive will check if any process in the group is alive
         let commands = [
-            "cd \"\(safeCwd)\"",
-            envExports.isEmpty ? nil : envExports,
-            "echo $$ > \"\(safePid)\"",
-            "\(base) 2>&1 | tee -a \"\(safeLog)\"",
+            "cd \"\(safeCwd)\"", envExports.isEmpty ? nil : envExports, "echo $$ > \"\(safePid)\"", "\(base) 2>&1 | tee -a \"\(safeLog)\"",
         ].compactMap { $0 }
         let script = commands.joined(separator: "; ")
         let singleQuoted = script.replacing("'", with: "'\\''")
@@ -2729,9 +2417,7 @@ public final class MuxyOrchestrator {
         if let pid = process.pid, pid > 0 {
             if isProcessAlive(pid: pid) { return pid }
             guard process.terminalApp == "iTerm2" else { return pid }
-            guard let pidFile = try? processRuntimePaths(workspaceID: process.workspaceID, name: process.templateName).pidFile else {
-                return pid
-            }
+            guard let pidFile = try? processRuntimePaths(workspaceID: process.workspaceID, name: process.templateName).pidFile else { return pid }
             if let runtimePID = runtimePID(fromFile: pidFile), runtimePID > 0, isProcessAlive(pid: runtimePID) { return runtimePID }
             return pid
         }
@@ -2749,11 +2435,9 @@ public final class MuxyOrchestrator {
 
     private func isProcessAlive(pid: Int) -> Bool {
         guard pid > 0 else { return false }
-        
         // First check if the specific PID is alive
         if Darwin.kill(pid_t(pid), 0) == 0 { return true }
         if errno == EPERM { return true }
-        
         // If the PID is dead, check if any child processes are still alive
         // This handles cases where the shell exits but the actual command continues
         guard let output = try? Shell.runAndCapture(["pgrep", "-P", "\(pid)"]) else { return false }
@@ -3057,17 +2741,14 @@ public final class MuxyOrchestrator {
     public func focusAgentWindow(_ record: AgentWindowRecord) throws {
         switch record.provider {
         case .iterm2:
-            let focused = (try? iterm.focusSessionOrTab(
-                preferredSessionID: record.itermSessionID, tabIndex: nil, windowID: record.windowID)) ?? false
+            let focused = (try? iterm.focusSessionOrTab(preferredSessionID: record.itermSessionID, tabIndex: nil, windowID: record.windowID)) ?? false
             if focused, let windowID = record.windowID ?? record.yabaiWindowID,
-               (try? itermFocusPulseEnabled()) ?? SettingsKey.defaultItermFocusPulseEnabled {
+                (try? itermFocusPulseEnabled()) ?? SettingsKey.defaultItermFocusPulseEnabled
+            {
                 let color = (try? itermFocusPulseColor()) ?? (r: 46, g: 41, b: 14)
                 try? iterm.pulseBackground(windowID: windowID, pulseColor: color)
             }
-        case .codex:
-            if let threadID = record.codexThreadID {
-                try Shell.run(["open", "codex://threads/\(threadID)"])
-            }
+        case .codex: if let threadID = record.codexThreadID { try Shell.run(["open", "codex://threads/\(threadID)"]) }
         }
     }
 

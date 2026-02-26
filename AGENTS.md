@@ -15,9 +15,9 @@
 
 ## Coding Agent Workflow
 - Use the Muxy CLI `mx` to enhance user experience with coding agents.
-- Always start by ensuring a Muxy workspace exists by running `mx workspace import --title [text] --tooltip [text]` from the project root directory.
-- When you have a question for the user or need permissions, run `mx agent event --type waiting` to indicate to the user that you are blocked and waiting for their response.
-- When code changes are ready for user review, always run `mx workspace up --force-restart --tooltip [text]` to ensure the Muxy workspace is running and set a tooltip to provide sufficient context for the user about what is being worked on and the changes
+- Always start by ensuring a Muxy workspace exists by running `~/projects/muxy/apps/macos/.build/debug/mx workspace import --title [text] --tooltip [text]` from the project root directory.
+- When you have a question for the user or need permissions, run `~/projects/muxy/apps/macos/.build/debug/mx agent event --type waiting` before asking to indicate to the user that you are blocked and waiting for their response.
+- When code changes are ready for user review, always run `~/projects/muxy/apps/macos/.build/debug/mx workspace up --force-restart --tooltip [text]` to ensure the Muxy workspace is running and set a tooltip to provide sufficient context for the user about what is being worked on and the changes
 
 ## Data & Paths
 - DB path: `~/.muxy/muxy.db` (managed automatically).

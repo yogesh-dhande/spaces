@@ -12,7 +12,6 @@ public struct ProcessTemplate: Codable, Sendable {
         self.kind = kind
         self.onExit = onExit
     }
-    
     private enum CodingKeys: String, CodingKey {
         case name
         case command

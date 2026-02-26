@@ -11,25 +11,19 @@ public struct UpdateInfo: Sendable {
 /// Checks the appcast feed for new versions of Muxy.
 public actor UpdateChecker {
     private static let appcastURL = URL(string: "https://muxy-dev.web.app/releases/appcast.xml")!
-    private static let checkInterval: TimeInterval = 4 * 60 * 60 // 4 hours
+    private static let checkInterval: TimeInterval = 4 * 60 * 60  // 4 hours
 
     private var cachedResult: UpdateInfo?
     private var lastCheckDate: Date?
 
     /// Check for an available update, using cache when fresh.
     public func checkForUpdate() async -> UpdateInfo? {
-        if let lastCheckDate, let cachedResult,
-           Date().timeIntervalSince(lastCheckDate) < Self.checkInterval
-        {
-            return cachedResult
-        }
+        if let lastCheckDate, let cachedResult, Date().timeIntervalSince(lastCheckDate) < Self.checkInterval { return cachedResult }
         return await fetchLatestRelease()
     }
 
     /// Force a fresh check, ignoring cache.
-    public func forceCheck() async -> UpdateInfo? {
-        await fetchLatestRelease()
-    }
+    public func forceCheck() async -> UpdateInfo? { await fetchLatestRelease() }
 
     private func fetchLatestRelease() async -> UpdateInfo? {
         var request = URLRequest(url: Self.appcastURL)
@@ -44,10 +38,7 @@ public actor UpdateChecker {
             }
 
             let parser = AppcastParser()
-            guard let item = parser.parse(data),
-                  let remoteVersion = item.version,
-                  let downloadURL = item.downloadURL
-            else {
+            guard let item = parser.parse(data), let remoteVersion = item.version, let downloadURL = item.downloadURL else {
                 lastCheckDate = Date()
                 cachedResult = nil
                 return nil
@@ -86,25 +77,21 @@ public actor UpdateChecker {
             let parser = XMLParser(data: data)
             parser.delegate = self
             parser.parse()
-            
             let url = currentURL.flatMap { URL(string: $0) }
             return AppcastItem(version: currentVersion, downloadURL: url, releaseNotes: nil)
         }
 
-        func parser(_ parser: XMLParser, didStartElement elementName: String, namespaceURI: String?, qualifiedName qName: String?, attributes: [String: String] = [:]) {
+        func parser(
+            _ parser: XMLParser, didStartElement elementName: String, namespaceURI: String?, qualifiedName qName: String?,
+            attributes: [String: String] = [:]
+        ) {
             currentElement = elementName
-            if elementName == "item" {
-                foundItem = true
-            } else if elementName == "enclosure", foundItem {
-                currentURL = attributes["url"]
-            }
+            if elementName == "item" { foundItem = true } else if elementName == "enclosure", foundItem { currentURL = attributes["url"] }
         }
 
         func parser(_ parser: XMLParser, foundCharacters string: String) {
             if currentElement == "sparkle:version" || currentElement == "sparkle:shortVersionString" {
-                if currentVersion == nil {
-                    currentVersion = string.trimmingCharacters(in: .whitespacesAndNewlines)
-                }
+                if currentVersion == nil { currentVersion = string.trimmingCharacters(in: .whitespacesAndNewlines) }
             }
         }
     }

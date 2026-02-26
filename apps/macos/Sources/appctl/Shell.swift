@@ -9,11 +9,7 @@ public enum Shell {
         // getenv reads the C-level environment, which includes setenv() changes
         // made after process start (e.g. in test helpers that inject mock binaries).
         let currentPath: String
-        if let raw = getenv("PATH") {
-            currentPath = String(cString: raw)
-        } else {
-            currentPath = ""
-        }
+        if let raw = getenv("PATH") { currentPath = String(cString: raw) } else { currentPath = "" }
         let brewPaths = "/opt/homebrew/bin:/usr/local/bin:/opt/local/bin"
         env["PATH"] = currentPath.isEmpty ? brewPaths : "\(currentPath):\(brewPaths)"
         return env

@@ -34,13 +34,13 @@ struct CLI {
         }
     }
 
-
     private func runProjectSubcommand(orchestrator: MuxyOrchestrator) throws {
         guard args.count >= 3 else {
             throw NSError(
                 domain: "mx.cli", code: 2,
-                userInfo: [NSLocalizedDescriptionKey: "Missing project action. Use: project list|add|update|remove|port|process|status-check|browser-session"]
-            )
+                userInfo: [
+                    NSLocalizedDescriptionKey: "Missing project action. Use: project list|add|update|remove|port|process|status-check|browser-session"
+                ])
         }
 
         switch args[2] {
@@ -58,8 +58,7 @@ struct CLI {
             let gitURL = optionalValue(for: "--git-url")
             if dir != nil, gitURL != nil {
                 throw NSError(
-                    domain: "mx.cli", code: 2,
-                    userInfo: [NSLocalizedDescriptionKey: "Use either --dir <path> or --git-url <url>, but not both."])
+                    domain: "mx.cli", code: 2, userInfo: [NSLocalizedDescriptionKey: "Use either --dir <path> or --git-url <url>, but not both."])
             }
             let record: ProjectRecord
             if let gitURL {
@@ -91,7 +90,9 @@ struct CLI {
 
     private func runProjectPortSubcommand(orchestrator: MuxyOrchestrator) throws {
         guard args.count >= 4 else {
-            throw NSError(domain: "mx.cli", code: 2, userInfo: [NSLocalizedDescriptionKey: "Missing action. Use: project port add|remove|list --dir <path> [--name <name>]"])
+            throw NSError(
+                domain: "mx.cli", code: 2,
+                userInfo: [NSLocalizedDescriptionKey: "Missing action. Use: project port add|remove|list --dir <path> [--name <name>]"])
         }
         let dir = try value(for: "--dir")
         let projectID = normalizePath(dir)
@@ -99,16 +100,12 @@ struct CLI {
         case "add":
             let name = try value(for: "--name")
             try orchestrator.updateProjectConfig(projectID: projectID) { config in
-                if !config.ports.contains(where: { $0.name == name }) {
-                    config.ports.append(PortDefinition(name: name))
-                }
+                if !config.ports.contains(where: { $0.name == name }) { config.ports.append(PortDefinition(name: name)) }
             }
             print("Added port \(name) to \(dir)")
         case "remove":
             let name = try value(for: "--name")
-            try orchestrator.updateProjectConfig(projectID: projectID) { config in
-                config.ports.removeAll { $0.name == name }
-            }
+            try orchestrator.updateProjectConfig(projectID: projectID) { config in config.ports.removeAll { $0.name == name } }
             print("Removed port \(name) from \(dir)")
         case "list":
             guard let project = try orchestrator.project(id: projectID) else {
@@ -116,13 +113,15 @@ struct CLI {
             }
             for port in project.ports { print(port.name) }
         default:
-            throw NSError(domain: "mx.cli", code: 2, userInfo: [NSLocalizedDescriptionKey: "Unknown action: \(args[3]). Use: project port add|remove|list"])
+            throw NSError(
+                domain: "mx.cli", code: 2, userInfo: [NSLocalizedDescriptionKey: "Unknown action: \(args[3]). Use: project port add|remove|list"])
         }
     }
 
     private func runProjectProcessSubcommand(orchestrator: MuxyOrchestrator) throws {
         guard args.count >= 4 else {
-            throw NSError(domain: "mx.cli", code: 2, userInfo: [NSLocalizedDescriptionKey: "Missing action. Use: project process add|remove|list --dir <path>"])
+            throw NSError(
+                domain: "mx.cli", code: 2, userInfo: [NSLocalizedDescriptionKey: "Missing action. Use: project process add|remove|list --dir <path>"])
         }
         let dir = try value(for: "--dir")
         let projectID = normalizePath(dir)
@@ -132,7 +131,9 @@ struct CLI {
             let command = try value(for: "--command")
             let onExitStr = optionalValue(for: "--on-exit") ?? ProcessExitAction.none.rawValue
             guard let onExit = ProcessExitAction(rawValue: onExitStr) else {
-                throw NSError(domain: "mx.cli", code: 2, userInfo: [NSLocalizedDescriptionKey: "Invalid --on-exit value '\(onExitStr)'. Use: none|restart|notify"])
+                throw NSError(
+                    domain: "mx.cli", code: 2,
+                    userInfo: [NSLocalizedDescriptionKey: "Invalid --on-exit value '\(onExitStr)'. Use: none|restart|notify"])
             }
             try orchestrator.updateProjectConfig(projectID: projectID) { config in
                 config.processes.append(ProcessTemplate(name: name, command: command, onExit: onExit))
@@ -140,25 +141,24 @@ struct CLI {
             print("Added process \(name ?? command) to \(dir)")
         case "remove":
             let name = try value(for: "--name")
-            try orchestrator.updateProjectConfig(projectID: projectID) { config in
-                config.processes.removeAll { $0.name == name }
-            }
+            try orchestrator.updateProjectConfig(projectID: projectID) { config in config.processes.removeAll { $0.name == name } }
             print("Removed process \(name) from \(dir)")
         case "list":
             guard let project = try orchestrator.project(id: projectID) else {
                 throw NSError(domain: "mx.cli", code: 2, userInfo: [NSLocalizedDescriptionKey: "Project not found for dir \(dir)"])
             }
-            for process in project.processes {
-                print("\(process.name ?? "-")\t\(process.command)\ton-exit=\(process.onExit.rawValue)")
-            }
+            for process in project.processes { print("\(process.name ?? "-")\t\(process.command)\ton-exit=\(process.onExit.rawValue)") }
         default:
-            throw NSError(domain: "mx.cli", code: 2, userInfo: [NSLocalizedDescriptionKey: "Unknown action: \(args[3]). Use: project process add|remove|list"])
+            throw NSError(
+                domain: "mx.cli", code: 2, userInfo: [NSLocalizedDescriptionKey: "Unknown action: \(args[3]). Use: project process add|remove|list"])
         }
     }
 
     private func runProjectStatusCheckSubcommand(orchestrator: MuxyOrchestrator) throws {
         guard args.count >= 4 else {
-            throw NSError(domain: "mx.cli", code: 2, userInfo: [NSLocalizedDescriptionKey: "Missing action. Use: project status-check add|remove|list --dir <path>"])
+            throw NSError(
+                domain: "mx.cli", code: 2,
+                userInfo: [NSLocalizedDescriptionKey: "Missing action. Use: project status-check add|remove|list --dir <path>"])
         }
         let dir = try value(for: "--dir")
         let projectID = normalizePath(dir)
@@ -171,12 +171,15 @@ struct CLI {
             let timeoutStr = optionalValue(for: "--timeout")
             let onFailStr = optionalValue(for: "--on-fail") ?? OnFailAction.none.rawValue
             guard let onFail = OnFailAction(rawValue: onFailStr) else {
-                throw NSError(domain: "mx.cli", code: 2, userInfo: [NSLocalizedDescriptionKey: "Invalid --on-fail value '\(onFailStr)'. Use: none|restart|notify"])
+                throw NSError(
+                    domain: "mx.cli", code: 2,
+                    userInfo: [NSLocalizedDescriptionKey: "Invalid --on-fail value '\(onFailStr)'. Use: none|restart|notify"])
             }
             let interval: Int
             if let s = intervalStr {
                 guard let n = Int(s), n > 0 else {
-                    throw NSError(domain: "mx.cli", code: 2, userInfo: [NSLocalizedDescriptionKey: "Invalid --interval '\(s)'. Must be a positive integer."])
+                    throw NSError(
+                        domain: "mx.cli", code: 2, userInfo: [NSLocalizedDescriptionKey: "Invalid --interval '\(s)'. Must be a positive integer."])
                 }
                 interval = n
             } else {
@@ -185,7 +188,8 @@ struct CLI {
             let timeout: Int
             if let s = timeoutStr {
                 guard let n = Int(s), n > 0 else {
-                    throw NSError(domain: "mx.cli", code: 2, userInfo: [NSLocalizedDescriptionKey: "Invalid --timeout '\(s)'. Must be a positive integer."])
+                    throw NSError(
+                        domain: "mx.cli", code: 2, userInfo: [NSLocalizedDescriptionKey: "Invalid --timeout '\(s)'. Must be a positive integer."])
                 }
                 timeout = n
             } else {
@@ -193,25 +197,26 @@ struct CLI {
             }
             try orchestrator.updateProjectConfig(projectID: projectID) { config in
                 config.statusChecks.append(
-                    StatusCheckDefinition(name: name, process: process, command: command, interval: interval, timeout: timeout, onFail: onFail)
-                )
+                    StatusCheckDefinition(name: name, process: process, command: command, interval: interval, timeout: timeout, onFail: onFail))
             }
             print("Added status check \(name ?? process) to \(dir)")
         case "remove":
             let name = try value(for: "--name")
-            try orchestrator.updateProjectConfig(projectID: projectID) { config in
-                config.statusChecks.removeAll { $0.name == name }
-            }
+            try orchestrator.updateProjectConfig(projectID: projectID) { config in config.statusChecks.removeAll { $0.name == name } }
             print("Removed status check \(name) from \(dir)")
         case "list":
             guard let project = try orchestrator.project(id: projectID) else {
                 throw NSError(domain: "mx.cli", code: 2, userInfo: [NSLocalizedDescriptionKey: "Project not found for dir \(dir)"])
             }
             for check in project.statusChecks {
-                print("\(check.name ?? "-")\tprocess=\(check.process)\tcommand=\(check.command)\tinterval=\(check.interval)\ttimeout=\(check.timeout)\ton-fail=\(check.onFail.rawValue)")
+                print(
+                    "\(check.name ?? "-")\tprocess=\(check.process)\tcommand=\(check.command)\tinterval=\(check.interval)\ttimeout=\(check.timeout)\ton-fail=\(check.onFail.rawValue)"
+                )
             }
         default:
-            throw NSError(domain: "mx.cli", code: 2, userInfo: [NSLocalizedDescriptionKey: "Unknown action: \(args[3]). Use: project status-check add|remove|list"])
+            throw NSError(
+                domain: "mx.cli", code: 2,
+                userInfo: [NSLocalizedDescriptionKey: "Unknown action: \(args[3]). Use: project status-check add|remove|list"])
         }
     }
 
@@ -227,25 +232,22 @@ struct CLI {
         case "add":
             let name = optionalValue(for: "--name")
             let url = try value(for: "--url")
-            try orchestrator.updateProjectConfig(projectID: projectID) { config in
-                config.browserSessions.append(BrowserSession(name: name, url: url))
+            try orchestrator.updateProjectConfig(projectID: projectID) { config in config.browserSessions.append(BrowserSession(name: name, url: url))
             }
             print("Added browser session \(name ?? url) to \(dir)")
         case "remove":
             let url = try value(for: "--url")
-            try orchestrator.updateProjectConfig(projectID: projectID) { config in
-                config.browserSessions.removeAll { $0.url == url }
-            }
+            try orchestrator.updateProjectConfig(projectID: projectID) { config in config.browserSessions.removeAll { $0.url == url } }
             print("Removed browser session \(url) from \(dir)")
         case "list":
             guard let project = try orchestrator.project(id: projectID) else {
                 throw NSError(domain: "mx.cli", code: 2, userInfo: [NSLocalizedDescriptionKey: "Project not found for dir \(dir)"])
             }
-            for session in project.browserSessions {
-                print("\(session.name ?? "-")\t\(session.url ?? "-")")
-            }
+            for session in project.browserSessions { print("\(session.name ?? "-")\t\(session.url ?? "-")") }
         default:
-            throw NSError(domain: "mx.cli", code: 2, userInfo: [NSLocalizedDescriptionKey: "Unknown action: \(args[3]). Use: project browser-session add|remove|list"])
+            throw NSError(
+                domain: "mx.cli", code: 2,
+                userInfo: [NSLocalizedDescriptionKey: "Unknown action: \(args[3]). Use: project browser-session add|remove|list"])
         }
     }
 
@@ -253,7 +255,10 @@ struct CLI {
         guard args.count >= 3 else {
             throw NSError(
                 domain: "mx.cli", code: 2,
-                userInfo: [NSLocalizedDescriptionKey: "Missing workspace action. Use: workspace list|create|import|update|launch|restart|up|stop|archive|focus"])
+                userInfo: [
+                    NSLocalizedDescriptionKey:
+                        "Missing workspace action. Use: workspace list|create|import|update|launch|restart|up|stop|archive|focus"
+                ])
         }
         switch args[2] {
         case "list":
@@ -261,9 +266,9 @@ struct CLI {
             let projectID = normalizePath(projectDir)
             let workspaces = try orchestrator.listWorkspaces(projectID: projectID, includeArchived: args.contains("--all"))
             for ws in workspaces {
-                let flags = [ws.isDefault ? "default" : nil, ws.isRunning ? "running" : nil, ws.isArchived ? "archived" : nil, !ws.isActive ? "inactive" : nil]
-                    .compactMap { $0 }
-                    .joined(separator: ",")
+                let flags = [
+                    ws.isDefault ? "default" : nil, ws.isRunning ? "running" : nil, ws.isArchived ? "archived" : nil, !ws.isActive ? "inactive" : nil,
+                ].compactMap { $0 }.joined(separator: ",")
                 print("\(ws.name)\t\(ws.dir)\t\(flags)")
             }
         case "create":
@@ -297,11 +302,7 @@ struct CLI {
             if let existing = try orchestrator.store.workspace(dir: normalizedImportDir), !existing.isArchived {
                 // Workspace already exists — update title/tooltip in place.
                 if title != nil || tooltip != nil {
-                    try orchestrator.updateWorkspaceMetadata(
-                        workspaceID: existing.id,
-                        title: title,
-                        tooltip: tooltip != nil ? .some(tooltip) : nil
-                    )
+                    try orchestrator.updateWorkspaceMetadata(workspaceID: existing.id, title: title, tooltip: tooltip != nil ? .some(tooltip) : nil)
                 }
                 workspace = try orchestrator.store.workspace(id: existing.id) ?? existing
                 print("Workspace already exists: \(workspace.name)\t\(workspace.dir)")
@@ -314,7 +315,7 @@ struct CLI {
                 workspace = created
                 print("Created workspace \(workspace.name)\t\(workspace.dir)")
             }
-            if let _ = inferCodingAgentProvider() {
+            if inferCodingAgentProvider() != nil {
                 try fireAgentEvent(orchestrator: orchestrator, workspaceID: workspace.id, status: .spinning)
                 print("Agent start: workspace=\(workspace.id)")
             }
@@ -336,20 +337,15 @@ struct CLI {
             let activateFlag = args.contains("--active")
             let deactivateFlag = args.contains("--inactive")
             if activateFlag && deactivateFlag {
-                throw NSError(
-                    domain: "mx.cli", code: 2,
-                    userInfo: [NSLocalizedDescriptionKey: "Use either --active or --inactive, but not both."])
+                throw NSError(domain: "mx.cli", code: 2, userInfo: [NSLocalizedDescriptionKey: "Use either --active or --inactive, but not both."])
             }
             let tooltipValue = optionalValueAllowingMissingValue(for: "--tooltip")
             if args.contains("--tooltip"), tooltipValue == nil {
-                throw NSError(
-                    domain: "mx.cli", code: 2,
-                    userInfo: [NSLocalizedDescriptionKey: "Missing required value for --tooltip"])
+                throw NSError(domain: "mx.cli", code: 2, userInfo: [NSLocalizedDescriptionKey: "Missing required value for --tooltip"])
             }
             if shouldClearTooltip, args.contains("--tooltip") {
                 throw NSError(
-                    domain: "mx.cli", code: 2,
-                    userInfo: [NSLocalizedDescriptionKey: "Use either --tooltip <text> or --clear-tooltip, but not both."])
+                    domain: "mx.cli", code: 2, userInfo: [NSLocalizedDescriptionKey: "Use either --tooltip <text> or --clear-tooltip, but not both."])
             }
             let tooltipUpdate: String??
             if shouldClearTooltip {
@@ -363,13 +359,14 @@ struct CLI {
             guard title != nil || branch != nil || directoryName != nil || tooltipUpdate != nil || activeUpdate != nil else {
                 throw NSError(
                     domain: "mx.cli", code: 2,
-                    userInfo: [NSLocalizedDescriptionKey: "No updates provided. Use one or more of --title, --branch, --directory-name/--dirname/--dir-name, --tooltip, --clear-tooltip, --active, or --inactive."])
+                    userInfo: [
+                        NSLocalizedDescriptionKey:
+                            "No updates provided. Use one or more of --title, --branch, --directory-name/--dirname/--dir-name, --tooltip, --clear-tooltip, --active, or --inactive."
+                    ])
             }
             try orchestrator.updateWorkspaceMetadata(
                 workspaceID: id, title: title, branch: branch, directoryName: directoryName, tooltip: tooltipUpdate)
-            if let activeUpdate {
-                try orchestrator.updateWorkspaceActive(workspaceID: id, isActive: activeUpdate)
-            }
+            if let activeUpdate { try orchestrator.updateWorkspaceActive(workspaceID: id, isActive: activeUpdate) }
             guard let updated = try orchestrator.store.workspace(id: id) else {
                 throw NSError(domain: "mx.cli", code: 2, userInfo: [NSLocalizedDescriptionKey: "Workspace not found for id \(id)"])
             }
@@ -391,14 +388,10 @@ struct CLI {
                 try orchestrator.updateWorkspaceTooltip(workspaceID: id, tooltip: tooltip)
             }
             try orchestrator.upWorkspace(workspaceID: id, restartIfRunning: shouldRestartIfRunning, background: !shouldFocus)
-            if shouldFocus {
-                try orchestrator.focusWorkspace(workspaceID: id)
-            }
+            if shouldFocus { try orchestrator.focusWorkspace(workspaceID: id) }
             print("Workspace is running \(id)")
-            if tooltipFlagPresent {
-                requestTooltipOverlayDisplay()
-            }
-            if let _ = inferCodingAgentProvider() {
+            if tooltipFlagPresent { requestTooltipOverlayDisplay() }
+            if inferCodingAgentProvider() != nil {
                 try fireAgentEvent(orchestrator: orchestrator, workspaceID: id, status: .done)
                 print("Agent stop: workspace=\(id)")
             }
@@ -437,32 +430,30 @@ struct CLI {
         guard let workspace = try orchestrator.store.workspace(dir: normalizedDir) else {
             throw NSError(
                 domain: "mx.cli", code: 2,
-                userInfo: [NSLocalizedDescriptionKey: "Workspace not found at: \(normalizedDir). Use --dir <path> to specify a different workspace directory."])
+                userInfo: [
+                    NSLocalizedDescriptionKey:
+                        "Workspace not found at: \(normalizedDir). Use --dir <path> to specify a different workspace directory."
+                ])
         }
         return workspace.id
     }
 
     private func runDiscover(orchestrator: MuxyOrchestrator) throws {
         guard args.count == 2 else {
-            throw NSError(
-                domain: "mx.cli", code: 2,
-                userInfo: [NSLocalizedDescriptionKey: "`mx discover` does not take any flags or arguments."])
+            throw NSError(domain: "mx.cli", code: 2, userInfo: [NSLocalizedDescriptionKey: "`mx discover` does not take any flags or arguments."])
         }
         let workspaces = try orchestrator.scanAndCreateWorkspacesFromWorktrees(projectID: nil)
         if workspaces.isEmpty {
             print("No new workspaces created")
         } else {
             print("Created \(workspaces.count) workspace(s):")
-            for ws in workspaces {
-                print("\(ws.name)\t\(ws.dir)")
-            }
+            for ws in workspaces { print("\(ws.name)\t\(ws.dir)") }
         }
     }
 
     private func runSettingsSubcommand(orchestrator: MuxyOrchestrator) throws {
         guard args.count >= 3 else {
-            throw NSError(
-                domain: "mx.cli", code: 2, userInfo: [NSLocalizedDescriptionKey: "Missing settings action. Use: settings get|set|reset"])
+            throw NSError(domain: "mx.cli", code: 2, userInfo: [NSLocalizedDescriptionKey: "Missing settings action. Use: settings get|set|reset"])
         }
 
         switch args[2] {
@@ -476,12 +467,6 @@ struct CLI {
             } else if args.contains("--gui-hotkey") {
                 let current = try orchestrator.guiHotkey()
                 print("gui-hotkey\t\(current)")
-            } else if args.contains("--gui-next-shortcut") {
-                let current = try orchestrator.guiNextShortcut()
-                print("gui-next-shortcut\t\(current)")
-            } else if args.contains("--gui-prev-shortcut") {
-                let current = try orchestrator.guiPreviousShortcut()
-                print("gui-prev-shortcut\t\(current)")
             } else if args.contains("--gui-add-project-shortcut") {
                 let current = try orchestrator.guiAddProjectShortcut()
                 print("gui-add-project-shortcut\t\(current)")
@@ -491,6 +476,12 @@ struct CLI {
             } else if args.contains("--gui-reload-shortcut") {
                 let current = try orchestrator.guiReloadShortcut()
                 print("gui-reload-shortcut\t\(current)")
+            } else if args.contains("--gui-next-shortcut") {
+                let current = try orchestrator.guiNextShortcut()
+                print("gui-next-shortcut\t\(current)")
+            } else if args.contains("--gui-prev-shortcut") {
+                let current = try orchestrator.guiPreviousShortcut()
+                print("gui-prev-shortcut\t\(current)")
             } else if args.contains("--gui-open-editor-shortcut") {
                 let current = try orchestrator.guiOpenEditorShortcut()
                 print("gui-open-editor-shortcut\t\(current)")
@@ -514,7 +505,7 @@ struct CLI {
                     domain: "mx.cli", code: 2,
                     userInfo: [
                         NSLocalizedDescriptionKey:
-                            "Missing setting flag. Use: settings get --editor|--port-range|--gui-hotkey|--gui-next-shortcut|--gui-prev-shortcut|--gui-add-project-shortcut|--gui-add-workspace-shortcut|--gui-reload-shortcut|--gui-open-editor-shortcut|--gui-open-terminal-shortcut|--gui-open-finder-shortcut|--gui-open-settings-shortcut|--iterm-focus-pulse-color|--iterm-focus-pulse-enabled"
+                            "Missing setting flag. Use: settings get --editor|--port-range|--gui-hotkey|--gui-add-project-shortcut|--gui-add-workspace-shortcut|--gui-reload-shortcut|--gui-next-shortcut|--gui-prev-shortcut|--gui-open-editor-shortcut|--gui-open-terminal-shortcut|--gui-open-finder-shortcut|--gui-open-settings-shortcut|--iterm-focus-pulse-color|--iterm-focus-pulse-enabled"
                     ])
             }
 
@@ -540,14 +531,6 @@ struct CLI {
                 let spec = try HotkeySpec.parse(raw)
                 try orchestrator.setGUIHotkey(spec.normalized)
                 print("Updated gui-hotkey\t\(spec.normalized)")
-            } else if let raw = optionalValue(for: "--gui-next-shortcut") {
-                let spec = try HotkeySpec.parse(raw)
-                try orchestrator.setGUINextShortcut(spec.normalized)
-                print("Updated gui-next-shortcut\t\(spec.normalized)")
-            } else if let raw = optionalValue(for: "--gui-prev-shortcut") {
-                let spec = try HotkeySpec.parse(raw)
-                try orchestrator.setGUIPreviousShortcut(spec.normalized)
-                print("Updated gui-prev-shortcut\t\(spec.normalized)")
             } else if let raw = optionalValue(for: "--gui-add-project-shortcut") {
                 let spec = try HotkeySpec.parse(raw)
                 try orchestrator.setGUIAddProjectShortcut(spec.normalized)
@@ -560,6 +543,14 @@ struct CLI {
                 let spec = try HotkeySpec.parse(raw)
                 try orchestrator.setGUIReloadShortcut(spec.normalized)
                 print("Updated gui-reload-shortcut\t\(spec.normalized)")
+            } else if let raw = optionalValue(for: "--gui-next-shortcut") {
+                let spec = try HotkeySpec.parse(raw)
+                try orchestrator.setGUINextShortcut(spec.normalized)
+                print("Updated gui-next-shortcut\t\(spec.normalized)")
+            } else if let raw = optionalValue(for: "--gui-prev-shortcut") {
+                let spec = try HotkeySpec.parse(raw)
+                try orchestrator.setGUIPreviousShortcut(spec.normalized)
+                print("Updated gui-prev-shortcut\t\(spec.normalized)")
             } else if let raw = optionalValue(for: "--gui-open-editor-shortcut") {
                 let spec = try HotkeySpec.parse(raw)
                 try orchestrator.setGUIOpenEditorShortcut(spec.normalized)
@@ -588,8 +579,7 @@ struct CLI {
             } else if let raw = optionalValue(for: "--iterm-focus-pulse-enabled") {
                 guard raw == "0" || raw == "1" else {
                     throw NSError(
-                        domain: "mx.cli", code: 2,
-                        userInfo: [NSLocalizedDescriptionKey: "Invalid value: \(raw). Use 1 to enable or 0 to disable."])
+                        domain: "mx.cli", code: 2, userInfo: [NSLocalizedDescriptionKey: "Invalid value: \(raw). Use 1 to enable or 0 to disable."])
                 }
                 try orchestrator.setItermFocusPulseEnabled(raw == "1")
                 print("Updated iterm-focus-pulse-enabled\t\(raw)")
@@ -598,7 +588,7 @@ struct CLI {
                     domain: "mx.cli", code: 2,
                     userInfo: [
                         NSLocalizedDescriptionKey:
-                            "Missing setting flag/value. Use: settings set --editor <value>|--port-range <start>-<end>|--gui-hotkey <spec>|--gui-next-shortcut <spec>|--gui-prev-shortcut <spec>|--gui-add-project-shortcut <spec>|--gui-add-workspace-shortcut <spec>|--gui-reload-shortcut <spec>|--gui-open-editor-shortcut <spec>|--gui-open-terminal-shortcut <spec>|--gui-open-finder-shortcut <spec>|--gui-open-settings-shortcut <spec>|--iterm-focus-pulse-color <r,g,b>|--iterm-focus-pulse-enabled <0|1>"
+                            "Missing setting flag/value. Use: settings set --editor <value>|--port-range <start>-<end>|--gui-hotkey <spec>|--gui-add-project-shortcut <spec>|--gui-add-workspace-shortcut <spec>|--gui-reload-shortcut <spec>|--gui-next-shortcut <spec>|--gui-prev-shortcut <spec>|--gui-open-editor-shortcut <spec>|--gui-open-terminal-shortcut <spec>|--gui-open-finder-shortcut <spec>|--gui-open-settings-shortcut <spec>|--iterm-focus-pulse-color <r,g,b>|--iterm-focus-pulse-enabled <0|1>"
                     ])
             }
 
@@ -606,12 +596,6 @@ struct CLI {
             if args.contains("--gui-hotkey") {
                 try orchestrator.setGUIHotkey(nil)
                 print("Reset gui-hotkey\t\(SettingsKey.defaultGUIHotkey)")
-            } else if args.contains("--gui-next-shortcut") {
-                try orchestrator.setGUINextShortcut(nil)
-                print("Reset gui-next-shortcut\t\(SettingsKey.defaultGUINextShortcut)")
-            } else if args.contains("--gui-prev-shortcut") {
-                try orchestrator.setGUIPreviousShortcut(nil)
-                print("Reset gui-prev-shortcut\t\(SettingsKey.defaultGUIPreviousShortcut)")
             } else if args.contains("--gui-add-project-shortcut") {
                 try orchestrator.setGUIAddProjectShortcut(nil)
                 print("Reset gui-add-project-shortcut\t\(SettingsKey.defaultGUIAddProjectShortcut)")
@@ -621,6 +605,12 @@ struct CLI {
             } else if args.contains("--gui-reload-shortcut") {
                 try orchestrator.setGUIReloadShortcut(nil)
                 print("Reset gui-reload-shortcut\t\(SettingsKey.defaultGUIReloadShortcut)")
+            } else if args.contains("--gui-next-shortcut") {
+                try orchestrator.setGUINextShortcut(nil)
+                print("Reset gui-next-shortcut\t\(SettingsKey.defaultGUINextShortcut)")
+            } else if args.contains("--gui-prev-shortcut") {
+                try orchestrator.setGUIPreviousShortcut(nil)
+                print("Reset gui-prev-shortcut\t\(SettingsKey.defaultGUIPreviousShortcut)")
             } else if args.contains("--gui-open-editor-shortcut") {
                 try orchestrator.setGUIOpenEditorShortcut(nil)
                 print("Reset gui-open-editor-shortcut\t\(SettingsKey.defaultGUIOpenEditorShortcut)")
@@ -651,7 +641,7 @@ struct CLI {
                     domain: "mx.cli", code: 2,
                     userInfo: [
                         NSLocalizedDescriptionKey:
-                            "Missing setting flag. Use: settings reset --editor|--port-range|--gui-hotkey|--gui-next-shortcut|--gui-prev-shortcut|--gui-add-project-shortcut|--gui-add-workspace-shortcut|--gui-reload-shortcut|--gui-open-editor-shortcut|--gui-open-terminal-shortcut|--gui-open-finder-shortcut|--gui-open-settings-shortcut|--iterm-focus-pulse-color|--iterm-focus-pulse-enabled"
+                            "Missing setting flag. Use: settings reset --editor|--port-range|--gui-hotkey|--gui-add-project-shortcut|--gui-add-workspace-shortcut|--gui-reload-shortcut|--gui-next-shortcut|--gui-prev-shortcut|--gui-open-editor-shortcut|--gui-open-terminal-shortcut|--gui-open-finder-shortcut|--gui-open-settings-shortcut|--iterm-focus-pulse-color|--iterm-focus-pulse-enabled"
                     ])
             }
 
@@ -682,7 +672,10 @@ struct CLI {
         guard args.count >= 3, args[2] == "event" else {
             throw NSError(
                 domain: "mx.cli", code: 2,
-                userInfo: [NSLocalizedDescriptionKey: "Missing agent action. Use: agent event --type init|start|waiting|done|stop [--dir <path>] [--provider iterm2|codex]"])
+                userInfo: [
+                    NSLocalizedDescriptionKey:
+                        "Missing agent action. Use: agent event --type init|start|waiting|done|stop [--dir <path>] [--provider iterm2|codex]"
+                ])
         }
         let hookType = try value(for: "--type")
         let dir = optionalValue(for: "--dir") ?? FileManager.default.currentDirectoryPath
@@ -739,49 +732,46 @@ struct CLI {
             let wsID = try ensureWorkspace()
             try orchestrator.registerAgentWindow(
                 workspaceID: wsID, provider: provider, label: label, itermSessionID: itermSessionID, codexThreadID: codexThreadID,
-                yabaiWindowID: yabaiWindowID,
-                status: .idle)
+                yabaiWindowID: yabaiWindowID, status: .idle)
             print("Agent init: workspace=\(wsID)")
             fireAgentEventNotification()
 
         case "start":
             let wsID = try ensureWorkspace()
             try orchestrator.updateAgentWindowStatus(
-                workspaceID: wsID, provider: provider, itermSessionID: itermSessionID, codexThreadID: codexThreadID,
-                yabaiWindowID: yabaiWindowID, label: label,
-                status: .spinning)
+                workspaceID: wsID, provider: provider, itermSessionID: itermSessionID, codexThreadID: codexThreadID, yabaiWindowID: yabaiWindowID,
+                label: label, status: .spinning)
             print("Agent start: workspace=\(wsID)")
             fireAgentEventNotification()
 
         case "waiting":
             let wsID = try ensureWorkspace()
             try orchestrator.updateAgentWindowStatus(
-                workspaceID: wsID, provider: provider, itermSessionID: itermSessionID, codexThreadID: codexThreadID,
-                yabaiWindowID: yabaiWindowID, label: label,
-                status: .waiting)
+                workspaceID: wsID, provider: provider, itermSessionID: itermSessionID, codexThreadID: codexThreadID, yabaiWindowID: yabaiWindowID,
+                label: label, status: .waiting)
             print("Agent waiting: workspace=\(wsID)")
             fireAgentEventNotification()
 
         case "done":
             let wsID = try ensureWorkspace()
             try orchestrator.updateAgentWindowStatus(
-                workspaceID: wsID, provider: provider, itermSessionID: itermSessionID, codexThreadID: codexThreadID,
-                yabaiWindowID: yabaiWindowID, label: label,
-                status: .done)
+                workspaceID: wsID, provider: provider, itermSessionID: itermSessionID, codexThreadID: codexThreadID, yabaiWindowID: yabaiWindowID,
+                label: label, status: .done)
             print("Agent done: workspace=\(wsID)")
             fireAgentEventNotification()
 
         case "stop":
             let wsID = try ensureWorkspace()
             try orchestrator.updateAgentWindowStatus(
-                workspaceID: wsID, provider: provider, itermSessionID: itermSessionID, codexThreadID: codexThreadID,
-                yabaiWindowID: yabaiWindowID, label: label,
-                status: .done)
+                workspaceID: wsID, provider: provider, itermSessionID: itermSessionID, codexThreadID: codexThreadID, yabaiWindowID: yabaiWindowID,
+                label: label, status: .done)
             print("Agent stop: workspace=\(wsID)")
             fireAgentEventNotification()
 
         default:
-            throw NSError(domain: "mx.cli", code: 2, userInfo: [NSLocalizedDescriptionKey: "Unknown event type '\(hookType)'. Use: init|start|waiting|done|stop"])
+            throw NSError(
+                domain: "mx.cli", code: 2,
+                userInfo: [NSLocalizedDescriptionKey: "Unknown event type '\(hookType)'. Use: init|start|waiting|done|stop"])
         }
     }
 
@@ -801,22 +791,15 @@ struct CLI {
         return nil
     }
 
-    private func hasKnownCodingAgentMarkers(env: [String: String]) -> Bool {
-        env["CODEX_THREAD_ID"] != nil || env["CLAUDE_CODE_ENTRYPOINT"] != nil
-    }
+    private func hasKnownCodingAgentMarkers(env: [String: String]) -> Bool { env["CODEX_THREAD_ID"] != nil || env["CLAUDE_CODE_ENTRYPOINT"] != nil }
 
     private func inferredAgentLabel(env: [String: String], provider: AgentProvider) -> String? {
         let bundleID = env["__CFBundleIdentifier"] ?? ""
         switch provider {
-        case .codex:
-            return "Codex App"
+        case .codex: return "Codex App"
         case .iterm2:
-            if bundleID == "com.googlecode.iterm2", env["CODEX_THREAD_ID"] != nil {
-                return "Codex CLI"
-            }
-            if bundleID == "com.googlecode.iterm2", env["CLAUDE_CODE_ENTRYPOINT"] != nil {
-                return "Claude Code CLI"
-            }
+            if bundleID == "com.googlecode.iterm2", env["CODEX_THREAD_ID"] != nil { return "Codex CLI" }
+            if bundleID == "com.googlecode.iterm2", env["CLAUDE_CODE_ENTRYPOINT"] != nil { return "Claude Code CLI" }
             return nil
         }
     }
@@ -843,27 +826,20 @@ struct CLI {
         }
         let codexThreadID = provider == .codex ? env["CODEX_THREAD_ID"] : nil
         let yabaiWindowID: Int? = {
-            guard let json = try? Shell.runAndCapture(["yabai", "-m", "query", "--windows", "--window"]),
-                  let data = json.data(using: .utf8),
-                  let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                  let id = obj["id"] as? Int
+            guard let json = try? Shell.runAndCapture(["yabai", "-m", "query", "--windows", "--window"]), let data = json.data(using: .utf8),
+                let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any], let id = obj["id"] as? Int
             else { return nil }
             return id
         }()
         try orchestrator.updateAgentWindowStatus(
-            workspaceID: workspaceID, provider: provider,
-            itermSessionID: itermSessionID, codexThreadID: codexThreadID,
-            yabaiWindowID: yabaiWindowID, label: label, status: status)
+            workspaceID: workspaceID, provider: provider, itermSessionID: itermSessionID, codexThreadID: codexThreadID, yabaiWindowID: yabaiWindowID,
+            label: label, status: status)
         fireAgentEventNotification()
     }
 
     private func requestTooltipOverlayDisplay() {
         DistributedNotificationCenter.default().postNotificationName(
-            IPCNotification.showTooltipOverlay,
-            object: nil,
-            userInfo: nil,
-            options: [.deliverImmediately]
-        )
+            IPCNotification.showTooltipOverlay, object: nil, userInfo: nil, options: [.deliverImmediately])
     }
 
     private func normalizePath(_ path: String) -> String { URL(fileURLWithPath: path).resolvingSymlinksInPath().standardizedFileURL.path }
@@ -880,11 +856,11 @@ struct CLI {
               mx settings get --editor
               mx settings get --port-range
               mx settings get --gui-hotkey
-              mx settings get --gui-next-shortcut
-              mx settings get --gui-prev-shortcut
               mx settings get --gui-add-project-shortcut
               mx settings get --gui-add-workspace-shortcut
               mx settings get --gui-reload-shortcut
+              mx settings get --gui-next-shortcut
+              mx settings get --gui-prev-shortcut
               mx settings get --gui-open-editor-shortcut
               mx settings get --gui-open-terminal-shortcut
               mx settings get --gui-open-finder-shortcut
@@ -893,11 +869,11 @@ struct CLI {
               mx settings set --editor none|vscode|cursor|windsurf|vim
               mx settings set --port-range <start>-<end>
               mx settings set --gui-hotkey <spec>
-              mx settings set --gui-next-shortcut <spec>
-              mx settings set --gui-prev-shortcut <spec>
               mx settings set --gui-add-project-shortcut <spec>
               mx settings set --gui-add-workspace-shortcut <spec>
               mx settings set --gui-reload-shortcut <spec>
+              mx settings set --gui-next-shortcut <spec>
+              mx settings set --gui-prev-shortcut <spec>
               mx settings set --gui-open-editor-shortcut <spec>
               mx settings set --gui-open-terminal-shortcut <spec>
               mx settings set --gui-open-finder-shortcut <spec>
@@ -905,11 +881,11 @@ struct CLI {
               mx settings reset --editor
               mx settings reset --port-range
               mx settings reset --gui-hotkey
-              mx settings reset --gui-next-shortcut
-              mx settings reset --gui-prev-shortcut
               mx settings reset --gui-add-project-shortcut
               mx settings reset --gui-add-workspace-shortcut
               mx settings reset --gui-reload-shortcut
+              mx settings reset --gui-next-shortcut
+              mx settings reset --gui-prev-shortcut
               mx settings reset --gui-open-editor-shortcut
               mx settings reset --gui-open-terminal-shortcut
               mx settings reset --gui-open-finder-shortcut

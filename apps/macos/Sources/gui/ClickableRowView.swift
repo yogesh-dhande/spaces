@@ -4,7 +4,10 @@ import AppKit
 /// Use `isInteractive = true` when a click action is attached; hover effects are skipped otherwise.
 final class ClickableRowView: NSView {
     var isInteractive: Bool {
-        didSet { updateBackgroundColor(); updateTrackingAreas() }
+        didSet {
+            updateBackgroundColor()
+            updateTrackingAreas()
+        }
     }
 
     private var isHovered = false
@@ -22,9 +25,7 @@ final class ClickableRowView: NSView {
 
     // MARK: - Background
 
-    private func updateBackgroundColor() {
-        layer?.backgroundColor = resolvedBackground().cgColor
-    }
+    private func updateBackgroundColor() { layer?.backgroundColor = resolvedBackground().cgColor }
 
     private func resolvedBackground() -> NSColor {
         guard isInteractive && isHovered else { return .quaternaryLabelColor }
@@ -46,13 +47,10 @@ final class ClickableRowView: NSView {
 
     override func updateTrackingAreas() {
         super.updateTrackingAreas()
-        trackingAreas.forEach { removeTrackingArea($0) }
+        for area in trackingAreas { removeTrackingArea(area) }
         guard isInteractive else { return }
-        addTrackingArea(NSTrackingArea(
-            rect: bounds,
-            options: [.mouseEnteredAndExited, .activeInKeyWindow, .inVisibleRect],
-            owner: self,
-            userInfo: nil))
+        addTrackingArea(
+            NSTrackingArea(rect: bounds, options: [.mouseEnteredAndExited, .activeInKeyWindow, .inVisibleRect], owner: self, userInfo: nil))
     }
 
     // MARK: - Hover events
@@ -72,7 +70,10 @@ final class ClickableRowView: NSView {
     }
 
     override func resetCursorRects() {
-        guard isInteractive else { super.resetCursorRects(); return }
+        guard isInteractive else {
+            super.resetCursorRects()
+            return
+        }
         addCursorRect(bounds, cursor: .pointingHand)
     }
 }

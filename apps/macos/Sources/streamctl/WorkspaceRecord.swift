@@ -16,8 +16,8 @@ public struct WorkspaceRecord: Codable, Sendable {
     public let tooltip: String?
 
     public init(
-        id: String, projectID: String, title: String, dir: String, dirname: String?, branch: String?, targetBranch: String? = nil, isDefault: Bool, isArchived: Bool,
-        isActive: Bool = true, isRunning: Bool, lastLaunchedAt: String?, tooltip: String? = nil
+        id: String, projectID: String, title: String, dir: String, dirname: String?, branch: String?, targetBranch: String? = nil, isDefault: Bool,
+        isArchived: Bool, isActive: Bool = true, isRunning: Bool, lastLaunchedAt: String?, tooltip: String? = nil
     ) {
         self.id = id
         self.projectID = projectID
@@ -37,8 +37,8 @@ public struct WorkspaceRecord: Codable, Sendable {
     public var name: String { title }
 
     public init(
-        id: String, projectID: String, name: String, dir: String, dirname: String?, branch: String?, targetBranch: String? = nil, isDefault: Bool, isArchived: Bool,
-        isActive: Bool = true, isRunning: Bool, lastLaunchedAt: String?, tooltip: String? = nil
+        id: String, projectID: String, name: String, dir: String, dirname: String?, branch: String?, targetBranch: String? = nil, isDefault: Bool,
+        isArchived: Bool, isActive: Bool = true, isRunning: Bool, lastLaunchedAt: String?, tooltip: String? = nil
     ) {
         self.init(
             id: id, projectID: projectID, title: name, dir: dir, dirname: dirname, branch: branch, targetBranch: targetBranch, isDefault: isDefault,

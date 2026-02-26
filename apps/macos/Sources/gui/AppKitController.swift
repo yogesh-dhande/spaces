@@ -75,12 +75,12 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     private var hotkeyRefs: [UInt32: EventHotKeyRef] = [:]
     private var toggleShortcutSpec: HotkeySpec?
     private var shortcutMonitor: Any?
-    private var nextShortcutSpec: HotkeySpec?
-    private var previousShortcutSpec: HotkeySpec?
     private var openEditorShortcutSpec: HotkeySpec?
     private var openTerminalShortcutSpec: HotkeySpec?
     private var openFinderShortcutSpec: HotkeySpec?
     private var openSettingsShortcutSpec: HotkeySpec?
+    private var nextShortcutSpec: HotkeySpec?
+    private var previousShortcutSpec: HotkeySpec?
     private var tooltipShortcutSpec: HotkeySpec?
     private var shortcutButtonsBySetting: [String: NSButton] = [:]
     private var activeShortcutCaptureSetting: ShortcutSetting?
@@ -162,16 +162,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         buildMainMenu()
         loadShortcutSpecs()
         setupGlobalHotkey()
-        showLoadingPlaceholder(
-            message: "Loading projects and workspaces...",
-            detail: "Muxy is preparing your workspace data."
-        )
+        showLoadingPlaceholder(message: "Loading projects and workspaces...", detail: "Muxy is preparing your workspace data.")
         setupShortcutMonitor()
         setupTooltipIPCObserver()
         setupAgentEventIPCObserver()
-        Task { @MainActor [weak self] in
-            await self?.loadInitialSidebarData()
-        }
+        Task { @MainActor [weak self] in await self?.loadInitialSidebarData() }
     }
 
     public func applicationWillTerminate(_ notification: Notification) {
@@ -197,21 +192,13 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
     private func setupTooltipIPCObserver() {
         tooltipIPCObserver = DistributedNotificationCenter.default().addObserver(
-            forName: IPCNotification.showTooltipOverlay,
-            object: nil,
-            queue: .main
-        ) { [weak self] _ in
-            Task { @MainActor [weak self] in
-                self?.refreshTooltipOverlay()
-            }
-        }
+            forName: IPCNotification.showTooltipOverlay, object: nil, queue: .main
+        ) { [weak self] _ in Task { @MainActor [weak self] in self?.refreshTooltipOverlay() } }
     }
 
     private func setupAgentEventIPCObserver() {
         agentEventIPCObserver = DistributedNotificationCenter.default().addObserver(
-            forName: IPCNotification.agentEventFired,
-            object: nil,
-            queue: .main
+            forName: IPCNotification.agentEventFired, object: nil, queue: .main
         ) { [weak self] _ in
             Task { @MainActor [weak self] in
                 self?.updateDashboardSidebarBadge()
@@ -234,14 +221,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                     if (refreshResult.didMutateDB || windowCountsChanged) && self.canReloadAfterBackgroundWorkspaceRefresh() {
                         self.requestSidebarReload()
                     }
-                case .failure(let error):
-                    self.showError(error)
+                case .failure(let error): self.showError(error)
                 }
-                do {
-                    try await Task.sleep(for: .seconds(PollingConstants.workspaceWindowRefreshInterval))
-                } catch {
-                    break
-                }
+                do { try await Task.sleep(for: .seconds(PollingConstants.workspaceWindowRefreshInterval)) } catch { break }
             }
         }
     }
@@ -254,18 +236,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 let result = await Self.runProcessMonitorSnapshot()
                 if Task.isCancelled { break }
                 switch result {
-                case .success(let didUpdate):
-                    if didUpdate && self.canReloadAfterBackgroundWorkspaceRefresh() {
-                        self.requestSidebarReload()
-                    }
-                case .failure:
-                    break
+                case .success(let didUpdate): if didUpdate && self.canReloadAfterBackgroundWorkspaceRefresh() { self.requestSidebarReload() }
+                case .failure: break
                 }
-                do {
-                    try await Task.sleep(for: .seconds(PollingConstants.processStatusCheckInterval))
-                } catch {
-                    break
-                }
+                do { try await Task.sleep(for: .seconds(PollingConstants.processStatusCheckInterval)) } catch { break }
             }
         }
     }
@@ -290,14 +264,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                         self.pendingWorktreeDiscoveryReload = false
                         self.requestSidebarReload()
                     }
-                case .failure:
-                    break
+                case .failure: break
                 }
-                do {
-                    try await Task.sleep(for: .seconds(PollingConstants.worktreeDiscoveryInterval))
-                } catch {
-                    break
-                }
+                do { try await Task.sleep(for: .seconds(PollingConstants.worktreeDiscoveryInterval)) } catch { break }
             }
         }
     }
@@ -307,11 +276,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         periodicSidebarMetadataRefreshTask = Task { @MainActor [weak self] in
             guard let self else { return }
             while !Task.isCancelled {
-                do {
-                    try await Task.sleep(for: .seconds(PollingConstants.sidebarMetadataRefreshInterval))
-                } catch {
-                    break
-                }
+                do { try await Task.sleep(for: .seconds(PollingConstants.sidebarMetadataRefreshInterval)) } catch { break }
                 if Task.isCancelled { break }
                 guard self.canReloadAfterBackgroundWorkspaceRefresh() else { continue }
                 // Catch external CLI edits (for example title/tooltip changes) that do not trigger other poller reloads.
@@ -326,9 +291,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             guard let self else { return }
             await self.performUpdateCheck()
             while !Task.isCancelled {
-                do {
-                    try await Task.sleep(for: .seconds(4 * 60 * 60))
-                } catch { break }
+                do { try await Task.sleep(for: .seconds(4 * 60 * 60)) } catch { break }
                 await self.performUpdateCheck()
             }
         }
@@ -376,18 +339,14 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         alert.addButton(withTitle: "Download & Install")
         alert.addButton(withTitle: "Later")
         let response = alert.runModal()
-        if response == .alertFirstButtonReturn {
-            performUpdate(info: info)
-        }
+        if response == .alertFirstButtonReturn { performUpdate(info: info) }
     }
 
     private func performUpdate(info: UpdateInfo) {
         Task {
             checkForUpdatesMenuItem?.title = "Downloading..."
             checkForUpdatesMenuItem?.isEnabled = false
-            do {
-                try await appUpdater.downloadAndInstall(from: info.downloadURL)
-            } catch {
+            do { try await appUpdater.downloadAndInstall(from: info.downloadURL) } catch {
                 checkForUpdatesMenuItem?.title = "Update Available: v\(info.version)"
                 checkForUpdatesMenuItem?.isEnabled = true
                 showError(error)
@@ -406,9 +365,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         case archive
     }
 
-    private struct WorkspaceLifecycleOutcome: Sendable {
-        let notice: String?
-    }
+    private struct WorkspaceLifecycleOutcome: Sendable { let notice: String? }
 
     private struct WorkspaceCreateInput: Sendable {
         let projectID: String
@@ -462,15 +419,13 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 let orchestrator = MuxyOrchestrator(store: store)
                 let result = try orchestrator.refreshAllWorkspaceWindows()
                 return .success(result)
-            } catch {
-                return .failure(error)
-            }
+            } catch { return .failure(error) }
         }.value
     }
 
-    nonisolated private static func runWorkspaceLifecycleAction(
-        _ action: WorkspaceLifecycleAction, workspaceID: String
-    ) async -> Result<WorkspaceLifecycleOutcome, Error> {
+    nonisolated private static func runWorkspaceLifecycleAction(_ action: WorkspaceLifecycleAction, workspaceID: String) async -> Result<
+        WorkspaceLifecycleOutcome, Error
+    > {
         await Task.detached(priority: .userInitiated) {
             do {
                 let db = try DatabaseLocator.defaultPath()
@@ -478,22 +433,17 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 let orchestrator = MuxyOrchestrator(store: store)
                 var notice: String?
                 switch action {
-                case .launch:
-                    try orchestrator.launchWorkspace(workspaceID: workspaceID)
-                case .restart:
-                    try orchestrator.restartWorkspace(workspaceID: workspaceID)
+                case .launch: try orchestrator.launchWorkspace(workspaceID: workspaceID)
+                case .restart: try orchestrator.restartWorkspace(workspaceID: workspaceID)
                 case .stop:
                     let outcome = try orchestrator.stopWorkspace(workspaceID: workspaceID)
                     if outcome.skippedStopScriptBecauseWorkspaceDirectoryMissing {
                         notice = "Workspace directory is missing. Muxy stopped the workspace and skipped its stop script."
                     }
-                case .archive:
-                    try orchestrator.archiveWorkspace(workspaceID: workspaceID)
+                case .archive: try orchestrator.archiveWorkspace(workspaceID: workspaceID)
                 }
                 return .success(.init(notice: notice))
-            } catch {
-                return .failure(error)
-            }
+            } catch { return .failure(error) }
         }.value
     }
 
@@ -504,23 +454,14 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 let store = try SQLiteStore(path: db)
                 let orchestrator = MuxyOrchestrator(store: store)
                 var workspace = try orchestrator.createWorkspace(
-                    projectID: input.projectID,
-                    name: input.name,
-                    branch: input.branch,
-                    targetBranch: input.targetBranch,
-                    directoryName: input.directoryName,
-                    runSetupScript: false,
-                    allowRemoteBranchLookup: input.allowRemoteBranchLookup)
+                    projectID: input.projectID, name: input.name, branch: input.branch, targetBranch: input.targetBranch,
+                    directoryName: input.directoryName, runSetupScript: false, allowRemoteBranchLookup: input.allowRemoteBranchLookup)
                 if let tooltip = input.tooltip {
                     try orchestrator.updateWorkspaceTooltip(workspaceID: workspace.id, tooltip: tooltip)
-                    if let updated = try orchestrator.store.workspace(id: workspace.id) {
-                        workspace = updated
-                    }
+                    if let updated = try orchestrator.store.workspace(id: workspace.id) { workspace = updated }
                 }
                 return .success(workspace)
-            } catch {
-                return .failure(error)
-            }
+            } catch { return .failure(error) }
         }.value
     }
 
@@ -547,9 +488,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                     project.statusChecks = input.statusChecks
                 }
                 return .success(record)
-            } catch {
-                return .failure(error)
-            }
+            } catch { return .failure(error) }
         }.value
     }
 
@@ -561,9 +500,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 let orchestrator = MuxyOrchestrator(store: store)
                 try orchestrator.removeProject(dir: projectDirectory)
                 return .success(())
-            } catch {
-                return .failure(error)
-            }
+            } catch { return .failure(error) }
         }.value
     }
 
@@ -575,9 +512,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 let orchestrator = MuxyOrchestrator(store: store)
                 try orchestrator.runWorkspaceSetup(workspaceID: workspaceID)
                 return .success(())
-            } catch {
-                return .failure(error)
-            }
+            } catch { return .failure(error) }
         }.value
     }
 
@@ -589,9 +524,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 let orchestrator = MuxyOrchestrator(store: store)
                 let options = try orchestrator.gitBranchOptions(projectID: projectID, includeLiveRemoteHeads: false)
                 return .success(options)
-            } catch {
-                return .failure(error)
-            }
+            } catch { return .failure(error) }
         }.value
     }
 
@@ -604,9 +537,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 let didUpdateProcessStates = try orchestrator.checkAndUpdateProcessStatuses()
                 let didRunStatusChecks = try orchestrator.runDueStatusChecksForRunningWorkspaces()
                 return .success(didUpdateProcessStates || didRunStatusChecks)
-            } catch {
-                return .failure(error)
-            }
+            } catch { return .failure(error) }
         }.value
     }
 
@@ -618,9 +549,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 let orchestrator = MuxyOrchestrator(store: store)
                 let created = try orchestrator.scanAndCreateWorkspacesFromWorktrees(projectID: nil)
                 return .success(created.count)
-            } catch {
-                return .failure(error)
-            }
+            } catch { return .failure(error) }
         }.value
     }
 
@@ -662,7 +591,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                         if workspace.isRunning {
                             let agentWindowsList = (try? orchestrator.agentWindows(workspaceID: workspace.id)) ?? []
                             let hasWaitingAgentWindow = agentWindowsList.contains { $0.status == .waiting }
-                            workspaceIndicatorStateByID[workspace.id] = (hasExitedProcess || hasFailedCheck || hasWaitingAgentWindow) ? .runningUnhealthy : .runningHealthy
+                            workspaceIndicatorStateByID[workspace.id] =
+                                (hasExitedProcess || hasFailedCheck || hasWaitingAgentWindow) ? .runningUnhealthy : .runningHealthy
                         } else {
                             workspaceIndicatorStateByID[workspace.id] = .idle
                         }
@@ -677,14 +607,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 }
                 return .success(
                     .init(
-                        config: config,
-                        projects: projects,
-                        workspacesByProject: workspacesByProject,
-                        gitActivityByWorkspaceID: gitActivityByWorkspaceID,
-                        workspaceIndicatorStateByID: workspaceIndicatorStateByID))
-            } catch {
-                return .failure(error)
-            }
+                        config: config, projects: projects, workspacesByProject: workspacesByProject,
+                        gitActivityByWorkspaceID: gitActivityByWorkspaceID, workspaceIndicatorStateByID: workspaceIndicatorStateByID))
+            } catch { return .failure(error) }
         }.value
     }
 
@@ -748,15 +673,13 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         content.addSubview(footerRow)
         NSLayoutConstraint.activate([
             splitView.leadingAnchor.constraint(equalTo: content.leadingAnchor), splitView.trailingAnchor.constraint(equalTo: content.trailingAnchor),
-            splitView.topAnchor.constraint(equalTo: content.topAnchor),
-            splitView.bottomAnchor.constraint(equalTo: footerSeparator.topAnchor),
+            splitView.topAnchor.constraint(equalTo: content.topAnchor), splitView.bottomAnchor.constraint(equalTo: footerSeparator.topAnchor),
             footerSeparator.leadingAnchor.constraint(equalTo: content.leadingAnchor),
             footerSeparator.trailingAnchor.constraint(equalTo: content.trailingAnchor),
             footerSeparator.bottomAnchor.constraint(equalTo: footerRow.topAnchor),
             footerRow.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 16),
             footerRow.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -16),
-            footerRow.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -6),
-            footerRow.heightAnchor.constraint(equalToConstant: 28),
+            footerRow.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -6), footerRow.heightAnchor.constraint(equalToConstant: 28),
         ])
         refreshWorkspaceShortcutFooterRow()
         window.contentView = content
@@ -779,8 +702,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let sectionHeader = sidebarSectionHeader(
             title: "Projects",
             actions: [
-                (symbol: showInactiveWorkspaces ? "eye.slash" : "eye", tooltip: showInactiveWorkspaces ? "Hide inactive workspaces" : "Show inactive workspaces", action: #selector(toggleInactiveWorkspaceVisibility)),
-                (symbol: "plus", tooltip: "New project", action: #selector(addProject)),
+                (
+                    symbol: showInactiveWorkspaces ? "eye.slash" : "eye",
+                    tooltip: showInactiveWorkspaces ? "Hide inactive workspaces" : "Show inactive workspaces",
+                    action: #selector(toggleInactiveWorkspaceVisibility)
+                ), (symbol: "plus", tooltip: "New project", action: #selector(addProject)),
             ])
         sectionHeader.translatesAutoresizingMaskIntoConstraints = false
         refreshInactiveVisibilityButton()
@@ -823,8 +749,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             sectionHeader.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -12),
             sectionHeader.topAnchor.constraint(equalTo: dashboardRow.bottomAnchor, constant: 10),
 
-            scroll.leadingAnchor.constraint(equalTo: container.leadingAnchor),
-            scroll.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+            scroll.leadingAnchor.constraint(equalTo: container.leadingAnchor), scroll.trailingAnchor.constraint(equalTo: container.trailingAnchor),
             scroll.topAnchor.constraint(equalTo: sectionHeader.bottomAnchor, constant: 6),
             scroll.bottomAnchor.constraint(equalTo: container.bottomAnchor),
         ])
@@ -846,10 +771,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         iconView.translatesAutoresizingMaskIntoConstraints = false
         iconView.setContentHuggingPriority(.required, for: .horizontal)
         iconView.setContentCompressionResistancePriority(.required, for: .horizontal)
-        NSLayoutConstraint.activate([
-            iconView.widthAnchor.constraint(equalToConstant: 18),
-            iconView.heightAnchor.constraint(equalToConstant: 18),
-        ])
+        NSLayoutConstraint.activate([iconView.widthAnchor.constraint(equalToConstant: 18), iconView.heightAnchor.constraint(equalToConstant: 18)])
 
         let settingsButton = sidebarRowIconButton(symbol: "gearshape", tooltip: "User settings", action: #selector(showSettings))
         let reloadButton = sidebarRowIconButton(symbol: "arrow.clockwise", tooltip: "Reload", action: #selector(reloadTapped))
@@ -867,10 +789,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
         row.addSubview(stack)
         NSLayoutConstraint.activate([
-            stack.leadingAnchor.constraint(equalTo: row.leadingAnchor),
-            stack.trailingAnchor.constraint(equalTo: row.trailingAnchor),
-            stack.topAnchor.constraint(equalTo: row.topAnchor),
-            stack.bottomAnchor.constraint(equalTo: row.bottomAnchor),
+            stack.leadingAnchor.constraint(equalTo: row.leadingAnchor), stack.trailingAnchor.constraint(equalTo: row.trailingAnchor),
+            stack.topAnchor.constraint(equalTo: row.topAnchor), stack.bottomAnchor.constraint(equalTo: row.bottomAnchor),
         ])
         return row
     }
@@ -899,7 +819,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         badge.drawsBackground = false
         badge.isHidden = true
         badge.translatesAutoresizingMaskIntoConstraints = false
-        NSLayoutConstraint.activate([badge.widthAnchor.constraint(greaterThanOrEqualToConstant: 18), badge.heightAnchor.constraint(equalToConstant: 14)])
+        NSLayoutConstraint.activate([
+            badge.widthAnchor.constraint(greaterThanOrEqualToConstant: 18), badge.heightAnchor.constraint(equalToConstant: 14),
+        ])
         dashboardRowBadge = badge
 
         let stack = NSStackView()
@@ -918,10 +840,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
         row.addSubview(stack)
         NSLayoutConstraint.activate([
-            stack.leadingAnchor.constraint(equalTo: row.leadingAnchor),
-            stack.trailingAnchor.constraint(equalTo: row.trailingAnchor),
-            stack.topAnchor.constraint(equalTo: row.topAnchor),
-            stack.bottomAnchor.constraint(equalTo: row.bottomAnchor),
+            stack.leadingAnchor.constraint(equalTo: row.leadingAnchor), stack.trailingAnchor.constraint(equalTo: row.trailingAnchor),
+            stack.topAnchor.constraint(equalTo: row.topAnchor), stack.bottomAnchor.constraint(equalTo: row.bottomAnchor),
         ])
 
         let click = NSClickGestureRecognizer(target: self, action: #selector(dashboardRowClicked))
@@ -929,9 +849,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         return row
     }
 
-    @objc private func dashboardRowClicked() {
-        showDashboardDetail()
-    }
+    @objc private func dashboardRowClicked() { showDashboardDetail() }
 
     private func updateDashboardRowAppearance() {
         guard let stack = dashboardRowStack else { return }
@@ -1002,14 +920,14 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                         detail = nil
                     }
                     let redChecks = allChecks.filter { $0.status == .failed }
-                    let eventDate: Date? = process.status == .exited
+                    let eventDate: Date? =
+                        process.status == .exited
                         ? process.exitedAt.flatMap { iso8601Formatter.date(from: $0) }
                         : redChecks.compactMap { $0.lastRunAt.flatMap { iso8601Formatter.date(from: $0) } }.max()
-                    items.append(DashboardAttentionEntry(
-                        icon: icon, iconColor: iconColor, label: label, detail: detail,
-                        shortcut: "", processStatus: process.status, agentStatus: nil,
-                        statusChecks: allChecks, eventDate: eventDate, windowListIndex: idx + 1,
-                        agentWindowRecord: nil))
+                    items.append(
+                        DashboardAttentionEntry(
+                            icon: icon, iconColor: iconColor, label: label, detail: detail, shortcut: "", processStatus: process.status,
+                            agentStatus: nil, statusChecks: allChecks, eventDate: eventDate, windowListIndex: idx + 1, agentWindowRecord: nil))
                 }
 
                 // Orphaned process entries (no captured window)
@@ -1018,15 +936,15 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                     let hasFailedCheck = allChecks.contains { $0.status == .failed }
                     guard process.status == .exited || hasFailedCheck else { continue }
                     let redChecks = allChecks.filter { $0.status == .failed }
-                    let eventDate: Date? = process.status == .exited
+                    let eventDate: Date? =
+                        process.status == .exited
                         ? process.exitedAt.flatMap { iso8601Formatter.date(from: $0) }
                         : redChecks.compactMap { $0.lastRunAt.flatMap { iso8601Formatter.date(from: $0) } }.max()
-                    items.append(DashboardAttentionEntry(
-                        icon: "terminal", iconColor: .systemGreen,
-                        label: process.templateName, detail: process.command,
-                        shortcut: "", processStatus: process.status, agentStatus: nil,
-                        statusChecks: allChecks, eventDate: eventDate, windowListIndex: nil,
-                        agentWindowRecord: nil))
+                    items.append(
+                        DashboardAttentionEntry(
+                            icon: "terminal", iconColor: .systemGreen, label: process.templateName, detail: process.command, shortcut: "",
+                            processStatus: process.status, agentStatus: nil, statusChecks: allChecks, eventDate: eventDate, windowListIndex: nil,
+                            agentWindowRecord: nil))
                 }
 
                 // Agent window attention items (waiting or done)
@@ -1035,11 +953,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                     let agentIcon = agentWin.provider == .codex ? "wand.and.stars" : "cpu.fill"
                     let agentIconColor: NSColor = agentWin.status == .done ? .systemGreen : .systemOrange
                     let eventDate = ISO8601DateFormatter().date(from: agentWin.updatedAt)
-                    items.append(DashboardAttentionEntry(
-                        icon: agentIcon, iconColor: agentIconColor, label: agentLabel, detail: nil,
-                        shortcut: "", processStatus: nil, agentStatus: agentWin.status,
-                        statusChecks: [], eventDate: eventDate, windowListIndex: nil,
-                        agentWindowRecord: agentWin))
+                    items.append(
+                        DashboardAttentionEntry(
+                            icon: agentIcon, iconColor: agentIconColor, label: agentLabel, detail: nil, shortcut: "", processStatus: nil,
+                            agentStatus: agentWin.status, statusChecks: [], eventDate: eventDate, windowListIndex: nil, agentWindowRecord: agentWin))
                 }
 
                 guard !items.isEmpty else { continue }
@@ -1216,9 +1133,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     /// Builds a window card with all status check sub-rows below it, identical to the workspace Run tab layout.
     private func dashboardWindowCard(entry: DashboardAttentionEntry, shortcut: String, action: (() -> Void)? = nil) -> NSView {
         let mainRow = windowRow(
-            icon: entry.icon, iconColor: entry.iconColor,
-            label: entry.label, detail: entry.detail,
-            shortcut: shortcut, processStatus: entry.processStatus, agentStatus: entry.agentStatus, action: action)
+            icon: entry.icon, iconColor: entry.iconColor, label: entry.label, detail: entry.detail, shortcut: shortcut,
+            processStatus: entry.processStatus, agentStatus: entry.agentStatus, action: action)
 
         guard !entry.statusChecks.isEmpty else { return mainRow }
 
@@ -1276,7 +1192,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                     if workspace.isRunning {
                         let agentWindowsList = (try? orchestrator.agentWindows(workspaceID: workspace.id)) ?? []
                         let hasWaitingAgentWindow = agentWindowsList.contains { $0.status == .waiting }
-                        workspaceIndicatorStateByID[workspace.id] = (hasExitedProcess || hasFailedCheck || hasWaitingAgentWindow) ? .runningUnhealthy : .runningHealthy
+                        workspaceIndicatorStateByID[workspace.id] =
+                            (hasExitedProcess || hasFailedCheck || hasWaitingAgentWindow) ? .runningUnhealthy : .runningHealthy
                     } else {
                         workspaceIndicatorStateByID[workspace.id] = .idle
                     }
@@ -1336,10 +1253,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             let result = await Self.initialSidebarDataSnapshot()
             guard !Task.isCancelled else { return }
             switch result {
-            case .success(let snapshot):
-                self.applySidebarDataSnapshot(snapshot)
-            case .failure(let error):
-                self.showError(error)
+            case .success(let snapshot): self.applySidebarDataSnapshot(snapshot)
+            case .failure(let error): self.showError(error)
             }
             self.sidebarReloadTask = nil
             if self.pendingSidebarReloadRequest {
@@ -1471,8 +1386,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let overlay: NSVisualEffectView
         let titleLabel: NSTextField
         let detailLabel: NSTextField
-        if let existingOverlay = operationProgressOverlay,
-            let existingTitleLabel = operationProgressOverlayTitleLabel,
+        if let existingOverlay = operationProgressOverlay, let existingTitleLabel = operationProgressOverlayTitleLabel,
             let existingDetailLabel = operationProgressOverlayDetailLabel
         {
             overlay = existingOverlay
@@ -1546,9 +1460,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         overlay.isHidden = false
     }
 
-    private func hideOperationProgressOverlay() {
-        operationProgressOverlay?.isHidden = true
-    }
+    private func hideOperationProgressOverlay() { operationProgressOverlay?.isHidden = true }
 
     private func showSettingsDetail() {
         clearInlineWorkspaceFieldRefs()
@@ -1629,7 +1541,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         // --- iTerm2 focus pulse ---
         stack.addArrangedSubview(label(text: "iTerm2 focus pulse"))
         let pulseColorNote = NSTextField(
-            labelWithString: "Briefly changes the iTerm2 background color when a terminal window is focused. Default color: \(SettingsKey.defaultItermFocusPulseColor).")
+            labelWithString:
+                "Briefly changes the iTerm2 background color when a terminal window is focused. Default color: \(SettingsKey.defaultItermFocusPulseColor)."
+        )
         pulseColorNote.font = .systemFont(ofSize: 11)
         pulseColorNote.textColor = .secondaryLabelColor
         pulseColorNote.maximumNumberOfLines = 0
@@ -1642,8 +1556,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
         let (pulseR, pulseG, pulseB) = (try? orchestrator.itermFocusPulseColor()) ?? (r: 46, g: 41, b: 14)
         let colorWell = NSColorWell()
-        colorWell.color = NSColor(
-            red: CGFloat(pulseR) / 255, green: CGFloat(pulseG) / 255, blue: CGFloat(pulseB) / 255, alpha: 1)
+        colorWell.color = NSColor(red: CGFloat(pulseR) / 255, green: CGFloat(pulseG) / 255, blue: CGFloat(pulseB) / 255, alpha: 1)
         colorWell.translatesAutoresizingMaskIntoConstraints = false
         colorWell.target = self
         colorWell.action = #selector(itermPulseColorChanged(_:))
@@ -1745,8 +1658,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         // --- Port definitions card ---
         let portCard = formSectionCard(
             icon: "network", title: "Port definitions",
-            subtitle: "Named ports allocated per workspace. Available as env vars in scripts and commands.",
-            contentViews: [portEditor.container])
+            subtitle: "Named ports allocated per workspace. Available as env vars in scripts and commands.", contentViews: [portEditor.container])
         stack.addArrangedSubview(portCard)
         constrainFormFieldToFillWidth(portCard, in: stack)
 
@@ -1798,8 +1710,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             projectID: project.id, setupView: setupView, stopView: stopView, portEditor: portEditor, processEditor: processEditor,
             browserSessionEditor: browserSessionEditor)
         registerDirtyTracking(
-            setupView: setupView, stopView: stopView, portEditor: portEditor, processEditor: processEditor,
-            browserSessionEditor: browserSessionEditor)
+            setupView: setupView, stopView: stopView, portEditor: portEditor, processEditor: processEditor, browserSessionEditor: browserSessionEditor
+        )
     }
 
     private func formSectionCard(icon: String, title: String, subtitle: String, trailingView: NSView? = nil, contentViews: [NSView]) -> NSView {
@@ -2018,8 +1930,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         // --- Port definitions card ---
         let addPortCard = formSectionCard(
             icon: "network", title: "Port definitions",
-            subtitle: "Named ports allocated per workspace. Available as env vars in scripts and commands.",
-            contentViews: [portEditor.container])
+            subtitle: "Named ports allocated per workspace. Available as env vars in scripts and commands.", contentViews: [portEditor.container])
         addPortCard.isHidden = true
         stack.addArrangedSubview(addPortCard)
 
@@ -2046,8 +1957,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
         // --- Buttons ---
         let createButton = actionButton(
-            title: "Create Project", symbol: nil, tooltip: "Create project (Return)", action: #selector(createProject(_:)),
-            primary: true)
+            title: "Create Project", symbol: nil, tooltip: "Create project (Return)", action: #selector(createProject(_:)), primary: true)
         createButton.keyEquivalent = "\r"
         createButton.isEnabled = false
         let cancelButton = actionButton(
@@ -2210,8 +2120,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
         // --- Buttons ---
         let createButton = actionButton(
-            title: "Create Workspace", symbol: nil, tooltip: "Create workspace (Return)", action: #selector(createWorkspace(_:)),
-            primary: true)
+            title: "Create Workspace", symbol: nil, tooltip: "Create workspace (Return)", action: #selector(createWorkspace(_:)), primary: true)
         createButton.keyEquivalent = "\r"
         let cancelButton = actionButton(
             title: "Cancel (Esc)", symbol: nil, tooltip: "Cancel (Esc)", action: #selector(cancelProjectForm), primary: false)
@@ -2323,14 +2232,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         if !workspace.isDefault {
             let tag = UUID().uuidString.hashValue
             let refs = InlineWorkspaceDetailFieldRefs(
-                workspaceID: workspace.id,
-                field: .title,
-                valueLabel: workspaceTitleLabel,
-                textField: workspaceTitleField,
-                saveButton: titleSaveButton,
-                cancelButton: titleCancelButton,
-                originalValue: workspace.name,
-                isEditing: false)
+                workspaceID: workspace.id, field: .title, valueLabel: workspaceTitleLabel, textField: workspaceTitleField,
+                saveButton: titleSaveButton, cancelButton: titleCancelButton, originalValue: workspace.name, isEditing: false)
             inlineWorkspaceFieldRefsByTag[tag] = refs
             inlineWorkspaceFieldTagByObjectID[ObjectIdentifier(workspaceTitleField)] = tag
             inlineWorkspaceLabelTagByObjectID[ObjectIdentifier(workspaceTitleLabel)] = tag
@@ -2376,13 +2279,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let inlineBranchRow: NSView?
         if project.isGitRepo, let branch = workspace.branch {
             let branchRow = makeInlineWorkspaceMetadataEditRow(
-                workspaceID: workspace.id,
-                field: .branch,
-                icon: "arrow.triangle.branch",
-                labelText: "Branch",
-                value: branch,
-                placeholder: "Branch name",
-                isEditable: !isProtectedBranchName(branch))
+                workspaceID: workspace.id, field: .branch, icon: "arrow.triangle.branch", labelText: "Branch", value: branch,
+                placeholder: "Branch name", isEditable: !isProtectedBranchName(branch))
             let activity =
                 gitActivityByWorkspaceID[workspace.id] ?? GitTrackedFileActivity(latestTrackedFileModificationDate: nil, modifiedTrackedFileCount: 0)
             if let branchStack = branchRow as? NSStackView {
@@ -2398,13 +2296,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             inlineBranchRow = nil
         }
         let inlineTooltipRow = makeInlineWorkspaceMetadataEditRow(
-            workspaceID: workspace.id,
-            field: .tooltip,
-            icon: "info.circle",
-            labelText: "Tooltip",
-            value: workspace.tooltip ?? "",
-            placeholder: "Optional workspace context",
-            isEditable: true)
+            workspaceID: workspace.id, field: .tooltip, icon: "info.circle", labelText: "Tooltip", value: workspace.tooltip ?? "",
+            placeholder: "Optional workspace context", isEditable: true)
 
         // --- Action buttons ---
         let launchOrRestartButton: NSButton
@@ -2419,11 +2312,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let stopButton = actionButton(title: "Stop", symbol: "stop.circle", tooltip: "Stop", action: #selector(stopWorkspace(_:)), primary: false)
         stopButton.identifier = NSUserInterfaceItemIdentifier(workspace.id)
         let activeToggleButton = actionButton(
-            title: workspace.isActive ? "Deactivate" : "Activate",
-            symbol: workspace.isActive ? "eye.slash" : "eye",
+            title: workspace.isActive ? "Deactivate" : "Activate", symbol: workspace.isActive ? "eye.slash" : "eye",
             tooltip: workspace.isActive ? "Hide this workspace from the sidebar by default" : "Show this workspace in the sidebar by default",
-            action: #selector(toggleWorkspaceActive(_:)),
-            primary: false)
+            action: #selector(toggleWorkspaceActive(_:)), primary: false)
         activeToggleButton.identifier = NSUserInterfaceItemIdentifier(workspace.id)
         let archiveButton = actionButton(
             title: "Archive", symbol: "archivebox", tooltip: "Archive", action: #selector(archiveWorkspace(_:)), primary: false)
@@ -2488,8 +2379,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             stack.trailingAnchor.constraint(equalTo: detailContainer.trailingAnchor, constant: -20),
             stack.topAnchor.constraint(equalTo: detailContainer.topAnchor, constant: 20),
             stack.bottomAnchor.constraint(lessThanOrEqualTo: detailContainer.bottomAnchor, constant: -20),
-            tabs.heightAnchor.constraint(equalToConstant: 460),
-            tabs.widthAnchor.constraint(equalTo: stack.widthAnchor),
+            tabs.heightAnchor.constraint(equalToConstant: 460), tabs.widthAnchor.constraint(equalTo: stack.widthAnchor),
         ])
         detailContainer.layoutSubtreeIfNeeded()
     }
@@ -2544,9 +2434,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let processes = (try? orchestrator.runningProcesses(workspaceID: workspace.id)) ?? []
         let windows = (try? orchestrator.windows(workspaceID: workspace.id)) ?? []
         let configuredBrowserSessions: [BrowserSession] = {
-            if let settings = try? orchestrator.workspaceSettings(workspaceID: workspace.id) {
-                return settings.browserSessions
-            }
+            if let settings = try? orchestrator.workspaceSettings(workspaceID: workspace.id) { return settings.browserSessions }
             return []
         }()
         let processesByWindowID: [Int: [RunningProcessRecord]] = {
@@ -2566,9 +2454,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             return map
         }()
         var statusResultsByProcessID: [String: [StatusResult]] = [:]
-        for process in processes {
-            statusResultsByProcessID[process.id] = (try? orchestrator.statusResults(processID: process.id)) ?? []
-        }
+        for process in processes { statusResultsByProcessID[process.id] = (try? orchestrator.statusResults(processID: process.id)) ?? [] }
         let agentWindowsForRunTab = (try? orchestrator.agentWindows(workspaceID: workspace.id)) ?? []
         // Build a set of yabai window IDs claimed by agent records so they can be moved to the Agents section.
         let agentYabaiWindowIDs: Set<Int> = Set(agentWindowsForRunTab.compactMap { $0.yabaiWindowID })
@@ -2630,18 +2516,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                         windowsSectionRowCount += 1
                         let rowAction: (() -> Void) = { [weak self] in
                             guard let self else { return }
-                            do {
-                                try self.orchestrator.focusWorkspaceProcess(workspaceID: workspaceID, processID: process.id)
-                            } catch {}
+                            do { try self.orchestrator.focusWorkspaceProcess(workspaceID: workspaceID, processID: process.id) } catch {}
                         }
                         let row = windowRow(
-                            icon: iconName,
-                            iconColor: iconColor,
-                            label: process.templateName,
-                            detail: resolveCommand(process.command),
-                            shortcut: rowShortcut,
-                            processStatus: process.status,
-                            action: rowAction)
+                            icon: iconName, iconColor: iconColor, label: process.templateName, detail: resolveCommand(process.command),
+                            shortcut: rowShortcut, processStatus: process.status, action: rowAction)
                         windowsStack.addArrangedSubview(row)
                         constrainFormFieldToFillWidth(row, in: windowsStack)
 
@@ -2659,8 +2538,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                     shortcutCounter += 1
                     windowsSectionRowCount += 1
                     let row = windowRow(
-                        icon: iconName, iconColor: iconColor, label: windowLabel, detail: windowDetail,
-                        shortcut: rowShortcut, processStatus: linkedProcess?.status,
+                        icon: iconName, iconColor: iconColor, label: windowLabel, detail: windowDetail, shortcut: rowShortcut,
+                        processStatus: linkedProcess?.status,
                         action: { [weak self] in
                             guard let self else { return }
                             do { try self.orchestrator.focusWorkspaceWindow(workspaceID: workspaceID, index: windowIndex) } catch {}
@@ -2753,7 +2632,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                     statusIcon = "circle"
                     statusColor = .tertiaryLabelColor
                 }
-                let row = processRow(icon: statusIcon, iconColor: statusColor, name: process.templateName, command: resolveCommand(process.command), shortcut: process.status.rawValue)
+                let row = processRow(
+                    icon: statusIcon, iconColor: statusColor, name: process.templateName, command: resolveCommand(process.command),
+                    shortcut: process.status.rawValue)
                 processesStack.addArrangedSubview(row)
                 constrainFormFieldToFillWidth(row, in: processesStack)
 
@@ -2844,8 +2725,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
         // --- Port definitions card ---
         let wsPortCard = formSectionCard(
-            icon: "network", title: "Port definitions",
-            subtitle: "Named ports for this workspace. Override project defaults.",
+            icon: "network", title: "Port definitions", subtitle: "Named ports for this workspace. Override project defaults.",
             contentViews: [portEditor.container])
         contentStack.addArrangedSubview(wsPortCard)
         constrainFormFieldToFillWidth(wsPortCard, in: contentStack)
@@ -2912,8 +2792,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             workspaceID: workspace.id, stopView: stopView, portEditor: portEditor, processEditor: processEditor,
             browserSessionEditor: browserSessionEditor)
         registerWorkspaceDirtyTracking(
-            stopView: stopView, portEditor: portEditor, processEditor: processEditor,
-            browserSessionEditor: browserSessionEditor)
+            stopView: stopView, portEditor: portEditor, processEditor: processEditor, browserSessionEditor: browserSessionEditor)
 
         return insetContainerView(container)
     }
@@ -2934,13 +2813,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         return false
     }
 
-    private func activeInlineWorkspaceEditTags() -> [Int] {
-        inlineWorkspaceFieldRefsByTag.compactMap { key, refs in refs.isEditing ? key : nil }
-    }
+    private func activeInlineWorkspaceEditTags() -> [Int] { inlineWorkspaceFieldRefsByTag.compactMap { key, refs in refs.isEditing ? key : nil } }
 
-    private func cancelInlineWorkspaceMetadataEdit(tag: Int) {
-        endInlineWorkspaceMetadataEdit(tag: tag, keepCurrentValueAsOriginal: false)
-    }
+    private func cancelInlineWorkspaceMetadataEdit(tag: Int) { endInlineWorkspaceMetadataEdit(tag: tag, keepCurrentValueAsOriginal: false) }
 
     private func setupInlineWorkspaceOutsideClickMonitorIfNeeded() {
         guard inlineWorkspaceOutsideClickMonitor == nil else { return }
@@ -2953,16 +2828,13 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             let hitView = contentView.hitTest(point)
             for tag in activeTags {
                 guard let refs = self.inlineWorkspaceFieldRefsByTag[tag] else { continue }
-                if self.isView(hitView, descendantOf: refs.textField) ||
-                    self.isView(hitView, descendantOf: refs.saveButton) ||
-                    self.isView(hitView, descendantOf: refs.cancelButton)
+                if self.isView(hitView, descendantOf: refs.textField) || self.isView(hitView, descendantOf: refs.saveButton)
+                    || self.isView(hitView, descendantOf: refs.cancelButton)
                 {
                     return event
                 }
             }
-            for tag in activeTags {
-                self.cancelInlineWorkspaceMetadataEdit(tag: tag)
-            }
+            for tag in activeTags { self.cancelInlineWorkspaceMetadataEdit(tag: tag) }
             return event
         }
     }
@@ -2977,10 +2849,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     private func inlineWorkspaceFieldDisplayValue(_ value: String, field: InlineWorkspaceDetailField) -> String {
         let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
         switch field {
-        case .tooltip:
-            return trimmed.isEmpty ? "No tooltip" : trimmed
-        case .title, .branch:
-            return trimmed
+        case .tooltip: return trimmed.isEmpty ? "No tooltip" : trimmed
+        case .title, .branch: return trimmed
         }
     }
 
@@ -2990,13 +2860,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     }
 
     private func makeInlineWorkspaceMetadataEditRow(
-        workspaceID: String,
-        field: InlineWorkspaceDetailField,
-        icon: String,
-        labelText: String,
-        value: String,
-        placeholder: String,
-        isEditable: Bool
+        workspaceID: String, field: InlineWorkspaceDetailField, icon: String, labelText: String, value: String, placeholder: String, isEditable: Bool
     ) -> NSView {
         let row = NSStackView()
         row.orientation = .horizontal
@@ -3022,7 +2886,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         valueLabel.textColor = .secondaryLabelColor
         valueLabel.lineBreakMode = .byTruncatingTail
         valueLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        valueLabel.toolTip = isEditable
+        valueLabel.toolTip =
+            isEditable
             ? "Double-click to edit \(labelText.lowercased())."
             : (field == .branch ? "Protected branch names main/master cannot be renamed." : "\(labelText) is not editable.")
 
@@ -3053,14 +2918,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         if isEditable {
             let tag = UUID().uuidString.hashValue
             let refs = InlineWorkspaceDetailFieldRefs(
-                workspaceID: workspaceID,
-                field: field,
-                valueLabel: valueLabel,
-                textField: textField,
-                saveButton: saveButton,
-                cancelButton: cancelButton,
-                originalValue: value,
-                isEditing: false)
+                workspaceID: workspaceID, field: field, valueLabel: valueLabel, textField: textField, saveButton: saveButton,
+                cancelButton: cancelButton, originalValue: value, isEditing: false)
             inlineWorkspaceFieldRefsByTag[tag] = refs
             inlineWorkspaceFieldTagByObjectID[ObjectIdentifier(textField)] = tag
             inlineWorkspaceLabelTagByObjectID[ObjectIdentifier(valueLabel)] = tag
@@ -3079,10 +2938,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
     private func normalizeInlineWorkspaceMetadataValue(_ value: String, for field: InlineWorkspaceDetailField) -> String {
         switch field {
-        case .title, .branch:
-            return value.trimmingCharacters(in: .whitespacesAndNewlines)
-        case .tooltip:
-            return value.trimmingCharacters(in: .whitespacesAndNewlines)
+        case .title, .branch: return value.trimmingCharacters(in: .whitespacesAndNewlines)
+        case .tooltip: return value.trimmingCharacters(in: .whitespacesAndNewlines)
         }
     }
 
@@ -3095,12 +2952,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     @objc private func beginInlineWorkspaceMetadataEdit(_ sender: NSClickGestureRecognizer) {
         guard let valueLabel = sender.view as? NSTextField else { return }
         guard let tag = inlineWorkspaceLabelTagByObjectID[ObjectIdentifier(valueLabel)] else { return }
-        if let refs = inlineWorkspaceFieldRefsByTag[tag], refs.field == .branch, isProtectedBranchName(refs.originalValue) {
-            return
-        }
-        for activeTag in activeInlineWorkspaceEditTags() where activeTag != tag {
-            cancelInlineWorkspaceMetadataEdit(tag: activeTag)
-        }
+        if let refs = inlineWorkspaceFieldRefsByTag[tag], refs.field == .branch, isProtectedBranchName(refs.originalValue) { return }
+        for activeTag in activeInlineWorkspaceEditTags() where activeTag != tag { cancelInlineWorkspaceMetadataEdit(tag: activeTag) }
         guard var refs = inlineWorkspaceFieldRefsByTag[tag] else { return }
         refs.isEditing = true
         refs.valueLabel.isHidden = true
@@ -3127,9 +2980,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         refs.saveButton.isHidden = true
         refs.cancelButton.isHidden = true
         inlineWorkspaceFieldRefsByTag[tag] = refs
-        if activeInlineWorkspaceEditTags().isEmpty {
-            teardownInlineWorkspaceOutsideClickMonitor()
-        }
+        if activeInlineWorkspaceEditTags().isEmpty { teardownInlineWorkspaceOutsideClickMonitor() }
     }
 
     private func saveInlineWorkspaceMetadata(tag: Int) {
@@ -3155,14 +3006,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             endInlineWorkspaceMetadataEdit(tag: tag, keepCurrentValueAsOriginal: true)
             workspaceHasUnsavedChanges = false
             reloadData()
-        } catch {
-            showError(error)
-        }
+        } catch { showError(error) }
     }
 
-    @objc private func saveInlineWorkspaceMetadata(_ sender: NSButton) {
-        saveInlineWorkspaceMetadata(tag: sender.tag)
-    }
+    @objc private func saveInlineWorkspaceMetadata(_ sender: NSButton) { saveInlineWorkspaceMetadata(tag: sender.tag) }
 
     @objc private func cancelInlineWorkspaceMetadata(_ sender: NSButton) {
         endInlineWorkspaceMetadataEdit(tag: sender.tag, keepCurrentValueAsOriginal: false)
@@ -3185,8 +3032,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     }
 
     private func windowRow(
-        icon: String, iconColor: NSColor, label: String, detail: String? = nil, shortcut: String,
-        processStatus: RunningProcessState? = nil, agentStatus: AgentWindowStatus? = nil, action: (() -> Void)? = nil
+        icon: String, iconColor: NSColor, label: String, detail: String? = nil, shortcut: String, processStatus: RunningProcessState? = nil,
+        agentStatus: AgentWindowStatus? = nil, action: (() -> Void)? = nil
     ) -> NSView {
         let container = ClickableRowView(isInteractive: action != nil)
 
@@ -3239,8 +3086,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 spinner.controlSize = .mini
                 spinner.translatesAutoresizingMaskIntoConstraints = false
                 NSLayoutConstraint.activate([
-                    spinner.widthAnchor.constraint(equalToConstant: 10),
-                    spinner.heightAnchor.constraint(equalToConstant: 10)
+                    spinner.widthAnchor.constraint(equalToConstant: 10), spinner.heightAnchor.constraint(equalToConstant: 10),
                 ])
                 spinner.setContentHuggingPriority(.required, for: .horizontal)
                 spinner.setContentCompressionResistancePriority(.required, for: .horizontal)
@@ -3265,8 +3111,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 statusDot.contentTintColor = statusColor
                 statusDot.translatesAutoresizingMaskIntoConstraints = false
                 NSLayoutConstraint.activate([
-                    statusDot.widthAnchor.constraint(equalToConstant: 8),
-                    statusDot.heightAnchor.constraint(equalToConstant: 8)
+                    statusDot.widthAnchor.constraint(equalToConstant: 8), statusDot.heightAnchor.constraint(equalToConstant: 8),
                 ])
                 statusDot.setContentHuggingPriority(.required, for: .horizontal)
                 statusDot.setContentCompressionResistancePriority(.required, for: .horizontal)
@@ -3290,10 +3135,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             statusDot.image = NSImage(systemSymbolName: statusIconName, accessibilityDescription: processStatus.rawValue)
             statusDot.contentTintColor = statusColor
             statusDot.translatesAutoresizingMaskIntoConstraints = false
-            NSLayoutConstraint.activate([
-                statusDot.widthAnchor.constraint(equalToConstant: 8),
-                statusDot.heightAnchor.constraint(equalToConstant: 8)
-            ])
+            NSLayoutConstraint.activate([statusDot.widthAnchor.constraint(equalToConstant: 8), statusDot.heightAnchor.constraint(equalToConstant: 8)])
             statusDot.setContentHuggingPriority(.required, for: .horizontal)
             statusDot.setContentCompressionResistancePriority(.required, for: .horizontal)
             row.addArrangedSubview(statusDot)
@@ -3313,10 +3155,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
         container.addSubview(row)
         NSLayoutConstraint.activate([
-            row.leadingAnchor.constraint(equalTo: container.leadingAnchor),
-            row.trailingAnchor.constraint(equalTo: container.trailingAnchor),
-            row.topAnchor.constraint(equalTo: container.topAnchor),
-            row.bottomAnchor.constraint(equalTo: container.bottomAnchor),
+            row.leadingAnchor.constraint(equalTo: container.leadingAnchor), row.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+            row.topAnchor.constraint(equalTo: container.topAnchor), row.bottomAnchor.constraint(equalTo: container.bottomAnchor),
         ])
         return container
     }
@@ -3564,18 +3404,14 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     private func refreshWorkspaceShortcutFooterRow() {
         let segments = workspaceDetailShortcutFooterSegments()
         guard workspaceShortcutFooterLabels.count == segments.count else { return }
-        for (index, label) in workspaceShortcutFooterLabels.enumerated() {
-            label.stringValue = segments[index]
-        }
+        for (index, label) in workspaceShortcutFooterLabels.enumerated() { label.stringValue = segments[index] }
         workspaceShortcutFooterRowView?.needsLayout = true
     }
 
     private func workspaceDetailShortcutFooterSegments() -> [String] {
         [
-            "Next \(footerShortcutHint(for: .guiNextShortcut))",
-            "Previous \(footerShortcutHint(for: .guiPreviousShortcut))",
-            "Settings \(footerShortcutHint(for: .guiOpenSettingsShortcut))",
-            "Toggle tooltip \(footerShortcutHint(for: .guiTooltipShortcut))",
+            "Next workspace \(footerShortcutHint(for: .guiNextShortcut))", "Prev workspace \(footerShortcutHint(for: .guiPreviousShortcut))",
+            "Settings \(footerShortcutHint(for: .guiOpenSettingsShortcut))", "Toggle tooltip \(footerShortcutHint(for: .guiTooltipShortcut))",
         ]
     }
 
@@ -3703,9 +3539,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         stack.addArrangedSubview(NSView())
         for action in actions {
             let button = sidebarRowIconButton(symbol: action.symbol, tooltip: action.tooltip, action: action.action)
-            if action.action == #selector(toggleInactiveWorkspaceVisibility) {
-                showInactiveWorkspacesButton = button
-            }
+            if action.action == #selector(toggleInactiveWorkspaceVisibility) { showInactiveWorkspacesButton = button }
             stack.addArrangedSubview(button)
         }
 
@@ -3883,12 +3717,12 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     }
 
     private func storeWorkspaceFields(
-        workspaceID: String, stopView: NSTextView, portEditor: PortEditor, processEditor: ProcessEditor,
-        browserSessionEditor: BrowserSessionEditor
+        workspaceID: String, stopView: NSTextView, portEditor: PortEditor, processEditor: ProcessEditor, browserSessionEditor: BrowserSessionEditor
     ) -> Int {
         let id = workspaceID.hashValue
         WorkspaceFieldCache.shared.cache[id] = WorkspaceFieldRefs(
-            workspaceID: workspaceID, stopView: stopView, portEditor: portEditor, processEditor: processEditor, browserSessionEditor: browserSessionEditor)
+            workspaceID: workspaceID, stopView: stopView, portEditor: portEditor, processEditor: processEditor,
+            browserSessionEditor: browserSessionEditor)
         return id
     }
 
@@ -3901,7 +3735,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         AddProjectFieldCache.shared.cache[id] = AddProjectFieldRefs(
             sourcePopup: sourcePopup, localSourceSection: localSourceSection, cloneSourceSection: cloneSourceSection, dirField: dirField,
             repoURLField: repoURLField, browseButton: browseButton, progressiveInputViews: progressiveInputViews, createButton: createButton,
-            setupView: setupView, stopView: stopView, portEditor: portEditor, processEditor: processEditor, browserSessionEditor: browserSessionEditor)
+            setupView: setupView, stopView: stopView, portEditor: portEditor, processEditor: processEditor, browserSessionEditor: browserSessionEditor
+        )
         sourcePopup.tag = id
         browseButton.tag = id
         return id
@@ -3971,8 +3806,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         guard parts.count == 3 else { return }
         do {
             try orchestrator.setItermFocusPulseColor(r: parts[0], g: parts[1], b: parts[2])
-            pulseColorWell?.color = NSColor(
-                red: CGFloat(parts[0]) / 255, green: CGFloat(parts[1]) / 255, blue: CGFloat(parts[2]) / 255, alpha: 1)
+            pulseColorWell?.color = NSColor(red: CGFloat(parts[0]) / 255, green: CGFloat(parts[1]) / 255, blue: CGFloat(parts[2]) / 255, alpha: 1)
         } catch { showError(error) }
     }
 
@@ -4018,23 +3852,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             return
         }
         let targetBranch: String?
-        if project.isGitRepo {
-            targetBranch = defaultWorkspaceTargetBranchFast(project: project)
-        } else {
-            targetBranch = nil
-        }
+        if project.isGitRepo { targetBranch = defaultWorkspaceTargetBranchFast(project: project) } else { targetBranch = nil }
         let input = WorkspaceCreateInput(
-            projectID: project.id,
-            name: name,
-            branch: project.isGitRepo ? name : nil,
-            targetBranch: targetBranch,
-            directoryName: nil,
-            tooltip: nil,
+            projectID: project.id, name: name, branch: project.isGitRepo ? name : nil, targetBranch: targetBranch, directoryName: nil, tooltip: nil,
             allowRemoteBranchLookup: false)
-        showOperationProgressOverlay(
-            message: "Creating workspace...",
-            detail: "Generating defaults and creating the workspace record."
-        )
+        showOperationProgressOverlay(message: "Creating workspace...", detail: "Generating defaults and creating the workspace record.")
         Task { @MainActor [weak self] in
             guard let self else { return }
             defer { hideOperationProgressOverlay() }
@@ -4047,17 +3869,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 selectedWorkspaceID = workspace.id
                 lastSelectedRow = -1
                 reloadData()
-                showOperationProgressOverlay(
-                    message: "Preparing workspace...",
-                    detail: "Running setup for the new workspace."
-                )
+                showOperationProgressOverlay(message: "Preparing workspace...", detail: "Running setup for the new workspace.")
                 let setupResult = await Self.runWorkspaceSetupSnapshot(workspaceID: workspace.id)
                 reloadData()
-                if case .failure(let error) = setupResult {
-                    showError(error)
-                }
-            case .failure(let error):
-                showError(error)
+                if case .failure(let error) = setupResult { showError(error) }
+            case .failure(let error): showError(error)
             }
         }
     }
@@ -4096,10 +3912,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         guard response == .alertFirstButtonReturn else { return }
 
         sender.isEnabled = false
-        showOperationProgressOverlay(
-            message: "Deleting project...",
-            detail: "Removing the project and its managed workspaces."
-        )
+        showOperationProgressOverlay(message: "Deleting project...", detail: "Removing the project and its managed workspaces.")
         Task { @MainActor [weak self, weak sender] in
             guard let self else { return }
             defer {
@@ -4112,8 +3925,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 projectHasUnsavedChanges = false
                 workspaceHasUnsavedChanges = false
                 reloadData()
-            case .failure(let error):
-                showError(error)
+            case .failure(let error): showError(error)
             }
         }
     }
@@ -4143,38 +3955,25 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 let repoURL = refs.repoURLField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
                 guard !repoURL.isEmpty else { throw MuxyError.invalidArgument(message: "Git repository URL is required.") }
                 input = ProjectCreateInput(
-                    gitURL: repoURL,
-                    directoryPath: nil,
-                    setupScript: refs.setupView.string.isEmpty ? nil : refs.setupView.string,
-                    stopScript: refs.stopView.string.isEmpty ? nil : refs.stopView.string,
-                    ports: refs.portEditor.currentDefinitions(),
-                    processes: refs.processEditor.currentProcesses(),
-                    browserSessions: refs.browserSessionEditor.currentSessions(),
-                    statusChecks: refs.processEditor.currentStatusChecks()
-                )
+                    gitURL: repoURL, directoryPath: nil, setupScript: refs.setupView.string.isEmpty ? nil : refs.setupView.string,
+                    stopScript: refs.stopView.string.isEmpty ? nil : refs.stopView.string, ports: refs.portEditor.currentDefinitions(),
+                    processes: refs.processEditor.currentProcesses(), browserSessions: refs.browserSessionEditor.currentSessions(),
+                    statusChecks: refs.processEditor.currentStatusChecks())
                 progressDetail = "Cloning repository and applying project settings."
             } else {
                 let dir = refs.dirField.toolTip?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
                 guard !dir.isEmpty else { return }
                 input = ProjectCreateInput(
-                    gitURL: nil,
-                    directoryPath: dir,
-                    setupScript: refs.setupView.string.isEmpty ? nil : refs.setupView.string,
-                    stopScript: refs.stopView.string.isEmpty ? nil : refs.stopView.string,
-                    ports: refs.portEditor.currentDefinitions(),
-                    processes: refs.processEditor.currentProcesses(),
-                    browserSessions: refs.browserSessionEditor.currentSessions(),
-                    statusChecks: refs.processEditor.currentStatusChecks()
-                )
+                    gitURL: nil, directoryPath: dir, setupScript: refs.setupView.string.isEmpty ? nil : refs.setupView.string,
+                    stopScript: refs.stopView.string.isEmpty ? nil : refs.stopView.string, ports: refs.portEditor.currentDefinitions(),
+                    processes: refs.processEditor.currentProcesses(), browserSessions: refs.browserSessionEditor.currentSessions(),
+                    statusChecks: refs.processEditor.currentStatusChecks())
                 progressDetail = "Registering project and applying project settings."
             }
             let originalTitle = sender.title
             sender.isEnabled = false
             sender.title = "Creating..."
-            showOperationProgressOverlay(
-                message: "Creating project...",
-                detail: progressDetail
-            )
+            showOperationProgressOverlay(message: "Creating project...", detail: progressDetail)
             Task { @MainActor [weak self, weak sender] in
                 guard let self else { return }
                 defer {
@@ -4187,8 +3986,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 case .success:
                     activeAddProjectFormTag = nil
                     reloadData()
-                case .failure(let error):
-                    showError(error)
+                case .failure(let error): showError(error)
                 }
             }
         } catch { showError(error) }
@@ -4231,9 +4029,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     }
 
     private func isAddProjectSourceConfigured(_ refs: AddProjectFieldRefs) -> Bool {
-        if refs.sourcePopup.indexOfSelectedItem == 1 {
-            return !refs.repoURLField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-        }
+        if refs.sourcePopup.indexOfSelectedItem == 1 { return !refs.repoURLField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
         let directoryPath = refs.dirField.toolTip?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         return !directoryPath.isEmpty
     }
@@ -4283,20 +4079,12 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 throw MuxyError.invalidArgument(message: "Target branch is required for git projects.")
             }
             let input = WorkspaceCreateInput(
-                projectID: refs.projectID,
-                name: name,
-                branch: branch,
-                targetBranch: targetBranch,
-                directoryName: resolvedDirectoryName,
-                tooltip: resolvedTooltip,
-                allowRemoteBranchLookup: true)
+                projectID: refs.projectID, name: name, branch: branch, targetBranch: targetBranch, directoryName: resolvedDirectoryName,
+                tooltip: resolvedTooltip, allowRemoteBranchLookup: true)
             let originalTitle = sender.title
             sender.isEnabled = false
             sender.title = "Creating..."
-            showOperationProgressOverlay(
-                message: "Creating workspace...",
-                detail: "Validating fields and creating the workspace."
-            )
+            showOperationProgressOverlay(message: "Creating workspace...", detail: "Validating fields and creating the workspace.")
             Task { @MainActor [weak self, weak sender] in
                 guard let self else { return }
                 defer {
@@ -4313,17 +4101,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                     selectedWorkspaceID = workspace.id
                     lastSelectedRow = -1
                     reloadData()
-                    showOperationProgressOverlay(
-                        message: "Preparing workspace...",
-                        detail: "Running setup for the new workspace."
-                    )
+                    showOperationProgressOverlay(message: "Preparing workspace...", detail: "Running setup for the new workspace.")
                     let setupResult = await Self.runWorkspaceSetupSnapshot(workspaceID: workspace.id)
                     reloadData()
-                    if case .failure(let error) = setupResult {
-                        showError(error)
-                    }
-                case .failure(let error):
-                    showError(error)
+                    if case .failure(let error) = setupResult { showError(error) }
+                case .failure(let error): showError(error)
                 }
             }
         } catch { showError(error) }
@@ -4399,10 +4181,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             let result = await Self.runWorkspaceLifecycleAction(.launch, workspaceID: id)
             sender?.isEnabled = true
             switch result {
-            case .success:
-                reloadData()
-            case .failure(let error):
-                showError(error)
+            case .success: reloadData()
+            case .failure(let error): showError(error)
             }
         }
     }
@@ -4415,10 +4195,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             let result = await Self.runWorkspaceLifecycleAction(.restart, workspaceID: id)
             sender?.isEnabled = true
             switch result {
-            case .success:
-                reloadData()
-            case .failure(let error):
-                showError(error)
+            case .success: reloadData()
+            case .failure(let error): showError(error)
             }
         }
     }
@@ -4434,8 +4212,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             case .success(let outcome):
                 reloadData()
                 if let notice = outcome.notice { showInfoMessage(title: "Workspace Stopped", message: notice) }
-            case .failure(let error):
-                showError(error)
+            case .failure(let error): showError(error)
             }
         }
     }
@@ -4461,8 +4238,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             if !targetIsActive, workspace.isRunning {
                 let stopResult = await Self.runWorkspaceLifecycleAction(.stop, workspaceID: id)
                 switch stopResult {
-                case .success(let outcome):
-                    if let notice = outcome.notice { showInfoMessage(title: "Workspace Stopped", message: notice) }
+                case .success(let outcome): if let notice = outcome.notice { showInfoMessage(title: "Workspace Stopped", message: notice) }
                 case .failure(let error):
                     sender?.isEnabled = true
                     showError(error)
@@ -4490,8 +4266,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         if workspace?.isDefault == true {
             showInfoMessage(
                 title: "Default Workspace",
-                message: "Default workspaces cannot be archived. Delete the project instead to remove all of its workspaces."
-            )
+                message: "Default workspaces cannot be archived. Delete the project instead to remove all of its workspaces.")
             return
         }
         let alert = NSAlert()
@@ -4505,10 +4280,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         guard response == .alertFirstButtonReturn else { return }
         let didOptimisticallyArchive = optimisticallyArchiveWorkspaceInSidebar(workspaceID: id)
         if !didOptimisticallyArchive { sender.isEnabled = false }
-        showOperationProgressOverlay(
-            message: "Archiving workspace...",
-            detail: "Stopping runtime state and cleaning up workspace files."
-        )
+        showOperationProgressOverlay(message: "Archiving workspace...", detail: "Stopping runtime state and cleaning up workspace files.")
         Task { @MainActor [weak self, weak sender] in
             guard let self else { return }
             defer { hideOperationProgressOverlay() }
@@ -4549,10 +4321,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         guard let targetURL, !targetURL.isEmpty else { return nil }
         var bestMatch: (length: Int, name: String)?
         for session in sessions {
-            guard
-                let prefix = session.url?.trimmingCharacters(in: .whitespacesAndNewlines),
-                let name = session.name?.trimmingCharacters(in: .whitespacesAndNewlines),
-                !prefix.isEmpty, !name.isEmpty, targetURL.hasPrefix(prefix)
+            guard let prefix = session.url?.trimmingCharacters(in: .whitespacesAndNewlines),
+                let name = session.name?.trimmingCharacters(in: .whitespacesAndNewlines), !prefix.isEmpty, !name.isEmpty, targetURL.hasPrefix(prefix)
             else { continue }
             if let bestMatch, bestMatch.length >= prefix.count { continue }
             bestMatch = (length: prefix.count, name: name)
@@ -4602,9 +4372,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         return nil
     }
 
-    private func isWorkspaceVisible(_ workspace: WorkspaceSummary) -> Bool {
-        !workspace.isArchived && (showInactiveWorkspaces || workspace.isActive)
-    }
+    private func isWorkspaceVisible(_ workspace: WorkspaceSummary) -> Bool { !workspace.isArchived && (showInactiveWorkspaces || workspace.isActive) }
 
     private func visibleWorkspaces(projectID: String) -> [WorkspaceSummary] {
         (workspacesByProject[projectID] ?? []).filter { isWorkspaceVisible($0) }
@@ -4637,7 +4405,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             teardownGlobalHotkey()
             return
         }
-        registerHotkeys(toggle: toggleShortcutSpec, next: nextShortcutSpec, previous: previousShortcutSpec)
+        registerHotkeys(toggle: toggleShortcutSpec)
     }
 
     private func teardownGlobalHotkey() {
@@ -4647,13 +4415,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         hotkeyHandler = nil
     }
 
-    private func registerHotkeys(toggle: HotkeySpec, next: HotkeySpec?, previous: HotkeySpec?) {
+    private func registerHotkeys(toggle: HotkeySpec) {
         teardownGlobalHotkey()
         let signature = OSType(UInt32(truncatingIfNeeded: "AMUX".utf8.reduce(0) { ($0 << 8) + UInt32($1) }))
         let target = GetEventDispatcherTarget()
         registerHotkey(spec: toggle, id: GlobalHotkey.toggle.rawValue, signature: signature, target: target)
-        if let next { registerHotkey(spec: next, id: GlobalHotkey.next.rawValue, signature: signature, target: target) }
-        if let previous { registerHotkey(spec: previous, id: GlobalHotkey.previous.rawValue, signature: signature, target: target) }
         if let tooltipSpec = tooltipShortcutSpec {
             registerHotkey(spec: tooltipSpec, id: GlobalHotkey.tooltip.rawValue, signature: signature, target: target)
         }
@@ -4686,6 +4452,14 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             }
             if self.handleFocusedTextInputShortcut(event: event) { return nil }
             if self.isTextInputFocused() { return event }
+            if let nextShortcutSpec, matches(event: event, spec: nextShortcutSpec) {
+                self.selectNextVisibleWorkspace()
+                return nil
+            }
+            if let previousShortcutSpec, matches(event: event, spec: previousShortcutSpec) {
+                self.selectPreviousVisibleWorkspace()
+                return nil
+            }
             if let openTerminalShortcutSpec, matches(event: event, spec: openTerminalShortcutSpec) {
                 if let workspaceID = self.selectedWorkspaceID { self.openWorkspaceTerminal(workspaceID: workspaceID) }
                 return nil
@@ -4696,14 +4470,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             }
             if let windowIndex = windowShortcutIndex(for: event) {
                 self.focusWindowShortcut(index: windowIndex)
-                return nil
-            }
-            if let nextShortcutSpec, matches(event: event, spec: nextShortcutSpec) {
-                self.selectNextVisibleWorkspace()
-                return nil
-            }
-            if let previousShortcutSpec, matches(event: event, spec: previousShortcutSpec) {
-                self.selectPreviousVisibleWorkspace()
                 return nil
             }
             return event
@@ -4729,8 +4495,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let flags = event.modifierFlags.intersection([.command, .shift, .option, .control])
         let key = event.charactersIgnoringModifiers?.lowercased() ?? ""
         guard flags == .command, key == "n" else { return false }
-        if let activeAddWorkspaceFormTag,
-            let refs = AddWorkspaceFieldCache.shared.cache[activeAddWorkspaceFormTag],
+        if let activeAddWorkspaceFormTag, let refs = AddWorkspaceFieldCache.shared.cache[activeAddWorkspaceFormTag],
             let project = projects.first(where: { $0.id == refs.projectID })
         {
             createWorkspaceWithDefaults(project: project)
@@ -4834,8 +4599,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         guard let hotkey = GlobalHotkey(rawValue: id) else { return }
         switch hotkey {
         case .toggle: toggleWindowFromHotkey()
-        case .next: if NSApp.isActive { selectNextVisibleWorkspace() } else { focusGlobalWindowNavigation(direction: 1) }
-        case .previous: if NSApp.isActive { selectPreviousVisibleWorkspace() } else { focusGlobalWindowNavigation(direction: -1) }
         case .tooltip: toggleTooltipDisplay()
         case .openEditor: openGlobalEditorFromHotkey()
         }
@@ -4926,7 +4689,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let contentHeight: CGFloat
         if hasTooltipBody {
             contentHeight =
-                titleField.frame.height + titleToBodySpacing + bodyField.frame.height + bodyToHintSpacing + hintField.frame.height + verticalPadding * 2
+                titleField.frame.height + titleToBodySpacing + bodyField.frame.height + bodyToHintSpacing + hintField.frame.height + verticalPadding
+                * 2
         } else {
             contentHeight = titleField.frame.height + bodyToHintSpacing + hintField.frame.height + verticalPadding * 2
         }
@@ -4941,21 +4705,13 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let hintY = verticalPadding
         let bodyY = hintY + hintField.frame.height + bodyToHintSpacing
         let titleY: CGFloat
-        if hasTooltipBody {
-            titleY = bodyY + bodyField.frame.height + titleToBodySpacing
-        } else {
-            titleY = bodyY
-        }
+        if hasTooltipBody { titleY = bodyY + bodyField.frame.height + titleToBodySpacing } else { titleY = bodyY }
 
         titleField.frame.origin = NSPoint(x: titleX, y: titleY)
-        if hasTooltipBody {
-            bodyField.frame.origin = NSPoint(x: bodyX, y: bodyY)
-        }
+        if hasTooltipBody { bodyField.frame.origin = NSPoint(x: bodyX, y: bodyY) }
         hintField.frame.origin = NSPoint(x: hintX, y: hintY)
         contentView.addSubview(titleField)
-        if hasTooltipBody {
-            contentView.addSubview(bodyField)
-        }
+        if hasTooltipBody { contentView.addSubview(bodyField) }
         contentView.addSubview(hintField)
 
         let windowWidth = contentView.frame.width
@@ -4964,9 +4720,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let windowY = screenFrame.origin.y + (screenFrame.height - windowHeight) / 2
 
         let window = NSWindow(
-            contentRect: NSRect(x: windowX, y: windowY, width: windowWidth, height: windowHeight),
-            styleMask: [.borderless],
-            backing: .buffered,
+            contentRect: NSRect(x: windowX, y: windowY, width: windowWidth, height: windowHeight), styleMask: [.borderless], backing: .buffered,
             defer: false)
         window.backgroundColor = .clear
         window.isOpaque = false
@@ -4974,7 +4728,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         window.level = .floating
         window.contentView = contentView
         window.makeKeyAndOrderFront(nil)
-        
         self.tooltipWindow = window
     }
 
@@ -4998,12 +4751,12 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     private func shortcutRawValue(for setting: ShortcutSetting) throws -> String {
         switch setting {
         case .guiHotkey: return try orchestrator.guiHotkey()
-        case .guiNextShortcut: return try orchestrator.guiNextShortcut()
-        case .guiPreviousShortcut: return try orchestrator.guiPreviousShortcut()
         case .guiShowShortcut: return try orchestrator.guiShowShortcut()
         case .guiAddProjectShortcut: return try orchestrator.guiAddProjectShortcut()
         case .guiAddWorkspaceShortcut: return try orchestrator.guiAddWorkspaceShortcut()
         case .guiReloadShortcut: return try orchestrator.guiReloadShortcut()
+        case .guiNextShortcut: return try orchestrator.guiNextShortcut()
+        case .guiPreviousShortcut: return try orchestrator.guiPreviousShortcut()
         case .guiOpenEditorShortcut: return try orchestrator.guiOpenEditorShortcut()
         case .guiOpenTerminalShortcut: return try orchestrator.guiOpenTerminalShortcut()
         case .guiOpenFinderShortcut: return try orchestrator.guiOpenFinderShortcut()
@@ -5015,12 +4768,12 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     private func setShortcutSetting(setting: ShortcutSetting, value: String?) throws {
         switch setting {
         case .guiHotkey: try orchestrator.setGUIHotkey(value)
-        case .guiNextShortcut: try orchestrator.setGUINextShortcut(value)
-        case .guiPreviousShortcut: try orchestrator.setGUIPreviousShortcut(value)
         case .guiShowShortcut: try orchestrator.setGUIShowShortcut(value)
         case .guiAddProjectShortcut: try orchestrator.setGUIAddProjectShortcut(value)
         case .guiAddWorkspaceShortcut: try orchestrator.setGUIAddWorkspaceShortcut(value)
         case .guiReloadShortcut: try orchestrator.setGUIReloadShortcut(value)
+        case .guiNextShortcut: try orchestrator.setGUINextShortcut(value)
+        case .guiPreviousShortcut: try orchestrator.setGUIPreviousShortcut(value)
         case .guiOpenEditorShortcut: try orchestrator.setGUIOpenEditorShortcut(value)
         case .guiOpenTerminalShortcut: try orchestrator.setGUIOpenTerminalShortcut(value)
         case .guiOpenFinderShortcut: try orchestrator.setGUIOpenFinderShortcut(value)
@@ -5032,12 +4785,12 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     private func shortcutSpec(for setting: ShortcutSetting) -> HotkeySpec? {
         switch setting {
         case .guiHotkey: return toggleShortcutSpec
-        case .guiNextShortcut: return nextShortcutSpec
-        case .guiPreviousShortcut: return previousShortcutSpec
         case .guiShowShortcut: return nil
         case .guiAddProjectShortcut: return nil
         case .guiAddWorkspaceShortcut: return nil
         case .guiReloadShortcut: return nil
+        case .guiNextShortcut: return nextShortcutSpec
+        case .guiPreviousShortcut: return previousShortcutSpec
         case .guiOpenEditorShortcut: return openEditorShortcutSpec
         case .guiOpenTerminalShortcut: return openTerminalShortcutSpec
         case .guiOpenFinderShortcut: return openFinderShortcutSpec
@@ -5062,28 +4815,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         return result
     }
 
-    private func selectNextVisibleWorkspace() {
-        let visible = allVisibleWorkspacesForCycling()
-        guard !visible.isEmpty else { return }
-        if let selectedWorkspaceID, let idx = visible.firstIndex(where: { $0.id == selectedWorkspaceID }) {
-            let next = visible[(idx + 1) % visible.count]
-            selectWorkspace(next)
-        } else {
-            selectWorkspace(visible[0])
-        }
-    }
-
-    private func selectPreviousVisibleWorkspace() {
-        let visible = allVisibleWorkspacesForCycling()
-        guard !visible.isEmpty else { return }
-        if let selectedWorkspaceID, let idx = visible.firstIndex(where: { $0.id == selectedWorkspaceID }) {
-            let prev = visible[(idx - 1 + visible.count) % visible.count]
-            selectWorkspace(prev)
-        } else {
-            selectWorkspace(visible[0])
-        }
-    }
-
     private func focusSelectedWorkspace() {
         guard let selectedWorkspaceID else { return }
         do { try orchestrator.focusWorkspace(workspaceID: selectedWorkspaceID) } catch { showError(error) }
@@ -5092,7 +4823,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     private func focusWindowShortcut(index: Int) {
         if showingDashboard {
             if let target = dashboardWindowFocusMap[index] {
-                do { try orchestrator.focusWorkspaceWindow(workspaceID: target.workspaceID, index: target.windowListIndex) } catch { showError(error) }
+                do { try orchestrator.focusWorkspaceWindow(workspaceID: target.workspaceID, index: target.windowListIndex) } catch {
+                    showError(error)
+                }
             } else if let agentRecord = dashboardAgentFocusMap[index] {
                 try? orchestrator.focusAgentWindow(agentRecord)
             }
@@ -5128,9 +4861,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             if window.role == "terminal", !windowProcesses.isEmpty {
                 for process in windowProcesses {
                     if shortcutCounter == index {
-                        do {
-                            try orchestrator.focusWorkspaceProcess(workspaceID: selectedWorkspaceID, processID: process.id)
-                        } catch {
+                        do { try orchestrator.focusWorkspaceProcess(workspaceID: selectedWorkspaceID, processID: process.id) } catch {
                             showError(error)
                         }
                         return
@@ -5139,11 +4870,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 }
             } else {
                 if shortcutCounter == index {
-                    do {
-                        try orchestrator.focusWorkspaceWindow(workspaceID: selectedWorkspaceID, index: windowListIndex)
-                    } catch {
-                        showError(error)
-                    }
+                    do { try orchestrator.focusWorkspaceWindow(workspaceID: selectedWorkspaceID, index: windowListIndex) } catch { showError(error) }
                     return
                 }
                 shortcutCounter += 1
@@ -5169,6 +4896,26 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         return keyMap[event.keyCode]
     }
 
+    private func selectNextVisibleWorkspace() {
+        let allVisible = projects.flatMap { visibleWorkspaces(projectID: $0.id) }
+        guard !allVisible.isEmpty else { return }
+        if let currentID = selectedWorkspaceID, let idx = allVisible.firstIndex(where: { $0.id == currentID }) {
+            selectWorkspace(allVisible[(idx + 1) % allVisible.count])
+        } else {
+            selectWorkspace(allVisible[0])
+        }
+    }
+
+    private func selectPreviousVisibleWorkspace() {
+        let allVisible = projects.flatMap { visibleWorkspaces(projectID: $0.id) }
+        guard !allVisible.isEmpty else { return }
+        if let currentID = selectedWorkspaceID, let idx = allVisible.firstIndex(where: { $0.id == currentID }) {
+            selectWorkspace(allVisible[(idx - 1 + allVisible.count) % allVisible.count])
+        } else {
+            selectWorkspace(allVisible[allVisible.count - 1])
+        }
+    }
+
     private func selectWorkspace(_ workspace: WorkspaceSummary) {
         for row in 0..<outlineView.numberOfRows {
             if let item = outlineView.item(atRow: row) as? OutlineItem {
@@ -5178,33 +4925,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 }
             }
         }
-    }
-
-    private func focusGlobalWindowNavigation(direction: Int) {
-        guard !NSApp.isActive else { return }
-        guard let workspaceID = globalWindowNavigationWorkspaceID() else { return }
-        do {
-            if direction > 0 {
-                try orchestrator.focusNextWindow(workspaceID: workspaceID)
-            } else {
-                try orchestrator.focusPreviousWindow(workspaceID: workspaceID)
-            }
-        } catch { showError(error) }
-    }
-
-    private func globalWindowNavigationWorkspaceID() -> String? {
-        if let workspaceID = try? orchestrator.workspaceIDForFocusedWindow() { return workspaceID }
-        if let workspaceID = try? orchestrator.activeWorkspaceID() { return workspaceID }
-        return nil
-    }
-
-    private func allVisibleWorkspacesForCycling() -> [WorkspaceSummary] {
-        var list: [WorkspaceSummary] = []
-        for project in projects {
-            let workspaces = workspacesByProject[project.id] ?? []
-            list.append(contentsOf: workspaces.filter { isWorkspaceVisible($0) })
-        }
-        return list
     }
 
     private func toggleWindowFromHotkey() {
@@ -5242,7 +4962,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             let visible = visibleWorkspaces(projectID: project.id)
             let workspace =
                 (index >= 0 && index < visible.count ? visible[index] : nil)
-                ?? WorkspaceSummary(id: "", name: "", branch: nil, targetBranch: nil, dir: "", isRunning: false, isArchived: false, isActive: true, isDefault: false)
+                ?? WorkspaceSummary(
+                    id: "", name: "", branch: nil, targetBranch: nil, dir: "", isRunning: false, isArchived: false, isActive: true, isDefault: false)
             return OutlineItem.workspace(project, workspace)
         }
         return OutlineItem.project(projects[0])
@@ -5323,12 +5044,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let indicatorState = workspaceIndicatorStateByID[workspace.id] ?? (workspace.isRunning ? .runningHealthy : .idle)
         statusIcon.image = NSImage(systemSymbolName: indicatorState == .idle ? "circle" : "circle.fill", accessibilityDescription: "Status")
         switch indicatorState {
-        case .idle:
-            statusIcon.contentTintColor = sidebarIdleIndicatorColor()
-        case .runningHealthy:
-            statusIcon.contentTintColor = sidebarRunningIndicatorColor()
-        case .runningUnhealthy:
-            statusIcon.contentTintColor = sidebarFailedIndicatorColor()
+        case .idle: statusIcon.contentTintColor = sidebarIdleIndicatorColor()
+        case .runningHealthy: statusIcon.contentTintColor = sidebarRunningIndicatorColor()
+        case .runningUnhealthy: statusIcon.contentTintColor = sidebarFailedIndicatorColor()
         }
         statusIcon.widthAnchor.constraint(equalToConstant: 10).isActive = true
         statusIcon.heightAnchor.constraint(equalToConstant: 10).isActive = true
@@ -5373,8 +5091,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
             NSLayoutConstraint.activate([
                 clockIcon.leadingAnchor.constraint(equalTo: activityRow.leadingAnchor),
-                clockIcon.centerYAnchor.constraint(equalTo: activityRow.centerYAnchor),
-                clockIcon.widthAnchor.constraint(equalToConstant: 10),
+                clockIcon.centerYAnchor.constraint(equalTo: activityRow.centerYAnchor), clockIcon.widthAnchor.constraint(equalToConstant: 10),
                 clockIcon.heightAnchor.constraint(equalToConstant: 10),
 
                 activityLabel.leadingAnchor.constraint(equalTo: clockIcon.trailingAnchor, constant: 4),
@@ -5382,8 +5099,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 activityLabel.trailingAnchor.constraint(lessThanOrEqualTo: conflictIcon.leadingAnchor, constant: -4),
 
                 conflictIcon.trailingAnchor.constraint(equalTo: activityRow.trailingAnchor),
-                conflictIcon.centerYAnchor.constraint(equalTo: activityRow.centerYAnchor),
-                conflictIcon.widthAnchor.constraint(equalToConstant: 10),
+                conflictIcon.centerYAnchor.constraint(equalTo: activityRow.centerYAnchor), conflictIcon.widthAnchor.constraint(equalToConstant: 10),
                 conflictIcon.heightAnchor.constraint(equalToConstant: 10),
 
                 activityRow.heightAnchor.constraint(equalToConstant: 14),
@@ -5411,10 +5127,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         return cell
     }
 
-    private func sidebarMetadataRow(
-        symbol: String, text: String, isSelected: Bool,
-        trailingSymbol: String? = nil, trailingColor: NSColor? = nil
-    ) -> NSStackView {
+    private func sidebarMetadataRow(symbol: String, text: String, isSelected: Bool, trailingSymbol: String? = nil, trailingColor: NSColor? = nil)
+        -> NSStackView
+    {
         let row = NSStackView()
         row.orientation = .horizontal
         row.alignment = .centerY
@@ -5538,9 +5253,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             showingSettings = false
             // Don't replace the detail pane if we're navigating to the dashboard;
             // showDashboardDetail() called deselectAll() intentionally.
-            if !showingDashboard {
-                showPlaceholder()
-            }
+            if !showingDashboard { showPlaceholder() }
             refreshSidebarSelectionRows(previousWorkspaceID: previousWorkspaceID, currentWorkspaceID: selectedWorkspaceID)
             return
         }
@@ -5603,8 +5316,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     }
 
     private func registerDirtyTracking(
-        setupView: NSTextView, stopView: NSTextView, portEditor: PortEditor, processEditor: ProcessEditor,
-        browserSessionEditor: BrowserSessionEditor
+        setupView: NSTextView, stopView: NSTextView, portEditor: PortEditor, processEditor: ProcessEditor, browserSessionEditor: BrowserSessionEditor
     ) {
         projectHasUnsavedChanges = false
         NotificationCenter.default.addObserver(forName: NSText.didChangeNotification, object: setupView, queue: .main) { [weak self] _ in
@@ -5619,8 +5331,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     }
 
     private func registerWorkspaceDirtyTracking(
-        stopView: NSTextView, portEditor: PortEditor, processEditor: ProcessEditor,
-        browserSessionEditor: BrowserSessionEditor
+        stopView: NSTextView, portEditor: PortEditor, processEditor: ProcessEditor, browserSessionEditor: BrowserSessionEditor
     ) {
         workspaceHasUnsavedChanges = false
         NotificationCenter.default.addObserver(forName: NSText.didChangeNotification, object: stopView, queue: .main) { [weak self] _ in

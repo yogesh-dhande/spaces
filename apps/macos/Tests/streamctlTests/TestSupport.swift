@@ -1,7 +1,7 @@
-import Foundation
 import AppKit
-import streamctl
+import Foundation
 import appctl
+import streamctl
 
 func makeTempDirectory() throws -> URL {
     let base = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
@@ -16,8 +16,9 @@ func makeTemporaryStore() throws -> SQLiteStore {
 }
 
 func makeProjectRecord(id: String = UUID().uuidString, dir: String) -> ProjectRecord {
-    ProjectRecord(id: id, name: "Project", dir: dir, isGitRepo: false, defaultBranch: nil,
-                  setupScript: nil, stopScript: nil, ports: [], processes: [], statusChecks: [], browserSessions: [])
+    ProjectRecord(
+        id: id, name: "Project", dir: dir, isGitRepo: false, defaultBranch: nil, setupScript: nil, stopScript: nil, ports: [], processes: [],
+        statusChecks: [], browserSessions: [])
 }
 
 func makeWorkspaceRecord(id: String = UUID().uuidString, projectID: String, name: String, dir: String) -> WorkspaceRecord {
@@ -27,7 +28,7 @@ func makeWorkspaceRecord(id: String = UUID().uuidString, projectID: String, name
 }
 
 // Mock iTerm2 adapter for testing that doesn't open actual terminal windows
-class MockIterm2Adapter: Iterm2Adapter {
+class MockIterm2Adapter: Iterm2Adapter, @unchecked Sendable {
     var openWindowAndRunCallCount = 0
     var openTabInWindowAndRunCallCount = 0
     var runInWindowCallCount = 0
@@ -43,7 +44,6 @@ class MockIterm2Adapter: Iterm2Adapter {
     var focusSessionOrTabResult = true
     var closedSessionIDs: [String] = []
     var stubbedSessionIDs: Set<String> = []
-    
     override func openWindowAndRun(command: String, background: Bool = false) throws -> ItermWindowInfo {
         openWindowAndRunCallCount += 1
         lastCommand = command
@@ -62,16 +62,12 @@ class MockIterm2Adapter: Iterm2Adapter {
         let sessionID = nextSessionID.map { "\($0)-tab-\(openTabInWindowAndRunCallCount)" }
         return ItermWindowInfo(id: windowID, sessionID: sessionID, tabIndex: tabIndex)
     }
-    
     override func runInWindow(id: Int, command: String) throws {
         runInWindowCallCount += 1
         lastCommand = command
         lastWindowID = id
     }
-    
-    override func isAvailable() -> Bool {
-        return true
-    }
+    override func isAvailable() -> Bool { return true }
 
     override func focusSessionOrTab(preferredSessionID: String?, tabIndex: Int?, windowID: Int?) throws -> Bool {
         focusSessionOrTabCallCount += 1
@@ -99,7 +95,5 @@ class MockIterm2Adapter: Iterm2Adapter {
         lastPulseColor = pulseColor
     }
 
-    override func listSessionIDs() throws -> Set<String> {
-        stubbedSessionIDs
-    }
+    override func listSessionIDs() throws -> Set<String> { stubbedSessionIDs }
 }

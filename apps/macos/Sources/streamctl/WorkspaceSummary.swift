@@ -13,10 +13,9 @@ public struct WorkspaceSummary: Sendable {
     public let tooltip: String?
 
     public init(
-        id: String, title: String, branch: String?, targetBranch: String? = nil, dir: String, isRunning: Bool, isArchived: Bool, isActive: Bool = true,
-        isDefault: Bool,
-        tooltip: String? = nil)
-    {
+        id: String, title: String, branch: String?, targetBranch: String? = nil, dir: String, isRunning: Bool, isArchived: Bool,
+        isActive: Bool = true, isDefault: Bool, tooltip: String? = nil
+    ) {
         self.id = id
         self.title = title
         self.branch = branch
@@ -33,12 +32,10 @@ public struct WorkspaceSummary: Sendable {
 
     public init(
         id: String, name: String, branch: String?, targetBranch: String? = nil, dir: String, isRunning: Bool, isArchived: Bool, isActive: Bool = true,
-        isDefault: Bool,
-        tooltip: String? = nil)
-    {
+        isDefault: Bool, tooltip: String? = nil
+    ) {
         self.init(
-            id: id, title: name, branch: branch, targetBranch: targetBranch, dir: dir, isRunning: isRunning, isArchived: isArchived, isActive: isActive,
-            isDefault: isDefault,
-            tooltip: tooltip)
+            id: id, title: name, branch: branch, targetBranch: targetBranch, dir: dir, isRunning: isRunning, isArchived: isArchived,
+            isActive: isActive, isDefault: isDefault, tooltip: tooltip)
     }
 }

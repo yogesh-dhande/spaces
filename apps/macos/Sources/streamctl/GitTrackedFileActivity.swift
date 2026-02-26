@@ -9,12 +9,8 @@ public struct GitTrackedFileActivity: Sendable {
     public let hasMergeConflicts: Bool
 
     public init(
-        latestTrackedFileModificationDate: Date?,
-        modifiedTrackedFileCount: Int,
-        aheadCount: Int = 0,
-        behindCount: Int = 0,
-        comparedBaseBranch: String? = nil,
-        hasMergeConflicts: Bool = false
+        latestTrackedFileModificationDate: Date?, modifiedTrackedFileCount: Int, aheadCount: Int = 0, behindCount: Int = 0,
+        comparedBaseBranch: String? = nil, hasMergeConflicts: Bool = false
     ) {
         self.latestTrackedFileModificationDate = latestTrackedFileModificationDate
         self.modifiedTrackedFileCount = modifiedTrackedFileCount

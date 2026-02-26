@@ -14,10 +14,9 @@ public struct ProjectRecord: Codable, Sendable {
     public var browserSessions: [BrowserSession]
 
     public init(
-        id: String, name: String, dir: String, isGitRepo: Bool, defaultBranch: String?,
-        setupScript: String? = nil, stopScript: String? = nil,
-        ports: [PortDefinition] = [], processes: [ProcessTemplate] = [],
-        statusChecks: [StatusCheckDefinition] = [], browserSessions: [BrowserSession] = []
+        id: String, name: String, dir: String, isGitRepo: Bool, defaultBranch: String?, setupScript: String? = nil, stopScript: String? = nil,
+        ports: [PortDefinition] = [], processes: [ProcessTemplate] = [], statusChecks: [StatusCheckDefinition] = [],
+        browserSessions: [BrowserSession] = []
     ) {
         self.id = id
         self.name = name

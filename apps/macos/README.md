@@ -19,7 +19,6 @@ It manages projects, workspaces, processes, and window sets so you can move betw
 - Managed git repos (from `mx project add --git-url`): `/Users/<username>/muxy/repos/<project_name>` (bare repo)
 - Git worktrees: `/Users/<username>/muxy/workspaces/<projectname>/<dirname>` (dirname defaults to a unique food name and can be overridden on workspace creation)
 - GUI shortcuts (when focused): `cmd+1` through `cmd+9` focus workspace windows
-- Global window navigation (when GUI not focused): `cmd+shift+]` and `cmd+shift+[`
 
 Global preferences are stored in the DB and configurable via `mx settings set` or the GUI Settings (⌘,):
 - `editor`: preferred editor for `mx workspace open-editor` (`none`, `vscode`, `cursor`, `windsurf`, `vim`)
@@ -97,7 +96,7 @@ Muxy periodically discovers and reconciles git worktrees for existing projects. 
   - Workspace window records are refreshed periodically in a background pass so stale closed windows are pruned without blocking interaction
   - The same refresh pass updates terminal window fallback labels (title/app) from live yabai data when that terminal window is not linked to a running process record
   - The sidebar also performs a periodic metadata reload (same snapshot path as the Reload button) so CLI edits like workspace/project title changes appear without manual refresh, unless the user is actively editing form fields
-  - Terminal focus prefers stored iTerm2 session/tab metadata (AppleScript) before generic window focus so cycling lands on the correct tab when available
+  - Terminal focus prefers stored iTerm2 session/tab metadata (AppleScript) before generic window focus so the correct tab is activated when available
   - Multi-process workspace launch uses a shared iTerm2 window by default (one tab/session per process), while preserving per-session focus/close behavior
   - Stop/cleanup closes process-backed iTerm terminals by stored session/tab first (preserving unrelated tabs in the same window when possible) and avoids `yabai` window-close for those process-backed terminal windows
   - Launch/Restart can extract one matching tab per browser session into a dedicated Chrome window and persist extracted-window mappings for faster focus
@@ -111,8 +110,6 @@ Muxy periodically discovers and reconciles git worktrees for existing projects. 
   - Window-scoped Chrome tab focus/close uses string-based window-id checks in AppleScript for reliable matching
   - Browser tab rows are sorted by configured browser-session order and then URL so shortcut indices remain stable
   - Browser session names are optional but preferred for display labels in workspace window rows; when present, rows show `name + URL` in the same split-label style as process rows
-  - Window cycling order is browser tabs first, then terminals, then other windows; once cycling starts, next/previous uses remembered cycle position
-  - Global next/previous window navigation disambiguates reused Chrome windows by active tab URL, so shortcuts stay on the correct workspace
   - Process restarts (status-check failure or `on_exit=restart`) terminate and wait for the tracked runtime PID before relaunch; if a clean stop does not finish in time, muxy restarts in a new terminal window instead of queueing in the busy one
   - Processes with status check results shown as indented sub-rows (colored dots)
   - Status checks run in periodic background monitoring for running workspaces (respecting each check interval), so health rows and on-fail restarts update even when the run tab is not open

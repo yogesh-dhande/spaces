@@ -187,9 +187,7 @@ final class AgentHookTests: XCTestCase {
         let bundleID = env["__CFBundleIdentifier"] ?? ""
         let claudeEntrypoint = env["CLAUDE_CODE_ENTRYPOINT"]
         let provider: AgentProvider?
-        if bundleID == "com.openai.codex" { provider = .codex }
-        else if claudeEntrypoint != nil { provider = .iterm2 }
-        else { provider = nil }
+        if bundleID == "com.openai.codex" { provider = .codex } else if claudeEntrypoint != nil { provider = .iterm2 } else { provider = nil }
         XCTAssertNil(provider)
     }
 
@@ -199,10 +197,15 @@ final class AgentHookTests: XCTestCase {
         let bundleID = env["__CFBundleIdentifier"] ?? ""
         let claudeEntrypoint = env["CLAUDE_CODE_ENTRYPOINT"]
         let provider: AgentProvider?
-        if bundleID == "com.openai.codex" { provider = .codex }
-        else if bundleID == "com.googlecode.iterm2", env["CODEX_THREAD_ID"] != nil { provider = .iterm2 }
-        else if claudeEntrypoint != nil { provider = .iterm2 }
-        else { provider = nil }
+        if bundleID == "com.openai.codex" {
+            provider = .codex
+        } else if bundleID == "com.googlecode.iterm2", env["CODEX_THREAD_ID"] != nil {
+            provider = .iterm2
+        } else if claudeEntrypoint != nil {
+            provider = .iterm2
+        } else {
+            provider = nil
+        }
         XCTAssertEqual(provider, .iterm2)
     }
 
@@ -212,10 +215,15 @@ final class AgentHookTests: XCTestCase {
         let bundleID = env["__CFBundleIdentifier"] ?? ""
         let claudeEntrypoint = env["CLAUDE_CODE_ENTRYPOINT"]
         let provider: AgentProvider?
-        if bundleID == "com.openai.codex" { provider = .codex }
-        else if bundleID == "com.googlecode.iterm2", env["CODEX_THREAD_ID"] != nil { provider = .iterm2 }
-        else if claudeEntrypoint != nil { provider = .iterm2 }
-        else { provider = nil }
+        if bundleID == "com.openai.codex" {
+            provider = .codex
+        } else if bundleID == "com.googlecode.iterm2", env["CODEX_THREAD_ID"] != nil {
+            provider = .iterm2
+        } else if claudeEntrypoint != nil {
+            provider = .iterm2
+        } else {
+            provider = nil
+        }
         XCTAssertEqual(provider, .iterm2)
     }
 
@@ -225,10 +233,15 @@ final class AgentHookTests: XCTestCase {
         let bundleID = env["__CFBundleIdentifier"] ?? ""
         let claudeEntrypoint = env["CLAUDE_CODE_ENTRYPOINT"]
         let provider: AgentProvider?
-        if bundleID == "com.openai.codex" { provider = .codex }
-        else if bundleID == "com.googlecode.iterm2", env["CODEX_THREAD_ID"] != nil { provider = .iterm2 }
-        else if claudeEntrypoint != nil { provider = .iterm2 }
-        else { provider = nil }
+        if bundleID == "com.openai.codex" {
+            provider = .codex
+        } else if bundleID == "com.googlecode.iterm2", env["CODEX_THREAD_ID"] != nil {
+            provider = .iterm2
+        } else if claudeEntrypoint != nil {
+            provider = .iterm2
+        } else {
+            provider = nil
+        }
         XCTAssertNil(provider)
     }
 
@@ -238,10 +251,15 @@ final class AgentHookTests: XCTestCase {
         let bundleID = env["__CFBundleIdentifier"] ?? ""
         let claudeEntrypoint = env["CLAUDE_CODE_ENTRYPOINT"]
         let provider: AgentProvider?
-        if bundleID == "com.openai.codex" { provider = .codex }
-        else if bundleID == "com.googlecode.iterm2", env["CODEX_THREAD_ID"] != nil { provider = .iterm2 }
-        else if bundleID == "com.googlecode.iterm2", claudeEntrypoint != nil { provider = .iterm2 }
-        else { provider = nil }
+        if bundleID == "com.openai.codex" {
+            provider = .codex
+        } else if bundleID == "com.googlecode.iterm2", env["CODEX_THREAD_ID"] != nil {
+            provider = .iterm2
+        } else if bundleID == "com.googlecode.iterm2", claudeEntrypoint != nil {
+            provider = .iterm2
+        } else {
+            provider = nil
+        }
         XCTAssertNil(provider)
     }
 
@@ -252,8 +270,7 @@ final class AgentHookTests: XCTestCase {
         let (_, workspace) = try makeProjectAndWorkspace(store: store)
 
         try orchestrator.registerAgentWindow(workspaceID: workspace.id, provider: .codex, status: .spinning)
-        let updated = try orchestrator.updateAgentWindowStatus(
-            workspaceID: workspace.id, provider: .codex, status: .done)
+        let updated = try orchestrator.updateAgentWindowStatus(workspaceID: workspace.id, provider: .codex, status: .done)
         XCTAssertEqual(updated.status, .done)
 
         let allRecords = try store.agentWindows(workspaceID: workspace.id)

@@ -1,10 +1,9 @@
-import Testing
 import Foundation
+import Testing
+
 @testable import streamctl
 
-@Suite("Status Check Tests")
-struct StatusCheckTests {
-    
+@Suite("Status Check Tests") struct StatusCheckTests {
     @Test("Status check command failure detection with docker commands")
     // Tests status check detects docker container failure by arranging representative inputs and asserting the expected result.
     func testStatusCheckDetectsDockerContainerFailure() throws {
@@ -12,7 +11,6 @@ struct StatusCheckTests {
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
         let store = try makeTemporaryStore()
-        
         // Use mock iTerm2 adapter to prevent actual terminal windows from opening
         let mockIterm = MockIterm2Adapter()
         let orchestrator = MuxyOrchestrator(store: store, iterm: mockIterm)
@@ -20,11 +18,9 @@ struct StatusCheckTests {
         let project = try orchestrator.addProject(dir: projectDir.path)
         let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
         try store.touchWorkspaceSettings(workspaceID: workspace.id, updatedAt: "now")
-        
         let mockScript = projectDir.appendingPathComponent("mock-docker-check.sh")
         try "#!/bin/bash\nexit 1".write(to: mockScript, atomically: true, encoding: .utf8)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: mockScript.path)
-        
         // Create a mock PID file to simulate the new PID after restart
         // The PID file is stored in ~/.muxy/runtime/<workspace-id>/
         let homeDir = FileManager.default.homeDirectoryForCurrentUser
@@ -33,45 +29,32 @@ struct StatusCheckTests {
         try FileManager.default.createDirectory(at: workspaceRuntime, withIntermediateDirectories: true)
         let pidFileURL = workspaceRuntime.appendingPathComponent("web-server.pid")
         try "10001".write(to: pidFileURL, atomically: true, encoding: .utf8)
-        
         try store.setWorkspaceStatusChecks(
             workspaceID: workspace.id,
             checks: [
                 StatusCheckDefinition(
-                    name: "docker-container-health",
-                    process: "web-server",
-                    command: mockScript.path,
-                    interval: 10,
-                    timeout: 5,
-                    onFail: .restart
-                ),
+                    name: "docker-container-health", process: "web-server", command: mockScript.path, interval: 10, timeout: 5, onFail: .restart)
             ])
-        
         let runningProcess = RunningProcessRecord(
-            id: UUID().uuidString, workspaceID: workspace.id, templateName: "web-server", 
-            command: "docker compose up -d", terminalApp: "iTerm2", windowID: 123, pid: 9000,
-            status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil)
+            id: UUID().uuidString, workspaceID: workspace.id, templateName: "web-server", command: "docker compose up -d", terminalApp: "iTerm2",
+            windowID: 123, pid: 9000, status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil)
         try store.upsert(runningProcess: runningProcess)
 
         let results = try orchestrator.runStatusChecks(workspaceID: workspace.id)
-        
         #expect(results.count == 1)
         #expect(results.first?.status == .failed)
         #expect(results.first?.checkName == "docker-container-health")
-        
         // Verify iTerm2 was called to run in existing window (not create new one)
         #expect(mockIterm.openWindowAndRunCallCount == 0)
         #expect(mockIterm.runInWindowCallCount == 1)
         #expect(mockIterm.lastWindowID == 123)
-        
         // Verify process was restarted (status should be running)
         let currentProcesses = try store.runningProcesses(workspaceID: workspace.id)
         #expect(currentProcesses.count == 1)
         let currentProcess = currentProcesses.first!
         #expect(currentProcess.status == .running)
-        #expect(currentProcess.windowID == 123) // Should have same window ID
+        #expect(currentProcess.windowID == 123)  // Should have same window ID
     }
-    
     @Test("Status check command success detection with docker commands")
     // Tests status check detects docker container success by arranging representative inputs and asserting the expected result.
     func testStatusCheckDetectsDockerContainerSuccess() throws {
@@ -84,41 +67,28 @@ struct StatusCheckTests {
         let project = try orchestrator.addProject(dir: projectDir.path)
         let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
         try store.touchWorkspaceSettings(workspaceID: workspace.id, updatedAt: "now")
-        
         let mockScript = projectDir.appendingPathComponent("mock-docker-check.sh")
         try "#!/bin/bash\necho 'pyfiddle_web_dev'".write(to: mockScript, atomically: true, encoding: .utf8)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: mockScript.path)
-        
         try store.setWorkspaceStatusChecks(
             workspaceID: workspace.id,
             checks: [
                 StatusCheckDefinition(
-                    name: "docker-container-health",
-                    process: "web-server",
-                    command: mockScript.path,
-                    interval: 10,
-                    timeout: 5,
-                    onFail: .restart
-                ),
+                    name: "docker-container-health", process: "web-server", command: mockScript.path, interval: 10, timeout: 5, onFail: .restart)
             ])
-        
         let runningProcess = RunningProcessRecord(
-            id: UUID().uuidString, workspaceID: workspace.id, templateName: "web-server", 
-            command: "docker compose up -d", terminalApp: "iTerm2", windowID: 123, pid: 9000,
-            status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil)
+            id: UUID().uuidString, workspaceID: workspace.id, templateName: "web-server", command: "docker compose up -d", terminalApp: "iTerm2",
+            windowID: 123, pid: 9000, status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil)
         try store.upsert(runningProcess: runningProcess)
 
         let results = try orchestrator.runStatusChecks(workspaceID: workspace.id)
-        
         #expect(results.count == 1)
         #expect(results.first?.status == .passed)
         #expect(results.first?.checkName == "docker-container-health")
-        
         let currentProcess = try store.runningProcesses(workspaceID: workspace.id).first!
         #expect(currentProcess.status == .running)
         #expect(currentProcess.pid == 9000)
     }
-    
     @Test("Status check with incorrect docker command logic demonstrates the bug")
     // Tests status check with incorrect docker command logic by arranging representative inputs and asserting the expected result.
     func testStatusCheckWithIncorrectDockerCommandLogic() throws {
@@ -131,36 +101,25 @@ struct StatusCheckTests {
         let project = try orchestrator.addProject(dir: projectDir.path)
         let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
         try store.touchWorkspaceSettings(workspaceID: workspace.id, updatedAt: "now")
-        
         let mockScript = projectDir.appendingPathComponent("mock-broken-docker-check.sh")
-        try "#!/bin/bash\n# Simulates 'docker ps | grep non-existent' behavior\n# Exits 0 but produces no output\nexit 0".write(to: mockScript, atomically: true, encoding: .utf8)
+        try "#!/bin/bash\n# Simulates 'docker ps | grep non-existent' behavior\n# Exits 0 but produces no output\nexit 0".write(
+            to: mockScript, atomically: true, encoding: .utf8)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: mockScript.path)
-        
         try store.setWorkspaceStatusChecks(
             workspaceID: workspace.id,
             checks: [
                 StatusCheckDefinition(
-                    name: "incorrect-docker-check",
-                    process: "web-server",
-                    command: mockScript.path,
-                    interval: 10,
-                    timeout: 5,
-                    onFail: .restart
-                ),
+                    name: "incorrect-docker-check", process: "web-server", command: mockScript.path, interval: 10, timeout: 5, onFail: .restart)
             ])
-        
         let runningProcess = RunningProcessRecord(
-            id: UUID().uuidString, workspaceID: workspace.id, templateName: "web-server", 
-            command: "docker compose up -d", terminalApp: "iTerm2", windowID: 123, pid: 9000,
-            status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil)
+            id: UUID().uuidString, workspaceID: workspace.id, templateName: "web-server", command: "docker compose up -d", terminalApp: "iTerm2",
+            windowID: 123, pid: 9000, status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil)
         try store.upsert(runningProcess: runningProcess)
 
         let results = try orchestrator.runStatusChecks(workspaceID: workspace.id)
-        
         #expect(results.count == 1)
-        #expect(results.first?.status == .passed) // This is the bug - should be red!
+        #expect(results.first?.status == .passed)  // This is the bug - should be red!
         #expect(results.first?.checkName == "incorrect-docker-check")
-        
         let currentProcess = try store.runningProcesses(workspaceID: workspace.id).first!
         #expect(currentProcess.status == .running)
         #expect(currentProcess.pid == 9000)
@@ -192,24 +151,16 @@ struct StatusCheckTests {
             workspaceID: workspace.id,
             checks: [
                 StatusCheckDefinition(
-                    name: "docker-container-health",
-                    process: "web-server",
-                    command: failingCheck.path,
-                    interval: 10,
-                    timeout: 5,
-                    onFail: .restart
-                ),
+                    name: "docker-container-health", process: "web-server", command: failingCheck.path, interval: 10, timeout: 5, onFail: .restart)
             ])
-        
         let workspaceRuntime = runtimeDir.appendingPathComponent(workspace.id, isDirectory: true)
         try FileManager.default.createDirectory(at: workspaceRuntime, withIntermediateDirectories: true)
         let pidFileURL = workspaceRuntime.appendingPathComponent("web-server.pid")
         try "98765".write(to: pidFileURL, atomically: true, encoding: .utf8)
 
         let runningProcess = RunningProcessRecord(
-            id: UUID().uuidString, workspaceID: workspace.id, templateName: "web-server",
-            command: "docker compose up --build", terminalApp: "iTerm2", windowID: 123, pid: nil,
-            status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil)
+            id: UUID().uuidString, workspaceID: workspace.id, templateName: "web-server", command: "docker compose up --build", terminalApp: "iTerm2",
+            windowID: 123, pid: nil, status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil)
         try store.upsert(runningProcess: runningProcess)
 
         let results = try orchestrator.runStatusChecks(workspaceID: workspace.id)

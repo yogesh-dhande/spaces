@@ -40,8 +40,8 @@ public final class SQLiteStore {
                   stop_script = excluded.stop_script
                 """,
             bindings: [
-                project.id, project.name, project.dir, project.isGitRepo ? "1" : "0",
-                project.defaultBranch ?? "", project.setupScript ?? "", project.stopScript ?? "",
+                project.id, project.name, project.dir, project.isGitRepo ? "1" : "0", project.defaultBranch ?? "", project.setupScript ?? "",
+                project.stopScript ?? "",
             ])
         try execute(sql: "DELETE FROM project_port_definitions WHERE project_id = ?", bindings: [project.id])
         for (index, definition) in project.ports.enumerated() {
@@ -63,8 +63,8 @@ public final class SQLiteStore {
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                 bindings: [
-                    UUID().uuidString, project.id, check.name ?? "", check.process, check.command,
-                    String(check.interval), String(check.timeout), check.onFail.rawValue, String(index),
+                    UUID().uuidString, project.id, check.name ?? "", check.process, check.command, String(check.interval), String(check.timeout),
+                    check.onFail.rawValue, String(index),
                 ])
         }
         try execute(sql: "DELETE FROM project_browser_sessions WHERE project_id = ?", bindings: [project.id])
@@ -76,16 +76,18 @@ public final class SQLiteStore {
     }
 
     public func project(id: String) throws -> ProjectRecord? {
-        guard let row = try queryRow(sql: "SELECT id, name, dir, is_git, default_branch, setup_script, stop_script FROM projects WHERE id = ?", bindings: [id]) else {
-            return nil
-        }
+        guard
+            let row = try queryRow(
+                sql: "SELECT id, name, dir, is_git, default_branch, setup_script, stop_script FROM projects WHERE id = ?", bindings: [id])
+        else { return nil }
         return try decodeProjectWithTemplates(row: row)
     }
 
     public func project(dir: String) throws -> ProjectRecord? {
-        guard let row = try queryRow(sql: "SELECT id, name, dir, is_git, default_branch, setup_script, stop_script FROM projects WHERE dir = ?", bindings: [dir]) else {
-            return nil
-        }
+        guard
+            let row = try queryRow(
+                sql: "SELECT id, name, dir, is_git, default_branch, setup_script, stop_script FROM projects WHERE dir = ?", bindings: [dir])
+        else { return nil }
         return try decodeProjectWithTemplates(row: row)
     }
 
@@ -137,10 +139,9 @@ public final class SQLiteStore {
                   tooltip = excluded.tooltip
                 """,
             bindings: [
-                workspace.id, workspace.projectID, workspace.title, workspace.dir, workspace.dirname ?? "", workspace.branch ?? "", workspace.targetBranch ?? "",
-                workspace.isDefault ? "1" : "0", workspace.isArchived ? "1" : "0", workspace.isActive ? "1" : "0", workspace.isRunning ? "1" : "0",
-                workspace.lastLaunchedAt ?? "",
-                workspace.tooltip ?? "",
+                workspace.id, workspace.projectID, workspace.title, workspace.dir, workspace.dirname ?? "", workspace.branch ?? "",
+                workspace.targetBranch ?? "", workspace.isDefault ? "1" : "0", workspace.isArchived ? "1" : "0", workspace.isActive ? "1" : "0",
+                workspace.isRunning ? "1" : "0", workspace.lastLaunchedAt ?? "", workspace.tooltip ?? "",
             ])
         try execute(sql: "DELETE FROM ignored_worktrees WHERE worktree_dir = ?", bindings: [workspace.dir])
     }
@@ -156,9 +157,7 @@ public final class SQLiteStore {
         return decodeWorkspace(row: row)
     }
 
-    public func workspace(projectID: String, name: String) throws -> WorkspaceRecord? {
-        try workspace(projectID: projectID, title: name)
-    }
+    public func workspace(projectID: String, name: String) throws -> WorkspaceRecord? { try workspace(projectID: projectID, title: name) }
 
     public func workspace(projectID: String, title: String) throws -> WorkspaceRecord? {
         guard
@@ -205,9 +204,7 @@ public final class SQLiteStore {
         try execute(sql: "DELETE FROM workspace_ports WHERE workspace_id = ?", bindings: [id])
         try execute(sql: "DELETE FROM workspace_port_definitions WHERE workspace_id = ?", bindings: [id])
         try execute(sql: "DELETE FROM workspaces WHERE id = ?", bindings: [id])
-        if let deletedWorkspace {
-            try markIgnoredWorktree(path: deletedWorkspace.dir, projectID: deletedWorkspace.projectID)
-        }
+        if let deletedWorkspace { try markIgnoredWorktree(path: deletedWorkspace.dir, projectID: deletedWorkspace.projectID) }
     }
 
     public func markIgnoredWorktree(path: String, projectID: String) throws {
@@ -216,8 +213,7 @@ public final class SQLiteStore {
                 INSERT INTO ignored_worktrees(worktree_dir, project_id)
                 VALUES (?, ?)
                 ON CONFLICT(worktree_dir) DO UPDATE SET project_id = excluded.project_id
-                """,
-            bindings: [path, projectID])
+                """, bindings: [path, projectID])
     }
 
     public func isIgnoredWorktree(path: String) throws -> Bool {
@@ -351,8 +347,9 @@ public final class SQLiteStore {
                 """, bindings: [workspaceID])
         return rows.map { row in
             StatusCheckDefinition(
-                name: row[0].isEmpty ? nil : row[0], process: row[1], command: row[2], interval: Int(row[3]) ?? PollingConstants.statusCheckDefaultInterval, timeout: Int(row[4]) ?? PollingConstants.statusCheckDefaultTimeout,
-                onFail: OnFailAction(rawValue: row[5]) ?? .none)
+                name: row[0].isEmpty ? nil : row[0], process: row[1], command: row[2],
+                interval: Int(row[3]) ?? PollingConstants.statusCheckDefaultInterval,
+                timeout: Int(row[4]) ?? PollingConstants.statusCheckDefaultTimeout, onFail: OnFailAction(rawValue: row[5]) ?? .none)
         }
     }
 
@@ -366,10 +363,11 @@ public final class SQLiteStore {
                 sql: """
                     INSERT INTO workspace_browser_sessions(id, workspace_id, name, url, extracted_target_url, extracted_window_id, extracted_window_valid, order_index)
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                    """, bindings: [
-                        UUID().uuidString, workspaceID, session.name ?? "", session.url ?? "", extractedTargetURL, extractedWindowID, extractedWindowValid,
-                        String(index),
-                    ])
+                    """,
+                bindings: [
+                    UUID().uuidString, workspaceID, session.name ?? "", session.url ?? "", extractedTargetURL, extractedWindowID,
+                    extractedWindowValid, String(index),
+                ])
         }
     }
 
@@ -398,11 +396,7 @@ public final class SQLiteStore {
     }
 
     public func setWorkspaceSetupState(
-        workspaceID: String,
-        status: WorkspaceSetupStatus,
-        errorMessage: String? = nil,
-        startedAt: String? = nil,
-        finishedAt: String? = nil
+        workspaceID: String, status: WorkspaceSetupStatus, errorMessage: String? = nil, startedAt: String? = nil, finishedAt: String? = nil
     ) throws {
         try execute(
             sql: """
@@ -413,8 +407,7 @@ public final class SQLiteStore {
                   setup_error = excluded.setup_error,
                   setup_started_at = excluded.setup_started_at,
                   setup_finished_at = excluded.setup_finished_at
-                """,
-            bindings: [workspaceID, status.rawValue, errorMessage ?? "", startedAt ?? "", finishedAt ?? ""])
+                """, bindings: [workspaceID, status.rawValue, errorMessage ?? "", startedAt ?? "", finishedAt ?? ""])
     }
 
     public func setWorkspaceStopScript(workspaceID: String, stopScript: String?) throws {
@@ -523,11 +516,16 @@ public final class SQLiteStore {
                   message = excluded.message,
                   last_run_at = excluded.last_run_at
                 """,
-            bindings: [statusResult.processID, statusResult.checkName, statusResult.status.rawValue, statusResult.message ?? "", statusResult.lastRunAt ?? ""])
+            bindings: [
+                statusResult.processID, statusResult.checkName, statusResult.status.rawValue, statusResult.message ?? "",
+                statusResult.lastRunAt ?? "",
+            ])
     }
 
     public func markStatusResultsAsFailed(processID: String) throws {
-        try execute(sql: "UPDATE status_results SET status = '\(StatusCheckStatus.failed.rawValue)', message = 'Process exited' WHERE process_id = ?", bindings: [processID])
+        try execute(
+            sql: "UPDATE status_results SET status = '\(StatusCheckStatus.failed.rawValue)', message = 'Process exited' WHERE process_id = ?",
+            bindings: [processID])
     }
 
     public func statusResults(processID: String) throws -> [StatusResult] {
@@ -535,10 +533,8 @@ public final class SQLiteStore {
             sql: "SELECT process_id, check_name, status, message, last_run_at FROM status_results WHERE process_id = ?", bindings: [processID])
         return rows.map { row in
             StatusResult(
-                processID: row[0], checkName: row[1],
-                status: StatusCheckStatus(rawValue: row[2]) ?? .failed,
-                message: row[3].isEmpty ? nil : row[3], lastRunAt: row[4].isEmpty ? nil : row[4]
-            )
+                processID: row[0], checkName: row[1], status: StatusCheckStatus(rawValue: row[2]) ?? .failed, message: row[3].isEmpty ? nil : row[3],
+                lastRunAt: row[4].isEmpty ? nil : row[4])
         }
     }
 
@@ -599,8 +595,7 @@ public final class SQLiteStore {
                 WHERE yabai_window_id = ? OR window_id = ?
                 ORDER BY updated_at DESC
                 LIMIT 1
-                """,
-            bindings: [String(yabaiWindowID), String(yabaiWindowID)])
+                """, bindings: [String(yabaiWindowID), String(yabaiWindowID)])
         return row?.first
     }
 
@@ -627,9 +622,7 @@ public final class SQLiteStore {
         let editor = try setting(key: SettingsKey.appEditor).flatMap { EditorPreference(rawValue: $0) }
         let start = try setting(key: SettingsKey.appPortRangeStart).flatMap(Int.init) ?? 20000
         let end = try setting(key: SettingsKey.appPortRangeEnd).flatMap(Int.init) ?? 30000
-        let portRange = (start <= 0 || end <= 0 || end <= start)
-            ? PortRange(start: 20000, end: 30000)
-            : PortRange(start: start, end: end)
+        let portRange = (start <= 0 || end <= 0 || end <= start) ? PortRange(start: 20000, end: 30000) : PortRange(start: start, end: end)
         return AppConfig(editor: editor, portRange: portRange)
     }
 
@@ -658,10 +651,8 @@ public final class SQLiteStore {
                   yabai_window_id = excluded.yabai_window_id
                 """,
             bindings: [
-                record.id, record.workspaceID, record.provider.rawValue, record.label ?? "",
-                record.itermSessionID ?? "", record.codexThreadID ?? "",
-                record.windowID.map(String.init) ?? "", record.status.rawValue,
-                record.createdAt, record.updatedAt,
+                record.id, record.workspaceID, record.provider.rawValue, record.label ?? "", record.itermSessionID ?? "", record.codexThreadID ?? "",
+                record.windowID.map(String.init) ?? "", record.status.rawValue, record.createdAt, record.updatedAt,
                 record.yabaiWindowID.map(String.init) ?? "",
             ])
     }
@@ -677,21 +668,23 @@ public final class SQLiteStore {
     }
 
     public func agentWindow(workspaceID: String, itermSessionID: String) throws -> AgentWindowRecord? {
-        guard let row = try queryRow(
-            sql: """
-                SELECT id, workspace_id, provider, label, iterm_session_id, codex_thread_id, window_id, status, created_at, updated_at, yabai_window_id
-                FROM agent_windows WHERE workspace_id = ? AND iterm_session_id = ?
-                """, bindings: [workspaceID, itermSessionID])
+        guard
+            let row = try queryRow(
+                sql: """
+                    SELECT id, workspace_id, provider, label, iterm_session_id, codex_thread_id, window_id, status, created_at, updated_at, yabai_window_id
+                    FROM agent_windows WHERE workspace_id = ? AND iterm_session_id = ?
+                    """, bindings: [workspaceID, itermSessionID])
         else { return nil }
         return decodeAgentWindow(row: row)
     }
 
     public func agentWindow(workspaceID: String, codexThreadID: String) throws -> AgentWindowRecord? {
-        guard let row = try queryRow(
-            sql: """
-                SELECT id, workspace_id, provider, label, iterm_session_id, codex_thread_id, window_id, status, created_at, updated_at, yabai_window_id
-                FROM agent_windows WHERE workspace_id = ? AND codex_thread_id = ?
-                """, bindings: [workspaceID, codexThreadID])
+        guard
+            let row = try queryRow(
+                sql: """
+                    SELECT id, workspace_id, provider, label, iterm_session_id, codex_thread_id, window_id, status, created_at, updated_at, yabai_window_id
+                    FROM agent_windows WHERE workspace_id = ? AND codex_thread_id = ?
+                    """, bindings: [workspaceID, codexThreadID])
         else { return nil }
         return decodeAgentWindow(row: row)
     }
@@ -707,18 +700,14 @@ public final class SQLiteStore {
     }
 
     public func updateAgentWindowStatus(id: String, status: AgentWindowStatus, updatedAt: String) throws {
-        try execute(
-            sql: "UPDATE agent_windows SET status = ?, updated_at = ? WHERE id = ?",
-            bindings: [status.rawValue, updatedAt, id])
+        try execute(sql: "UPDATE agent_windows SET status = ?, updated_at = ? WHERE id = ?", bindings: [status.rawValue, updatedAt, id])
     }
 
     public func deleteAgentWindows(workspaceID: String) throws {
         try execute(sql: "DELETE FROM agent_windows WHERE workspace_id = ?", bindings: [workspaceID])
     }
 
-    public func deleteAgentWindow(id: String) throws {
-        try execute(sql: "DELETE FROM agent_windows WHERE id = ?", bindings: [id])
-    }
+    public func deleteAgentWindow(id: String) throws { try execute(sql: "DELETE FROM agent_windows WHERE id = ?", bindings: [id]) }
 
     public func deleteAgentWindowsByProvider(workspaceID: String, provider: AgentProvider) throws {
         try execute(sql: "DELETE FROM agent_windows WHERE workspace_id = ? AND provider = ?", bindings: [workspaceID, provider.rawValue])
@@ -730,13 +719,8 @@ public final class SQLiteStore {
         let status = AgentWindowStatus(rawValue: row[7]) ?? .idle
         let yabaiWindowID = row.count > 10 ? (row[10].isEmpty ? nil : Int(row[10])) : nil
         return AgentWindowRecord(
-            id: row[0], workspaceID: row[1], provider: provider,
-            label: row[3].isEmpty ? nil : row[3],
-            itermSessionID: row[4].isEmpty ? nil : row[4],
-            codexThreadID: row[5].isEmpty ? nil : row[5],
-            windowID: row[6].isEmpty ? nil : Int(row[6]),
-            yabaiWindowID: yabaiWindowID,
-            status: status,
+            id: row[0], workspaceID: row[1], provider: provider, label: row[3].isEmpty ? nil : row[3], itermSessionID: row[4].isEmpty ? nil : row[4],
+            codexThreadID: row[5].isEmpty ? nil : row[5], windowID: row[6].isEmpty ? nil : Int(row[6]), yabaiWindowID: yabaiWindowID, status: status,
             createdAt: row[8], updatedAt: row[9])
     }
 
@@ -938,9 +922,7 @@ public final class SQLiteStore {
         try createSchema()
         try applyAdditiveMigrations()
         let currentVersion = try schemaVersionValue()
-        if currentVersion != schemaVersion {
-            try setSchemaVersion(schemaVersion)
-        }
+        if currentVersion != schemaVersion { try setSchemaVersion(schemaVersion) }
     }
 
     private func schemaVersionValue() throws -> Int? {
@@ -975,9 +957,7 @@ public final class SQLiteStore {
         if !workspaceColumns.contains("title") {
             try ensureColumnExists(table: "workspaces", name: "title", definition: "title TEXT NOT NULL DEFAULT ''")
         }
-        if workspaceColumns.contains("name") {
-            try execute(sql: "UPDATE workspaces SET title = name WHERE title = ''", bindings: [])
-        }
+        if workspaceColumns.contains("name") { try execute(sql: "UPDATE workspaces SET title = name WHERE title = ''", bindings: []) }
         try execute(sql: "CREATE UNIQUE INDEX IF NOT EXISTS idx_workspaces_project_title_unique ON workspaces(project_id, title)", bindings: [])
         try ensureColumnExists(table: "project_browser_sessions", name: "name", definition: "name TEXT")
         try ensureColumnExists(table: "workspace_browser_sessions", name: "name", definition: "name TEXT")
@@ -985,8 +965,7 @@ public final class SQLiteStore {
         try ensureColumnExists(table: "workspace_browser_sessions", name: "extracted_window_id", definition: "extracted_window_id INTEGER")
         try ensureColumnExists(
             table: "workspace_browser_sessions", name: "extracted_window_valid", definition: "extracted_window_valid INTEGER NOT NULL DEFAULT 0")
-        try ensureColumnExists(
-            table: "workspace_settings", name: "setup_status", definition: "setup_status TEXT NOT NULL DEFAULT 'succeeded'")
+        try ensureColumnExists(table: "workspace_settings", name: "setup_status", definition: "setup_status TEXT NOT NULL DEFAULT 'succeeded'")
         try ensureColumnExists(table: "workspace_settings", name: "setup_error", definition: "setup_error TEXT")
         try ensureColumnExists(table: "workspace_settings", name: "setup_started_at", definition: "setup_started_at TEXT")
         try ensureColumnExists(table: "workspace_settings", name: "setup_finished_at", definition: "setup_finished_at TEXT")
@@ -1015,9 +994,9 @@ public final class SQLiteStore {
     private func decodeProjectWithTemplates(row: [String]) throws -> ProjectRecord? {
         guard row.count >= 7 else { return nil }
         let id = row[0]
-        let ports = try queryRows(
-            sql: "SELECT name FROM project_port_definitions WHERE project_id = ? ORDER BY order_index", bindings: [id]
-        ).map { PortDefinition(name: $0[0]) }
+        let ports = try queryRows(sql: "SELECT name FROM project_port_definitions WHERE project_id = ? ORDER BY order_index", bindings: [id]).map {
+            PortDefinition(name: $0[0])
+        }
         let processes = try queryRows(
             sql: "SELECT name, command, on_exit FROM project_processes WHERE project_id = ? ORDER BY order_index", bindings: [id]
         ).map { row in ProcessTemplate(name: row[0].isEmpty ? nil : row[0], command: row[1], onExit: ProcessExitAction(rawValue: row[2]) ?? .none) }
@@ -1028,16 +1007,15 @@ public final class SQLiteStore {
             StatusCheckDefinition(
                 name: row[0].isEmpty ? nil : row[0], process: row[1], command: row[2],
                 interval: Int(row[3]) ?? PollingConstants.statusCheckDefaultInterval,
-                timeout: Int(row[4]) ?? PollingConstants.statusCheckDefaultTimeout,
-                onFail: OnFailAction(rawValue: row[5]) ?? .none)
+                timeout: Int(row[4]) ?? PollingConstants.statusCheckDefaultTimeout, onFail: OnFailAction(rawValue: row[5]) ?? .none)
         }
         let browserSessions = try queryRows(
             sql: "SELECT name, url FROM project_browser_sessions WHERE project_id = ? ORDER BY order_index", bindings: [id]
         ).map { row in BrowserSession(name: row[0].isEmpty ? nil : row[0], url: row[1].isEmpty ? nil : row[1]) }
         return ProjectRecord(
             id: id, name: row[1], dir: row[2], isGitRepo: row[3] == "1", defaultBranch: row[4].isEmpty ? nil : row[4],
-            setupScript: row[5].isEmpty ? nil : row[5], stopScript: row[6].isEmpty ? nil : row[6],
-            ports: ports, processes: processes, statusChecks: statusChecks, browserSessions: browserSessions)
+            setupScript: row[5].isEmpty ? nil : row[5], stopScript: row[6].isEmpty ? nil : row[6], ports: ports, processes: processes,
+            statusChecks: statusChecks, browserSessions: browserSessions)
     }
 
     private func decodeWorkspace(row: [String]) -> WorkspaceRecord? {
@@ -1061,8 +1039,8 @@ public final class SQLiteStore {
         guard row.count >= 11 else { return nil }
         return WindowRecord(
             id: row[0], workspaceID: row[1], app: row[2], title: row[3].isEmpty ? nil : row[3], targetURL: row[4].isEmpty ? nil : row[4],
-            windowID: Int(row[5]), itermSessionID: row[6].isEmpty ? nil : row[6], itermTabIndex: Int(row[7]),
-            role: row[8], orderIndex: Int(row[9]) ?? 0, lastSeenAt: row[10])
+            windowID: Int(row[5]), itermSessionID: row[6].isEmpty ? nil : row[6], itermTabIndex: Int(row[7]), role: row[8],
+            orderIndex: Int(row[9]) ?? 0, lastSeenAt: row[10])
     }
 
     private func executeBatch(sql: String) throws {
@@ -1134,9 +1112,7 @@ public final class SQLiteStore {
         while true {
             var statement: OpaquePointer?
             let result = sqlite3_prepare_v2(db, sql, -1, &statement, nil)
-            if result == SQLITE_OK, let statement {
-                return statement
-            }
+            if result == SQLITE_OK, let statement { return statement }
             if isBusyOrLocked(result), attempts < busyRetryAttempts {
                 attempts += 1
                 Thread.sleep(forTimeInterval: busyRetryDelaySeconds)
@@ -1160,9 +1136,7 @@ public final class SQLiteStore {
         }
     }
 
-    private func isBusyOrLocked(_ code: Int32) -> Bool {
-        code == SQLITE_BUSY || code == SQLITE_LOCKED
-    }
+    private func isBusyOrLocked(_ code: Int32) -> Bool { code == SQLITE_BUSY || code == SQLITE_LOCKED }
 
     private func extractRow(statement: OpaquePointer) -> [String] {
         let columnCount = Int(sqlite3_column_count(statement))

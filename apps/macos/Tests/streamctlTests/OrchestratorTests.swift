@@ -4,14 +4,10 @@ import XCTest
 
 final class OrchestratorTests: XCTestCase {
     // Tests workspace window refresh interval is positive by arranging representative inputs and asserting the expected result.
-    func testWorkspaceWindowRefreshIntervalIsPositive() {
-        XCTAssertGreaterThan(PollingConstants.workspaceWindowRefreshInterval, 0)
-    }
+    func testWorkspaceWindowRefreshIntervalIsPositive() { XCTAssertGreaterThan(PollingConstants.workspaceWindowRefreshInterval, 0) }
 
     // Tests worktree discovery interval is positive by arranging representative inputs and asserting the expected result.
-    func testWorktreeDiscoveryIntervalIsPositive() {
-        XCTAssertGreaterThan(PollingConstants.worktreeDiscoveryInterval, 0)
-    }
+    func testWorktreeDiscoveryIntervalIsPositive() { XCTAssertGreaterThan(PollingConstants.worktreeDiscoveryInterval, 0) }
 
     // Tests update editor preference persists to db by arranging representative inputs and asserting the expected result.
     func testUpdateEditorPreferencePersistsToDB() throws {
@@ -61,8 +57,7 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertEqual(project.dir, expected)
         XCTAssertTrue(FileManager.default.fileExists(atPath: expected))
         XCTAssertEqual(
-            try runGitAndCapture(["rev-parse", "--is-bare-repository"], cwd: project.dir).trimmingCharacters(in: .whitespacesAndNewlines),
-            "true")
+            try runGitAndCapture(["rev-parse", "--is-bare-repository"], cwd: project.dir).trimmingCharacters(in: .whitespacesAndNewlines), "true")
         let defaultWorkspace = try XCTUnwrap(try orchestrator.listWorkspaces(projectID: project.id).first(where: \.isDefault))
         XCTAssertEqual(defaultWorkspace.name, "main")
         XCTAssertEqual(defaultWorkspace.branch, "main")
@@ -85,8 +80,7 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertEqual(project.dir, expected)
         XCTAssertEqual(project.name, "source")
         XCTAssertEqual(
-            try runGitAndCapture(["rev-parse", "--is-bare-repository"], cwd: project.dir).trimmingCharacters(in: .whitespacesAndNewlines),
-            "true")
+            try runGitAndCapture(["rev-parse", "--is-bare-repository"], cwd: project.dir).trimmingCharacters(in: .whitespacesAndNewlines), "true")
     }
 
     // Tests add project by cloning uses master branch when main is unavailable by arranging representative inputs and asserting the expected result.
@@ -132,8 +126,7 @@ final class OrchestratorTests: XCTestCase {
         let projectsRoot = root.appendingPathComponent("repos", isDirectory: true)
         let workspacesRoot = root.appendingPathComponent("workspaces", isDirectory: true)
         let store = try makeTemporaryStore()
-        let orchestrator = MuxyOrchestrator(
-            store: store, projectsRootDirectory: projectsRoot, workspacesRootDirectory: workspacesRoot)
+        let orchestrator = MuxyOrchestrator(store: store, projectsRootDirectory: projectsRoot, workspacesRootDirectory: workspacesRoot)
 
         let project = try orchestrator.addProject(gitURL: fixture.path)
         let projectWorkspaceRoot = workspacesRoot.appendingPathComponent(project.name, isDirectory: true)
@@ -159,8 +152,7 @@ final class OrchestratorTests: XCTestCase {
         let projectsRoot = root.appendingPathComponent("projects", isDirectory: true)
         let workspacesRoot = root.appendingPathComponent("workspaces", isDirectory: true)
         let store = try makeTemporaryStore()
-        let orchestrator = MuxyOrchestrator(
-            store: store, projectsRootDirectory: projectsRoot, workspacesRootDirectory: workspacesRoot)
+        let orchestrator = MuxyOrchestrator(store: store, projectsRootDirectory: projectsRoot, workspacesRootDirectory: workspacesRoot)
 
         let project = try orchestrator.addProject(dir: projectDir.path)
         let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature", branch: "feature")
@@ -388,9 +380,7 @@ final class OrchestratorTests: XCTestCase {
         let store = try makeTemporaryStore()
         let orchestrator = MuxyOrchestrator(store: store)
         let project = try orchestrator.addProject(dir: projectDir.path)
-        try orchestrator.updateProjectConfig(projectID: project.id) { config in
-            config.setupScript = "echo ready > .muxy-setup-marker"
-        }
+        try orchestrator.updateProjectConfig(projectID: project.id) { config in config.setupScript = "echo ready > .muxy-setup-marker" }
 
         let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature", runSetupScript: false)
         let pendingState = try orchestrator.workspaceSetupState(workspaceID: workspace.id)
@@ -416,8 +406,7 @@ final class OrchestratorTests: XCTestCase {
         let orchestrator = MuxyOrchestrator(store: store, workspacesRootDirectory: workspacesRoot)
 
         let project = try orchestrator.addProject(dir: repo.path)
-        _ = try orchestrator.createWorkspace(
-            projectID: project.id, name: "feature-branch", branch: "feature-branch", targetBranch: "develop")
+        _ = try orchestrator.createWorkspace(projectID: project.id, name: "feature-branch", branch: "feature-branch", targetBranch: "develop")
 
         let workspaces = try orchestrator.listWorkspaces(projectID: project.id, includeArchived: true)
         let feature = try XCTUnwrap(workspaces.first(where: { $0.name == "feature-branch" }))
@@ -512,7 +501,6 @@ final class OrchestratorTests: XCTestCase {
 
     // Tests gui shortcuts and active workspace round trip by arranging representative inputs and asserting the expected result.
     func testGUIShortcutsAndActiveWorkspaceRoundTrip() throws {
-        let root = try makeTempDirectory()
         let store = try makeTemporaryStore()
         let orchestrator = MuxyOrchestrator(store: store)
 
@@ -605,9 +593,7 @@ final class OrchestratorTests: XCTestCase {
         try store.touchWorkspaceSettings(workspaceID: workspace.id, updatedAt: "now")
         try store.setWorkspaceStatusChecks(
             workspaceID: workspace.id,
-            checks: [
-                StatusCheckDefinition(name: "health", process: "api", command: "echo ok", interval: 60, timeout: 2, onFail: .none),
-            ])
+            checks: [StatusCheckDefinition(name: "health", process: "api", command: "echo ok", interval: 60, timeout: 2, onFail: .none)])
         let runningProcess = RunningProcessRecord(
             id: UUID().uuidString, workspaceID: workspace.id, templateName: "api", command: "echo api", terminalApp: nil, windowID: nil, pid: 9000,
             status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil)
@@ -617,12 +603,10 @@ final class OrchestratorTests: XCTestCase {
         let firstRun = try orchestrator.runStatusChecks(workspaceID: workspace.id, dueOnly: true, now: now)
         XCTAssertEqual(firstRun.count, 1)
 
-        let secondRunWithinInterval = try orchestrator.runStatusChecks(
-            workspaceID: workspace.id, dueOnly: true, now: now.addingTimeInterval(5))
+        let secondRunWithinInterval = try orchestrator.runStatusChecks(workspaceID: workspace.id, dueOnly: true, now: now.addingTimeInterval(5))
         XCTAssertTrue(secondRunWithinInterval.isEmpty)
 
-        let forcedRun = try orchestrator.runStatusChecks(
-            workspaceID: workspace.id, dueOnly: false, now: now.addingTimeInterval(5))
+        let forcedRun = try orchestrator.runStatusChecks(workspaceID: workspace.id, dueOnly: false, now: now.addingTimeInterval(5))
         XCTAssertEqual(forcedRun.count, 1)
     }
 
@@ -640,9 +624,7 @@ final class OrchestratorTests: XCTestCase {
         try store.updateWorkspaceRunning(id: workspace.id, isRunning: true, launchedAt: ISO8601DateFormatter().string(from: Date()))
         try store.setWorkspaceStatusChecks(
             workspaceID: workspace.id,
-            checks: [
-                StatusCheckDefinition(name: "health", process: "api", command: "echo ok", interval: 10, timeout: 2, onFail: .none),
-            ])
+            checks: [StatusCheckDefinition(name: "health", process: "api", command: "echo ok", interval: 10, timeout: 2, onFail: .none)])
         let runningProcess = RunningProcessRecord(
             id: UUID().uuidString, workspaceID: workspace.id, templateName: "api", command: "echo api", terminalApp: nil, windowID: nil, pid: 9000,
             status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil)
@@ -670,9 +652,7 @@ final class OrchestratorTests: XCTestCase {
         try store.touchWorkspaceSettings(workspaceID: workspace.id, updatedAt: "now")
         try store.setWorkspaceStatusChecks(
             workspaceID: workspace.id,
-            checks: [
-                StatusCheckDefinition(process: "api", command: "echo failed && exit 1", interval: 10, timeout: 2, onFail: .none),
-            ])
+            checks: [StatusCheckDefinition(process: "api", command: "echo failed && exit 1", interval: 10, timeout: 2, onFail: .none)])
         let runningProcess = RunningProcessRecord(
             id: UUID().uuidString, workspaceID: workspace.id, templateName: "api", command: "echo api", terminalApp: nil, windowID: nil, pid: 9000,
             status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil)
@@ -682,7 +662,6 @@ final class OrchestratorTests: XCTestCase {
 
         XCTAssertEqual(results.count, 1)
         XCTAssertEqual(results.first?.status, .failed)
-        
         // Process should still be running (no restart)
         let currentProcess = try store.runningProcesses(workspaceID: workspace.id).first!
         XCTAssertEqual(currentProcess.status, .running)
@@ -703,7 +682,7 @@ final class OrchestratorTests: XCTestCase {
         try store.setWorkspaceStatusChecks(
             workspaceID: workspace.id,
             checks: [
-                StatusCheckDefinition(name: "health", process: "api", command: "echo unhealthy && exit 1", interval: 10, timeout: 2, onFail: .notify),
+                StatusCheckDefinition(name: "health", process: "api", command: "echo unhealthy && exit 1", interval: 10, timeout: 2, onFail: .notify)
             ])
         let runningProcess = RunningProcessRecord(
             id: UUID().uuidString, workspaceID: workspace.id, templateName: "api", command: "echo api", terminalApp: nil, windowID: nil, pid: 9000,
@@ -714,12 +693,10 @@ final class OrchestratorTests: XCTestCase {
 
         XCTAssertEqual(results.count, 1)
         XCTAssertEqual(results.first?.status, .failed)
-        
         // Process should still be running (no restart)
         let currentProcess = try store.runningProcesses(workspaceID: workspace.id).first!
         XCTAssertEqual(currentProcess.status, .running)
         XCTAssertEqual(currentProcess.pid, 9000)
-        
         // Note: We can't easily test the actual notification delivery without complex mocking
         // but we can verify the process wasn't restarted, which is the key behavior
     }
@@ -730,7 +707,6 @@ final class OrchestratorTests: XCTestCase {
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
         let store = try makeTemporaryStore()
-        
         // Use mock iTerm2 adapter to prevent actual terminal windows from opening
         let mockIterm = MockIterm2Adapter()
         let orchestrator = MuxyOrchestrator(store: store, iterm: mockIterm)
@@ -741,11 +717,11 @@ final class OrchestratorTests: XCTestCase {
         try store.setWorkspaceStatusChecks(
             workspaceID: workspace.id,
             checks: [
-                StatusCheckDefinition(name: "health", process: "api", command: "echo crashed && exit 1", interval: 10, timeout: 2, onFail: .restart),
+                StatusCheckDefinition(name: "health", process: "api", command: "echo crashed && exit 1", interval: 10, timeout: 2, onFail: .restart)
             ])
         let runningProcess = RunningProcessRecord(
-            id: UUID().uuidString, workspaceID: workspace.id, templateName: "api", command: "npm start", terminalApp: "iTerm2", windowID: 123, pid: 9000,
-            status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil)
+            id: UUID().uuidString, workspaceID: workspace.id, templateName: "api", command: "npm start", terminalApp: "iTerm2", windowID: 123,
+            pid: 9000, status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil)
         try store.upsert(runningProcess: runningProcess)
 
         // Create a mock PID file to simulate the new PID after restart
@@ -761,21 +737,19 @@ final class OrchestratorTests: XCTestCase {
 
         XCTAssertEqual(results.count, 1)
         XCTAssertEqual(results.first?.status, .failed)
-        
         // Verify iTerm2 was called to run in existing window (not create new one)
         XCTAssertEqual(mockIterm.openWindowAndRunCallCount, 0)
         XCTAssertEqual(mockIterm.runInWindowCallCount, 1)
         XCTAssertEqual(mockIterm.lastWindowID, 123)
         XCTAssertTrue(mockIterm.lastCommand!.contains("cd \"\(workspace.dir)\""))
         XCTAssertTrue(mockIterm.lastCommand!.contains("npm start"))
-        
         // Verify process was restarted in the same window
         let currentProcesses = try store.runningProcesses(workspaceID: workspace.id)
         XCTAssertEqual(currentProcesses.count, 1)
         let currentProcess = currentProcesses.first!
         XCTAssertEqual(currentProcess.status, .running)
-        XCTAssertEqual(currentProcess.windowID, 123) // Should have same window ID
-        XCTAssertEqual(currentProcess.pid, 10001) // PID should be updated from PID file
+        XCTAssertEqual(currentProcess.windowID, 123)  // Should have same window ID
+        XCTAssertEqual(currentProcess.pid, 10001)  // PID should be updated from PID file
     }
 
     // Tests status check on fail restart with missing pid does not crash by arranging representative inputs and asserting the expected result.
@@ -784,7 +758,6 @@ final class OrchestratorTests: XCTestCase {
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
         let store = try makeTemporaryStore()
-        
         // Use mock iTerm2 adapter to prevent actual terminal windows from opening
         let mockIterm = MockIterm2Adapter()
         let orchestrator = MuxyOrchestrator(store: store, iterm: mockIterm)
@@ -794,24 +767,20 @@ final class OrchestratorTests: XCTestCase {
         try store.touchWorkspaceSettings(workspaceID: workspace.id, updatedAt: "now")
         try store.setWorkspaceStatusChecks(
             workspaceID: workspace.id,
-            checks: [
-                StatusCheckDefinition(process: "api", command: "echo failed && exit 1", interval: 10, timeout: 2, onFail: .restart),
-            ])
+            checks: [StatusCheckDefinition(process: "api", command: "echo failed && exit 1", interval: 10, timeout: 2, onFail: .restart)])
         let runningProcess = RunningProcessRecord(
-            id: UUID().uuidString, workspaceID: workspace.id, templateName: "api", command: "npm start", terminalApp: "iTerm2", windowID: 123, pid: nil,
-            status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil)
+            id: UUID().uuidString, workspaceID: workspace.id, templateName: "api", command: "npm start", terminalApp: "iTerm2", windowID: 123,
+            pid: nil, status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil)
         try store.upsert(runningProcess: runningProcess)
 
         // Should not crash even with missing PID
         XCTAssertNoThrow(try orchestrator.runStatusChecks(workspaceID: workspace.id))
-        
         // Should still attempt to restart - verify iTerm2 was called
-        XCTAssertEqual(mockIterm.openWindowAndRunCallCount, 0) // Should not create new window
-        XCTAssertEqual(mockIterm.runInWindowCallCount, 1) // Should reuse existing window
-        XCTAssertEqual(mockIterm.lastWindowID, 123) // Should use existing window
+        XCTAssertEqual(mockIterm.openWindowAndRunCallCount, 0)  // Should not create new window
+        XCTAssertEqual(mockIterm.runInWindowCallCount, 1)  // Should reuse existing window
+        XCTAssertEqual(mockIterm.lastWindowID, 123)  // Should use existing window
         XCTAssertTrue(mockIterm.lastCommand!.contains("cd \"\(workspace.dir)\""))
         XCTAssertTrue(mockIterm.lastCommand!.contains("npm start"))
-        
         // When PID is missing, the restart logic should still attempt to restart
         // The process should have the same window ID because we reuse windows
         let currentProcesses = try store.runningProcesses(workspaceID: workspace.id)
@@ -832,16 +801,13 @@ final class OrchestratorTests: XCTestCase {
 
         let project = try orchestrator.addProject(dir: projectDir.path)
         let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
-        
         // Create a process with a PID that doesn't exist
         let deadProcess = RunningProcessRecord(
-            id: UUID().uuidString, workspaceID: workspace.id, templateName: "api", command: "npm start", 
-            terminalApp: "iTerm2", windowID: 123, pid: 99999, status: .running, logPath: nil, 
-            lastOutputAt: nil, startedAt: ISO8601DateFormatter().string(from: Date().addingTimeInterval(-20)), exitedAt: nil)
+            id: UUID().uuidString, workspaceID: workspace.id, templateName: "api", command: "npm start", terminalApp: "iTerm2", windowID: 123,
+            pid: 99999, status: .running, logPath: nil, lastOutputAt: nil,
+            startedAt: ISO8601DateFormatter().string(from: Date().addingTimeInterval(-20)), exitedAt: nil)
         try store.upsert(runningProcess: deadProcess)
-        
         let didUpdate = try orchestrator.checkAndUpdateProcessStatuses()
-        
         XCTAssertTrue(didUpdate)
         let updated = try store.runningProcesses(workspaceID: workspace.id).first
         XCTAssertEqual(updated?.status, .exited)
@@ -861,13 +827,14 @@ final class OrchestratorTests: XCTestCase {
 
         // Create a dead process with a previously-green status result
         let deadProcess = RunningProcessRecord(
-            id: UUID().uuidString, workspaceID: workspace.id, templateName: "api", command: "npm start",
-            terminalApp: "iTerm2", windowID: 123, pid: 99999, status: .running, logPath: nil,
-            lastOutputAt: nil, startedAt: ISO8601DateFormatter().string(from: Date().addingTimeInterval(-20)), exitedAt: nil)
+            id: UUID().uuidString, workspaceID: workspace.id, templateName: "api", command: "npm start", terminalApp: "iTerm2", windowID: 123,
+            pid: 99999, status: .running, logPath: nil, lastOutputAt: nil,
+            startedAt: ISO8601DateFormatter().string(from: Date().addingTimeInterval(-20)), exitedAt: nil)
         try store.upsert(runningProcess: deadProcess)
 
         // Simulate a previously-passing status check result
-        let greenResult = StatusResult(processID: deadProcess.id, checkName: "health", status: .passed, message: nil, lastRunAt: ISO8601DateFormatter().string(from: Date()))
+        let greenResult = StatusResult(
+            processID: deadProcess.id, checkName: "health", status: .passed, message: nil, lastRunAt: ISO8601DateFormatter().string(from: Date()))
         try store.upsert(statusResult: greenResult)
 
         let didUpdate = try orchestrator.checkAndUpdateProcessStatuses()
@@ -889,23 +856,19 @@ final class OrchestratorTests: XCTestCase {
 
         let project = try orchestrator.addProject(dir: projectDir.path)
         let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
-        
         // Create a process that just started (within grace period)
         let newProcess = RunningProcessRecord(
-            id: UUID().uuidString, workspaceID: workspace.id, templateName: "api", command: "npm start", 
-            terminalApp: "iTerm2", windowID: 123, pid: 99999, status: .running, logPath: nil, 
-            lastOutputAt: nil, startedAt: ISO8601DateFormatter().string(from: Date().addingTimeInterval(-5)), exitedAt: nil)
+            id: UUID().uuidString, workspaceID: workspace.id, templateName: "api", command: "npm start", terminalApp: "iTerm2", windowID: 123,
+            pid: 99999, status: .running, logPath: nil, lastOutputAt: nil,
+            startedAt: ISO8601DateFormatter().string(from: Date().addingTimeInterval(-5)), exitedAt: nil)
         try store.upsert(runningProcess: newProcess)
-        
         let didUpdate = try orchestrator.checkAndUpdateProcessStatuses()
-        
         // Should not update because process is within grace period
         XCTAssertFalse(didUpdate)
         let unchanged = try store.runningProcesses(workspaceID: workspace.id).first
         XCTAssertEqual(unchanged?.status, .running)
         XCTAssertNil(unchanged?.exitedAt)
     }
-    
     // Tests check and update process statuses skips processes without pid by arranging representative inputs and asserting the expected result.
     func testCheckAndUpdateProcessStatusesSkipsProcessesWithoutPID() throws {
         let root = try makeTempDirectory()
@@ -916,22 +879,18 @@ final class OrchestratorTests: XCTestCase {
 
         let project = try orchestrator.addProject(dir: projectDir.path)
         let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
-        
         // Create a process without a PID (still starting up)
         let noPidProcess = RunningProcessRecord(
-            id: UUID().uuidString, workspaceID: workspace.id, templateName: "api", command: "npm start", 
-            terminalApp: "iTerm2", windowID: 123, pid: nil, status: .running, logPath: nil, 
-            lastOutputAt: nil, startedAt: ISO8601DateFormatter().string(from: Date().addingTimeInterval(-20)), exitedAt: nil)
+            id: UUID().uuidString, workspaceID: workspace.id, templateName: "api", command: "npm start", terminalApp: "iTerm2", windowID: 123,
+            pid: nil, status: .running, logPath: nil, lastOutputAt: nil,
+            startedAt: ISO8601DateFormatter().string(from: Date().addingTimeInterval(-20)), exitedAt: nil)
         try store.upsert(runningProcess: noPidProcess)
-        
         let didUpdate = try orchestrator.checkAndUpdateProcessStatuses()
-        
         // Should not update because process has no PID to check
         XCTAssertFalse(didUpdate)
         let unchanged = try store.runningProcesses(workspaceID: workspace.id).first
         XCTAssertEqual(unchanged?.status, .running)
     }
-    
     // Tests check and update process statuses only checks running processes by arranging representative inputs and asserting the expected result.
     func testCheckAndUpdateProcessStatusesOnlyChecksRunningProcesses() throws {
         let root = try makeTempDirectory()
@@ -942,24 +901,19 @@ final class OrchestratorTests: XCTestCase {
 
         let project = try orchestrator.addProject(dir: projectDir.path)
         let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
-        
         // Create an already-exited process
         let exitedProcess = RunningProcessRecord(
-            id: UUID().uuidString, workspaceID: workspace.id, templateName: "api", command: "npm start", 
-            terminalApp: "iTerm2", windowID: 123, pid: 99999, status: .exited, logPath: nil, 
-            lastOutputAt: nil, startedAt: ISO8601DateFormatter().string(from: Date().addingTimeInterval(-20)), 
-            exitedAt: ISO8601DateFormatter().string(from: Date()))
+            id: UUID().uuidString, workspaceID: workspace.id, templateName: "api", command: "npm start", terminalApp: "iTerm2", windowID: 123,
+            pid: 99999, status: .exited, logPath: nil, lastOutputAt: nil,
+            startedAt: ISO8601DateFormatter().string(from: Date().addingTimeInterval(-20)), exitedAt: ISO8601DateFormatter().string(from: Date()))
         try store.upsert(runningProcess: exitedProcess)
-        
         let didUpdate = try orchestrator.checkAndUpdateProcessStatuses()
-        
         // Should not check or update already-exited processes
         XCTAssertFalse(didUpdate)
     }
 
     // Tests create workspace throws for unknown project by arranging representative inputs and asserting the expected result.
     func testCreateWorkspaceThrowsForUnknownProject() throws {
-        let root = try makeTempDirectory()
         let store = try makeTemporaryStore()
         let orchestrator = MuxyOrchestrator(store: store)
 
@@ -1041,7 +995,8 @@ final class OrchestratorTests: XCTestCase {
         let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature", branch: "feature-start")
 
         try orchestrator.updateWorkspaceMetadata(
-            workspaceID: workspace.id, title: "feature-auth", branch: "feature-auth", directoryName: "feature_auth", tooltip: .some("Reviewing OAuth flow"))
+            workspaceID: workspace.id, title: "feature-auth", branch: "feature-auth", directoryName: "feature_auth",
+            tooltip: .some("Reviewing OAuth flow"))
 
         let updated = try XCTUnwrap(store.workspace(id: workspace.id))
         XCTAssertEqual(updated.name, "feature-auth")
@@ -1249,8 +1204,8 @@ final class OrchestratorTests: XCTestCase {
 
         try store.upsert(
             window: WindowRecord(
-                id: UUID().uuidString, workspaceID: workspace.id, app: "iTerm2", title: "shell", windowID: 777, role: "terminal",
-                orderIndex: 200, lastSeenAt: "now"))
+                id: UUID().uuidString, workspaceID: workspace.id, app: "iTerm2", title: "shell", windowID: 777, role: "terminal", orderIndex: 200,
+                lastSeenAt: "now"))
 
         try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) {
             try withEnv(name: "YABAI_FOCUSED_ID", value: "777") {
@@ -1315,9 +1270,9 @@ final class OrchestratorTests: XCTestCase {
                 lastSeenAt: "now"))
         try store.upsert(
             runningProcess: RunningProcessRecord(
-                id: UUID().uuidString, workspaceID: workspace.id, templateName: "api", command: "npm run api", terminalApp: "iTerm2",
-                windowID: 101, itermSessionID: "session-101", itermTabIndex: 1, pid: 1234, status: .running, logPath: nil, lastOutputAt: nil,
-                startedAt: "now", exitedAt: nil))
+                id: UUID().uuidString, workspaceID: workspace.id, templateName: "api", command: "npm run api", terminalApp: "iTerm2", windowID: 101,
+                itermSessionID: "session-101", itermTabIndex: 1, pid: 1234, status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now",
+                exitedAt: nil))
 
         try withMockCommands(["yabai": Self.orchestratorYabaiMockScript, "osascript": Self.orchestratorOsaScriptMock]) {
             try withEnv(name: "YABAI_FOCUS_LOG_FILE", value: yabaiFocusLog.path) {
@@ -1350,16 +1305,16 @@ final class OrchestratorTests: XCTestCase {
 
         try store.upsert(
             window: WindowRecord(
-                id: UUID().uuidString, workspaceID: workspace.id, app: "iTerm2", title: "shared", windowID: 555, role: "terminal",
-                orderIndex: 200, lastSeenAt: "now"))
+                id: UUID().uuidString, workspaceID: workspace.id, app: "iTerm2", title: "shared", windowID: 555, role: "terminal", orderIndex: 200,
+                lastSeenAt: "now"))
         let first = RunningProcessRecord(
-            id: UUID().uuidString, workspaceID: workspace.id, templateName: "api", command: "npm run api",
-            terminalApp: "iTerm2", windowID: 555, itermSessionID: "session-a", itermTabIndex: 1,
-            pid: nil, status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil)
+            id: UUID().uuidString, workspaceID: workspace.id, templateName: "api", command: "npm run api", terminalApp: "iTerm2", windowID: 555,
+            itermSessionID: "session-a", itermTabIndex: 1, pid: nil, status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now",
+            exitedAt: nil)
         let second = RunningProcessRecord(
-            id: UUID().uuidString, workspaceID: workspace.id, templateName: "web", command: "npm run web",
-            terminalApp: "iTerm2", windowID: 555, itermSessionID: "session-b", itermTabIndex: 2,
-            pid: nil, status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil)
+            id: UUID().uuidString, workspaceID: workspace.id, templateName: "web", command: "npm run web", terminalApp: "iTerm2", windowID: 555,
+            itermSessionID: "session-b", itermTabIndex: 2, pid: nil, status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now",
+            exitedAt: nil)
         try store.upsert(runningProcess: first)
         try store.upsert(runningProcess: second)
 
@@ -1371,8 +1326,8 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertEqual(mockIterm.lastFocusedTabIndex, 2)
     }
 
-    // Tests focus window navigation uses relative order and wraps by arranging representative inputs and asserting the expected result.
-    func testFocusWindowNavigationUsesRelativeOrderAndWraps() throws {
+    // Tests focus workspace window by index sets the active workspace by arranging representative inputs and asserting the expected result.
+    func testFocusWorkspaceWindowByIndexSetsActiveWorkspace() throws {
         let (orchestrator, store, _, workspace, root) = try makeOrchestratorWithWorkspace()
         let focusLog = root.appendingPathComponent("relative-focus.log")
 
@@ -1389,19 +1344,17 @@ final class OrchestratorTests: XCTestCase {
                 id: UUID().uuidString, workspaceID: workspace.id, app: "iTerm2", title: "three", windowID: 303, role: "terminal", orderIndex: 2,
                 lastSeenAt: "now"))
 
-        // Mocked dependency: `yabai` focused-window query and focus command.
-        // Why: deterministically exercise relative navigation and wraparound.
+        // Mocked dependency: `yabai` focus command.
+        // Why: verify indexed window focus and active workspace tracking.
         // Remaining risk: real-time focus transitions and stale snapshots are not represented.
         try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) {
             try withEnv(name: "YABAI_FOCUS_LOG_FILE", value: focusLog.path) {
-                try withEnv(name: "YABAI_FOCUSED_ID", value: "202") { try orchestrator.focusNextWindow(workspaceID: workspace.id) }
-                try withEnv(name: "YABAI_FOCUSED_ID", value: "101") { try orchestrator.focusPreviousWindow(workspaceID: workspace.id) }
                 try orchestrator.focusWorkspaceWindow(workspaceID: workspace.id, index: 2)
             }
         }
 
         let focusedIDs = try String(contentsOf: focusLog).split(separator: "\n").map(String.init)
-        XCTAssertEqual(focusedIDs, ["303", "202", "202"])
+        XCTAssertEqual(focusedIDs, ["202"])
         XCTAssertEqual(try orchestrator.activeWorkspaceID(), workspace.id)
     }
 
@@ -1429,52 +1382,6 @@ final class OrchestratorTests: XCTestCase {
         if focusLogExists {
             let focusedIDs = try String(contentsOf: focusLog).trimmingCharacters(in: .whitespacesAndNewlines)
             XCTAssertTrue(focusedIDs.isEmpty)
-        }
-    }
-
-    // Tests focus window navigation wraps across browser targets in same chrome window by arranging representative inputs and asserting the expected result.
-    func testFocusWindowNavigationWrapsAcrossBrowserTargetsInSameChromeWindow() throws {
-        let (orchestrator, store, _, workspace, root) = try makeOrchestratorWithWorkspace()
-        let focusLog = root.appendingPathComponent("browser-nav-focus.log")
-        let chromeLog = root.appendingPathComponent("browser-nav-chrome.log")
-        let chromeActiveURL = root.appendingPathComponent("browser-nav-active-url.log")
-        try "http://localhost:3001".write(to: chromeActiveURL, atomically: true, encoding: .utf8)
-
-        try store.upsert(
-            window: WindowRecord(
-                id: UUID().uuidString, workspaceID: workspace.id, app: "iTerm2", title: "shell", windowID: 101, role: "terminal", orderIndex: 0,
-                lastSeenAt: "now"))
-        try store.upsert(
-            window: WindowRecord(
-                id: UUID().uuidString, workspaceID: workspace.id, app: "Google Chrome", title: "localhost-3001", targetURL: "http://localhost:3001",
-                windowID: 202, role: "browser", orderIndex: 1, lastSeenAt: "now"))
-        try store.upsert(
-            window: WindowRecord(
-                id: UUID().uuidString, workspaceID: workspace.id, app: "Google Chrome", title: "localhost-8000",
-                targetURL: "http://localhost:8000/admin", windowID: 202, role: "browser", orderIndex: 2, lastSeenAt: "now"))
-
-        // Mocked dependencies: Chrome active-tab focus/read + yabai fallback focus.
-        // Why: verify deterministic next-window traversal when multiple tracked browser targets share one Chrome window.
-        // Remaining risk: real-world browser/window races are not represented by this mock.
-        try withMockCommands(["yabai": Self.orchestratorYabaiMockScript, "osascript": Self.orchestratorOsaScriptMock]) {
-            try withEnv(name: "YABAI_FOCUS_LOG_FILE", value: focusLog.path) {
-                try withEnv(name: "MOCK_CHROME_FOCUS_LOG_FILE", value: chromeLog.path) {
-                    try withEnv(name: "MOCK_CHROME_ACTIVE_URL_FILE", value: chromeActiveURL.path) {
-                        try withEnv(name: "YABAI_FOCUSED_ID", value: "202") {
-                            try orchestrator.focusNextWindow(workspaceID: workspace.id)
-                            try orchestrator.focusNextWindow(workspaceID: workspace.id)
-                        }
-                        try withEnv(name: "YABAI_FOCUSED_ID", value: "101") { try orchestrator.focusNextWindow(workspaceID: workspace.id) }
-                    }
-                }
-            }
-        }
-
-        let chromeURLs = try String(contentsOf: chromeLog).split(separator: "\n").map(String.init)
-        XCTAssertEqual(chromeURLs, ["http://localhost:8000/admin", "http://localhost:3001"])
-        if FileManager.default.fileExists(atPath: focusLog.path) {
-            let focusedIDs = try String(contentsOf: focusLog).split(separator: "\n").map(String.init)
-            XCTAssertEqual(focusedIDs, ["101"])
         }
     }
 
@@ -1662,44 +1569,6 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertEqual(focusedURLs, ["http://localhost:3001", "http://localhost:3001/admin", "http://localhost:3001/admin/users"])
     }
 
-    // Tests focus window navigation prefers remembered index across browser rows sharing window id by arranging representative inputs and asserting the expected result.
-    func testFocusWindowNavigationPrefersRememberedIndexAcrossBrowserRowsSharingWindowID() throws {
-        let (orchestrator, store, _, workspace, root) = try makeOrchestratorWithWorkspace()
-        let chromeLog = root.appendingPathComponent("browser-nav-remembered.log")
-        try store.setWorkspaceBrowserSessions(
-            workspaceID: workspace.id, sessions: [BrowserSession(url: "http://localhost:3001"), BrowserSession(url: "http://localhost:8000/admin")])
-        try store.upsert(
-            window: WindowRecord(
-                id: UUID().uuidString, workspaceID: workspace.id, app: "iTerm2", title: "shell", windowID: 101, role: "terminal", orderIndex: 200,
-                lastSeenAt: "now"))
-        try store.upsert(
-            window: WindowRecord(
-                id: UUID().uuidString, workspaceID: workspace.id, app: "iTerm2", title: "build", windowID: 102, role: "terminal", orderIndex: 201,
-                lastSeenAt: "now"))
-        let chromeMatches =
-            "202\tGoogle Chrome — localhost 3001\thttp://localhost:3001\n202\tGoogle Chrome — localhost 8000\thttp://localhost:8000/admin\n"
-
-        // Mocked dependencies: Chrome tab scan + focus calls and yabai focused-window query.
-        // Why: ensure forward navigation continues from remembered cycle index instead of oscillating between browser rows that share one window ID.
-        // Remaining risk: host-level focus races can still diverge under heavy desktop activity.
-        try withMockCommands(["yabai": Self.orchestratorYabaiMockScript, "osascript": Self.orchestratorOsaScriptMock]) {
-            try withEnv(name: "MOCK_CHROME_WINDOW_MATCHES", value: chromeMatches) {
-                try withEnv(name: "MOCK_CHROME_FOCUS_LOG_FILE", value: chromeLog.path) {
-                    try withEnv(name: "YABAI_FOCUSED_ID", value: "101") {
-                        try withEnv(name: "YABAI_FOCUSED_APP", value: "iTerm2") {
-                            try orchestrator.focusNextWindow(workspaceID: workspace.id)  // terminal 102
-                            try orchestrator.focusNextWindow(workspaceID: workspace.id)  // browser 3001
-                            try orchestrator.focusNextWindow(workspaceID: workspace.id)  // browser 8000
-                        }
-                    }
-                }
-            }
-        }
-
-        let focusedURLs = try String(contentsOf: chromeLog).split(separator: "\n").map(String.init)
-        XCTAssertEqual(focusedURLs, ["http://localhost:3001", "http://localhost:8000/admin"])
-    }
-
     // Tests tracked windows orders browser then terminal then other roles by arranging representative inputs and asserting the expected result.
     func testTrackedWindowsOrdersBrowserThenTerminalThenOtherRoles() throws {
         let (orchestrator, store, _, workspace, _) = try makeOrchestratorWithWorkspace()
@@ -1764,56 +1633,6 @@ final class OrchestratorTests: XCTestCase {
         let windows = try orchestrator.windows(workspaceID: workspace.id)
         XCTAssertEqual(windows.filter { $0.role == "browser" }.count, 1)
         XCTAssertEqual(windows.first(where: { $0.role == "browser" })?.targetURL, "http://localhost:3001")
-    }
-
-    // Tests focus window navigation uses active browser tab when remembered index is stale by arranging representative inputs and asserting the expected result.
-    func testFocusWindowNavigationUsesActiveBrowserTabWhenRememberedIndexIsStale() throws {
-        let (orchestrator, store, _, workspace, root) = try makeOrchestratorWithWorkspace()
-        let focusLog = root.appendingPathComponent("browser-nav-stale-focus.log")
-        let chromeLog = root.appendingPathComponent("browser-nav-stale-chrome.log")
-        let chromeActiveURL = root.appendingPathComponent("browser-nav-stale-active-url.log")
-        try "http://localhost:3001".write(to: chromeActiveURL, atomically: true, encoding: .utf8)
-
-        let terminalRowID = UUID().uuidString
-        try store.upsert(
-            window: WindowRecord(
-                id: terminalRowID, workspaceID: workspace.id, app: "iTerm2", title: "shell", windowID: 101, role: "terminal", orderIndex: 0,
-                lastSeenAt: "now"))
-        try store.upsert(
-            window: WindowRecord(
-                id: UUID().uuidString, workspaceID: workspace.id, app: "Google Chrome", title: "localhost-3001", targetURL: "http://localhost:3001",
-                windowID: 202, role: "browser", orderIndex: 1, lastSeenAt: "now"))
-        try store.upsert(
-            window: WindowRecord(
-                id: UUID().uuidString, workspaceID: workspace.id, app: "Google Chrome", title: "localhost-8000",
-                targetURL: "http://localhost:8000/admin", windowID: 202, role: "browser", orderIndex: 2, lastSeenAt: "now"))
-
-        // Mocked dependencies: Chrome active-tab focus/read + yabai focused-window query.
-        // Why: ensure next-window navigation uses the actual active tab URL when multiple tracked tabs share one window.
-        // Remaining risk: live Chrome/yabai timing races can still diverge from this deterministic harness.
-        try withMockCommands(["yabai": Self.orchestratorYabaiMockScript, "osascript": Self.orchestratorOsaScriptMock]) {
-            try withEnv(name: "YABAI_FOCUS_LOG_FILE", value: focusLog.path) {
-                try withEnv(name: "MOCK_CHROME_FOCUS_LOG_FILE", value: chromeLog.path) {
-                    try withEnv(name: "MOCK_CHROME_ACTIVE_URL_FILE", value: chromeActiveURL.path) {
-                        try orchestrator.focusWorkspaceWindow(workspaceID: workspace.id, index: 3)
-                        try store.deleteWindow(id: terminalRowID)
-                        try "http://localhost:3001".write(to: chromeActiveURL, atomically: true, encoding: .utf8)
-                        try withEnv(name: "YABAI_FOCUSED_ID", value: "202") {
-                            try withEnv(name: "YABAI_FOCUSED_APP", value: "Google Chrome") {
-                                try orchestrator.focusNextWindow(workspaceID: workspace.id)
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        let chromeURLs = try String(contentsOf: chromeLog).split(separator: "\n").map(String.init)
-        XCTAssertEqual(chromeURLs, ["http://localhost:8000/admin", "http://localhost:8000/admin"])
-        if FileManager.default.fileExists(atPath: focusLog.path) {
-            let focusedIDs = try String(contentsOf: focusLog).split(separator: "\n").map(String.init)
-            XCTAssertTrue(focusedIDs.isEmpty)
-        }
     }
 
     // Tests launch workspace tracks terminal windows from running processes when multiple processes share one iTerm2 window.
@@ -1905,14 +1724,11 @@ final class OrchestratorTests: XCTestCase {
         let (orchestrator, store, _, workspace, root) = try makeOrchestratorWithWorkspace()
         let chromeOpenLog = root.appendingPathComponent("chrome-open-shared-window.log")
         try store.setWorkspaceBrowserSessions(
-            workspaceID: workspace.id,
-            sessions: [BrowserSession(url: "http://localhost:3001"), BrowserSession(url: "http://localhost:8000/admin")])
+            workspaceID: workspace.id, sessions: [BrowserSession(url: "http://localhost:3001"), BrowserSession(url: "http://localhost:8000/admin")])
 
         try withMockCommands(["yabai": Self.orchestratorYabaiMockScript, "osascript": Self.orchestratorOsaScriptMock]) {
             try withEnv(name: "MOCK_CHROME_OPEN_LOG_FILE", value: chromeOpenLog.path) {
-                try withEnv(name: "MOCK_CHROME_FOCUS_RESULT", value: "0") {
-                    try orchestrator.launchWorkspace(workspaceID: workspace.id)
-                }
+                try withEnv(name: "MOCK_CHROME_FOCUS_RESULT", value: "0") { try orchestrator.launchWorkspace(workspaceID: workspace.id) }
             }
         }
 
@@ -1955,7 +1771,7 @@ final class OrchestratorTests: XCTestCase {
             sessions: [
                 BrowserSession(
                     url: "http://localhost:3001",
-                    extractedWindow: ExtractedBrowserWindowMapping(targetURL: "http://localhost:3001", windowID: 999, isValid: true)),
+                    extractedWindow: ExtractedBrowserWindowMapping(targetURL: "http://localhost:3001", windowID: 999, isValid: true))
             ])
         let chromeMatches = "202\tGoogle Chrome — localhost 3001\thttp://localhost:3001\n"
 
@@ -2140,8 +1956,8 @@ final class OrchestratorTests: XCTestCase {
                 orderIndex: 0, lastSeenAt: "now"))
         try store.upsert(
             window: WindowRecord(
-                id: UUID().uuidString, workspaceID: archivedWorkspace.id, app: "iTerm2", title: "archived-stale", windowID: 912,
-                role: "terminal", orderIndex: 0, lastSeenAt: "now"))
+                id: UUID().uuidString, workspaceID: archivedWorkspace.id, app: "iTerm2", title: "archived-stale", windowID: 912, role: "terminal",
+                orderIndex: 0, lastSeenAt: "now"))
 
         // Mocked dependency: live yabai window inventory.
         // Why: confirm bulk refresh reconciles active workspaces only and leaves archived workspace rows unchanged.
@@ -2178,14 +1994,11 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertFalse(refreshResult.didMutateDB)
         // All non-archived workspaces should still appear in tracked counts (with zero windows).
         XCTAssertFalse(refreshResult.trackedWindowCounts.isEmpty)
-        for (_, count) in refreshResult.trackedWindowCounts {
-            XCTAssertEqual(count, 0)
-        }
+        for (_, count) in refreshResult.trackedWindowCounts { XCTAssertEqual(count, 0) }
     }
 
     // Tests list space options sorts by display then space by arranging representative inputs and asserting the expected result.
     func testListSpaceOptionsSortsByDisplayThenSpace() throws {
-        let root = try makeTempDirectory()
         let store = try makeTemporaryStore()
         let orchestrator = MuxyOrchestrator(store: store)
 
@@ -2534,8 +2347,8 @@ final class OrchestratorTests: XCTestCase {
         // Process window (window 501) with session
         try store.upsert(
             window: WindowRecord(
-                id: UUID().uuidString, workspaceID: workspace.id, app: "iTerm2", title: "npm run dev", windowID: 501,
-                itermSessionID: "session-proc", itermTabIndex: 1, role: "terminal", orderIndex: 0, lastSeenAt: "now"))
+                id: UUID().uuidString, workspaceID: workspace.id, app: "iTerm2", title: "npm run dev", windowID: 501, itermSessionID: "session-proc",
+                itermTabIndex: 1, role: "terminal", orderIndex: 0, lastSeenAt: "now"))
         try store.upsert(
             runningProcess: RunningProcessRecord(
                 id: UUID().uuidString, workspaceID: workspace.id, templateName: "api", command: "npm run dev", terminalApp: "iTerm2", windowID: 501,
@@ -2545,8 +2358,8 @@ final class OrchestratorTests: XCTestCase {
         // Tracked terminal window (window 502) opened via "Open Terminal" with a valid session
         try store.upsert(
             window: WindowRecord(
-                id: UUID().uuidString, workspaceID: workspace.id, app: "iTerm2", title: "-zsh", windowID: 502,
-                itermSessionID: "session-term", itermTabIndex: 1, role: "terminal", orderIndex: 1, lastSeenAt: "now"))
+                id: UUID().uuidString, workspaceID: workspace.id, app: "iTerm2", title: "-zsh", windowID: 502, itermSessionID: "session-term",
+                itermTabIndex: 1, role: "terminal", orderIndex: 1, lastSeenAt: "now"))
 
         try orchestrator.stopWorkspace(workspaceID: workspace.id)
 
@@ -2622,19 +2435,13 @@ final class OrchestratorTests: XCTestCase {
         let store = try makeTemporaryStore()
         let orchestrator = MuxyOrchestrator(store: store)
         let project = try orchestrator.addProject(dir: projectDir.path)
-        try orchestrator.updateProjectConfig(projectID: project.id) { config in
-            config.setupScript = "sleep 1; echo done > .muxy-launch-wait-marker"
-        }
+        try orchestrator.updateProjectConfig(projectID: project.id) { config in config.setupScript = "sleep 1; echo done > .muxy-launch-wait-marker" }
 
         let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "launch-waits", runSetupScript: false)
-        let setupThread = Thread {
-            try? orchestrator.runWorkspaceSetup(workspaceID: workspace.id)
-        }
+        let setupThread = Thread { try? orchestrator.runWorkspaceSetup(workspaceID: workspace.id) }
         setupThread.start()
 
-        try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) {
-            try orchestrator.launchWorkspace(workspaceID: workspace.id)
-        }
+        try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) { try orchestrator.launchWorkspace(workspaceID: workspace.id) }
 
         XCTAssertEqual(try store.workspace(id: workspace.id)?.isRunning, true)
         XCTAssertEqual(try orchestrator.workspaceSetupState(workspaceID: workspace.id).status, .succeeded)
@@ -2666,9 +2473,7 @@ final class OrchestratorTests: XCTestCase {
     func testUpWorkspaceLaunchesWhenStopped() throws {
         let (orchestrator, store, _, workspace, _) = try makeOrchestratorWithWorkspace()
 
-        try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) {
-            try orchestrator.upWorkspace(workspaceID: workspace.id)
-        }
+        try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) { try orchestrator.upWorkspace(workspaceID: workspace.id) }
 
         XCTAssertEqual(try store.workspace(id: workspace.id)?.isRunning, true)
         XCTAssertTrue(try orchestrator.runningProcesses(workspaceID: workspace.id).isEmpty)
@@ -2687,15 +2492,10 @@ final class OrchestratorTests: XCTestCase {
         let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
 
         try orchestrator.updateWorkspaceSettings(workspaceID: workspace.id) { settings in
-            settings.processes = [
-                ProcessTemplate(name: "api", command: "echo api"),
-                ProcessTemplate(name: "web", command: "echo web"),
-            ]
+            settings.processes = [ProcessTemplate(name: "api", command: "echo api"), ProcessTemplate(name: "web", command: "echo web")]
         }
 
-        try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) {
-            try orchestrator.upWorkspace(workspaceID: workspace.id)
-        }
+        try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) { try orchestrator.upWorkspace(workspaceID: workspace.id) }
 
         XCTAssertEqual(mockIterm.openWindowAndRunCallCount, 1)
         XCTAssertEqual(mockIterm.openTabInWindowAndRunCallCount, 1)
@@ -2715,9 +2515,7 @@ final class OrchestratorTests: XCTestCase {
                 id: UUID().uuidString, workspaceID: workspace.id, templateName: "old", command: "echo old", terminalApp: "iTerm2", windowID: 501,
                 pid: nil, status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil))
 
-        try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) {
-            try orchestrator.upWorkspace(workspaceID: workspace.id)
-        }
+        try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) { try orchestrator.upWorkspace(workspaceID: workspace.id) }
 
         XCTAssertEqual(try store.workspace(id: workspace.id)?.isRunning, false)
         XCTAssertEqual(try orchestrator.runningProcesses(workspaceID: workspace.id).count, 1)
@@ -2773,13 +2571,11 @@ final class OrchestratorTests: XCTestCase {
         // user ran `claude` from within the workspace terminal tab).
         try store.upsert(
             window: WindowRecord(
-                id: UUID().uuidString, workspaceID: workspace.id, app: "iTerm2", title: "claude",
-                windowID: 501, itermSessionID: "agent-session-1", itermTabIndex: 1,
-                role: "terminal", orderIndex: 0, lastSeenAt: "now"))
+                id: UUID().uuidString, workspaceID: workspace.id, app: "iTerm2", title: "claude", windowID: 501, itermSessionID: "agent-session-1",
+                itermTabIndex: 1, role: "terminal", orderIndex: 0, lastSeenAt: "now"))
         let agentRecord = AgentWindowRecord(
-            id: UUID().uuidString, workspaceID: workspace.id, provider: .iterm2, label: "Claude Code",
-            itermSessionID: "agent-session-1", codexThreadID: nil, windowID: nil,
-            yabaiWindowID: 501, status: .spinning, createdAt: "now", updatedAt: "now")
+            id: UUID().uuidString, workspaceID: workspace.id, provider: .iterm2, label: "Claude Code", itermSessionID: "agent-session-1",
+            codexThreadID: nil, windowID: nil, yabaiWindowID: 501, status: .spinning, createdAt: "now", updatedAt: "now")
         try store.upsertAgentWindow(agentRecord)
 
         // Mocked dependencies: yabai and osascript for stop/launch phases.
@@ -2810,13 +2606,11 @@ final class OrchestratorTests: XCTestCase {
         // Workspace terminal tab (session A) is a different tab in the same window as the agent (session B).
         try store.upsert(
             window: WindowRecord(
-                id: UUID().uuidString, workspaceID: workspace.id, app: "iTerm2", title: "shell",
-                windowID: 501, itermSessionID: "workspace-session-A", itermTabIndex: 0,
-                role: "terminal", orderIndex: 0, lastSeenAt: "now"))
+                id: UUID().uuidString, workspaceID: workspace.id, app: "iTerm2", title: "shell", windowID: 501, itermSessionID: "workspace-session-A",
+                itermTabIndex: 0, role: "terminal", orderIndex: 0, lastSeenAt: "now"))
         let agentRecord = AgentWindowRecord(
-            id: UUID().uuidString, workspaceID: workspace.id, provider: .iterm2, label: "Claude Code",
-            itermSessionID: "agent-session-B", codexThreadID: nil, windowID: nil,
-            yabaiWindowID: 501, status: .spinning, createdAt: "now", updatedAt: "now")
+            id: UUID().uuidString, workspaceID: workspace.id, provider: .iterm2, label: "Claude Code", itermSessionID: "agent-session-B",
+            codexThreadID: nil, windowID: nil, yabaiWindowID: 501, status: .spinning, createdAt: "now", updatedAt: "now")
         try store.upsertAgentWindow(agentRecord)
 
         // Mocked dependencies: yabai and osascript for stop/launch phases.
@@ -2843,9 +2637,8 @@ final class OrchestratorTests: XCTestCase {
         let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
         try store.updateWorkspaceRunning(id: workspace.id, isRunning: true, launchedAt: "now")
         let agentRecord = AgentWindowRecord(
-            id: UUID().uuidString, workspaceID: workspace.id, provider: .iterm2, label: "Claude Code",
-            itermSessionID: "agent-session-2", codexThreadID: nil, windowID: nil,
-            status: .spinning, createdAt: "now", updatedAt: "now")
+            id: UUID().uuidString, workspaceID: workspace.id, provider: .iterm2, label: "Claude Code", itermSessionID: "agent-session-2",
+            codexThreadID: nil, windowID: nil, status: .spinning, createdAt: "now", updatedAt: "now")
         try store.upsertAgentWindow(agentRecord)
 
         // Mocked dependencies: yabai and osascript for stop/launch phases.
@@ -2873,9 +2666,8 @@ final class OrchestratorTests: XCTestCase {
         let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
         try store.updateWorkspaceRunning(id: workspace.id, isRunning: true, launchedAt: "now")
         let agentRecord = AgentWindowRecord(
-            id: UUID().uuidString, workspaceID: workspace.id, provider: .iterm2, label: "Claude Code",
-            itermSessionID: "agent-session-stop", codexThreadID: nil, windowID: nil,
-            yabaiWindowID: nil, status: .spinning, createdAt: "now", updatedAt: "now")
+            id: UUID().uuidString, workspaceID: workspace.id, provider: .iterm2, label: "Claude Code", itermSessionID: "agent-session-stop",
+            codexThreadID: nil, windowID: nil, yabaiWindowID: nil, status: .spinning, createdAt: "now", updatedAt: "now")
         try store.upsertAgentWindow(agentRecord)
 
         // Why: explicit stop should not close or delete coding agent sessions so they survive for the next launch.
@@ -3553,26 +3345,20 @@ final class OrchestratorTests: XCTestCase {
     // Tests create workspace from worktree infers project and branch by arranging representative inputs and asserting the expected result.
     func testCreateWorkspaceFromWorktreeInfersProjectAndBranch() throws {
         let repo = try makeTempGitRepo(name: "test-repo")
-        
         let store = try makeTemporaryStore()
         let orchestrator = MuxyOrchestrator(store: store)
         let project = try orchestrator.addProject(dir: repo.path)
-        
         let root = repo.deletingLastPathComponent()
-        
         let worktree = root.appendingPathComponent("feature-branch", isDirectory: true)
         let client = GitClient()
         try client.createWorktree(path: repo.path, worktreePath: worktree.path, branch: "feature-branch")
-        
         let workspace = try orchestrator.createWorkspaceFromWorktree(worktreePath: worktree.path, name: nil)
-        
         XCTAssertEqual(workspace.projectID, project.id)
         XCTAssertEqual(workspace.name, "feature-branch")
         XCTAssertEqual(workspace.branch, "feature-branch")
         XCTAssertEqual(workspace.dir, worktree.path)
         XCTAssertEqual(workspace.dirname, "feature-branch")
         XCTAssertFalse(workspace.isArchived)
-        
         let stored = try store.workspace(id: workspace.id)
         XCTAssertNotNil(stored)
         XCTAssertEqual(stored?.name, "feature-branch")
@@ -3582,17 +3368,13 @@ final class OrchestratorTests: XCTestCase {
     func testCreateWorkspaceFromWorktreeWithCustomName() throws {
         let repo = try makeTempGitRepo(name: "test-repo")
         let root = repo.deletingLastPathComponent()
-        
         let store = try makeTemporaryStore()
         let orchestrator = MuxyOrchestrator(store: store)
         _ = try orchestrator.addProject(dir: repo.path)
-        
         let worktree = root.appendingPathComponent("fix-bug", isDirectory: true)
         let client = GitClient()
         try client.createWorktree(path: repo.path, worktreePath: worktree.path, branch: "fix/bug-123")
-        
         let workspace = try orchestrator.createWorkspaceFromWorktree(worktreePath: worktree.path, name: "bug-fix")
-        
         XCTAssertEqual(workspace.name, "bug-fix")
         XCTAssertEqual(workspace.branch, "fix/bug-123")
     }
@@ -3601,14 +3383,11 @@ final class OrchestratorTests: XCTestCase {
     func testCreateWorkspaceFromWorktreeFailsIfProjectNotRegistered() throws {
         let repo = try makeTempGitRepo(name: "test-repo")
         let root = repo.deletingLastPathComponent()
-        
         let worktree = root.appendingPathComponent("feature", isDirectory: true)
         let client = GitClient()
         try client.createWorktree(path: repo.path, worktreePath: worktree.path, branch: "feature")
-        
         let store = try makeTemporaryStore()
         let orchestrator = MuxyOrchestrator(store: store)
-        
         XCTAssertThrowsError(try orchestrator.createWorkspaceFromWorktree(worktreePath: worktree.path, name: nil)) { error in
             let nsError = error as NSError
             XCTAssertTrue(nsError.localizedDescription.contains("Project not found"))
@@ -3620,17 +3399,13 @@ final class OrchestratorTests: XCTestCase {
     func testCreateWorkspaceFromWorktreeFailsIfAlreadyExists() throws {
         let repo = try makeTempGitRepo(name: "test-repo")
         let root = repo.deletingLastPathComponent()
-        
         let store = try makeTemporaryStore()
         let orchestrator = MuxyOrchestrator(store: store)
         _ = try orchestrator.addProject(dir: repo.path)
-        
         let worktree = root.appendingPathComponent("feature", isDirectory: true)
         let client = GitClient()
         try client.createWorktree(path: repo.path, worktreePath: worktree.path, branch: "feature")
-        
         _ = try orchestrator.createWorkspaceFromWorktree(worktreePath: worktree.path, name: nil)
-        
         XCTAssertThrowsError(try orchestrator.createWorkspaceFromWorktree(worktreePath: worktree.path, name: nil)) { error in
             let nsError = error as NSError
             XCTAssertTrue(nsError.localizedDescription.contains("already exists"))
@@ -3641,25 +3416,19 @@ final class OrchestratorTests: XCTestCase {
     func testScanAndCreateWorkspacesFromWorktreesFindsAllWorktrees() throws {
         let repo = try makeTempGitRepo(name: "test-repo")
         let root = repo.deletingLastPathComponent()
-        
         let store = try makeTemporaryStore()
         let orchestrator = MuxyOrchestrator(store: store)
         let project = try orchestrator.addProject(dir: repo.path)
-        
         let client = GitClient()
         let worktree1 = root.appendingPathComponent("feature-1", isDirectory: true)
         let worktree2 = root.appendingPathComponent("feature-2", isDirectory: true)
         try client.createWorktree(path: repo.path, worktreePath: worktree1.path, branch: "feature-1")
         try client.createWorktree(path: repo.path, worktreePath: worktree2.path, branch: "feature-2")
-        
         let created = try orchestrator.scanAndCreateWorkspacesFromWorktrees(projectID: project.id)
-        
         XCTAssertEqual(created.count, 2)
-        
         let names = Set(created.map(\.name))
         XCTAssertTrue(names.contains("feature-1"))
         XCTAssertTrue(names.contains("feature-2"))
-        
         let allWorkspaces = try store.workspaces(projectID: project.id, includeArchived: false)
         XCTAssertEqual(allWorkspaces.count, 3)
     }
@@ -3668,22 +3437,16 @@ final class OrchestratorTests: XCTestCase {
     func testScanAndCreateWorkspacesFromWorktreesSkipsExistingWorkspaces() throws {
         let repo = try makeTempGitRepo(name: "test-repo")
         let root = repo.deletingLastPathComponent()
-        
         let store = try makeTemporaryStore()
         let orchestrator = MuxyOrchestrator(store: store)
         let project = try orchestrator.addProject(dir: repo.path)
-        
         let client = GitClient()
         let worktree1 = root.appendingPathComponent("feature-1", isDirectory: true)
         try client.createWorktree(path: repo.path, worktreePath: worktree1.path, branch: "feature-1")
-        
         _ = try orchestrator.createWorkspaceFromWorktree(worktreePath: worktree1.path, name: nil)
-        
         let worktree2 = root.appendingPathComponent("feature-2", isDirectory: true)
         try client.createWorktree(path: repo.path, worktreePath: worktree2.path, branch: "feature-2")
-        
         let created = try orchestrator.scanAndCreateWorkspacesFromWorktrees(projectID: project.id)
-        
         XCTAssertEqual(created.count, 1)
         let names = Set(created.map(\.name))
         XCTAssertTrue(names.contains("feature-2"))
@@ -3700,8 +3463,7 @@ final class OrchestratorTests: XCTestCase {
         let orchestrator = MuxyOrchestrator(store: store)
         let project = try orchestrator.addProject(dir: repo.path)
 
-        try orchestrator.updateProjectConfig(projectID: project.id) { config in
-            config.setupScript = "echo discovered > .muxy-discovery-setup-marker"
+        try orchestrator.updateProjectConfig(projectID: project.id) { config in config.setupScript = "echo discovered > .muxy-discovery-setup-marker"
         }
 
         let client = GitClient()
@@ -3807,26 +3569,19 @@ final class OrchestratorTests: XCTestCase {
         let repo1 = try makeTempGitRepo(name: "repo1")
         let repo2 = try makeTempGitRepo(name: "repo2")
         let root = repo1.deletingLastPathComponent()
-        
         let store = try makeTemporaryStore()
         let orchestrator = MuxyOrchestrator(store: store)
         let project1 = try orchestrator.addProject(dir: repo1.path)
         let project2 = try orchestrator.addProject(dir: repo2.path)
-        
         let client = GitClient()
         let worktree1 = root.appendingPathComponent("repo1-feature", isDirectory: true)
         try client.createWorktree(path: repo1.path, worktreePath: worktree1.path, branch: "feature")
-        
         let worktree2 = root.appendingPathComponent("repo2-bugfix", isDirectory: true)
         try client.createWorktree(path: repo2.path, worktreePath: worktree2.path, branch: "bugfix")
-        
         let created = try orchestrator.scanAndCreateWorkspacesFromWorktrees(projectID: nil)
-        
         XCTAssertEqual(created.count, 2)
-        
         let project1Workspaces = try store.workspaces(projectID: project1.id, includeArchived: false)
         XCTAssertEqual(project1Workspaces.count, 2)
-        
         let project2Workspaces = try store.workspaces(projectID: project2.id, includeArchived: false)
         XCTAssertEqual(project2Workspaces.count, 2)
     }
@@ -3874,21 +3629,19 @@ final class OrchestratorTests: XCTestCase {
 
         try store.upsert(
             window: WindowRecord(
-                id: UUID().uuidString, workspaceID: workspace.id, app: "iTerm2", title: "api", windowID: 555, role: "terminal",
-                orderIndex: 0, lastSeenAt: "now"))
+                id: UUID().uuidString, workspaceID: workspace.id, app: "iTerm2", title: "api", windowID: 555, role: "terminal", orderIndex: 0,
+                lastSeenAt: "now"))
         try store.upsert(
             runningProcess: RunningProcessRecord(
-                id: UUID().uuidString, workspaceID: workspace.id, templateName: "api", command: "npm run api",
-                terminalApp: "iTerm2", windowID: 555, itermSessionID: "session-555", itermTabIndex: 1,
-                pid: 1234, status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil))
+                id: UUID().uuidString, workspaceID: workspace.id, templateName: "api", command: "npm run api", terminalApp: "iTerm2", windowID: 555,
+                itermSessionID: "session-555", itermTabIndex: 1, pid: 1234, status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now",
+                exitedAt: nil))
 
         try orchestrator.focusWorkspaceWindow(workspaceID: workspace.id, index: 1)
 
         // Pulse is dispatched asynchronously; allow the Task to run.
         let deadline = Date().addingTimeInterval(2)
-        while mockIterm.pulseCallCount == 0, Date() < deadline {
-            RunLoop.current.run(until: Date().addingTimeInterval(0.05))
-        }
+        while mockIterm.pulseCallCount == 0, Date() < deadline { RunLoop.current.run(until: Date().addingTimeInterval(0.05)) }
 
         XCTAssertEqual(mockIterm.pulseCallCount, 1)
         XCTAssertEqual(mockIterm.lastPulsedWindowID, 555)
@@ -3912,20 +3665,18 @@ final class OrchestratorTests: XCTestCase {
         try orchestrator.setItermFocusPulseColor(r: 0, g: 100, b: 200)
         try store.upsert(
             window: WindowRecord(
-                id: UUID().uuidString, workspaceID: workspace.id, app: "iTerm2", title: "api", windowID: 556, role: "terminal",
-                orderIndex: 0, lastSeenAt: "now"))
+                id: UUID().uuidString, workspaceID: workspace.id, app: "iTerm2", title: "api", windowID: 556, role: "terminal", orderIndex: 0,
+                lastSeenAt: "now"))
         try store.upsert(
             runningProcess: RunningProcessRecord(
-                id: UUID().uuidString, workspaceID: workspace.id, templateName: "api", command: "npm run api",
-                terminalApp: "iTerm2", windowID: 556, itermSessionID: "session-556", itermTabIndex: 1,
-                pid: 1234, status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil))
+                id: UUID().uuidString, workspaceID: workspace.id, templateName: "api", command: "npm run api", terminalApp: "iTerm2", windowID: 556,
+                itermSessionID: "session-556", itermTabIndex: 1, pid: 1234, status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now",
+                exitedAt: nil))
 
         try orchestrator.focusWorkspaceWindow(workspaceID: workspace.id, index: 1)
 
         let deadline = Date().addingTimeInterval(2)
-        while mockIterm.pulseCallCount == 0, Date() < deadline {
-            RunLoop.current.run(until: Date().addingTimeInterval(0.05))
-        }
+        while mockIterm.pulseCallCount == 0, Date() < deadline { RunLoop.current.run(until: Date().addingTimeInterval(0.05)) }
 
         XCTAssertEqual(mockIterm.pulseCallCount, 1)
         XCTAssertEqual(mockIterm.lastPulseColor?.r, 0)
@@ -3963,13 +3714,13 @@ final class OrchestratorTests: XCTestCase {
         try orchestrator.setItermFocusPulseEnabled(false)
         try store.upsert(
             window: WindowRecord(
-                id: UUID().uuidString, workspaceID: workspace.id, app: "iTerm2", title: "api", windowID: 557, role: "terminal",
-                orderIndex: 0, lastSeenAt: "now"))
+                id: UUID().uuidString, workspaceID: workspace.id, app: "iTerm2", title: "api", windowID: 557, role: "terminal", orderIndex: 0,
+                lastSeenAt: "now"))
         try store.upsert(
             runningProcess: RunningProcessRecord(
-                id: UUID().uuidString, workspaceID: workspace.id, templateName: "api", command: "npm run api",
-                terminalApp: "iTerm2", windowID: 557, itermSessionID: "session-557", itermTabIndex: 1,
-                pid: 1234, status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil))
+                id: UUID().uuidString, workspaceID: workspace.id, templateName: "api", command: "npm run api", terminalApp: "iTerm2", windowID: 557,
+                itermSessionID: "session-557", itermTabIndex: 1, pid: 1234, status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now",
+                exitedAt: nil))
 
         try orchestrator.focusWorkspaceWindow(workspaceID: workspace.id, index: 1)
 
@@ -3992,8 +3743,7 @@ final class OrchestratorTests: XCTestCase {
     func testApplyEnvVarsSubstitutesMultipleVars() {
         let orchestrator = MuxyOrchestrator(store: try! makeTemporaryStore())
         let result = orchestrator.applyEnvVars(
-            "PORT=$FRONTEND_PORT BACKEND=$BACKEND_PORT node server.js",
-            env: ["FRONTEND_PORT": "3000", "BACKEND_PORT": "4000"])
+            "PORT=$FRONTEND_PORT BACKEND=$BACKEND_PORT node server.js", env: ["FRONTEND_PORT": "3000", "BACKEND_PORT": "4000"])
         XCTAssertEqual(result, "PORT=3000 BACKEND=4000 node server.js")
     }
 
@@ -4037,9 +3787,7 @@ final class OrchestratorTests: XCTestCase {
         try store.upsert(workspace: workspace)
         try store.setWorkspacePorts(workspaceID: workspace.id, ports: [3000, 4000], names: ["FRONTEND_PORT", "BACKEND_PORT"])
 
-        let resolved = try orchestrator.resolveEnvVars(
-            in: "FRONTEND=$FRONTEND_PORT BACKEND=$BACKEND_PORT node app.js",
-            workspaceID: workspace.id)
+        let resolved = try orchestrator.resolveEnvVars(in: "FRONTEND=$FRONTEND_PORT BACKEND=$BACKEND_PORT node app.js", workspaceID: workspace.id)
         XCTAssertEqual(resolved, "FRONTEND=3000 BACKEND=4000 node app.js")
     }
 

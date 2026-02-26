@@ -1,5 +1,5 @@
-import XCTest
 import SQLite3
+import XCTest
 
 @testable import streamctl
 
@@ -47,11 +47,7 @@ final class StoreTests: XCTestCase {
         XCTAssertEqual(try store.workspace(id: "legacy-workspace")?.name, "default")
         let workspaceColumns = try readTableColumns(dbURL: dbURL, table: "workspaces")
         XCTAssertTrue(workspaceColumns.contains("title"))
-        XCTAssertEqual(
-            try readSingleText(
-                dbURL: dbURL,
-                sql: "SELECT title FROM workspaces WHERE id = 'legacy-workspace'"),
-            "default")
+        XCTAssertEqual(try readSingleText(dbURL: dbURL, sql: "SELECT title FROM workspaces WHERE id = 'legacy-workspace'"), "default")
 
         try store.markIgnoredWorktree(path: "/tmp/legacy-project", projectID: "legacy-project")
         XCTAssertTrue(try store.isIgnoredWorktree(path: "/tmp/legacy-project"))
@@ -242,10 +238,8 @@ final class StoreTests: XCTestCase {
             workspaceID: workspace.id,
             sessions: [
                 BrowserSession(
-                    name: "checkout",
-                    url: "https://example.com",
-                    extractedWindow: ExtractedBrowserWindowMapping(targetURL: "https://example.com", windowID: 303, isValid: true)),
-                BrowserSession(),
+                    name: "checkout", url: "https://example.com",
+                    extractedWindow: ExtractedBrowserWindowMapping(targetURL: "https://example.com", windowID: 303, isValid: true)), BrowserSession(),
             ])
         let sessions = try store.workspaceBrowserSessions(workspaceID: workspace.id)
         XCTAssertEqual(sessions.count, 2)
@@ -267,11 +261,7 @@ final class StoreTests: XCTestCase {
         XCTAssertNil(try store.workspaceStopScript(workspaceID: workspace.id))
 
         try store.setWorkspaceSetupState(
-            workspaceID: workspace.id,
-            status: .failed,
-            errorMessage: "setup failed",
-            startedAt: "start",
-            finishedAt: "end")
+            workspaceID: workspace.id, status: .failed, errorMessage: "setup failed", startedAt: "start", finishedAt: "end")
         let setupState = try store.workspaceSetupState(workspaceID: workspace.id)
         XCTAssertEqual(setupState?.status, .failed)
         XCTAssertEqual(setupState?.errorMessage, "setup failed")
@@ -348,8 +338,8 @@ final class StoreTests: XCTestCase {
         try store.upsert(
             statusResult: StatusResult(processID: processID, checkName: "health", status: .passed, message: "ok", lastRunAt: "2026-01-01T00:00:00Z"))
         try store.upsert(
-            statusResult: StatusResult(processID: processID, checkName: "health", status: .failed, message: "failed", lastRunAt: "2026-01-01T00:02:00Z")
-        )
+            statusResult: StatusResult(
+                processID: processID, checkName: "health", status: .failed, message: "failed", lastRunAt: "2026-01-01T00:02:00Z"))
         let results = try store.statusResults(processID: processID)
         XCTAssertEqual(results.count, 1)
         XCTAssertEqual(results[0].status, .failed)
@@ -382,17 +372,8 @@ final class StoreTests: XCTestCase {
 
         try store.upsertAgentWindow(
             AgentWindowRecord(
-                id: UUID().uuidString,
-                workspaceID: workspace.id,
-                provider: .codex,
-                label: "Codex",
-                itermSessionID: nil,
-                codexThreadID: "thread-123",
-                windowID: nil,
-                yabaiWindowID: 4242,
-                status: .spinning,
-                createdAt: "2026-02-25T00:00:00Z",
-                updatedAt: "2026-02-25T00:00:01Z"))
+                id: UUID().uuidString, workspaceID: workspace.id, provider: .codex, label: "Codex", itermSessionID: nil, codexThreadID: "thread-123",
+                windowID: nil, yabaiWindowID: 4242, status: .spinning, createdAt: "2026-02-25T00:00:00Z", updatedAt: "2026-02-25T00:00:01Z"))
 
         XCTAssertEqual(try store.workspaceIDForAgentWindow(yabaiWindowID: 4242), workspace.id)
     }
@@ -526,8 +507,8 @@ final class StoreTests: XCTestCase {
             id: "default", projectID: aProject.id, name: "default", dir: aDir, dirname: nil, branch: nil, isDefault: true, isArchived: false,
             isRunning: false, lastLaunchedAt: nil)
         let archivedWorkspace = WorkspaceRecord(
-            id: "archived", projectID: aProject.id, name: "feature", dir: aDir, dirname: nil, branch: nil, targetBranch: "develop",
-            isDefault: false, isArchived: true, isRunning: false, lastLaunchedAt: nil)
+            id: "archived", projectID: aProject.id, name: "feature", dir: aDir, dirname: nil, branch: nil, targetBranch: "develop", isDefault: false,
+            isArchived: true, isRunning: false, lastLaunchedAt: nil)
         try store.upsert(workspace: archivedWorkspace)
         try store.upsert(workspace: defaultWorkspace)
 
@@ -569,14 +550,11 @@ final class StoreTests: XCTestCase {
     func testProjectTemplateFieldsRoundTrip() throws {
         let store = try makeTemporaryStore()
         let dir = try makeTempDirectory().path
-        var project = ProjectRecord(
-            id: dir, name: "myproject", dir: dir, isGitRepo: false, defaultBranch: nil,
-            setupScript: "echo setup", stopScript: "echo stop",
+        let project = ProjectRecord(
+            id: dir, name: "myproject", dir: dir, isGitRepo: false, defaultBranch: nil, setupScript: "echo setup", stopScript: "echo stop",
             ports: [PortDefinition(name: "API_PORT"), PortDefinition(name: "WEB_PORT")],
             processes: [ProcessTemplate(name: "api", command: "npm run api"), ProcessTemplate(command: "npm run worker")],
-            statusChecks: [
-                StatusCheckDefinition(name: "health", process: "api", command: "curl /health", interval: 10, timeout: 3, onFail: .notify),
-            ],
+            statusChecks: [StatusCheckDefinition(name: "health", process: "api", command: "curl /health", interval: 10, timeout: 3, onFail: .notify)],
             browserSessions: [BrowserSession(name: "frontend", url: "https://localhost:3000")])
 
         try store.upsert(project: project)
@@ -604,8 +582,7 @@ final class StoreTests: XCTestCase {
         let store = try makeTemporaryStore()
         let dir = try makeTempDirectory().path
         var project = ProjectRecord(
-            id: dir, name: "project", dir: dir, isGitRepo: false, defaultBranch: nil,
-            ports: [PortDefinition(name: "OLD_PORT")])
+            id: dir, name: "project", dir: dir, isGitRepo: false, defaultBranch: nil, ports: [PortDefinition(name: "OLD_PORT")])
         try store.upsert(project: project)
 
         project.ports = [PortDefinition(name: "NEW_PORT"), PortDefinition(name: "EXTRA_PORT")]
@@ -623,8 +600,7 @@ final class StoreTests: XCTestCase {
         let store = try makeTemporaryStore()
         let dir = try makeTempDirectory().path
         let project = ProjectRecord(
-            id: dir, name: "project", dir: dir, isGitRepo: false, defaultBranch: nil,
-            ports: [PortDefinition(name: "PORT")],
+            id: dir, name: "project", dir: dir, isGitRepo: false, defaultBranch: nil, ports: [PortDefinition(name: "PORT")],
             processes: [ProcessTemplate(command: "echo run")])
         try store.upsert(project: project)
 
@@ -638,10 +614,8 @@ final class StoreTests: XCTestCase {
         let store = try makeTemporaryStore()
         let dir1 = try makeTempDirectory().path
         let dir2 = try makeTempDirectory().path
-        let p1 = ProjectRecord(id: dir1, name: "alpha", dir: dir1, isGitRepo: false, defaultBranch: nil,
-                               ports: [PortDefinition(name: "PORT1")])
-        let p2 = ProjectRecord(id: dir2, name: "beta", dir: dir2, isGitRepo: false, defaultBranch: nil,
-                               processes: [ProcessTemplate(command: "run")])
+        let p1 = ProjectRecord(id: dir1, name: "alpha", dir: dir1, isGitRepo: false, defaultBranch: nil, ports: [PortDefinition(name: "PORT1")])
+        let p2 = ProjectRecord(id: dir2, name: "beta", dir: dir2, isGitRepo: false, defaultBranch: nil, processes: [ProcessTemplate(command: "run")])
         try store.upsert(project: p1)
         try store.upsert(project: p2)
 
@@ -659,28 +633,23 @@ final class StoreTests: XCTestCase {
         let projectDir = try makeTempDirectory().path
         let workspace1Dir = try makeTempDirectory().path
         let workspace2Dir = try makeTempDirectory().path
-        
         let project = makeProjectRecord(dir: projectDir)
         let workspace1 = WorkspaceRecord(
-            id: "ws1", projectID: project.id, name: "feature-1", dir: workspace1Dir, dirname: "feature-1",
-            branch: "feature-1", isDefault: false, isArchived: false, isRunning: false, lastLaunchedAt: nil)
+            id: "ws1", projectID: project.id, name: "feature-1", dir: workspace1Dir, dirname: "feature-1", branch: "feature-1", isDefault: false,
+            isArchived: false, isRunning: false, lastLaunchedAt: nil)
         let workspace2 = WorkspaceRecord(
-            id: "ws2", projectID: project.id, name: "feature-2", dir: workspace2Dir, dirname: "feature-2",
-            branch: "feature-2", isDefault: false, isArchived: false, isRunning: false, lastLaunchedAt: nil)
-        
+            id: "ws2", projectID: project.id, name: "feature-2", dir: workspace2Dir, dirname: "feature-2", branch: "feature-2", isDefault: false,
+            isArchived: false, isRunning: false, lastLaunchedAt: nil)
         try store.upsert(project: project)
         try store.upsert(workspace: workspace1)
         try store.upsert(workspace: workspace2)
-        
         let found1 = try store.workspace(dir: workspace1Dir)
         XCTAssertEqual(found1?.id, "ws1")
         XCTAssertEqual(found1?.name, "feature-1")
         XCTAssertEqual(found1?.dir, workspace1Dir)
-        
         let found2 = try store.workspace(dir: workspace2Dir)
         XCTAssertEqual(found2?.id, "ws2")
         XCTAssertEqual(found2?.name, "feature-2")
-        
         let notFound = try store.workspace(dir: "/nonexistent/path")
         XCTAssertNil(notFound)
     }

@@ -101,41 +101,29 @@ final class GitClientTests: XCTestCase {
         try FileManager.default.createDirectory(at: repo, withIntermediateDirectories: true)
         try initializeGitRepository(at: repo, initialBranch: "main")
         let client = GitClient()
-        
         let worktree1 = root.appendingPathComponent("feature-1", isDirectory: true)
         let worktree2 = root.appendingPathComponent("feature-2", isDirectory: true)
         try client.createWorktree(path: repo.path, worktreePath: worktree1.path, branch: "feature-1")
         try client.createWorktree(path: repo.path, worktreePath: worktree2.path, branch: "feature-2")
-        
         let worktrees = try client.listWorktrees(path: repo.path)
-        
         XCTAssertEqual(worktrees.count, 3)
-        
         let normalizedRepoPath = URL(fileURLWithPath: repo.path).resolvingSymlinksInPath().path
         let normalizedWorktree1Path = URL(fileURLWithPath: worktree1.path).resolvingSymlinksInPath().path
         let normalizedWorktree2Path = URL(fileURLWithPath: worktree2.path).resolvingSymlinksInPath().path
-        
-        let mainWorktree = try XCTUnwrap(worktrees.first(where: { 
-            URL(fileURLWithPath: $0.path).resolvingSymlinksInPath().path == normalizedRepoPath 
-        }))
+        let mainWorktree = try XCTUnwrap(
+            worktrees.first(where: { URL(fileURLWithPath: $0.path).resolvingSymlinksInPath().path == normalizedRepoPath }))
         XCTAssertEqual(mainWorktree.branchName, "main")
-        
-        let feature1 = try XCTUnwrap(worktrees.first(where: { 
-            URL(fileURLWithPath: $0.path).resolvingSymlinksInPath().path == normalizedWorktree1Path 
-        }))
+        let feature1 = try XCTUnwrap(
+            worktrees.first(where: { URL(fileURLWithPath: $0.path).resolvingSymlinksInPath().path == normalizedWorktree1Path }))
         XCTAssertEqual(feature1.branchName, "feature-1")
-        
-        let feature2 = try XCTUnwrap(worktrees.first(where: { 
-            URL(fileURLWithPath: $0.path).resolvingSymlinksInPath().path == normalizedWorktree2Path 
-        }))
+        let feature2 = try XCTUnwrap(
+            worktrees.first(where: { URL(fileURLWithPath: $0.path).resolvingSymlinksInPath().path == normalizedWorktree2Path }))
         XCTAssertEqual(feature2.branchName, "feature-2")
     }
-    
     // Tests list worktrees returns empty for non git repo by arranging representative inputs and asserting the expected result.
     func testListWorktreesReturnsEmptyForNonGitRepo() throws {
         let nonRepo = try makeTempDirectory()
         let client = GitClient()
-        
         XCTAssertThrowsError(try client.listWorktrees(path: nonRepo.path))
     }
 
@@ -183,8 +171,7 @@ final class GitClientTests: XCTestCase {
         try runGit(["checkout", "-b", "new-remote-target"], cwd: fixture.source.path)
         try "target".write(to: fixture.source.appending(path: "NEW_REMOTE_TARGET.md"), atomically: true, encoding: .utf8)
         try runGit(["add", "NEW_REMOTE_TARGET.md"], cwd: fixture.source.path)
-        try runGit(
-            ["-c", "user.name=muxy-test", "-c", "user.email=test@example.com", "commit", "-m", "remote target"], cwd: fixture.source.path)
+        try runGit(["-c", "user.name=muxy-test", "-c", "user.email=test@example.com", "commit", "-m", "remote target"], cwd: fixture.source.path)
         try runGit(["push", fixture.remote.path, "new-remote-target"], cwd: fixture.source.path)
 
         let expectedHead = try runGit(["rev-parse", "new-remote-target"], cwd: fixture.source.path).trimmingCharacters(in: .whitespacesAndNewlines)

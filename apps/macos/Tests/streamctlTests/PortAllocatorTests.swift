@@ -49,9 +49,7 @@ final class PortAllocatorTests: XCTestCase {
 
         XCTAssertThrowsError(
             try allocator.allocatePorts(workspaceID: workspaceB.id, definitions: definitions, range: PortRange(start: 20000, end: 20002))
-        ) { error in
-            guard case MuxyError.invalidArgument = error else { return XCTFail("Unexpected error: \(error)") }
-        }
+        ) { error in guard case MuxyError.invalidArgument = error else { return XCTFail("Unexpected error: \(error)") } }
 
         let stored = try store.workspacePorts(workspaceID: workspaceB.id)
         XCTAssertEqual(stored, [])

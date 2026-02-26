@@ -8,8 +8,8 @@ public struct WorkspaceSettings: Sendable {
     public var browserSessions: [BrowserSession]
 
     public init(
-        stopScript: String? = nil, ports: [PortDefinition] = [], processes: [ProcessTemplate] = [],
-        statusChecks: [StatusCheckDefinition] = [], browserSessions: [BrowserSession] = []
+        stopScript: String? = nil, ports: [PortDefinition] = [], processes: [ProcessTemplate] = [], statusChecks: [StatusCheckDefinition] = [],
+        browserSessions: [BrowserSession] = []
     ) {
         self.stopScript = stopScript
         self.ports = ports

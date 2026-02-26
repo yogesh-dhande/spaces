@@ -7,32 +7,22 @@ public final class PortReserver: Sendable {
     private let lock = NSLock()
     private nonisolated(unsafe) let _reservedSockets = UnsafeMutablePointer<[String: [Int32]]>.allocate(capacity: 1)
 
-    private init() {
-        _reservedSockets.initialize(to: [:])
-    }
+    private init() { _reservedSockets.initialize(to: [:]) }
 
     deinit {
         lock.lock()
         let all = _reservedSockets.pointee
         lock.unlock()
-        for (_, fds) in all {
-            for fd in fds { Darwin.close(fd) }
-        }
+        for (_, fds) in all { for fd in fds { Darwin.close(fd) } }
         _reservedSockets.deinitialize(count: 1)
         _reservedSockets.deallocate()
     }
 
     public func reservePorts(workspaceID: String, ports: [Int]) {
         var fds: [Int32] = []
-        for port in ports {
-            if let fd = bindSocket(port: port) {
-                fds.append(fd)
-            }
-        }
+        for port in ports { if let fd = bindSocket(port: port) { fds.append(fd) } }
         lock.lock()
-        if let existing = _reservedSockets.pointee[workspaceID] {
-            for fd in existing { Darwin.close(fd) }
-        }
+        if let existing = _reservedSockets.pointee[workspaceID] { for fd in existing { Darwin.close(fd) } }
         _reservedSockets.pointee[workspaceID] = fds
         lock.unlock()
     }
