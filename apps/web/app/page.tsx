@@ -360,19 +360,6 @@ export default function HomePage() {
 
             <details className="group rounded-xl border border-line bg-surface/75">
               <summary className="flex cursor-pointer select-none list-none items-center justify-between px-4 py-3.5 text-sm font-semibold text-foreground">
-                Can I use it with Conductor?
-                <span aria-hidden className="ml-3 shrink-0 text-foreground-soft transition-transform duration-200 group-open:rotate-180">▾</span>
-              </summary>
-              <div className="border-t border-line px-4 pb-4 pt-3 text-sm leading-7 text-foreground-soft">
-                Yes. You can use Conductor to create worktrees and write code. Muxy will automatically import them as workspaces so you can manage windows and context with Muxy. 
-                We recommend using Muxy setup scripts and processes to configure workspaces and leaving Conductor setup and run scripts empty. See the{" "}
-                <Link href="/docs/guides" className="text-accent hover:underline">cookbook guides</Link>{" "}
-                for a detailed walkthrough.
-              </div>
-            </details>
-
-            <details className="group rounded-xl border border-line bg-surface/75">
-              <summary className="flex cursor-pointer select-none list-none items-center justify-between px-4 py-3.5 text-sm font-semibold text-foreground">
                 I only work on one project at a time. How will Muxy help me?
                 <span aria-hidden className="ml-3 shrink-0 text-foreground-soft transition-transform duration-200 group-open:rotate-180">▾</span>
               </summary>

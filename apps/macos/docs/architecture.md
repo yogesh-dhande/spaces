@@ -570,3 +570,22 @@ Muxy uses 7 distinct yabai commands across 35+ call sites via `YabaiAdapter`:
 | Window title | AX `kAXTitleAttribute` | Requires Accessibility permission per app |
 
 **Conclusion:** yabai cannot be fully replaced with public macOS APIs. The critical gaps are window-level focus (vs app-level), space index assignment, and reliable cross-app window title access. The query side could be partially replaced by CGWindowList for ID-based snapshot-diff, but mutations (`--focus`, `--close`) and space/display metadata have no equivalent.
+
+## Onboarding & Prerequisites
+
+Muxy depends on iTerm2 and yabai being installed and configured before workspaces can be created or launched. On every launch, the app runs four prerequisite checks in order:
+
+| # | Check | Passes when |
+|---|---|---|
+| 1 | iTerm2 installed | `Iterm2Adapter.isAvailable()` returns `true` |
+| 2 | yabai installed | `yabai --version` exits 0 |
+| 3 | yabai service running | `yabai -m query --spaces` returns a JSON array |
+| 4 | yabai Accessibility | `yabai -m query --windows` returns a non-empty array (Finder always has windows when AX is granted) |
+
+If all checks pass, the main split-view UI is shown immediately. If any check fails, a step-by-step setup view is shown in the same main window (no second window) starting at the first failing step. The setup view polls every 2 seconds and also re-checks immediately when the app becomes active (critical for the Accessibility step after the user grants permission in System Settings). Once all steps pass the main UI loads automatically.
+
+### Key types
+
+- `SetupChecker` (`appctl`): Pure logic class that runs individual or all checks. Injectable `Iterm2Adapter` enables unit testing without real apps.
+- `SetupManager` (`gui`): Builds the setup NSView, drives polling, and calls `onComplete` when all steps pass. Installed as `window.contentView` — no second window.
+- `AppKitController`: `buildShellWindow()` creates and shows the NSWindow on launch; `buildMainWindowContent()` populates it with the split-view layout (called either directly or via `SetupManager.onComplete`).

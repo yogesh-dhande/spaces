@@ -218,8 +218,7 @@
     - On app launch, muxy shows a startup loading state in the detail pane ("Loading projects and workspaces...") while initial project/workspace/git activity data is fetched in a background task so first paint remains responsive
     - Global focus hotkeys are registered during initial startup so showing/focusing muxy does not wait for background hydration to finish
     - During startup reconciliation passes, sidebar refreshes must run through background snapshot loading so workspace switching stays responsive (no main-thread blocking reload path)
-    - Check for required dependencies e.g. yabai. If missing, ask user to install and provide instructions or links to instructions
-    - Check for required permissions e.g. accessibility. If missing, ask user to provide using deep links to settings whenever possible. Provide instructions.
+    - On every launch, check prerequisites in order: (1) iTerm2 installed, (2) yabai installed, (3) yabai service running, (4) yabai Accessibility permission. All four are blocking — if any fail, a step-by-step setup view is shown in the main window (no second window) starting at the first failing step, with inline instructions, copy-ready commands, and deep links to System Settings. The setup view polls every 2 seconds and immediately re-checks when the app becomes active. The main UI loads automatically once all steps pass.
     - Once the app is configured appropriately, prompt the user to create their first project
     - Run a periodic background reconciliation pass for all non-archived workspace windows
         - this pass should prune stale window records for windows that were manually closed outside muxy

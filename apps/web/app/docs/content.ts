@@ -9,7 +9,7 @@ export const docsPageLinks: DocsPageLink[] = [
     href: "/docs/installation",
     title: "Installation & Setup",
     summary:
-      "Get Muxy installed, permissions configured, and your environment verified.",
+      "Get Muxy installed, permissions configured, and your environment verified. Muxy guides you through any missing prerequisites (iTerm2, yabai, Accessibility) with a step-by-step in-app setup flow on first launch.",
   },
   {
     href: "/docs/getting-started",

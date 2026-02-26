@@ -101,6 +101,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     private var tooltipIPCObserver: NSObjectProtocol?
     private var agentEventIPCObserver: NSObjectProtocol?
     private var didStartBackgroundServices = false
+    private var setupManager: SetupManager?
     private var sidebarReloadTask: Task<Void, Never>?
     private var pendingSidebarReloadRequest = false
 
@@ -157,16 +158,27 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             return
         }
 
-        buildWindow()
+        buildShellWindow()
         NSApp.activate(ignoringOtherApps: true)
         buildMainMenu()
         loadShortcutSpecs()
         setupGlobalHotkey()
-        showLoadingPlaceholder(message: "Loading projects and workspaces...", detail: "Muxy is preparing your workspace data.")
         setupShortcutMonitor()
         setupTooltipIPCObserver()
         setupAgentEventIPCObserver()
-        Task { @MainActor [weak self] in await self?.loadInitialSidebarData() }
+
+        let mgr = SetupManager()
+        mgr.onComplete = { [weak self] in
+            self?.setupManager = nil
+            self?.buildMainWindowContent()
+            self?.showLoadingPlaceholder(message: "Loading projects and workspaces...", detail: "Muxy is preparing your workspace data.")
+            Task { @MainActor [weak self] in await self?.loadInitialSidebarData() }
+        }
+        self.setupManager = mgr
+        window.contentView = mgr.makeContentView()
+        // start() skips to the first unmet requirement; if all pass it calls onComplete
+        // synchronously (before any draw cycle) so there is no visual flash of the setup UI.
+        mgr.start()
     }
 
     public func applicationWillTerminate(_ notification: Notification) {
@@ -640,13 +652,18 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         NSApp.mainMenu = mainMenu
     }
 
-    private func buildWindow() {
+    /// Creates and shows the NSWindow shell (size, title, center, delegate, makeKeyAndOrderFront) without setting content.
+    private func buildShellWindow() {
         let rect = NSRect(x: 200, y: 200, width: 1100, height: 700)
         window = NSWindow(contentRect: rect, styleMask: [.titled, .resizable, .closable], backing: .buffered, defer: false)
         window.title = "Muxy"
         window.center()
         window.delegate = self
+        window.makeKeyAndOrderFront(nil)
+    }
 
+    /// Builds the split view layout + footer and sets it as window.contentView.
+    private func buildMainWindowContent() {
         let splitView = NSSplitView()
         splitView.dividerStyle = .thin
         splitView.isVertical = true
@@ -683,7 +700,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         ])
         refreshWorkspaceShortcutFooterRow()
         window.contentView = content
-        window.makeKeyAndOrderFront(nil)
     }
 
     private func makeLeftPane() -> NSView {

@@ -14,6 +14,8 @@ It manages projects, workspaces, processes, and window sets so you can move betw
 - Google Chrome (browser sessions)
 - Accessibility permissions granted for window focus and control
 
+> **In-app onboarding:** On first launch (or any launch where a prerequisite is missing), Muxy shows a step-by-step setup guide directly in the main window. It checks for iTerm2, yabai installation, yabai service, and Accessibility permission in order — auto-advancing as each step passes. No manual setup steps are required beyond following the in-app prompts.
+
 ## Configuration
 - DB: `~/.muxy/muxy.db` — all model data and global preferences (projects, templates, workspaces, ports, windows, settings, editor, port range)
 - Managed git repos (from `mx project add --git-url`): `/Users/<username>/muxy/repos/<project_name>` (bare repo)

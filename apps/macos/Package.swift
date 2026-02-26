@@ -23,7 +23,7 @@ let package = Package(
             dependencies: ["appctl"],
             linkerSettings: [.linkedLibrary("sqlite3")]
         ),
-        .target(name: "gui", dependencies: ["streamctl"]),
+        .target(name: "gui", dependencies: ["streamctl", "appctl"]),
         .executableTarget(name: "mx", dependencies: ["streamctl", "appctl"]),
         .executableTarget(
             name: "Muxy",
