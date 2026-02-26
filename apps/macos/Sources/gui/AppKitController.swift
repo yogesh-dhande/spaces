@@ -2457,8 +2457,45 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         for process in processes { statusResultsByProcessID[process.id] = (try? orchestrator.statusResults(processID: process.id)) ?? [] }
         let agentWindowsForRunTab = (try? orchestrator.agentWindows(workspaceID: workspace.id)) ?? []
         let agentYabaiWindowIDs: Set<Int> = Set(agentWindowsForRunTab.compactMap { $0.yabaiWindowID })
+        // Query live iTerm2 session IDs once so we can suppress shortcuts for sessions that were closed.
+        let liveItermSessionIDs: Set<String>? = orchestrator.liveItermSessionIDs()
         var matchedProcessIDs: Set<String> = []
+        // Shortcut counter is shared across all sections so numbers are assigned
+        // in the order rows appear on screen: Coding Agents → Browser Tabs → Processes.
         var shortcutCounter = 1
+
+        // --- Build Coding Agents rows first (displayed at the top) ---
+        var agentsStack: NSStackView? = nil
+        if !agentWindowsForRunTab.isEmpty {
+            let linkedWindowByYabaiID: [Int: WindowRecord] = Dictionary(
+                uniqueKeysWithValues: windows.compactMap { w in
+                    guard let wid = w.windowID, agentYabaiWindowIDs.contains(wid) else { return nil }
+                    return (wid, w)
+                })
+            let stack = NSStackView()
+            stack.orientation = .vertical
+            stack.spacing = 4
+            for agentWin in agentWindowsForRunTab {
+                let agentIcon = agentWin.provider == .codex ? "wand.and.stars" : "cpu.fill"
+                let agentColor: NSColor = agentWin.status == .done ? .systemGreen : agentWin.status == .waiting ? .systemOrange : .secondaryLabelColor
+                let linkedWin = agentWin.yabaiWindowID.flatMap { linkedWindowByYabaiID[$0] }
+                let agentLabel = agentWin.label ?? (agentWin.provider == .codex ? "Codex App" : "Claude Code CLI")
+                let agentDetail = linkedWin?.title ?? linkedWin?.app
+                let agentShortcutNum = shortcutCounter
+                shortcutCounter += 1
+                let rec = agentWin
+                let row = windowRow(
+                    icon: agentIcon, iconColor: agentColor, label: agentLabel, detail: agentDetail, shortcut: "CMD+\(agentShortcutNum)",
+                    agentStatus: agentWin.status,
+                    action: { [weak self] in
+                        guard let self else { return }
+                        try? self.orchestrator.focusAgentWindow(rec)
+                    })
+                stack.addArrangedSubview(row)
+                constrainFormFieldToFillWidth(row, in: stack)
+            }
+            agentsStack = stack
+        }
 
         // --- Build Browser Tabs rows ---
         let browserStack = NSStackView()
@@ -2508,13 +2545,22 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 if !windowProcesses.isEmpty {
                     for process in windowProcesses {
                         matchedProcessIDs.insert(process.id)
-                        let rowShortcut = "CMD+\(shortcutCounter)"
-                        shortcutCounter += 1
+                        // A session is navigable only if it is known to be alive in iTerm2.
+                        // If liveItermSessionIDs is nil (iTerm2 not running), fall back to
+                        // status-based check so running processes remain clickable.
+                        let sessionIsAlive: Bool = {
+                            if let sid = process.itermSessionID, let live = liveItermSessionIDs {
+                                return live.contains(sid)
+                            }
+                            return process.status == .running
+                        }()
+                        let rowShortcut = sessionIsAlive ? "CMD+\(shortcutCounter)" : ""
+                        if sessionIsAlive { shortcutCounter += 1 }
                         processRowCount += 1
-                        let rowAction: (() -> Void) = { [weak self] in
+                        let rowAction: (() -> Void)? = sessionIsAlive ? { [weak self] in
                             guard let self else { return }
                             do { try self.orchestrator.focusWorkspaceProcess(workspaceID: workspaceID, processID: process.id) } catch {}
-                        }
+                        } : nil
                         let row = windowRow(
                             icon: "terminal", iconColor: .systemGreen, label: process.templateName,
                             detail: resolveCommand(process.command), shortcut: rowShortcut, processStatus: process.status, action: rowAction)
@@ -2587,7 +2633,15 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             }
         }
 
-        // --- Browser Tabs section (only if rows exist) ---
+        // --- Add sections in display order: Coding Agents → Browser Tabs → Processes ---
+        if let agentsStack {
+            let agentsHeader = sectionHeader(icon: "cpu.fill", title: "Coding Agents")
+            container.addArrangedSubview(agentsHeader)
+            constrainFormFieldToFillWidth(agentsHeader, in: container)
+            container.addArrangedSubview(agentsStack)
+            constrainFormFieldToFillWidth(agentsStack, in: container)
+        }
+
         if browserRowCount > 0 {
             let browserHeader = sectionHeader(icon: "globe", title: "Browser Tabs")
             container.addArrangedSubview(browserHeader)
@@ -2596,43 +2650,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             constrainFormFieldToFillWidth(browserStack, in: container)
         }
 
-        // --- Coding Agents section (only if agent windows exist) ---
-        if !agentWindowsForRunTab.isEmpty {
-            let linkedWindowByYabaiID: [Int: WindowRecord] = Dictionary(
-                uniqueKeysWithValues: windows.compactMap { w in
-                    guard let wid = w.windowID, agentYabaiWindowIDs.contains(wid) else { return nil }
-                    return (wid, w)
-                })
-            let agentsStack = NSStackView()
-            agentsStack.orientation = .vertical
-            agentsStack.spacing = 4
-            for agentWin in agentWindowsForRunTab {
-                let agentIcon = agentWin.provider == .codex ? "wand.and.stars" : "cpu.fill"
-                let agentColor: NSColor = agentWin.status == .done ? .systemGreen : agentWin.status == .waiting ? .systemOrange : .secondaryLabelColor
-                let linkedWin = agentWin.yabaiWindowID.flatMap { linkedWindowByYabaiID[$0] }
-                let agentLabel = agentWin.label ?? (agentWin.provider == .codex ? "Codex App" : "Claude Code CLI")
-                let agentDetail = linkedWin?.title ?? linkedWin?.app
-                let agentShortcutNum = shortcutCounter
-                shortcutCounter += 1
-                let rec = agentWin
-                let row = windowRow(
-                    icon: agentIcon, iconColor: agentColor, label: agentLabel, detail: agentDetail, shortcut: "CMD+\(agentShortcutNum)",
-                    agentStatus: agentWin.status,
-                    action: { [weak self] in
-                        guard let self else { return }
-                        try? self.orchestrator.focusAgentWindow(rec)
-                    })
-                agentsStack.addArrangedSubview(row)
-                constrainFormFieldToFillWidth(row, in: agentsStack)
-            }
-            let agentsHeader = sectionHeader(icon: "cpu.fill", title: "Coding Agents")
-            container.addArrangedSubview(agentsHeader)
-            constrainFormFieldToFillWidth(agentsHeader, in: container)
-            container.addArrangedSubview(agentsStack)
-            constrainFormFieldToFillWidth(agentsStack, in: container)
-        }
-
-        // --- Processes section (only if rows exist) ---
         if processRowCount > 0 {
             let processesHeader = sectionHeader(icon: "terminal.fill", title: "Processes")
             container.addArrangedSubview(processesHeader)
@@ -4797,36 +4814,56 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             return map
         }()
         let agentYabaiWindowIDs: Set<Int> = Set(agentWindows.compactMap { $0.yabaiWindowID })
+        let liveItermSessionIDs: Set<String>? = orchestrator.liveItermSessionIDs()
+        // Iterate in the same order as the Run tab display: Coding Agents → Browser Tabs → Processes.
         var shortcutCounter = 1
-        for (windowIdx, window) in windows.enumerated() {
-            let windowListIndex = windowIdx + 1
-            let windowProcesses = (window.role == "terminal" ? (window.windowID.flatMap { processesByWindowID[$0] }) : nil) ?? []
-            let isAgentClaimedWindow = window.windowID != nil && agentYabaiWindowIDs.contains(window.windowID!)
-            if isAgentClaimedWindow && (window.role != "terminal" || windowProcesses.isEmpty) { continue }
-            if window.role == "terminal", !windowProcesses.isEmpty {
-                for process in windowProcesses {
-                    if shortcutCounter == index {
-                        do { try orchestrator.focusWorkspaceProcess(workspaceID: selectedWorkspaceID, processID: process.id) } catch {
-                            showError(error)
-                        }
-                        return
-                    }
-                    shortcutCounter += 1
-                }
-            } else {
-                if shortcutCounter == index {
-                    do { try orchestrator.focusWorkspaceWindow(workspaceID: selectedWorkspaceID, index: windowListIndex) } catch { showError(error) }
-                    return
-                }
-                shortcutCounter += 1
-            }
-        }
+        // 1. Coding Agents
         for agentWin in agentWindows {
             if shortcutCounter == index {
                 try? orchestrator.focusAgentWindow(agentWin)
                 return
             }
             shortcutCounter += 1
+        }
+        // 2. Browser Tabs
+        for (windowIdx, window) in windows.enumerated() {
+            guard window.role == "browser" else { continue }
+            let isAgentClaimedWindow = window.windowID != nil && agentYabaiWindowIDs.contains(window.windowID!)
+            guard !isAgentClaimedWindow else { continue }
+            let windowListIndex = windowIdx + 1
+            if shortcutCounter == index {
+                do { try orchestrator.focusWorkspaceWindow(workspaceID: selectedWorkspaceID, index: windowListIndex) } catch { showError(error) }
+                return
+            }
+            shortcutCounter += 1
+        }
+        // 3. Processes (terminal windows + other non-browser windows)
+        for (windowIdx, window) in windows.enumerated() {
+            guard window.role != "browser" else { continue }
+            let windowListIndex = windowIdx + 1
+            let windowProcesses = (window.role == "terminal" ? (window.windowID.flatMap { processesByWindowID[$0] }) : nil) ?? []
+            let isAgentClaimedWindow = window.windowID != nil && agentYabaiWindowIDs.contains(window.windowID!)
+            if isAgentClaimedWindow && (window.role != "terminal" || windowProcesses.isEmpty) { continue }
+            if window.role == "terminal", !windowProcesses.isEmpty {
+                for process in windowProcesses {
+                    let sessionIsAlive: Bool = {
+                        if let sid = process.itermSessionID, let live = liveItermSessionIDs { return live.contains(sid) }
+                        return process.status == .running
+                    }()
+                    guard sessionIsAlive else { continue }
+                    if shortcutCounter == index {
+                        do { try orchestrator.focusWorkspaceProcess(workspaceID: selectedWorkspaceID, processID: process.id) } catch { showError(error) }
+                        return
+                    }
+                    shortcutCounter += 1
+                }
+            } else if !isAgentClaimedWindow {
+                if shortcutCounter == index {
+                    do { try orchestrator.focusWorkspaceWindow(workspaceID: selectedWorkspaceID, index: windowListIndex) } catch { showError(error) }
+                    return
+                }
+                shortcutCounter += 1
+            }
         }
     }
 

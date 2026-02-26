@@ -1639,6 +1639,10 @@ public final class MuxyOrchestrator {
         try store.setSetting(key: SettingsKey.itermFocusPulseEnabled, value: enabled ? "1" : "0")
     }
 
+    /// Returns the set of iTerm2 session IDs that are currently alive.
+    /// Returns nil if iTerm2 is not running or the query fails.
+    public func liveItermSessionIDs() -> Set<String>? { try? iterm.listSessionIDs() }
+
     public func activeWorkspaceID() throws -> String? { try store.setting(key: "active_workspace_id") }
 
     public func setActiveWorkspace(id: String?) throws { try store.setSetting(key: "active_workspace_id", value: id) }
