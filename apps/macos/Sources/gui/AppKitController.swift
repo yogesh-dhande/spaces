@@ -1331,7 +1331,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             showProjectDetail(project: project)
             return
         }
-        showPlaceholder()
+        showDashboardDetail()
     }
 
     private func showPlaceholder(message: String = "Select a project or workspace.") {
@@ -3388,6 +3388,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
     private func workspaceDetailShortcutFooterSegments() -> [String] {
         [
+            "Dashboard ⌘ ⇧ D",
             "Next workspace \(footerShortcutHint(for: .guiNextShortcut))", "Prev workspace \(footerShortcutHint(for: .guiPreviousShortcut))",
             "Settings \(footerShortcutHint(for: .guiOpenSettingsShortcut))", "Toggle tooltip \(footerShortcutHint(for: .guiTooltipShortcut))",
         ]
