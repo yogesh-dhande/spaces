@@ -2430,7 +2430,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         container.addArrangedSubview(centeredOpenRow)
         constrainFormFieldToFillWidth(centeredOpenRow, in: container)
 
-        // --- Windows card ---
+        // --- Windows grouped into Browser Tabs / Coding Agents / Processes ---
         let processes = (try? orchestrator.runningProcesses(workspaceID: workspace.id)) ?? []
         let windows = (try? orchestrator.windows(workspaceID: workspace.id)) ?? []
         let configuredBrowserSessions: [BrowserSession] = {
@@ -2456,127 +2456,148 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         var statusResultsByProcessID: [String: [StatusResult]] = [:]
         for process in processes { statusResultsByProcessID[process.id] = (try? orchestrator.statusResults(processID: process.id)) ?? [] }
         let agentWindowsForRunTab = (try? orchestrator.agentWindows(workspaceID: workspace.id)) ?? []
-        // Build a set of yabai window IDs claimed by agent records so they can be moved to the Agents section.
         let agentYabaiWindowIDs: Set<Int> = Set(agentWindowsForRunTab.compactMap { $0.yabaiWindowID })
-        let windowsStack = NSStackView()
-        windowsStack.orientation = .vertical
-        windowsStack.spacing = 4
         var matchedProcessIDs: Set<String> = []
-        var windowsSectionRowCount = 0
         var shortcutCounter = 1
-        if windows.isEmpty {
-            let emptyLabel = NSTextField(labelWithString: "No captured windows")
-            emptyLabel.font = .systemFont(ofSize: 11)
-            emptyLabel.textColor = .tertiaryLabelColor
-            emptyLabel.alignment = .left
-            windowsStack.alignment = .leading
-            windowsStack.addArrangedSubview(emptyLabel)
-        } else {
-            // Use the original 1-based index in the full windows array so CMD+N matches focusWorkspaceWindow(index:).
-            for (idx, win) in windows.enumerated() {
-                let windowProcesses = (win.role == "terminal" ? (win.windowID.flatMap { processesByWindowID[$0] }) : nil) ?? []
-                let isAgentClaimedWindow = win.windowID != nil && agentYabaiWindowIDs.contains(win.windowID!)
-                if isAgentClaimedWindow && (win.role != "terminal" || windowProcesses.isEmpty) { continue }
-                let windowLabel: String
-                let windowDetail: String?
-                let iconName: String
-                let iconColor: NSColor
-                let linkedProcess: RunningProcessRecord? = nil
-                switch win.role {
-                case "browser":
-                    if let sessionName = browserSessionDisplayName(for: win.targetURL, sessions: configuredBrowserSessions),
-                        let targetURL = win.targetURL
-                    {
-                        windowLabel = sessionName
-                        windowDetail = targetURL
-                    } else {
-                        windowLabel = win.targetURL ?? win.title ?? win.app
-                        windowDetail = nil
-                    }
-                    iconName = "globe"
-                    iconColor = .systemBlue
-                case "terminal":
-                    windowLabel = win.title ?? win.app
-                    windowDetail = nil
-                    iconName = "terminal"
-                    iconColor = .systemGreen
-                default:
-                    windowLabel = win.title ?? win.app
-                    windowDetail = nil
-                    iconName = "chevron.left.forwardslash.chevron.right"
-                    iconColor = .systemPurple
+
+        // --- Build Browser Tabs rows ---
+        let browserStack = NSStackView()
+        browserStack.orientation = .vertical
+        browserStack.spacing = 4
+        var browserRowCount = 0
+
+        // --- Build Processes rows ---
+        let processesStack = NSStackView()
+        processesStack.orientation = .vertical
+        processesStack.spacing = 4
+        var processRowCount = 0
+
+        // Use the original 1-based index in the full windows array so CMD+N matches focusWorkspaceWindow(index:).
+        for (idx, win) in windows.enumerated() {
+            let windowProcesses = (win.role == "terminal" ? (win.windowID.flatMap { processesByWindowID[$0] }) : nil) ?? []
+            let isAgentClaimedWindow = win.windowID != nil && agentYabaiWindowIDs.contains(win.windowID!)
+            if isAgentClaimedWindow && (win.role != "terminal" || windowProcesses.isEmpty) { continue }
+            let windowIndex = idx + 1
+            let workspaceID = workspace.id
+            switch win.role {
+            case "browser":
+                let sessionLabel: String
+                let sessionDetail: String?
+                if let sessionName = browserSessionDisplayName(for: win.targetURL, sessions: configuredBrowserSessions),
+                    let targetURL = win.targetURL
+                {
+                    sessionLabel = sessionName
+                    sessionDetail = targetURL
+                } else {
+                    sessionLabel = win.targetURL ?? win.title ?? win.app
+                    sessionDetail = nil
                 }
-                let windowIndex = idx + 1
-                let workspaceID = workspace.id
-                if win.role == "terminal", !windowProcesses.isEmpty {
+                let rowShortcut = "CMD+\(shortcutCounter)"
+                shortcutCounter += 1
+                browserRowCount += 1
+                let row = windowRow(
+                    icon: "globe", iconColor: .systemBlue, label: sessionLabel, detail: sessionDetail,
+                    shortcut: rowShortcut, processStatus: nil,
+                    action: { [weak self] in
+                        guard let self else { return }
+                        do { try self.orchestrator.focusWorkspaceWindow(workspaceID: workspaceID, index: windowIndex) } catch {}
+                    })
+                browserStack.addArrangedSubview(row)
+                constrainFormFieldToFillWidth(row, in: browserStack)
+            case "terminal":
+                if !windowProcesses.isEmpty {
                     for process in windowProcesses {
                         matchedProcessIDs.insert(process.id)
                         let rowShortcut = "CMD+\(shortcutCounter)"
                         shortcutCounter += 1
-                        windowsSectionRowCount += 1
+                        processRowCount += 1
                         let rowAction: (() -> Void) = { [weak self] in
                             guard let self else { return }
                             do { try self.orchestrator.focusWorkspaceProcess(workspaceID: workspaceID, processID: process.id) } catch {}
                         }
                         let row = windowRow(
-                            icon: iconName, iconColor: iconColor, label: process.templateName, detail: resolveCommand(process.command),
-                            shortcut: rowShortcut, processStatus: process.status, action: rowAction)
-                        windowsStack.addArrangedSubview(row)
-                        constrainFormFieldToFillWidth(row, in: windowsStack)
-
+                            icon: "terminal", iconColor: .systemGreen, label: process.templateName,
+                            detail: resolveCommand(process.command), shortcut: rowShortcut, processStatus: process.status, action: rowAction)
+                        processesStack.addArrangedSubview(row)
+                        constrainFormFieldToFillWidth(row, in: processesStack)
                         let checks = statusResultsByProcessID[process.id] ?? []
                         for check in checks {
                             let isHealthy = check.status == .passed && process.status != .exited
                             let checkColor: NSColor = isHealthy ? .systemGreen : .systemRed
                             let checkRow = statusCheckSubRow(name: check.checkName, color: checkColor, status: check.status)
-                            windowsStack.addArrangedSubview(checkRow)
-                            constrainFormFieldToFillWidth(checkRow, in: windowsStack)
+                            processesStack.addArrangedSubview(checkRow)
+                            constrainFormFieldToFillWidth(checkRow, in: processesStack)
                         }
                     }
-                } else {
+                } else if !isAgentClaimedWindow {
                     let rowShortcut = "CMD+\(shortcutCounter)"
                     shortcutCounter += 1
-                    windowsSectionRowCount += 1
+                    processRowCount += 1
                     let row = windowRow(
-                        icon: iconName, iconColor: iconColor, label: windowLabel, detail: windowDetail, shortcut: rowShortcut,
-                        processStatus: linkedProcess?.status,
+                        icon: "terminal", iconColor: .systemGreen, label: win.title ?? win.app, detail: nil,
+                        shortcut: rowShortcut, processStatus: nil,
                         action: { [weak self] in
                             guard let self else { return }
                             do { try self.orchestrator.focusWorkspaceWindow(workspaceID: workspaceID, index: windowIndex) } catch {}
                         })
-                    windowsStack.addArrangedSubview(row)
-                    constrainFormFieldToFillWidth(row, in: windowsStack)
-
-                    if let process = linkedProcess {
-                        let checks = statusResultsByProcessID[process.id] ?? []
-                        for check in checks {
-                            let isHealthy = check.status == .passed && process.status != .exited
-                            let checkColor: NSColor = isHealthy ? .systemGreen : .systemRed
-                            let checkRow = statusCheckSubRow(name: check.checkName, color: checkColor, status: check.status)
-                            windowsStack.addArrangedSubview(checkRow)
-                            constrainFormFieldToFillWidth(checkRow, in: windowsStack)
-                        }
-                    }
+                    processesStack.addArrangedSubview(row)
+                    constrainFormFieldToFillWidth(row, in: processesStack)
+                }
+            default:
+                if !isAgentClaimedWindow {
+                    let rowShortcut = "CMD+\(shortcutCounter)"
+                    shortcutCounter += 1
+                    processRowCount += 1
+                    let row = windowRow(
+                        icon: "chevron.left.forwardslash.chevron.right", iconColor: .systemPurple,
+                        label: win.title ?? win.app, detail: nil, shortcut: rowShortcut, processStatus: nil,
+                        action: { [weak self] in
+                            guard let self else { return }
+                            do { try self.orchestrator.focusWorkspaceWindow(workspaceID: workspaceID, index: windowIndex) } catch {}
+                        })
+                    processesStack.addArrangedSubview(row)
+                    constrainFormFieldToFillWidth(row, in: processesStack)
                 }
             }
-            if windowsSectionRowCount == 0 {
-                let emptyLabel = NSTextField(labelWithString: "No captured windows")
-                emptyLabel.font = .systemFont(ofSize: 11)
-                emptyLabel.textColor = .tertiaryLabelColor
-                emptyLabel.alignment = .left
-                windowsStack.alignment = .leading
-                windowsStack.addArrangedSubview(emptyLabel)
+        }
+
+        // Orphaned processes (no linked window = corresponding iTerm2 session was closed by the user)
+        let orphanedProcesses = processes.filter { !matchedProcessIDs.contains($0.id) }
+        for process in orphanedProcesses {
+            let statusColor: NSColor
+            switch process.status {
+            case .running: statusColor = .systemGreen
+            case .exited: statusColor = .systemRed
+            case .idle: statusColor = .tertiaryLabelColor
+            }
+            // No shortcut — iTerm2 session was closed, so navigation is not possible
+            let row = windowRow(
+                icon: "terminal", iconColor: statusColor, label: process.templateName,
+                detail: resolveCommand(process.command), shortcut: "", processStatus: process.status, action: nil)
+            processesStack.addArrangedSubview(row)
+            constrainFormFieldToFillWidth(row, in: processesStack)
+            processRowCount += 1
+            let checks = statusResultsByProcessID[process.id] ?? []
+            for check in checks {
+                let isHealthy = check.status == .passed && process.status != .exited
+                let checkColor: NSColor = isHealthy ? .systemGreen : .systemRed
+                let checkRow = statusCheckSubRow(name: check.checkName, color: checkColor, status: check.status)
+                processesStack.addArrangedSubview(checkRow)
+                constrainFormFieldToFillWidth(checkRow, in: processesStack)
             }
         }
-        let windowsHeader = sectionHeader(icon: "macwindow.on.rectangle", title: "Windows")
-        container.addArrangedSubview(windowsHeader)
-        constrainFormFieldToFillWidth(windowsHeader, in: container)
-        container.addArrangedSubview(windowsStack)
-        constrainFormFieldToFillWidth(windowsStack, in: container)
 
-        // --- Coding Agents section ---
+        // --- Browser Tabs section (only if rows exist) ---
+        if browserRowCount > 0 {
+            let browserHeader = sectionHeader(icon: "globe", title: "Browser Tabs")
+            container.addArrangedSubview(browserHeader)
+            constrainFormFieldToFillWidth(browserHeader, in: container)
+            container.addArrangedSubview(browserStack)
+            constrainFormFieldToFillWidth(browserStack, in: container)
+        }
+
+        // --- Coding Agents section (only if agent windows exist) ---
         if !agentWindowsForRunTab.isEmpty {
-            // Build lookup: yabai window ID → captured window record for agent rows
             let linkedWindowByYabaiID: [Int: WindowRecord] = Dictionary(
                 uniqueKeysWithValues: windows.compactMap { w in
                     guard let wid = w.windowID, agentYabaiWindowIDs.contains(wid) else { return nil }
@@ -2588,7 +2609,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             for agentWin in agentWindowsForRunTab {
                 let agentIcon = agentWin.provider == .codex ? "wand.and.stars" : "cpu.fill"
                 let agentColor: NSColor = agentWin.status == .done ? .systemGreen : agentWin.status == .waiting ? .systemOrange : .secondaryLabelColor
-                // Provider name shown first; window title (or custom label) shown as secondary detail
                 let linkedWin = agentWin.yabaiWindowID.flatMap { linkedWindowByYabaiID[$0] }
                 let agentLabel = agentWin.label ?? (agentWin.provider == .codex ? "Codex App" : "Claude Code CLI")
                 let agentDetail = linkedWin?.title ?? linkedWin?.app
@@ -2612,41 +2632,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             constrainFormFieldToFillWidth(agentsStack, in: container)
         }
 
-        // --- Orphaned processes (no linked window) ---
-        let orphanedProcesses = processes.filter { !matchedProcessIDs.contains($0.id) }
-        if !orphanedProcesses.isEmpty {
-            let processesStack = NSStackView()
-            processesStack.orientation = .vertical
-            processesStack.spacing = 4
-            for process in orphanedProcesses {
-                let statusIcon: String
-                let statusColor: NSColor
-                switch process.status {
-                case .running:
-                    statusIcon = "circle.fill"
-                    statusColor = .systemGreen
-                case .exited:
-                    statusIcon = "circle"
-                    statusColor = .systemRed
-                case .idle:
-                    statusIcon = "circle"
-                    statusColor = .tertiaryLabelColor
-                }
-                let row = processRow(
-                    icon: statusIcon, iconColor: statusColor, name: process.templateName, command: resolveCommand(process.command),
-                    shortcut: process.status.rawValue)
-                processesStack.addArrangedSubview(row)
-                constrainFormFieldToFillWidth(row, in: processesStack)
-
-                let checks = statusResultsByProcessID[process.id] ?? []
-                for check in checks {
-                    let isHealthy = check.status == .passed && process.status != .exited
-                    let checkColor: NSColor = isHealthy ? .systemGreen : .systemRed
-                    let checkRow = statusCheckSubRow(name: check.checkName, color: checkColor, status: check.status)
-                    processesStack.addArrangedSubview(checkRow)
-                    constrainFormFieldToFillWidth(checkRow, in: processesStack)
-                }
-            }
+        // --- Processes section (only if rows exist) ---
+        if processRowCount > 0 {
             let processesHeader = sectionHeader(icon: "terminal.fill", title: "Processes")
             container.addArrangedSubview(processesHeader)
             constrainFormFieldToFillWidth(processesHeader, in: container)
@@ -3159,48 +3146,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             row.topAnchor.constraint(equalTo: container.topAnchor), row.bottomAnchor.constraint(equalTo: container.bottomAnchor),
         ])
         return container
-    }
-
-    private func processRow(icon: String, iconColor: NSColor, name: String, command: String, shortcut: String) -> NSView {
-        let row = NSStackView()
-        row.orientation = .horizontal
-        row.alignment = .centerY
-        row.spacing = 8
-        row.wantsLayer = true
-        row.layer?.cornerRadius = 6
-        row.layer?.backgroundColor = NSColor.quaternaryLabelColor.cgColor
-        row.edgeInsets = NSEdgeInsets(top: 6, left: 8, bottom: 6, right: 8)
-
-        let badge = NSTextField(labelWithString: shortcut)
-        badge.font = .monospacedSystemFont(ofSize: 10, weight: .medium)
-        badge.textColor = .secondaryLabelColor
-        badge.setContentHuggingPriority(.required, for: .horizontal)
-        badge.setContentCompressionResistancePriority(.required, for: .horizontal)
-
-        let iconView = NSImageView()
-        iconView.image = NSImage(systemSymbolName: icon, accessibilityDescription: nil)
-        iconView.contentTintColor = iconColor
-        iconView.setContentHuggingPriority(.required, for: .horizontal)
-        iconView.setContentCompressionResistancePriority(.required, for: .horizontal)
-
-        let nameField = NSTextField(labelWithString: name)
-        nameField.font = .systemFont(ofSize: 12, weight: .semibold)
-        nameField.textColor = .labelColor
-        nameField.setContentHuggingPriority(.defaultHigh, for: .horizontal)
-        nameField.setContentCompressionResistancePriority(.required, for: .horizontal)
-
-        let commandField = NSTextField(labelWithString: command)
-        commandField.font = .systemFont(ofSize: 11)
-        commandField.textColor = .secondaryLabelColor
-        commandField.lineBreakMode = .byTruncatingTail
-        commandField.setContentHuggingPriority(.defaultLow, for: .horizontal)
-        commandField.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-
-        row.addArrangedSubview(badge)
-        row.addArrangedSubview(iconView)
-        row.addArrangedSubview(nameField)
-        row.addArrangedSubview(commandField)
-        return row
     }
 
     private func statusCheckSubRow(name: String, color: NSColor, status: StatusCheckStatus) -> NSView {
