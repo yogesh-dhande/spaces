@@ -2344,19 +2344,17 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         topActionRow.orientation = .horizontal
         topActionRow.alignment = .centerY
         topActionRow.spacing = 8
+        topActionRow.addArrangedSubview(NSView())
         topActionRow.addArrangedSubview(launchOrRestartButton)
         topActionRow.addArrangedSubview(stopButton)
         topActionRow.addArrangedSubview(activeToggleButton)
-        topActionRow.setContentHuggingPriority(.required, for: .horizontal)
-        topActionRow.setContentCompressionResistancePriority(.required, for: .horizontal)
 
         let headerAndActionsRow = NSStackView()
-        headerAndActionsRow.orientation = .horizontal
-        headerAndActionsRow.alignment = .centerY
-        headerAndActionsRow.spacing = 12
-        headerAndActionsRow.addArrangedSubview(headerRow)
-        headerAndActionsRow.addArrangedSubview(NSView())
+        headerAndActionsRow.orientation = .vertical
+        headerAndActionsRow.alignment = .leading
+        headerAndActionsRow.spacing = 4
         headerAndActionsRow.addArrangedSubview(topActionRow)
+        headerAndActionsRow.addArrangedSubview(headerRow)
 
         // --- Tabs ---
         let tabs = NSTabView()
@@ -2384,6 +2382,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         stack.setCustomSpacing(16, after: headerAndActionsRow)
         if let inlineBranchRow { constrainFormFieldToFillWidth(inlineBranchRow, in: stack) }
         constrainFormFieldToFillWidth(inlineTooltipRow, in: stack)
+        constrainFormFieldToFillWidth(topActionRow, in: headerAndActionsRow)
+        constrainFormFieldToFillWidth(headerRow, in: headerAndActionsRow)
         constrainFormFieldToFillWidth(headerAndActionsRow, in: stack)
         detailContainer.addSubview(stack)
         NSLayoutConstraint.activate([
