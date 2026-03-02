@@ -360,6 +360,7 @@
         - When a text input is focused, default text-edit shortcuts (copy/cut/paste/select-all/undo/redo) must keep working and should not be intercepted by app-level hotkey handling
 - Agent Event (`mx agent event`)
     - Coding agents (Claude Code CLI, Codex CLI in iTerm2, OpenAI Codex Desktop) call `mx agent event --type <type>` to register lifecycle events with Muxy.
+    - Agent event commands are always explicit; `mx workspace import` and `mx workspace up` do NOT automatically fire any agent events.
     - Hook types: `init` (agent started), `start` (task running), `waiting` (needs human review), `done` (task finished).
     - Provider is auto-detected from environment:
         - `__CFBundleIdentifier=com.openai.codex` → Codex App provider.

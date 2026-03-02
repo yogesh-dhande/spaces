@@ -183,7 +183,8 @@ mx workspace stop --dir /path/to/workspace
 mx workspace archive --dir /path/to/workspace
 mx workspace focus --dir /path/to/workspace [--window 2]
 
-# Agent lifecycle events (called by coding agents to report status)
+# Agent lifecycle events (called explicitly by coding agents to report status)
+# Note: mx workspace import and mx workspace up do NOT automatically fire agent events.
 mx agent event --type init    [--dir /path/to/workspace] [--provider iterm2|codex]
 mx agent event --type start   [--dir /path/to/workspace]
 mx agent event --type waiting [--dir /path/to/workspace]

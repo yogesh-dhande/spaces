@@ -315,10 +315,6 @@ struct CLI {
                 workspace = created
                 print("Created workspace \(workspace.name)\t\(workspace.dir)")
             }
-            if inferCodingAgentProvider() != nil {
-                try fireAgentEvent(orchestrator: orchestrator, workspaceID: workspace.id, status: .spinning)
-                print("Agent start: workspace=\(workspace.id)")
-            }
         case "update":
             let id = try workspaceID(orchestrator: orchestrator)
             let title = optionalValue(for: "--title")
@@ -391,10 +387,6 @@ struct CLI {
             if shouldFocus { try orchestrator.focusWorkspace(workspaceID: id) }
             print("Workspace is running \(id)")
             if tooltipFlagPresent { requestTooltipOverlayDisplay() }
-            if inferCodingAgentProvider() != nil {
-                try fireAgentEvent(orchestrator: orchestrator, workspaceID: id, status: .done)
-                print("Agent stop: workspace=\(id)")
-            }
         case "stop":
             let id = try workspaceID(orchestrator: orchestrator)
             let outcome = try orchestrator.stopWorkspace(workspaceID: id)
