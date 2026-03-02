@@ -74,4 +74,157 @@ import Testing
         for subview in view.subviews { results.append(contentsOf: findTextFields(in: subview, matching: predicate)) }
         return results
     }
+
+    // Tests currentProcesses returns the templates that were set via setProcesses.
+    @Test func currentProcessesReturnsSetProcesses() {
+        let editor = ProcessEditor()
+        editor.setProcesses([.init(name: "server", command: "npm start")])
+        let processes = editor.currentProcesses()
+        #expect(processes.count == 1)
+        #expect(processes[0].name == "server")
+        #expect(processes[0].command == "npm start")
+    }
+
+    // Tests currentProcesses filters out rows that have an empty command field.
+    @Test func currentProcessesFiltersRowsWithEmptyCommand() {
+        let editor = ProcessEditor()
+        // Editor starts with one empty row; no command so nothing is returned.
+        let processes = editor.currentProcesses()
+        #expect(processes.isEmpty)
+    }
+
+    // Tests currentProcesses returns a nil name when the name field is empty.
+    @Test func currentProcessesUsesNilNameForEmptyNameField() {
+        let editor = ProcessEditor()
+        editor.setProcesses([.init(name: nil, command: "echo hello")])
+        let processes = editor.currentProcesses()
+        #expect(processes.count == 1)
+        #expect(processes[0].name == nil)
+    }
+
+    // Tests currentStatusChecks returns checks associated with a named process.
+    @Test func currentStatusChecksReturnsChecksForNamedProcess() {
+        let editor = ProcessEditor()
+        editor.setProcessesWithChecks(
+            [.init(name: "api", command: "run api")],
+            statusChecks: [.init(process: "api", command: "curl localhost", interval: 30, timeout: 5)])
+        let checks = editor.currentStatusChecks()
+        #expect(checks.count == 1)
+        #expect(checks[0].process == "api")
+        #expect(checks[0].command == "curl localhost")
+    }
+
+    // Tests currentStatusChecks skips process rows that have no name.
+    @Test func currentStatusChecksSkipsUnnamedProcessRows() {
+        let editor = ProcessEditor()
+        editor.setProcesses([.init(name: nil, command: "run api")])
+        let checks = editor.currentStatusChecks()
+        #expect(checks.isEmpty)
+    }
+
+    // Tests processNames returns a sorted, deduplicated list of non-empty process names.
+    @Test func processNamesReturnsSortedUniqueNames() {
+        let editor = ProcessEditor()
+        editor.setProcesses([
+            .init(name: "zebra", command: "run z"),
+            .init(name: "apple", command: "run a"),
+            .init(name: "zebra", command: "run z2"),
+        ])
+        let names = editor.processNames()
+        #expect(names == ["apple", "zebra"])
+    }
+
+    // Tests setProcesses with an empty array results in no current processes returned.
+    @Test func setProcessesWithEmptyArrayProducesNoCurrentProcesses() {
+        let editor = ProcessEditor()
+        editor.setProcesses([.init(name: "server", command: "npm start")])
+        editor.setProcesses([])
+        let processes = editor.currentProcesses()
+        #expect(processes.isEmpty)
+    }
+
+    // Tests the onDirty callback fires after setProcesses is called.
+    @Test func onDirtyCallbackFiresAfterSetProcesses() {
+        let editor = ProcessEditor()
+        var callCount = 0
+        editor.onDirty = { callCount += 1 }
+        editor.setProcesses([.init(name: "server", command: "npm start")])
+        #expect(callCount > 0)
+    }
+
+    // Tests that setProcessesWithChecks called a second time replaces existing rows and their status checks.
+    @Test func setProcessesWithChecksReplacesExistingRowsOnSecondCall() {
+        let editor = ProcessEditor()
+        editor.setProcessesWithChecks(
+            [.init(name: "api", command: "run api")],
+            statusChecks: [.init(process: "api", command: "curl localhost", interval: 30, timeout: 5)])
+
+        // Second call replaces the rows.
+        editor.setProcessesWithChecks(
+            [.init(name: "server", command: "npm start")],
+            statusChecks: [])
+
+        let processes = editor.currentProcesses()
+        #expect(processes.count == 1)
+        #expect(processes[0].name == "server")
+        // No status checks on the new row.
+        let checks = editor.currentStatusChecks()
+        #expect(checks.isEmpty)
+    }
+
+    // Tests that processNames returns an empty list when all process rows have empty names.
+    @Test func processNamesReturnsEmptyWhenAllNamesAreEmpty() {
+        let editor = ProcessEditor()
+        editor.setProcesses([.init(name: nil, command: "run something")])
+        let names = editor.processNames()
+        #expect(names.isEmpty)
+    }
+
+    // Tests that the header add button triggers addRowFromButton, adding a new row to the rows stack.
+    @Test func headerAddButtonAddsNewRow() {
+        let editor = ProcessEditor()
+        editor.setProcesses([.init(name: "server", command: "npm start")])
+        let rowsStack = editor.container.arrangedSubviews.last as! NSStackView
+        let initialCount = rowsStack.arrangedSubviews.count
+
+        let header = editor.container.arrangedSubviews.first as! NSStackView
+        let addButton = header.arrangedSubviews.last as! NSButton
+        _ = (addButton.target as AnyObject?)?.perform(addButton.action)
+
+        #expect(rowsStack.arrangedSubviews.count > initialCount, "Add button should append a new row to the rows stack")
+    }
+
+    // Tests that clicking the remove button on a process row triggers the onDirty callback (covers the onRemove closure).
+    @Test func removeButtonTriggersDirtyCallback() {
+        let editor = ProcessEditor()
+        editor.setProcesses([.init(name: "server", command: "npm start")])
+        var dirtyCount = 0
+        editor.onDirty = { dirtyCount += 1 }
+
+        let rowsStack = editor.container.arrangedSubviews.last as! NSStackView
+        let processRow = rowsStack.arrangedSubviews.first as! NSStackView
+        let removeButton = processRow.arrangedSubviews.last as! NSButton
+        let prevCount = dirtyCount
+        _ = (removeButton.target as AnyObject?)?.perform(removeButton.action)
+
+        #expect(dirtyCount > prevCount, "Remove button should fire onDirty callback")
+    }
+
+    // Tests that the add-check button within a process row triggers addCheckRow, adding to the checks stack (covers lines 279-283).
+    @Test func addCheckButtonAddsCheckRow() {
+        let editor = ProcessEditor()
+        editor.setProcesses([.init(name: "api", command: "run api")])
+
+        let rowsStack = editor.container.arrangedSubviews.last as! NSStackView
+        let checksSection = rowsStack.arrangedSubviews[1] as! NSStackView
+        let innerStack = checksSection.arrangedSubviews[1] as! NSStackView
+        let checksHeader = innerStack.arrangedSubviews[0] as! NSStackView
+        let checksStack = innerStack.arrangedSubviews[2] as! NSStackView
+        let addCheckButton = checksHeader.arrangedSubviews[2] as! NSButton
+
+        let prevCount = checksStack.arrangedSubviews.count
+        _ = (addCheckButton.target as AnyObject?)?.perform(addCheckButton.action)
+
+        #expect(checksStack.arrangedSubviews.count > prevCount, "Add-check button should append a new check row")
+    }
 }

@@ -33,4 +33,26 @@ final class ShellTests: XCTestCase {
             XCTAssertTrue((nsError.localizedDescription).contains("boom"))
         }
     }
+
+    // Tests run throws for empty command by arranging representative inputs and asserting the expected result.
+    func testRunThrowsForEmptyCommand() {
+        XCTAssertThrowsError(try Shell.run([])) { error in
+            let nsError = error as NSError
+            XCTAssertEqual(nsError.domain, "muxy.shell")
+        }
+    }
+
+    // Tests runAndCapture throws for empty command by arranging representative inputs and asserting the expected result.
+    func testRunAndCaptureThrowsForEmptyCommand() {
+        XCTAssertThrowsError(try Shell.runAndCapture([])) { error in
+            let nsError = error as NSError
+            XCTAssertEqual(nsError.domain, "muxy.shell")
+        }
+    }
+
+    // Tests run(lines:) joins lines with newlines and executes the resulting script.
+    func testAppleScriptRunJoinsLines() throws {
+        let result = try AppleScript.run(lines: ["return \"hello\""])
+        XCTAssertEqual(result, "hello")
+    }
 }

@@ -3818,4 +3818,1618 @@ final class OrchestratorTests: XCTestCase {
         let resolved = try orchestrator.resolveEnvVars(in: "cd $MUXY_WORKSPACE_DIR && npm start", workspaceID: workspace.id)
         XCTAssertEqual(resolved, "cd /workspaces/myapp/dev && npm start")
     }
+
+    // Tests setItermFocusPulseColor clamps values to 0–255 by arranging representative inputs and asserting the expected result.
+    func testItermFocusPulseColorClamps() throws {
+        let store = try makeTemporaryStore()
+        let orchestrator = MuxyOrchestrator(store: store)
+
+        try orchestrator.setItermFocusPulseColor(r: -10, g: 300, b: 128)
+        let clamped = try orchestrator.itermFocusPulseColor()
+        XCTAssertEqual(clamped.r, 0)
+        XCTAssertEqual(clamped.g, 255)
+        XCTAssertEqual(clamped.b, 128)
+    }
+
+    // Tests itermFocusPulseEnabled round-trips through store by arranging representative inputs and asserting the expected result.
+    func testItermFocusPulseEnabledRoundTrip() throws {
+        let store = try makeTemporaryStore()
+        let orchestrator = MuxyOrchestrator(store: store)
+
+        // Default is enabled.
+        XCTAssertTrue(try orchestrator.itermFocusPulseEnabled())
+
+        try orchestrator.setItermFocusPulseEnabled(false)
+        XCTAssertFalse(try orchestrator.itermFocusPulseEnabled())
+
+        try orchestrator.setItermFocusPulseEnabled(true)
+        XCTAssertTrue(try orchestrator.itermFocusPulseEnabled())
+    }
+
+    // MARK: - updatePortRange
+
+    // Tests updatePortRange persists to the app config by arranging representative inputs and asserting the expected result.
+    func testUpdatePortRangePersists() throws {
+        let store = try makeTemporaryStore()
+        let orchestrator = MuxyOrchestrator(store: store)
+
+        let updated = try orchestrator.updatePortRange(PortRange(start: 25000, end: 35000))
+        XCTAssertEqual(updated.portRange.start, 25000)
+        XCTAssertEqual(updated.portRange.end, 35000)
+        XCTAssertEqual(try orchestrator.appConfig().portRange.start, 25000)
+    }
+
+    // MARK: - listProjects
+
+    // Tests listProjects returns summaries for all stored projects by arranging representative inputs and asserting the expected result.
+    func testListProjectsReturnsSummariesForAllProjects() throws {
+        let store = try makeTemporaryStore()
+        let orchestrator = MuxyOrchestrator(store: store)
+
+        XCTAssertTrue(try orchestrator.listProjects().isEmpty)
+
+        let root = try makeTempDirectory()
+        let dirA = root.appendingPathComponent("a", isDirectory: true)
+        let dirB = root.appendingPathComponent("b", isDirectory: true)
+        try FileManager.default.createDirectory(at: dirA, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: dirB, withIntermediateDirectories: true)
+
+        _ = try orchestrator.addProject(dir: dirA.path)
+        _ = try orchestrator.addProject(dir: dirB.path)
+
+        let projects = try orchestrator.listProjects()
+        XCTAssertEqual(projects.count, 2)
+        let names = Set(projects.map(\.name))
+        XCTAssertTrue(names.contains("a"))
+        XCTAssertTrue(names.contains("b"))
+    }
+
+    // MARK: - refreshAllWorkspaceWindows
+
+    // Tests refreshAllWorkspaceWindows iterates all projects and workspaces by arranging representative inputs and asserting the expected result.
+    func testRefreshAllWorkspaceWindowsIteratesAllWorkspaces() throws {
+        let store = try makeTemporaryStore()
+        let mockIterm = MockIterm2Adapter()
+        let orchestrator = MuxyOrchestrator(store: store, iterm: mockIterm)
+
+        let root = try makeTempDirectory()
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
+        try store.upsert(
+            window: WindowRecord(
+                id: UUID().uuidString, workspaceID: workspace.id, app: "iTerm2", title: "shell", windowID: 707, role: "terminal", orderIndex: 0,
+                lastSeenAt: "now"))
+        try store.updateWorkspaceRunning(id: workspace.id, isRunning: true, launchedAt: "now")
+
+        // Mocked dependency: yabai window list (empty means the stale window gets pruned).
+        // Why: verify refreshAllWorkspaceWindows iterates workspaces and returns correct counts.
+        // Remaining risk: real yabai interactions not covered.
+        var result: MuxyOrchestrator.RefreshResult!
+        try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) {
+            try withEnv(name: "YABAI_WINDOWS_JSON", value: "[]") { result = try orchestrator.refreshAllWorkspaceWindows() }
+        }
+
+        XCTAssertTrue(result.didMutateDB)
+        XCTAssertEqual(result.trackedWindowCounts[workspace.id], 0)
+    }
+
+    // MARK: - stopWorkspace
+
+    // Tests stopWorkspace with running processes clears all runtime state by arranging representative inputs and asserting the expected result.
+    func testStopWorkspaceClearsAllRuntimeState() throws {
+        let store = try makeTemporaryStore()
+        let mockIterm = MockIterm2Adapter()
+        let orchestrator = MuxyOrchestrator(store: store, iterm: mockIterm)
+
+        let root = try makeTempDirectory()
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
+
+        try store.upsert(
+            runningProcess: RunningProcessRecord(
+                id: UUID().uuidString, workspaceID: workspace.id, templateName: "api", command: "npm run api", terminalApp: "iTerm2", windowID: 200,
+                pid: nil, status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil))
+        try store.upsert(
+            window: WindowRecord(
+                id: UUID().uuidString, workspaceID: workspace.id, app: "iTerm2", title: "api", windowID: 200, role: "terminal", orderIndex: 0,
+                lastSeenAt: "now"))
+        try store.updateWorkspaceRunning(id: workspace.id, isRunning: true, launchedAt: "now")
+
+        let outcome = try orchestrator.stopWorkspace(workspaceID: workspace.id)
+
+        XCTAssertFalse(outcome.skippedStopScriptBecauseWorkspaceDirectoryMissing)
+        XCTAssertTrue(try store.runningProcesses(workspaceID: workspace.id).isEmpty)
+        XCTAssertTrue(try store.windows(workspaceID: workspace.id).isEmpty)
+        XCTAssertEqual(try store.workspace(id: workspace.id)?.isRunning, false)
+    }
+
+    // Tests stopWorkspace with stop script that runs by arranging representative inputs and asserting the expected result.
+    func testStopWorkspaceWithStopScriptRuns() throws {
+        let root = try makeTempDirectory()
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let store = try makeTemporaryStore()
+        let orchestrator = MuxyOrchestrator(store: store)
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
+
+        let markerFile = root.appendingPathComponent("stop-marker.txt")
+        try store.touchWorkspaceSettings(workspaceID: workspace.id, updatedAt: "now")
+        try store.setWorkspaceStopScript(workspaceID: workspace.id, stopScript: "touch \(markerFile.path)")
+        try store.updateWorkspaceRunning(id: workspace.id, isRunning: true, launchedAt: "now")
+
+        let outcome = try orchestrator.stopWorkspace(workspaceID: workspace.id)
+
+        XCTAssertFalse(outcome.skippedStopScriptBecauseWorkspaceDirectoryMissing)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: markerFile.path))
+    }
+
+    // Tests stopWorkspace skips stop script when workspace directory is missing by arranging representative inputs and asserting the expected result.
+    func testStopWorkspaceSkipsStopScriptWhenDirectoryMissing() throws {
+        let store = try makeTemporaryStore()
+        let orchestrator = MuxyOrchestrator(store: store)
+
+        let project = makeProjectRecord(dir: "/nonexistent/project/path")
+        let workspace = makeWorkspaceRecord(projectID: project.id, name: "feature", dir: "/nonexistent/project/path/feature")
+        try store.upsert(project: project)
+        try store.upsert(workspace: workspace)
+        try store.touchWorkspaceSettings(workspaceID: workspace.id, updatedAt: "now")
+        try store.setWorkspaceStopScript(workspaceID: workspace.id, stopScript: "echo this-should-not-run")
+        try store.updateWorkspaceRunning(id: workspace.id, isRunning: true, launchedAt: "now")
+
+        let outcome = try orchestrator.stopWorkspace(workspaceID: workspace.id)
+        XCTAssertTrue(outcome.skippedStopScriptBecauseWorkspaceDirectoryMissing)
+    }
+
+    // MARK: - syncConfig / appConfig
+
+    // Tests syncConfig returns the current app config by arranging representative inputs and asserting the expected result.
+    func testSyncConfigReturnsCurrentAppConfig() throws {
+        let store = try makeTemporaryStore()
+        let orchestrator = MuxyOrchestrator(store: store)
+
+        let config = try orchestrator.syncConfig()
+        XCTAssertEqual(config.portRange.start, 20000)
+        XCTAssertEqual(config.portRange.end, 30000)
+
+        let config2 = try orchestrator.appConfig()
+        XCTAssertEqual(config2.portRange.start, 20000)
+    }
+
+    // MARK: - updateProjectConfig default workspace sync
+
+    // Tests updateProjectConfig syncs default workspace settings when they match the previous template by arranging representative inputs and asserting the expected result.
+    func testUpdateProjectConfigSyncsDefaultWorkspaceSettings() throws {
+        let root = try makeTempDirectory()
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let store = try makeTemporaryStore()
+        let orchestrator = MuxyOrchestrator(store: store)
+
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        let defaultWorkspace = try store.workspaces(projectID: project.id).first(where: \.isDefault)!
+
+        // Set default workspace settings to match the project template (initially empty).
+        try store.touchWorkspaceSettings(workspaceID: defaultWorkspace.id, updatedAt: "now")
+
+        // Update the project config with a stop script.
+        try orchestrator.updateProjectConfig(projectID: project.id) { record in
+            record.stopScript = "echo project-stop"
+        }
+
+        // The default workspace should now have the synced stop script.
+        let syncedScript = try store.workspaceStopScript(workspaceID: defaultWorkspace.id)
+        XCTAssertEqual(syncedScript, "echo project-stop")
+    }
+
+    // Tests updateProjectConfig with git repo project refreshes default workspace by arranging representative inputs and asserting the expected result.
+    func testAddProjectDirForGitRepoDetectsGitBranch() throws {
+        let fixture = try makeTempGitRepo(name: "detect-git")
+        let store = try makeTemporaryStore()
+        let orchestrator = MuxyOrchestrator(store: store)
+
+        let project = try orchestrator.addProject(dir: fixture.path)
+
+        XCTAssertTrue(project.isGitRepo)
+        XCTAssertNotNil(project.defaultBranch)
+        XCTAssertFalse((project.defaultBranch ?? "").isEmpty)
+    }
+
+    // MARK: - workspaceSetupState from orchestrator
+
+    // Tests workspaceSetupState returns current state by arranging representative inputs and asserting the expected result.
+    func testOrchestratorWorkspaceSetupStateReturnsCurrentState() throws {
+        let root = try makeTempDirectory()
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let store = try makeTemporaryStore()
+        let orchestrator = MuxyOrchestrator(store: store)
+
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
+
+        // Setup state is seeded automatically.
+        let state = try orchestrator.workspaceSetupState(workspaceID: workspace.id)
+        XCTAssertEqual(state.status, .succeeded)
+    }
+
+    // MARK: - workspacePorts
+
+    // Tests workspacePortsNamed returns named ports by arranging representative inputs and asserting the expected result.
+    func testWorkspacePortsNamedReturnsNamedPorts() throws {
+        let store = try makeTemporaryStore()
+        let orchestrator = MuxyOrchestrator(store: store)
+        let project = makeProjectRecord(dir: "/projects/myapp")
+        try store.upsert(project: project)
+        let workspace = makeWorkspaceRecord(projectID: project.id, name: "dev", dir: "/projects/myapp")
+        try store.upsert(workspace: workspace)
+        try store.setWorkspacePorts(workspaceID: workspace.id, ports: [3000, 4000], names: ["FRONTEND", "BACKEND"])
+
+        let named = try orchestrator.workspacePortsNamed(workspaceID: workspace.id)
+        XCTAssertEqual(named.count, 2)
+        XCTAssertEqual(named[0].name, "FRONTEND")
+        XCTAssertEqual(named[0].port, 3000)
+        XCTAssertEqual(named[1].name, "BACKEND")
+        XCTAssertEqual(named[1].port, 4000)
+    }
+
+    // MARK: - upWorkspace restart-exited-processes path
+
+    // Tests upWorkspace with no runtime indicators launches workspace fresh by arranging representative inputs and asserting the expected result.
+    func testUpWorkspaceWithNoRuntimeIndicatorsLaunchesFresh() throws {
+        let store = try makeTemporaryStore()
+        let mockIterm = MockIterm2Adapter()
+        let orchestrator = MuxyOrchestrator(store: store, iterm: mockIterm)
+
+        let root = try makeTempDirectory()
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
+
+        // Set up workspace with a process template.
+        try store.touchWorkspaceSettings(workspaceID: workspace.id, updatedAt: "now")
+        try store.setWorkspaceProcesses(workspaceID: workspace.id, processes: [ProcessTemplate(name: "api", command: "echo api")])
+
+        // Mocked dependencies: yabai and iTerm2.
+        // Why: upWorkspace calls launchWorkspace which needs both.
+        // Remaining risk: process spawning and window capture not exercised.
+        try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) {
+            try withEnv(name: "YABAI_WINDOWS_JSON", value: "[]") {
+                try orchestrator.upWorkspace(workspaceID: workspace.id)
+            }
+        }
+
+        XCTAssertEqual(try store.workspace(id: workspace.id)?.isRunning, true)
+    }
+
+    // Tests upWorkspace with restartIfRunning stops then restarts workspace by arranging representative inputs and asserting the expected result.
+    func testUpWorkspaceWithRestartIfRunningStopsThenRestarts() throws {
+        let store = try makeTemporaryStore()
+        let mockIterm = MockIterm2Adapter()
+        let orchestrator = MuxyOrchestrator(store: store, iterm: mockIterm)
+
+        let root = try makeTempDirectory()
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
+
+        // Mark workspace as running with a tracked process.
+        try store.updateWorkspaceRunning(id: workspace.id, isRunning: true, launchedAt: "now")
+        try store.upsert(
+            runningProcess: RunningProcessRecord(
+                id: UUID().uuidString, workspaceID: workspace.id, templateName: "api", command: "echo api", terminalApp: nil, windowID: nil,
+                pid: nil, status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil))
+
+        // Mocked dependencies: yabai for stop and re-launch.
+        // Why: exercise the restartIfRunning=true branch which calls stop then launch.
+        try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) {
+            try withEnv(name: "YABAI_WINDOWS_JSON", value: "[]") {
+                try orchestrator.upWorkspace(workspaceID: workspace.id, restartIfRunning: true)
+            }
+        }
+
+        // After restart, process list is cleared and workspace re-launched.
+        XCTAssertTrue(try store.runningProcesses(workspaceID: workspace.id).isEmpty)
+    }
+
+    // Tests workspaceGitTrackedFileActivity returns nil for non-git project by arranging representative inputs and asserting the expected result.
+    func testWorkspaceGitTrackedFileActivityReturnsNilForNonGitProject() throws {
+        let root = try makeTempDirectory()
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let store = try makeTemporaryStore()
+        let orchestrator = MuxyOrchestrator(store: store)
+
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
+
+        let activity = try orchestrator.workspaceGitTrackedFileActivity(workspaceID: workspace.id)
+        XCTAssertNil(activity)
+    }
+
+    // Tests gitBranchOptions returns empty for non-git project by arranging representative inputs and asserting the expected result.
+    func testGitBranchOptionsReturnsEmptyForNonGitProject() throws {
+        let root = try makeTempDirectory()
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let store = try makeTemporaryStore()
+        let orchestrator = MuxyOrchestrator(store: store)
+
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        let options = try orchestrator.gitBranchOptions(projectID: project.id)
+        XCTAssertTrue(options.isEmpty)
+    }
+
+    // Tests setActiveWorkspace and activeWorkspaceID persist by arranging representative inputs and asserting the expected result.
+    func testActiveWorkspaceRoundTrip() throws {
+        let store = try makeTemporaryStore()
+        let orchestrator = MuxyOrchestrator(store: store)
+
+        XCTAssertNil(try orchestrator.activeWorkspaceID())
+        try orchestrator.setActiveWorkspace(id: "workspace-xyz")
+        XCTAssertEqual(try orchestrator.activeWorkspaceID(), "workspace-xyz")
+        try orchestrator.setActiveWorkspace(id: nil)
+        XCTAssertNil(try orchestrator.activeWorkspaceID())
+    }
+
+    // Tests updateWorkspaceActive persists isActive state by arranging representative inputs and asserting the expected result.
+    func testUpdateWorkspaceActiveIdemopotentWhenSameValue() throws {
+        let root = try makeTempDirectory()
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let store = try makeTemporaryStore()
+        let orchestrator = MuxyOrchestrator(store: store)
+
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
+
+        // Default isActive is true; setting it to true again should be a no-op.
+        try orchestrator.updateWorkspaceActive(workspaceID: workspace.id, isActive: true)
+        XCTAssertEqual(try store.workspace(id: workspace.id)?.isActive, true)
+
+        // Setting to false should persist.
+        try orchestrator.updateWorkspaceActive(workspaceID: workspace.id, isActive: false)
+        XCTAssertEqual(try store.workspace(id: workspace.id)?.isActive, false)
+    }
+
+    // Tests updateWorkspaceTooltip persists tooltip through orchestrator by arranging representative inputs and asserting the expected result.
+    func testUpdateWorkspaceTooltipPersistsThroughOrchestrator() throws {
+        let root = try makeTempDirectory()
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let store = try makeTemporaryStore()
+        let orchestrator = MuxyOrchestrator(store: store)
+
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
+
+        try orchestrator.updateWorkspaceTooltip(workspaceID: workspace.id, tooltip: "Working on API")
+        XCTAssertEqual(try store.workspace(id: workspace.id)?.tooltip, "Working on API")
+
+        try orchestrator.updateWorkspaceTooltip(workspaceID: workspace.id, tooltip: nil)
+        XCTAssertNil(try store.workspace(id: workspace.id)?.tooltip)
+    }
+
+    // Tests workspaceSettings seeds and returns defaults for workspace without explicit settings by arranging representative inputs and asserting the expected result.
+    func testWorkspaceSettingsReturnsDefaultsWhenNotExplicitlySet() throws {
+        let root = try makeTempDirectory()
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let store = try makeTemporaryStore()
+        let orchestrator = MuxyOrchestrator(store: store)
+
+        let project = makeProjectRecord(dir: projectDir.path)
+        try store.upsert(project: project)
+        let workspace = makeWorkspaceRecord(projectID: project.id, name: "raw", dir: projectDir.path)
+        try store.upsert(workspace: workspace)
+
+        // workspaceSettings seeds defaults when no settings exist; returns an empty (non-nil) settings object.
+        let settings = try orchestrator.workspaceSettings(workspaceID: workspace.id)
+        XCTAssertNotNil(settings)
+        XCTAssertNil(settings?.stopScript)
+        XCTAssertTrue(settings?.ports.isEmpty ?? false)
+        XCTAssertTrue(settings?.processes.isEmpty ?? false)
+    }
+
+    // Tests guiTooltipShortcut and setGUITooltipShortcut round-trip by arranging representative inputs and asserting the expected result.
+    func testGUITooltipShortcutRoundTrip() throws {
+        let store = try makeTemporaryStore()
+        let orchestrator = MuxyOrchestrator(store: store)
+
+        let defaultVal = try orchestrator.guiTooltipShortcut()
+        XCTAssertFalse(defaultVal.isEmpty)
+
+        try orchestrator.setGUITooltipShortcut("ctrl+t")
+        XCTAssertEqual(try orchestrator.guiTooltipShortcut(), "ctrl+t")
+
+        try orchestrator.setGUITooltipShortcut(nil)
+        XCTAssertEqual(try orchestrator.guiTooltipShortcut(), SettingsKey.defaultGUITooltipShortcut)
+    }
+
+    // Tests upWorkspace allocates ports when port definitions exist but no ports are allocated by arranging representative inputs and asserting the expected result.
+    func testUpWorkspaceAllocatesPortsWhenDefinitionsExistButNoPortsAllocated() throws {
+        let store = try makeTemporaryStore()
+        let mockIterm = MockIterm2Adapter()
+        let orchestrator = MuxyOrchestrator(store: store, iterm: mockIterm)
+        let root = try makeTempDirectory()
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
+
+        // Add port definitions so that portDefinitions.count > 0 with no ports allocated yet.
+        try orchestrator.updateWorkspaceSettings(workspaceID: workspace.id) { settings in
+            settings.ports = [PortDefinition(name: "web"), PortDefinition(name: "api")]
+        }
+
+        try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) {
+            try orchestrator.upWorkspace(workspaceID: workspace.id)
+        }
+
+        // Ports should now be allocated.
+        let allocatedPorts = try store.workspacePorts(workspaceID: workspace.id)
+        XCTAssertEqual(allocatedPorts.count, 2)
+    }
+
+    // Tests stopWorkspace skips stop script when workspace directory is missing by arranging representative inputs and asserting the expected result.
+    func testStopWorkspaceSkipsStopScriptWhenWorkspaceDirMissing() throws {
+        let store = try makeTemporaryStore()
+        let mockIterm = MockIterm2Adapter()
+        let orchestrator = MuxyOrchestrator(store: store, iterm: mockIterm)
+        let root = try makeTempDirectory()
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let workspaceDir = root.appendingPathComponent("workspace", isDirectory: true)
+        try FileManager.default.createDirectory(at: workspaceDir, withIntermediateDirectories: true)
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
+
+        // Set a stop script that would fail if the directory doesn't exist.
+        try orchestrator.updateWorkspaceSettings(workspaceID: workspace.id) { settings in
+            settings.stopScript = "echo stopped"
+        }
+
+        // Mark workspace as running so stop can proceed.
+        var runningWorkspace = workspace
+        runningWorkspace = WorkspaceRecord(
+            id: workspace.id, projectID: workspace.projectID, name: workspace.name, dir: "/nonexistent/workspace-\(UUID().uuidString)",
+            dirname: workspace.dirname, branch: workspace.branch, targetBranch: workspace.targetBranch, isDefault: workspace.isDefault,
+            isArchived: workspace.isArchived, isActive: workspace.isActive, isRunning: true, lastLaunchedAt: nil, tooltip: nil)
+        try store.upsert(workspace: runningWorkspace)
+
+        // Stop should succeed (skip script because dir is missing) rather than throw.
+        try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) {
+            let outcome = try orchestrator.stopWorkspace(workspaceID: workspace.id)
+            XCTAssertTrue(outcome.skippedStopScriptBecauseWorkspaceDirectoryMissing)
+        }
+    }
+
+    // Tests stopWorkspace closes non-iTerm2 tracked windows via yabai by arranging representative inputs and asserting the expected result.
+    func testStopWorkspaceClosesNonItermTrackedWindowsViaYabai() throws {
+        let store = try makeTemporaryStore()
+        let mockIterm = MockIterm2Adapter()
+        let orchestrator = MuxyOrchestrator(store: store, iterm: mockIterm)
+        let root = try makeTempDirectory()
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
+
+        // Insert a tracked "editor" window (non-browser, non-iTerm2) so lines 702-705 are reached.
+        let editorWindow = WindowRecord(
+            id: UUID().uuidString, workspaceID: workspace.id, app: "Cursor", title: "editor", windowID: 42,
+            role: "editor", orderIndex: 100, lastSeenAt: "2024-01-01T00:00:00Z")
+        try store.upsert(window: editorWindow)
+
+        // Mark workspace as running.
+        let runningWorkspace = WorkspaceRecord(
+            id: workspace.id, projectID: workspace.projectID, name: workspace.name, dir: projectDir.path,
+            dirname: workspace.dirname, branch: workspace.branch, targetBranch: workspace.targetBranch, isDefault: workspace.isDefault,
+            isArchived: workspace.isArchived, isActive: workspace.isActive, isRunning: true, lastLaunchedAt: nil, tooltip: nil)
+        try store.upsert(workspace: runningWorkspace)
+
+        // Stop workspace: should attempt to close the editor window via yabai (yabai.closeWindow may fail silently).
+        try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) {
+            _ = try orchestrator.stopWorkspace(workspaceID: workspace.id)
+        }
+
+        // The window records should be deleted after stop.
+        let remainingWindows = try store.windows(workspaceID: workspace.id)
+        XCTAssertTrue(remainingWindows.isEmpty)
+    }
+
+    // Tests registerAgentWindow prunes stale iTerm2 sessions from DB by arranging representative inputs and asserting the expected result.
+    func testRegisterAgentWindowPrunesStaleItermSessionsOnRegistration() throws {
+        let root = try makeTempDirectory()
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let store = try makeTemporaryStore()
+        let mockIterm = MockIterm2Adapter()
+        // Only "live-session" is alive; "stale-session" should be pruned.
+        mockIterm.stubbedSessionIDs = ["live-session"]
+        let orchestrator = MuxyOrchestrator(store: store, iterm: mockIterm)
+
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
+
+        // Insert a stale agent window directly.
+        let stale = AgentWindowRecord(
+            id: UUID().uuidString, workspaceID: workspace.id, provider: .iterm2, label: nil, itermSessionID: "stale-session",
+            codexThreadID: nil, windowID: nil, status: .idle, createdAt: "2024-01-01T00:00:00Z", updatedAt: "2024-01-01T00:00:00Z")
+        try store.upsertAgentWindow(stale)
+        // Insert an agent with nil session ID - should be pruned immediately.
+        let noSid = AgentWindowRecord(
+            id: UUID().uuidString, workspaceID: workspace.id, provider: .iterm2, label: nil, itermSessionID: nil,
+            codexThreadID: nil, windowID: nil, status: .idle, createdAt: "2024-01-01T00:00:00Z", updatedAt: "2024-01-01T00:00:00Z")
+        try store.upsertAgentWindow(noSid)
+
+        // registerAgentWindow should prune stale and nil-session agents before adding the new one.
+        _ = try orchestrator.registerAgentWindow(workspaceID: workspace.id, provider: .iterm2, itermSessionID: "live-session")
+
+        let remaining = try store.agentWindows(workspaceID: workspace.id)
+        // Only the "live-session" agent should remain (stale and no-sid were pruned).
+        XCTAssertEqual(remaining.count, 1)
+        XCTAssertEqual(remaining.first?.itermSessionID, "live-session")
+    }
+
+    // Tests addProject throws when directory does not exist by arranging representative inputs and asserting the expected result.
+    func testAddProjectThrowsWhenDirectoryNotFound() throws {
+        let store = try makeTemporaryStore()
+        let orchestrator = MuxyOrchestrator(store: store)
+        let nonExistent = "/tmp/muxy-test-nonexistent-\(UUID().uuidString)"
+        XCTAssertThrowsError(try orchestrator.addProject(dir: nonExistent)) { error in
+            guard case MuxyError.invalidArgument = error else { return XCTFail("Expected invalidArgument, got \(error)") }
+        }
+    }
+
+    // Tests updateWorkspaceMetadata throws when renaming to a duplicate title by arranging representative inputs and asserting the expected result.
+    func testUpdateWorkspaceMetadataDuplicateTitleThrows() throws {
+        let root = try makeTempDirectory()
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let store = try makeTemporaryStore()
+        let orchestrator = MuxyOrchestrator(store: store)
+
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        let ws1 = try orchestrator.createWorkspace(projectID: project.id, name: "alpha")
+        _ = try orchestrator.createWorkspace(projectID: project.id, name: "beta")
+
+        // Renaming ws1 to "beta" (already taken by another workspace) should throw.
+        XCTAssertThrowsError(try orchestrator.updateWorkspaceMetadata(workspaceID: ws1.id, title: "beta")) { error in
+            guard case MuxyError.workspaceAlreadyExists = error else { return XCTFail("Expected workspaceAlreadyExists, got \(error)") }
+        }
+    }
+
+    // Tests addProject by gitURL throws when destination directory already exists on disk by arranging representative inputs and asserting the expected result.
+    func testAddProjectByGitURLThrowsWhenDestinationExists() throws {
+        let root = try makeTempDirectory()
+        let reposRoot = root.appendingPathComponent("repos", isDirectory: true)
+        let workspacesRoot = root.appendingPathComponent("workspaces", isDirectory: true)
+        let store = try makeTemporaryStore()
+        let orchestrator = MuxyOrchestrator(store: store, projectsRootDirectory: reposRoot, workspacesRootDirectory: workspacesRoot)
+
+        // Pre-create the destination directory so it already exists on disk.
+        let existingDir = reposRoot.appendingPathComponent("my-repo", isDirectory: true)
+        try FileManager.default.createDirectory(at: existingDir, withIntermediateDirectories: true)
+
+        // addProject(gitURL:) should throw because the destination directory is already present.
+        XCTAssertThrowsError(try orchestrator.addProject(gitURL: "https://example.com/my-repo.git")) { error in
+            guard case MuxyError.invalidArgument = error else { return XCTFail("Expected invalidArgument, got \(error)") }
+        }
+    }
+
+    // Tests checkAndUpdateProcessStatuses prunes stale iTerm2 agent sessions by arranging representative inputs and asserting the expected result.
+    func testCheckAndUpdateProcessStatusesPrunesStaleItermAgentSessions() throws {
+        let root = try makeTempDirectory()
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let store = try makeTemporaryStore()
+        let mockIterm = MockIterm2Adapter()
+        let orchestrator = MuxyOrchestrator(store: store, iterm: mockIterm)
+
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
+
+        // Insert agent windows directly to bypass registerAgentWindow's own pruning.
+        let staleAgent = AgentWindowRecord(
+            id: UUID().uuidString, workspaceID: workspace.id, provider: .iterm2, label: nil, itermSessionID: "stale-sid",
+            codexThreadID: nil, windowID: nil, status: .idle, createdAt: "2024-01-01T00:00:00Z", updatedAt: "2024-01-01T00:00:00Z")
+        let noSidAgent = AgentWindowRecord(
+            id: UUID().uuidString, workspaceID: workspace.id, provider: .iterm2, label: nil, itermSessionID: nil,
+            codexThreadID: nil, windowID: nil, status: .idle, createdAt: "2024-01-01T00:00:00Z", updatedAt: "2024-01-01T00:00:00Z")
+        try store.upsertAgentWindow(staleAgent)
+        try store.upsertAgentWindow(noSidAgent)
+
+        // alive set does NOT contain "stale-sid", so both agents should be pruned.
+        mockIterm.stubbedSessionIDs = ["alive-session"]
+
+        let didUpdate = try orchestrator.checkAndUpdateProcessStatuses()
+
+        XCTAssertTrue(didUpdate)
+        let remaining = try store.agentWindows(workspaceID: workspace.id)
+        XCTAssertTrue(remaining.isEmpty)
+    }
+
+    // Tests checkAndUpdateProcessStatuses keeps live iTerm2 agent sessions by arranging representative inputs and asserting the expected result.
+    func testCheckAndUpdateProcessStatusesKeepsLiveItermAgentSessions() throws {
+        let root = try makeTempDirectory()
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let store = try makeTemporaryStore()
+        let mockIterm = MockIterm2Adapter()
+        let orchestrator = MuxyOrchestrator(store: store, iterm: mockIterm)
+
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
+
+        let liveAgent = AgentWindowRecord(
+            id: UUID().uuidString, workspaceID: workspace.id, provider: .iterm2, label: nil, itermSessionID: "live-sid",
+            codexThreadID: nil, windowID: nil, status: .idle, createdAt: "2024-01-01T00:00:00Z", updatedAt: "2024-01-01T00:00:00Z")
+        try store.upsertAgentWindow(liveAgent)
+
+        // alive set contains "live-sid", so it should NOT be pruned.
+        mockIterm.stubbedSessionIDs = ["live-sid"]
+
+        let didUpdate = try orchestrator.checkAndUpdateProcessStatuses()
+
+        XCTAssertFalse(didUpdate)
+        let remaining = try store.agentWindows(workspaceID: workspace.id)
+        XCTAssertEqual(remaining.count, 1)
+        XCTAssertEqual(remaining.first?.itermSessionID, "live-sid")
+    }
+
+    // Tests gitBranchOptions returns branches for a real git project by arranging representative inputs and asserting the expected result.
+    func testGitBranchOptionsForGitProject() throws {
+        let fixture = try makeTempGitRepo(name: "branch-opts-test")
+        let root = try makeTempDirectory()
+        let reposRoot = root.appendingPathComponent("repos", isDirectory: true)
+        let workspacesRoot = root.appendingPathComponent("workspaces", isDirectory: true)
+        let store = try makeTemporaryStore()
+        let orchestrator = MuxyOrchestrator(store: store, projectsRootDirectory: reposRoot, workspacesRootDirectory: workspacesRoot)
+
+        let project = try orchestrator.addProject(gitURL: fixture.path)
+        let options = try orchestrator.gitBranchOptions(projectID: project.id)
+        XCTAssertFalse(options.isEmpty)
+        XCTAssertTrue(options.contains("main"))
+    }
+
+    // Tests workspaceGitTrackedFileActivity returns non-nil for a git workspace by arranging representative inputs and asserting the expected result.
+    func testWorkspaceGitTrackedFileActivityForGitWorkspace() throws {
+        let fixture = try makeTempGitRepo(name: "git-activity-test")
+        let root = try makeTempDirectory()
+        let reposRoot = root.appendingPathComponent("repos", isDirectory: true)
+        let workspacesRoot = root.appendingPathComponent("workspaces", isDirectory: true)
+        let store = try makeTemporaryStore()
+        let orchestrator = MuxyOrchestrator(store: store, projectsRootDirectory: reposRoot, workspacesRootDirectory: workspacesRoot)
+
+        let project = try orchestrator.addProject(gitURL: fixture.path)
+        let defaultWorkspace = try XCTUnwrap(orchestrator.listWorkspaces(projectID: project.id).first(where: \.isDefault))
+        let activity = try orchestrator.workspaceGitTrackedFileActivity(workspaceID: defaultWorkspace.id)
+        XCTAssertNotNil(activity)
+    }
+
+    // Tests createWorkspace revives an archived git workspace by recreating the worktree by arranging representative inputs and asserting the expected result.
+    func testCreateWorkspaceRevivesArchivedGitWorkspace() throws {
+        let repo = try makeTempGitRepo(name: "revive-git-workspace")
+        let root = try makeTempDirectory()
+        let workspacesRoot = root.appendingPathComponent("workspaces", isDirectory: true)
+        let store = try makeTemporaryStore()
+        let orchestrator = MuxyOrchestrator(store: store, workspacesRootDirectory: workspacesRoot)
+
+        let project = try orchestrator.addProject(dir: repo.path)
+        let original = try orchestrator.createWorkspace(projectID: project.id, name: "feature", branch: "feature-branch")
+        try orchestrator.archiveWorkspace(workspaceID: original.id)
+        let archived = try XCTUnwrap(store.workspace(id: original.id))
+        XCTAssertTrue(archived.isArchived)
+
+        // Revive the archived workspace by creating with the same name and branch
+        let revived = try orchestrator.createWorkspace(projectID: project.id, name: "feature", branch: "feature-branch")
+        let persisted = try XCTUnwrap(store.workspace(id: revived.id))
+        XCTAssertEqual(revived.id, original.id)
+        XCTAssertFalse(persisted.isArchived)
+        XCTAssertEqual(persisted.branch, "feature-branch")
+    }
+
+    // Tests createWorkspaceFromWorktree throws when the path does not exist by arranging representative inputs and asserting the expected result.
+    func testCreateWorkspaceFromWorktreeThrowsWhenPathMissing() throws {
+        let store = try makeTemporaryStore()
+        let orchestrator = MuxyOrchestrator(store: store)
+        XCTAssertThrowsError(
+            try orchestrator.createWorkspaceFromWorktree(worktreePath: "/nonexistent/path/\(UUID().uuidString)")
+        ) { error in
+            guard case MuxyError.invalidArgument = error else { return XCTFail("Expected invalidArgument, got \(error)") }
+        }
+    }
+
+    // Tests createWorkspaceFromWorktree throws when the path is not a git repository by arranging representative inputs and asserting the expected result.
+    func testCreateWorkspaceFromWorktreeThrowsWhenNotGitRepo() throws {
+        let dir = try makeTempDirectory()
+        let store = try makeTemporaryStore()
+        let orchestrator = MuxyOrchestrator(store: store)
+        XCTAssertThrowsError(
+            try orchestrator.createWorkspaceFromWorktree(worktreePath: dir.path)
+        ) { error in
+            guard case MuxyError.invalidArgument = error else { return XCTFail("Expected invalidArgument, got \(error)") }
+        }
+    }
+
+    // Tests updateWorkspaceMetadata throws for empty title by arranging representative inputs and asserting the expected result.
+    func testUpdateWorkspaceMetadataThrowsForEmptyTitle() throws {
+        let store = try makeTemporaryStore()
+        let orchestrator = MuxyOrchestrator(store: store)
+        let root = try makeTempDirectory()
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
+        XCTAssertThrowsError(try orchestrator.updateWorkspaceMetadata(workspaceID: workspace.id, title: "   ")) { error in
+            guard case MuxyError.invalidArgument = error else { return XCTFail("Expected invalidArgument, got \(error)") }
+        }
+    }
+
+    // Tests updateWorkspaceMetadata throws for empty branch on git project by arranging representative inputs and asserting the expected result.
+    func testUpdateWorkspaceMetadataThrowsForEmptyBranchOnGitProject() throws {
+        let repo = try makeTempGitRepo(name: "empty-branch-metadata")
+        let root = try makeTempDirectory()
+        let workspacesRoot = root.appendingPathComponent("workspaces", isDirectory: true)
+        let store = try makeTemporaryStore()
+        let orchestrator = MuxyOrchestrator(store: store, workspacesRootDirectory: workspacesRoot)
+        let project = try orchestrator.addProject(dir: repo.path)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature", branch: "feature-start")
+        XCTAssertThrowsError(try orchestrator.updateWorkspaceMetadata(workspaceID: workspace.id, branch: "  ")) { error in
+            guard case MuxyError.invalidArgument = error else { return XCTFail("Expected invalidArgument, got \(error)") }
+        }
+    }
+
+    // Tests updateWorkspaceMetadata throws for empty directoryName on git project by arranging representative inputs and asserting the expected result.
+    func testUpdateWorkspaceMetadataThrowsForEmptyDirectoryNameOnGitProject() throws {
+        let repo = try makeTempGitRepo(name: "empty-dirname-metadata")
+        let root = try makeTempDirectory()
+        let workspacesRoot = root.appendingPathComponent("workspaces", isDirectory: true)
+        let store = try makeTemporaryStore()
+        let orchestrator = MuxyOrchestrator(store: store, workspacesRootDirectory: workspacesRoot)
+        let project = try orchestrator.addProject(dir: repo.path)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature", branch: "feature-start")
+        XCTAssertThrowsError(try orchestrator.updateWorkspaceMetadata(workspaceID: workspace.id, directoryName: "")) { error in
+            guard case MuxyError.invalidArgument = error else { return XCTFail("Expected invalidArgument, got \(error)") }
+        }
+    }
+
+    // Tests updateWorkspaceMetadata throws for duplicate directory name across workspaces by arranging representative inputs and asserting the expected result.
+    func testUpdateWorkspaceMetadataThrowsForDuplicateDirectoryName() throws {
+        let repo = try makeTempGitRepo(name: "dup-dirname-metadata")
+        let root = try makeTempDirectory()
+        let workspacesRoot = root.appendingPathComponent("workspaces", isDirectory: true)
+        let store = try makeTemporaryStore()
+        let orchestrator = MuxyOrchestrator(store: store, workspacesRootDirectory: workspacesRoot)
+        let project = try orchestrator.addProject(dir: repo.path)
+        let ws1 = try orchestrator.createWorkspace(projectID: project.id, name: "feature", branch: "feature-start")
+        let ws2 = try orchestrator.createWorkspace(projectID: project.id, name: "other", branch: "other-branch")
+        guard let ws1Dirname = ws1.dirname, let ws2Dirname = ws2.dirname else { return }
+        XCTAssertNotEqual(ws1Dirname, ws2Dirname)
+        // Try to set ws2's dirname to ws1's dirname - should throw duplicate error
+        XCTAssertThrowsError(try orchestrator.updateWorkspaceMetadata(workspaceID: ws2.id, directoryName: ws1Dirname)) { error in
+            guard case MuxyError.invalidArgument = error else { return XCTFail("Expected invalidArgument, got \(error)") }
+        }
+    }
+
+    // Tests suggestedWorkspaceName throws when all available names are exhausted by arranging representative inputs and asserting the expected result.
+    func testSuggestedWorkspaceNameThrowsWhenAllNamesExhausted() throws {
+        let store = try makeTemporaryStore()
+        let orchestrator = MuxyOrchestrator(store: store)
+        let root = try makeTempDirectory()
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let project = try orchestrator.addProject(dir: projectDir.path)
+
+        // Insert workspace records for all known food names to exhaust suggestions
+        let allFoodNames = ["almond", "anchovy", "apple", "apricot", "avocado", "bagel", "bacon", "banana", "basil", "bean",
+            "beef", "beet", "berry", "biscuit", "bread", "broccoli", "brownie", "burger", "burrito", "butter",
+            "cabbage", "cacao", "candy", "cantaloupe", "caramel", "carrot", "cashew", "celery", "cereal", "cherry",
+            "cheddar", "cheesecake", "chili", "chips", "chive", "chocolate", "chutney", "cider", "cinnamon", "clove",
+            "cocoa", "coconut", "coffee", "coleslaw", "cookie", "corn", "couscous", "cracker", "cream", "crouton",
+            "cucumber", "cupcake", "curry", "custard", "danish", "dill", "donut", "dumpling", "eclair", "edamame",
+            "egg", "empanada", "endive", "fajita", "falafel", "fig", "flan", "fries", "garlic", "ginger", "gnocchi",
+            "granola", "grape", "gravy", "grits", "guava", "ham", "hazelnut", "honey", "hummus", "icecream", "jam",
+            "jalapeno", "jelly", "kale", "kebab", "ketchup", "kiwi", "kohlrabi", "lasagna", "leek", "lemon", "lentil",
+            "lettuce", "lime", "lobster", "lychee", "macaroni", "macaron", "mango", "maple", "marshmallow",
+            "mascarpone", "mayo", "meatball", "melon", "mint", "mocha", "molasses", "muffin", "mushroom", "mustard",
+            "nacho", "noodle", "nutmeg", "oat", "omelet", "olive", "onion", "orange", "oreo", "pancake", "papaya",
+            "paprika", "parsnip", "pastry", "peach", "peanut", "pear", "peas", "pecan", "pepper", "pesto", "pho",
+            "pickle", "pie", "pineapple", "pita", "pizza", "plum", "poppy", "popcorn", "pork", "potato", "poutine",
+            "pretzel", "prune", "pudding", "pumpkin", "quiche", "quinoa", "radish", "raisin", "ramen", "relish",
+            "rice", "risotto", "roast", "roll", "saffron", "sage", "salad", "salami", "salsa", "salt", "sardine",
+            "sausage", "scone", "seaweed", "sesame", "shallot", "shrimp", "soup", "sorbet", "soy", "spice",
+            "spinach", "squash", "steak", "stew", "sugar", "sushi", "syrup", "taco", "tamarind", "tapioca", "tea",
+            "toffee", "toast", "tofu", "tomato", "tortilla", "tuna", "turkey", "turnip", "vanilla", "vinegar",
+            "waffle", "walnut", "watermelon", "yams", "yogurt", "ziti", "zucchini"]
+        for name in allFoodNames {
+            let ws = makeWorkspaceRecord(projectID: project.id, name: name, dir: projectDir.path)
+            try store.upsert(workspace: ws)
+        }
+
+        XCTAssertThrowsError(try orchestrator.suggestedWorkspaceName(projectID: project.id)) { error in
+            guard case MuxyError.invalidArgument = error else { return XCTFail("Expected invalidArgument, got \(error)") }
+        }
+    }
+
+    // Tests checkAndUpdateProcessStatuses marks a dead process as exited and calls handleProcessExit .none case by arranging representative inputs and asserting the expected result.
+    func testCheckAndUpdateProcessStatusesDetectsDeadProcessAndHandlesExit() throws {
+        let store = try makeTemporaryStore()
+        let orchestrator = MuxyOrchestrator(store: store)
+        let root = try makeTempDirectory()
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
+
+        // Add process template with onExit .none so handleProcessExit covers the .none switch case
+        try orchestrator.updateWorkspaceSettings(workspaceID: workspace.id) { settings in
+            settings.processes = [ProcessTemplate(name: "web", command: "sleep 1", onExit: .none)]
+        }
+
+        // Insert a running process with a dead PID (macOS max PID is ~99998; 2_000_000 is guaranteed dead)
+        let proc = RunningProcessRecord(
+            id: UUID().uuidString, workspaceID: workspace.id, templateName: "web", command: "sleep 1",
+            terminalApp: "Terminal", windowID: nil, itermSessionID: nil, itermTabIndex: nil,
+            pid: 2_000_000, status: .running, logPath: nil, lastOutputAt: nil,
+            startedAt: "2020-01-01T00:00:00Z", exitedAt: nil)
+        try store.upsert(runningProcess: proc)
+
+        let didUpdate = try orchestrator.checkAndUpdateProcessStatuses()
+        XCTAssertTrue(didUpdate)
+        let processes = try store.runningProcesses(workspaceID: workspace.id)
+        XCTAssertEqual(processes.first?.status, .exited)
+    }
+
+    // Tests checkAndUpdateProcessStatuses skips recently started processes within the 10-second grace window by arranging representative inputs and asserting the expected result.
+    func testCheckAndUpdateProcessStatusesSkipsRecentlyStartedProcess() throws {
+        let store = try makeTemporaryStore()
+        let orchestrator = MuxyOrchestrator(store: store)
+        let root = try makeTempDirectory()
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
+
+        // Insert a process with a dead PID but very recent startedAt (within 10-second grace)
+        let recentStart = ISO8601DateFormatter().string(from: Date())
+        let proc = RunningProcessRecord(
+            id: UUID().uuidString, workspaceID: workspace.id, templateName: "web", command: "sleep 1",
+            terminalApp: "Terminal", windowID: nil, itermSessionID: nil, itermTabIndex: nil,
+            pid: 2_000_000, status: .running, logPath: nil, lastOutputAt: nil,
+            startedAt: recentStart, exitedAt: nil)
+        try store.upsert(runningProcess: proc)
+
+        let didUpdate = try orchestrator.checkAndUpdateProcessStatuses()
+        XCTAssertFalse(didUpdate)
+        let processes = try store.runningProcesses(workspaceID: workspace.id)
+        XCTAssertEqual(processes.first?.status, .running)
+    }
+
+    // Tests createWorkspace throws when target branch cannot be resolved for a git project with no main/master by arranging representative inputs and asserting the expected result.
+    func testCreateWorkspaceThrowsWhenTargetBranchCannotBeResolved() throws {
+        // Create a git repo with a non-standard initial branch (not main or master)
+        let repo = try makeTempGitRepo(name: "no-main-or-master", initialBranch: "develop")
+        let store = try makeTemporaryStore()
+        // Insert the project directly with defaultBranch = nil to force the main/master branch check
+        let projectRecord = ProjectRecord(id: repo.path, name: "test", dir: repo.path, isGitRepo: true, defaultBranch: nil)
+        try store.upsert(project: projectRecord)
+
+        let orchestrator = MuxyOrchestrator(store: store)
+        // Without targetBranch, resolveWorkspaceTargetBranch should check for main/master, find neither, and throw
+        XCTAssertThrowsError(
+            try orchestrator.createWorkspace(projectID: projectRecord.id, name: "feature", branch: "feature-branch")
+        ) { error in
+            guard case MuxyError.invalidArgument = error else { return XCTFail("Expected invalidArgument, got \(error)") }
+        }
+    }
+
+    // Tests updateWorkspaceMetadata branch update on non-git project throws by arranging representative inputs and asserting the expected result.
+    func testUpdateWorkspaceMetadataBranchThrowsForNonGitProject() throws {
+        let store = try makeTemporaryStore()
+        let orchestrator = MuxyOrchestrator(store: store)
+        let root = try makeTempDirectory()
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
+        XCTAssertThrowsError(try orchestrator.updateWorkspaceMetadata(workspaceID: workspace.id, branch: "new-branch")) { error in
+            guard case MuxyError.invalidArgument = error else { return XCTFail("Expected invalidArgument, got \(error)") }
+        }
+    }
+
+    // Tests updateWorkspaceMetadata directoryName update on non-git project throws by arranging representative inputs and asserting the expected result.
+    func testUpdateWorkspaceMetadataDirectoryNameThrowsForNonGitProject() throws {
+        let store = try makeTemporaryStore()
+        let orchestrator = MuxyOrchestrator(store: store)
+        let root = try makeTempDirectory()
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
+        XCTAssertThrowsError(try orchestrator.updateWorkspaceMetadata(workspaceID: workspace.id, directoryName: "newdir")) { error in
+            guard case MuxyError.invalidArgument = error else { return XCTFail("Expected invalidArgument, got \(error)") }
+        }
+    }
+
+    // Tests liveItermSessionIDs delegates to the iterm adapter by arranging representative inputs and asserting the expected result.
+    func testLiveItermSessionIDsReturnsAdapterSessions() throws {
+        let store = try makeTemporaryStore()
+        let mockIterm = MockIterm2Adapter()
+        mockIterm.stubbedSessionIDs = ["session-alpha", "session-beta"]
+        let orchestrator = MuxyOrchestrator(store: store, iterm: mockIterm)
+
+        let sessions = orchestrator.liveItermSessionIDs()
+        XCTAssertEqual(sessions, ["session-alpha", "session-beta"])
+    }
+
+    // Tests workspaceIDForFocusedWindow returns the workspace of an agent window by arranging representative inputs and asserting the expected result.
+    func testWorkspaceIDForFocusedWindowReturnsAgentWindowMatch() throws {
+        let store = try makeTemporaryStore()
+        let orchestrator = MuxyOrchestrator(store: store)
+        let root = try makeTempDirectory()
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
+
+        // Insert an agent window with yabaiWindowID=101; no regular tracked window has that ID.
+        let agentWindow = AgentWindowRecord(
+            id: UUID().uuidString, workspaceID: workspace.id, provider: .iterm2,
+            label: nil, itermSessionID: "s1", codexThreadID: nil, windowID: nil,
+            yabaiWindowID: 101, status: .idle, createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:00:00Z")
+        try store.upsertAgentWindow(agentWindow)
+
+        // Mocked dependency: yabai focused window returns id=101, app=Finder (not Chrome, not tracked as a window record).
+        // Why: exercise the agent-window fallback path in workspaceIDForFocusedWindow.
+        // Remaining risk: only a single app name other than Chrome is tested.
+        try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) {
+            try withEnv(name: "YABAI_FOCUSED_ID", value: "101") {
+                try withEnv(name: "YABAI_FOCUSED_APP", value: "Finder") {
+                    let result = try orchestrator.workspaceIDForFocusedWindow()
+                    XCTAssertEqual(result, workspace.id)
+                }
+            }
+        }
+    }
+
+    // Tests openWorkspaceTerminal falls back to the first sorted tracked iTerm2 window ID when no running process provides one by arranging representative inputs and asserting the expected result.
+    func testOpenWorkspaceTerminalFallsBackToSortedTrackedWindowID() throws {
+        let store = try makeTemporaryStore()
+        let mockIterm = MockIterm2Adapter()
+        let orchestrator = MuxyOrchestrator(store: store, iterm: mockIterm)
+        let root = try makeTempDirectory()
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
+
+        // Add a tracked iTerm2 terminal window but no running processes.
+        try store.upsert(
+            window: WindowRecord(
+                id: UUID().uuidString, workspaceID: workspace.id, app: "iTerm2", title: "shell",
+                windowID: 42, role: "terminal", orderIndex: 200, lastSeenAt: "now"))
+
+        // Mocked dependency: yabai focused window returns Finder (not iTerm2), FOCUSED_ID not in tracked windows.
+        // Why: ensure preferredWorkspaceItermWindowID falls back to sorted tracked window IDs.
+        // Remaining risk: only single-window case is tested.
+        try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) {
+            try withEnv(name: "YABAI_FOCUSED_ID", value: "999") {
+                try withEnv(name: "YABAI_FOCUSED_APP", value: "Finder") {
+                    try orchestrator.openWorkspaceTerminal(workspaceID: workspace.id)
+                }
+            }
+        }
+
+        XCTAssertEqual(mockIterm.openWindowAndRunCallCount, 0)
+        XCTAssertEqual(mockIterm.openTabInWindowAndRunCallCount, 1)
+        XCTAssertEqual(mockIterm.openedTabWindowIDs, [42])
+    }
+
+    // Tests openWorkspaceTerminal uses the window ID from a running iTerm2 process when the focused window is not iTerm2 by arranging representative inputs and asserting the expected result.
+    func testOpenWorkspaceTerminalUsesRunningProcessWindowFallback() throws {
+        let store = try makeTemporaryStore()
+        let mockIterm = MockIterm2Adapter()
+        let orchestrator = MuxyOrchestrator(store: store, iterm: mockIterm)
+        let root = try makeTempDirectory()
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
+
+        // Add tracked iTerm2 window AND a running process recording that window.
+        try store.upsert(
+            window: WindowRecord(
+                id: UUID().uuidString, workspaceID: workspace.id, app: "iTerm2", title: "shell",
+                windowID: 42, role: "terminal", orderIndex: 200, lastSeenAt: "now"))
+        let proc = RunningProcessRecord(
+            id: UUID().uuidString, workspaceID: workspace.id, templateName: "web", command: "echo hi",
+            terminalApp: "iTerm2", windowID: 42, itermSessionID: "s1", itermTabIndex: nil,
+            pid: nil, status: .running, logPath: nil, lastOutputAt: nil, startedAt: nil, exitedAt: nil)
+        try store.upsert(runningProcess: proc)
+
+        // Mocked dependency: yabai focused window is Finder (not iTerm2) so line 1242 is skipped.
+        // Why: ensure preferredWorkspaceItermWindowID uses the running-process window ID on line 1243-1245.
+        // Remaining risk: only a single process is tested.
+        try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) {
+            try withEnv(name: "YABAI_FOCUSED_ID", value: "999") {
+                try withEnv(name: "YABAI_FOCUSED_APP", value: "Finder") {
+                    try orchestrator.openWorkspaceTerminal(workspaceID: workspace.id)
+                }
+            }
+        }
+
+        XCTAssertEqual(mockIterm.openWindowAndRunCallCount, 0)
+        XCTAssertEqual(mockIterm.openTabInWindowAndRunCallCount, 1)
+        XCTAssertEqual(mockIterm.openedTabWindowIDs, [42])
+    }
+
+    // Tests ensureDefaultWorkspace revives an archived default workspace via updateProjectConfig by arranging representative inputs and asserting the expected result.
+    func testEnsureDefaultWorkspaceRevivesArchivedDefaultViaUpdateProjectConfig() throws {
+        let store = try makeTemporaryStore()
+        let orchestrator = MuxyOrchestrator(store: store)
+        let root = try makeTempDirectory()
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let project = try orchestrator.addProject(dir: projectDir.path)
+
+        // Find the default workspace and archive it via store directly.
+        let workspaces = try store.workspaces(projectID: project.id, includeArchived: false)
+        let defaultWS = try XCTUnwrap(workspaces.first(where: \.isDefault))
+        let archived = WorkspaceRecord(
+            id: defaultWS.id, projectID: project.id, name: defaultWS.name, dir: defaultWS.dir,
+            dirname: defaultWS.dirname, branch: defaultWS.branch, isDefault: true, isArchived: true,
+            isRunning: defaultWS.isRunning, lastLaunchedAt: defaultWS.lastLaunchedAt)
+        try store.upsert(workspace: archived)
+        XCTAssertTrue(try XCTUnwrap(store.workspace(id: defaultWS.id)).isArchived)
+
+        // updateProjectConfig calls ensureDefaultWorkspace, which should revive the archived default workspace.
+        try orchestrator.updateProjectConfig(projectID: project.id) { _ in }
+
+        let revived = try XCTUnwrap(store.workspace(id: defaultWS.id))
+        XCTAssertFalse(revived.isArchived)
+    }
+
+    // Tests handleProcessExit with onExit .restart restarts the process via openWindowAndRun by arranging representative inputs and asserting the expected result.
+    func testHandleProcessExitRestartCaseCallsOpenWindowAndRun() throws {
+        let store = try makeTemporaryStore()
+        let mockIterm = MockIterm2Adapter()
+        let orchestrator = MuxyOrchestrator(store: store, iterm: mockIterm)
+        let root = try makeTempDirectory()
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
+
+        // Add process template with onExit .restart.
+        try orchestrator.updateWorkspaceSettings(workspaceID: workspace.id) { settings in
+            settings.processes = [ProcessTemplate(name: "web", command: "echo hi", onExit: .restart)]
+        }
+
+        // Insert a dead running process (PID 2_000_000 is guaranteed dead, windowID nil forces openWindowAndRun fallback).
+        let proc = RunningProcessRecord(
+            id: UUID().uuidString, workspaceID: workspace.id, templateName: "web", command: "echo hi",
+            terminalApp: "Terminal", windowID: nil, itermSessionID: nil, itermTabIndex: nil,
+            pid: 2_000_000, status: .running, logPath: nil, lastOutputAt: nil,
+            startedAt: "2020-01-01T00:00:00Z", exitedAt: nil)
+        try store.upsert(runningProcess: proc)
+
+        let didUpdate = try orchestrator.checkAndUpdateProcessStatuses()
+        XCTAssertTrue(didUpdate)
+        // handleProcessExit .restart calls restartProcessInTerminal which opens a new iTerm2 window.
+        XCTAssertEqual(mockIterm.openWindowAndRunCallCount, 1)
+    }
+
+    // Tests createWorkspaceFromWorktree throws when the worktree directory matches an archived workspace by arranging representative inputs and asserting the expected result.
+    func testCreateWorkspaceFromWorktreeThrowsWhenAlreadyArchivedWorkspaceExists() throws {
+        let repo = try makeTempGitRepo(name: "archived-worktree-repo")
+        let store = try makeTemporaryStore()
+        let orchestrator = MuxyOrchestrator(store: store)
+        let project = try orchestrator.addProject(dir: repo.path)
+
+        // The default workspace has dir=repo.path; archive it so the next createWorkspaceFromWorktree finds it archived.
+        let workspaces = try store.workspaces(projectID: project.id, includeArchived: false)
+        let defaultWS = try XCTUnwrap(workspaces.first(where: \.isDefault))
+        let archived = WorkspaceRecord(
+            id: defaultWS.id, projectID: project.id, name: defaultWS.name, dir: defaultWS.dir,
+            dirname: defaultWS.dirname, branch: defaultWS.branch, isDefault: true, isArchived: true,
+            isRunning: false, lastLaunchedAt: nil)
+        try store.upsert(workspace: archived)
+
+        // createWorkspaceFromWorktree should detect the archived workspace and throw.
+        XCTAssertThrowsError(try orchestrator.createWorkspaceFromWorktree(worktreePath: repo.path)) { error in
+            guard case MuxyError.invalidArgument = error else { return XCTFail("Expected invalidArgument, got \(error)") }
+        }
+    }
+
+    // Tests focusAgentWindow calls iTerm2 focus and pulse for an iterm2 provider record by arranging representative inputs and asserting the expected result.
+    func testFocusAgentWindowCallsItermFocusForIterm2Provider() throws {
+        let store = try makeTemporaryStore()
+        let mockIterm = MockIterm2Adapter()
+        mockIterm.focusSessionOrTabResult = true
+        let orchestrator = MuxyOrchestrator(store: store, iterm: mockIterm)
+
+        let record = AgentWindowRecord(
+            id: UUID().uuidString, workspaceID: "ws1", provider: .iterm2,
+            label: nil, itermSessionID: "sess1", codexThreadID: nil, windowID: 42,
+            yabaiWindowID: nil, status: .idle, createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:00:00Z")
+
+        try orchestrator.focusAgentWindow(record)
+
+        XCTAssertEqual(mockIterm.focusSessionOrTabCallCount, 1)
+        XCTAssertEqual(mockIterm.lastFocusedSessionID, "sess1")
+        // focusPulseEnabled defaults to true; windowID is non-nil and focus succeeded so pulse runs.
+        XCTAssertEqual(mockIterm.pulseCallCount, 1)
+        XCTAssertEqual(mockIterm.lastPulsedWindowID, 42)
+    }
+
+    // Tests syncDefaultWorkspaceSettings reseeds missing settings when updateProjectConfig is called by arranging representative inputs and asserting the expected result.
+    func testSyncDefaultWorkspaceSettingsReseesIfSettingsMissing() throws {
+        let store = try makeTemporaryStore()
+        let root = try makeTempDirectory()
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+
+        // Use symlink-resolved path so it matches what normalizePath returns internally.
+        let normalizedDir = URL(fileURLWithPath: projectDir.path).resolvingSymlinksInPath().path
+        let projectRecord = ProjectRecord(id: normalizedDir, name: "test", dir: normalizedDir, isGitRepo: false, defaultBranch: nil)
+        try store.upsert(project: projectRecord)
+
+        // Insert a default workspace directly without going through seedWorkspaceSettings.
+        let workspaceID = UUID().uuidString
+        let workspaceRecord = WorkspaceRecord(
+            id: workspaceID, projectID: normalizedDir, name: "default", dir: normalizedDir,
+            dirname: nil, branch: nil, isDefault: true, isArchived: false, isRunning: false, lastLaunchedAt: nil)
+        try store.upsert(workspace: workspaceRecord)
+        XCTAssertFalse(try store.workspaceSettingsExists(workspaceID: workspaceID))
+
+        // updateProjectConfig triggers syncDefaultWorkspaceSettingsIfTemplateBased, which reseeds missing settings.
+        let orchestrator = MuxyOrchestrator(store: store)
+        try orchestrator.updateProjectConfig(projectID: normalizedDir) { _ in }
+
+        XCTAssertTrue(try store.workspaceSettingsExists(workspaceID: workspaceID))
+    }
+
+    // Tests createWorkspace rejects a non-ASCII directory name by arranging representative inputs and asserting the expected result.
+    func testCreateWorkspaceRejectsNonAsciiDirectoryName() throws {
+        let repo = try makeTempGitRepo(name: "non-ascii-dirname-repo")
+        let root = try makeTempDirectory()
+        let workspacesRoot = root.appendingPathComponent("workspaces", isDirectory: true)
+        let store = try makeTemporaryStore()
+        let orchestrator = MuxyOrchestrator(store: store, workspacesRootDirectory: workspacesRoot)
+        let project = try orchestrator.addProject(dir: repo.path)
+
+        // Pass a non-ASCII directory name (é is non-ASCII) to trigger the guard scalar.isASCII path.
+        XCTAssertThrowsError(
+            try orchestrator.createWorkspace(
+                projectID: project.id, name: "feature-name", branch: "feature-branch", directoryName: "f\u{00e9}ature")
+        ) { error in
+            guard case MuxyError.invalidArgument = error else { return XCTFail("Expected invalidArgument, got \(error)") }
+        }
+    }
+
+    // Tests expandTilde resolves a standalone tilde to the home directory path by arranging representative inputs and asserting the expected result.
+    func testExpandTildeResolvesStandaloneTildeToHome() throws {
+        let store = try makeTemporaryStore()
+        let orchestrator = MuxyOrchestrator(store: store)
+        // "~" expands to the home directory; no project exists there so removeProject returns silently.
+        XCTAssertNoThrow(try orchestrator.removeProject(dir: "~"))
+    }
+
+    // Tests expandTilde resolves a tilde-slash prefix to the corresponding home subdirectory path by arranging representative inputs and asserting the expected result.
+    func testExpandTildeResolvesTildeSlashPrefixToHomeSubdirectory() throws {
+        let store = try makeTemporaryStore()
+        let orchestrator = MuxyOrchestrator(store: store)
+        // "~/foo" expands to home/foo; no project exists there so removeProject returns silently.
+        XCTAssertNoThrow(try orchestrator.removeProject(dir: "~/muxy-test-nonexistent-path-xyzzy"))
+    }
+
+    // Tests expandTilde passes through a tilde-name prefix unchanged by arranging representative inputs and asserting the expected result.
+    func testExpandTildePassesThroughTildeNamePrefixUnchanged() throws {
+        let store = try makeTemporaryStore()
+        let orchestrator = MuxyOrchestrator(store: store)
+        // "~user" starts with ~ but is neither "~" alone nor "~/"; returned unchanged, no project found.
+        XCTAssertNoThrow(try orchestrator.removeProject(dir: "~notahomedirectory"))
+    }
+
+    // Tests archiveWorkspace suppresses isMissingWorktreeError when the worktree directory is not registered in git by arranging representative inputs and asserting the expected result.
+    func testArchiveWorkspaceSuppressesIsMissingWorktreeErrorForUnregisteredPath() throws {
+        let repo = try makeTempGitRepo(name: "archive-git-missing-worktree-path")
+        let root = try makeTempDirectory()
+        let workspacesRoot = root.appendingPathComponent("workspaces", isDirectory: true)
+        let store = try makeTemporaryStore()
+        let orchestrator = MuxyOrchestrator(store: store, workspacesRootDirectory: workspacesRoot)
+        let project = try orchestrator.addProject(dir: repo.path)
+
+        // Create a workspace record pointing to a path that is NOT a registered git worktree.
+        // When archiveWorkspace calls git.removeWorktree, git fails with "not a working tree"
+        // → isMissingWorktreeError returns true → error is suppressed.
+        let fakeWorktreeDir = root.appendingPathComponent("not-a-registered-worktree").path
+        let workspaceRecord = WorkspaceRecord(
+            id: UUID().uuidString, projectID: project.id, name: "fake-worktree-ws",
+            dir: fakeWorktreeDir, dirname: "fake", branch: "feature-x", isDefault: false,
+            isArchived: false, isRunning: false, lastLaunchedAt: nil)
+        try store.upsert(workspace: workspaceRecord)
+
+        XCTAssertNoThrow(try orchestrator.archiveWorkspace(workspaceID: workspaceRecord.id))
+
+        let archived = try store.workspace(id: workspaceRecord.id)
+        XCTAssertEqual(archived?.isArchived, true)
+    }
+
+    // Tests removeProject without projectsRootDirectory exercises the default repositories and legacy project root directory paths by arranging representative inputs and asserting the expected result.
+    func testRemoveGitProjectWithoutProjectsRootDirectoryCoversDefaultRootPaths() throws {
+        let store = try makeTemporaryStore()
+        let root = try makeTempDirectory()
+        let workspacesRoot = root.appendingPathComponent("workspaces", isDirectory: true)
+        // projectsRootDirectory is nil → repositoriesRootDirectory() uses ~/muxy/repos (default path)
+        // and legacyProjectsRootDirectory() uses ~/muxy/projects (default path).
+        let orchestrator = MuxyOrchestrator(store: store, workspacesRootDirectory: workspacesRoot)
+
+        // Insert a fake git project at a temp path so removeProject reaches isManagedRepositoryDirectory.
+        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString).path
+        let projectRecord = ProjectRecord(id: tempDir, name: "coverage-test", dir: tempDir, isGitRepo: true, defaultBranch: "main")
+        try store.upsert(project: projectRecord)
+        let workspaceRecord = WorkspaceRecord(
+            id: UUID().uuidString, projectID: tempDir, name: "default", dir: tempDir, dirname: nil, branch: "main",
+            isDefault: true, isArchived: false, isRunning: false, lastLaunchedAt: nil)
+        try store.upsert(workspace: workspaceRecord)
+
+        // removeProject exercises isManagedRepositoryDirectory which calls repositoriesRootDirectory()
+        // and legacyProjectsRootDirectory(); the temp path is under neither managed root so nothing gets deleted.
+        try orchestrator.removeProject(dir: tempDir)
+        XCTAssertNil(try store.project(dir: tempDir))
+    }
+
+    // Tests createWorkspaceFromWorktree throws workspaceAlreadyExists when a non-archived workspace with the same name already exists.
+    func testCreateWorkspaceFromWorktreeThrowsWorkspaceAlreadyExists() throws {
+        let repo = try makeTempGitRepo(name: "workspace-duplicate-name")
+        let root = try makeTempDirectory()
+        let workspacesRoot = root.appendingPathComponent("workspaces", isDirectory: true)
+        let store = try makeTemporaryStore()
+        let orchestrator = MuxyOrchestrator(store: store, workspacesRootDirectory: workspacesRoot)
+        _ = try orchestrator.addProject(dir: repo.path)
+
+        // Create first worktree and register it with name "feature".
+        let worktree1 = root.appendingPathComponent("worktree1", isDirectory: true)
+        try runGit(["worktree", "add", "-b", "feature-branch-1", worktree1.path], cwd: repo.path)
+        _ = try orchestrator.createWorkspaceFromWorktree(worktreePath: worktree1.path, name: "feature")
+
+        // Create a second worktree at a different path but register with the same name "feature".
+        // This should fail because a non-archived workspace named "feature" already exists.
+        let worktree2 = root.appendingPathComponent("worktree2", isDirectory: true)
+        try runGit(["worktree", "add", "-b", "feature-branch-2", worktree2.path], cwd: repo.path)
+        XCTAssertThrowsError(try orchestrator.createWorkspaceFromWorktree(worktreePath: worktree2.path, name: "feature")) { error in
+            guard case MuxyError.workspaceAlreadyExists = error else {
+                return XCTFail("Expected workspaceAlreadyExists, got \(error)")
+            }
+        }
+    }
+
+    // Tests addProject(dir:) throws projectAlreadyExists when the directory has already been imported.
+    func testAddProjectDirThrowsWhenProjectAlreadyExists() throws {
+        let root = try makeTempDirectory()
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let store = try makeTemporaryStore()
+        let orchestrator = MuxyOrchestrator(store: store)
+        _ = try orchestrator.addProject(dir: projectDir.path)
+
+        XCTAssertThrowsError(try orchestrator.addProject(dir: projectDir.path)) { error in
+            guard case MuxyError.projectAlreadyExists = error else {
+                return XCTFail("Expected projectAlreadyExists, got \(error)")
+            }
+        }
+    }
+
+    // Tests updateWorkspaceName throws invalidArgument when the new name is empty or whitespace-only.
+    func testUpdateWorkspaceNameRejectsEmptyName() throws {
+        let root = try makeTempDirectory()
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let store = try makeTemporaryStore()
+        let orchestrator = MuxyOrchestrator(store: store)
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
+
+        XCTAssertThrowsError(try orchestrator.updateWorkspaceName(workspaceID: workspace.id, name: "")) { error in
+            XCTAssertTrue(error.localizedDescription.contains("Workspace name is required"))
+        }
+        XCTAssertThrowsError(try orchestrator.updateWorkspaceName(workspaceID: workspace.id, name: "   ")) { error in
+            XCTAssertTrue(error.localizedDescription.contains("Workspace name is required"))
+        }
+    }
+
+    // Tests updateWorkspaceName is a no-op when the trimmed name matches the current name.
+    func testUpdateWorkspaceNameIsNoOpWhenNameIsUnchanged() throws {
+        let root = try makeTempDirectory()
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let store = try makeTemporaryStore()
+        let orchestrator = MuxyOrchestrator(store: store)
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
+
+        // Renaming to the same name should not throw and should not change the record.
+        XCTAssertNoThrow(try orchestrator.updateWorkspaceName(workspaceID: workspace.id, name: "feature"))
+        let fetched = try XCTUnwrap(store.workspace(id: workspace.id))
+        XCTAssertEqual(fetched.name, "feature")
+    }
+
+    // Tests addProject(gitURL:) throws invalidArgument when the URL is an empty string.
+    func testAddProjectByGitURLThrowsWhenURLIsEmpty() throws {
+        let store = try makeTemporaryStore()
+        let orchestrator = MuxyOrchestrator(store: store)
+
+        XCTAssertThrowsError(try orchestrator.addProject(gitURL: "")) { error in
+            guard case MuxyError.invalidArgument = error else {
+                return XCTFail("Expected invalidArgument, got \(error)")
+            }
+        }
+        XCTAssertThrowsError(try orchestrator.addProject(gitURL: "   ")) { error in
+            guard case MuxyError.invalidArgument = error else {
+                return XCTFail("Expected invalidArgument, got \(error)")
+            }
+        }
+    }
+
+    // Tests createWorkspace throws invalidArgument when the workspace name is empty.
+    func testCreateWorkspaceThrowsWhenNameIsEmpty() throws {
+        let root = try makeTempDirectory()
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let store = try makeTemporaryStore()
+        let orchestrator = MuxyOrchestrator(store: store)
+        let project = try orchestrator.addProject(dir: projectDir.path)
+
+        XCTAssertThrowsError(try orchestrator.createWorkspace(projectID: project.id, name: "")) { error in
+            XCTAssertTrue(error.localizedDescription.contains("Workspace name is required"))
+        }
+        XCTAssertThrowsError(try orchestrator.createWorkspace(projectID: project.id, name: "   ")) { error in
+            XCTAssertTrue(error.localizedDescription.contains("Workspace name is required"))
+        }
+    }
+
+    // Tests openWorkspaceEditor throws invalidArgument when the workspace is archived.
+    func testOpenWorkspaceEditorThrowsForArchivedWorkspace() throws {
+        let root = try makeTempDirectory()
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let store = try makeTemporaryStore()
+        let orchestrator = MuxyOrchestrator(store: store)
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
+
+        // Archive the workspace directly via the store.
+        try store.updateWorkspaceArchived(id: workspace.id, isArchived: true)
+
+        XCTAssertThrowsError(try orchestrator.openWorkspaceEditor(workspaceID: workspace.id)) { error in
+            XCTAssertTrue(error.localizedDescription.contains("archived"))
+        }
+    }
+
+    // Tests openWorkspaceTerminal throws invalidArgument when the workspace is archived.
+    func testOpenWorkspaceTerminalThrowsForArchivedWorkspace() throws {
+        let root = try makeTempDirectory()
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let store = try makeTemporaryStore()
+        let orchestrator = MuxyOrchestrator(store: store)
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
+
+        // Archive the workspace directly via the store.
+        try store.updateWorkspaceArchived(id: workspace.id, isArchived: true)
+
+        XCTAssertThrowsError(try orchestrator.openWorkspaceTerminal(workspaceID: workspace.id)) { error in
+            XCTAssertTrue(error.localizedDescription.contains("archived"))
+        }
+    }
+
+    // Tests focusWorkspaceWindow with index 0 is a no-op (guard index > 0 early return).
+    func testFocusWorkspaceWindowWithZeroIndexIsNoOp() throws {
+        let (orchestrator, _, _, workspace, _) = try makeOrchestratorWithWorkspace()
+
+        // Index 0 is invalid (windows are 1-based); should return without throwing.
+        XCTAssertNoThrow(try orchestrator.focusWorkspaceWindow(workspaceID: workspace.id, index: 0))
+    }
+
+    // Tests focusWorkspaceWindow with an out-of-bounds index is a no-op (guard index <= windows.count early return).
+    func testFocusWorkspaceWindowWithOutOfBoundsIndexIsNoOp() throws {
+        let (orchestrator, _, _, workspace, _) = try makeOrchestratorWithWorkspace()
+        // No windows are tracked; index 99 is out of bounds.
+        XCTAssertNoThrow(try orchestrator.focusWorkspaceWindow(workspaceID: workspace.id, index: 99))
+    }
+
+    // Tests scanAndCreateWorkspacesFromWorktrees throws missingProject when a specific projectID is not found.
+    func testScanAndCreateWorkspacesFromWorktreesThrowsForMissingProjectID() throws {
+        let store = try makeTemporaryStore()
+        let orchestrator = MuxyOrchestrator(store: store)
+
+        XCTAssertThrowsError(try orchestrator.scanAndCreateWorkspacesFromWorktrees(projectID: "/nonexistent/project/\(UUID().uuidString)")) { error in
+            guard case MuxyError.missingProject = error else {
+                return XCTFail("Expected missingProject, got \(error)")
+            }
+        }
+    }
+
+    // Tests addProject(gitURL:) throws projectAlreadyExists when the same destination is already registered.
+    func testAddProjectByGitURLThrowsWhenProjectAlreadyExistsInDB() throws {
+        let fixture = try makeTempGitRepo(name: "duplicate-project")
+        let root = try makeTempDirectory()
+        let reposRoot = root.appendingPathComponent("repos", isDirectory: true)
+        let workspacesRoot = root.appendingPathComponent("workspaces", isDirectory: true)
+        let store = try makeTemporaryStore()
+        let orchestrator = MuxyOrchestrator(store: store, projectsRootDirectory: reposRoot, workspacesRootDirectory: workspacesRoot)
+
+        _ = try orchestrator.addProject(gitURL: fixture.path)
+
+        // The destination directory now exists in the repos root AND in the DB.
+        // Cloning again should fail because the project already exists in the DB.
+        XCTAssertThrowsError(try orchestrator.addProject(gitURL: fixture.path)) { error in
+            // Either projectAlreadyExists (DB hit) or invalidArgument (directory on disk hit) — both are valid.
+            let desc = error.localizedDescription
+            XCTAssertTrue(desc.contains("already exists"), "Expected 'already exists' in error, got: \(desc)")
+        }
+    }
+
+    // Tests updateWorkspaceMetadata with all-nil arguments is a no-op (covers guard didChange else { return }).
+    func testUpdateWorkspaceMetadataWithAllNilArgsIsNoOp() throws {
+        let root = try makeTempDirectory()
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let store = try makeTemporaryStore()
+        let orchestrator = MuxyOrchestrator(store: store)
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
+
+        // No optional parameters → didChange stays false → guard else return is hit.
+        XCTAssertNoThrow(try orchestrator.updateWorkspaceMetadata(workspaceID: workspace.id))
+        let fetched = try XCTUnwrap(store.workspace(id: workspace.id))
+        XCTAssertEqual(fetched.name, "feature")
+    }
+
+    // Tests updateWorkspaceMetadata with the same title as current is a no-op (covers trimmedTitle == workspace.name false branch).
+    func testUpdateWorkspaceMetadataWithSameTitleIsNoOp() throws {
+        let root = try makeTempDirectory()
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let store = try makeTemporaryStore()
+        let orchestrator = MuxyOrchestrator(store: store)
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
+
+        // Same title → trimmedTitle == workspace.name → no change, didChange stays false.
+        XCTAssertNoThrow(try orchestrator.updateWorkspaceMetadata(workspaceID: workspace.id, title: "feature"))
+        let fetched = try XCTUnwrap(store.workspace(id: workspace.id))
+        XCTAssertEqual(fetched.name, "feature")
+    }
+
+    // Tests updateWorkspaceMetadata with a tooltip matching the current (nil) is a no-op (covers tooltip == workspace.tooltip false branch).
+    func testUpdateWorkspaceMetadataWithSameTooltipIsNoOp() throws {
+        let root = try makeTempDirectory()
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let store = try makeTemporaryStore()
+        let orchestrator = MuxyOrchestrator(store: store)
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
+
+        // tooltip: .some(nil) — outer optional is present, inner value is nil (same as current nil tooltip).
+        // tooltip != workspace.tooltip → nil != nil → false → didChange stays false → guard else return.
+        XCTAssertNoThrow(try orchestrator.updateWorkspaceMetadata(workspaceID: workspace.id, tooltip: .some(nil)))
+        let fetched = try XCTUnwrap(store.workspace(id: workspace.id))
+        XCTAssertNil(fetched.tooltip)
+    }
+
+    // Tests upWorkspace throws invalidArgument when the workspace is archived (covers guard !workspace.isArchived else throw).
+    func testUpWorkspaceThrowsForArchivedWorkspace() throws {
+        let root = try makeTempDirectory()
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let store = try makeTemporaryStore()
+        let orchestrator = MuxyOrchestrator(store: store)
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
+        try store.updateWorkspaceArchived(id: workspace.id, isArchived: true)
+
+        XCTAssertThrowsError(try orchestrator.upWorkspace(workspaceID: workspace.id)) { error in
+            XCTAssertTrue(error.localizedDescription.contains("archived"))
+        }
+    }
+
+    // Tests updateProjectConfig throws missingProject when the project ID does not exist in the store.
+    func testUpdateProjectConfigThrowsForMissingProject() throws {
+        let store = try makeTemporaryStore()
+        let orchestrator = MuxyOrchestrator(store: store)
+
+        XCTAssertThrowsError(try orchestrator.updateProjectConfig(projectID: "/nonexistent/\(UUID().uuidString)") { _ in }) { error in
+            guard case MuxyError.missingProject = error else {
+                return XCTFail("Expected missingProject, got \(error)")
+            }
+        }
+    }
+
+    // Tests addProject(gitURL:) throws when the cloned repo has neither main nor master branch.
+    func testAddProjectByGitURLThrowsWhenRepoHasNeitherMainNorMaster() throws {
+        let fixture = try makeTempGitRepo(name: "develop-only", initialBranch: "develop")
+        let root = try makeTempDirectory()
+        let reposRoot = root.appendingPathComponent("repos", isDirectory: true)
+        let workspacesRoot = root.appendingPathComponent("workspaces", isDirectory: true)
+        let store = try makeTemporaryStore()
+        let orchestrator = MuxyOrchestrator(store: store, projectsRootDirectory: reposRoot, workspacesRootDirectory: workspacesRoot)
+
+        XCTAssertThrowsError(try orchestrator.addProject(gitURL: fixture.path)) { error in
+            XCTAssertTrue(error.localizedDescription.contains("main or master branch"))
+        }
+    }
+
+    // Tests addProject(gitURL:) succeeds for a repo with only a master branch (covers preferredImportedDefaultBranch master path).
+    func testAddProjectByGitURLSucceedsWithMasterBranch() throws {
+        let fixture = try makeTempGitRepo(name: "master-only", initialBranch: "master")
+        let root = try makeTempDirectory()
+        let reposRoot = root.appendingPathComponent("repos", isDirectory: true)
+        let workspacesRoot = root.appendingPathComponent("workspaces", isDirectory: true)
+        let store = try makeTemporaryStore()
+        let orchestrator = MuxyOrchestrator(store: store, projectsRootDirectory: reposRoot, workspacesRootDirectory: workspacesRoot)
+
+        let project = try orchestrator.addProject(gitURL: fixture.path)
+        XCTAssertEqual(project.defaultBranch, "master")
+    }
+
+    // Tests addProject(gitURL:) with an SSH-style URL (no "://", colon after last slash) covers inferredProjectName SSH path.
+    func testAddProjectByGitURLWithSSHStyleURLCoversInferredProjectName() throws {
+        let root = try makeTempDirectory()
+        let reposRoot = root.appendingPathComponent("repos", isDirectory: true)
+        let workspacesRoot = root.appendingPathComponent("workspaces", isDirectory: true)
+        let store = try makeTemporaryStore()
+        let orchestrator = MuxyOrchestrator(store: store, projectsRootDirectory: reposRoot, workspacesRootDirectory: workspacesRoot)
+
+        // URL: "users/host:sshrepo.git" — no "://", colon (index 10) > last slash (index 5).
+        // inferredProjectName strips the SSH prefix → "sshrepo.git" → strips ".git" → "sshrepo".
+        // Clone will fail (not a real remote), but lines 2657-2659 are covered before the clone attempt.
+        XCTAssertThrowsError(try orchestrator.addProject(gitURL: "users/host:sshrepo.git"))
+    }
+
+    // Tests addProject(gitURL:) with a project name containing "." covers sanitizeDirname's return "-" path.
+    func testAddProjectByGitURLWithSpecialCharsInNameSanitizesDirname() throws {
+        let fixture = try makeTempGitRepo(name: "my.project", initialBranch: "main")
+        let root = try makeTempDirectory()
+        let reposRoot = root.appendingPathComponent("repos", isDirectory: true)
+        let workspacesRoot = root.appendingPathComponent("workspaces", isDirectory: true)
+        let store = try makeTemporaryStore()
+        let orchestrator = MuxyOrchestrator(store: store, projectsRootDirectory: reposRoot, workspacesRootDirectory: workspacesRoot)
+
+        // "my.project" contains "." → sanitizeDirname replaces "." with "-" → cloned as "my-project".
+        let project = try orchestrator.addProject(gitURL: fixture.path)
+        XCTAssertEqual(project.name, "my-project")
+    }
+
+    // Tests createWorkspace throws when the requested directoryName is already in use by another workspace (covers makeWorkspaceDirname line 2503).
+    func testCreateWorkspaceDirnameConflictThrows() throws {
+        let repo = try makeTempGitRepo(name: "dirname-conflict-repo")
+        let root = try makeTempDirectory()
+        let workspacesRoot = root.appendingPathComponent("workspaces", isDirectory: true)
+        let store = try makeTemporaryStore()
+        let orchestrator = MuxyOrchestrator(store: store, workspacesRootDirectory: workspacesRoot)
+
+        let project = try orchestrator.addProject(dir: repo.path)
+        _ = try orchestrator.createWorkspace(
+            projectID: project.id, name: "feature-a", branch: "feature-a", directoryName: "apple",
+            runSetupScript: false)
+        XCTAssertThrowsError(
+            try orchestrator.createWorkspace(
+                projectID: project.id, name: "feature-b", branch: "feature-b", directoryName: "apple",
+                runSetupScript: false)
+        ) { error in
+            XCTAssertTrue(error.localizedDescription.contains("already in use"), "Expected 'already in use' error, got: \(error)")
+        }
+    }
 }
