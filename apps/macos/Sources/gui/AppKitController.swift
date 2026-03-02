@@ -2261,8 +2261,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         workspaceTitleLabel.toolTip = "Double-click to edit title."
 
         // --- Metadata rows ---
-        var metadataRows: [NSView] = []
-
         let dirRow = NSStackView()
         dirRow.orientation = .horizontal
         dirRow.alignment = .centerY
@@ -2274,7 +2272,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let dirField = NSTextField(labelWithString: workspace.dir)
         dirField.font = .systemFont(ofSize: 12)
         dirField.textColor = .secondaryLabelColor
-        dirField.lineBreakMode = .byTruncatingMiddle
+        dirField.lineBreakMode = .byTruncatingHead
+        dirField.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         let copyDirButton = NSButton(
             image: NSImage(systemSymbolName: "doc.on.doc", accessibilityDescription: "Copy path")!, target: self,
             action: #selector(copyDirectoryPath(_:)))
@@ -2285,7 +2284,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         dirRow.addArrangedSubview(folderIcon)
         dirRow.addArrangedSubview(dirField)
         dirRow.addArrangedSubview(copyDirButton)
-        metadataRows.append(dirRow)
 
         // --- Inline editable metadata ---
         let inlineBranchRow: NSView?
@@ -2374,13 +2372,26 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         tabs.addTabViewItem(settingsTab)
 
         stack.addArrangedSubview(headerAndActionsRow)
-        for row in metadataRows { stack.addArrangedSubview(row) }
-        if let inlineBranchRow { stack.addArrangedSubview(inlineBranchRow) }
+        if let inlineBranchRow {
+            let combinedRow = NSStackView()
+            combinedRow.orientation = .horizontal
+            combinedRow.alignment = .centerY
+            combinedRow.spacing = 12
+            combinedRow.translatesAutoresizingMaskIntoConstraints = false
+            inlineBranchRow.setContentHuggingPriority(.defaultHigh, for: .horizontal)
+            inlineBranchRow.setContentCompressionResistancePriority(.defaultHigh, for: .horizontal)
+            dirRow.setContentHuggingPriority(.defaultLow, for: .horizontal)
+            combinedRow.addArrangedSubview(inlineBranchRow)
+            combinedRow.addArrangedSubview(dirRow)
+            stack.addArrangedSubview(combinedRow)
+            constrainFormFieldToFillWidth(combinedRow, in: stack)
+        } else {
+            stack.addArrangedSubview(dirRow)
+        }
         stack.addArrangedSubview(inlineTooltipRow)
         stack.addArrangedSubview(tabs)
         stack.addArrangedSubview(archiveButton)
         stack.setCustomSpacing(16, after: headerAndActionsRow)
-        if let inlineBranchRow { constrainFormFieldToFillWidth(inlineBranchRow, in: stack) }
         constrainFormFieldToFillWidth(inlineTooltipRow, in: stack)
         constrainFormFieldToFillWidth(topActionRow, in: headerAndActionsRow)
         constrainFormFieldToFillWidth(headerRow, in: headerAndActionsRow)
