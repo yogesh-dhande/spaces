@@ -85,7 +85,7 @@ GUI interaction notes:
 - Status checks are configured inline under each process in the `ProcessEditor` rather than in a separate form section; the process name is implicit from the parent row.
 - Browser sessions are editable via `BrowserSessionEditor` (`name` + URL prefix rows) in project detail, add-project form, and workspace settings.
 - The run tab displays status check results as indented sub-rows under each process with colored dots (passed=green/failed=red) instead of inline badge text.
-- In the run-tab Windows list, browser rows render a two-part label: browser-session name first (when configured) plus the matched URL in secondary text.
+- In the run-tab Windows list, browser rows render a two-part label: browser-session name first (when configured) plus the matched URL in secondary text. Session names are matched to live tab URLs using env-var-expanded session URL prefixes (e.g. `$PORT` → allocated port number); when a tab URL matches multiple configured session prefixes, the longest prefix wins so the most-specific session name is shown.
 - In the run-tab Windows list, terminal rows are rendered per running process session (one row per iTerm2 tab/session), so multiple workspace processes in the same iTerm2 window still appear as separate rows.
 - Window cards in the Run tab and Dashboard are clickable: clicking a card calls `focusWorkspaceWindow` for that window, equivalent to the `CMD+N` keyboard shortcut.
 - Keyboard shortcut overrides for supported GUI actions are persisted in SQLite settings and editable in the GUI Settings view and CLI settings commands.

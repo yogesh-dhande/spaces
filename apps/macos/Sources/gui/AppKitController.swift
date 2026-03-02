@@ -891,8 +891,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 let windows = workspace.isRunning ? ((try? orchestrator.windows(workspaceID: workspace.id)) ?? []) : []
                 let configuredSessions: [BrowserSession] = {
                     guard workspace.isRunning else { return [] }
-                    if let settings = try? orchestrator.workspaceSettings(workspaceID: workspace.id) { return settings.browserSessions }
-                    return []
+                    return (try? orchestrator.resolvedWorkspaceBrowserSessions(workspaceID: workspace.id)) ?? []
                 }()
                 var processByWindowID: [Int: RunningProcessRecord] = [:]
                 for process in processes { if let wid = process.windowID { processByWindowID[wid] = process } }
@@ -2457,8 +2456,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let processes = (try? orchestrator.runningProcesses(workspaceID: workspace.id)) ?? []
         let windows = (try? orchestrator.windows(workspaceID: workspace.id)) ?? []
         let configuredBrowserSessions: [BrowserSession] = {
-            if let settings = try? orchestrator.workspaceSettings(workspaceID: workspace.id) { return settings.browserSessions }
-            return []
+            (try? orchestrator.resolvedWorkspaceBrowserSessions(workspaceID: workspace.id)) ?? []
         }()
         let processesByWindowID: [Int: [RunningProcessRecord]] = {
             var map: [Int: [RunningProcessRecord]] = [:]

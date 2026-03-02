@@ -5433,4 +5433,127 @@ final class OrchestratorTests: XCTestCase {
             XCTAssertTrue(error.localizedDescription.contains("already in use"), "Expected 'already in use' error, got: \(error)")
         }
     }
+
+    // MARK: - resolvedWorkspaceBrowserSessions
+
+    // Tests resolvedWorkspaceBrowserSessions returns sessions with static URLs unchanged.
+    func testResolvedWorkspaceBrowserSessionsReturnsStaticURLsUnchanged() throws {
+        let store = try makeTemporaryStore()
+        let orchestrator = MuxyOrchestrator(store: store)
+        let project = makeProjectRecord(dir: "/projects/app")
+        try store.upsert(project: project)
+        let workspace = makeWorkspaceRecord(projectID: project.id, name: "dev", dir: "/projects/app")
+        try store.upsert(workspace: workspace)
+        try store.setWorkspaceBrowserSessions(
+            workspaceID: workspace.id,
+            sessions: [
+                BrowserSession(name: "App", url: "http://localhost:3000"),
+                BrowserSession(name: "Admin", url: "http://localhost:3000/admin"),
+            ])
+
+        let resolved = try orchestrator.resolvedWorkspaceBrowserSessions(workspaceID: workspace.id)
+        XCTAssertEqual(resolved.count, 2)
+        XCTAssertEqual(resolved[0].name, "App")
+        XCTAssertEqual(resolved[0].url, "http://localhost:3000")
+        XCTAssertEqual(resolved[1].name, "Admin")
+        XCTAssertEqual(resolved[1].url, "http://localhost:3000/admin")
+    }
+
+    // Tests resolvedWorkspaceBrowserSessions expands port env vars to their allocated values.
+    func testResolvedWorkspaceBrowserSessionsExpandsPortEnvVars() throws {
+        let store = try makeTemporaryStore()
+        let orchestrator = MuxyOrchestrator(store: store)
+        let project = makeProjectRecord(dir: "/projects/app")
+        try store.upsert(project: project)
+        let workspace = makeWorkspaceRecord(projectID: project.id, name: "dev", dir: "/projects/app")
+        try store.upsert(workspace: workspace)
+        try store.setWorkspacePorts(workspaceID: workspace.id, ports: [3000, 4000], names: ["PORT", "API_PORT"])
+        try store.setWorkspaceBrowserSessions(
+            workspaceID: workspace.id,
+            sessions: [
+                BrowserSession(name: "Frontend", url: "http://localhost:$PORT"),
+                BrowserSession(name: "API", url: "http://localhost:$API_PORT/v1"),
+            ])
+
+        let resolved = try orchestrator.resolvedWorkspaceBrowserSessions(workspaceID: workspace.id)
+        XCTAssertEqual(resolved.count, 2)
+        XCTAssertEqual(resolved[0].name, "Frontend")
+        XCTAssertEqual(resolved[0].url, "http://localhost:3000")
+        XCTAssertEqual(resolved[1].name, "API")
+        XCTAssertEqual(resolved[1].url, "http://localhost:4000/v1")
+    }
+
+    // Tests resolvedWorkspaceBrowserSessions deduplicates sessions that resolve to the same URL.
+    func testResolvedWorkspaceBrowserSessionsDeduplicatesSameResolvedURL() throws {
+        let store = try makeTemporaryStore()
+        let orchestrator = MuxyOrchestrator(store: store)
+        let project = makeProjectRecord(dir: "/projects/app")
+        try store.upsert(project: project)
+        let workspace = makeWorkspaceRecord(projectID: project.id, name: "dev", dir: "/projects/app")
+        try store.upsert(workspace: workspace)
+        try store.setWorkspacePorts(workspaceID: workspace.id, ports: [3000], names: ["PORT"])
+        try store.setWorkspaceBrowserSessions(
+            workspaceID: workspace.id,
+            sessions: [
+                BrowserSession(name: "First", url: "http://localhost:$PORT"),
+                BrowserSession(name: "Duplicate", url: "http://localhost:$PORT"),
+            ])
+
+        let resolved = try orchestrator.resolvedWorkspaceBrowserSessions(workspaceID: workspace.id)
+        XCTAssertEqual(resolved.count, 1)
+        XCTAssertEqual(resolved[0].name, "First")
+        XCTAssertEqual(resolved[0].url, "http://localhost:3000")
+    }
+
+    // Tests resolvedWorkspaceBrowserSessions omits sessions with empty or nil URLs.
+    func testResolvedWorkspaceBrowserSessionsOmitsSessionsWithEmptyURL() throws {
+        let store = try makeTemporaryStore()
+        let orchestrator = MuxyOrchestrator(store: store)
+        let project = makeProjectRecord(dir: "/projects/app")
+        try store.upsert(project: project)
+        let workspace = makeWorkspaceRecord(projectID: project.id, name: "dev", dir: "/projects/app")
+        try store.upsert(workspace: workspace)
+        try store.setWorkspaceBrowserSessions(
+            workspaceID: workspace.id,
+            sessions: [
+                BrowserSession(name: "App", url: "http://localhost:3000"),
+                BrowserSession(name: "NoURL", url: nil),
+            ])
+
+        let resolved = try orchestrator.resolvedWorkspaceBrowserSessions(workspaceID: workspace.id)
+        XCTAssertEqual(resolved.count, 1)
+        XCTAssertEqual(resolved[0].name, "App")
+    }
+
+    // Tests resolvedWorkspaceBrowserSessions resolved URLs enable longest-prefix name matching.
+    func testResolvedWorkspaceBrowserSessionsEnablesLongestPrefixNameMatching() throws {
+        let store = try makeTemporaryStore()
+        let orchestrator = MuxyOrchestrator(store: store)
+        let project = makeProjectRecord(dir: "/projects/app")
+        try store.upsert(project: project)
+        let workspace = makeWorkspaceRecord(projectID: project.id, name: "dev", dir: "/projects/app")
+        try store.upsert(workspace: workspace)
+        try store.setWorkspacePorts(workspaceID: workspace.id, ports: [3000], names: ["PORT"])
+        try store.setWorkspaceBrowserSessions(
+            workspaceID: workspace.id,
+            sessions: [
+                BrowserSession(name: "App", url: "http://localhost:$PORT"),
+                BrowserSession(name: "Admin", url: "http://localhost:$PORT/admin"),
+            ])
+
+        let resolved = try orchestrator.resolvedWorkspaceBrowserSessions(workspaceID: workspace.id)
+        XCTAssertEqual(resolved.count, 2)
+        XCTAssertEqual(resolved[0].url, "http://localhost:3000")
+        XCTAssertEqual(resolved[1].url, "http://localhost:3000/admin")
+
+        // Simulate the longest-prefix name lookup that the GUI uses.
+        let tabURL = "http://localhost:3000/admin/users"
+        var bestName: String?
+        var bestLength = 0
+        for session in resolved {
+            guard let prefix = session.url, !prefix.isEmpty, tabURL.hasPrefix(prefix) else { continue }
+            if prefix.count > bestLength { bestLength = prefix.count; bestName = session.name }
+        }
+        XCTAssertEqual(bestName, "Admin", "Longest-prefix match should yield 'Admin' not 'App'")
+    }
 }

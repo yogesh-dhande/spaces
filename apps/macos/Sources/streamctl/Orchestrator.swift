@@ -149,6 +149,21 @@ public final class MuxyOrchestrator {
         return try loadWorkspaceSettings(project: project, workspace: workspace)
     }
 
+    /// Returns the workspace's browser sessions with environment variables (e.g. $PORT) resolved to their
+    /// actual values. The `url` field of each returned session is the fully-expanded prefix used for
+    /// matching. Sessions whose URL is empty after expansion are omitted; duplicate resolved URLs are
+    /// deduplicated (first occurrence wins, preserving order).
+    public func resolvedWorkspaceBrowserSessions(workspaceID: String) throws -> [BrowserSession] {
+        let (project, workspace) = try resolveWorkspace(id: workspaceID)
+        let sessions = try store.workspaceBrowserSessions(workspaceID: workspace.id)
+        guard !sessions.isEmpty else { return [] }
+        let namedPorts = try store.workspacePortsNamed(workspaceID: workspace.id)
+        let env = buildWorkspaceEnv(project: project, workspace: workspace, namedPorts: namedPorts)
+        return resolveBrowserSessions(sessions, env: env).map { resolved in
+            BrowserSession(name: resolved.session.name, url: resolved.prefix, extractedWindow: resolved.session.extractedWindow)
+        }
+    }
+
     public func updateWorkspaceSettings(workspaceID: String, update: (inout WorkspaceSettings) -> Void) throws {
         let (project, workspace) = try resolveWorkspace(id: workspaceID)
         guard var existing = try loadWorkspaceSettings(project: project, workspace: workspace) else {
