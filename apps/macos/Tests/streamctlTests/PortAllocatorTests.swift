@@ -71,4 +71,28 @@ final class PortAllocatorTests: XCTestCase {
         XCTAssertEqual(ports, [])
         XCTAssertTrue(try store.workspacePorts(workspaceID: workspace.id).isEmpty)
     }
+
+    // Tests reserveExistingPorts with stored ports calls PortReserver (covers the non-empty ports path at line 38).
+    func testReserveExistingPortsWithStoredPortsCallsPortReserver() throws {
+        let store = try makeTemporaryStore()
+        let projectDir = try makeTempDirectory().path
+        let project = makeProjectRecord(dir: projectDir)
+        try store.upsert(project: project)
+
+        let workspace = makeWorkspaceRecord(projectID: project.id, name: "alpha", dir: projectDir)
+        try store.upsert(workspace: workspace)
+
+        // Store ports directly so reserveExistingPorts finds a non-empty list.
+        try store.setWorkspacePorts(workspaceID: workspace.id, ports: [29001, 29002])
+
+        let allocator = PortAllocator(store: store)
+        // Should not throw and should call PortReserver.shared.reservePorts (non-empty ports path).
+        XCTAssertNoThrow(try allocator.reserveExistingPorts(workspaceID: workspace.id))
+
+        // Verify PortReserver tracks the workspace as reserved.
+        XCTAssertTrue(PortReserver.shared.reservedWorkspaceIDs().contains(workspace.id))
+
+        // Cleanup: release so other tests are not affected.
+        PortReserver.shared.releasePorts(workspaceID: workspace.id)
+    }
 }

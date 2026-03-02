@@ -627,6 +627,221 @@ final class StoreTests: XCTestCase {
         XCTAssertEqual(beta.processes.count, 1)
     }
 
+    // Tests windows query by window ID returns matching records by arranging representative inputs and asserting the expected result.
+    func testWindowsQueryByWindowID() throws {
+        let store = try makeTemporaryStore()
+        let project = makeProjectRecord(dir: try makeTempDirectory().path)
+        let workspaceA = makeWorkspaceRecord(projectID: project.id, name: "ws-a", dir: project.dir)
+        let workspaceB = makeWorkspaceRecord(projectID: project.id, name: "ws-b", dir: project.dir)
+        try store.upsert(project: project)
+        try store.upsert(workspace: workspaceA)
+        try store.upsert(workspace: workspaceB)
+
+        let windowID = 9999
+        try store.upsert(
+            window: WindowRecord(
+                id: UUID().uuidString, workspaceID: workspaceA.id, app: "iTerm2", title: "shell-a", windowID: windowID, role: "terminal",
+                orderIndex: 0, lastSeenAt: "2026-01-01T00:00:01Z"))
+        try store.upsert(
+            window: WindowRecord(
+                id: UUID().uuidString, workspaceID: workspaceB.id, app: "iTerm2", title: "shell-b", windowID: windowID, role: "terminal",
+                orderIndex: 0, lastSeenAt: "2026-01-01T00:00:02Z"))
+
+        let found = try store.windows(windowID: windowID)
+        XCTAssertEqual(found.count, 2)
+        // Results ordered by last_seen_at DESC
+        XCTAssertEqual(found[0].workspaceID, workspaceB.id)
+        XCTAssertEqual(found[1].workspaceID, workspaceA.id)
+
+        let notFound = try store.windows(windowID: 0)
+        XCTAssertTrue(notFound.isEmpty)
+    }
+
+    // Tests workspace browser sessions with extracted window round trips correctly by arranging representative inputs and asserting the expected result.
+    func testWorkspaceBrowserSessionsWithExtractedWindowRoundTrip() throws {
+        let store = try makeTemporaryStore()
+        let project = makeProjectRecord(dir: try makeTempDirectory().path)
+        let workspace = makeWorkspaceRecord(projectID: project.id, name: "feature", dir: project.dir)
+        try store.upsert(project: project)
+        try store.upsert(workspace: workspace)
+
+        let extractedWindow = ExtractedBrowserWindowMapping(targetURL: "http://localhost:3000", windowID: 501, isValid: true)
+        let sessions: [BrowserSession] = [
+            BrowserSession(name: "frontend", url: "http://localhost:3000", extractedWindow: extractedWindow),
+            BrowserSession(name: "backend", url: "http://localhost:4000", extractedWindow: nil),
+        ]
+        try store.setWorkspaceBrowserSessions(workspaceID: workspace.id, sessions: sessions)
+
+        let loaded = try store.workspaceBrowserSessions(workspaceID: workspace.id)
+        XCTAssertEqual(loaded.count, 2)
+        XCTAssertEqual(loaded[0].name, "frontend")
+        XCTAssertEqual(loaded[0].url, "http://localhost:3000")
+        XCTAssertNotNil(loaded[0].extractedWindow)
+        XCTAssertEqual(loaded[0].extractedWindow?.windowID, 501)
+        XCTAssertEqual(loaded[0].extractedWindow?.targetURL, "http://localhost:3000")
+        XCTAssertEqual(loaded[0].extractedWindow?.isValid, true)
+        XCTAssertEqual(loaded[1].name, "backend")
+        XCTAssertNil(loaded[1].extractedWindow)
+    }
+
+    // Tests agent window lookup by codex thread ID returns the matching record by arranging representative inputs and asserting the expected result.
+    func testAgentWindowLookupByCodexThreadID() throws {
+        let store = try makeTemporaryStore()
+        let project = makeProjectRecord(dir: try makeTempDirectory().path)
+        let workspace = makeWorkspaceRecord(projectID: project.id, name: "feature", dir: project.dir)
+        try store.upsert(project: project)
+        try store.upsert(workspace: workspace)
+
+        let threadID = "thread-abc"
+        let id = UUID().uuidString
+        try store.upsertAgentWindow(
+            AgentWindowRecord(
+                id: id, workspaceID: workspace.id, provider: .codex, label: nil, itermSessionID: nil, codexThreadID: threadID, windowID: nil,
+                yabaiWindowID: nil, status: .spinning, createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:00:00Z"))
+
+        let found = try store.agentWindow(workspaceID: workspace.id, codexThreadID: threadID)
+        XCTAssertEqual(found?.id, id)
+        XCTAssertEqual(found?.codexThreadID, threadID)
+        XCTAssertNil(try store.agentWindow(workspaceID: workspace.id, codexThreadID: "nonexistent"))
+    }
+
+    // Tests agentWindowsByProvider returns only records matching the provider by arranging representative inputs and asserting the expected result.
+    func testAgentWindowsByProviderFiltersCorrectly() throws {
+        let store = try makeTemporaryStore()
+        let project = makeProjectRecord(dir: try makeTempDirectory().path)
+        let workspace = makeWorkspaceRecord(projectID: project.id, name: "feature", dir: project.dir)
+        try store.upsert(project: project)
+        try store.upsert(workspace: workspace)
+
+        try store.upsertAgentWindow(
+            AgentWindowRecord(
+                id: UUID().uuidString, workspaceID: workspace.id, provider: .iterm2, label: "claude", itermSessionID: "session-a", codexThreadID: nil,
+                windowID: nil, yabaiWindowID: nil, status: .idle, createdAt: "2026-01-01T00:00:01Z", updatedAt: "2026-01-01T00:00:01Z"))
+        try store.upsertAgentWindow(
+            AgentWindowRecord(
+                id: UUID().uuidString, workspaceID: workspace.id, provider: .codex, label: "codex", itermSessionID: nil, codexThreadID: "thread-1",
+                windowID: nil, yabaiWindowID: nil, status: .spinning, createdAt: "2026-01-01T00:00:02Z", updatedAt: "2026-01-01T00:00:02Z"))
+
+        let itermWindows = try store.agentWindowsByProvider(workspaceID: workspace.id, provider: .iterm2)
+        XCTAssertEqual(itermWindows.count, 1)
+        XCTAssertEqual(itermWindows[0].provider, .iterm2)
+
+        let codexWindows = try store.agentWindowsByProvider(workspaceID: workspace.id, provider: .codex)
+        XCTAssertEqual(codexWindows.count, 1)
+        XCTAssertEqual(codexWindows[0].provider, .codex)
+    }
+
+    // Tests deleteAgentWindow removes a single record by arranging representative inputs and asserting the expected result.
+    func testDeleteAgentWindowRemovesSingleRecord() throws {
+        let store = try makeTemporaryStore()
+        let project = makeProjectRecord(dir: try makeTempDirectory().path)
+        let workspace = makeWorkspaceRecord(projectID: project.id, name: "feature", dir: project.dir)
+        try store.upsert(project: project)
+        try store.upsert(workspace: workspace)
+
+        let idA = UUID().uuidString
+        let idB = UUID().uuidString
+        try store.upsertAgentWindow(
+            AgentWindowRecord(
+                id: idA, workspaceID: workspace.id, provider: .iterm2, label: nil, itermSessionID: "session-a", codexThreadID: nil, windowID: nil,
+                yabaiWindowID: nil, status: .idle, createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:00:00Z"))
+        try store.upsertAgentWindow(
+            AgentWindowRecord(
+                id: idB, workspaceID: workspace.id, provider: .iterm2, label: nil, itermSessionID: "session-b", codexThreadID: nil, windowID: nil,
+                yabaiWindowID: nil, status: .idle, createdAt: "2026-01-01T00:00:01Z", updatedAt: "2026-01-01T00:00:01Z"))
+
+        try store.deleteAgentWindow(id: idA)
+        let remaining = try store.agentWindows(workspaceID: workspace.id)
+        XCTAssertEqual(remaining.count, 1)
+        XCTAssertEqual(remaining[0].id, idB)
+    }
+
+    // Tests deleteAgentWindowsByProvider removes only records for the given provider by arranging representative inputs and asserting the expected result.
+    func testDeleteAgentWindowsByProviderRemovesOnlyMatchingProvider() throws {
+        let store = try makeTemporaryStore()
+        let project = makeProjectRecord(dir: try makeTempDirectory().path)
+        let workspace = makeWorkspaceRecord(projectID: project.id, name: "feature", dir: project.dir)
+        try store.upsert(project: project)
+        try store.upsert(workspace: workspace)
+
+        try store.upsertAgentWindow(
+            AgentWindowRecord(
+                id: UUID().uuidString, workspaceID: workspace.id, provider: .iterm2, label: nil, itermSessionID: "s1", codexThreadID: nil,
+                windowID: nil, yabaiWindowID: nil, status: .idle, createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:00:00Z"))
+        try store.upsertAgentWindow(
+            AgentWindowRecord(
+                id: UUID().uuidString, workspaceID: workspace.id, provider: .codex, label: nil, itermSessionID: nil, codexThreadID: "t1",
+                windowID: nil, yabaiWindowID: nil, status: .spinning, createdAt: "2026-01-01T00:00:01Z", updatedAt: "2026-01-01T00:00:01Z"))
+
+        try store.deleteAgentWindowsByProvider(workspaceID: workspace.id, provider: .iterm2)
+        let all = try store.agentWindows(workspaceID: workspace.id)
+        XCTAssertEqual(all.count, 1)
+        XCTAssertEqual(all[0].provider, .codex)
+    }
+
+    // Tests updateAgentWindowStatus persists the new status by arranging representative inputs and asserting the expected result.
+    func testUpdateAgentWindowStatusPersistsNewStatus() throws {
+        let store = try makeTemporaryStore()
+        let project = makeProjectRecord(dir: try makeTempDirectory().path)
+        let workspace = makeWorkspaceRecord(projectID: project.id, name: "feature", dir: project.dir)
+        try store.upsert(project: project)
+        try store.upsert(workspace: workspace)
+
+        let id = UUID().uuidString
+        try store.upsertAgentWindow(
+            AgentWindowRecord(
+                id: id, workspaceID: workspace.id, provider: .iterm2, label: nil, itermSessionID: "s1", codexThreadID: nil, windowID: nil,
+                yabaiWindowID: nil, status: .idle, createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:00:00Z"))
+
+        try store.updateAgentWindowStatus(id: id, status: .done, updatedAt: "2026-01-01T00:01:00Z")
+        let updated = try store.agentWindows(workspaceID: workspace.id).first
+        XCTAssertEqual(updated?.status, .done)
+    }
+
+    // Tests workspaceSetupState persists all fields by arranging representative inputs and asserting the expected result.
+    func testWorkspaceSetupStateRoundTrip() throws {
+        let store = try makeTemporaryStore()
+        let project = makeProjectRecord(dir: try makeTempDirectory().path)
+        let workspace = makeWorkspaceRecord(projectID: project.id, name: "feature", dir: project.dir)
+        try store.upsert(project: project)
+        try store.upsert(workspace: workspace)
+
+        // No setup state yet.
+        XCTAssertNil(try store.workspaceSetupState(workspaceID: workspace.id))
+
+        try store.setWorkspaceSetupState(
+            workspaceID: workspace.id, status: .running, errorMessage: nil, startedAt: "2026-01-01T00:00:00Z", finishedAt: nil)
+        let running = try store.workspaceSetupState(workspaceID: workspace.id)
+        XCTAssertEqual(running?.status, .running)
+        XCTAssertNil(running?.errorMessage)
+
+        try store.setWorkspaceSetupState(
+            workspaceID: workspace.id, status: .failed, errorMessage: "setup failed", startedAt: "2026-01-01T00:00:00Z",
+            finishedAt: "2026-01-01T00:00:05Z")
+        let failed = try store.workspaceSetupState(workspaceID: workspace.id)
+        XCTAssertEqual(failed?.status, .failed)
+        XCTAssertEqual(failed?.errorMessage, "setup failed")
+        XCTAssertEqual(failed?.finishedAt, "2026-01-01T00:00:05Z")
+    }
+
+    // Tests markStatusResultsAsFailed updates all results for a process by arranging representative inputs and asserting the expected result.
+    func testMarkStatusResultsAsFailedUpdatesAllResults() throws {
+        let store = try makeTemporaryStore()
+        let project = makeProjectRecord(dir: try makeTempDirectory().path)
+        let workspace = makeWorkspaceRecord(projectID: project.id, name: "feature", dir: project.dir)
+        try store.upsert(project: project)
+        try store.upsert(workspace: workspace)
+
+        let processID = UUID().uuidString
+        try store.upsert(statusResult: StatusResult(processID: processID, checkName: "health", status: .passed, message: "ok", lastRunAt: "now"))
+        try store.upsert(statusResult: StatusResult(processID: processID, checkName: "ready", status: .passed, message: "ready", lastRunAt: "now"))
+
+        try store.markStatusResultsAsFailed(processID: processID)
+        let results = try store.statusResults(processID: processID)
+        XCTAssertTrue(results.allSatisfy { $0.status == .failed })
+        XCTAssertTrue(results.allSatisfy { $0.message == "Process exited" })
+    }
+
     // Tests workspace lookup by directory by arranging representative inputs and asserting the expected result.
     func testWorkspaceLookupByDirectory() throws {
         let store = try makeTemporaryStore()
@@ -652,6 +867,55 @@ final class StoreTests: XCTestCase {
         XCTAssertEqual(found2?.name, "feature-2")
         let notFound = try store.workspace(dir: "/nonexistent/path")
         XCTAssertNil(notFound)
+    }
+
+    // Tests updateWorkspaceBranch persists the new branch value by arranging representative inputs and asserting the expected result.
+    func testUpdateWorkspaceBranchPersists() throws {
+        let store = try makeTemporaryStore()
+        let project = makeProjectRecord(dir: try makeTempDirectory().path)
+        try store.upsert(project: project)
+        let workspace = makeWorkspaceRecord(projectID: project.id, name: "feature", dir: try makeTempDirectory().path)
+        try store.upsert(workspace: workspace)
+
+        try store.updateWorkspaceBranch(id: workspace.id, branch: "feature/new-name")
+        XCTAssertEqual(try store.workspace(id: workspace.id)?.branch, "feature/new-name")
+
+        try store.updateWorkspaceBranch(id: workspace.id, branch: nil)
+        let afterNil = try store.workspace(id: workspace.id)?.branch
+        // Nil branch is stored as empty string and read back as nil or empty.
+        XCTAssertTrue(afterNil == nil || afterNil?.isEmpty == true)
+    }
+
+    // Tests updateWorkspaceDirname persists the new dirname value by arranging representative inputs and asserting the expected result.
+    func testUpdateWorkspaceDirnamePersists() throws {
+        let store = try makeTemporaryStore()
+        let project = makeProjectRecord(dir: try makeTempDirectory().path)
+        try store.upsert(project: project)
+        let workspace = makeWorkspaceRecord(projectID: project.id, name: "feature", dir: try makeTempDirectory().path)
+        try store.upsert(workspace: workspace)
+
+        try store.updateWorkspaceDirname(id: workspace.id, dirname: "new-feature-dir")
+        XCTAssertEqual(try store.workspace(id: workspace.id)?.dirname, "new-feature-dir")
+    }
+
+    // Tests appConfig falls back to the default port range when stored values are invalid (end <= start).
+    func testAppConfigInvalidPortRangeFallsBackToDefault() throws {
+        let store = try makeTemporaryStore()
+        // Write an invalid range where end < start; appConfig should substitute the default.
+        try store.setAppConfig(AppConfig(portRange: PortRange(start: 30000, end: 20000)))
+        let config = try store.appConfig()
+        XCTAssertEqual(config.portRange.start, 20000)
+        XCTAssertEqual(config.portRange.end, 30000)
+    }
+
+    // Tests setAppConfig round-trips a valid port range and editor preference through the settings store.
+    func testSetAppConfigRoundTripsPortRangeAndEditor() throws {
+        let store = try makeTemporaryStore()
+        try store.setAppConfig(AppConfig(editor: .cursor, portRange: PortRange(start: 10000, end: 15000)))
+        let config = try store.appConfig()
+        XCTAssertEqual(config.editor, .cursor)
+        XCTAssertEqual(config.portRange.start, 10000)
+        XCTAssertEqual(config.portRange.end, 15000)
     }
 
     private func runSQLiteExec(dbURL: URL, sql: String) throws {

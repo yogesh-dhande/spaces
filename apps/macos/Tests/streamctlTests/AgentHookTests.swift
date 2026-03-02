@@ -277,6 +277,27 @@ final class AgentHookTests: XCTestCase {
         XCTAssertEqual(allRecords[0].status, .done)
     }
 
+    // Tests updateAgentWindowStatus with a specific codex thread ID matches and updates the existing record by arranging representative inputs and asserting the expected result.
+    func testUpdateAgentWindowStatusWithCodexThreadIDUpdatesMatchingRecord() throws {
+        let store = try makeTemporaryStore()
+        let orchestrator = MuxyOrchestrator(store: store)
+        let (_, workspace) = try makeProjectAndWorkspace(store: store)
+
+        // Register a codex agent window with a specific thread ID.
+        try orchestrator.registerAgentWindow(workspaceID: workspace.id, provider: .codex, codexThreadID: "thread-xyz", status: .idle)
+
+        // updateAgentWindowStatus with codexThreadID takes the "else if provider == .codex, let threadID" branch.
+        let updated = try orchestrator.updateAgentWindowStatus(
+            workspaceID: workspace.id, provider: .codex, codexThreadID: "thread-xyz", status: .spinning)
+
+        XCTAssertEqual(updated.status, .spinning)
+        XCTAssertEqual(updated.codexThreadID, "thread-xyz")
+
+        let allRecords = try store.agentWindows(workspaceID: workspace.id)
+        XCTAssertEqual(allRecords.count, 1)
+        XCTAssertEqual(allRecords[0].status, .spinning)
+    }
+
     // MARK: - Helpers
 
     private func makeProjectAndWorkspace(store: SQLiteStore, projectName: String = "TestProject", workspaceName: String = "default") throws -> (

@@ -339,6 +339,25 @@ final class GitClientTests: XCTestCase {
         XCTAssertFalse(client.branchExists(path: destination.path, branch: "delete-me"))
     }
 
+    // Tests createWorktree throws when target branch does not exist locally or remotely by arranging representative inputs and asserting the expected result.
+    func testCreateWorktreeThrowsWhenTargetBranchNotFound() throws {
+        let root = try makeTempDirectory()
+        let repo = root.appendingPathComponent("repo", isDirectory: true)
+        try FileManager.default.createDirectory(at: repo, withIntermediateDirectories: true)
+        try initializeGitRepository(at: repo, initialBranch: "main")
+
+        let worktree = root.appendingPathComponent("nonexistent-worktree", isDirectory: true)
+        let client = GitClient()
+        // "nonexistent-branch" does not exist locally or remotely.
+        XCTAssertThrowsError(
+            try client.createWorktree(
+                path: repo.path, worktreePath: worktree.path, branch: "new-feature", targetBranch: "nonexistent-branch",
+                allowRemoteBranchLookup: false)
+        ) { error in
+            guard case MuxyError.invalidArgument = error else { return XCTFail("Expected invalidArgument, got \(error)") }
+        }
+    }
+
     private func initializeGitRepository(at directory: URL, initialBranch: String) throws {
         try runGit(["init", "-b", initialBranch], cwd: directory.path)
         let readme = directory.appendingPathComponent("README.md")
@@ -416,5 +435,115 @@ final class GitClientTests: XCTestCase {
             return
         }
         XCTAssertLessThanOrEqual(abs(lhs.timeIntervalSince(rhs)), tolerance, file: file, line: line)
+    }
+
+    // Tests removeWorktree throws a gitCommandFailed error when the path does not exist by arranging representative inputs and asserting the expected result.
+    func testRemoveWorktreeThrowsWhenPathIsInvalid() throws {
+        let repo = try makeTempDirectory()
+        try initializeGitRepository(at: repo, initialBranch: "main")
+        let client = GitClient()
+
+        // Attempt to remove a worktree path that was never created; git will fail with a non-zero exit code.
+        XCTAssertThrowsError(
+            try client.removeWorktree(path: repo.path, worktreePath: "/nonexistent/path/\(UUID().uuidString)")
+        ) { error in
+            guard case MuxyError.gitCommandFailed = error else { return XCTFail("Expected gitCommandFailed, got \(error)") }
+        }
+    }
+
+    // Tests WorktreeInfo.branchName returns nil when branch is nil by arranging representative inputs and asserting the expected result.
+    func testWorktreeInfoBranchNameReturnsNilWhenBranchIsNil() {
+        let info = WorktreeInfo(path: "/tmp/repo", head: "abc123", branch: nil)
+        XCTAssertNil(info.branchName)
+    }
+
+    // Tests WorktreeInfo.branchName returns the raw branch string when it contains no slash separator by arranging representative inputs and asserting the expected result.
+    func testWorktreeInfoBranchNameReturnsRawStringWhenNoSlashPresent() {
+        let info = WorktreeInfo(path: "/tmp/repo", head: "abc123", branch: "")
+        XCTAssertEqual(info.branchName, "")
+    }
+
+    // Tests trackedFileActivity with a non-existent base branch returns zero ahead/behind counts and nil comparedBaseBranch.
+    func testTrackedFileActivityWithNonExistentBranchReturnsZeroAheadBehind() throws {
+        let root = try makeTempDirectory()
+        let repo = root.appendingPathComponent("repo", isDirectory: true)
+        try FileManager.default.createDirectory(at: repo, withIntermediateDirectories: true)
+        try initializeGitRepository(at: repo, initialBranch: "main")
+        // "no-such-branch-xyz" does not exist locally or remotely → resolveComparisonBaseRef returns nil.
+        let activity = GitClient().trackedFileActivity(path: repo.path, baseBranch: "no-such-branch-xyz")
+        XCTAssertNil(activity.comparedBaseBranch)
+        XCTAssertEqual(activity.aheadCount, 0)
+        XCTAssertEqual(activity.behindCount, 0)
+    }
+
+    // Tests trackedFileActivity uses a remote tracking branch when the branch exists only on the remote.
+    func testTrackedFileActivityUsesRemoteTrackingBranchWhenLocalBranchMissing() throws {
+        let fixture = try makeRemoteFixture()
+        // fixture.clone has origin/remote-feature as a remote tracking branch but no local "remote-feature" branch.
+        let activity = GitClient().trackedFileActivity(path: fixture.clone.path, baseBranch: "remote-feature")
+        // resolveComparisonBaseRef should find origin/remote-feature and return it.
+        XCTAssertEqual(activity.comparedBaseBranch, "remote-feature")
+    }
+
+    // Tests renameCurrentBranch throws invalidArgument when an empty branch name is provided.
+    func testRenameCurrentBranchThrowsForEmptyName() throws {
+        let repo = try makeTempDirectory()
+        try initializeGitRepository(at: repo, initialBranch: "main")
+        let client = GitClient()
+
+        XCTAssertThrowsError(try client.renameCurrentBranch(path: repo.path, to: "")) { error in
+            guard case MuxyError.invalidArgument = error else {
+                return XCTFail("Expected invalidArgument, got \(error)")
+            }
+        }
+        XCTAssertThrowsError(try client.renameCurrentBranch(path: repo.path, to: "   ")) { error in
+            guard case MuxyError.invalidArgument = error else {
+                return XCTFail("Expected invalidArgument, got \(error)")
+            }
+        }
+    }
+
+    // Tests renameCurrentBranch is a no-op when the new name matches the current branch.
+    func testRenameCurrentBranchIsNoOpWhenNameIsUnchanged() throws {
+        let repo = try makeTempDirectory()
+        try initializeGitRepository(at: repo, initialBranch: "main")
+        let client = GitClient()
+
+        // Renaming "main" to "main" should succeed without throwing.
+        XCTAssertNoThrow(try client.renameCurrentBranch(path: repo.path, to: "main"))
+
+        // Verify the branch name is still "main".
+        let output = try runGit(["rev-parse", "--abbrev-ref", "HEAD"], cwd: repo.path)
+        XCTAssertEqual(output.trimmingCharacters(in: .whitespacesAndNewlines), "main")
+    }
+
+    // Tests latestTrackedFileModificationDate does not update when a later-encountered file is older than the current latest.
+    // This covers the false branch of `if modificationDate > existingLatestDate` in latestTrackedFileModificationDate.
+    func testTrackedFileActivityLatestDateIsNotUpdatedByOlderSecondFile() throws {
+        let root = try makeTempDirectory()
+        let repo = root.appending(path: "repo", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: repo, withIntermediateDirectories: true)
+        try initializeGitRepository(at: repo, initialBranch: "main")
+
+        // Add a second tracked file committed after the first.
+        let secondFile = repo.appendingPathComponent("zzz.md")
+        try "second".write(to: secondFile, atomically: true, encoding: .utf8)
+        try runGit(["add", "zzz.md"], cwd: repo.path)
+        try runGit(["-c", "user.name=muxy-test", "-c", "user.email=test@example.com", "commit", "-m", "add zzz"], cwd: repo.path)
+
+        // Set modification dates: README.md (alphabetically first) gets a NEWER date,
+        // zzz.md (alphabetically second) gets an OLDER date.
+        // ls-files returns alphabetical order: README.md first, zzz.md second.
+        let readmeFile = repo.appendingPathComponent("README.md")
+        let newerDate = Date(timeIntervalSinceNow: -100)
+        let olderDate = Date(timeIntervalSinceNow: -500)
+        try setModificationDate(newerDate, for: readmeFile)
+        try setModificationDate(olderDate, for: secondFile)
+
+        let activity = GitClient().trackedFileActivity(path: repo.path)
+
+        // latestTrackedFileModificationDate should be the newer date from README.md.
+        // When zzz.md is processed: olderDate > newerDate → false → latestDate stays as newerDate.
+        assertEqualDate(activity.latestTrackedFileModificationDate, newerDate)
     }
 }

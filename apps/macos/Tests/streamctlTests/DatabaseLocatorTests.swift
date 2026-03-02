@@ -34,4 +34,10 @@ final class DatabaseLocatorTests: XCTestCase {
         let second = try DatabaseLocator.defaultPath(homeDirectoryURL: tempHomeURL)
         XCTAssertEqual(first, second)
     }
+
+    // Tests the public defaultPath() overload succeeds and returns a path ending in muxy.db.
+    func testPublicDefaultPathReturnsValidPath() throws {
+        let path = try DatabaseLocator.defaultPath()
+        XCTAssertTrue(path.hasSuffix("muxy.db"), "Expected path to end with muxy.db, got \(path)")
+    }
 }
