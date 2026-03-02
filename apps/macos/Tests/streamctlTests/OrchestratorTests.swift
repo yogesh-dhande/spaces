@@ -969,7 +969,7 @@ final class OrchestratorTests: XCTestCase {
     }
 
     // Tests default workspace name cannot be changed by arranging representative inputs and asserting the expected result.
-    func testUpdateWorkspaceNameRejectsDefaultWorkspaceRename() throws {
+    func testUpdateWorkspaceNameAllowsDefaultWorkspaceRename() throws {
         let root = try makeTempDirectory()
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
@@ -979,9 +979,10 @@ final class OrchestratorTests: XCTestCase {
         let project = try orchestrator.addProject(dir: projectDir.path)
         let defaultWorkspace = try XCTUnwrap(store.workspace(projectID: project.id, name: "default"))
 
-        XCTAssertThrowsError(try orchestrator.updateWorkspaceName(workspaceID: defaultWorkspace.id, name: "renamed-default")) { error in
-            XCTAssertTrue(error.localizedDescription.contains("Default workspace name cannot be changed"))
-        }
+        XCTAssertNoThrow(try orchestrator.updateWorkspaceName(workspaceID: defaultWorkspace.id, name: "renamed-default"))
+        let updated = try XCTUnwrap(store.workspace(id: defaultWorkspace.id))
+        XCTAssertEqual(updated.title, "renamed-default")
+        XCTAssertTrue(updated.isDefault)
     }
 
     // Tests workspace metadata update can change title, branch, directory name, and tooltip by arranging representative inputs and asserting the expected result.

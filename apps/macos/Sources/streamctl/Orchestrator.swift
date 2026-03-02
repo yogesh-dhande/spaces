@@ -189,9 +189,6 @@ public final class MuxyOrchestrator {
         let (project, workspace) = try resolveWorkspace(id: workspaceID)
         let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedName.isEmpty else { throw MuxyError.invalidArgument(message: "Workspace name is required.") }
-        guard !workspace.isDefault || trimmedName == workspace.name else {
-            throw MuxyError.invalidArgument(message: "Default workspace name cannot be changed.")
-        }
         if trimmedName == workspace.name { return }
         if let existing = try store.workspace(projectID: workspace.projectID, name: trimmedName), existing.id != workspace.id {
             throw MuxyError.workspaceAlreadyExists(project: project.name, workspace: trimmedName)

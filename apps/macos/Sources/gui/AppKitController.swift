@@ -2245,24 +2245,20 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         headerRow.addArrangedSubview(titleCancelButton)
         headerRow.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
 
-        if !workspace.isDefault {
-            let tag = UUID().uuidString.hashValue
-            let refs = InlineWorkspaceDetailFieldRefs(
-                workspaceID: workspace.id, field: .title, valueLabel: workspaceTitleLabel, textField: workspaceTitleField,
-                saveButton: titleSaveButton, cancelButton: titleCancelButton, originalValue: workspace.name, isEditing: false)
-            inlineWorkspaceFieldRefsByTag[tag] = refs
-            inlineWorkspaceFieldTagByObjectID[ObjectIdentifier(workspaceTitleField)] = tag
-            inlineWorkspaceLabelTagByObjectID[ObjectIdentifier(workspaceTitleLabel)] = tag
-            titleSaveButton.tag = tag
-            titleCancelButton.tag = tag
+        let tag = UUID().uuidString.hashValue
+        let refs = InlineWorkspaceDetailFieldRefs(
+            workspaceID: workspace.id, field: .title, valueLabel: workspaceTitleLabel, textField: workspaceTitleField,
+            saveButton: titleSaveButton, cancelButton: titleCancelButton, originalValue: workspace.name, isEditing: false)
+        inlineWorkspaceFieldRefsByTag[tag] = refs
+        inlineWorkspaceFieldTagByObjectID[ObjectIdentifier(workspaceTitleField)] = tag
+        inlineWorkspaceLabelTagByObjectID[ObjectIdentifier(workspaceTitleLabel)] = tag
+        titleSaveButton.tag = tag
+        titleCancelButton.tag = tag
 
-            let titleDoubleClick = NSClickGestureRecognizer(target: self, action: #selector(beginInlineWorkspaceMetadataEdit(_:)))
-            titleDoubleClick.numberOfClicksRequired = 2
-            workspaceTitleLabel.addGestureRecognizer(titleDoubleClick)
-            workspaceTitleLabel.toolTip = "Double-click to edit title."
-        } else {
-            workspaceTitleLabel.toolTip = "Default workspace title is fixed."
-        }
+        let titleDoubleClick = NSClickGestureRecognizer(target: self, action: #selector(beginInlineWorkspaceMetadataEdit(_:)))
+        titleDoubleClick.numberOfClicksRequired = 2
+        workspaceTitleLabel.addGestureRecognizer(titleDoubleClick)
+        workspaceTitleLabel.toolTip = "Double-click to edit title."
 
         // --- Metadata rows ---
         var metadataRows: [NSView] = []
