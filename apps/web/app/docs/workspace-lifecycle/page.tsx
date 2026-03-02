@@ -44,7 +44,7 @@ export default function WorkspaceLifecycleDocsPage() {
           running, use restart instead.
         </p>
         <ul className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
-          <li>• Starts workspace processes in dedicated terminal windows.</li>
+          <li>• Starts workspace processes in iTerm2 (one tab/session per process in a shared window when possible).</li>
           <li>• Opens browser sessions and tracks matching Chrome tabs by URL prefix.</li>
           <li>• Captures workspace windows so they can be focused later by shortcut.</li>
         </ul>
@@ -70,9 +70,9 @@ export default function WorkspaceLifecycleDocsPage() {
           <li>• Tracked workspace windows are closed (terminals and browsers).</li>
         </ul>
         <p className="mt-3 text-sm leading-7 text-foreground-soft">
-          Use <code>mx workspace up</code> for idempotent automation: it launches stopped workspaces and
-          otherwise does nothing by default. Add <code>--force-restart</code> to force stop then launch when
-          runtime state is already present.
+          Use <code>mx workspace up</code> for idempotent automation: it launches stopped workspaces and,
+          when already running, restarts exited processes by default. Add <code>--force-restart</code> to
+          force stop then launch when runtime state is already present.
         </p>
       </article>
 

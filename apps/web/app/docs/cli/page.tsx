@@ -100,7 +100,7 @@ mx --version
         <CodeBlock>{`# Register an existing local directory
 mx project add --dir /path/to/repo
 
-# Clone a remote git repo into ~/muxy/projects/ and register it
+# Clone a remote git repo into ~/muxy/repos/ and register it
 mx project add --git-url https://github.com/owner/repo.git`}</CodeBlock>
         <p className="mt-2 text-sm leading-7 text-foreground-soft">
           Muxy detects whether the directory is a Git repo and creates a non-archivable default
@@ -122,7 +122,7 @@ mx project add --git-url https://github.com/owner/repo.git`}</CodeBlock>
         <p className="mt-2 text-sm leading-7 text-foreground-soft">
           Removes Muxy state, force-removes git worktrees, and deletes workspace directories under{" "}
           <Cmd>~/muxy/workspaces</Cmd>. If the project was cloned via{" "}
-          <Cmd>--git-url</Cmd>, its clone under <Cmd>~/muxy/projects</Cmd> is also deleted.
+          <Cmd>--git-url</Cmd>, its clone under <Cmd>~/muxy/repos</Cmd> is also deleted.
         </p>
       </article>
 
@@ -310,9 +310,9 @@ mx workspace launch
 # Launch from specific workspace directory
 mx workspace launch --dir /path/to/workspace`}</CodeBlock>
         <p className="mt-2 text-sm leading-7 text-foreground-soft">
-          Starts configured processes in iTerm2, opens browser sessions in Chrome, and opens the
-          preferred editor. Only valid for stopped workspaces. When run without arguments, uses
-          the current directory to identify the workspace.
+          Starts configured processes in iTerm2 and opens browser sessions in Chrome. Only valid
+          for stopped workspaces. When run without arguments, uses the current directory to
+          identify the workspace.
         </p>
 
         <h3 className="mt-5 text-base font-semibold">Stop a workspace</h3>
@@ -345,10 +345,11 @@ mx workspace up --dir /path/to/workspace --force-restart
 # Ensure running, focus, and show tooltip overlay
 mx workspace up --dir /path/to/workspace --tooltip "Reviewing auth callback"`}</CodeBlock>
         <p className="mt-2 text-sm leading-7 text-foreground-soft">
-          Idempotent run command: launches when stopped. If already running (or runtime indicators exist),
-          it does nothing by default; pass <Cmd>--force-restart</Cmd> to run stop then launch. In all cases,
-          Muxy focuses the workspace once running. With <Cmd>--tooltip [text]</Cmd>, Muxy shows the tooltip
-          overlay after focus and updates tooltip text when text is provided.
+          Idempotent run command: launches when stopped. If already running (or runtime indicators
+          exist), it restarts exited processes by default; pass <Cmd>--force-restart</Cmd> to run
+          stop then launch. Use <Cmd>--focus</Cmd> when you want to bring the workspace to the
+          foreground after ensuring runtime. With <Cmd>--tooltip [text]</Cmd>, Muxy shows the
+          tooltip overlay and updates tooltip text when text is provided.
         </p>
 
         <h3 className="mt-5 text-base font-semibold">Archive a workspace</h3>
@@ -388,21 +389,27 @@ mx workspace focus --dir /path/to/workspace --window 2`}</CodeBlock>
 mx settings get --gui-hotkey
 mx settings get --gui-next-shortcut
 mx settings get --gui-prev-shortcut
-mx settings get --gui-show-shortcut
+mx settings get --iterm-focus-pulse-color
+mx settings get --iterm-focus-pulse-enabled
 
 # Set
 mx settings set --gui-hotkey cmd+shift+m
 mx settings set --gui-next-shortcut ctrl+tab
 mx settings set --gui-prev-shortcut ctrl+shift+tab
+mx settings set --iterm-focus-pulse-color 46,41,14
+mx settings set --iterm-focus-pulse-enabled 0
 
 # Reset to default
 mx settings reset --gui-hotkey
-mx settings reset --gui-next-shortcut`}</CodeBlock>
+mx settings reset --gui-next-shortcut
+mx settings reset --iterm-focus-pulse-color
+mx settings reset --iterm-focus-pulse-enabled`}</CodeBlock>
         <p className="mt-3 text-sm leading-7 text-foreground-soft">
           Additional keys: <Cmd>--gui-add-project-shortcut</Cmd>,{" "}
           <Cmd>--gui-add-workspace-shortcut</Cmd>, <Cmd>--gui-reload-shortcut</Cmd>,{" "}
           <Cmd>--gui-open-editor-shortcut</Cmd>, <Cmd>--gui-open-terminal-shortcut</Cmd>,{" "}
-          <Cmd>--gui-open-finder-shortcut</Cmd>, <Cmd>--gui-open-settings-shortcut</Cmd>.
+          <Cmd>--gui-open-finder-shortcut</Cmd>, <Cmd>--gui-open-settings-shortcut</Cmd>,{" "}
+          <Cmd>--iterm-focus-pulse-color</Cmd>, and <Cmd>--iterm-focus-pulse-enabled</Cmd>.
         </p>
       </article>
 

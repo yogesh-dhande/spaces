@@ -1,11 +1,11 @@
 # Architecture
 
 ## Overview
-`muxy` is a macOS Swift app for stream-based workspace orchestration. A stream is a captured set of windows tied to a workspace. SQLite is the single source of truth for all data including global preferences (`editor`, `port_range`).
+`muxy` is a macOS Swift app for stream-based workspace orchestration. A stream is a captured set of windows tied to a workspace. SQLite is the single source of truth for all data including global preferences (`editor`, `port_range`, iTerm focus pulse settings, GUI shortcuts).
 
 Key invariants:
 - SQLite is the single source of truth for all model data and global preferences.
-- Global preferences (`editor`, `port_range`) are stored in the SQLite `settings` table.
+- Global preferences (`editor`, `port_range`, `iterm_focus_pulse_color`, `iterm_focus_pulse_enabled`, GUI shortcut overrides) are stored in the SQLite `settings` table.
 - Workspace settings are stored in SQLite and seeded from project templates; per-workspace overrides are preserved.
 - SQLite stores runtime state; schema is versioned and migrated in place with additive/non-destructive changes (currently v6).
 - yabai is the source of truth for window IDs and generic cross-app window focus.
@@ -111,11 +111,12 @@ GUI interaction notes:
 
 ## Data Model
 Global preferences (stored in SQLite `settings` table):
-- Keys: `app_editor` (optional), `app_port_range_start`, `app_port_range_end`, `iterm_focus_pulse_color`.
+- Keys: `app_editor` (optional), `app_port_range_start`, `app_port_range_end`, `iterm_focus_pulse_color`, `iterm_focus_pulse_enabled`.
 - Default port range: 20000–30000.
-- `iterm_focus_pulse_color`: RGB string `"r,g,b"` (0–255 per channel) used as the pulse color when an iTerm2 window is focused. Default: `"255,195,0"` (amber, ≈ AppleScript `{65535, 50000, 0}`). Editable via the GUI Settings view color well or `mx settings set --iterm-focus-pulse-color <r,g,b>`.
+- `iterm_focus_pulse_color`: RGB string `"r,g,b"` (0–255 per channel) used as the pulse color when an iTerm2 window is focused. Default: `"46,41,14"`. Editable via the GUI Settings view color well or `mx settings set --iterm-focus-pulse-color <r,g,b>`.
+- `iterm_focus_pulse_enabled`: `"1"` or `"0"` toggle for enabling/disabling pulse-on-focus behavior. Default: `"1"`.
 - When an iTerm2 terminal window is successfully focused, `Iterm2Adapter.pulseBackground` briefly sets the session's background color to the configured pulse color then restores it (via AppleScript `delay 0.3`), dispatched as a detached background task so it does not block the focus call.
-- The GUI Settings view and `mx settings set` write `editor` and `port_range`.
+- The GUI Settings view and `mx settings set` write `editor`, `port_range`, and iTerm focus pulse settings.
 Project data (stored in SQLite):
 - Fields: `dir`, `setup_script`, `stop_script`, `ports` (named port definitions), `processes`, `status_checks`, `browser_sessions`.
 - Browser sessions include optional `name` and required URL-prefix matching at runtime.
@@ -402,7 +403,7 @@ Run/recovery semantics:
 - `launchProcesses` opens the first workspace process in a new iTerm2 window, then opens additional workspace processes as tabs in that same iTerm2 window (capturing/persisting per-session metadata for focus/close).
 - Launch waits for setup completion when setup state is `pending`/`running`; if setup state is `failed`, launch fails with the setup error message.
 - `restartWorkspace` is the explicit recovery path and always performs stop then launch for the same workspace.
-- `upWorkspace` is idempotent "ensure running": launch when stopped; if runtime is already present, either no-op (default) or restart when `restartIfRunning` is true.
+- `upWorkspace` is idempotent "ensure running": launch when stopped; if runtime is already present, restart any exited processes by default, or run full stop+launch when `restartIfRunning` is true.
 - Workspace lifecycle actions are guarded by a per-workspace in-flight lock so overlapping launch/stop/restart/archive actions cannot run concurrently for the same workspace.
 - GUI run controls are state-aware: show `Launch` when stopped and `Restart` when running.
 - AppKit launch/restart/stop/archive button handlers dispatch lifecycle work in detached background tasks (fresh orchestrator/store instances) so long-running automation does not block the UI event loop.

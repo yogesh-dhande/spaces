@@ -59,12 +59,6 @@ export const docsPageLinks: DocsPageLink[] = [
       "Get instant passed/failed health feedback on running processes before you switch context.",
   },
   {
-    href: "/docs/dashboard",
-    title: "Dashboard",
-    summary:
-      "See failing processes/checks from running workspaces plus waiting/done coding agents, even when a workspace is stopped.",
-  },
-  {
     href: "/docs/shortcuts",
     title: "Keyboard Shortcuts",
     summary:

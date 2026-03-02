@@ -36,12 +36,13 @@
             - Workspace settings are seeded from project templates on creation or when missing.
             - Schema changes use additive, non-destructive migrations; existing workspace/project data must be preserved.
             - Additive migrations must backfill newly required status-check action columns (for example `on_fail`) with safe defaults for existing rows.
-        - Global preferences (`editor`, `port_range`, `iterm_focus_pulse_color`) are stored in the SQLite `settings` table.
+        - Global preferences (`editor`, `port_range`, `iterm_focus_pulse_color`, `iterm_focus_pulse_enabled`) are stored in the SQLite `settings` table.
             - Old YAML files (`~/.muxy/config.yaml`) with `editor`/`port_range`/`projects:` are automatically migrated to SQLite once on first launch. The YAML file is no longer written or read after migration.
     - User preferences
-        - editor: enum - None, VS Code, Cursor, Windsurf, Vim - if specified, used to open an editor at workspace launch
+        - editor: enum - None, VS Code, Cursor, Windsurf, Vim - if specified, used by Open Editor actions (GUI + shortcuts)
             - GUI settings only surface installed VS Code, Cursor, or Windsurf
-        - iterm_focus_pulse_color: RGB (0–255 per channel, default `255,195,0` amber); the iTerm2 session background color is briefly pulsed to this color and back when an iTerm2 window is focused. Configurable via GUI Settings color well or `mx settings set --iterm-focus-pulse-color <r,g,b>`.
+        - iterm_focus_pulse_color: RGB (0–255 per channel, default `46,41,14`); the iTerm2 session background color is briefly pulsed to this color and back when an iTerm2 window is focused. Configurable via GUI Settings color well or `mx settings set --iterm-focus-pulse-color <r,g,b>`.
+        - iterm_focus_pulse_enabled: bool (default `true`); enables/disables iTerm2 focus pulsing. Configurable via GUI Settings toggle or `mx settings set --iterm-focus-pulse-enabled <0|1>`.
     - Project
         - fields
             - dir: str, path of the project folder, name can be inferred from it for display in the UI
@@ -258,7 +259,7 @@
         - New Project form uses source-first progressive disclosure; additional settings appear only after a local directory is chosen or a git URL is entered
         - New Project and New Workspace forms support keyboard shortcuts (`Return` create, `Esc` cancel); Create labels omit shortcut text while Cancel keeps `(Esc)` in the label, and `Esc` cancels either form
         - for git projects, muxy uses the same auto-generated value for initial workspace title and branch name
-        - for git projects, target branch defaults using this precedence: project default branch, `main`, `master`, first discovered branch
+        - for git projects, target branch defaults using this precedence: project default branch, `main`, `master`
         - for git projects, directory name defaults to muxy's auto-generated unique dirname
         - users can update workspace title/branch/tooltip after creation via inline workspace-detail labels/header and can update all metadata via `mx workspace update`
             - exception: protected `main`/`master` branch names are read-only and cannot be renamed

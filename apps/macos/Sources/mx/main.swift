@@ -295,7 +295,7 @@ struct CLI {
             print("Created workspace \(workspace.name)\t\(workspace.dir)")
         case "import":
             let dir = optionalValue(for: "--dir") ?? FileManager.default.currentDirectoryPath
-            let title = optionalValue(for: "--title") ?? optionalValue(for: "--name")
+            let title = optionalValue(for: "--title")
             let tooltip = optionalValue(for: "--tooltip")
             let normalizedImportDir = normalizePath(dir)
             let workspace: WorkspaceRecord
@@ -858,6 +858,7 @@ struct CLI {
               mx settings get --gui-open-finder-shortcut
               mx settings get --gui-open-settings-shortcut
               mx settings get --iterm-focus-pulse-color
+              mx settings get --iterm-focus-pulse-enabled
               mx settings set --editor none|vscode|cursor|windsurf|vim
               mx settings set --port-range <start>-<end>
               mx settings set --gui-hotkey <spec>
@@ -870,6 +871,8 @@ struct CLI {
               mx settings set --gui-open-terminal-shortcut <spec>
               mx settings set --gui-open-finder-shortcut <spec>
               mx settings set --gui-open-settings-shortcut <spec>
+              mx settings set --iterm-focus-pulse-color <r,g,b>
+              mx settings set --iterm-focus-pulse-enabled <0|1>
               mx settings reset --editor
               mx settings reset --port-range
               mx settings reset --gui-hotkey
@@ -882,8 +885,8 @@ struct CLI {
               mx settings reset --gui-open-terminal-shortcut
               mx settings reset --gui-open-finder-shortcut
               mx settings reset --gui-open-settings-shortcut
-              mx settings set --iterm-focus-pulse-color <r,g,b>
               mx settings reset --iterm-focus-pulse-color
+              mx settings reset --iterm-focus-pulse-enabled
 
               mx project list
               mx project add --dir <path>
@@ -921,8 +924,8 @@ struct CLI {
               - GUI settings (⌘,) let you pick a preferred editor (VS Code, Cursor, Windsurf).
               - Runtime state is stored in ~/.muxy/muxy.db and migrated in place with additive schema changes.
               - Removing a git project first removes managed worktrees via `git worktree remove --force`, then deletes related workspace directories under ~/muxy/workspaces.
-              - Removing a project deletes only muxy state unless it is an muxy-cloned git repo under ~/muxy/repos (or legacy ~/muxy/projects); those managed repository directories are deleted.
-              - Workspaces snapshot project processes, status checks, and browser sessions into the runtime DB on creation.
+              - Removing a project deletes only muxy state unless it is a muxy-cloned git repo under ~/muxy/repos (or legacy ~/muxy/projects); those managed repository directories are deleted.
+              - Workspaces snapshot project port definitions, processes, status checks, and browser sessions into the runtime DB on creation.
               - Project `setup_script` runs when a workspace is created/revived; GUI create persists workspace first and runs setup in background.
               - Launch waits for pending/running setup to complete and fails with the setup error if setup failed.
               - `mx discover` reconciles git worktrees across all registered projects by creating missing workspaces, archiving workspaces whose worktrees are no longer valid, refreshing stored branch names from disk, and running the project `setup_script` for each newly created workspace.
@@ -933,7 +936,7 @@ struct CLI {
               - `workspace create --directory-name` (or `--dirname`) overrides the auto-generated git worktree directory name; allowed characters are letters, numbers, '-', and '_', with no spaces.
               - `workspace update` updates workspace metadata (`--title`, `--branch`, `--directory-name`/`--dirname`/`--dir-name`, `--tooltip`) and visibility state (`--active`/`--inactive`); protected `main`/`master` branches cannot be renamed.
               - Archiving a non-git workspace never deletes the project directory.
-              - Workspaces reserve PORT0-PORT9 from the configured port range.
+              - Workspaces reserve named ports from the configured port range based on project/workspace port definitions.
               - GUI window focus shortcuts: cmd+1 through cmd+9 (when GUI is focused).
               - GUI window cycle shortcuts: cmd+shift+[ and cmd+shift+] (global, when GUI is not focused).
               - GUI tooltip shortcut (default cmd+shift+i) is global and toggles the focused workspace tooltip for tracked workspace/agent windows.

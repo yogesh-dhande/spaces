@@ -23,9 +23,10 @@ It manages projects, workspaces, processes, and window sets so you can move betw
 - GUI shortcuts (when focused): `cmd+1` through `cmd+9` focus workspace windows
 
 Global preferences are stored in the DB and configurable via `mx settings set` or the GUI Settings (⌘,):
-- `editor`: preferred editor for `mx workspace open-editor` (`none`, `vscode`, `cursor`, `windsurf`, `vim`)
+- `editor`: preferred editor used by GUI "Open Editor" actions (`none`, `vscode`, `cursor`, `windsurf`, `vim`)
 - `port_range`: range for workspace port allocation (default `20000-30000`)
-- `iterm_focus_pulse_color`: RGB background pulse color for iTerm2 window focus (format `r,g,b`, values 0–255, default `255,195,0` which is amber). Configurable in GUI Settings via a color well or via `mx settings set --iterm-focus-pulse-color <r,g,b>`.
+- `iterm_focus_pulse_color`: RGB background pulse color for iTerm2 window focus (format `r,g,b`, values 0–255, default `46,41,14`). Configurable in GUI Settings via a color well or via `mx settings set --iterm-focus-pulse-color <r,g,b>`.
+- `iterm_focus_pulse_enabled`: toggle the iTerm2 focus pulse effect (`1` enabled, `0` disabled; default `1`) via `mx settings set --iterm-focus-pulse-enabled <0|1>`.
 
 ```
 mx settings set --editor vscode
@@ -195,10 +196,8 @@ Provider auto-detection uses environment context only for supported hosts: `__CF
 
 For git projects, `workspace create` requires `--branch`; `--target-branch` defaults to `main`/`master` when available.
 `workspace create --directory-name` (alias: `--dirname`) is optional for git projects and must use only letters, numbers, `-`, and `_` with no spaces.
-`workspace import` supports `--title` (preferred; `--name` also accepted for backward compatibility) and optional `--tooltip`.
+`workspace import` supports `--title` and optional `--tooltip`.
 `workspace update` updates workspace metadata (`--title`, `--branch`, `--directory-name`/`--dirname`/`--dir-name`, and tooltip values) plus sidebar visibility default state (`--active` / `--inactive`). Default workspaces keep their fixed initial title (`default` for directory projects, `main`/`master` for git-url imports). Protected `main`/`master` branches cannot be renamed.
-`workspace up` is idempotent: it launches a stopped workspace, and otherwise does nothing by default.
-Add `--force-restart` to force stop+launch when runtime state is already present.
 `workspace up` ensures the workspace and all its processes are running. When stopped, it launches in the background. When already running, it restarts any exited processes in the background without touching healthy ones. Add `--force-restart` to force a full stop+launch. Add `--focus` to bring the workspace to the foreground. `--tooltip [text]` displays the tooltip overlay (updating tooltip text when text is provided).
 `mx discover` scans all registered git projects and reconciles worktrees by creating missing workspaces, archiving workspaces whose worktrees are no longer valid, and refreshing workspace branch names from disk.
 When tooltip overlay is shown for focused workspace, it always displays workspace title as the title; when tooltip text is set, it is shown as body content. The overlay also shows the effective tooltip-toggle shortcut (default `cmd+shift+i`, or your custom override).
