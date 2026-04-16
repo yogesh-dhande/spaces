@@ -1327,6 +1327,41 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertEqual(mockIterm.lastFocusedTabIndex, 2)
     }
 
+    // Tests focus workspace process does not borrow another shared-tab index when targeting a specific session.
+    func testFocusWorkspaceProcessDoesNotFallbackToDifferentSharedWindowTabIndex() throws {
+        let store = try makeTemporaryStore()
+        let mockIterm = MockIterm2Adapter()
+        let orchestrator = MuxyOrchestrator(store: store, iterm: mockIterm)
+
+        let root = try makeTempDirectory()
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
+
+        try store.upsert(
+            window: WindowRecord(
+                id: UUID().uuidString, workspaceID: workspace.id, app: "iTerm2", title: "shared", windowID: 555, role: "terminal", orderIndex: 200,
+                lastSeenAt: "now"))
+        try store.upsert(
+            runningProcess: RunningProcessRecord(
+                id: UUID().uuidString, workspaceID: workspace.id, templateName: "api", command: "npm run api", terminalApp: "iTerm2", windowID: 555,
+                itermSessionID: "session-a", itermTabIndex: 1, pid: nil, status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now",
+                exitedAt: nil))
+        let second = RunningProcessRecord(
+            id: UUID().uuidString, workspaceID: workspace.id, templateName: "web", command: "npm run web", terminalApp: "iTerm2", windowID: 555,
+            itermSessionID: "session-b", itermTabIndex: nil, pid: nil, status: .exited, logPath: nil, lastOutputAt: nil, startedAt: "now",
+            exitedAt: "later")
+        try store.upsert(runningProcess: second)
+
+        try orchestrator.focusWorkspaceProcess(workspaceID: workspace.id, processID: second.id)
+
+        XCTAssertEqual(mockIterm.focusSessionOrTabCallCount, 1)
+        XCTAssertEqual(mockIterm.lastWindowID, 555)
+        XCTAssertEqual(mockIterm.lastFocusedSessionID, "session-b")
+        XCTAssertNil(mockIterm.lastFocusedTabIndex)
+    }
+
     // Tests focus workspace window by index sets the active workspace by arranging representative inputs and asserting the expected result.
     func testFocusWorkspaceWindowByIndexSetsActiveWorkspace() throws {
         let (orchestrator, store, _, workspace, root) = try makeOrchestratorWithWorkspace()
@@ -1356,6 +1391,37 @@ final class OrchestratorTests: XCTestCase {
 
         let focusedIDs = try String(contentsOf: focusLog).split(separator: "\n").map(String.init)
         XCTAssertEqual(focusedIDs, ["202"])
+        XCTAssertEqual(try orchestrator.activeWorkspaceID(), workspace.id)
+    }
+
+    // Tests focus window navigation uses the current focused window and wraps by arranging representative inputs and asserting the expected result.
+    func testFocusWindowNavigationUsesRelativeOrderAndWraps() throws {
+        let (orchestrator, store, _, workspace, root) = try makeOrchestratorWithWorkspace()
+        let focusLog = root.appendingPathComponent("relative-focus.log")
+
+        try store.upsert(
+            window: WindowRecord(
+                id: UUID().uuidString, workspaceID: workspace.id, app: "iTerm2", title: "one", windowID: 101, role: "terminal", orderIndex: 0,
+                lastSeenAt: "now"))
+        try store.upsert(
+            window: WindowRecord(
+                id: UUID().uuidString, workspaceID: workspace.id, app: "iTerm2", title: "two", windowID: 202, role: "terminal", orderIndex: 1,
+                lastSeenAt: "now"))
+        try store.upsert(
+            window: WindowRecord(
+                id: UUID().uuidString, workspaceID: workspace.id, app: "iTerm2", title: "three", windowID: 303, role: "terminal", orderIndex: 2,
+                lastSeenAt: "now"))
+
+        try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) {
+            try withEnv(name: "YABAI_FOCUS_LOG_FILE", value: focusLog.path) {
+                try withEnv(name: "YABAI_FOCUSED_ID", value: "202") { try orchestrator.focusNextWindow(workspaceID: workspace.id) }
+                try withEnv(name: "YABAI_FOCUSED_ID", value: "101") { try orchestrator.focusPreviousWindow(workspaceID: workspace.id) }
+                try orchestrator.focusWorkspaceWindow(workspaceID: workspace.id, index: 2)
+            }
+        }
+
+        let focusedIDs = try String(contentsOf: focusLog).split(separator: "\n").map(String.init)
+        XCTAssertEqual(focusedIDs, ["303", "303", "202"])
         XCTAssertEqual(try orchestrator.activeWorkspaceID(), workspace.id)
     }
 
@@ -1418,6 +1484,423 @@ final class OrchestratorTests: XCTestCase {
             let focusedIDs = try String(contentsOf: focusLog).trimmingCharacters(in: .whitespacesAndNewlines)
             XCTAssertTrue(focusedIDs.isEmpty)
         }
+    }
+
+    // Tests focus window navigation wraps across browser targets in same chrome window by arranging representative inputs and asserting the expected result.
+    func testFocusWindowNavigationWrapsAcrossBrowserTargetsInSameChromeWindow() throws {
+        let (orchestrator, store, _, workspace, root) = try makeOrchestratorWithWorkspace()
+        let focusLog = root.appendingPathComponent("browser-nav-focus.log")
+        let chromeLog = root.appendingPathComponent("browser-nav-chrome.log")
+        let chromeActiveURL = root.appendingPathComponent("browser-nav-active-url.log")
+        try "http://localhost:3001".write(to: chromeActiveURL, atomically: true, encoding: .utf8)
+
+        try store.upsert(
+            window: WindowRecord(
+                id: UUID().uuidString, workspaceID: workspace.id, app: "iTerm2", title: "shell", windowID: 101, role: "terminal", orderIndex: 0,
+                lastSeenAt: "now"))
+        try store.upsert(
+            window: WindowRecord(
+                id: UUID().uuidString, workspaceID: workspace.id, app: "Google Chrome", title: "localhost-3001", targetURL: "http://localhost:3001",
+                windowID: 202, role: "browser", orderIndex: 1, lastSeenAt: "now"))
+        try store.upsert(
+            window: WindowRecord(
+                id: UUID().uuidString, workspaceID: workspace.id, app: "Google Chrome", title: "localhost-8000",
+                targetURL: "http://localhost:8000/admin", windowID: 202, role: "browser", orderIndex: 2, lastSeenAt: "now"))
+
+        try withMockCommands(["yabai": Self.orchestratorYabaiMockScript, "osascript": Self.orchestratorOsaScriptMock]) {
+            try withEnv(name: "YABAI_FOCUS_LOG_FILE", value: focusLog.path) {
+                try withEnv(name: "MOCK_CHROME_FOCUS_LOG_FILE", value: chromeLog.path) {
+                    try withEnv(name: "MOCK_CHROME_ACTIVE_URL_FILE", value: chromeActiveURL.path) {
+                        try withEnv(name: "YABAI_FOCUSED_ID", value: "202") {
+                            try withEnv(name: "YABAI_FOCUSED_APP", value: "Google Chrome") {
+                                try orchestrator.focusNextWindow(workspaceID: workspace.id)
+                                try "http://localhost:8000/admin".write(to: chromeActiveURL, atomically: true, encoding: .utf8)
+                                try orchestrator.focusNextWindow(workspaceID: workspace.id)
+                            }
+                        }
+                        try withEnv(name: "YABAI_FOCUSED_ID", value: "101") {
+                            try withEnv(name: "YABAI_FOCUSED_APP", value: "iTerm2") {
+                                try orchestrator.focusNextWindow(workspaceID: workspace.id)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        let chromeURLs = try String(contentsOf: chromeLog).split(separator: "\n").map(String.init)
+        XCTAssertEqual(chromeURLs, ["http://localhost:8000/admin", "http://localhost:3001"])
+        if FileManager.default.fileExists(atPath: focusLog.path) {
+            let focusedIDs = try String(contentsOf: focusLog).split(separator: "\n").map(String.init)
+            XCTAssertEqual(focusedIDs, ["101"])
+        }
+    }
+
+    // Tests focus window navigation uses remembered target identity across shared chrome rows when the focused target cannot be resolved.
+    func testFocusWindowNavigationUsesRememberedTargetIdentityAcrossSharedChromeWindowRows() throws {
+        let (orchestrator, store, _, workspace, root) = try makeOrchestratorWithWorkspace()
+        let chromeLog = root.appendingPathComponent("browser-nav-remembered.log")
+        try store.setWorkspaceBrowserSessions(
+            workspaceID: workspace.id, sessions: [BrowserSession(url: "http://localhost:3001"), BrowserSession(url: "http://localhost:8000/admin")])
+        try store.upsert(
+            window: WindowRecord(
+                id: UUID().uuidString, workspaceID: workspace.id, app: "iTerm2", title: "shell", windowID: 101, role: "terminal", orderIndex: 0,
+                lastSeenAt: "now"))
+        try store.upsert(
+            window: WindowRecord(
+                id: UUID().uuidString, workspaceID: workspace.id, app: "iTerm2", title: "two", windowID: 102, role: "terminal", orderIndex: 1,
+                lastSeenAt: "now"))
+        let chromeMatches =
+            "202\tGoogle Chrome — localhost 3001\thttp://localhost:3001\n202\tGoogle Chrome — localhost 8000\thttp://localhost:8000/admin\n"
+
+        try withMockCommands(["yabai": Self.orchestratorYabaiMockScript, "osascript": Self.orchestratorOsaScriptMock]) {
+            try withEnv(name: "MOCK_CHROME_WINDOW_MATCHES", value: chromeMatches) {
+                try withEnv(name: "MOCK_CHROME_FOCUS_LOG_FILE", value: chromeLog.path) {
+                    try withEnv(name: "YABAI_FOCUSED_ID", value: "101") {
+                        try withEnv(name: "YABAI_FOCUSED_APP", value: "iTerm2") {
+                            try orchestrator.focusNextWindow(workspaceID: workspace.id)
+                        }
+                    }
+                    try withEnv(name: "YABAI_FOCUSED_ID", value: "102") {
+                        try withEnv(name: "YABAI_FOCUSED_APP", value: "iTerm2") {
+                            try orchestrator.focusNextWindow(workspaceID: workspace.id)
+                        }
+                    }
+                    try withEnv(name: "YABAI_FOCUSED_ID", value: "999") {
+                        try withEnv(name: "YABAI_FOCUSED_APP", value: "Finder") {
+                            try orchestrator.focusNextWindow(workspaceID: workspace.id)
+                        }
+                    }
+                }
+            }
+        }
+
+        let focusedURLs = try String(contentsOf: chromeLog).split(separator: "\n").map(String.init)
+        XCTAssertEqual(focusedURLs, ["http://localhost:3001", "http://localhost:8000/admin"])
+    }
+
+    // Tests focus window navigation falls back to the remembered cursor when Chrome URL matching is ambiguous across tracked windows.
+    func testFocusWindowNavigationUsesRememberedCursorWhenChromeURLMatchIsAmbiguousAcrossWindows() throws {
+        let (orchestrator, store, _, workspace, root) = try makeOrchestratorWithWorkspace()
+        let chromeLog = root.appendingPathComponent("chrome-ambiguous-url-window-chrome.log")
+        let chromeActiveURL = root.appendingPathComponent("chrome-ambiguous-url-window-active-url.log")
+        let itermFocusLog = root.appendingPathComponent("chrome-ambiguous-url-window-iterm.log")
+        try "http://localhost:3001".write(to: chromeActiveURL, atomically: true, encoding: .utf8)
+
+        try store.upsert(
+            window: WindowRecord(
+                id: UUID().uuidString, workspaceID: workspace.id, app: "iTerm2", title: "shell", windowID: 101, role: "terminal", orderIndex: 0,
+                lastSeenAt: "now"))
+        try store.upsert(
+            window: WindowRecord(
+                id: UUID().uuidString, workspaceID: workspace.id, app: "Google Chrome", title: "frontend-a", targetURL: "http://localhost:3001",
+                windowID: 202, role: "browser", orderIndex: 1, lastSeenAt: "now"))
+        try store.upsert(
+            window: WindowRecord(
+                id: UUID().uuidString, workspaceID: workspace.id, app: "Google Chrome", title: "frontend-b", targetURL: "http://localhost:3001",
+                windowID: 303, role: "browser", orderIndex: 2, lastSeenAt: "now"))
+
+        try withMockCommands(["yabai": Self.orchestratorYabaiMockScript, "osascript": Self.orchestratorOsaScriptMock]) {
+            try withEnv(name: "MOCK_ITERM_FOCUS_LOG_FILE", value: itermFocusLog.path) {
+                try withEnv(name: "MOCK_CHROME_FOCUS_LOG_FILE", value: chromeLog.path) {
+                    try withEnv(name: "MOCK_CHROME_ACTIVE_URL_FILE", value: chromeActiveURL.path) {
+                        try orchestrator.focusWorkspaceWindow(workspaceID: workspace.id, index: 3)
+                        try "http://localhost:3001".write(to: chromeActiveURL, atomically: true, encoding: .utf8)
+                        try withEnv(name: "YABAI_FOCUSED_ID", value: "202") {
+                            try withEnv(name: "YABAI_FOCUSED_APP", value: "Google Chrome") {
+                                try orchestrator.focusNextWindow(workspaceID: workspace.id)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        let chromeURLs = try String(contentsOf: chromeLog).split(separator: "\n").map(String.init)
+        XCTAssertEqual(chromeURLs, ["http://localhost:3001"])
+        let itermFocuses = try String(contentsOf: itermFocusLog).split(separator: "\n").map(String.init)
+        XCTAssertEqual(itermFocuses, ["|-1|101"])
+    }
+
+    // Tests focus window navigation falls back to the remembered cursor when Chrome window matching is ambiguous for an unrelated active tab.
+    func testFocusWindowNavigationUsesRememberedCursorWhenChromeWindowMatchIsAmbiguous() throws {
+        let (orchestrator, store, _, workspace, root) = try makeOrchestratorWithWorkspace()
+        let chromeLog = root.appendingPathComponent("chrome-ambiguous-window-chrome.log")
+        let chromeActiveURL = root.appendingPathComponent("chrome-ambiguous-window-active-url.log")
+        let itermFocusLog = root.appendingPathComponent("chrome-ambiguous-window-iterm.log")
+        try "https://calendar.google.com/".write(to: chromeActiveURL, atomically: true, encoding: .utf8)
+
+        try store.upsert(
+            window: WindowRecord(
+                id: UUID().uuidString, workspaceID: workspace.id, app: "iTerm2", title: "shell", windowID: 101, role: "terminal", orderIndex: 0,
+                lastSeenAt: "now"))
+        try store.upsert(
+            window: WindowRecord(
+                id: UUID().uuidString, workspaceID: workspace.id, app: "Google Chrome", title: "frontend", targetURL: "http://localhost:3001",
+                windowID: 202, role: "browser", orderIndex: 1, lastSeenAt: "now"))
+        try store.upsert(
+            window: WindowRecord(
+                id: UUID().uuidString, workspaceID: workspace.id, app: "Google Chrome", title: "admin",
+                targetURL: "http://localhost:8000/admin", windowID: 202, role: "browser", orderIndex: 2, lastSeenAt: "now"))
+
+        try withMockCommands(["yabai": Self.orchestratorYabaiMockScript, "osascript": Self.orchestratorOsaScriptMock]) {
+            try withEnv(name: "MOCK_ITERM_FOCUS_LOG_FILE", value: itermFocusLog.path) {
+                try withEnv(name: "MOCK_CHROME_FOCUS_LOG_FILE", value: chromeLog.path) {
+                    try withEnv(name: "MOCK_CHROME_ACTIVE_URL_FILE", value: chromeActiveURL.path) {
+                        try orchestrator.focusWorkspaceWindow(workspaceID: workspace.id, index: 3)
+                        try "https://calendar.google.com/".write(to: chromeActiveURL, atomically: true, encoding: .utf8)
+                        try withEnv(name: "YABAI_FOCUSED_ID", value: "202") {
+                            try withEnv(name: "YABAI_FOCUSED_APP", value: "Google Chrome") {
+                                try orchestrator.focusNextWindow(workspaceID: workspace.id)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        let chromeURLs = try String(contentsOf: chromeLog).split(separator: "\n").map(String.init)
+        XCTAssertEqual(chromeURLs, ["http://localhost:8000/admin"])
+        let itermFocuses = try String(contentsOf: itermFocusLog).split(separator: "\n").map(String.init)
+        XCTAssertEqual(itermFocuses, ["|-1|101"])
+    }
+
+    // Tests focus window navigation cycles agent and process iTerm sessions separately when they share one iTerm window.
+    func testFocusWindowNavigationCyclesSharedItermAgentAndProcessSessionsSeparately() throws {
+        let store = try makeTemporaryStore()
+        let mockIterm = MockIterm2Adapter()
+        mockIterm.stubbedSessionIDs = ["agent-session", "process-session"]
+        let orchestrator = MuxyOrchestrator(store: store, iterm: mockIterm)
+
+        let root = try makeTempDirectory()
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
+        let chromeLog = root.appendingPathComponent("agent-process-cycle.log")
+        let chromeActiveURL = root.appendingPathComponent("agent-process-active-url.log")
+        try "http://localhost:3000".write(to: chromeActiveURL, atomically: true, encoding: .utf8)
+
+        try store.upsert(
+            window: WindowRecord(
+                id: UUID().uuidString, workspaceID: workspace.id, app: "iTerm2", title: "agent", targetURL: nil, windowID: 555, role: "terminal",
+                orderIndex: 0, lastSeenAt: "now"))
+        try store.upsert(
+            window: WindowRecord(
+                id: UUID().uuidString, workspaceID: workspace.id, app: "Google Chrome", title: "frontend", targetURL: "http://localhost:3000",
+                windowID: 777, role: "browser", orderIndex: 1, lastSeenAt: "now"))
+        try store.upsertAgentWindow(
+            AgentWindowRecord(
+                id: UUID().uuidString, workspaceID: workspace.id, provider: .iterm2, label: "Claude Code CLI", itermSessionID: "agent-session",
+                codexThreadID: nil, windowID: nil, yabaiWindowID: 555, status: .idle, createdAt: "now", updatedAt: "now"))
+        try store.upsert(
+            runningProcess: RunningProcessRecord(
+                id: UUID().uuidString, workspaceID: workspace.id, templateName: "web", command: "npm run dev", terminalApp: "iTerm2", windowID: 555,
+                itermSessionID: "process-session", itermTabIndex: 2, pid: 123, status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now",
+                exitedAt: nil))
+
+        try withMockCommands(["yabai": Self.orchestratorYabaiMockScript, "osascript": Self.orchestratorOsaScriptMock]) {
+            try withEnv(name: "MOCK_CHROME_FOCUS_LOG_FILE", value: chromeLog.path) {
+                try withEnv(name: "MOCK_CHROME_ACTIVE_URL_FILE", value: chromeActiveURL.path) {
+                    try withEnv(name: "YABAI_FOCUSED_ID", value: "555") {
+                        try withEnv(name: "YABAI_FOCUSED_APP", value: "iTerm2") {
+                            mockIterm.focusedSessionIDResult = "agent-session"
+                            try orchestrator.focusNextWindow(workspaceID: workspace.id)
+
+                            try "http://localhost:3000".write(to: chromeActiveURL, atomically: true, encoding: .utf8)
+                            try withEnv(name: "YABAI_FOCUSED_ID", value: "777") {
+                                try withEnv(name: "YABAI_FOCUSED_APP", value: "Google Chrome") {
+                                    try orchestrator.focusNextWindow(workspaceID: workspace.id)
+                                }
+                            }
+
+                            mockIterm.focusedSessionIDResult = "process-session"
+                            try orchestrator.focusNextWindow(workspaceID: workspace.id)
+                        }
+                    }
+                }
+            }
+        }
+
+        let focusedURLs = try String(contentsOf: chromeLog).split(separator: "\n").map(String.init)
+        XCTAssertEqual(focusedURLs, ["http://localhost:3000"])
+        XCTAssertEqual(mockIterm.focusSessionOrTabCallCount, 2)
+        XCTAssertEqual(mockIterm.focusedSessionIDs.compactMap { $0 }, ["process-session", "agent-session"])
+    }
+
+    // Tests focus window navigation remembers browser targets by identity instead of stale array index when targets reorder.
+    func testFocusWindowNavigationUsesRememberedTargetIdentityAfterReorder() throws {
+        let store = try makeTemporaryStore()
+        let mockIterm = MockIterm2Adapter()
+        mockIterm.stubbedSessionIDs = ["agent-session", "process-session"]
+        let orchestrator = MuxyOrchestrator(store: store, iterm: mockIterm)
+
+        let root = try makeTempDirectory()
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
+        let chromeLog = root.appendingPathComponent("reordered-browser-cycle.log")
+        let chromeActiveURL = root.appendingPathComponent("reordered-browser-active-url.log")
+        try "http://localhost:3000".write(to: chromeActiveURL, atomically: true, encoding: .utf8)
+
+        try store.upsert(
+            window: WindowRecord(
+                id: UUID().uuidString, workspaceID: workspace.id, app: "iTerm2", title: "agent", targetURL: nil, windowID: 555, role: "terminal",
+                orderIndex: 0, lastSeenAt: "now"))
+        try store.upsert(
+            window: WindowRecord(
+                id: UUID().uuidString, workspaceID: workspace.id, app: "Google Chrome", title: "frontend", targetURL: "http://localhost:3000",
+                windowID: 777, role: "browser", orderIndex: 2, lastSeenAt: "now"))
+        try store.upsertAgentWindow(
+            AgentWindowRecord(
+                id: UUID().uuidString, workspaceID: workspace.id, provider: .iterm2, label: "Claude Code CLI", itermSessionID: "agent-session",
+                codexThreadID: nil, windowID: nil, yabaiWindowID: 555, status: .idle, createdAt: "now", updatedAt: "now"))
+        let processID = UUID().uuidString
+        try store.upsert(
+            runningProcess: RunningProcessRecord(
+                id: processID, workspaceID: workspace.id, templateName: "web", command: "npm run dev", terminalApp: "iTerm2", windowID: 555,
+                itermSessionID: "process-session", itermTabIndex: 2, pid: 123, status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now",
+                exitedAt: nil))
+
+        try withMockCommands(["yabai": Self.orchestratorYabaiMockScript, "osascript": Self.orchestratorOsaScriptMock]) {
+            try withEnv(name: "MOCK_CHROME_FOCUS_LOG_FILE", value: chromeLog.path) {
+                try withEnv(name: "MOCK_CHROME_ACTIVE_URL_FILE", value: chromeActiveURL.path) {
+                    try withEnv(name: "YABAI_FOCUSED_ID", value: "777") {
+                        try withEnv(name: "YABAI_FOCUSED_APP", value: "Google Chrome") {
+                            try orchestrator.focusWorkspaceWindow(workspaceID: workspace.id, index: 2)
+                        }
+                    }
+
+                    try store.upsert(
+                        window: WindowRecord(
+                            id: UUID().uuidString, workspaceID: workspace.id, app: "Google Chrome", title: "preview",
+                            targetURL: "http://localhost:2999", windowID: 778, role: "browser", orderIndex: 1, lastSeenAt: "now"))
+
+                    try withEnv(name: "YABAI_FOCUSED_ID", value: "999") {
+                        try withEnv(name: "YABAI_FOCUSED_APP", value: "Finder") {
+                            try orchestrator.focusNextWindow(workspaceID: workspace.id)
+                        }
+                    }
+                }
+            }
+        }
+
+        XCTAssertEqual(mockIterm.focusedSessionIDs.compactMap { $0 }, ["process-session"])
+    }
+
+    // Tests focus window navigation prefers the currently focused iTerm session over stale remembered target identity.
+    func testFocusWindowNavigationPrefersFocusedSessionOverRememberedTarget() throws {
+        let store = try makeTemporaryStore()
+        let mockIterm = MockIterm2Adapter()
+        mockIterm.stubbedSessionIDs = ["agent-session", "process-session"]
+        let orchestrator = MuxyOrchestrator(store: store, iterm: mockIterm)
+
+        let root = try makeTempDirectory()
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
+        let chromeLog = root.appendingPathComponent("manual-focus-cycle.log")
+        let chromeActiveURL = root.appendingPathComponent("manual-focus-active-url.log")
+        try "http://localhost:3000".write(to: chromeActiveURL, atomically: true, encoding: .utf8)
+
+        try store.upsert(
+            window: WindowRecord(
+                id: UUID().uuidString, workspaceID: workspace.id, app: "iTerm2", title: "agent", targetURL: nil, windowID: 555, role: "terminal",
+                orderIndex: 0, lastSeenAt: "now"))
+        try store.upsert(
+            window: WindowRecord(
+                id: UUID().uuidString, workspaceID: workspace.id, app: "Google Chrome", title: "frontend", targetURL: "http://localhost:3000",
+                windowID: 777, role: "browser", orderIndex: 1, lastSeenAt: "now"))
+        try store.upsertAgentWindow(
+            AgentWindowRecord(
+                id: UUID().uuidString, workspaceID: workspace.id, provider: .iterm2, label: "Claude Code CLI", itermSessionID: "agent-session",
+                codexThreadID: nil, windowID: nil, yabaiWindowID: 555, status: .idle, createdAt: "now", updatedAt: "now"))
+        try store.upsert(
+            runningProcess: RunningProcessRecord(
+                id: UUID().uuidString, workspaceID: workspace.id, templateName: "web", command: "npm run dev", terminalApp: "iTerm2", windowID: 555,
+                itermSessionID: "process-session", itermTabIndex: 2, pid: 123, status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now",
+                exitedAt: nil))
+
+        try withMockCommands(["yabai": Self.orchestratorYabaiMockScript, "osascript": Self.orchestratorOsaScriptMock]) {
+            try withEnv(name: "MOCK_CHROME_FOCUS_LOG_FILE", value: chromeLog.path) {
+                try withEnv(name: "MOCK_CHROME_ACTIVE_URL_FILE", value: chromeActiveURL.path) {
+                    try withEnv(name: "YABAI_FOCUSED_ID", value: "777") {
+                        try withEnv(name: "YABAI_FOCUSED_APP", value: "Google Chrome") {
+                            try orchestrator.focusWorkspaceWindow(workspaceID: workspace.id, index: 2)
+                        }
+                    }
+
+                    mockIterm.focusedSessionIDResult = "process-session"
+                    try withEnv(name: "YABAI_FOCUSED_ID", value: "555") {
+                        try withEnv(name: "YABAI_FOCUSED_APP", value: "iTerm2") {
+                            try orchestrator.focusNextWindow(workspaceID: workspace.id)
+                        }
+                    }
+                }
+            }
+        }
+
+        XCTAssertEqual(mockIterm.focusedSessionIDs.compactMap { $0 }, ["agent-session"])
+    }
+
+    // Tests focus window navigation uses remembered iTerm target identity when focused-session lookup cannot disambiguate shared tabs.
+    func testFocusWindowNavigationUsesRememberedItermTargetWhenFocusedSessionLookupFails() throws {
+        let store = try makeTemporaryStore()
+        let mockIterm = MockIterm2Adapter()
+        mockIterm.stubbedSessionIDs = ["process-1", "process-2"]
+        let orchestrator = MuxyOrchestrator(store: store, iterm: mockIterm)
+
+        let root = try makeTempDirectory()
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
+        let chromeLog = root.appendingPathComponent("shared-iterm-remembered.log")
+        let chromeActiveURL = root.appendingPathComponent("shared-iterm-remembered-active-url.log")
+        try "http://localhost:3000".write(to: chromeActiveURL, atomically: true, encoding: .utf8)
+
+        try store.upsert(
+            window: WindowRecord(
+                id: UUID().uuidString, workspaceID: workspace.id, app: "iTerm2", title: "shell", targetURL: nil, windowID: 555, role: "terminal",
+                orderIndex: 0, lastSeenAt: "now"))
+        try store.upsert(
+            window: WindowRecord(
+                id: UUID().uuidString, workspaceID: workspace.id, app: "Google Chrome", title: "frontend", targetURL: "http://localhost:3000",
+                windowID: 777, role: "browser", orderIndex: 1, lastSeenAt: "now"))
+        let process1ID = UUID().uuidString
+        let process2ID = UUID().uuidString
+        try store.upsert(
+            runningProcess: RunningProcessRecord(
+                id: process1ID, workspaceID: workspace.id, templateName: "web", command: "npm run dev", terminalApp: "iTerm2", windowID: 555,
+                itermSessionID: "process-1", itermTabIndex: 1, pid: 123, status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now",
+                exitedAt: nil))
+        try store.upsert(
+            runningProcess: RunningProcessRecord(
+                id: process2ID, workspaceID: workspace.id, templateName: "web 2", command: "npm run dev", terminalApp: "iTerm2", windowID: 555,
+                itermSessionID: "process-2", itermTabIndex: nil, pid: nil, status: .exited, logPath: nil, lastOutputAt: nil, startedAt: "now",
+                exitedAt: "later"))
+
+        try withMockCommands(["yabai": Self.orchestratorYabaiMockScript, "osascript": Self.orchestratorOsaScriptMock]) {
+            try withEnv(name: "MOCK_CHROME_FOCUS_LOG_FILE", value: chromeLog.path) {
+                try withEnv(name: "MOCK_CHROME_ACTIVE_URL_FILE", value: chromeActiveURL.path) {
+                    mockIterm.focusedSessionIDResult = "process-2"
+                    try orchestrator.focusWorkspaceProcess(workspaceID: workspace.id, processID: process2ID)
+
+                    mockIterm.focusedSessionIDResult = nil
+                    try withEnv(name: "YABAI_FOCUSED_ID", value: "555") {
+                        try withEnv(name: "YABAI_FOCUSED_APP", value: "iTerm2") {
+                            try orchestrator.focusNextWindow(workspaceID: workspace.id)
+                        }
+                    }
+                }
+            }
+        }
+
+        let focusedURLs = try String(contentsOf: chromeLog).split(separator: "\n").map(String.init)
+        XCTAssertEqual(focusedURLs, ["http://localhost:3000"])
+        XCTAssertEqual(mockIterm.focusedSessionIDs.compactMap { $0 }, ["process-2"])
     }
 
     // Tests windows live scan uses session prefixes and deduplicates overlapping matches by arranging representative inputs and asserting the expected result.
@@ -1807,6 +2290,53 @@ final class OrchestratorTests: XCTestCase {
             try withEnv(name: "YABAI_FOCUSED_ID", value: "202") { XCTAssertEqual(try orchestrator.workspaceIDForFocusedWindow(), workspace.id) }
 
             try withEnv(name: "YABAI_FOCUSED_NONE", value: "1") { XCTAssertNil(try orchestrator.workspaceIDForFocusedWindow()) }
+        }
+    }
+
+    // Tests focus window navigation uses active browser tab when remembered index is stale by arranging representative inputs and asserting the expected result.
+    func testFocusWindowNavigationUsesActiveBrowserTabWhenRememberedIndexIsStale() throws {
+        let (orchestrator, store, _, workspace, root) = try makeOrchestratorWithWorkspace()
+        let focusLog = root.appendingPathComponent("browser-nav-stale-focus.log")
+        let chromeLog = root.appendingPathComponent("browser-nav-stale-chrome.log")
+        let chromeActiveURL = root.appendingPathComponent("browser-nav-stale-active-url.log")
+        try "http://localhost:3001".write(to: chromeActiveURL, atomically: true, encoding: .utf8)
+
+        let terminalRowID = UUID().uuidString
+        try store.upsert(
+            window: WindowRecord(
+                id: terminalRowID, workspaceID: workspace.id, app: "iTerm2", title: "shell", windowID: 101, role: "terminal", orderIndex: 0,
+                lastSeenAt: "now"))
+        try store.upsert(
+            window: WindowRecord(
+                id: UUID().uuidString, workspaceID: workspace.id, app: "Google Chrome", title: "localhost-3001", targetURL: "http://localhost:3001",
+                windowID: 202, role: "browser", orderIndex: 1, lastSeenAt: "now"))
+        try store.upsert(
+            window: WindowRecord(
+                id: UUID().uuidString, workspaceID: workspace.id, app: "Google Chrome", title: "localhost-8000",
+                targetURL: "http://localhost:8000/admin", windowID: 202, role: "browser", orderIndex: 2, lastSeenAt: "now"))
+
+        try withMockCommands(["yabai": Self.orchestratorYabaiMockScript, "osascript": Self.orchestratorOsaScriptMock]) {
+            try withEnv(name: "YABAI_FOCUS_LOG_FILE", value: focusLog.path) {
+                try withEnv(name: "MOCK_CHROME_FOCUS_LOG_FILE", value: chromeLog.path) {
+                    try withEnv(name: "MOCK_CHROME_ACTIVE_URL_FILE", value: chromeActiveURL.path) {
+                        try orchestrator.focusWorkspaceWindow(workspaceID: workspace.id, index: 3)
+                        try store.deleteWindow(id: terminalRowID)
+                        try "http://localhost:3001".write(to: chromeActiveURL, atomically: true, encoding: .utf8)
+                        try withEnv(name: "YABAI_FOCUSED_ID", value: "202") {
+                            try withEnv(name: "YABAI_FOCUSED_APP", value: "Google Chrome") {
+                                try orchestrator.focusNextWindow(workspaceID: workspace.id)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        let chromeURLs = try String(contentsOf: chromeLog).split(separator: "\n").map(String.init)
+        XCTAssertEqual(chromeURLs, ["http://localhost:8000/admin", "http://localhost:8000/admin"])
+        if FileManager.default.fileExists(atPath: focusLog.path) {
+            let focusedIDs = try String(contentsOf: focusLog).split(separator: "\n").map(String.init)
+            XCTAssertTrue(focusedIDs.isEmpty)
         }
     }
 

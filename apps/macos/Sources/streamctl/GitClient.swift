@@ -2,12 +2,26 @@ import Foundation
 import appctl
 
 public final class GitClient {
-    public init() {}
+    private let gitExecutable: String
+    private let environmentOverrides: [String: String]
+    private let metadataCommandTimeout: TimeInterval
 
-    public func isRepo(path: String) -> Bool { (try? runGitAndCapture(["-C", path, "rev-parse", "--is-inside-work-tree"])) != nil }
+    public init(
+        gitExecutable: String = "git", environmentOverrides: [String: String] = [:], metadataCommandTimeout: TimeInterval = 2
+    ) {
+        self.gitExecutable = gitExecutable
+        self.environmentOverrides = environmentOverrides
+        self.metadataCommandTimeout = metadataCommandTimeout
+    }
+
+    public func isRepo(path: String) -> Bool {
+        (try? runGitAndCapture(["-C", path, "rev-parse", "--is-inside-work-tree"], timeout: metadataCommandTimeout)) != nil
+    }
 
     public func defaultBranch(path: String) -> String? {
-        if let output = try? runGitAndCapture(["-C", path, "symbolic-ref", "--short", "refs/remotes/origin/HEAD"]) {
+        if let output = try? runGitAndCapture(
+            ["-C", path, "symbolic-ref", "--short", "refs/remotes/origin/HEAD"], timeout: metadataCommandTimeout)
+        {
             let trimmed = output.trimmingCharacters(in: .whitespacesAndNewlines)
             if let slash = trimmed.split(separator: "/").last { return String(slash) }
         }
@@ -17,22 +31,28 @@ public final class GitClient {
     }
 
     public func branchExists(path: String, branch: String) -> Bool {
-        let status = (try? runGit(["-C", path, "show-ref", "--verify", "--quiet", "refs/heads/\(branch)"])) ?? 1
+        let status =
+            (try? runGit(["-C", path, "show-ref", "--verify", "--quiet", "refs/heads/\(branch)"], timeout: metadataCommandTimeout)) ?? 1
         return status == 0
     }
 
     public func remoteBranchExists(path: String, branch: String) -> Bool {
-        let status = (try? runGit(["-C", path, "ls-remote", "--exit-code", "--heads", "origin", branch])) ?? 1
+        let status =
+            (try? runGit(["-C", path, "ls-remote", "--exit-code", "--heads", "origin", branch], timeout: metadataCommandTimeout)) ?? 1
         return status == 0
     }
 
     public func branchOptions(path: String, includeLiveRemoteHeads: Bool = true) -> [String] {
         var branches = Set<String>()
-        if let local = try? runGitAndCapture(["-C", path, "for-each-ref", "--format=%(refname:short)", "refs/heads"]) {
+        if let local = try? runGitAndCapture(
+            ["-C", path, "for-each-ref", "--format=%(refname:short)", "refs/heads"], timeout: metadataCommandTimeout)
+        {
             let values = local.split(separator: "\n").map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
             branches.formUnion(values.filter { !$0.isEmpty })
         }
-        if let remote = try? runGitAndCapture(["-C", path, "for-each-ref", "--format=%(refname:short)", "refs/remotes/origin"]) {
+        if let remote = try? runGitAndCapture(
+            ["-C", path, "for-each-ref", "--format=%(refname:short)", "refs/remotes/origin"], timeout: metadataCommandTimeout)
+        {
             for raw in remote.split(separator: "\n") {
                 let trimmed = String(raw).trimmingCharacters(in: .whitespacesAndNewlines)
                 guard !trimmed.isEmpty, trimmed != "origin/HEAD" else { continue }
@@ -40,7 +60,9 @@ public final class GitClient {
             }
         }
         // Include live remote heads when explicitly requested so latency-sensitive UI paths can stay local-only.
-        if includeLiveRemoteHeads, let remoteHeads = try? runGitAndCapture(["-C", path, "ls-remote", "--heads", "origin"]) {
+        if includeLiveRemoteHeads,
+            let remoteHeads = try? runGitAndCapture(["-C", path, "ls-remote", "--heads", "origin"], timeout: metadataCommandTimeout)
+        {
             for raw in remoteHeads.split(separator: "\n") {
                 let columns = raw.split(separator: "\t", omittingEmptySubsequences: true)
                 guard columns.count == 2 else { continue }
@@ -148,21 +170,21 @@ public final class GitClient {
         try runGitOrThrow(["-C", worktreePath, "branch", "-m", trimmedBranch])
     }
 
-    private func runGit(_ arguments: [String]) throws -> Int32 {
+    private func runGit(_ arguments: [String], timeout: TimeInterval? = nil) throws -> Int32 {
         let process = makeGitProcess(arguments)
         try process.run()
-        process.waitUntilExit()
+        try waitForProcess(process, timeout: timeout, arguments: arguments)
         return process.terminationStatus
     }
 
-    public func runGitAndCapture(_ arguments: [String]) throws -> String {
+    public func runGitAndCapture(_ arguments: [String], timeout: TimeInterval? = nil) throws -> String {
         let process = makeGitProcess(arguments)
         let out = Pipe()
         let err = Pipe()
         process.standardOutput = out
         process.standardError = err
         try process.run()
-        process.waitUntilExit()
+        try waitForProcess(process, timeout: timeout, arguments: arguments)
         let outputData = out.fileHandleForReading.readDataToEndOfFile()
         if process.terminationStatus != 0 {
             let errData = err.fileHandleForReading.readDataToEndOfFile()
@@ -181,7 +203,7 @@ public final class GitClient {
         process.standardError = err
 
         try process.run()
-        process.waitUntilExit()
+        try waitForProcess(process, timeout: nil, arguments: arguments)
 
         if process.terminationStatus != 0 {
             let errData = err.fileHandleForReading.readDataToEndOfFile()
@@ -206,7 +228,7 @@ public final class GitClient {
     }
 
     private func trackedFilePaths(path: String) -> [String] {
-        guard let output = try? runGitAndCapture(["-C", path, "ls-files", "-z"]) else { return [] }
+        guard let output = try? runGitAndCapture(["-C", path, "ls-files", "-z"], timeout: metadataCommandTimeout) else { return [] }
         return parseNullSeparatedOutput(output)
     }
 
@@ -251,14 +273,19 @@ public final class GitClient {
 
     private func aheadBehindCounts(path: String, baseRef: String?) -> (aheadCount: Int, behindCount: Int) {
         guard let baseRef else { return (0, 0) }
-        guard let output = try? runGitAndCapture(["-C", path, "rev-list", "--left-right", "--count", "\(baseRef)...HEAD"]) else { return (0, 0) }
+        guard
+            let output = try? runGitAndCapture(
+                ["-C", path, "rev-list", "--left-right", "--count", "\(baseRef)...HEAD"], timeout: metadataCommandTimeout)
+        else { return (0, 0) }
         let values = output.split(whereSeparator: \.isWhitespace)
         guard values.count >= 2, let behindCount = Int(values[0]), let aheadCount = Int(values[1]) else { return (0, 0) }
         return (aheadCount, behindCount)
     }
 
     private func hasMergeConflicts(path: String) -> Bool {
-        guard let output = try? runGitAndCapture(["-C", path, "diff", "--name-only", "--diff-filter=U"]) else { return false }
+        guard let output = try? runGitAndCapture(["-C", path, "diff", "--name-only", "--diff-filter=U"], timeout: metadataCommandTimeout) else {
+            return false
+        }
         return !output.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
@@ -270,7 +297,7 @@ public final class GitClient {
     private func trackedDiffPaths(path: String, includeStaged: Bool) -> Set<String> {
         var arguments = ["-C", path, "diff", "--name-only", "-z"]
         if includeStaged { arguments.insert("--cached", at: 3) }
-        guard let output = try? runGitAndCapture(arguments) else { return [] }
+        guard let output = try? runGitAndCapture(arguments, timeout: metadataCommandTimeout) else { return [] }
         return Set(parseNullSeparatedOutput(output))
     }
 
@@ -281,7 +308,7 @@ public final class GitClient {
     private func makeGitProcess(_ arguments: [String]) -> Process {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-        process.arguments = ["git"] + arguments
+        process.arguments = [gitExecutable] + arguments
         process.environment = gitEnvironment()
         return process
     }
@@ -291,7 +318,26 @@ public final class GitClient {
         environment.removeValue(forKey: "GIT_DIR")
         environment.removeValue(forKey: "GIT_WORK_TREE")
         environment.removeValue(forKey: "GIT_INDEX_FILE")
+        for (key, value) in environmentOverrides { environment[key] = value }
         return environment
+    }
+
+    private func waitForProcess(_ process: Process, timeout: TimeInterval?, arguments: [String]) throws {
+        guard let timeout else {
+            process.waitUntilExit()
+            return
+        }
+
+        let deadline = Date().addingTimeInterval(timeout)
+        while process.isRunning {
+            if Date() >= deadline {
+                process.terminate()
+                process.waitUntilExit()
+                let commandDescription = ([gitExecutable] + arguments).joined(separator: " ")
+                throw MuxyError.gitCommandFailed(message: "Git command timed out after \(timeout)s: \(commandDescription)")
+            }
+            Thread.sleep(forTimeInterval: 0.01)
+        }
     }
 }
 

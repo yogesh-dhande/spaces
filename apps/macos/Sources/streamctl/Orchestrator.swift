@@ -45,6 +45,20 @@ public final class MuxyOrchestrator {
         let tabIndex: Int?
     }
 
+    private enum WorkspaceNavigationCursor: Equatable {
+        case session(String)
+        case browserWindowURL(Int, String)
+        case browserURL(String)
+        case window(Int)
+    }
+
+    private enum WorkspaceNavigationTarget {
+        case agent(AgentWindowRecord)
+        case browser(WindowRecord)
+        case process(RunningProcessRecord)
+        case window(WindowRecord)
+    }
+
     public let store: SQLiteStore
     private let git: GitClient
     private let yabai: YabaiAdapter
@@ -58,6 +72,8 @@ public final class MuxyOrchestrator {
     private var workspaceLifecycleInFlight: Set<String> = []
     private let workspaceSetupLock = NSLock()
     private var workspaceSetupInFlight: Set<String> = []
+    private let windowNavigationLock = NSLock()
+    private var windowNavigationCursorByWorkspace: [String: WorkspaceNavigationCursor] = [:]
     private let browserScanCacheLock = NSLock()
     private var browserWindowScanCacheByWorkspace: [String: BrowserWindowScanCacheEntry] = [:]
     private let itermTerminalSessionLock = NSLock()
@@ -1007,6 +1023,7 @@ public final class MuxyOrchestrator {
         let hasRuntimeIndicators = try hasTrackedRuntimeIndicators(workspaceID: workspaceID)
         if !hasRuntimeIndicators {
             try store.updateWorkspaceRunning(id: workspaceID, isRunning: false, launchedAt: workspace.lastLaunchedAt)
+            setWindowNavigationCursor(nil, workspaceID: workspaceID)
             didMutate = true
         }
         return didMutate
@@ -1100,6 +1117,7 @@ public final class MuxyOrchestrator {
             let ok = focusTrackedWindow(window, workspaceID: workspaceID)
             if ok {
                 focused = true
+                rememberNavigationTarget(navigationTarget(for: window), workspaceID: workspaceID)
                 break
             }
         }
@@ -1112,24 +1130,23 @@ public final class MuxyOrchestrator {
         guard index <= windows.count else { return }
         let targetIndex = index - 1
         let ok = focusTrackedWindow(windows[targetIndex], workspaceID: workspaceID)
-        if ok { try setActiveWorkspace(id: workspaceID) }
+        if ok {
+            rememberNavigationTarget(navigationTarget(for: windows[targetIndex]), workspaceID: workspaceID)
+            try setActiveWorkspace(id: workspaceID)
+        }
     }
 
     public func focusWorkspaceProcess(workspaceID: String, processID: String) throws {
         guard let process = try store.runningProcesses(workspaceID: workspaceID).first(where: { $0.id == processID }) else { return }
-        guard process.terminalApp == "iTerm2", let trackedWindowID = process.windowID else { return }
-        let ok = try focusItermTerminalWindow(
-            workspaceID: workspaceID, trackedWindowID: trackedWindowID, preferredSessionID: process.itermSessionID,
-            preferredTabIndex: process.itermTabIndex)
-        if ok {
-            if (try? itermFocusPulseEnabled()) ?? SettingsKey.defaultItermFocusPulseEnabled {
-                let pulseColor = (try? itermFocusPulseColor()) ?? (r: 46, g: 41, b: 14)
-                let capturedIterm = iterm
-                Task.detached { try? capturedIterm.pulseBackground(windowID: trackedWindowID, pulseColor: pulseColor) }
-            }
+        if try focusWorkspaceProcessRecord(process, workspaceID: workspaceID) {
+            rememberNavigationTarget(.process(process), workspaceID: workspaceID)
             try setActiveWorkspace(id: workspaceID)
         }
     }
+
+    public func focusNextWindow(workspaceID: String) throws { try focusWindowRelative(workspaceID: workspaceID, delta: 1) }
+
+    public func focusPreviousWindow(workspaceID: String) throws { try focusWindowRelative(workspaceID: workspaceID, delta: -1) }
 
     public func workspaceIDForFocusedWindow() throws -> String? {
         guard let focused = try yabai.focusedWindow() else { return nil }
@@ -1158,6 +1175,220 @@ public final class MuxyOrchestrator {
         if candidateWorkspaceIDs.count == 1 { return candidateWorkspaceIDs[0] }
         if let activeWorkspaceID = try activeWorkspaceID(), candidateWorkspaceIDs.contains(activeWorkspaceID) { return activeWorkspaceID }
         return candidates.max(by: { lhs, rhs in lhs.lastSeenAt < rhs.lastSeenAt })?.workspaceID
+    }
+
+    private func focusWindowRelative(workspaceID: String, delta: Int) throws {
+        let targets = try workspaceNavigationTargets(workspaceID: workspaceID)
+        guard !targets.isEmpty else { return }
+        let currentIndex =
+            try currentFocusedNavigationTargetIndex(targets: targets)
+            ?? windowNavigationCursor(workspaceID: workspaceID).flatMap { navigationTargetIndex(cursor: $0, targets: targets) }
+        let targetIndex: Int
+        if let currentIndex {
+            targetIndex = (currentIndex + delta + targets.count) % targets.count
+        } else if delta > 0 {
+            targetIndex = 0
+        } else {
+            targetIndex = targets.count - 1
+        }
+        let ok = try focusNavigationTarget(targets[targetIndex], workspaceID: workspaceID)
+        if ok {
+            setWindowNavigationCursor(navigationCursor(for: targets[targetIndex]), workspaceID: workspaceID)
+            try setActiveWorkspace(id: workspaceID)
+        }
+    }
+
+    private func currentFocusedNavigationTargetIndex(targets: [WorkspaceNavigationTarget]) throws -> Int? {
+        if let focused = try yabai.focusedWindow() {
+            if focused.app == "iTerm2",
+                let focusedSessionID = ((try? iterm.focusedSessionID(windowID: focused.id)) ?? nil)
+                    ?? ((try? iterm.focusedSessionID(windowID: nil)) ?? nil),
+                let sessionMatch = targets.enumerated().first(where: {
+                    navigationTargetSessionID($0.element) == focusedSessionID
+                })
+            {
+                return sessionMatch.offset
+            }
+            if focused.app == "Google Chrome", chrome.isAvailable() {
+                return try currentFocusedChromeNavigationTargetIndex(targets: targets, focusedWindow: focused)
+            }
+            let candidates = targets.enumerated().filter { navigationTargetWindowID($0.element) == focused.id }
+            if candidates.count == 1 { return candidates[0].offset }
+        }
+        return nil
+    }
+
+    private func currentFocusedChromeNavigationTargetIndex(targets: [WorkspaceNavigationTarget], focusedWindow: YabaiWindow) throws -> Int? {
+        if let activeURL = (try? chrome.frontmostActiveTabURL()) ?? nil {
+            let urlMatches = targets.enumerated().compactMap { entry -> (offset: Int, priority: Int)? in
+                let priority = browserTabMatchPriority(activeURL: activeURL, targetURL: navigationTargetBrowserURL(entry.element))
+                guard priority > 0 else { return nil }
+                return (entry.offset, priority)
+            }
+            if let highestPriority = urlMatches.map(\.priority).max() {
+                let bestMatches = urlMatches.filter { $0.priority == highestPriority }
+                if bestMatches.count == 1 { return bestMatches[0].offset }
+                return nil
+            }
+        }
+
+        let candidates = targets.enumerated().filter { navigationTargetWindowID($0.element) == focusedWindow.id }
+        if candidates.count == 1 { return candidates[0].offset }
+        return nil
+    }
+
+    private func workspaceNavigationTargets(workspaceID: String) throws -> [WorkspaceNavigationTarget] {
+        let windows = try trackedWindows(workspaceID: workspaceID)
+        let processes = try store.runningProcesses(workspaceID: workspaceID)
+        let agentWindows = try store.agentWindows(workspaceID: workspaceID)
+        let liveItermSessionIDs = try? iterm.listSessionIDs()
+        let agentYabaiWindowIDs = Set(agentWindows.compactMap(\.yabaiWindowID))
+        let processesByWindowID: [Int: [RunningProcessRecord]] = {
+            var map: [Int: [RunningProcessRecord]] = [:]
+            for process in processes {
+                guard let windowID = process.windowID else { continue }
+                map[windowID, default: []].append(process)
+            }
+            for (windowID, list) in map {
+                map[windowID] = list.sorted { lhs, rhs in
+                    let lhsTab = lhs.itermTabIndex ?? Int.max
+                    let rhsTab = rhs.itermTabIndex ?? Int.max
+                    if lhsTab != rhsTab { return lhsTab < rhsTab }
+                    return lhs.templateName.localizedStandardCompare(rhs.templateName) == .orderedAscending
+                }
+            }
+            return map
+        }()
+
+        var targets: [WorkspaceNavigationTarget] = []
+
+        for record in agentWindows {
+            if let sessionID = record.itermSessionID, let liveItermSessionIDs, !liveItermSessionIDs.contains(sessionID) { continue }
+            targets.append(.agent(record))
+        }
+
+        for window in windows where window.role == "browser" {
+            let isAgentClaimedWindow = window.windowID != nil && agentYabaiWindowIDs.contains(window.windowID!)
+            guard !isAgentClaimedWindow else { continue }
+            targets.append(.browser(window))
+        }
+
+        for window in windows where window.role != "browser" {
+            let windowProcesses = (window.role == "terminal" ? (window.windowID.flatMap { processesByWindowID[$0] }) : nil) ?? []
+            let isAgentClaimedWindow = window.windowID != nil && agentYabaiWindowIDs.contains(window.windowID!)
+            if window.role == "terminal", !windowProcesses.isEmpty {
+                for process in windowProcesses {
+                    if let sessionID = process.itermSessionID, let liveItermSessionIDs, !liveItermSessionIDs.contains(sessionID) { continue }
+                    if process.status != .running, process.itermSessionID == nil { continue }
+                    targets.append(.process(process))
+                }
+                continue
+            }
+            if isAgentClaimedWindow { continue }
+            targets.append(.window(window))
+        }
+
+        return targets
+    }
+
+    private func navigationTargetWindowID(_ target: WorkspaceNavigationTarget) -> Int? {
+        switch target {
+        case .agent(let record): return record.windowID ?? record.yabaiWindowID
+        case .browser(let window), .window(let window): return window.windowID
+        case .process(let process): return process.windowID
+        }
+    }
+
+    private func navigationTargetSessionID(_ target: WorkspaceNavigationTarget) -> String? {
+        switch target {
+        case .agent(let record): return record.itermSessionID
+        case .process(let process): return process.itermSessionID
+        case .browser, .window: return nil
+        }
+    }
+
+    private func navigationTargetBrowserURL(_ target: WorkspaceNavigationTarget) -> String? {
+        switch target {
+        case .browser(let window), .window(let window): return window.targetURL
+        case .agent, .process: return nil
+        }
+    }
+
+    private func focusNavigationTarget(_ target: WorkspaceNavigationTarget, workspaceID: String) throws -> Bool {
+        switch target {
+        case .agent(let record):
+            return try focusAgentWindowRecord(record)
+        case .browser(let window), .window(let window):
+            return focusTrackedWindow(window, workspaceID: workspaceID)
+        case .process(let process):
+            return try focusWorkspaceProcessRecord(process, workspaceID: workspaceID)
+        }
+    }
+
+    private func browserTabMatchPriority(activeURL: String, targetURL: String?) -> Int {
+        guard let targetURL else { return 0 }
+        if activeURL == targetURL { return 2 }
+        if activeURL.hasPrefix(targetURL) { return 1 }
+        return 0
+    }
+
+    private func navigationCursor(for target: WorkspaceNavigationTarget) -> WorkspaceNavigationCursor? {
+        switch target {
+        case .agent(let record):
+            if let sessionID = record.itermSessionID, !sessionID.isEmpty { return .session(sessionID) }
+            if let windowID = record.windowID ?? record.yabaiWindowID { return .window(windowID) }
+        case .browser(let window):
+            if let browserURL = window.targetURL, !browserURL.isEmpty, let windowID = window.windowID {
+                return .browserWindowURL(windowID, browserURL)
+            }
+            if let browserURL = window.targetURL, !browserURL.isEmpty { return .browserURL(browserURL) }
+            if let windowID = window.windowID { return .window(windowID) }
+        case .process(let process):
+            if let sessionID = process.itermSessionID, !sessionID.isEmpty { return .session(sessionID) }
+            if let windowID = process.windowID { return .window(windowID) }
+        case .window(let window):
+            if let sessionID = window.itermSessionID, !sessionID.isEmpty { return .session(sessionID) }
+            if let windowID = window.windowID { return .window(windowID) }
+        }
+        return nil
+    }
+
+    private func navigationTarget(for window: WindowRecord) -> WorkspaceNavigationTarget {
+        window.role == "browser" ? .browser(window) : .window(window)
+    }
+
+    private func rememberNavigationTarget(_ target: WorkspaceNavigationTarget, workspaceID: String) {
+        setWindowNavigationCursor(navigationCursor(for: target), workspaceID: workspaceID)
+    }
+
+    private func navigationTargetIndex(cursor: WorkspaceNavigationCursor, targets: [WorkspaceNavigationTarget]) -> Int? {
+        targets.enumerated().first(where: { navigationCursor(for: $0.element) == cursor })?.offset
+    }
+
+    private func rememberFocusedNavigationTarget(workspaceID: String) throws {
+        let targets = try workspaceNavigationTargets(workspaceID: workspaceID)
+        guard !targets.isEmpty else {
+            setWindowNavigationCursor(nil, workspaceID: workspaceID)
+            return
+        }
+        let cursor = try currentFocusedNavigationTargetIndex(targets: targets).flatMap { navigationCursor(for: targets[$0]) }
+        setWindowNavigationCursor(cursor, workspaceID: workspaceID)
+    }
+
+    private func windowNavigationCursor(workspaceID: String) -> WorkspaceNavigationCursor? {
+        windowNavigationLock.lock()
+        defer { windowNavigationLock.unlock() }
+        return windowNavigationCursorByWorkspace[workspaceID]
+    }
+
+    private func setWindowNavigationCursor(_ cursor: WorkspaceNavigationCursor?, workspaceID: String) {
+        windowNavigationLock.lock()
+        if let cursor {
+            windowNavigationCursorByWorkspace[workspaceID] = cursor
+        } else {
+            windowNavigationCursorByWorkspace.removeValue(forKey: workspaceID)
+        }
+        windowNavigationLock.unlock()
     }
 
     private func focusTrackedWindow(_ window: WindowRecord, workspaceID: String) -> Bool {
@@ -1241,9 +1472,18 @@ public final class MuxyOrchestrator {
             $0.role == "terminal" && $0.app == "iTerm2" && $0.windowID == trackedWindowID
         }
         let fallbackMetadata = itermTerminalSessionMetadata(workspaceID: workspaceID, windowID: trackedWindowID)
+        let resolvedSessionID: String?
+        let resolvedTabIndex: Int?
+        if let preferredSessionID, !preferredSessionID.isEmpty {
+            resolvedSessionID = preferredSessionID
+            resolvedTabIndex = preferredTabIndex
+        } else {
+            resolvedSessionID = runningProcess?.itermSessionID ?? trackedWindow?.itermSessionID ?? fallbackMetadata?.sessionID
+            resolvedTabIndex = preferredTabIndex ?? runningProcess?.itermTabIndex ?? trackedWindow?.itermTabIndex ?? fallbackMetadata?.tabIndex
+        }
         return try iterm.focusSessionOrTab(
-            preferredSessionID: preferredSessionID ?? runningProcess?.itermSessionID ?? trackedWindow?.itermSessionID ?? fallbackMetadata?.sessionID,
-            tabIndex: preferredTabIndex ?? runningProcess?.itermTabIndex ?? trackedWindow?.itermTabIndex ?? fallbackMetadata?.tabIndex,
+            preferredSessionID: resolvedSessionID,
+            tabIndex: resolvedTabIndex,
             windowID: trackedWindowID)
     }
 
@@ -2683,47 +2923,35 @@ public final class MuxyOrchestrator {
         yabaiWindowID: Int? = nil, status: AgentWindowStatus = .idle
     ) throws -> AgentWindowRecord {
         let now = nowISO8601()
-
-        switch provider {
-        case .codex:
-            // Only one Codex agent record per workspace
-            try store.deleteAgentWindowsByProvider(workspaceID: workspaceID, provider: .codex)
-            let record = AgentWindowRecord(
-                id: UUID().uuidString, workspaceID: workspaceID, provider: .codex, label: label, itermSessionID: nil, codexThreadID: codexThreadID,
-                windowID: nil, yabaiWindowID: yabaiWindowID, status: status, createdAt: now, updatedAt: now)
-            try store.upsertAgentWindow(record)
-            return record
-
-        case .iterm2:
-            // Prune stale sessions before creating
-            if let sessionID = itermSessionID {
-                // Update existing record if same session
-                if let existing = try store.agentWindow(workspaceID: workspaceID, itermSessionID: sessionID) {
-                    let updated = AgentWindowRecord(
-                        id: existing.id, workspaceID: existing.workspaceID, provider: existing.provider, label: label ?? existing.label,
-                        itermSessionID: existing.itermSessionID, codexThreadID: existing.codexThreadID, windowID: existing.windowID,
-                        yabaiWindowID: yabaiWindowID ?? existing.yabaiWindowID, status: status, createdAt: existing.createdAt, updatedAt: now)
-                    try store.upsertAgentWindow(updated)
-                    return updated
-                }
+        // Prune stale sessions before creating.
+        if let sessionID = itermSessionID {
+            // Update existing record if same session.
+            if let existing = try store.agentWindow(workspaceID: workspaceID, itermSessionID: sessionID) {
+                let updated = AgentWindowRecord(
+                    id: existing.id, workspaceID: existing.workspaceID, provider: existing.provider, label: label ?? existing.label,
+                    itermSessionID: existing.itermSessionID, codexThreadID: existing.codexThreadID, windowID: existing.windowID,
+                    yabaiWindowID: yabaiWindowID ?? existing.yabaiWindowID, status: status, createdAt: existing.createdAt, updatedAt: now)
+                try store.upsertAgentWindow(updated)
+                return updated
             }
-            // Prune stale iTerm2 sessions
-            if let aliveIDs = try? iterm.listSessionIDs() {
-                let existingRecords = try store.agentWindowsByProvider(workspaceID: workspaceID, provider: .iterm2)
-                for stale in existingRecords {
-                    guard let sid = stale.itermSessionID else {
-                        try store.deleteAgentWindow(id: stale.id)
-                        continue
-                    }
-                    if !aliveIDs.contains(sid) { try store.deleteAgentWindow(id: stale.id) }
-                }
-            }
-            let record = AgentWindowRecord(
-                id: UUID().uuidString, workspaceID: workspaceID, provider: .iterm2, label: label, itermSessionID: itermSessionID, codexThreadID: nil,
-                windowID: nil, yabaiWindowID: yabaiWindowID, status: status, createdAt: now, updatedAt: now)
-            try store.upsertAgentWindow(record)
-            return record
         }
+        // Prune stale iTerm2 sessions.
+        if let aliveIDs = try? iterm.listSessionIDs() {
+            let existingRecords = try store.agentWindowsByProvider(workspaceID: workspaceID, provider: .iterm2)
+            for stale in existingRecords {
+                guard let sid = stale.itermSessionID else {
+                    try store.deleteAgentWindow(id: stale.id)
+                    continue
+                }
+                if !aliveIDs.contains(sid) { try store.deleteAgentWindow(id: stale.id) }
+            }
+        }
+        let record = AgentWindowRecord(
+            id: UUID().uuidString, workspaceID: workspaceID, provider: .iterm2, label: label, itermSessionID: itermSessionID,
+            codexThreadID: codexThreadID,
+            windowID: nil, yabaiWindowID: yabaiWindowID, status: status, createdAt: now, updatedAt: now)
+        try store.upsertAgentWindow(record)
+        return record
     }
 
     @discardableResult public func updateAgentWindowStatus(
@@ -2733,12 +2961,8 @@ public final class MuxyOrchestrator {
         let now = nowISO8601()
         // Find existing record
         var existing: AgentWindowRecord?
-        if provider == .iterm2, let sessionID = itermSessionID {
+        if let sessionID = itermSessionID {
             existing = try store.agentWindow(workspaceID: workspaceID, itermSessionID: sessionID)
-        } else if provider == .codex, let threadID = codexThreadID {
-            existing = try store.agentWindow(workspaceID: workspaceID, codexThreadID: threadID)
-        } else if provider == .codex {
-            existing = try store.agentWindowsByProvider(workspaceID: workspaceID, provider: .codex).first
         }
         if let existing {
             let updated = AgentWindowRecord(
@@ -2755,17 +2979,36 @@ public final class MuxyOrchestrator {
     }
 
     public func focusAgentWindow(_ record: AgentWindowRecord) throws {
-        switch record.provider {
-        case .iterm2:
-            let focused = (try? iterm.focusSessionOrTab(preferredSessionID: record.itermSessionID, tabIndex: nil, windowID: record.windowID)) ?? false
-            if focused, let windowID = record.windowID ?? record.yabaiWindowID,
-                (try? itermFocusPulseEnabled()) ?? SettingsKey.defaultItermFocusPulseEnabled
-            {
-                let color = (try? itermFocusPulseColor()) ?? (r: 46, g: 41, b: 14)
-                try? iterm.pulseBackground(windowID: windowID, pulseColor: color)
-            }
-        case .codex: if let threadID = record.codexThreadID { try Shell.run(["open", "codex://threads/\(threadID)"]) }
+        if try focusAgentWindowRecord(record) {
+            rememberNavigationTarget(.agent(record), workspaceID: record.workspaceID)
+            try setActiveWorkspace(id: record.workspaceID)
         }
+    }
+
+    private func focusWorkspaceProcessRecord(_ process: RunningProcessRecord, workspaceID: String) throws -> Bool {
+        guard process.terminalApp == "iTerm2", let trackedWindowID = process.windowID else { return false }
+        let focused = try focusItermTerminalWindow(
+            workspaceID: workspaceID, trackedWindowID: trackedWindowID, preferredSessionID: process.itermSessionID,
+            preferredTabIndex: process.itermTabIndex)
+        if focused {
+            if (try? itermFocusPulseEnabled()) ?? SettingsKey.defaultItermFocusPulseEnabled {
+                let pulseColor = (try? itermFocusPulseColor()) ?? (r: 46, g: 41, b: 14)
+                let capturedIterm = iterm
+                Task.detached { try? capturedIterm.pulseBackground(windowID: trackedWindowID, pulseColor: pulseColor) }
+            }
+        }
+        return focused
+    }
+
+    private func focusAgentWindowRecord(_ record: AgentWindowRecord) throws -> Bool {
+        let focused = (try? iterm.focusSessionOrTab(preferredSessionID: record.itermSessionID, tabIndex: nil, windowID: record.windowID)) ?? false
+        if focused, let windowID = record.windowID ?? record.yabaiWindowID,
+            (try? itermFocusPulseEnabled()) ?? SettingsKey.defaultItermFocusPulseEnabled
+        {
+            let color = (try? itermFocusPulseColor()) ?? (r: 46, g: 41, b: 14)
+            try? iterm.pulseBackground(windowID: windowID, pulseColor: color)
+        }
+        return focused
     }
 
     private func safeFilename(_ raw: String) -> String {

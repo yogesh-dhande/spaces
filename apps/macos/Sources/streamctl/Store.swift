@@ -678,17 +678,6 @@ public final class SQLiteStore {
         return decodeAgentWindow(row: row)
     }
 
-    public func agentWindow(workspaceID: String, codexThreadID: String) throws -> AgentWindowRecord? {
-        guard
-            let row = try queryRow(
-                sql: """
-                    SELECT id, workspace_id, provider, label, iterm_session_id, codex_thread_id, window_id, status, created_at, updated_at, yabai_window_id
-                    FROM agent_windows WHERE workspace_id = ? AND codex_thread_id = ?
-                    """, bindings: [workspaceID, codexThreadID])
-        else { return nil }
-        return decodeAgentWindow(row: row)
-    }
-
     public func agentWindowsByProvider(workspaceID: String, provider: AgentProvider) throws -> [AgentWindowRecord] {
         let rows = try queryRows(
             sql: """
@@ -980,6 +969,8 @@ public final class SQLiteStore {
         try ensureColumnExists(table: "windows", name: "iterm_session_id", definition: "iterm_session_id TEXT")
         try ensureColumnExists(table: "windows", name: "iterm_tab_index", definition: "iterm_tab_index INTEGER")
         try ensureColumnExists(table: "agent_windows", name: "yabai_window_id", definition: "yabai_window_id INTEGER")
+        // Legacy Codex desktop records cannot be focused once terminal-only agent support is enabled.
+        try execute(sql: "DELETE FROM agent_windows WHERE provider = 'codex'", bindings: [])
         // Migrate legacy color-based status values to semantic names
         try execute(sql: "UPDATE status_results SET status = 'passed' WHERE status = 'green'", bindings: [])
         try execute(sql: "UPDATE status_results SET status = 'failed' WHERE status = 'red'", bindings: [])

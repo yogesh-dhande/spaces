@@ -201,6 +201,33 @@ open class Iterm2Adapter: @unchecked Sendable {
         return Set(ids)
     }
 
+    open func focusedSessionID(windowID: Int?) throws -> String? {
+        let targetWindowID = windowID ?? -1
+        let script = """
+            tell application "iTerm2"
+              set targetWindowID to \(targetWindowID)
+
+              if targetWindowID > 0 then
+                repeat with w in windows
+                  if id of w is targetWindowID then
+                    return (id of current session of w as string)
+                  end if
+                end repeat
+                return ""
+              end if
+
+              try
+                return (id of current session of current window as string)
+              on error
+                return ""
+              end try
+            end tell
+            """
+        let output = try AppleScript.run(script)
+        let trimmed = output.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
     open func focusSessionOrTab(preferredSessionID: String?, tabIndex: Int?, windowID: Int?) throws -> Bool {
         let escapedSessionID = (preferredSessionID ?? "").replacingOccurrences(of: "\"", with: "\\\"")
         let targetTabIndex = tabIndex ?? -1
@@ -216,11 +243,17 @@ open class Iterm2Adapter: @unchecked Sendable {
                   repeat with t in tabs of w
                     repeat with s in sessions of t
                       if (id of s as string) is targetSessionID then
+                        activate
                         tell w to select
                         select t
                         tell s to select
-                        activate
-                        return "session"
+                        repeat 10 times
+                          if (id of current session of w as string) is targetSessionID then
+                            return "session"
+                          end if
+                          delay 0.05
+                        end repeat
+                        return ""
                       end if
                     end repeat
                   end repeat

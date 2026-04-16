@@ -372,8 +372,9 @@ final class StoreTests: XCTestCase {
 
         try store.upsertAgentWindow(
             AgentWindowRecord(
-                id: UUID().uuidString, workspaceID: workspace.id, provider: .codex, label: "Codex", itermSessionID: nil, codexThreadID: "thread-123",
-                windowID: nil, yabaiWindowID: 4242, status: .spinning, createdAt: "2026-02-25T00:00:00Z", updatedAt: "2026-02-25T00:00:01Z"))
+                id: UUID().uuidString, workspaceID: workspace.id, provider: .iterm2, label: "Codex CLI", itermSessionID: "session-123",
+                codexThreadID: "thread-123", windowID: nil, yabaiWindowID: 4242, status: .spinning, createdAt: "2026-02-25T00:00:00Z",
+                updatedAt: "2026-02-25T00:00:01Z"))
 
         XCTAssertEqual(try store.workspaceIDForAgentWindow(yabaiWindowID: 4242), workspace.id)
     }
@@ -684,34 +685,36 @@ final class StoreTests: XCTestCase {
         XCTAssertNil(loaded[1].extractedWindow)
     }
 
-    // Tests agent window lookup by codex thread ID returns the matching record by arranging representative inputs and asserting the expected result.
-    func testAgentWindowLookupByCodexThreadID() throws {
+    // Tests agent window lookup by iTerm session ID returns the matching record by arranging representative inputs and asserting the expected result.
+    func testAgentWindowLookupByItermSessionID() throws {
         let store = try makeTemporaryStore()
         let project = makeProjectRecord(dir: try makeTempDirectory().path)
         let workspace = makeWorkspaceRecord(projectID: project.id, name: "feature", dir: project.dir)
         try store.upsert(project: project)
         try store.upsert(workspace: workspace)
 
-        let threadID = "thread-abc"
+        let sessionID = "session-abc"
         let id = UUID().uuidString
         try store.upsertAgentWindow(
             AgentWindowRecord(
-                id: id, workspaceID: workspace.id, provider: .codex, label: nil, itermSessionID: nil, codexThreadID: threadID, windowID: nil,
+                id: id, workspaceID: workspace.id, provider: .iterm2, label: nil, itermSessionID: sessionID, codexThreadID: nil, windowID: nil,
                 yabaiWindowID: nil, status: .spinning, createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:00:00Z"))
 
-        let found = try store.agentWindow(workspaceID: workspace.id, codexThreadID: threadID)
+        let found = try store.agentWindow(workspaceID: workspace.id, itermSessionID: sessionID)
         XCTAssertEqual(found?.id, id)
-        XCTAssertEqual(found?.codexThreadID, threadID)
-        XCTAssertNil(try store.agentWindow(workspaceID: workspace.id, codexThreadID: "nonexistent"))
+        XCTAssertEqual(found?.itermSessionID, sessionID)
+        XCTAssertNil(try store.agentWindow(workspaceID: workspace.id, itermSessionID: "nonexistent"))
     }
 
-    // Tests agentWindowsByProvider returns only records matching the provider by arranging representative inputs and asserting the expected result.
+    // Tests agentWindowsByProvider returns only records from the requested workspace/provider by arranging representative inputs and asserting the expected result.
     func testAgentWindowsByProviderFiltersCorrectly() throws {
         let store = try makeTemporaryStore()
         let project = makeProjectRecord(dir: try makeTempDirectory().path)
         let workspace = makeWorkspaceRecord(projectID: project.id, name: "feature", dir: project.dir)
+        let workspaceB = makeWorkspaceRecord(projectID: project.id, name: "feature-b", dir: project.dir)
         try store.upsert(project: project)
         try store.upsert(workspace: workspace)
+        try store.upsert(workspace: workspaceB)
 
         try store.upsertAgentWindow(
             AgentWindowRecord(
@@ -719,16 +722,13 @@ final class StoreTests: XCTestCase {
                 windowID: nil, yabaiWindowID: nil, status: .idle, createdAt: "2026-01-01T00:00:01Z", updatedAt: "2026-01-01T00:00:01Z"))
         try store.upsertAgentWindow(
             AgentWindowRecord(
-                id: UUID().uuidString, workspaceID: workspace.id, provider: .codex, label: "codex", itermSessionID: nil, codexThreadID: "thread-1",
+                id: UUID().uuidString, workspaceID: workspaceB.id, provider: .iterm2, label: "codex", itermSessionID: "session-b", codexThreadID: nil,
                 windowID: nil, yabaiWindowID: nil, status: .spinning, createdAt: "2026-01-01T00:00:02Z", updatedAt: "2026-01-01T00:00:02Z"))
 
         let itermWindows = try store.agentWindowsByProvider(workspaceID: workspace.id, provider: .iterm2)
         XCTAssertEqual(itermWindows.count, 1)
         XCTAssertEqual(itermWindows[0].provider, .iterm2)
-
-        let codexWindows = try store.agentWindowsByProvider(workspaceID: workspace.id, provider: .codex)
-        XCTAssertEqual(codexWindows.count, 1)
-        XCTAssertEqual(codexWindows[0].provider, .codex)
+        XCTAssertEqual(itermWindows[0].itermSessionID, "session-a")
     }
 
     // Tests deleteAgentWindow removes a single record by arranging representative inputs and asserting the expected result.
@@ -756,7 +756,7 @@ final class StoreTests: XCTestCase {
         XCTAssertEqual(remaining[0].id, idB)
     }
 
-    // Tests deleteAgentWindowsByProvider removes only records for the given provider by arranging representative inputs and asserting the expected result.
+    // Tests deleteAgentWindowsByProvider removes terminal-agent rows for the workspace by arranging representative inputs and asserting the expected result.
     func testDeleteAgentWindowsByProviderRemovesOnlyMatchingProvider() throws {
         let store = try makeTemporaryStore()
         let project = makeProjectRecord(dir: try makeTempDirectory().path)
@@ -770,13 +770,12 @@ final class StoreTests: XCTestCase {
                 windowID: nil, yabaiWindowID: nil, status: .idle, createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:00:00Z"))
         try store.upsertAgentWindow(
             AgentWindowRecord(
-                id: UUID().uuidString, workspaceID: workspace.id, provider: .codex, label: nil, itermSessionID: nil, codexThreadID: "t1",
+                id: UUID().uuidString, workspaceID: workspace.id, provider: .iterm2, label: nil, itermSessionID: "s2", codexThreadID: nil,
                 windowID: nil, yabaiWindowID: nil, status: .spinning, createdAt: "2026-01-01T00:00:01Z", updatedAt: "2026-01-01T00:00:01Z"))
 
         try store.deleteAgentWindowsByProvider(workspaceID: workspace.id, provider: .iterm2)
         let all = try store.agentWindows(workspaceID: workspace.id)
-        XCTAssertEqual(all.count, 1)
-        XCTAssertEqual(all[0].provider, .codex)
+        XCTAssertTrue(all.isEmpty)
     }
 
     // Tests updateAgentWindowStatus persists the new status by arranging representative inputs and asserting the expected result.

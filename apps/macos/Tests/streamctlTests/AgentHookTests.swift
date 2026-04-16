@@ -46,22 +46,25 @@ final class AgentHookTests: XCTestCase {
         XCTAssertEqual(allRecords.count, 1)
     }
 
-    // Tests registerAgentWindow replaces existing Codex record (only 1 per workspace).
-    func testRegisterAgentWindowReplacesSingleCodexRecord() throws {
+    // Tests registerAgentWindow keeps separate iTerm2 rows for distinct sessions.
+    func testRegisterAgentWindowKeepsDistinctItermSessions() throws {
         let store = try makeTemporaryStore()
-        let orchestrator = MuxyOrchestrator(store: store)
+        let mockIterm = MockIterm2Adapter()
+        mockIterm.stubbedSessionIDs = ["session-1", "session-2"]
+        let orchestrator = MuxyOrchestrator(store: store, iterm: mockIterm)
         let (_, workspace) = try makeProjectAndWorkspace(store: store)
 
-        let first = try orchestrator.registerAgentWindow(workspaceID: workspace.id, provider: .codex, codexThreadID: "thread-1", status: .idle)
+        let first = try orchestrator.registerAgentWindow(workspaceID: workspace.id, provider: .iterm2, itermSessionID: "session-1", status: .idle)
 
-        let second = try orchestrator.registerAgentWindow(workspaceID: workspace.id, provider: .codex, codexThreadID: "thread-2", status: .spinning)
+        let second = try orchestrator.registerAgentWindow(
+            workspaceID: workspace.id, provider: .iterm2, itermSessionID: "session-2", status: .spinning)
 
         XCTAssertNotEqual(first.id, second.id)
-        XCTAssertEqual(second.codexThreadID, "thread-2")
+        XCTAssertEqual(second.itermSessionID, "session-2")
 
-        let allRecords = try store.agentWindowsByProvider(workspaceID: workspace.id, provider: .codex)
-        XCTAssertEqual(allRecords.count, 1)
-        XCTAssertEqual(allRecords[0].codexThreadID, "thread-2")
+        let allRecords = try store.agentWindowsByProvider(workspaceID: workspace.id, provider: .iterm2)
+        XCTAssertEqual(allRecords.count, 2)
+        XCTAssertEqual(Set(allRecords.compactMap(\.itermSessionID)), Set(["session-1", "session-2"]))
     }
 
     // Tests updateAgentWindowStatus creates record when not found.
@@ -149,36 +152,37 @@ final class AgentHookTests: XCTestCase {
     // Tests agentWindows returns correct records.
     func testAgentWindowsReturnsCorrectRecords() throws {
         let store = try makeTemporaryStore()
-        let orchestrator = MuxyOrchestrator(store: store)
+        let mockIterm = MockIterm2Adapter()
+        mockIterm.stubbedSessionIDs = ["s1", "s2", "s3"]
+        let orchestrator = MuxyOrchestrator(store: store, iterm: mockIterm)
         let (_, workspace) = try makeProjectAndWorkspace(store: store)
         let (_, workspace2) = try makeProjectAndWorkspace(store: store, projectName: "proj2", workspaceName: "ws2")
 
         try orchestrator.registerAgentWindow(workspaceID: workspace.id, provider: .iterm2, itermSessionID: "s1", status: .idle)
-        try orchestrator.registerAgentWindow(workspaceID: workspace.id, provider: .codex, codexThreadID: "t1", status: .spinning)
+        try orchestrator.registerAgentWindow(workspaceID: workspace.id, provider: .iterm2, itermSessionID: "s2", status: .spinning)
         // Different workspace - should not appear
-        try orchestrator.registerAgentWindow(workspaceID: workspace2.id, provider: .iterm2, itermSessionID: "s2", status: .waiting)
+        try orchestrator.registerAgentWindow(workspaceID: workspace2.id, provider: .iterm2, itermSessionID: "s3", status: .waiting)
 
         let records = try orchestrator.agentWindows(workspaceID: workspace.id)
         XCTAssertEqual(records.count, 2)
         XCTAssertTrue(records.contains { $0.itermSessionID == "s1" })
-        XCTAssertTrue(records.contains { $0.codexThreadID == "t1" })
+        XCTAssertTrue(records.contains { $0.itermSessionID == "s2" })
     }
 
-    // Tests provider detection defaults to iterm2 for CLI context.
+    // Tests provider detection defaults to iTerm2 for non-agent CLI context.
     func testProviderDetectionDefaultsToIterm2() {
-        // Simulating: no __CFBundleIdentifier == com.openai.codex → iterm2
         let env: [String: String] = ["ITERM_SESSION_ID": "some-session"]
         let bundleID = env["__CFBundleIdentifier"] ?? ""
-        let provider: AgentProvider = bundleID == "com.openai.codex" ? .codex : .iterm2
+        let provider: AgentProvider = bundleID == "com.googlecode.iterm2" ? .iterm2 : .iterm2
         XCTAssertEqual(provider, .iterm2)
     }
 
-    // Tests provider detection resolves to codex when bundle ID matches.
-    func testProviderDetectionResolvesToCodex() {
+    // Tests Codex desktop bundle no longer resolves to a supported provider.
+    func testProviderDetectionDoesNotResolveCodexDesktopBundle() {
         let env: [String: String] = ["__CFBundleIdentifier": "com.openai.codex"]
         let bundleID = env["__CFBundleIdentifier"] ?? ""
-        let provider: AgentProvider = bundleID == "com.openai.codex" ? .codex : .iterm2
-        XCTAssertEqual(provider, .codex)
+        let provider: AgentProvider? = bundleID == "com.googlecode.iterm2" ? .iterm2 : nil
+        XCTAssertNil(provider)
     }
 
     // Tests inferCodingAgentProvider logic: returns nil when no known coding agent env var is set.
@@ -187,7 +191,7 @@ final class AgentHookTests: XCTestCase {
         let bundleID = env["__CFBundleIdentifier"] ?? ""
         let claudeEntrypoint = env["CLAUDE_CODE_ENTRYPOINT"]
         let provider: AgentProvider?
-        if bundleID == "com.openai.codex" { provider = .codex } else if claudeEntrypoint != nil { provider = .iterm2 } else { provider = nil }
+        if bundleID == "com.googlecode.iterm2", claudeEntrypoint != nil { provider = .iterm2 } else { provider = nil }
         XCTAssertNil(provider)
     }
 
@@ -197,9 +201,7 @@ final class AgentHookTests: XCTestCase {
         let bundleID = env["__CFBundleIdentifier"] ?? ""
         let claudeEntrypoint = env["CLAUDE_CODE_ENTRYPOINT"]
         let provider: AgentProvider?
-        if bundleID == "com.openai.codex" {
-            provider = .codex
-        } else if bundleID == "com.googlecode.iterm2", env["CODEX_THREAD_ID"] != nil {
+        if bundleID == "com.googlecode.iterm2", env["CODEX_THREAD_ID"] != nil {
             provider = .iterm2
         } else if claudeEntrypoint != nil {
             provider = .iterm2
@@ -215,9 +217,7 @@ final class AgentHookTests: XCTestCase {
         let bundleID = env["__CFBundleIdentifier"] ?? ""
         let claudeEntrypoint = env["CLAUDE_CODE_ENTRYPOINT"]
         let provider: AgentProvider?
-        if bundleID == "com.openai.codex" {
-            provider = .codex
-        } else if bundleID == "com.googlecode.iterm2", env["CODEX_THREAD_ID"] != nil {
+        if bundleID == "com.googlecode.iterm2", env["CODEX_THREAD_ID"] != nil {
             provider = .iterm2
         } else if claudeEntrypoint != nil {
             provider = .iterm2
@@ -233,9 +233,7 @@ final class AgentHookTests: XCTestCase {
         let bundleID = env["__CFBundleIdentifier"] ?? ""
         let claudeEntrypoint = env["CLAUDE_CODE_ENTRYPOINT"]
         let provider: AgentProvider?
-        if bundleID == "com.openai.codex" {
-            provider = .codex
-        } else if bundleID == "com.googlecode.iterm2", env["CODEX_THREAD_ID"] != nil {
+        if bundleID == "com.googlecode.iterm2", env["CODEX_THREAD_ID"] != nil {
             provider = .iterm2
         } else if claudeEntrypoint != nil {
             provider = .iterm2
@@ -251,9 +249,7 @@ final class AgentHookTests: XCTestCase {
         let bundleID = env["__CFBundleIdentifier"] ?? ""
         let claudeEntrypoint = env["CLAUDE_CODE_ENTRYPOINT"]
         let provider: AgentProvider?
-        if bundleID == "com.openai.codex" {
-            provider = .codex
-        } else if bundleID == "com.googlecode.iterm2", env["CODEX_THREAD_ID"] != nil {
+        if bundleID == "com.googlecode.iterm2", env["CODEX_THREAD_ID"] != nil {
             provider = .iterm2
         } else if bundleID == "com.googlecode.iterm2", claudeEntrypoint != nil {
             provider = .iterm2
@@ -269,26 +265,23 @@ final class AgentHookTests: XCTestCase {
         let orchestrator = MuxyOrchestrator(store: store)
         let (_, workspace) = try makeProjectAndWorkspace(store: store)
 
-        try orchestrator.registerAgentWindow(workspaceID: workspace.id, provider: .codex, status: .spinning)
-        let updated = try orchestrator.updateAgentWindowStatus(workspaceID: workspace.id, provider: .codex, status: .done)
+        try orchestrator.registerAgentWindow(workspaceID: workspace.id, provider: .iterm2, itermSessionID: "session-stop", status: .spinning)
+        let updated = try orchestrator.updateAgentWindowStatus(
+            workspaceID: workspace.id, provider: .iterm2, itermSessionID: "session-stop", status: .done)
         XCTAssertEqual(updated.status, .done)
 
         let allRecords = try store.agentWindows(workspaceID: workspace.id)
         XCTAssertEqual(allRecords[0].status, .done)
     }
 
-    // Tests updateAgentWindowStatus with a specific codex thread ID matches and updates the existing record by arranging representative inputs and asserting the expected result.
-    func testUpdateAgentWindowStatusWithCodexThreadIDUpdatesMatchingRecord() throws {
+    // Tests updateAgentWindowStatus without an existing session creates a new terminal-backed record.
+    func testUpdateAgentWindowStatusCreatesNewTerminalRecordWithoutSessionMatch() throws {
         let store = try makeTemporaryStore()
         let orchestrator = MuxyOrchestrator(store: store)
         let (_, workspace) = try makeProjectAndWorkspace(store: store)
 
-        // Register a codex agent window with a specific thread ID.
-        try orchestrator.registerAgentWindow(workspaceID: workspace.id, provider: .codex, codexThreadID: "thread-xyz", status: .idle)
-
-        // updateAgentWindowStatus with codexThreadID takes the "else if provider == .codex, let threadID" branch.
         let updated = try orchestrator.updateAgentWindowStatus(
-            workspaceID: workspace.id, provider: .codex, codexThreadID: "thread-xyz", status: .spinning)
+            workspaceID: workspace.id, provider: .iterm2, codexThreadID: "thread-xyz", status: .spinning)
 
         XCTAssertEqual(updated.status, .spinning)
         XCTAssertEqual(updated.codexThreadID, "thread-xyz")

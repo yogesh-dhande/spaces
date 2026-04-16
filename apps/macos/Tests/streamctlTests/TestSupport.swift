@@ -37,6 +37,7 @@ class MockIterm2Adapter: Iterm2Adapter, @unchecked Sendable {
     var lastWindowID: Int?
     var openedTabWindowIDs: [Int] = []
     var lastFocusedSessionID: String?
+    var focusedSessionIDs: [String?] = []
     var lastFocusedTabIndex: Int?
     var nextWindowID: Int = 9999
     var nextSessionID: String? = "mock-session"
@@ -44,6 +45,7 @@ class MockIterm2Adapter: Iterm2Adapter, @unchecked Sendable {
     var focusSessionOrTabResult = true
     var closedSessionIDs: [String] = []
     var stubbedSessionIDs: Set<String> = []
+    var focusedSessionIDResult: String?
     override func openWindowAndRun(command: String, background: Bool = false) throws -> ItermWindowInfo {
         openWindowAndRunCallCount += 1
         lastCommand = command
@@ -72,8 +74,12 @@ class MockIterm2Adapter: Iterm2Adapter, @unchecked Sendable {
     override func focusSessionOrTab(preferredSessionID: String?, tabIndex: Int?, windowID: Int?) throws -> Bool {
         focusSessionOrTabCallCount += 1
         lastFocusedSessionID = preferredSessionID
+        focusedSessionIDs.append(preferredSessionID)
         lastFocusedTabIndex = tabIndex
         lastWindowID = windowID
+        if focusSessionOrTabResult, let preferredSessionID, !preferredSessionID.isEmpty {
+            focusedSessionIDResult = preferredSessionID
+        }
         return focusSessionOrTabResult
     }
 
@@ -96,4 +102,9 @@ class MockIterm2Adapter: Iterm2Adapter, @unchecked Sendable {
     }
 
     override func listSessionIDs() throws -> Set<String> { stubbedSessionIDs }
+
+    override func focusedSessionID(windowID: Int?) throws -> String? {
+        lastWindowID = windowID
+        return focusedSessionIDResult
+    }
 }

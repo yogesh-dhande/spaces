@@ -116,7 +116,7 @@ Muxy periodically discovers and reconciles git worktrees for existing projects. 
   - Process restarts (status-check failure or `on_exit=restart`) terminate and wait for the tracked runtime PID before relaunch; if a clean stop does not finish in time, muxy restarts in a new terminal window instead of queueing in the busy one
   - Processes with status check results shown as indented sub-rows (colored dots)
   - Status checks run in periodic background monitoring for running workspaces (respecting each check interval), so health rows and on-fail restarts update even when the run tab is not open
-  - Agent window rows show coding agent sessions (`Claude Code CLI`, `Codex CLI`, `Codex App`) with a spinner (active), red dot (waiting for review), or green dot (done); clicking focuses the agent session
+  - Agent window rows show terminal-based coding agent sessions (`Claude Code CLI`, `Codex CLI`) with a spinner (active), red dot (waiting for review), or green dot (done); clicking focuses the agent session
   - Windows list with shortcut hints
   - Env vars/ports tab
   - Workspace settings tab
@@ -128,8 +128,13 @@ Hotkeys:
 - Global focus: `cmd+shift+=`
   - Brings muxy to front and keeps current window-selection shortcuts active; workspace-window reconciliation runs on the periodic background interval
   - Defers selected-workspace detail refresh to the next main-actor turn so focus feels immediate
-- Next visible workspace: `cmd+shift+]` (cycles sidebar-visible workspaces and keeps Muxy focused)
-- Previous visible workspace: `cmd+shift+[` (cycles sidebar-visible workspaces and keeps Muxy focused)
+- Next workspace/window: `cmd+shift+]`
+  - When Muxy is focused, cycles sidebar-visible workspaces and keeps Muxy focused
+  - When a tracked workspace window is focused, cycles to the next focus target in that workspace, including coding-agent and process iTerm sessions that share one iTerm window, and resolves shared iTerm tabs by session ID
+  - Repeated cycling remembers the last browser/session target by stable target identity, so reordered Run items keep the loop stable and ambiguous Chrome focus falls back to the remembered target instead of guessing
+- Previous workspace/window: `cmd+shift+[`
+  - When Muxy is focused, cycles sidebar-visible workspaces and keeps Muxy focused
+  - When a tracked workspace window is focused, cycles to the previous focus target in that workspace, including coding-agent and process iTerm sessions that share one iTerm window, and resolves shared iTerm tabs by session ID
 - Open editor (global): `cmd+shift+e` (opens editor for the workspace owning the focused workspace window)
 - Open terminal: `cmd+shift+t`
 - Open Finder: `cmd+shift+f`
@@ -186,13 +191,13 @@ mx workspace focus --dir /path/to/workspace [--window 2]
 
 # Agent lifecycle events (called explicitly by coding agents to report status)
 # Note: mx workspace import and mx workspace up do NOT automatically fire agent events.
-mx agent event --type init    [--dir /path/to/workspace] [--provider iterm2|codex]
+mx agent event --type init    [--dir /path/to/workspace] [--provider iterm2]
 mx agent event --type start   [--dir /path/to/workspace]
 mx agent event --type waiting [--dir /path/to/workspace]
 mx agent event --type done    [--dir /path/to/workspace]
 ```
 
-Provider auto-detection uses environment context only for supported hosts: `__CFBundleIdentifier=com.openai.codex` maps to the Codex desktop app, while Claude Code / Codex CLI in iTerm2 (`__CFBundleIdentifier=com.googlecode.iterm2` with `CLAUDE_CODE_ENTRYPOINT` or `CODEX_THREAD_ID`) map to iTerm2 so Muxy focuses the terminal session directly. Coding-agent env markers from unsupported terminal apps are ignored.
+Provider auto-detection uses environment context only for supported terminal hosts: Claude Code / Codex CLI in iTerm2 (`__CFBundleIdentifier=com.googlecode.iterm2` with `CLAUDE_CODE_ENTRYPOINT` or `CODEX_THREAD_ID`) map to iTerm2 so Muxy focuses the terminal session directly. Coding-agent env markers from unsupported terminal apps are ignored.
 
 For git projects, `workspace create` requires `--branch`; `--target-branch` defaults to `main`/`master` when available.
 `workspace create --directory-name` (alias: `--dirname`) is optional for git projects and must use only letters, numbers, `-`, and `_` with no spaces.

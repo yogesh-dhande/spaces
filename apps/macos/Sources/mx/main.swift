@@ -666,7 +666,7 @@ struct CLI {
                 domain: "mx.cli", code: 2,
                 userInfo: [
                     NSLocalizedDescriptionKey:
-                        "Missing agent action. Use: agent event --type init|start|waiting|done|stop [--dir <path>] [--provider iterm2|codex]"
+                        "Missing agent action. Use: agent event --type init|start|waiting|done|stop [--dir <path>] [--provider iterm2]"
                 ])
         }
         let hookType = try value(for: "--type")
@@ -678,11 +678,9 @@ struct CLI {
         let provider: AgentProvider
         if let p = providerArg {
             guard let parsed = AgentProvider(rawValue: p) else {
-                throw NSError(domain: "mx.cli", code: 2, userInfo: [NSLocalizedDescriptionKey: "Unknown provider '\(p)'. Use: iterm2|codex"])
+                throw NSError(domain: "mx.cli", code: 2, userInfo: [NSLocalizedDescriptionKey: "Unknown provider '\(p)'. Use: iterm2"])
             }
             provider = parsed
-        } else if bundleID == "com.openai.codex" {
-            provider = .codex
         } else if bundleID == "com.googlecode.iterm2" {
             provider = .iterm2
         } else if hasKnownCodingAgentMarkers(env: env) {
@@ -701,7 +699,7 @@ struct CLI {
             guard let colonIdx = raw.lastIndex(of: ":") else { return raw }
             return String(raw[raw.index(after: colonIdx)...])
         }
-        let codexThreadID = provider == .codex ? env["CODEX_THREAD_ID"] : nil
+        let codexThreadID = env["CODEX_THREAD_ID"]
 
         // Capture the yabai window ID of the window hosting this agent session.
         let yabaiWindowID: Int? = {
@@ -777,7 +775,6 @@ struct CLI {
     private func inferCodingAgentProvider() -> AgentProvider? {
         let env = ProcessInfo.processInfo.environment
         let bundleID = env["__CFBundleIdentifier"] ?? ""
-        if bundleID == "com.openai.codex" { return .codex }
         if bundleID == "com.googlecode.iterm2", env["CODEX_THREAD_ID"] != nil { return .iterm2 }
         if bundleID == "com.googlecode.iterm2", env["CLAUDE_CODE_ENTRYPOINT"] != nil { return .iterm2 }
         return nil
@@ -787,13 +784,9 @@ struct CLI {
 
     private func inferredAgentLabel(env: [String: String], provider: AgentProvider) -> String? {
         let bundleID = env["__CFBundleIdentifier"] ?? ""
-        switch provider {
-        case .codex: return "Codex App"
-        case .iterm2:
-            if bundleID == "com.googlecode.iterm2", env["CODEX_THREAD_ID"] != nil { return "Codex CLI" }
-            if bundleID == "com.googlecode.iterm2", env["CLAUDE_CODE_ENTRYPOINT"] != nil { return "Claude Code CLI" }
-            return nil
-        }
+        if bundleID == "com.googlecode.iterm2", env["CODEX_THREAD_ID"] != nil { return "Codex CLI" }
+        if bundleID == "com.googlecode.iterm2", env["CLAUDE_CODE_ENTRYPOINT"] != nil { return "Claude Code CLI" }
+        return nil
     }
 
     /// Fires an agent event for the given workspace and status, using the current environment's session identifiers.
@@ -801,9 +794,7 @@ struct CLI {
         let env = ProcessInfo.processInfo.environment
         let bundleID = env["__CFBundleIdentifier"] ?? ""
         let provider: AgentProvider
-        if bundleID == "com.openai.codex" {
-            provider = .codex
-        } else if bundleID == "com.googlecode.iterm2" {
+        if bundleID == "com.googlecode.iterm2" {
             provider = .iterm2
         } else if hasKnownCodingAgentMarkers(env: env) {
             return
@@ -816,7 +807,7 @@ struct CLI {
             guard let colonIdx = raw.lastIndex(of: ":") else { return raw }
             return String(raw[raw.index(after: colonIdx)...])
         }
-        let codexThreadID = provider == .codex ? env["CODEX_THREAD_ID"] : nil
+        let codexThreadID = env["CODEX_THREAD_ID"]
         let yabaiWindowID: Int? = {
             guard let json = try? Shell.runAndCapture(["yabai", "-m", "query", "--windows", "--window"]), let data = json.data(using: .utf8),
                 let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any], let id = obj["id"] as? Int
@@ -917,7 +908,7 @@ struct CLI {
               mx workspace archive [--dir <path>]
               mx workspace focus [--dir <path>] [--window <index>]
 
-              mx agent event --type init|start|waiting|done|stop [--dir <path>] [--provider iterm2|codex]
+              mx agent event --type init|start|waiting|done|stop [--dir <path>] [--provider iterm2]
 
             Notes:
               - All settings are stored in ~/.muxy/muxy.db.

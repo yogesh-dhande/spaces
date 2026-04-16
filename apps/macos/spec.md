@@ -150,6 +150,10 @@
                 - after archive is confirmed in the GUI, show a non-blocking progress indicator with archive status text while cleanup runs
                 - the app window includes a fixed one-row full-width footer that shows effective shortcut hints for next/previous workspace navigation, Settings, and tooltip toggle (reflecting user overrides)
                 - when Muxy is focused, next/previous workspace shortcuts cycle sidebar-visible workspaces (including stopped and inactive-visible ones) without focusing a workspace window; `cmd+1..9` is used to focus a specific window
+                - when Muxy is not focused, the same next/previous shortcuts cycle through the workspace's focus targets in Run-tab order (coding agents, browser tabs, then processes/other windows), falling back to the active workspace when no workspace window is focused
+                - shared iTerm tabs must be resolved and focused by iTerm session ID so exited-process tabs and coding-agent tabs remain distinct cycle targets even when they share one iTerm window
+                - repeated next/previous cycling must remember the last focus target by stable identity (iTerm session ID, browser window+URL identity when available, browser URL fallback, or window ID fallback) rather than by transient row index
+                - if frontmost Chrome state does not uniquely resolve to one tracked browser row, next/previous cycling must fall back to the remembered target instead of choosing an arbitrary Chrome row
             - Forms
                 - In-place editors for project and workspace data
                 - Primary form actions (create/save) use a shared high-contrast style with a darker accent fill and white text/icon treatment for consistent readability
@@ -213,6 +217,8 @@
             - Automatically identify any chrome windows that have matching BrowserSessions open (browser url starts with BrowserSession.url) and attach those to the related workspace. User may open additional tabs or windows. all of them should be automatically identified and tracked
             - when looping through windows, the order should be browser windows and then terminal windows; the Run tab should show one terminal row per process session (even when multiple rows share the same iTerm2 window)
             - when GUI is focused, cmd+1 through cmd+9 focus the corresponding workspace window
+            - global next/previous window cycling must remember the last focused target per workspace by stable identity so repeated cycling through multiple tracked Chrome tabs in the same window does not collapse onto a single window id when rows reorder
+            - global next/previous window cycling must treat iTerm sessions as distinct targets, so coding-agent tabs and process tabs in one shared iTerm window are each reachable as separate cycle steps
             - Window records may become stale across app restarts; muxy must re-discover windows on launch and reconcile with stored state
 - User flow
     - User installs the app
@@ -360,20 +366,19 @@
         - Global tooltip toggle resolves focused workspace/agent windows, so a focused coding-agent terminal window can toggle the workspace tooltip even if the workspace is not currently marked running
         - When a text input is focused, default text-edit shortcuts (copy/cut/paste/select-all/undo/redo) must keep working and should not be intercepted by app-level hotkey handling
 - Agent Event (`mx agent event`)
-    - Coding agents (Claude Code CLI, Codex CLI in iTerm2, OpenAI Codex Desktop) call `mx agent event --type <type>` to register lifecycle events with Muxy.
+    - Coding agents (Claude Code CLI, Codex CLI in iTerm2) call `mx agent event --type <type>` to register lifecycle events with Muxy.
     - Agent event commands are always explicit; `mx workspace import` and `mx workspace up` do NOT automatically fire any agent events.
     - Hook types: `init` (agent started), `start` (task running), `waiting` (needs human review), `done` (task finished).
     - Provider is auto-detected from environment:
-        - `__CFBundleIdentifier=com.openai.codex` → Codex App provider.
         - Codex CLI in iTerm2 (`CODEX_THREAD_ID` with `__CFBundleIdentifier=com.googlecode.iterm2`) and Claude Code CLI in iTerm2 (`CLAUDE_CODE_ENTRYPOINT` with `__CFBundleIdentifier=com.googlecode.iterm2`) → iTerm2 provider.
         - Coding-agent env markers from unsupported terminal apps are ignored (no auto-registration).
-        - Can be overridden with `--provider iterm2|codex`.
-    - iTerm2 sessions: `ITERM_SESSION_ID` captured for focus/close; Codex: `CODEX_THREAD_ID` captured for deep-link focus.
-    - At most one Codex agent record per workspace; multiple iTerm2 sessions per workspace allowed.
+        - Can be overridden with `--provider iterm2`.
+    - iTerm2 sessions: `ITERM_SESSION_ID` captured for focus/close; `CODEX_THREAD_ID` may also be recorded as metadata for Codex CLI sessions.
+    - Multiple iTerm2 agent sessions per workspace are allowed.
     - Status values: `idle`, `spinning` (active, spinner animation), `waiting` (red dot, triggers workspace unhealthy indicator), `done` (green dot).
-    - Agent windows appear in the Run tab Windows section with the appropriate status indicator and environment-specific labels (`Codex App`, `Codex CLI`, `Claude Code CLI`).
+    - Agent windows appear in the Run tab Windows section with the appropriate status indicator and environment-specific labels (`Codex CLI`, `Claude Code CLI`).
     - Agent windows with `waiting` or `done` status appear on the Dashboard as attention items.
-    - Clicking an agent entry focuses the agent's iTerm2 session or opens `codex://threads/<id>`.
+    - Clicking an agent entry focuses the agent's iTerm2 session.
     - On workspace stop, all iTerm2 agent sessions are closed; agent records are deleted.
 
 - Auto-Update

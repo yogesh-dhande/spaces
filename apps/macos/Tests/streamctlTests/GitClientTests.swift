@@ -320,6 +320,40 @@ final class GitClientTests: XCTestCase {
         XCTAssertFalse(activity.hasMergeConflicts)
     }
 
+    // Tests trackedFileActivity times out hanging git metadata probes and returns an empty snapshot instead of blocking indefinitely.
+    func testTrackedFileActivityTimesOutSlowGitMetadata() throws {
+        let root = try makeTempDirectory()
+        let repo = root.appendingPathComponent("repo", isDirectory: true)
+        try FileManager.default.createDirectory(at: repo, withIntermediateDirectories: true)
+        try initializeGitRepository(at: repo, initialBranch: "main")
+
+        let binDir = root.appendingPathComponent("bin", isDirectory: true)
+        try FileManager.default.createDirectory(at: binDir, withIntermediateDirectories: true)
+        let fakeGit = binDir.appendingPathComponent("git-sleep")
+        let script = """
+            #!/bin/sh
+            sleep 1
+            exit 0
+            """
+        try script.write(to: fakeGit, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: fakeGit.path)
+
+        var environment = ProcessInfo.processInfo.environment
+        environment["PATH"] = "\(binDir.path):\(environment["PATH"] ?? "/usr/bin:/bin")"
+        let client = GitClient(gitExecutable: "git-sleep", environmentOverrides: environment, metadataCommandTimeout: 0.05)
+
+        let start = Date()
+        let activity = client.trackedFileActivity(path: repo.path)
+        let elapsed = Date().timeIntervalSince(start)
+
+        XCTAssertLessThan(elapsed, 0.5)
+        XCTAssertNil(activity.latestTrackedFileModificationDate)
+        XCTAssertEqual(activity.modifiedTrackedFileCount, 0)
+        XCTAssertEqual(activity.aheadCount, 0)
+        XCTAssertEqual(activity.behindCount, 0)
+        XCTAssertFalse(activity.hasMergeConflicts)
+    }
+
     // Tests clone and delete branch by arranging representative inputs and asserting the expected result.
     func testCloneAndDeleteBranch() throws {
         let source = try makeTempDirectory()

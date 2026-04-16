@@ -115,6 +115,17 @@ final class AppctlAdapterTests: XCTestCase {
         }
     }
 
+    // Tests iTerm session focus activates the app before selecting the target session by arranging representative inputs and asserting the expected result.
+    func testItermSessionFocusActivatesBeforeSelectingTargetSession() throws {
+        // Mocked dependency: `osascript` verifier for the generated iTerm focus AppleScript.
+        // Why: lock in the activation ordering needed to reliably front iTerm when switching from a browser to a terminal session.
+        // Remaining risk: real iTerm AppleScript behavior can still vary by app version or OS automation quirks.
+        try withMockCommands(["osascript": Self.osaScriptSessionFocusActivationMock]) {
+            let iterm = Iterm2Adapter()
+            XCTAssertTrue(try iterm.focusSessionOrTab(preferredSessionID: "session-77", tabIndex: 2, windowID: 77))
+        }
+    }
+
     // Tests apple script run throws on failure by arranging representative inputs and asserting the expected result.
     func testAppleScriptRunThrowsOnFailure() throws {
         // Mocked dependency: failing `osascript`.
@@ -307,6 +318,30 @@ final class AppctlAdapterTests: XCTestCase {
         if [[ "$script" == *'write text'* || "$script" == *'close w'* ]]; then
           echo ""
           exit 0
+        fi
+
+        echo "unexpected script" >&2
+        exit 1
+        """
+
+    private static let osaScriptSessionFocusActivationMock = """
+        #!/bin/bash
+        script="${*: -1}"
+
+        if [[ "$script" == *'tell application "iTerm2" to version'* ]]; then
+          echo "3.5.0"
+          exit 0
+        fi
+
+        if [[ "$script" == *'set targetSessionID to'* && "$script" == *'tell application "iTerm2"'* ]]; then
+          activate_line=$(printf '%s\n' "$script" | nl -ba | awk '/^[[:space:]]*[0-9]+[[:space:]]+activate$/ { print $1; exit }')
+          select_line=$(printf '%s\n' "$script" | nl -ba | awk '/tell w to select/ { print $1; exit }')
+          if [[ -n "$activate_line" && -n "$select_line" && "$activate_line" -lt "$select_line" ]]; then
+            echo "session"
+            exit 0
+          fi
+          echo "activate must precede window selection" >&2
+          exit 1
         fi
 
         echo "unexpected script" >&2

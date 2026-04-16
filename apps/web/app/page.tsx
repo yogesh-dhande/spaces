@@ -50,7 +50,7 @@ const keyFeatures = [
   {
     title: "Bring your own tools",
     description:
-      "Muxy works with your preferred stack, whether it is Claude Code or Codex, Cursor or Windsurf. You do not need to learn a new tool or settle for a weaker coding agent just for UX.",
+      "Muxy works with your preferred stack, whether it is Claude Code CLI or Codex CLI paired with Cursor or Windsurf. You do not need to learn a new tool or settle for a weaker coding agent just for UX.",
   },
   {
     title: "Native MacOS app under 5 MB",
@@ -343,18 +343,6 @@ export default function HomePage() {
                 to your project&apos;s AGENTS.md. See the{" "}
                 <Link href="/docs/guides" className="text-accent hover:underline">cookbook guides</Link>{" "}
                 for step-by-step setup.
-              </div>
-            </details>
-
-            <details className="group rounded-xl border border-line bg-surface/75">
-              <summary className="flex cursor-pointer select-none list-none items-center justify-between px-4 py-3.5 text-sm font-semibold text-foreground">
-                Can I use it with the Codex app?
-                <span aria-hidden className="ml-3 shrink-0 text-foreground-soft transition-transform duration-200 group-open:rotate-180">▾</span>
-              </summary>
-              <div className="border-t border-line px-4 pb-4 pt-3 text-sm leading-7 text-foreground-soft">
-                Yes. Muxy works alongside the Codex app — it automatically imports Codex worktrees as workspaces. See the{" "}
-                <Link href="/docs/guides" className="text-accent hover:underline">cookbook guides</Link>{" "}
-                for a detailed walkthrough.
               </div>
             </details>
 

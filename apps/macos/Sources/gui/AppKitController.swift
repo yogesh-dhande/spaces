@@ -964,8 +964,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
                 // Agent window attention items (waiting or done)
                 for agentWin in attentionAgentWindows {
-                    let agentLabel = agentWin.label ?? (agentWin.provider == .codex ? "Codex App" : "Claude Code CLI")
-                    let agentIcon = agentWin.provider == .codex ? "wand.and.stars" : "cpu.fill"
+                    let agentLabel = agentWin.label ?? "Coding Agent CLI"
+                    let agentIcon = "cpu.fill"
                     let agentIconColor: NSColor = agentWin.status == .done ? .systemGreen : .systemOrange
                     let eventDate = ISO8601DateFormatter().date(from: agentWin.updatedAt)
                     items.append(
@@ -2497,10 +2497,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             stack.orientation = .vertical
             stack.spacing = 4
             for agentWin in agentWindowsForRunTab {
-                let agentIcon = agentWin.provider == .codex ? "wand.and.stars" : "cpu.fill"
+                let agentIcon = "cpu.fill"
                 let agentColor: NSColor = agentWin.status == .done ? .systemGreen : agentWin.status == .waiting ? .systemOrange : .secondaryLabelColor
                 let linkedWin = agentWin.yabaiWindowID.flatMap { linkedWindowByYabaiID[$0] }
-                let agentLabel = agentWin.label ?? (agentWin.provider == .codex ? "Codex App" : "Claude Code CLI")
+                let agentLabel = agentWin.label ?? "Coding Agent CLI"
                 let agentDetail = linkedWin?.title ?? linkedWin?.app
                 let agentShortcutNum = shortcutCounter
                 shortcutCounter += 1
@@ -4389,7 +4389,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             teardownGlobalHotkey()
             return
         }
-        registerHotkeys(toggle: toggleShortcutSpec)
+        registerHotkeys(toggle: toggleShortcutSpec, next: nextShortcutSpec, previous: previousShortcutSpec)
     }
 
     private func teardownGlobalHotkey() {
@@ -4399,11 +4399,13 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         hotkeyHandler = nil
     }
 
-    private func registerHotkeys(toggle: HotkeySpec) {
+    private func registerHotkeys(toggle: HotkeySpec, next: HotkeySpec?, previous: HotkeySpec?) {
         teardownGlobalHotkey()
         let signature = OSType(UInt32(truncatingIfNeeded: "AMUX".utf8.reduce(0) { ($0 << 8) + UInt32($1) }))
         let target = GetEventDispatcherTarget()
         registerHotkey(spec: toggle, id: GlobalHotkey.toggle.rawValue, signature: signature, target: target)
+        if let next { registerHotkey(spec: next, id: GlobalHotkey.next.rawValue, signature: signature, target: target) }
+        if let previous { registerHotkey(spec: previous, id: GlobalHotkey.previous.rawValue, signature: signature, target: target) }
         if let tooltipSpec = tooltipShortcutSpec {
             registerHotkey(spec: tooltipSpec, id: GlobalHotkey.tooltip.rawValue, signature: signature, target: target)
         }
@@ -4583,6 +4585,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         guard let hotkey = GlobalHotkey(rawValue: id) else { return }
         switch hotkey {
         case .toggle: toggleWindowFromHotkey()
+        case .next: if NSApp.isActive { selectNextVisibleWorkspace() } else { focusGlobalWindowNavigation(direction: 1) }
+        case .previous: if NSApp.isActive { selectPreviousVisibleWorkspace() } else { focusGlobalWindowNavigation(direction: -1) }
         case .tooltip: toggleTooltipDisplay()
         case .openEditor: openGlobalEditorFromHotkey()
         }
@@ -4929,6 +4933,26 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 }
             }
         }
+    }
+
+    private func focusGlobalWindowNavigation(direction: Int) {
+        guard !NSApp.isActive else { return }
+        guard let workspaceID = globalWindowNavigationWorkspaceID() else { return }
+        do {
+            if direction > 0 {
+                try orchestrator.focusNextWindow(workspaceID: workspaceID)
+            } else {
+                try orchestrator.focusPreviousWindow(workspaceID: workspaceID)
+            }
+        } catch {
+            showError(error)
+        }
+    }
+
+    private func globalWindowNavigationWorkspaceID() -> String? {
+        if let workspaceID = try? orchestrator.workspaceIDForFocusedWindow() { return workspaceID }
+        if let workspaceID = try? orchestrator.activeWorkspaceID() { return workspaceID }
+        return nil
     }
 
     private func toggleWindowFromHotkey() {

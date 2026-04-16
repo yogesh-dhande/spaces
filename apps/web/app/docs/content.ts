@@ -38,7 +38,7 @@ export const docsPageLinks: DocsPageLink[] = [
     href: "/docs/window-management",
     title: "Window Management",
     summary:
-      "Capture the windows you need and switch context quickly, with workspace cycling separated from explicit window focus shortcuts.",
+      "Capture the windows you need and switch context quickly, with next/previous shortcuts cycling workspaces in-app and cycling tracked browser and iTerm session targets by stable target identity, shared iTerm session IDs, and remembered-target fallback when Chrome focus is ambiguous.",
   },
   {
     href: "/docs/processes",
@@ -62,7 +62,7 @@ export const docsPageLinks: DocsPageLink[] = [
     href: "/docs/shortcuts",
     title: "Keyboard Shortcuts",
     summary:
-      "Jump between workspaces and trigger common actions, including the global workspace tooltip toggle, without lifting your hands from the keyboard; a full-width app footer shows live shortcut hints for navigation, Settings, and tooltip toggle.",
+      "Jump between workspaces, cycle tracked workspace windows, and trigger common actions, including the global workspace tooltip toggle, without lifting your hands from the keyboard; a full-width app footer shows live shortcut hints for navigation, Settings, and tooltip toggle.",
   },
   {
     href: "/docs/troubleshooting",
@@ -80,7 +80,7 @@ export const docsPageLinks: DocsPageLink[] = [
     href: "/docs/cli",
     title: "CLI Reference",
     summary:
-      "Drive every Muxy action from the terminal or automate workspace management from scripts and AI pipelines, including Claude Code and Codex CLI session hooks.",
+      "Drive every Muxy action from the terminal or automate workspace management from scripts and AI pipelines, including terminal-agent session hooks for Claude Code and Codex CLI.",
   },
 ];
 

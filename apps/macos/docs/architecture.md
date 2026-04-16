@@ -80,6 +80,9 @@ GUI interaction notes:
 - Workspace detail metadata shows the current branch and, when present and different, appends `forked from <target branch>`.
 - Window focus shortcuts in the GUI use `cmd+1` through `cmd+9`.
 - When Muxy is focused, next/previous workspace shortcuts (`cmd+shift+]` / `cmd+shift+[`) change only sidebar selection and cycle across all sidebar-visible workspaces, including stopped workspaces.
+- When Muxy is not focused, the same next/previous shortcuts resolve the workspace owning the currently focused workspace window (or fall back to the active workspace) and call relative workspace-window focus.
+- Relative workspace-window focus remembers the last resolved target by iTerm session ID, browser window+URL identity when available, browser URL fallback, or window ID fallback instead of by transient row index, so shared iTerm/Chrome targets remain stable when the Run list reorders and ambiguous Chrome focus falls back to the remembered target.
+- iTerm target focus uses the recorded session ID as the source of truth for shared tabs and treats a session focus attempt as successful only after iTerm reports that session as current.
 - Global focus hotkey activation (`cmd+shift+=`) prioritizes immediate app fronting and defers selected-workspace detail refresh to the next main-actor turn.
 - Port definitions are editable via `PortEditor` in the project detail view, the add-project form, and workspace settings.
 - Status checks are configured inline under each process in the `ProcessEditor` rather than in a separate form section; the process name is implicit from the parent row.
@@ -88,6 +91,7 @@ GUI interaction notes:
 - In the run-tab Windows list, browser rows render a two-part label: browser-session name first (when configured) plus the matched URL in secondary text. Session names are matched to live tab URLs using env-var-expanded session URL prefixes (e.g. `$PORT` → allocated port number); when a tab URL matches multiple configured session prefixes, the longest prefix wins so the most-specific session name is shown.
 - In the run-tab Windows list, terminal rows are rendered per running process session (one row per iTerm2 tab/session), so multiple workspace processes in the same iTerm2 window still appear as separate rows.
 - Window cards in the Run tab and Dashboard are clickable: clicking a card calls `focusWorkspaceWindow` for that window, equivalent to the `CMD+N` keyboard shortcut.
+- Relative workspace-window focus remembers the last focused tracked row per workspace, uses the frontmost Chrome tab URL to disambiguate multiple tracked browser rows that share one Chrome window ID, and uses the frontmost iTerm session ID to distinguish coding-agent/process tabs that share one iTerm window.
 - Keyboard shortcut overrides for supported GUI actions are persisted in SQLite settings and editable in the GUI Settings view and CLI settings commands.
 - Tooltip overlay includes a footer hint showing the effective tooltip-toggle shortcut (`gui_tooltip_shortcut`, default `cmd+shift+i`) using the user override when configured.
 - The app provides a standard Edit menu with Copy (Cmd+C) and Select All (Cmd+A) for system clipboard support in read-only text views.
@@ -149,7 +153,7 @@ Workspace identification:
 - `workspace up --force-restart` behavior: if runtime is already present, run stop then full launch in background; if stopped, launch in background.
 - `workspace up --focus` brings the workspace to the foreground after launch/no-op/restart completes.
 - `workspace up --tooltip [<text>]` optionally updates tooltip text when provided and displays the tooltip overlay.
-- The global tooltip shortcut resolves focused workspace windows using tracked workspace windows first, then agent-window yabai IDs so Codex/iTerm agent windows can still toggle tooltip overlay.
+- The global tooltip shortcut resolves focused workspace windows using tracked workspace windows first, then agent-window yabai IDs so terminal agent windows can still toggle tooltip overlay.
 - `mx workspace focus` focuses the workspace window set; `--window <index>` focuses a specific tracked window.
 - `mx workspace import [--dir <path>] [--title <title>] [--tooltip <text>]` registers existing git worktrees as Muxy workspaces by inferring project, branch, and title from the worktree path when a title is not provided.
 - `mx discover` automatically discovers and registers all untracked worktrees for registered projects.
@@ -444,16 +448,16 @@ Degraded runtime edge cases and handling:
 - `refreshAllWorkspaceWindows` returns a `RefreshResult` containing `didMutateDB` (whether windows were pruned or workspace running flags changed) and `trackedWindowCounts` (per-workspace tracked window counts including live browser scan results); the GUI compares both against the previous snapshot and skips `reloadData()` entirely when nothing changed, avoiding unnecessary UI rebuilds.
 
 Agent window lifecycle:
-- Coding agents (Claude Code CLI in iTerm2, Codex CLI in iTerm2, OpenAI Codex Desktop) register themselves with Muxy by calling `mx agent event --type init|start|waiting|done [--dir <path>] [--provider iterm2|codex]`. Agent event commands are always explicit; `mx workspace import` and `mx workspace up` do not automatically fire any agent events.
-- Provider is auto-detected from env vars only for supported hosts: `__CFBundleIdentifier=com.openai.codex` → Codex App provider; Codex CLI in iTerm2 (`CODEX_THREAD_ID` + `__CFBundleIdentifier=com.googlecode.iterm2`) and Claude Code CLI in iTerm2 (`CLAUDE_CODE_ENTRYPOINT` + `__CFBundleIdentifier=com.googlecode.iterm2`) → iTerm2. Coding-agent env markers from other terminal apps are ignored.
-- `ITERM_SESSION_ID` is captured for iTerm2 agent focus/close; `CODEX_THREAD_ID` is captured for Codex deep-link focus.
-- Agent records are stored in `agent_windows` table; one record per iTerm2 session, at most one per workspace for Codex.
+- Coding agents (Claude Code CLI in iTerm2, Codex CLI in iTerm2) register themselves with Muxy by calling `mx agent event --type init|start|waiting|done [--dir <path>] [--provider iterm2]`. Agent event commands are always explicit; `mx workspace import` and `mx workspace up` do not automatically fire any agent events.
+- Provider is auto-detected from env vars only for supported terminal hosts: Codex CLI in iTerm2 (`CODEX_THREAD_ID` + `__CFBundleIdentifier=com.googlecode.iterm2`) and Claude Code CLI in iTerm2 (`CLAUDE_CODE_ENTRYPOINT` + `__CFBundleIdentifier=com.googlecode.iterm2`) → iTerm2. Coding-agent env markers from other terminal apps are ignored.
+- `ITERM_SESSION_ID` is captured for iTerm2 agent focus/close. `CODEX_THREAD_ID` may also be recorded as agent metadata for terminal Codex sessions.
+- Agent records are stored in `agent_windows` table with one record per iTerm2 session.
 - Status transitions: `idle` → `spinning` (active) → `waiting` (human review requested, red dot) → `done` (finished, green dot).
 - Agent windows appear in the Run tab Windows section with a spinner (spinning), red dot (waiting), or green dot (done) status indicator.
-- Agent row labels are environment-specific (`Codex App`, `Codex CLI`, `Claude Code CLI`) so focus routes match the host window type.
+- Agent row labels are environment-specific (`Codex CLI`, `Claude Code CLI`) so focus routes match the terminal session type.
 - Waiting agent windows trigger the workspace indicator to show `runningUnhealthy` (orange dot) in the sidebar.
 - Agent windows surfaced as Dashboard attention items when status is `waiting` or `done`.
-- Clicking an agent window row focuses the agent's iTerm2 session or opens the Codex thread deep-link.
+- Clicking an agent window row focuses the agent's iTerm2 session.
 - On workspace stop, all iTerm2 agent sessions for that workspace are closed via AppleScript; all agent window records are deleted.
 - Stale iTerm2 agent sessions are pruned during the periodic process monitoring cycle using `Iterm2Adapter.listSessionIDs()`.
 - The CLI fires a `muxy.ipc.agent-hook-fired` distributed notification after each hook call; the GUI observes this to refresh the Dashboard badge and current selection without a full reload.
