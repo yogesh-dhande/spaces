@@ -4,20 +4,30 @@ import appctl
 @testable import streamctl
 
 final class AgentHookTests: XCTestCase {
+    override func invokeTest() {
+        do {
+            try withMockCommands(["yabai": Self.yabaiMockScript]) {
+                super.invokeTest()
+            }
+        } catch {
+            XCTFail("Failed to install mock commands: \(error)")
+        }
+    }
 
     // Tests registerAgentWindow creates new record for iTerm2.
     func testRegisterAgentWindowCreatesNewIterm2Record() throws {
         let store = try makeTemporaryStore()
-        let mockIterm = MockIterm2Adapter()
-        let orchestrator = MuxyOrchestrator(store: store, iterm: mockIterm)
+        let (orchestrator, _, mockTmux) = makeTmuxOrchestrator(store: store)
         let (project, workspace) = try makeProjectAndWorkspace(store: store)
         _ = project
+        mockTmux.createSession(named: "muxy-\(workspace.id)")
 
-        let record = try orchestrator.registerAgentWindow(workspaceID: workspace.id, provider: .iterm2, itermSessionID: "session-abc", status: .idle)
+        let record = try orchestrator.registerAgentWindow(
+            workspaceID: workspace.id, provider: .iterm2, itermSessionID: "workspace-session", tmuxWindowID: "@1", status: .idle)
 
         XCTAssertEqual(record.workspaceID, workspace.id)
         XCTAssertEqual(record.provider, .iterm2)
-        XCTAssertEqual(record.itermSessionID, "session-abc")
+        XCTAssertEqual(record.tmuxWindowID, "@1")
         XCTAssertEqual(record.status, .idle)
 
         let allRecords = try store.agentWindows(workspaceID: workspace.id)
@@ -28,16 +38,17 @@ final class AgentHookTests: XCTestCase {
     // Tests registerAgentWindow updates existing iTerm2 session (same sessionID → same row).
     func testRegisterAgentWindowUpdatesSameItermSession() throws {
         let store = try makeTemporaryStore()
-        let mockIterm = MockIterm2Adapter()
-        // Make listSessionIDs return the session so it won't be pruned
-        mockIterm.stubbedSessionIDs = ["session-xyz"]
-        let orchestrator = MuxyOrchestrator(store: store, iterm: mockIterm)
+        let (orchestrator, _, mockTmux) = makeTmuxOrchestrator(store: store)
         let (_, workspace) = try makeProjectAndWorkspace(store: store)
+        mockTmux.createSession(named: "muxy-\(workspace.id)")
+        _ = mockTmux.addWindow(sessionName: "muxy-\(workspace.id)", id: "@1", name: "agent-1", index: 0, isActive: true)
+        _ = mockTmux.addWindow(sessionName: "muxy-\(workspace.id)", id: "@2", name: "agent-2", index: 1)
 
-        let first = try orchestrator.registerAgentWindow(workspaceID: workspace.id, provider: .iterm2, itermSessionID: "session-xyz", status: .idle)
+        let first = try orchestrator.registerAgentWindow(
+            workspaceID: workspace.id, provider: .iterm2, itermSessionID: "workspace-session", tmuxWindowID: "@1", status: .idle)
 
         let second = try orchestrator.registerAgentWindow(
-            workspaceID: workspace.id, provider: .iterm2, itermSessionID: "session-xyz", status: .spinning)
+            workspaceID: workspace.id, provider: .iterm2, itermSessionID: "workspace-session", tmuxWindowID: "@1", status: .spinning)
 
         XCTAssertEqual(first.id, second.id)
         XCTAssertEqual(second.status, .spinning)
@@ -49,35 +60,38 @@ final class AgentHookTests: XCTestCase {
     // Tests registerAgentWindow keeps separate iTerm2 rows for distinct sessions.
     func testRegisterAgentWindowKeepsDistinctItermSessions() throws {
         let store = try makeTemporaryStore()
-        let mockIterm = MockIterm2Adapter()
-        mockIterm.stubbedSessionIDs = ["session-1", "session-2"]
-        let orchestrator = MuxyOrchestrator(store: store, iterm: mockIterm)
+        let (orchestrator, _, mockTmux) = makeTmuxOrchestrator(store: store)
         let (_, workspace) = try makeProjectAndWorkspace(store: store)
+        mockTmux.createSession(named: "muxy-\(workspace.id)")
+        _ = mockTmux.addWindow(sessionName: "muxy-\(workspace.id)", id: "@1", name: "agent-1", index: 0, isActive: true)
+        _ = mockTmux.addWindow(sessionName: "muxy-\(workspace.id)", id: "@2", name: "agent-2", index: 1)
 
-        let first = try orchestrator.registerAgentWindow(workspaceID: workspace.id, provider: .iterm2, itermSessionID: "session-1", status: .idle)
+        let first = try orchestrator.registerAgentWindow(
+            workspaceID: workspace.id, provider: .iterm2, itermSessionID: "workspace-session", tmuxWindowID: "@1", status: .idle)
 
         let second = try orchestrator.registerAgentWindow(
-            workspaceID: workspace.id, provider: .iterm2, itermSessionID: "session-2", status: .spinning)
+            workspaceID: workspace.id, provider: .iterm2, itermSessionID: "workspace-session", tmuxWindowID: "@2", status: .spinning)
 
         XCTAssertNotEqual(first.id, second.id)
-        XCTAssertEqual(second.itermSessionID, "session-2")
+        XCTAssertEqual(second.tmuxWindowID, "@2")
 
         let allRecords = try store.agentWindowsByProvider(workspaceID: workspace.id, provider: .iterm2)
         XCTAssertEqual(allRecords.count, 2)
-        XCTAssertEqual(Set(allRecords.compactMap(\.itermSessionID)), Set(["session-1", "session-2"]))
+        XCTAssertEqual(Set(allRecords.compactMap(\.tmuxWindowID)), Set(["@1", "@2"]))
     }
 
     // Tests updateAgentWindowStatus creates record when not found.
     func testUpdateAgentWindowStatusCreatesWhenNotFound() throws {
         let store = try makeTemporaryStore()
-        let orchestrator = MuxyOrchestrator(store: store)
+        let (orchestrator, _, mockTmux) = makeTmuxOrchestrator(store: store)
         let (_, workspace) = try makeProjectAndWorkspace(store: store)
+        mockTmux.createSession(named: "muxy-\(workspace.id)")
 
         let record = try orchestrator.updateAgentWindowStatus(
-            workspaceID: workspace.id, provider: .iterm2, itermSessionID: "new-session", status: .waiting)
+            workspaceID: workspace.id, provider: .iterm2, itermSessionID: "workspace-session", tmuxWindowID: "@1", status: .waiting)
 
         XCTAssertEqual(record.status, .waiting)
-        XCTAssertEqual(record.itermSessionID, "new-session")
+        XCTAssertEqual(record.tmuxWindowID, "@1")
 
         let allRecords = try store.agentWindows(workspaceID: workspace.id)
         XCTAssertEqual(allRecords.count, 1)
@@ -86,15 +100,15 @@ final class AgentHookTests: XCTestCase {
     // Tests updateAgentWindowStatus updates existing record.
     func testUpdateAgentWindowStatusUpdatesExistingRecord() throws {
         let store = try makeTemporaryStore()
-        let mockIterm = MockIterm2Adapter()
-        mockIterm.stubbedSessionIDs = ["session-1"]
-        let orchestrator = MuxyOrchestrator(store: store, iterm: mockIterm)
+        let (orchestrator, _, mockTmux) = makeTmuxOrchestrator(store: store)
         let (_, workspace) = try makeProjectAndWorkspace(store: store)
+        mockTmux.createSession(named: "muxy-\(workspace.id)")
 
-        try orchestrator.registerAgentWindow(workspaceID: workspace.id, provider: .iterm2, itermSessionID: "session-1", status: .idle)
+        try orchestrator.registerAgentWindow(
+            workspaceID: workspace.id, provider: .iterm2, itermSessionID: "workspace-session", tmuxWindowID: "@1", status: .idle)
 
         let updated = try orchestrator.updateAgentWindowStatus(
-            workspaceID: workspace.id, provider: .iterm2, itermSessionID: "session-1", status: .done)
+            workspaceID: workspace.id, provider: .iterm2, itermSessionID: "workspace-session", tmuxWindowID: "@1", status: .done)
 
         XCTAssertEqual(updated.status, .done)
 
@@ -106,16 +120,17 @@ final class AgentHookTests: XCTestCase {
     // Tests updateAgentWindowStatus can persist/update display label metadata for an existing agent row.
     func testUpdateAgentWindowStatusUpdatesExistingLabel() throws {
         let store = try makeTemporaryStore()
-        let mockIterm = MockIterm2Adapter()
-        mockIterm.stubbedSessionIDs = ["session-1"]
-        let orchestrator = MuxyOrchestrator(store: store, iterm: mockIterm)
+        let (orchestrator, _, mockTmux) = makeTmuxOrchestrator(store: store)
         let (_, workspace) = try makeProjectAndWorkspace(store: store)
+        mockTmux.createSession(named: "muxy-\(workspace.id)")
 
         try orchestrator.registerAgentWindow(
-            workspaceID: workspace.id, provider: .iterm2, label: "Claude Code CLI", itermSessionID: "session-1", status: .idle)
+            workspaceID: workspace.id, provider: .iterm2, label: "Claude Code CLI", itermSessionID: "workspace-session", tmuxWindowID: "@1",
+            status: .idle)
 
         let updated = try orchestrator.updateAgentWindowStatus(
-            workspaceID: workspace.id, provider: .iterm2, itermSessionID: "session-1", label: "Codex CLI", status: .spinning)
+            workspaceID: workspace.id, provider: .iterm2, itermSessionID: "workspace-session", tmuxWindowID: "@1", label: "Codex CLI",
+            status: .spinning)
 
         XCTAssertEqual(updated.label, "Codex CLI")
 
@@ -123,50 +138,30 @@ final class AgentHookTests: XCTestCase {
         XCTAssertEqual(allRecords[0].label, "Codex CLI")
     }
 
-    // Tests stopWorkspace preserves iTerm2 agent sessions and their DB records.
-    func testStopWorkspacePreservesItermAgentSessions() throws {
-        let store = try makeTemporaryStore()
-        let mockIterm = MockIterm2Adapter()
-        mockIterm.stubbedSessionIDs = ["agent-session"]
-        let orchestrator = MuxyOrchestrator(store: store, iterm: mockIterm)
-        let (project, workspace) = try makeProjectAndWorkspace(store: store)
-        _ = project
-
-        // Mark workspace as running
-        try store.updateWorkspaceRunning(id: workspace.id, isRunning: true, launchedAt: nil)
-
-        // Register an iTerm2 agent window
-        try orchestrator.registerAgentWindow(workspaceID: workspace.id, provider: .iterm2, itermSessionID: "agent-session", status: .waiting)
-
-        // Stop workspace
-        _ = try orchestrator.stopWorkspace(workspaceID: workspace.id)
-
-        // Agent session should not be closed — coding agent sessions survive workspace stop.
-        XCTAssertFalse(mockIterm.closedSessionIDs.contains("agent-session"))
-
-        // Agent window records should be preserved
-        let remaining = try store.agentWindows(workspaceID: workspace.id)
-        XCTAssertEqual(remaining.count, 1)
-    }
-
     // Tests agentWindows returns correct records.
     func testAgentWindowsReturnsCorrectRecords() throws {
         let store = try makeTemporaryStore()
-        let mockIterm = MockIterm2Adapter()
-        mockIterm.stubbedSessionIDs = ["s1", "s2", "s3"]
-        let orchestrator = MuxyOrchestrator(store: store, iterm: mockIterm)
+        let (orchestrator, _, mockTmux) = makeTmuxOrchestrator(store: store)
         let (_, workspace) = try makeProjectAndWorkspace(store: store)
         let (_, workspace2) = try makeProjectAndWorkspace(store: store, projectName: "proj2", workspaceName: "ws2")
+        mockTmux.createSession(named: "muxy-\(workspace.id)")
+        mockTmux.createSession(named: "muxy-\(workspace2.id)")
+        _ = mockTmux.addWindow(sessionName: "muxy-\(workspace.id)", id: "@1", name: "agent-1", index: 0, isActive: true)
+        _ = mockTmux.addWindow(sessionName: "muxy-\(workspace.id)", id: "@2", name: "agent-2", index: 1)
+        _ = mockTmux.addWindow(sessionName: "muxy-\(workspace2.id)", id: "@3", name: "agent-3", index: 0, isActive: true)
 
-        try orchestrator.registerAgentWindow(workspaceID: workspace.id, provider: .iterm2, itermSessionID: "s1", status: .idle)
-        try orchestrator.registerAgentWindow(workspaceID: workspace.id, provider: .iterm2, itermSessionID: "s2", status: .spinning)
+        try orchestrator.registerAgentWindow(
+            workspaceID: workspace.id, provider: .iterm2, itermSessionID: "workspace-session", tmuxWindowID: "@1", status: .idle)
+        try orchestrator.registerAgentWindow(
+            workspaceID: workspace.id, provider: .iterm2, itermSessionID: "workspace-session", tmuxWindowID: "@2", status: .spinning)
         // Different workspace - should not appear
-        try orchestrator.registerAgentWindow(workspaceID: workspace2.id, provider: .iterm2, itermSessionID: "s3", status: .waiting)
+        try orchestrator.registerAgentWindow(
+            workspaceID: workspace2.id, provider: .iterm2, itermSessionID: "workspace-session", tmuxWindowID: "@3", status: .waiting)
 
         let records = try orchestrator.agentWindows(workspaceID: workspace.id)
         XCTAssertEqual(records.count, 2)
-        XCTAssertTrue(records.contains { $0.itermSessionID == "s1" })
-        XCTAssertTrue(records.contains { $0.itermSessionID == "s2" })
+        XCTAssertTrue(records.contains { $0.tmuxWindowID == "@1" })
+        XCTAssertTrue(records.contains { $0.tmuxWindowID == "@2" })
     }
 
     // Tests provider detection defaults to iTerm2 for non-agent CLI context.
@@ -262,12 +257,14 @@ final class AgentHookTests: XCTestCase {
     // Tests that agent event "stop" type sets status to done (same as "done").
     func testAgentStopEventSetsStatusToDone() throws {
         let store = try makeTemporaryStore()
-        let orchestrator = MuxyOrchestrator(store: store)
+        let (orchestrator, _, mockTmux) = makeTmuxOrchestrator(store: store)
         let (_, workspace) = try makeProjectAndWorkspace(store: store)
+        mockTmux.createSession(named: "muxy-\(workspace.id)")
 
-        try orchestrator.registerAgentWindow(workspaceID: workspace.id, provider: .iterm2, itermSessionID: "session-stop", status: .spinning)
+        try orchestrator.registerAgentWindow(
+            workspaceID: workspace.id, provider: .iterm2, itermSessionID: "workspace-session", tmuxWindowID: "@1", status: .spinning)
         let updated = try orchestrator.updateAgentWindowStatus(
-            workspaceID: workspace.id, provider: .iterm2, itermSessionID: "session-stop", status: .done)
+            workspaceID: workspace.id, provider: .iterm2, itermSessionID: "workspace-session", tmuxWindowID: "@1", status: .done)
         XCTAssertEqual(updated.status, .done)
 
         let allRecords = try store.agentWindows(workspaceID: workspace.id)
@@ -277,14 +274,17 @@ final class AgentHookTests: XCTestCase {
     // Tests updateAgentWindowStatus without an existing session creates a new terminal-backed record.
     func testUpdateAgentWindowStatusCreatesNewTerminalRecordWithoutSessionMatch() throws {
         let store = try makeTemporaryStore()
-        let orchestrator = MuxyOrchestrator(store: store)
+        let (orchestrator, _, mockTmux) = makeTmuxOrchestrator(store: store)
         let (_, workspace) = try makeProjectAndWorkspace(store: store)
+        mockTmux.createSession(named: "muxy-\(workspace.id)")
 
         let updated = try orchestrator.updateAgentWindowStatus(
-            workspaceID: workspace.id, provider: .iterm2, codexThreadID: "thread-xyz", status: .spinning)
+            workspaceID: workspace.id, provider: .iterm2, itermSessionID: "workspace-session", tmuxWindowID: "@1", codexThreadID: "thread-xyz",
+            status: .spinning)
 
         XCTAssertEqual(updated.status, .spinning)
         XCTAssertEqual(updated.codexThreadID, "thread-xyz")
+        XCTAssertEqual(updated.tmuxWindowID, "@1")
 
         let allRecords = try store.agentWindows(workspaceID: workspace.id)
         XCTAssertEqual(allRecords.count, 1)
@@ -307,4 +307,61 @@ final class AgentHookTests: XCTestCase {
         try store.upsert(workspace: workspace)
         return (project, workspace)
     }
+
+    private func makeTmuxOrchestrator(store: SQLiteStore) -> (MuxyOrchestrator, MockIterm2Adapter, MockTmuxAdapter) {
+        let mockIterm = MockIterm2Adapter()
+        let mockTmux = MockTmuxAdapter()
+        let orchestrator = MuxyOrchestrator(store: store, iterm: mockIterm, tmux: mockTmux)
+        return (orchestrator, mockIterm, mockTmux)
+    }
+
+    private func withMockCommands(_ commands: [String: String], run: () throws -> Void) throws {
+        let directory = try makeTempDirectory()
+        for (name, script) in commands {
+            let file = directory.appendingPathComponent(name)
+            try script.write(to: file, atomically: true, encoding: .utf8)
+            try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: file.path)
+        }
+
+        sharedPathMutationLock.lock()
+        defer { sharedPathMutationLock.unlock() }
+        let originalPath = ProcessInfo.processInfo.environment["PATH"] ?? ""
+        let updatedPath = originalPath.isEmpty ? directory.path : "\(directory.path):\(originalPath)"
+        setenv("PATH", updatedPath, 1)
+        defer { setenv("PATH", originalPath, 1) }
+
+        try run()
+    }
+
+    private static let yabaiMockScript = """
+        #!/bin/bash
+        args="$*"
+
+        if [[ "$args" == *"query --displays"* ]]; then
+          echo '[{"index":1}]'
+          exit 0
+        fi
+
+        if [[ "$args" == *"query --spaces"* ]]; then
+          echo '[{"index":1,"display":1}]'
+          exit 0
+        fi
+
+        if [[ "$args" == *"query --windows --window"* ]]; then
+          echo '{"id":101,"pid":11,"app":"iTerm2","title":"shell","space":1,"display":1,"is-sticky":false,"is-hidden":false,"is-visible":true,"is-native-fullscreen":false}'
+          exit 0
+        fi
+
+        if [[ "$args" == *"query --windows"* ]]; then
+          echo '[{"id":101,"pid":11,"app":"iTerm2","title":"shell","space":1,"display":1,"is-sticky":false,"is-hidden":false,"is-visible":true,"is-native-fullscreen":false}]'
+          exit 0
+        fi
+
+        if [[ "$args" == *"window --focus"* || "$args" == *"window --minimize"* || "$args" == *"window --close"* ]]; then
+          exit 0
+        fi
+
+        echo "unsupported yabai args: $args" >&2
+        exit 1
+        """
 }

@@ -46,7 +46,7 @@ public final class MuxyOrchestrator {
     }
 
     private enum WorkspaceNavigationCursor: Equatable {
-        case session(String)
+        case terminal(String)
         case browserWindowURL(Int, String)
         case browserURL(String)
         case window(Int)
@@ -63,6 +63,7 @@ public final class MuxyOrchestrator {
     private let git: GitClient
     private let yabai: YabaiAdapter
     private let iterm: Iterm2Adapter
+    private let tmux: TmuxAdapter
     private let chrome: ChromeAdapter
     private let browserWindowScanDebounceInterval: TimeInterval
     private let currentDate: () -> Date
@@ -81,7 +82,7 @@ public final class MuxyOrchestrator {
 
     public init(
         store: SQLiteStore, projectsRootDirectory: URL? = nil, workspacesRootDirectory: URL? = nil, git: GitClient = .init(),
-        yabai: YabaiAdapter = .init(), iterm: Iterm2Adapter = .init(), chrome: ChromeAdapter = .init(),
+        yabai: YabaiAdapter = .init(), iterm: Iterm2Adapter = .init(), tmux: TmuxAdapter = .init(), chrome: ChromeAdapter = .init(),
         browserWindowScanDebounceInterval: TimeInterval = PollingConstants.browserWindowScanDebounceInterval,
         currentDate: @escaping () -> Date = Date.init
     ) {
@@ -90,6 +91,7 @@ public final class MuxyOrchestrator {
         self.git = git
         self.yabai = yabai
         self.iterm = iterm
+        self.tmux = tmux
         self.chrome = chrome
         self.workspacesRootDirectoryURL = workspacesRootDirectory
         self.browserWindowScanDebounceInterval = browserWindowScanDebounceInterval
@@ -632,12 +634,7 @@ public final class MuxyOrchestrator {
         var windowSnapshot = try yabai.listWindows()
 
         if let config {
-            try launchProcesses(workspace: workspace, templates: config.processes, env: env, background: background)
-            let capturedTerminals = try captureNewWindows(
-                snapshot: windowSnapshot, role: "terminal", appName: "iTerm2", workspaceID: workspace.id, orderOffset: 200)
-            newWindows.append(contentsOf: capturedTerminals)
-            let ensuredTerminals = try terminalWindowsFromRunningProcesses(workspace: workspace, existingWindows: newWindows)
-            newWindows.append(contentsOf: ensuredTerminals)
+            newWindows.append(contentsOf: try launchProcesses(workspace: workspace, templates: config.processes, env: env, background: background))
             windowSnapshot = try yabai.listWindows()
 
             let browserSessionResult = try ensureBrowserSessions(
@@ -668,7 +665,8 @@ public final class MuxyOrchestrator {
         for window in uniqueWindows {
             let stored = WindowRecord(
                 id: window.id, workspaceID: window.workspaceID, app: window.app, title: window.title, targetURL: window.targetURL,
-                windowID: window.windowID, role: window.role, orderIndex: index, lastSeenAt: window.lastSeenAt)
+                windowID: window.windowID, itermSessionID: window.itermSessionID, itermTabIndex: window.itermTabIndex,
+                tmuxWindowID: window.tmuxWindowID, role: window.role, orderIndex: index, lastSeenAt: window.lastSeenAt)
             index += 1
             try store.upsert(window: stored)
         }
@@ -683,6 +681,7 @@ public final class MuxyOrchestrator {
     private func stopWorkspaceUnlocked(workspaceID: String) throws -> WorkspaceStopOutcome {
         let (project, workspace) = try resolveWorkspace(id: workspaceID)
         let windows = try trackedWindows(workspaceID: workspace.id)
+        let terminalWindowID = try workspaceTerminalWindowID(workspaceID: workspace.id)
         let namedPorts = try store.workspacePortsNamed(workspaceID: workspace.id)
         let env = buildWorkspaceEnv(project: project, workspace: workspace, namedPorts: namedPorts)
         let settings = try loadWorkspaceSettings(project: project, workspace: workspace)
@@ -698,42 +697,21 @@ public final class MuxyOrchestrator {
                 skippedStopScriptBecauseWorkspaceDirectoryMissing = true
             }
         }
-        // Always preserve coding agent sessions: collect their iTerm2 session IDs to skip when closing windows.
-        let agentWindowsList = (try? store.agentWindows(workspaceID: workspace.id)) ?? []
-        let agentItermSessionIDs = Set(agentWindowsList.compactMap { $0.itermSessionID })
-        var processTerminalWindowIDs = Set<Int>()
-        var closedProcessTerminalWindowIDs = Set<Int>()
-        for process in processes where process.terminalApp == "iTerm2" {
-            let didClose = (try? closeTrackedItermTerminalContainer(process)) ?? false
-            if let windowID = process.windowID {
-                processTerminalWindowIDs.insert(windowID)
-                if didClose { closedProcessTerminalWindowIDs.insert(windowID) }
-            }
-        }
-        var closedWindowIDs = closedProcessTerminalWindowIDs
         for window in windows {
             if window.role == "browser" {
                 closeTrackedBrowserTab(window)
                 continue
             }
-            if window.role == "terminal", window.app == "iTerm2", let id = window.windowID {
-                if closedWindowIDs.contains(id) { continue }
-                if !processTerminalWindowIDs.contains(id) {
-                    // Skip closing this specific session if it belongs to a coding agent.
-                    let isAgentSession = window.itermSessionID.map({ agentItermSessionIDs.contains($0) }) == true
-                    if !isAgentSession { _ = try? closeTrackedItermTerminalWindow(workspaceID: workspace.id, windowID: id) }
-                }
-                closedWindowIDs.insert(id)
-                continue
-            }
-            if window.role == "terminal", let id = window.windowID, processTerminalWindowIDs.contains(id) { continue }
-            if let id = window.windowID, !closedWindowIDs.contains(id) {
-                closedWindowIDs.insert(id)
-                _ = try? yabai.closeWindow(id: id)
-            }
+            if window.role == "terminal", window.app == "iTerm2" { continue }
+            if let id = window.windowID { _ = try? yabai.closeWindow(id: id) }
         }
+        for tmuxWindow in try tmuxWindows(workspaceID: workspace.id) {
+            _ = try? tmux.killWindow(windowID: tmuxWindow.id)
+        }
+        if let terminalWindowID { _ = try? iterm.closeWindow(id: terminalWindowID) }
         try store.deleteRunningProcesses(workspaceID: workspace.id)
         try store.deleteWindows(workspaceID: workspace.id)
+        try store.deleteAgentWindows(workspaceID: workspace.id)
         clearItermTerminalSessionMetadata(workspaceID: workspace.id)
         try store.updateWorkspaceRunning(id: workspace.id, isRunning: false, launchedAt: workspace.lastLaunchedAt)
         return WorkspaceStopOutcome(skippedStopScriptBecauseWorkspaceDirectoryMissing: skippedStopScriptBecauseWorkspaceDirectoryMissing)
@@ -797,7 +775,8 @@ public final class MuxyOrchestrator {
                         let updatedProcess = RunningProcessRecord(
                             id: process.id, workspaceID: process.workspaceID, templateName: process.templateName, command: process.command,
                             terminalApp: process.terminalApp, windowID: process.windowID, itermSessionID: process.itermSessionID,
-                            itermTabIndex: process.itermTabIndex, pid: process.pid, status: .exited, logPath: process.logPath,
+                            itermTabIndex: process.itermTabIndex, tmuxWindowID: process.tmuxWindowID, pid: process.pid, status: .exited,
+                            logPath: process.logPath,
                             lastOutputAt: process.lastOutputAt, startedAt: process.startedAt, exitedAt: nowISO8601())
                         try store.upsert(runningProcess: updatedProcess)
                         // Mark status check results as failed so they reflect the process exit.
@@ -808,34 +787,9 @@ public final class MuxyOrchestrator {
                         try handleProcessExit(workspaceID: workspace.id, process: updatedProcess, project: project, workspace: workspace)
                     }
                 }
+                if try syncTrackedTmuxRuntime(workspaceID: workspace.id) { didUpdate = true }
             }
         }
-        // Prune stale iTerm2 agent sessions
-        var aliveItermSessionIDs: Set<String>? = nil
-        for project in allProjects {
-            let workspaces = try store.workspaces(projectID: project.id, includeArchived: false)
-            for workspace in workspaces {
-                let agentWindowsList = (try? store.agentWindows(workspaceID: workspace.id)) ?? []
-                let itermAgents = agentWindowsList.filter { $0.provider == .iterm2 }
-                guard !itermAgents.isEmpty else { continue }
-                if aliveItermSessionIDs == nil {
-                    // Leave nil on failure so the guard below skips pruning this cycle.
-                    aliveItermSessionIDs = try? iterm.listSessionIDs()
-                }
-                guard let aliveIDs = aliveItermSessionIDs else { continue }
-                for agent in itermAgents {
-                    guard let sid = agent.itermSessionID else {
-                        try? store.deleteAgentWindow(id: agent.id)
-                        continue
-                    }
-                    if !aliveIDs.contains(sid) {
-                        try? store.deleteAgentWindow(id: agent.id)
-                        didUpdate = true
-                    }
-                }
-            }
-        }
-
         return didUpdate
     }
 
@@ -929,8 +883,8 @@ public final class MuxyOrchestrator {
         let updatedProcess = RunningProcessRecord(
             id: process.id, workspaceID: process.workspaceID, templateName: process.templateName, command: process.command,
             terminalApp: process.terminalApp, windowID: process.windowID, itermSessionID: process.itermSessionID,
-            itermTabIndex: process.itermTabIndex, pid: process.pid, status: .exited, logPath: process.logPath, lastOutputAt: process.lastOutputAt,
-            startedAt: process.startedAt, exitedAt: nowISO8601())
+            itermTabIndex: process.itermTabIndex, tmuxWindowID: process.tmuxWindowID, pid: process.pid, status: .exited,
+            logPath: process.logPath, lastOutputAt: process.lastOutputAt, startedAt: process.startedAt, exitedAt: nowISO8601())
         try store.upsert(runningProcess: updatedProcess)
         // Restart the process in a new terminal
         try restartProcessInTerminal(workspaceID: workspaceID, process: process)
@@ -963,37 +917,22 @@ public final class MuxyOrchestrator {
         let namedPorts = try store.workspacePortsNamed(workspaceID: workspaceID)
         let env = buildWorkspaceEnv(project: project, workspace: workspace, namedPorts: namedPorts)
         let didTerminate = terminateProcessForRestart(process)
+        let terminalHandle = try ensureWorkspaceTerminalAttached(workspace: workspace, background: background)
         // Prepare the command with proper environment and PID tracking
         let (logFile, pidFile) = try processRuntimePaths(workspaceID: workspace.id, name: process.templateName)
         let command = shellCommand(base: process.command, cwd: workspace.dir, env: env, logFile: logFile, pidFile: pidFile)
-        if didTerminate, let windowID = process.windowID, process.terminalApp == "iTerm2" {
-            // Reuse existing terminal window
-            fputs("muxy: Restarting process '\(process.templateName)' in existing terminal window \(windowID)\n", stderr)
-            try iterm.runInWindow(id: windowID, command: command)
-            // Read the new PID from the PID file and update the process record
-            let newPID = try? Int(String(contentsOfFile: pidFile).trimmingCharacters(in: .whitespacesAndNewlines))
-            let restartedProcess = RunningProcessRecord(
-                id: process.id, workspaceID: process.workspaceID, templateName: process.templateName, command: process.command,
-                terminalApp: process.terminalApp, windowID: windowID, itermSessionID: process.itermSessionID, itermTabIndex: process.itermTabIndex,
-                pid: newPID, status: .running, logPath: process.logPath, lastOutputAt: nil, startedAt: nowISO8601(), exitedAt: nil)
-            try store.upsert(runningProcess: restartedProcess)
-        } else {
-            // Fallback: create new terminal window when there is no reusable window or shutdown did not complete.
-            fputs("muxy: Creating new terminal window for process '\(process.templateName)'\n", stderr)
-            let windowInfo = try iterm.openWindowAndRun(command: command, background: background)
-            let windowID = windowInfo.id
-            // Read the new PID from the PID file and update the process record
-            let newPID = try? Int(String(contentsOfFile: pidFile).trimmingCharacters(in: .whitespacesAndNewlines))
-            let restartedProcess = RunningProcessRecord(
-                id: process.id, workspaceID: process.workspaceID, templateName: process.templateName, command: process.command, terminalApp: "iTerm2",
-                windowID: windowID, itermSessionID: windowInfo.sessionID, itermTabIndex: windowInfo.tabIndex, pid: newPID, status: .running,
-                logPath: process.logPath, lastOutputAt: nil, startedAt: nowISO8601(), exitedAt: nil)
-            if windowID > 0 {
-                setItermTerminalSessionMetadata(
-                    workspaceID: process.workspaceID, windowID: windowID, sessionID: windowInfo.sessionID, tabIndex: windowInfo.tabIndex)
-            }
-            try store.upsert(runningProcess: restartedProcess)
-        }
+        let reusedTmuxWindowID = didTerminate ? process.tmuxWindowID : nil
+        let tmuxWindow = try createOrRespawnTmuxWindow(
+            workspace: workspace, name: process.templateName, command: command, existingWindowID: reusedTmuxWindowID)
+        if !background { _ = try? tmux.selectWindow(windowID: tmuxWindow.id) }
+        let newPID = try? Int(String(contentsOfFile: pidFile).trimmingCharacters(in: .whitespacesAndNewlines))
+        let restartedProcess = RunningProcessRecord(
+            id: process.id, workspaceID: process.workspaceID, templateName: process.templateName, command: process.command, terminalApp: "iTerm2",
+            windowID: terminalHandle.id, itermSessionID: terminalHandle.sessionID, itermTabIndex: nil, tmuxWindowID: tmuxWindow.id, pid: newPID,
+            status: .running, logPath: process.logPath, lastOutputAt: nil, startedAt: nowISO8601(), exitedAt: nil)
+        try store.upsert(runningProcess: restartedProcess)
+        _ = try upsertTmuxTerminalWindow(
+            workspaceID: workspace.id, windowID: terminalHandle.id, itermSessionID: terminalHandle.sessionID, tmuxWindow: tmuxWindow)
     }
 
     private func terminateProcessForRestart(_ process: RunningProcessRecord) -> Bool {
@@ -1001,7 +940,7 @@ public final class MuxyOrchestrator {
         terminateProcessGroup(pid: pid)
         waitForProcessExit(pid: pid, timeout: 10.0)
         guard isProcessAlive(pid: pid) else { return true }
-        fputs("muxy: Process '\(process.templateName)' with pid \(pid) did not exit in time; restart will use a new terminal window\n", stderr)
+        fputs("muxy: Process '\(process.templateName)' with pid \(pid) did not exit in time; restart will use a new tmux window\n", stderr)
         return false
     }
 
@@ -1015,10 +954,11 @@ public final class MuxyOrchestrator {
     }
 
     @discardableResult public func refreshWorkspaceWindows(workspaceID: String) throws -> Bool {
+        let syncedTmuxRuntime = try syncTrackedTmuxRuntime(workspaceID: workspaceID)
         _ = try trackedWindows(workspaceID: workspaceID)
         let refreshedTerminalTitles = try refreshUnmanagedTerminalWindowTitles(workspaceID: workspaceID)
         let pruned = try pruneMissingWindows(workspaceID: workspaceID)
-        var didMutate = refreshedTerminalTitles > 0 || pruned > 0
+        var didMutate = syncedTmuxRuntime || refreshedTerminalTitles > 0 || pruned > 0
         guard let workspace = try store.workspace(id: workspaceID), workspace.isRunning else { return didMutate }
         let hasRuntimeIndicators = try hasTrackedRuntimeIndicators(workspaceID: workspaceID)
         if !hasRuntimeIndicators {
@@ -1033,6 +973,7 @@ public final class MuxyOrchestrator {
         let windows = try store.windows(workspaceID: workspaceID)
         let processWindowIDs = Set(try store.runningProcesses(workspaceID: workspaceID).compactMap(\.windowID))
         let terminalWindowsToRefresh = windows.filter { window in
+            if window.tmuxWindowID != nil { return false }
             guard window.role == "terminal", let windowID = window.windowID else { return false }
             return !processWindowIDs.contains(windowID)
         }
@@ -1088,22 +1029,29 @@ public final class MuxyOrchestrator {
         let (_, workspace) = try resolveWorkspace(id: workspaceID)
         guard !workspace.isArchived else { throw MuxyError.invalidArgument(message: "Workspace is archived.") }
         guard iterm.isAvailable() else { throw MuxyError.dependencyMissing(message: "iTerm2 is required to open terminal windows.") }
-        let snapshot = try yabai.listWindows()
-        let escapedDir = workspace.dir.replacingOccurrences(of: "\"", with: "\\\"")
-        let window: ItermWindowInfo
-        if let targetWindowID = try preferredWorkspaceItermWindowID(workspaceID: workspace.id) {
-            window = try iterm.openTabInWindowAndRun(windowID: targetWindowID, command: "cd \"\(escapedDir)\"")
+        guard tmux.isAvailable() else { throw MuxyError.dependencyMissing(message: "tmux is required to open terminal windows.") }
+        let sessionName = tmuxSessionName(workspaceID: workspace.id)
+        let sessionExisted = tmux.hasSession(named: sessionName)
+        let terminalHandle = try ensureWorkspaceTerminalAttached(workspace: workspace)
+        let liveTmuxWindows = try tmuxWindows(workspaceID: workspace.id)
+        let shellName = "shell-\(liveTmuxWindows.count + 1)"
+        let tmuxWindow: TmuxWindowInfo
+        if !sessionExisted, let currentWindow = try tmux.currentWindow(sessionName: sessionName) {
+            try tmux.renameWindow(windowID: currentWindow.id, name: shellName)
+            try tmux.setRemainOnExit(windowID: currentWindow.id, enabled: false)
+            tmuxWindow = try liveTmuxWindow(workspaceID: workspace.id, windowID: currentWindow.id)
+                ?? TmuxWindowInfo(id: currentWindow.id, index: currentWindow.index, name: shellName, sessionName: currentWindow.sessionName, isActive: true)
         } else {
-            window = try iterm.openWindowAndRun(command: "cd \"\(escapedDir)\"")
+            tmuxWindow = try createOrRespawnTmuxWindow(
+                workspace: workspace, name: shellName, command: interactiveShellCommand(cwd: workspace.dir), remainOnExit: false)
         }
-        if let focused = try yabai.focusedWindow(), focused.app == "iTerm2" {
-            setItermTerminalSessionMetadata(workspaceID: workspace.id, windowID: focused.id, sessionID: window.sessionID, tabIndex: window.tabIndex)
-        }
-        try attachNewWindows(snapshot: snapshot, workspaceID: workspace.id, role: "terminal", appName: "iTerm2", orderOffset: 200)
-        if let focused = try yabai.focusedWindow(), focused.app == "iTerm2" {
-            try persistItermTerminalWindowMetadata(
-                workspaceID: workspace.id, windowID: focused.id, sessionID: window.sessionID, tabIndex: window.tabIndex)
-        }
+        _ = try? tmux.selectWindow(windowID: tmuxWindow.id)
+        _ = try? iterm.focusSessionOrTab(
+            preferredSessionID: terminalHandle.sessionID,
+            tabIndex: nil,
+            windowID: terminalHandle.id)
+        _ = try upsertTmuxTerminalWindow(
+            workspaceID: workspace.id, windowID: terminalHandle.id, itermSessionID: terminalHandle.sessionID, tmuxWindow: tmuxWindow)
         if !workspace.isRunning {
             let launchedAt = workspace.lastLaunchedAt ?? nowISO8601()
             try store.updateWorkspaceRunning(id: workspace.id, isRunning: true, launchedAt: launchedAt)
@@ -1181,7 +1129,7 @@ public final class MuxyOrchestrator {
         let targets = try workspaceNavigationTargets(workspaceID: workspaceID)
         guard !targets.isEmpty else { return }
         let currentIndex =
-            try currentFocusedNavigationTargetIndex(targets: targets)
+            try currentFocusedNavigationTargetIndex(targets: targets, workspaceID: workspaceID)
             ?? windowNavigationCursor(workspaceID: workspaceID).flatMap { navigationTargetIndex(cursor: $0, targets: targets) }
         let targetIndex: Int
         if let currentIndex {
@@ -1198,16 +1146,24 @@ public final class MuxyOrchestrator {
         }
     }
 
-    private func currentFocusedNavigationTargetIndex(targets: [WorkspaceNavigationTarget]) throws -> Int? {
+    private func currentFocusedNavigationTargetIndex(targets: [WorkspaceNavigationTarget], workspaceID: String) throws -> Int? {
         if let focused = try yabai.focusedWindow() {
-            if focused.app == "iTerm2",
-                let focusedSessionID = ((try? iterm.focusedSessionID(windowID: focused.id)) ?? nil)
+            if focused.app == "iTerm2" {
+                if let currentTmuxWindowID = try tmux.currentWindow(sessionName: tmuxSessionName(workspaceID: workspaceID))?.id,
+                    let tmuxMatch = targets.enumerated().first(where: {
+                        navigationTargetTerminalID($0.element) == currentTmuxWindowID
+                    })
+                {
+                    return tmuxMatch.offset
+                }
+                if let focusedSessionID = ((try? iterm.focusedSessionID(windowID: focused.id)) ?? nil)
                     ?? ((try? iterm.focusedSessionID(windowID: nil)) ?? nil),
-                let sessionMatch = targets.enumerated().first(where: {
-                    navigationTargetSessionID($0.element) == focusedSessionID
-                })
-            {
-                return sessionMatch.offset
+                    let sessionMatch = targets.enumerated().first(where: {
+                        navigationTargetTerminalID($0.element) == focusedSessionID
+                    })
+                {
+                    return sessionMatch.offset
+                }
             }
             if focused.app == "Google Chrome", chrome.isAvailable() {
                 return try currentFocusedChromeNavigationTargetIndex(targets: targets, focusedWindow: focused)
@@ -1241,19 +1197,19 @@ public final class MuxyOrchestrator {
         let windows = try trackedWindows(workspaceID: workspaceID)
         let processes = try store.runningProcesses(workspaceID: workspaceID)
         let agentWindows = try store.agentWindows(workspaceID: workspaceID)
-        let liveItermSessionIDs = try? iterm.listSessionIDs()
+        let tmuxIndexByWindowID = Dictionary(uniqueKeysWithValues: try tmuxWindows(workspaceID: workspaceID).map { ($0.id, $0.index) })
         let agentYabaiWindowIDs = Set(agentWindows.compactMap(\.yabaiWindowID))
-        let processesByWindowID: [Int: [RunningProcessRecord]] = {
-            var map: [Int: [RunningProcessRecord]] = [:]
+        let processesByTerminalID: [String: [RunningProcessRecord]] = {
+            var map: [String: [RunningProcessRecord]] = [:]
             for process in processes {
-                guard let windowID = process.windowID else { continue }
-                map[windowID, default: []].append(process)
+                guard let terminalID = terminalTargetID(process: process) else { continue }
+                map[terminalID, default: []].append(process)
             }
-            for (windowID, list) in map {
-                map[windowID] = list.sorted { lhs, rhs in
-                    let lhsTab = lhs.itermTabIndex ?? Int.max
-                    let rhsTab = rhs.itermTabIndex ?? Int.max
-                    if lhsTab != rhsTab { return lhsTab < rhsTab }
+            for (terminalID, list) in map {
+                map[terminalID] = list.sorted { lhs, rhs in
+                    let lhsIndex = lhs.tmuxWindowID.flatMap { tmuxIndexByWindowID[$0] } ?? Int.max
+                    let rhsIndex = rhs.tmuxWindowID.flatMap { tmuxIndexByWindowID[$0] } ?? Int.max
+                    if lhsIndex != rhsIndex { return lhsIndex < rhsIndex }
                     return lhs.templateName.localizedStandardCompare(rhs.templateName) == .orderedAscending
                 }
             }
@@ -1262,8 +1218,12 @@ public final class MuxyOrchestrator {
 
         var targets: [WorkspaceNavigationTarget] = []
 
-        for record in agentWindows {
-            if let sessionID = record.itermSessionID, let liveItermSessionIDs, !liveItermSessionIDs.contains(sessionID) { continue }
+        for record in agentWindows.sorted(by: {
+            let lhs = $0.tmuxWindowID.flatMap { tmuxIndexByWindowID[$0] } ?? Int.max
+            let rhs = $1.tmuxWindowID.flatMap { tmuxIndexByWindowID[$0] } ?? Int.max
+            if lhs != rhs { return lhs < rhs }
+            return ($0.label ?? "").localizedStandardCompare($1.label ?? "") == .orderedAscending
+        }) {
             targets.append(.agent(record))
         }
 
@@ -1274,11 +1234,10 @@ public final class MuxyOrchestrator {
         }
 
         for window in windows where window.role != "browser" {
-            let windowProcesses = (window.role == "terminal" ? (window.windowID.flatMap { processesByWindowID[$0] }) : nil) ?? []
+            let windowProcesses = (window.role == "terminal" ? (terminalTargetID(window: window).flatMap { processesByTerminalID[$0] }) : nil) ?? []
             let isAgentClaimedWindow = window.windowID != nil && agentYabaiWindowIDs.contains(window.windowID!)
             if window.role == "terminal", !windowProcesses.isEmpty {
                 for process in windowProcesses {
-                    if let sessionID = process.itermSessionID, let liveItermSessionIDs, !liveItermSessionIDs.contains(sessionID) { continue }
                     if process.status != .running, process.itermSessionID == nil { continue }
                     targets.append(.process(process))
                 }
@@ -1299,11 +1258,12 @@ public final class MuxyOrchestrator {
         }
     }
 
-    private func navigationTargetSessionID(_ target: WorkspaceNavigationTarget) -> String? {
+    private func navigationTargetTerminalID(_ target: WorkspaceNavigationTarget) -> String? {
         switch target {
-        case .agent(let record): return record.itermSessionID
-        case .process(let process): return process.itermSessionID
-        case .browser, .window: return nil
+        case .agent(let record): return terminalTargetID(record: record)
+        case .process(let process): return terminalTargetID(process: process)
+        case .window(let window): return terminalTargetID(window: window)
+        case .browser: return nil
         }
     }
 
@@ -1335,7 +1295,7 @@ public final class MuxyOrchestrator {
     private func navigationCursor(for target: WorkspaceNavigationTarget) -> WorkspaceNavigationCursor? {
         switch target {
         case .agent(let record):
-            if let sessionID = record.itermSessionID, !sessionID.isEmpty { return .session(sessionID) }
+            if let terminalID = terminalTargetID(record: record), !terminalID.isEmpty { return .terminal(terminalID) }
             if let windowID = record.windowID ?? record.yabaiWindowID { return .window(windowID) }
         case .browser(let window):
             if let browserURL = window.targetURL, !browserURL.isEmpty, let windowID = window.windowID {
@@ -1344,10 +1304,10 @@ public final class MuxyOrchestrator {
             if let browserURL = window.targetURL, !browserURL.isEmpty { return .browserURL(browserURL) }
             if let windowID = window.windowID { return .window(windowID) }
         case .process(let process):
-            if let sessionID = process.itermSessionID, !sessionID.isEmpty { return .session(sessionID) }
+            if let terminalID = terminalTargetID(process: process), !terminalID.isEmpty { return .terminal(terminalID) }
             if let windowID = process.windowID { return .window(windowID) }
         case .window(let window):
-            if let sessionID = window.itermSessionID, !sessionID.isEmpty { return .session(sessionID) }
+            if let terminalID = terminalTargetID(window: window), !terminalID.isEmpty { return .terminal(terminalID) }
             if let windowID = window.windowID { return .window(windowID) }
         }
         return nil
@@ -1371,7 +1331,9 @@ public final class MuxyOrchestrator {
             setWindowNavigationCursor(nil, workspaceID: workspaceID)
             return
         }
-        let cursor = try currentFocusedNavigationTargetIndex(targets: targets).flatMap { navigationCursor(for: targets[$0]) }
+        let cursor = try currentFocusedNavigationTargetIndex(targets: targets, workspaceID: workspaceID).flatMap {
+            navigationCursor(for: targets[$0])
+        }
         setWindowNavigationCursor(cursor, workspaceID: workspaceID)
     }
 
@@ -1394,14 +1356,18 @@ public final class MuxyOrchestrator {
     private func focusTrackedWindow(_ window: WindowRecord, workspaceID: String) -> Bool {
         let focusStartedAt = currentDate()
         var focusPath = "yabai"
-        if window.role == "terminal", let trackedWindowID = window.windowID, window.app == "iTerm2" {
-            let focusedIterm = (try? focusItermTerminalWindow(workspaceID: workspaceID, trackedWindowID: trackedWindowID)) ?? false
+        if window.role == "terminal", window.app == "iTerm2" {
+            let focusedIterm =
+                (try? focusItermTerminalWindow(
+                    workspaceID: workspaceID, trackedWindowID: window.windowID, preferredTerminalID: terminalTargetID(window: window))) ?? false
             if focusedIterm {
-                logBrowserFocus("workspace=\(workspaceID) path=iterm window=\(trackedWindowID) elapsed_ms=\(elapsedMS(since: focusStartedAt))")
-                if (try? itermFocusPulseEnabled()) ?? SettingsKey.defaultItermFocusPulseEnabled {
-                    let pulseColor = (try? itermFocusPulseColor()) ?? (r: 46, g: 41, b: 14)
-                    let capturedIterm = iterm
-                    Task.detached { try? capturedIterm.pulseBackground(windowID: trackedWindowID, pulseColor: pulseColor) }
+                if let trackedWindowID = window.windowID {
+                    logBrowserFocus("workspace=\(workspaceID) path=iterm window=\(trackedWindowID) elapsed_ms=\(elapsedMS(since: focusStartedAt))")
+                    if (try? itermFocusPulseEnabled()) ?? SettingsKey.defaultItermFocusPulseEnabled {
+                        let pulseColor = (try? itermFocusPulseColor()) ?? (r: 46, g: 41, b: 14)
+                        let capturedIterm = iterm
+                        Task.detached { try? capturedIterm.pulseBackground(windowID: trackedWindowID, pulseColor: pulseColor) }
+                    }
                 }
                 return true
             }
@@ -1462,59 +1428,41 @@ public final class MuxyOrchestrator {
         return focused
     }
 
-    private func focusItermTerminalWindow(workspaceID: String, trackedWindowID: Int, preferredSessionID: String? = nil, preferredTabIndex: Int? = nil)
-        throws -> Bool
-    {
-        let runningProcess = try store.runningProcesses(workspaceID: workspaceID).first {
-            $0.terminalApp == "iTerm2" && $0.windowID == trackedWindowID
-        }
-        let trackedWindow = try store.windows(workspaceID: workspaceID).first {
-            $0.role == "terminal" && $0.app == "iTerm2" && $0.windowID == trackedWindowID
-        }
-        let fallbackMetadata = itermTerminalSessionMetadata(workspaceID: workspaceID, windowID: trackedWindowID)
-        let resolvedSessionID: String?
-        let resolvedTabIndex: Int?
-        if let preferredSessionID, !preferredSessionID.isEmpty {
-            resolvedSessionID = preferredSessionID
-            resolvedTabIndex = preferredTabIndex
-        } else {
-            resolvedSessionID = runningProcess?.itermSessionID ?? trackedWindow?.itermSessionID ?? fallbackMetadata?.sessionID
-            resolvedTabIndex = preferredTabIndex ?? runningProcess?.itermTabIndex ?? trackedWindow?.itermTabIndex ?? fallbackMetadata?.tabIndex
+    private func focusItermTerminalWindow(workspaceID: String, trackedWindowID: Int?, preferredTerminalID: String? = nil) throws -> Bool {
+        let (_, workspace) = try resolveWorkspace(id: workspaceID)
+        let terminalHandle = try ensureWorkspaceTerminalAttached(workspace: workspace)
+        if let preferredTerminalID, tmux.hasSession(named: tmuxSessionName(workspaceID: workspaceID)) {
+            _ = try? tmux.selectWindow(windowID: preferredTerminalID)
         }
         return try iterm.focusSessionOrTab(
-            preferredSessionID: resolvedSessionID,
-            tabIndex: resolvedTabIndex,
-            windowID: trackedWindowID)
-    }
-
-    private func preferredWorkspaceItermWindowID(workspaceID: String) throws -> Int? {
-        let trackedTerminalWindowIDs = Set(
-            try store.windows(workspaceID: workspaceID).filter { $0.role == "terminal" && $0.app == "iTerm2" }.compactMap(\.windowID))
-        if trackedTerminalWindowIDs.isEmpty { return nil }
-        if let focused = try yabai.focusedWindow(), focused.app == "iTerm2", trackedTerminalWindowIDs.contains(focused.id) { return focused.id }
-        let runningProcessWindow = try store.runningProcesses(workspaceID: workspaceID).first { $0.terminalApp == "iTerm2" && $0.windowID != nil }?
-            .windowID
-        if let runningProcessWindow { return runningProcessWindow }
-        return trackedTerminalWindowIDs.sorted().first
+            preferredSessionID: terminalHandle.sessionID,
+            tabIndex: nil,
+            windowID: terminalHandle.id)
     }
 
     private func closeTrackedItermTerminalContainer(_ process: RunningProcessRecord) throws -> Bool {
         guard process.terminalApp == "iTerm2" else { return false }
+        if let tmuxWindowID = process.tmuxWindowID {
+            try tmux.killWindow(windowID: tmuxWindowID)
+            return true
+        }
         return (try? iterm.closeSessionOrTab(preferredSessionID: process.itermSessionID, tabIndex: process.itermTabIndex, windowID: process.windowID))
             ?? false
     }
 
-    private func closeTrackedItermTerminalWindow(workspaceID: String, windowID: Int) throws -> Bool {
-        let trackedWindow = try store.windows(workspaceID: workspaceID).first {
-            $0.role == "terminal" && $0.app == "iTerm2" && $0.windowID == windowID
+    private func closeTrackedItermTerminalWindow(_ trackedWindow: WindowRecord) throws -> Bool {
+        if let tmuxWindowID = trackedWindow.tmuxWindowID {
+            try tmux.killWindow(windowID: tmuxWindowID)
+            return true
         }
-        if let preferredSessionID = trackedWindow?.itermSessionID,
+        guard let windowID = trackedWindow.windowID else { return false }
+        if let preferredSessionID = trackedWindow.itermSessionID,
             let closedSessionOrTab = try? iterm.closeSessionOrTab(
-                preferredSessionID: preferredSessionID, tabIndex: trackedWindow?.itermTabIndex, windowID: windowID), closedSessionOrTab
+                preferredSessionID: preferredSessionID, tabIndex: trackedWindow.itermTabIndex, windowID: windowID), closedSessionOrTab
         {
             return true
         }
-        if let metadata = itermTerminalSessionMetadata(workspaceID: workspaceID, windowID: windowID) {
+        if let metadata = itermTerminalSessionMetadata(workspaceID: trackedWindow.workspaceID, windowID: windowID) {
             let closedSessionOrTab =
                 (try? iterm.closeSessionOrTab(preferredSessionID: metadata.sessionID, tabIndex: metadata.tabIndex, windowID: windowID)) ?? false
             if closedSessionOrTab { return true }
@@ -1552,6 +1500,224 @@ public final class MuxyOrchestrator {
             windowID: existing.windowID, itermSessionID: sessionID, itermTabIndex: tabIndex, role: existing.role, orderIndex: existing.orderIndex,
             lastSeenAt: nowISO8601())
         try store.upsert(window: updated)
+    }
+
+    private func tmuxSessionName(workspaceID: String) -> String { "muxy-\(workspaceID)" }
+
+    private func terminalTargetID(process: RunningProcessRecord) -> String? { process.tmuxWindowID ?? process.itermSessionID }
+
+    private func terminalTargetID(record: AgentWindowRecord) -> String? { record.tmuxWindowID ?? record.itermSessionID }
+
+    private func terminalTargetID(window: WindowRecord) -> String? { window.tmuxWindowID ?? window.itermSessionID }
+
+    private func workspaceTerminalWindowID(workspaceID: String) throws -> Int? {
+        let liveWindowIDs = Set(try yabai.listWindows().filter { $0.app == "iTerm2" }.map(\.id))
+        let windowIDs = try store.windows(workspaceID: workspaceID).filter { $0.role == "terminal" && $0.app == "iTerm2" }.compactMap(\.windowID)
+        let processWindowIDs = try store.runningProcesses(workspaceID: workspaceID).compactMap(\.windowID)
+        let agentWindowIDs = try store.agentWindows(workspaceID: workspaceID).compactMap { $0.windowID ?? $0.yabaiWindowID }
+        let candidateWindowIDs = windowIDs + processWindowIDs + agentWindowIDs
+        return candidateWindowIDs.first(where: { liveWindowIDs.contains($0) })
+    }
+
+    private func workspaceTerminalSessionID(workspaceID: String) throws -> String? {
+        if let sessionID = try store.windows(workspaceID: workspaceID).first(where: {
+            $0.role == "terminal" && $0.app == "iTerm2" && ($0.itermSessionID?.isEmpty == false)
+        })?.itermSessionID {
+            return sessionID
+        }
+        if let sessionID = try store.runningProcesses(workspaceID: workspaceID).first(where: { $0.itermSessionID?.isEmpty == false })?.itermSessionID {
+            return sessionID
+        }
+        return try store.agentWindows(workspaceID: workspaceID).first(where: { $0.itermSessionID?.isEmpty == false })?.itermSessionID
+    }
+
+    private func waitForTmuxSession(named sessionName: String, timeout: TimeInterval = 5.0) -> Bool {
+        let deadline = currentDate().addingTimeInterval(timeout)
+        while currentDate() < deadline {
+            if tmux.hasSession(named: sessionName) { return true }
+            Thread.sleep(forTimeInterval: 0.05)
+        }
+        return tmux.hasSession(named: sessionName)
+    }
+
+    private func workspaceAttachCommand(workspace: WorkspaceRecord) -> String {
+        let escapedDir = workspace.dir.replacingOccurrences(of: "\"", with: "\\\"")
+        return "cd \"\(escapedDir)\" && exec tmux new-session -A -s \(tmuxSessionName(workspaceID: workspace.id)) -c \"\(escapedDir)\""
+    }
+
+    private func interactiveShellCommand(cwd: String) -> String {
+        let escapedDir = cwd.replacingOccurrences(of: "\"", with: "\\\"")
+        return #"bash -lc 'cd "\#(escapedDir)" && exec "${SHELL:-/bin/zsh}" -l'"#
+    }
+
+    @discardableResult private func ensureWorkspaceTerminalAttached(workspace: WorkspaceRecord, background: Bool = false) throws -> ItermWindowInfo {
+        if let windowID = try workspaceTerminalWindowID(workspaceID: workspace.id) {
+            return ItermWindowInfo(id: windowID, sessionID: try workspaceTerminalSessionID(workspaceID: workspace.id), tabIndex: nil)
+        }
+
+        let windowInfo = try iterm.openWindowAndRun(command: workspaceAttachCommand(workspace: workspace), background: background)
+        guard waitForTmuxSession(named: tmuxSessionName(workspaceID: workspace.id)) else {
+            throw MuxyError.invalidArgument(message: "Timed out waiting for tmux session to become available.")
+        }
+        try rebindWorkspaceTerminalWindow(workspaceID: workspace.id, windowID: windowInfo.id, sessionID: windowInfo.sessionID)
+        return windowInfo
+    }
+
+    private func tmuxWindows(workspaceID: String) throws -> [TmuxWindowInfo] {
+        try tmux.listWindows(sessionName: tmuxSessionName(workspaceID: workspaceID))
+    }
+
+    private func liveTmuxWindow(workspaceID: String, windowID: String) throws -> TmuxWindowInfo? {
+        try tmuxWindows(workspaceID: workspaceID).first(where: { $0.id == windowID })
+    }
+
+    private func rebindWorkspaceTerminalWindow(workspaceID: String, windowID: Int, sessionID: String?) throws {
+        let now = nowISO8601()
+        for window in try store.windows(workspaceID: workspaceID) where window.role == "terminal" && window.app == "iTerm2" {
+            try store.upsert(
+                window: WindowRecord(
+                    id: window.id, workspaceID: window.workspaceID, app: window.app, title: window.title, targetURL: window.targetURL,
+                    windowID: windowID, itermSessionID: sessionID ?? window.itermSessionID, itermTabIndex: nil, tmuxWindowID: window.tmuxWindowID,
+                    role: window.role, orderIndex: window.orderIndex, lastSeenAt: now))
+        }
+        for process in try store.runningProcesses(workspaceID: workspaceID) where process.terminalApp == "iTerm2" {
+            try store.upsert(
+                runningProcess: RunningProcessRecord(
+                    id: process.id, workspaceID: process.workspaceID, templateName: process.templateName, command: process.command,
+                    terminalApp: process.terminalApp, windowID: windowID, itermSessionID: sessionID ?? process.itermSessionID, itermTabIndex: nil,
+                    tmuxWindowID: process.tmuxWindowID, pid: process.pid, status: process.status, logPath: process.logPath,
+                    lastOutputAt: process.lastOutputAt, startedAt: process.startedAt, exitedAt: process.exitedAt))
+        }
+        for agent in try store.agentWindows(workspaceID: workspaceID) where agent.provider == .iterm2 {
+            try store.upsertAgentWindow(
+                AgentWindowRecord(
+                    id: agent.id, workspaceID: agent.workspaceID, provider: agent.provider, label: agent.label,
+                    itermSessionID: sessionID ?? agent.itermSessionID, tmuxWindowID: agent.tmuxWindowID, codexThreadID: agent.codexThreadID,
+                    windowID: windowID, yabaiWindowID: windowID, status: agent.status, createdAt: agent.createdAt, updatedAt: now))
+        }
+        setItermTerminalSessionMetadata(workspaceID: workspaceID, windowID: windowID, sessionID: sessionID, tabIndex: nil)
+    }
+
+    private func createOrRespawnTmuxWindow(
+        workspace: WorkspaceRecord, name: String, command: String, existingWindowID: String? = nil, remainOnExit: Bool = true
+    ) throws -> TmuxWindowInfo {
+        let sessionName = tmuxSessionName(workspaceID: workspace.id)
+        if let existingWindowID {
+            try tmux.renameWindow(windowID: existingWindowID, name: name)
+            try tmux.respawnWindow(windowID: existingWindowID, command: command)
+            try tmux.setRemainOnExit(windowID: existingWindowID, enabled: remainOnExit)
+            if let window = try liveTmuxWindow(workspaceID: workspace.id, windowID: existingWindowID) { return window }
+        }
+        let window = try tmux.createWindow(sessionName: sessionName, name: name, command: command, detached: true)
+        try tmux.setRemainOnExit(windowID: window.id, enabled: remainOnExit)
+        return window
+    }
+
+    private func upsertTmuxTerminalWindow(
+        workspaceID: String, windowID: Int?, itermSessionID: String?, tmuxWindow: TmuxWindowInfo, lastSeenAt: String = ""
+    ) throws -> WindowRecord {
+        let existingID = try store.windows(workspaceID: workspaceID).first(where: { $0.tmuxWindowID == tmuxWindow.id })?.id ?? UUID().uuidString
+        let record = WindowRecord(
+            id: existingID, workspaceID: workspaceID, app: "iTerm2", title: tmuxWindow.name, targetURL: nil, windowID: windowID,
+            itermSessionID: itermSessionID, itermTabIndex: nil, tmuxWindowID: tmuxWindow.id, role: "terminal",
+            orderIndex: 200 + tmuxWindow.index, lastSeenAt: lastSeenAt.isEmpty ? nowISO8601() : lastSeenAt)
+        try store.upsert(window: record)
+        return record
+    }
+
+    private func tmuxTerminalWindowRecord(
+        workspaceID: String, windowID: Int?, itermSessionID: String?, tmuxWindow: TmuxWindowInfo, lastSeenAt: String = ""
+    ) -> WindowRecord {
+        let now = lastSeenAt.isEmpty ? nowISO8601() : lastSeenAt
+        return WindowRecord(
+            id: UUID().uuidString, workspaceID: workspaceID, app: "iTerm2", title: tmuxWindow.name, targetURL: nil, windowID: windowID,
+            itermSessionID: itermSessionID, itermTabIndex: nil, tmuxWindowID: tmuxWindow.id, role: "terminal",
+            orderIndex: 200 + tmuxWindow.index, lastSeenAt: now)
+    }
+
+    @discardableResult private func syncTrackedTmuxRuntime(workspaceID: String) throws -> Bool {
+        guard tmux.isAvailable() else { return false }
+        let liveTmuxWindows = try tmuxWindows(workspaceID: workspaceID)
+        let liveWindowsByID = Dictionary(uniqueKeysWithValues: liveTmuxWindows.map { ($0.id, $0) })
+        let liveTmuxWindowIDs = Set(liveWindowsByID.keys)
+        let attachedWindowID = try workspaceTerminalWindowID(workspaceID: workspaceID)
+        let attachedSessionID = try workspaceTerminalSessionID(workspaceID: workspaceID)
+        let now = nowISO8601()
+        var didMutate = false
+
+        for window in try store.windows(workspaceID: workspaceID) where window.role == "terminal" && window.app == "iTerm2" {
+            guard let tmuxWindowID = window.tmuxWindowID else {
+                try store.deleteWindow(id: window.id)
+                didMutate = true
+                continue
+            }
+            guard let liveTmuxWindow = liveWindowsByID[tmuxWindowID] else {
+                try store.deleteWindow(id: window.id)
+                didMutate = true
+                continue
+            }
+            if window.title != liveTmuxWindow.name || window.orderIndex != 200 + liveTmuxWindow.index
+                || (attachedWindowID != nil && window.windowID != attachedWindowID)
+                || (attachedSessionID != nil && window.itermSessionID != attachedSessionID)
+            {
+                try store.upsert(
+                    window: WindowRecord(
+                        id: window.id, workspaceID: window.workspaceID, app: window.app, title: liveTmuxWindow.name, targetURL: window.targetURL,
+                        windowID: attachedWindowID ?? window.windowID, itermSessionID: attachedSessionID ?? window.itermSessionID, itermTabIndex: nil,
+                        tmuxWindowID: tmuxWindowID, role: window.role, orderIndex: 200 + liveTmuxWindow.index, lastSeenAt: now))
+                didMutate = true
+            }
+        }
+
+        for process in try store.runningProcesses(workspaceID: workspaceID) where process.terminalApp == "iTerm2" {
+            guard let tmuxWindowID = process.tmuxWindowID else {
+                try store.deleteRunningProcess(id: process.id)
+                didMutate = true
+                continue
+            }
+            guard liveTmuxWindowIDs.contains(tmuxWindowID) else {
+                try store.deleteRunningProcess(id: process.id)
+                didMutate = true
+                continue
+            }
+            if attachedWindowID != nil && process.windowID != attachedWindowID || attachedSessionID != nil && process.itermSessionID != attachedSessionID {
+                try store.upsert(
+                    runningProcess: RunningProcessRecord(
+                        id: process.id, workspaceID: process.workspaceID, templateName: process.templateName, command: process.command,
+                        terminalApp: process.terminalApp, windowID: attachedWindowID ?? process.windowID,
+                        itermSessionID: attachedSessionID ?? process.itermSessionID, itermTabIndex: nil, tmuxWindowID: tmuxWindowID, pid: process.pid,
+                        status: process.status, logPath: process.logPath, lastOutputAt: process.lastOutputAt, startedAt: process.startedAt,
+                        exitedAt: process.exitedAt))
+                didMutate = true
+            }
+        }
+
+        for agent in try store.agentWindows(workspaceID: workspaceID) where agent.provider == .iterm2 {
+            guard let tmuxWindowID = agent.tmuxWindowID else {
+                try store.deleteAgentWindow(id: agent.id)
+                didMutate = true
+                continue
+            }
+            guard liveTmuxWindowIDs.contains(tmuxWindowID) else {
+                try store.deleteAgentWindow(id: agent.id)
+                didMutate = true
+                continue
+            }
+            if attachedWindowID != nil && agent.windowID != attachedWindowID
+                || attachedSessionID != nil && agent.itermSessionID != attachedSessionID
+                || attachedWindowID != nil && agent.yabaiWindowID != attachedWindowID
+            {
+                try store.upsertAgentWindow(
+                    AgentWindowRecord(
+                        id: agent.id, workspaceID: agent.workspaceID, provider: agent.provider, label: agent.label,
+                        itermSessionID: attachedSessionID ?? agent.itermSessionID, tmuxWindowID: tmuxWindowID, codexThreadID: agent.codexThreadID,
+                        windowID: attachedWindowID ?? agent.windowID, yabaiWindowID: attachedWindowID ?? agent.yabaiWindowID, status: agent.status,
+                        createdAt: agent.createdAt, updatedAt: now))
+                didMutate = true
+            }
+        }
+
+        return didMutate
     }
 
     private func trackedWindows(workspaceID: String) throws -> [WindowRecord] {
@@ -2219,78 +2385,63 @@ public final class MuxyOrchestrator {
         if !toStart.isEmpty || !toRestart.isEmpty, !iterm.isAvailable() {
             throw MuxyError.dependencyMissing(message: "iTerm2 is required to launch processes.")
         }
+        if !toStart.isEmpty || !toRestart.isEmpty, !tmux.isAvailable() {
+            throw MuxyError.dependencyMissing(message: "tmux is required to launch processes.")
+        }
+
+        let terminalHandle: ItermWindowInfo? = (!toStart.isEmpty || !toRestart.isEmpty) ? (try ensureWorkspaceTerminalAttached(workspace: workspace)) : nil
 
         for process in toStop {
             if let pid = resolvedRuntimePID(for: process) { terminateProcessGroup(pid: pid) }
             if process.terminalApp == "iTerm2" { _ = try? closeTrackedItermTerminalContainer(process) }
             try store.deleteRunningProcess(id: process.id)
+            if let terminalWindow = try store.windows(workspaceID: workspace.id).first(where: { $0.tmuxWindowID == process.tmuxWindowID }) {
+                try store.deleteWindow(id: terminalWindow.id)
+            }
         }
 
         for (desired, process) in toRelabel {
             let updated = RunningProcessRecord(
                 id: process.id, workspaceID: workspace.id, templateName: desired.desiredKey, command: process.command,
                 terminalApp: process.terminalApp, windowID: process.windowID, itermSessionID: process.itermSessionID,
-                itermTabIndex: process.itermTabIndex, pid: process.pid, status: process.status, logPath: process.logPath,
-                lastOutputAt: process.lastOutputAt, startedAt: process.startedAt, exitedAt: process.exitedAt)
+                itermTabIndex: process.itermTabIndex, tmuxWindowID: process.tmuxWindowID, pid: process.pid, status: process.status,
+                logPath: process.logPath, lastOutputAt: process.lastOutputAt, startedAt: process.startedAt, exitedAt: process.exitedAt)
             try store.upsert(runningProcess: updated)
         }
-
-        var existingWindowIDs = Set<Int>((try store.windows(workspaceID: workspace.id)).compactMap { $0.windowID })
-        var terminalCount = (try? store.windows(workspaceID: workspace.id).filter { $0.role == "terminal" }.count) ?? 0
 
         for (desired, process) in toRestart {
             let name = desired.desiredKey
             let (logFile, pidFile) = try processRuntimePaths(workspaceID: workspace.id, name: name)
             let command = shellCommand(base: desired.template.command, cwd: workspace.dir, env: env, logFile: logFile, pidFile: pidFile)
-            if let windowID = process.windowID {
-                if let pid = resolvedRuntimePID(for: process) { terminateProcessGroup(pid: pid) }
-                try iterm.runInWindow(id: windowID, command: command)
-                let pid = try? Int(String(contentsOfFile: pidFile).trimmingCharacters(in: .whitespacesAndNewlines))
-                let updated = RunningProcessRecord(
-                    id: process.id, workspaceID: workspace.id, templateName: desired.desiredKey, command: desired.template.command,
-                    terminalApp: "iTerm2", windowID: windowID, itermSessionID: process.itermSessionID, itermTabIndex: process.itermTabIndex, pid: pid,
-                    status: .running, logPath: logFile, lastOutputAt: nil, startedAt: nowISO8601(), exitedAt: nil)
-                try store.upsert(runningProcess: updated)
-            } else {
-                let snapshot = try yabai.listWindows()
-                let window = try iterm.openWindowAndRun(command: command)
-                let captured = try captureNewWindows(
-                    snapshot: snapshot, role: "terminal", appName: "iTerm2", workspaceID: workspace.id, orderOffset: 200 + terminalCount)
-                let resolvedWindowID = window.id >= 0 ? window.id : captured.first?.windowID
-                let pid = try? Int(String(contentsOfFile: pidFile).trimmingCharacters(in: .whitespacesAndNewlines))
-                let updated = RunningProcessRecord(
-                    id: process.id, workspaceID: workspace.id, templateName: desired.desiredKey, command: desired.template.command,
-                    terminalApp: "iTerm2", windowID: resolvedWindowID, itermSessionID: window.sessionID, itermTabIndex: window.tabIndex, pid: pid,
-                    status: .running, logPath: logFile, lastOutputAt: nil, startedAt: nowISO8601(), exitedAt: nil)
-                if let resolvedWindowID, resolvedWindowID > 0 {
-                    setItermTerminalSessionMetadata(
-                        workspaceID: workspace.id, windowID: resolvedWindowID, sessionID: window.sessionID, tabIndex: window.tabIndex)
-                }
-                try store.upsert(runningProcess: updated)
-                try upsertCapturedTerminalWindows(captured, existingWindowIDs: &existingWindowIDs, terminalCount: &terminalCount)
-            }
+            let didTerminate = terminateProcessForRestart(process)
+            let tmuxWindow = try createOrRespawnTmuxWindow(
+                workspace: workspace, name: name, command: command, existingWindowID: didTerminate ? process.tmuxWindowID : nil)
+            let pid = try? Int(String(contentsOfFile: pidFile).trimmingCharacters(in: .whitespacesAndNewlines))
+            let updated = RunningProcessRecord(
+                id: process.id, workspaceID: workspace.id, templateName: desired.desiredKey, command: desired.template.command,
+                terminalApp: "iTerm2", windowID: terminalHandle?.id ?? process.windowID,
+                itermSessionID: terminalHandle?.sessionID ?? process.itermSessionID, itermTabIndex: nil, tmuxWindowID: tmuxWindow.id, pid: pid,
+                status: .running, logPath: logFile, lastOutputAt: nil, startedAt: nowISO8601(), exitedAt: nil)
+            try store.upsert(runningProcess: updated)
+            _ = try upsertTmuxTerminalWindow(
+                workspaceID: workspace.id, windowID: terminalHandle?.id ?? process.windowID,
+                itermSessionID: terminalHandle?.sessionID ?? process.itermSessionID, tmuxWindow: tmuxWindow)
         }
 
         for (_, desired) in toStart {
             let name = desired.desiredKey
             let (logFile, pidFile) = try processRuntimePaths(workspaceID: workspace.id, name: name)
             let command = shellCommand(base: desired.template.command, cwd: workspace.dir, env: env, logFile: logFile, pidFile: pidFile)
-            let snapshot = try yabai.listWindows()
-            let window = try iterm.openWindowAndRun(command: command)
-            let captured = try captureNewWindows(
-                snapshot: snapshot, role: "terminal", appName: "iTerm2", workspaceID: workspace.id, orderOffset: 200 + terminalCount)
-            let resolvedWindowID = window.id >= 0 ? window.id : captured.first?.windowID
+            let tmuxWindow = try createOrRespawnTmuxWindow(workspace: workspace, name: name, command: command)
             let pid = try? Int(String(contentsOfFile: pidFile).trimmingCharacters(in: .whitespacesAndNewlines))
             let record = RunningProcessRecord(
                 id: UUID().uuidString, workspaceID: workspace.id, templateName: desired.desiredKey, command: desired.template.command,
-                terminalApp: "iTerm2", windowID: resolvedWindowID, itermSessionID: window.sessionID, itermTabIndex: window.tabIndex, pid: pid,
-                status: .running, logPath: logFile, lastOutputAt: nil, startedAt: nowISO8601(), exitedAt: nil)
-            if let resolvedWindowID, resolvedWindowID > 0 {
-                setItermTerminalSessionMetadata(
-                    workspaceID: workspace.id, windowID: resolvedWindowID, sessionID: window.sessionID, tabIndex: window.tabIndex)
-            }
+                terminalApp: "iTerm2", windowID: terminalHandle?.id, itermSessionID: terminalHandle?.sessionID, itermTabIndex: nil,
+                tmuxWindowID: tmuxWindow.id, pid: pid, status: .running, logPath: logFile, lastOutputAt: nil, startedAt: nowISO8601(),
+                exitedAt: nil)
             try store.upsert(runningProcess: record)
-            try upsertCapturedTerminalWindows(captured, existingWindowIDs: &existingWindowIDs, terminalCount: &terminalCount)
+            _ = try upsertTmuxTerminalWindow(
+                workspaceID: workspace.id, windowID: terminalHandle?.id, itermSessionID: terminalHandle?.sessionID, tmuxWindow: tmuxWindow)
         }
 
         let ensuredTerminals = try terminalWindowsFromRunningProcesses(
@@ -2351,10 +2502,13 @@ public final class MuxyOrchestrator {
         var pruned = 0
         for window in windows {
             guard let id = window.windowID else {
-                try store.deleteWindow(id: window.id)
-                pruned += 1
+                if window.tmuxWindowID == nil {
+                    try store.deleteWindow(id: window.id)
+                    pruned += 1
+                }
                 continue
             }
+            if window.role == "terminal", window.app == "iTerm2", window.tmuxWindowID != nil { continue }
             if !existingIDs.contains(id) {
                 try store.deleteWindow(id: window.id)
                 pruned += 1
@@ -2366,6 +2520,7 @@ public final class MuxyOrchestrator {
     private func windowTrackingKey(_ window: WindowRecord) -> String {
         let idPart = window.windowID.map(String.init) ?? "none"
         if window.role == "browser" { return "browser:\(idPart):\(window.targetURL ?? "")" }
+        if let tmuxWindowID = window.tmuxWindowID, !tmuxWindowID.isEmpty { return "\(window.role):\(idPart):\(tmuxWindowID)" }
         return "\(window.role):\(idPart)"
     }
 
@@ -2389,21 +2544,22 @@ public final class MuxyOrchestrator {
 
     private func terminalWindowsFromRunningProcesses(workspace: WorkspaceRecord, existingWindows: [WindowRecord]) throws -> [WindowRecord] {
         let processRecords = try store.runningProcesses(workspaceID: workspace.id)
-        let terminalProcessWindowIDs = processRecords.filter { $0.terminalApp == "iTerm2" }.compactMap(\.windowID)
-        guard !terminalProcessWindowIDs.isEmpty else { return [] }
-        let yabaiWindowsByID = Dictionary(uniqueKeysWithValues: try yabai.listWindows().map { ($0.id, $0) })
-        var seenWindowIDs = Set(existingWindows.compactMap(\.windowID))
-        var nextIndex = Self.nextWindowOrderIndex(existing: existingWindows, role: "terminal", orderOffset: 200)
+        let liveTmuxWindows = Dictionary(uniqueKeysWithValues: try tmuxWindows(workspaceID: workspace.id).map { ($0.id, $0) })
+        let attachedWindowID = try workspaceTerminalWindowID(workspaceID: workspace.id)
+        let attachedSessionID = try workspaceTerminalSessionID(workspaceID: workspace.id)
+        let tmuxWindowIDs = processRecords.filter { $0.terminalApp == "iTerm2" }.compactMap(\.tmuxWindowID)
+        guard !tmuxWindowIDs.isEmpty else { return [] }
+        var seenWindowIDs = Set(existingWindows.compactMap(\.tmuxWindowID))
         var synthesized: [WindowRecord] = []
-        for windowID in terminalProcessWindowIDs {
-            if seenWindowIDs.contains(windowID) { continue }
-            guard let yabaiWindow = yabaiWindowsByID[windowID] else { continue }
-            seenWindowIDs.insert(windowID)
+        for tmuxWindowID in tmuxWindowIDs {
+            if seenWindowIDs.contains(tmuxWindowID) { continue }
+            guard let tmuxWindow = liveTmuxWindows[tmuxWindowID] else { continue }
+            seenWindowIDs.insert(tmuxWindowID)
             synthesized.append(
                 WindowRecord(
-                    id: UUID().uuidString, workspaceID: workspace.id, app: yabaiWindow.app, title: yabaiWindow.title, windowID: windowID,
-                    role: "terminal", orderIndex: nextIndex, lastSeenAt: nowISO8601()))
-            nextIndex += 1
+                    id: UUID().uuidString, workspaceID: workspace.id, app: "iTerm2", title: tmuxWindow.name, windowID: attachedWindowID,
+                    itermSessionID: attachedSessionID, itermTabIndex: nil, tmuxWindowID: tmuxWindow.id, role: "terminal",
+                    orderIndex: 200 + tmuxWindow.index, lastSeenAt: nowISO8601()))
         }
         return synthesized
     }
@@ -2442,49 +2598,52 @@ public final class MuxyOrchestrator {
         }
     }
 
-    private func launchProcesses(workspace: WorkspaceRecord, templates: [ProcessTemplate], env: [String: String], background: Bool = false) throws {
+    private func launchProcesses(workspace: WorkspaceRecord, templates: [ProcessTemplate], env: [String: String], background: Bool = false) throws
+        -> [WindowRecord]
+    {
         guard !templates.isEmpty else {
             try store.deleteRunningProcesses(workspaceID: workspace.id)
-            return
+            return []
         }
         guard iterm.isAvailable() else { throw MuxyError.dependencyMissing(message: "iTerm2 is required to launch processes.") }
+        guard tmux.isAvailable() else { throw MuxyError.dependencyMissing(message: "tmux is required to launch processes.") }
         let runtimeRoot = try runtimeDirectory()
         let workspaceRuntime = URL(fileURLWithPath: runtimeRoot).appendingPathComponent(workspace.id, isDirectory: true)
         try FileManager.default.createDirectory(at: workspaceRuntime, withIntermediateDirectories: true)
 
         try store.deleteRunningProcesses(workspaceID: workspace.id)
+        let sessionName = tmuxSessionName(workspaceID: workspace.id)
+        let sessionExisted = tmux.hasSession(named: sessionName)
+        let terminalHandle = try ensureWorkspaceTerminalAttached(workspace: workspace, background: background)
+        var reusableInitialWindowID: String?
+        if !sessionExisted {
+            reusableInitialWindowID = try tmux.currentWindow(sessionName: sessionName)?.id
+        }
 
-        var sharedItermWindowID: Int?
-        for template in templates {
+        var terminalWindows: [WindowRecord] = []
+        var firstTmuxWindowID: String?
+        for (index, template) in templates.enumerated() {
             let name = template.name ?? template.command
             let logFile = workspaceRuntime.appendingPathComponent("\(safeFilename(name)).log").path
             let pidFile = workspaceRuntime.appendingPathComponent("\(safeFilename(name)).pid").path
             let command = shellCommand(base: template.command, cwd: workspace.dir, env: env, logFile: logFile, pidFile: pidFile)
-            let snapshot = try yabai.listWindows()
-            let window: ItermWindowInfo
-            if let existingWindowID = sharedItermWindowID {
-                window = try iterm.openTabInWindowAndRun(windowID: existingWindowID, command: command, background: background)
-            } else {
-                window = try iterm.openWindowAndRun(command: command, background: background)
-            }
-            let fallbackWindowID = try captureNewWindows(
-                snapshot: snapshot, role: "terminal", appName: "iTerm2", workspaceID: workspace.id, orderOffset: 200
-            ).first?.windowID
-            let resolvedWindowID = window.id >= 0 ? window.id : fallbackWindowID
-            if let resolvedWindowID { sharedItermWindowID = resolvedWindowID }
-
+            let tmuxWindow = try createOrRespawnTmuxWindow(
+                workspace: workspace, name: name, command: command, existingWindowID: index == 0 ? reusableInitialWindowID : nil)
+            if firstTmuxWindowID == nil { firstTmuxWindowID = tmuxWindow.id }
             let pid = try? Int(String(contentsOfFile: pidFile).trimmingCharacters(in: .whitespacesAndNewlines))
             let running = RunningProcessRecord(
                 id: UUID().uuidString, workspaceID: workspace.id, templateName: name, command: template.command, terminalApp: "iTerm2",
-                windowID: resolvedWindowID, itermSessionID: window.sessionID, itermTabIndex: window.tabIndex, pid: pid, status: .running,
-                logPath: logFile, lastOutputAt: nil, startedAt: nowISO8601(), exitedAt: nil)
-            if let resolvedWindowID, resolvedWindowID > 0 {
-                setItermTerminalSessionMetadata(
-                    workspaceID: workspace.id, windowID: resolvedWindowID, sessionID: window.sessionID, tabIndex: window.tabIndex)
-            }
+                windowID: terminalHandle.id, itermSessionID: terminalHandle.sessionID, itermTabIndex: nil, tmuxWindowID: tmuxWindow.id, pid: pid,
+                status: .running, logPath: logFile, lastOutputAt: nil, startedAt: nowISO8601(), exitedAt: nil)
             try store.upsert(runningProcess: running)
+            terminalWindows.append(
+                tmuxTerminalWindowRecord(
+                    workspaceID: workspace.id, windowID: terminalHandle.id, itermSessionID: terminalHandle.sessionID, tmuxWindow: tmuxWindow))
         }
-
+        if let firstTmuxWindowID {
+            _ = try? tmux.selectWindow(windowID: firstTmuxWindowID)
+        }
+        return terminalWindows
     }
 
     private func ensureBrowserSessions(
@@ -2919,63 +3078,51 @@ public final class MuxyOrchestrator {
     public func agentWindows(workspaceID: String) throws -> [AgentWindowRecord] { try store.agentWindows(workspaceID: workspaceID) }
 
     @discardableResult public func registerAgentWindow(
-        workspaceID: String, provider: AgentProvider, label: String? = nil, itermSessionID: String? = nil, codexThreadID: String? = nil,
-        yabaiWindowID: Int? = nil, status: AgentWindowStatus = .idle
+        workspaceID: String, provider: AgentProvider, label: String? = nil, itermSessionID: String? = nil, tmuxWindowID: String? = nil,
+        codexThreadID: String? = nil, yabaiWindowID: Int? = nil, status: AgentWindowStatus = .idle
     ) throws -> AgentWindowRecord {
         let now = nowISO8601()
-        // Prune stale sessions before creating.
-        if let sessionID = itermSessionID {
-            // Update existing record if same session.
-            if let existing = try store.agentWindow(workspaceID: workspaceID, itermSessionID: sessionID) {
-                let updated = AgentWindowRecord(
-                    id: existing.id, workspaceID: existing.workspaceID, provider: existing.provider, label: label ?? existing.label,
-                    itermSessionID: existing.itermSessionID, codexThreadID: existing.codexThreadID, windowID: existing.windowID,
-                    yabaiWindowID: yabaiWindowID ?? existing.yabaiWindowID, status: status, createdAt: existing.createdAt, updatedAt: now)
-                try store.upsertAgentWindow(updated)
-                return updated
-            }
+        if let tmuxWindowID, let existing = try store.agentWindow(workspaceID: workspaceID, tmuxWindowID: tmuxWindowID) {
+            let updated = AgentWindowRecord(
+                id: existing.id, workspaceID: existing.workspaceID, provider: existing.provider, label: label ?? existing.label,
+                itermSessionID: itermSessionID ?? existing.itermSessionID, tmuxWindowID: tmuxWindowID, codexThreadID: existing.codexThreadID,
+                windowID: existing.windowID, yabaiWindowID: yabaiWindowID ?? existing.yabaiWindowID, status: status, createdAt: existing.createdAt,
+                updatedAt: now)
+            try store.upsertAgentWindow(updated)
+            return updated
         }
-        // Prune stale iTerm2 sessions.
-        if let aliveIDs = try? iterm.listSessionIDs() {
-            let existingRecords = try store.agentWindowsByProvider(workspaceID: workspaceID, provider: .iterm2)
-            for stale in existingRecords {
-                guard let sid = stale.itermSessionID else {
-                    try store.deleteAgentWindow(id: stale.id)
-                    continue
-                }
-                if !aliveIDs.contains(sid) { try store.deleteAgentWindow(id: stale.id) }
-            }
-        }
+        _ = try? syncTrackedTmuxRuntime(workspaceID: workspaceID)
+        let resolvedItermSessionID = try workspaceTerminalSessionID(workspaceID: workspaceID)
+        let resolvedWindowID = try workspaceTerminalWindowID(workspaceID: workspaceID)
         let record = AgentWindowRecord(
-            id: UUID().uuidString, workspaceID: workspaceID, provider: .iterm2, label: label, itermSessionID: itermSessionID,
-            codexThreadID: codexThreadID,
-            windowID: nil, yabaiWindowID: yabaiWindowID, status: status, createdAt: now, updatedAt: now)
+            id: UUID().uuidString, workspaceID: workspaceID, provider: .iterm2, label: label,
+            itermSessionID: itermSessionID ?? resolvedItermSessionID, tmuxWindowID: tmuxWindowID, codexThreadID: codexThreadID,
+            windowID: resolvedWindowID, yabaiWindowID: yabaiWindowID ?? resolvedWindowID, status: status, createdAt: now, updatedAt: now)
         try store.upsertAgentWindow(record)
         return record
     }
 
     @discardableResult public func updateAgentWindowStatus(
-        workspaceID: String, provider: AgentProvider, itermSessionID: String? = nil, codexThreadID: String? = nil, yabaiWindowID: Int? = nil,
-        label: String? = nil, status: AgentWindowStatus
+        workspaceID: String, provider: AgentProvider, itermSessionID: String? = nil, tmuxWindowID: String? = nil, codexThreadID: String? = nil,
+        yabaiWindowID: Int? = nil, label: String? = nil, status: AgentWindowStatus
     ) throws -> AgentWindowRecord {
         let now = nowISO8601()
-        // Find existing record
         var existing: AgentWindowRecord?
-        if let sessionID = itermSessionID {
-            existing = try store.agentWindow(workspaceID: workspaceID, itermSessionID: sessionID)
+        if let tmuxWindowID {
+            existing = try store.agentWindow(workspaceID: workspaceID, tmuxWindowID: tmuxWindowID)
         }
         if let existing {
             let updated = AgentWindowRecord(
                 id: existing.id, workspaceID: existing.workspaceID, provider: existing.provider, label: label ?? existing.label,
-                itermSessionID: existing.itermSessionID, codexThreadID: existing.codexThreadID, windowID: existing.windowID,
-                yabaiWindowID: yabaiWindowID ?? existing.yabaiWindowID, status: status, createdAt: existing.createdAt, updatedAt: now)
+                itermSessionID: itermSessionID ?? existing.itermSessionID, tmuxWindowID: tmuxWindowID ?? existing.tmuxWindowID,
+                codexThreadID: existing.codexThreadID, windowID: existing.windowID, yabaiWindowID: yabaiWindowID ?? existing.yabaiWindowID,
+                status: status, createdAt: existing.createdAt, updatedAt: now)
             try store.upsertAgentWindow(updated)
             return updated
         }
-        // Not found: register new
         return try registerAgentWindow(
-            workspaceID: workspaceID, provider: provider, label: label, itermSessionID: itermSessionID, codexThreadID: codexThreadID,
-            yabaiWindowID: yabaiWindowID, status: status)
+            workspaceID: workspaceID, provider: provider, label: label, itermSessionID: itermSessionID, tmuxWindowID: tmuxWindowID,
+            codexThreadID: codexThreadID, yabaiWindowID: yabaiWindowID, status: status)
     }
 
     public func focusAgentWindow(_ record: AgentWindowRecord) throws {
@@ -2986,12 +3133,11 @@ public final class MuxyOrchestrator {
     }
 
     private func focusWorkspaceProcessRecord(_ process: RunningProcessRecord, workspaceID: String) throws -> Bool {
-        guard process.terminalApp == "iTerm2", let trackedWindowID = process.windowID else { return false }
+        guard process.terminalApp == "iTerm2" else { return false }
         let focused = try focusItermTerminalWindow(
-            workspaceID: workspaceID, trackedWindowID: trackedWindowID, preferredSessionID: process.itermSessionID,
-            preferredTabIndex: process.itermTabIndex)
+            workspaceID: workspaceID, trackedWindowID: process.windowID, preferredTerminalID: terminalTargetID(process: process))
         if focused {
-            if (try? itermFocusPulseEnabled()) ?? SettingsKey.defaultItermFocusPulseEnabled {
+            if let trackedWindowID = process.windowID, (try? itermFocusPulseEnabled()) ?? SettingsKey.defaultItermFocusPulseEnabled {
                 let pulseColor = (try? itermFocusPulseColor()) ?? (r: 46, g: 41, b: 14)
                 let capturedIterm = iterm
                 Task.detached { try? capturedIterm.pulseBackground(windowID: trackedWindowID, pulseColor: pulseColor) }
@@ -3001,7 +3147,9 @@ public final class MuxyOrchestrator {
     }
 
     private func focusAgentWindowRecord(_ record: AgentWindowRecord) throws -> Bool {
-        let focused = (try? iterm.focusSessionOrTab(preferredSessionID: record.itermSessionID, tabIndex: nil, windowID: record.windowID)) ?? false
+        let focused = try focusItermTerminalWindow(
+            workspaceID: record.workspaceID, trackedWindowID: record.windowID ?? record.yabaiWindowID,
+            preferredTerminalID: terminalTargetID(record: record))
         if focused, let windowID = record.windowID ?? record.yabaiWindowID,
             (try? itermFocusPulseEnabled()) ?? SettingsKey.defaultItermFocusPulseEnabled
         {

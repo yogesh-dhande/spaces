@@ -34,6 +34,13 @@ final class SetupManager: NSObject {
             action: .openURL(URL(string: "https://iterm2.com/downloads.html")!)
         ),
         SetupStep(
+            ids: [.tmuxInstalled],
+            icon: "square.split.2x1",
+            title: "Install tmux",
+            body: "Muxy runs each workspace terminal inside a shared tmux session so processes, terminals, and coding agents can each keep their own tmux window.",
+            action: .copyCommand("brew install tmux")
+        ),
+        SetupStep(
             ids: [.yabaiInstalled],
             icon: "hammer",
             title: "Install yabai",

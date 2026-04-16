@@ -462,9 +462,9 @@ public final class SQLiteStore {
             sql: """
                 INSERT INTO running_processes(
                   id, workspace_id, template_name, command, terminal_app, window_id, iterm_session_id, iterm_tab_index,
-                  pid, status, log_path, last_output_at, started_at, exited_at
+                  tmux_window_id, pid, status, log_path, last_output_at, started_at, exited_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(id) DO UPDATE SET
                   template_name = excluded.template_name,
                   command = excluded.command,
@@ -472,6 +472,7 @@ public final class SQLiteStore {
                   window_id = excluded.window_id,
                   iterm_session_id = excluded.iterm_session_id,
                   iterm_tab_index = excluded.iterm_tab_index,
+                  tmux_window_id = excluded.tmux_window_id,
                   pid = excluded.pid,
                   status = excluded.status,
                   log_path = excluded.log_path,
@@ -482,15 +483,16 @@ public final class SQLiteStore {
             bindings: [
                 runningProcess.id, runningProcess.workspaceID, runningProcess.templateName, runningProcess.command, runningProcess.terminalApp ?? "",
                 runningProcess.windowID.map(String.init) ?? "", runningProcess.itermSessionID ?? "",
-                runningProcess.itermTabIndex.map(String.init) ?? "", runningProcess.pid.map(String.init) ?? "", runningProcess.status.rawValue,
-                runningProcess.logPath ?? "", runningProcess.lastOutputAt ?? "", runningProcess.startedAt ?? "", runningProcess.exitedAt ?? "",
+                runningProcess.itermTabIndex.map(String.init) ?? "", runningProcess.tmuxWindowID ?? "",
+                runningProcess.pid.map(String.init) ?? "", runningProcess.status.rawValue, runningProcess.logPath ?? "",
+                runningProcess.lastOutputAt ?? "", runningProcess.startedAt ?? "", runningProcess.exitedAt ?? "",
             ])
     }
 
     public func runningProcesses(workspaceID: String) throws -> [RunningProcessRecord] {
         let rows = try queryRows(
             sql: """
-                SELECT id, workspace_id, template_name, command, terminal_app, window_id, iterm_session_id, iterm_tab_index, pid, status, log_path, last_output_at, started_at, exited_at
+                SELECT id, workspace_id, template_name, command, terminal_app, window_id, iterm_session_id, iterm_tab_index, tmux_window_id, pid, status, log_path, last_output_at, started_at, exited_at
                 FROM running_processes WHERE workspace_id = ?
                 ORDER BY started_at
                 """, bindings: [workspaceID])
@@ -541,8 +543,10 @@ public final class SQLiteStore {
     public func upsert(window: WindowRecord) throws {
         try execute(
             sql: """
-                INSERT INTO windows(id, workspace_id, app, title, target_url, window_id, iterm_session_id, iterm_tab_index, role, order_index, last_seen_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO windows(
+                  id, workspace_id, app, title, target_url, window_id, iterm_session_id, iterm_tab_index, tmux_window_id, role, order_index, last_seen_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(id) DO UPDATE SET
                   app = excluded.app,
                   title = excluded.title,
@@ -550,20 +554,22 @@ public final class SQLiteStore {
                   window_id = excluded.window_id,
                   iterm_session_id = excluded.iterm_session_id,
                   iterm_tab_index = excluded.iterm_tab_index,
+                  tmux_window_id = excluded.tmux_window_id,
                   role = excluded.role,
                   order_index = excluded.order_index,
                   last_seen_at = excluded.last_seen_at
                 """,
             bindings: [
                 window.id, window.workspaceID, window.app, window.title ?? "", window.targetURL ?? "", window.windowID.map(String.init) ?? "",
-                window.itermSessionID ?? "", window.itermTabIndex.map(String.init) ?? "", window.role, String(window.orderIndex), window.lastSeenAt,
+                window.itermSessionID ?? "", window.itermTabIndex.map(String.init) ?? "", window.tmuxWindowID ?? "", window.role,
+                String(window.orderIndex), window.lastSeenAt,
             ])
     }
 
     public func windows(workspaceID: String) throws -> [WindowRecord] {
         let rows = try queryRows(
             sql: """
-                SELECT id, workspace_id, app, title, target_url, window_id, iterm_session_id, iterm_tab_index, role, order_index, last_seen_at
+                SELECT id, workspace_id, app, title, target_url, window_id, iterm_session_id, iterm_tab_index, tmux_window_id, role, order_index, last_seen_at
                 FROM windows WHERE workspace_id = ?
                 ORDER BY order_index
                 """, bindings: [workspaceID])
@@ -573,7 +579,7 @@ public final class SQLiteStore {
     public func windows(windowID: Int) throws -> [WindowRecord] {
         let rows = try queryRows(
             sql: """
-                SELECT id, workspace_id, app, title, target_url, window_id, iterm_session_id, iterm_tab_index, role, order_index, last_seen_at
+                SELECT id, workspace_id, app, title, target_url, window_id, iterm_session_id, iterm_tab_index, tmux_window_id, role, order_index, last_seen_at
                 FROM windows
                 WHERE window_id = ?
                 ORDER BY last_seen_at DESC, order_index
@@ -637,13 +643,16 @@ public final class SQLiteStore {
     public func upsertAgentWindow(_ record: AgentWindowRecord) throws {
         try execute(
             sql: """
-                INSERT INTO agent_windows(id, workspace_id, provider, label, iterm_session_id, codex_thread_id, window_id, status, created_at, updated_at, yabai_window_id)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO agent_windows(
+                  id, workspace_id, provider, label, iterm_session_id, tmux_window_id, codex_thread_id, window_id, status, created_at, updated_at, yabai_window_id
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(id) DO UPDATE SET
                   workspace_id = excluded.workspace_id,
                   provider = excluded.provider,
                   label = excluded.label,
                   iterm_session_id = excluded.iterm_session_id,
+                  tmux_window_id = excluded.tmux_window_id,
                   codex_thread_id = excluded.codex_thread_id,
                   window_id = excluded.window_id,
                   status = excluded.status,
@@ -651,8 +660,8 @@ public final class SQLiteStore {
                   yabai_window_id = excluded.yabai_window_id
                 """,
             bindings: [
-                record.id, record.workspaceID, record.provider.rawValue, record.label ?? "", record.itermSessionID ?? "", record.codexThreadID ?? "",
-                record.windowID.map(String.init) ?? "", record.status.rawValue, record.createdAt, record.updatedAt,
+                record.id, record.workspaceID, record.provider.rawValue, record.label ?? "", record.itermSessionID ?? "", record.tmuxWindowID ?? "",
+                record.codexThreadID ?? "", record.windowID.map(String.init) ?? "", record.status.rawValue, record.createdAt, record.updatedAt,
                 record.yabaiWindowID.map(String.init) ?? "",
             ])
     }
@@ -660,7 +669,7 @@ public final class SQLiteStore {
     public func agentWindows(workspaceID: String) throws -> [AgentWindowRecord] {
         let rows = try queryRows(
             sql: """
-                SELECT id, workspace_id, provider, label, iterm_session_id, codex_thread_id, window_id, status, created_at, updated_at, yabai_window_id
+                SELECT id, workspace_id, provider, label, iterm_session_id, tmux_window_id, codex_thread_id, window_id, status, created_at, updated_at, yabai_window_id
                 FROM agent_windows WHERE workspace_id = ?
                 ORDER BY created_at
                 """, bindings: [workspaceID])
@@ -671,9 +680,20 @@ public final class SQLiteStore {
         guard
             let row = try queryRow(
                 sql: """
-                    SELECT id, workspace_id, provider, label, iterm_session_id, codex_thread_id, window_id, status, created_at, updated_at, yabai_window_id
+                    SELECT id, workspace_id, provider, label, iterm_session_id, tmux_window_id, codex_thread_id, window_id, status, created_at, updated_at, yabai_window_id
                     FROM agent_windows WHERE workspace_id = ? AND iterm_session_id = ?
                     """, bindings: [workspaceID, itermSessionID])
+        else { return nil }
+        return decodeAgentWindow(row: row)
+    }
+
+    public func agentWindow(workspaceID: String, tmuxWindowID: String) throws -> AgentWindowRecord? {
+        guard
+            let row = try queryRow(
+                sql: """
+                    SELECT id, workspace_id, provider, label, iterm_session_id, tmux_window_id, codex_thread_id, window_id, status, created_at, updated_at, yabai_window_id
+                    FROM agent_windows WHERE workspace_id = ? AND tmux_window_id = ?
+                    """, bindings: [workspaceID, tmuxWindowID])
         else { return nil }
         return decodeAgentWindow(row: row)
     }
@@ -681,7 +701,7 @@ public final class SQLiteStore {
     public func agentWindowsByProvider(workspaceID: String, provider: AgentProvider) throws -> [AgentWindowRecord] {
         let rows = try queryRows(
             sql: """
-                SELECT id, workspace_id, provider, label, iterm_session_id, codex_thread_id, window_id, status, created_at, updated_at, yabai_window_id
+                SELECT id, workspace_id, provider, label, iterm_session_id, tmux_window_id, codex_thread_id, window_id, status, created_at, updated_at, yabai_window_id
                 FROM agent_windows WHERE workspace_id = ? AND provider = ?
                 ORDER BY created_at
                 """, bindings: [workspaceID, provider.rawValue])
@@ -703,14 +723,14 @@ public final class SQLiteStore {
     }
 
     private func decodeAgentWindow(row: [String]) -> AgentWindowRecord? {
-        guard row.count >= 10 else { return nil }
+        guard row.count >= 12 else { return nil }
         guard let provider = AgentProvider(rawValue: row[2]) else { return nil }
-        let status = AgentWindowStatus(rawValue: row[7]) ?? .idle
-        let yabaiWindowID = row.count > 10 ? (row[10].isEmpty ? nil : Int(row[10])) : nil
+        let status = AgentWindowStatus(rawValue: row[8]) ?? .idle
+        let yabaiWindowID = row.count > 11 ? (row[11].isEmpty ? nil : Int(row[11])) : nil
         return AgentWindowRecord(
             id: row[0], workspaceID: row[1], provider: provider, label: row[3].isEmpty ? nil : row[3], itermSessionID: row[4].isEmpty ? nil : row[4],
-            codexThreadID: row[5].isEmpty ? nil : row[5], windowID: row[6].isEmpty ? nil : Int(row[6]), yabaiWindowID: yabaiWindowID, status: status,
-            createdAt: row[8], updatedAt: row[9])
+            tmuxWindowID: row[5].isEmpty ? nil : row[5], codexThreadID: row[6].isEmpty ? nil : row[6],
+            windowID: row[7].isEmpty ? nil : Int(row[7]), yabaiWindowID: yabaiWindowID, status: status, createdAt: row[9], updatedAt: row[10])
     }
 
     private func createSchema() throws {
@@ -845,6 +865,7 @@ public final class SQLiteStore {
               window_id INTEGER,
               iterm_session_id TEXT,
               iterm_tab_index INTEGER,
+              tmux_window_id TEXT,
               pid INTEGER,
               status TEXT NOT NULL,
               log_path TEXT,
@@ -871,6 +892,7 @@ public final class SQLiteStore {
               window_id INTEGER,
               iterm_session_id TEXT,
               iterm_tab_index INTEGER,
+              tmux_window_id TEXT,
               role TEXT NOT NULL,
               order_index INTEGER,
               last_seen_at TEXT
@@ -892,6 +914,7 @@ public final class SQLiteStore {
               provider TEXT NOT NULL,
               label TEXT,
               iterm_session_id TEXT,
+              tmux_window_id TEXT,
               codex_thread_id TEXT,
               window_id INTEGER,
               status TEXT NOT NULL DEFAULT 'idle',
@@ -966,8 +989,11 @@ public final class SQLiteStore {
         try ensureColumnExists(table: "running_processes", name: "exited_at", definition: "exited_at TEXT")
         try ensureColumnExists(table: "running_processes", name: "iterm_session_id", definition: "iterm_session_id TEXT")
         try ensureColumnExists(table: "running_processes", name: "iterm_tab_index", definition: "iterm_tab_index INTEGER")
+        try ensureColumnExists(table: "running_processes", name: "tmux_window_id", definition: "tmux_window_id TEXT")
         try ensureColumnExists(table: "windows", name: "iterm_session_id", definition: "iterm_session_id TEXT")
         try ensureColumnExists(table: "windows", name: "iterm_tab_index", definition: "iterm_tab_index INTEGER")
+        try ensureColumnExists(table: "windows", name: "tmux_window_id", definition: "tmux_window_id TEXT")
+        try ensureColumnExists(table: "agent_windows", name: "tmux_window_id", definition: "tmux_window_id TEXT")
         try ensureColumnExists(table: "agent_windows", name: "yabai_window_id", definition: "yabai_window_id INTEGER")
         // Legacy Codex desktop records cannot be focused once terminal-only agent support is enabled.
         try execute(sql: "DELETE FROM agent_windows WHERE provider = 'codex'", bindings: [])
@@ -1018,20 +1044,20 @@ public final class SQLiteStore {
     }
 
     private func decodeRunningProcess(row: [String]) -> RunningProcessRecord? {
-        guard row.count >= 14 else { return nil }
+        guard row.count >= 15 else { return nil }
         return RunningProcessRecord(
             id: row[0], workspaceID: row[1], templateName: row[2], command: row[3], terminalApp: row[4].isEmpty ? nil : row[4], windowID: Int(row[5]),
-            itermSessionID: row[6].isEmpty ? nil : row[6], itermTabIndex: Int(row[7]), pid: Int(row[8]),
-            status: RunningProcessState(rawValue: row[9]) ?? .running, logPath: row[10].isEmpty ? nil : row[10],
-            lastOutputAt: row[11].isEmpty ? nil : row[11], startedAt: row[12].isEmpty ? nil : row[12], exitedAt: row[13].isEmpty ? nil : row[13])
+            itermSessionID: row[6].isEmpty ? nil : row[6], itermTabIndex: Int(row[7]), tmuxWindowID: row[8].isEmpty ? nil : row[8],
+            pid: Int(row[9]), status: RunningProcessState(rawValue: row[10]) ?? .running, logPath: row[11].isEmpty ? nil : row[11],
+            lastOutputAt: row[12].isEmpty ? nil : row[12], startedAt: row[13].isEmpty ? nil : row[13], exitedAt: row[14].isEmpty ? nil : row[14])
     }
 
     private func decodeWindow(row: [String]) -> WindowRecord? {
-        guard row.count >= 11 else { return nil }
+        guard row.count >= 12 else { return nil }
         return WindowRecord(
             id: row[0], workspaceID: row[1], app: row[2], title: row[3].isEmpty ? nil : row[3], targetURL: row[4].isEmpty ? nil : row[4],
-            windowID: Int(row[5]), itermSessionID: row[6].isEmpty ? nil : row[6], itermTabIndex: Int(row[7]), role: row[8],
-            orderIndex: Int(row[9]) ?? 0, lastSeenAt: row[10])
+            windowID: Int(row[5]), itermSessionID: row[6].isEmpty ? nil : row[6], itermTabIndex: Int(row[7]),
+            tmuxWindowID: row[8].isEmpty ? nil : row[8], role: row[9], orderIndex: Int(row[10]) ?? 0, lastSeenAt: row[11])
     }
 
     private func executeBatch(sql: String) throws {

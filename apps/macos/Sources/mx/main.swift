@@ -699,6 +699,12 @@ struct CLI {
             guard let colonIdx = raw.lastIndex(of: ":") else { return raw }
             return String(raw[raw.index(after: colonIdx)...])
         }
+        let tmuxWindowID: String? = {
+            guard env["TMUX"] != nil else { return nil }
+            let output = try? Shell.runAndCapture(["tmux", "display-message", "-p", "#{window_id}"])
+            let trimmed = output?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            return trimmed.isEmpty ? nil : trimmed
+        }()
         let codexThreadID = env["CODEX_THREAD_ID"]
 
         // Capture the yabai window ID of the window hosting this agent session.
@@ -721,7 +727,8 @@ struct CLI {
         case "init":
             let wsID = try ensureWorkspace()
             try orchestrator.registerAgentWindow(
-                workspaceID: wsID, provider: provider, label: label, itermSessionID: itermSessionID, codexThreadID: codexThreadID,
+                workspaceID: wsID, provider: provider, label: label, itermSessionID: itermSessionID, tmuxWindowID: tmuxWindowID,
+                codexThreadID: codexThreadID,
                 yabaiWindowID: yabaiWindowID, status: .idle)
             print("Agent init: workspace=\(wsID)")
             fireAgentEventNotification()
@@ -729,32 +736,32 @@ struct CLI {
         case "start":
             let wsID = try ensureWorkspace()
             try orchestrator.updateAgentWindowStatus(
-                workspaceID: wsID, provider: provider, itermSessionID: itermSessionID, codexThreadID: codexThreadID, yabaiWindowID: yabaiWindowID,
-                label: label, status: .spinning)
+                workspaceID: wsID, provider: provider, itermSessionID: itermSessionID, tmuxWindowID: tmuxWindowID,
+                codexThreadID: codexThreadID, yabaiWindowID: yabaiWindowID, label: label, status: .spinning)
             print("Agent start: workspace=\(wsID)")
             fireAgentEventNotification()
 
         case "waiting":
             let wsID = try ensureWorkspace()
             try orchestrator.updateAgentWindowStatus(
-                workspaceID: wsID, provider: provider, itermSessionID: itermSessionID, codexThreadID: codexThreadID, yabaiWindowID: yabaiWindowID,
-                label: label, status: .waiting)
+                workspaceID: wsID, provider: provider, itermSessionID: itermSessionID, tmuxWindowID: tmuxWindowID,
+                codexThreadID: codexThreadID, yabaiWindowID: yabaiWindowID, label: label, status: .waiting)
             print("Agent waiting: workspace=\(wsID)")
             fireAgentEventNotification()
 
         case "done":
             let wsID = try ensureWorkspace()
             try orchestrator.updateAgentWindowStatus(
-                workspaceID: wsID, provider: provider, itermSessionID: itermSessionID, codexThreadID: codexThreadID, yabaiWindowID: yabaiWindowID,
-                label: label, status: .done)
+                workspaceID: wsID, provider: provider, itermSessionID: itermSessionID, tmuxWindowID: tmuxWindowID,
+                codexThreadID: codexThreadID, yabaiWindowID: yabaiWindowID, label: label, status: .done)
             print("Agent done: workspace=\(wsID)")
             fireAgentEventNotification()
 
         case "stop":
             let wsID = try ensureWorkspace()
             try orchestrator.updateAgentWindowStatus(
-                workspaceID: wsID, provider: provider, itermSessionID: itermSessionID, codexThreadID: codexThreadID, yabaiWindowID: yabaiWindowID,
-                label: label, status: .done)
+                workspaceID: wsID, provider: provider, itermSessionID: itermSessionID, tmuxWindowID: tmuxWindowID,
+                codexThreadID: codexThreadID, yabaiWindowID: yabaiWindowID, label: label, status: .done)
             print("Agent stop: workspace=\(wsID)")
             fireAgentEventNotification()
 
@@ -807,6 +814,12 @@ struct CLI {
             guard let colonIdx = raw.lastIndex(of: ":") else { return raw }
             return String(raw[raw.index(after: colonIdx)...])
         }
+        let tmuxWindowID: String? = {
+            guard env["TMUX"] != nil else { return nil }
+            let output = try? Shell.runAndCapture(["tmux", "display-message", "-p", "#{window_id}"])
+            let trimmed = output?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            return trimmed.isEmpty ? nil : trimmed
+        }()
         let codexThreadID = env["CODEX_THREAD_ID"]
         let yabaiWindowID: Int? = {
             guard let json = try? Shell.runAndCapture(["yabai", "-m", "query", "--windows", "--window"]), let data = json.data(using: .utf8),
@@ -815,8 +828,8 @@ struct CLI {
             return id
         }()
         try orchestrator.updateAgentWindowStatus(
-            workspaceID: workspaceID, provider: provider, itermSessionID: itermSessionID, codexThreadID: codexThreadID, yabaiWindowID: yabaiWindowID,
-            label: label, status: status)
+            workspaceID: workspaceID, provider: provider, itermSessionID: itermSessionID, tmuxWindowID: tmuxWindowID,
+            codexThreadID: codexThreadID, yabaiWindowID: yabaiWindowID, label: label, status: status)
         fireAgentEventNotification()
     }
 

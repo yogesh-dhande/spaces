@@ -2458,17 +2458,34 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let configuredBrowserSessions: [BrowserSession] = {
             (try? orchestrator.resolvedWorkspaceBrowserSessions(workspaceID: workspace.id)) ?? []
         }()
-        let processesByWindowID: [Int: [RunningProcessRecord]] = {
-            var map: [Int: [RunningProcessRecord]] = [:]
+        let terminalTargetKeyForProcess: (RunningProcessRecord) -> String? = { process in
+            if let tmuxWindowID = process.tmuxWindowID, !tmuxWindowID.isEmpty { return tmuxWindowID }
+            if let sessionID = process.itermSessionID, !sessionID.isEmpty { return sessionID }
+            if let windowID = process.windowID { return "window:\(windowID)" }
+            return nil
+        }
+        let terminalTargetKeyForWindow: (WindowRecord) -> String? = { window in
+            if let tmuxWindowID = window.tmuxWindowID, !tmuxWindowID.isEmpty { return tmuxWindowID }
+            if let sessionID = window.itermSessionID, !sessionID.isEmpty { return sessionID }
+            if let windowID = window.windowID { return "window:\(windowID)" }
+            return nil
+        }
+        let terminalOrderByTargetID: [String: Int] = Dictionary(
+            uniqueKeysWithValues: windows.compactMap { window in
+                guard window.role == "terminal", let targetID = terminalTargetKeyForWindow(window) else { return nil }
+                return (targetID, window.orderIndex)
+            })
+        let processesByTerminalID: [String: [RunningProcessRecord]] = {
+            var map: [String: [RunningProcessRecord]] = [:]
             for process in processes {
-                guard let wid = process.windowID else { continue }
-                map[wid, default: []].append(process)
+                guard let targetID = terminalTargetKeyForProcess(process) else { continue }
+                map[targetID, default: []].append(process)
             }
-            for (wid, list) in map {
-                map[wid] = list.sorted { lhs, rhs in
-                    let lhsTab = lhs.itermTabIndex ?? Int.max
-                    let rhsTab = rhs.itermTabIndex ?? Int.max
-                    if lhsTab != rhsTab { return lhsTab < rhsTab }
+            for (targetID, list) in map {
+                map[targetID] = list.sorted { lhs, rhs in
+                    let lhsOrder = terminalTargetKeyForProcess(lhs).flatMap { terminalOrderByTargetID[$0] } ?? Int.max
+                    let rhsOrder = terminalTargetKeyForProcess(rhs).flatMap { terminalOrderByTargetID[$0] } ?? Int.max
+                    if lhsOrder != rhsOrder { return lhsOrder < rhsOrder }
                     return lhs.templateName.localizedStandardCompare(rhs.templateName) == .orderedAscending
                 }
             }
@@ -2478,8 +2495,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         for process in processes { statusResultsByProcessID[process.id] = (try? orchestrator.statusResults(processID: process.id)) ?? [] }
         let agentWindowsForRunTab = (try? orchestrator.agentWindows(workspaceID: workspace.id)) ?? []
         let agentYabaiWindowIDs: Set<Int> = Set(agentWindowsForRunTab.compactMap { $0.yabaiWindowID })
-        // Query live iTerm2 session IDs once so we can suppress shortcuts for sessions that were closed.
-        let liveItermSessionIDs: Set<String>? = orchestrator.liveItermSessionIDs()
         var matchedProcessIDs: Set<String> = []
         // Shortcut counter is shared across all sections so numbers are assigned
         // in the order rows appear on screen: Coding Agents → Browser Tabs → Processes.
@@ -2532,7 +2547,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
         // Use the original 1-based index in the full windows array so CMD+N matches focusWorkspaceWindow(index:).
         for (idx, win) in windows.enumerated() {
-            let windowProcesses = (win.role == "terminal" ? (win.windowID.flatMap { processesByWindowID[$0] }) : nil) ?? []
+            let windowProcesses = (win.role == "terminal" ? (terminalTargetKeyForWindow(win).flatMap { processesByTerminalID[$0] }) : nil) ?? []
             let isAgentClaimedWindow = win.windowID != nil && agentYabaiWindowIDs.contains(win.windowID!)
             if isAgentClaimedWindow && (win.role != "terminal" || windowProcesses.isEmpty) { continue }
             let windowIndex = idx + 1
@@ -2566,22 +2581,13 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 if !windowProcesses.isEmpty {
                     for process in windowProcesses {
                         matchedProcessIDs.insert(process.id)
-                        // A session is navigable only if it is known to be alive in iTerm2.
-                        // If liveItermSessionIDs is nil (iTerm2 not running), fall back to
-                        // status-based check so running processes remain clickable.
-                        let sessionIsAlive: Bool = {
-                            if let sid = process.itermSessionID, let live = liveItermSessionIDs {
-                                return live.contains(sid)
-                            }
-                            return process.status == .running
-                        }()
-                        let rowShortcut = sessionIsAlive ? "CMD+\(shortcutCounter)" : ""
-                        if sessionIsAlive { shortcutCounter += 1 }
+                        let rowShortcut = "CMD+\(shortcutCounter)"
+                        shortcutCounter += 1
                         processRowCount += 1
-                        let rowAction: (() -> Void)? = sessionIsAlive ? { [weak self] in
+                        let rowAction: (() -> Void)? = { [weak self] in
                             guard let self else { return }
                             do { try self.orchestrator.focusWorkspaceProcess(workspaceID: workspaceID, processID: process.id) } catch {}
-                        } : nil
+                        }
                         let row = windowRow(
                             icon: "terminal", iconColor: .systemGreen, label: process.templateName,
                             detail: resolveCommand(process.command), shortcut: rowShortcut, processStatus: process.status, action: rowAction)
@@ -2629,7 +2635,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         }
 
         // Orphaned processes (no linked window = corresponding iTerm2 session was closed by the user)
-        let orphanedProcesses = processes.filter { !matchedProcessIDs.contains($0.id) }
+        let orphanedProcesses = processes.filter { !matchedProcessIDs.contains($0.id) && $0.tmuxWindowID == nil }
         for process in orphanedProcesses {
             let statusColor: NSColor
             switch process.status {

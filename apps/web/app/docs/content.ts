@@ -9,7 +9,7 @@ export const docsPageLinks: DocsPageLink[] = [
     href: "/docs/installation",
     title: "Installation & Setup",
     summary:
-      "Get Muxy installed, permissions configured, and your environment verified. Muxy guides you through any missing prerequisites (iTerm2, yabai, Accessibility) with a step-by-step in-app setup flow on first launch.",
+      "Get Muxy installed, permissions configured, and your environment verified. Muxy guides you through any missing prerequisites (iTerm2, tmux, yabai, Accessibility) with a step-by-step in-app setup flow on first launch.",
   },
   {
     href: "/docs/getting-started",
@@ -32,19 +32,19 @@ export const docsPageLinks: DocsPageLink[] = [
     href: "/docs/workspace-lifecycle",
     title: "Workspace Lifecycle",
     summary:
-      "Launch, stop, restart, and archive workspaces—including automated bring-up from the CLI and AI agents.",
+      "Launch, stop, restart, and archive workspaces—including automated bring-up from the CLI and AI agents, with stop/restart fully tearing down each workspace tmux session.",
   },
   {
     href: "/docs/window-management",
     title: "Window Management",
     summary:
-      "Capture the windows you need and switch context quickly, with next/previous shortcuts cycling workspaces in-app and cycling tracked browser and iTerm session targets by stable target identity, shared iTerm session IDs, and remembered-target fallback when Chrome focus is ambiguous.",
+      "Capture the windows you need and switch context quickly, with next/previous shortcuts cycling workspaces in-app and cycling tracked browser and tmux-window targets by stable target identity inside each workspace’s shared iTerm session.",
   },
   {
     href: "/docs/processes",
     title: "Processes",
     summary:
-      "Run app servers, workers, and AI agents alongside each workspace so they start and stop together, with iTerm2 launching one tab/session per process in a shared workspace window when possible.",
+      "Run app servers, workers, and AI agents alongside each workspace so they start and stop together, with one iTerm2 terminal per workspace and one tmux window per process, agent, or manual shell, all cleaned up on stop.",
   },
   {
     href: "/docs/browser-sessions",
@@ -80,7 +80,7 @@ export const docsPageLinks: DocsPageLink[] = [
     href: "/docs/cli",
     title: "CLI Reference",
     summary:
-      "Drive every Muxy action from the terminal or automate workspace management from scripts and AI pipelines, including terminal-agent session hooks for Claude Code and Codex CLI.",
+      "Drive every Muxy action from the terminal or automate workspace management from scripts and AI pipelines, including tmux-aware terminal-agent hooks for Claude Code and Codex CLI.",
   },
 ];
 

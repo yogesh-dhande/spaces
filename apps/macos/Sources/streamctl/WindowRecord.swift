@@ -9,13 +9,14 @@ public struct WindowRecord: Sendable {
     public let windowID: Int?
     public let itermSessionID: String?
     public let itermTabIndex: Int?
+    public let tmuxWindowID: String?
     public let role: String
     public let orderIndex: Int
     public let lastSeenAt: String
 
     public init(
         id: String, workspaceID: String, app: String, title: String?, targetURL: String? = nil, windowID: Int?, itermSessionID: String? = nil,
-        itermTabIndex: Int? = nil, role: String, orderIndex: Int, lastSeenAt: String
+        itermTabIndex: Int? = nil, tmuxWindowID: String? = nil, role: String, orderIndex: Int, lastSeenAt: String
     ) {
         self.id = id
         self.workspaceID = workspaceID
@@ -25,6 +26,7 @@ public struct WindowRecord: Sendable {
         self.windowID = windowID
         self.itermSessionID = itermSessionID
         self.itermTabIndex = itermTabIndex
+        self.tmuxWindowID = tmuxWindowID
         self.role = role
         self.orderIndex = orderIndex
         self.lastSeenAt = lastSeenAt

@@ -10,7 +10,7 @@ Key invariants:
 - SQLite stores runtime state; schema is versioned and migrated in place with additive/non-destructive changes (currently v6).
 - yabai is the source of truth for window IDs and generic cross-app window focus.
 - Stream capture must happen before a stream is shown or focused.
-- Avoid window-level automation outside yabai, except iTerm2 tab/session selection via iTerm2 AppleScript for terminal-tab focus.
+- Avoid window-level automation outside yabai, except iTerm2 window focus via AppleScript after selecting the target tmux window.
 - Local key monitors must not override standard text-edit shortcuts while an input has focus.
 
 Test execution:
@@ -34,11 +34,12 @@ flowchart LR
 
   appctl --> yabai["yabai"]
   appctl --> iterm["iTerm2 (AppleScript)"]
+  appctl --> tmux["tmux"]
   appctl --> chrome["Chrome (AppleScript)"]
 ```
 
 Module responsibilities:
-- `appctl`: Shell + AppleScript adapters for yabai, iTerm2, and Chrome.
+- `appctl`: Shell + AppleScript adapters for tmux, yabai, iTerm2, and Chrome.
 - `streamctl`: Orchestration, config normalization, named port allocation (via `PortAllocator` and `PortReserver`), workspace lifecycle, and persistence.
 - `gui`: AppKit UI library that calls into `streamctl`.
 - `muxy`: CLI entrypoint that calls into `streamctl`.
@@ -81,17 +82,17 @@ GUI interaction notes:
 - Window focus shortcuts in the GUI use `cmd+1` through `cmd+9`.
 - When Muxy is focused, next/previous workspace shortcuts (`cmd+shift+]` / `cmd+shift+[`) change only sidebar selection and cycle across all sidebar-visible workspaces, including stopped workspaces.
 - When Muxy is not focused, the same next/previous shortcuts resolve the workspace owning the currently focused workspace window (or fall back to the active workspace) and call relative workspace-window focus.
-- Relative workspace-window focus remembers the last resolved target by iTerm session ID, browser window+URL identity when available, browser URL fallback, or window ID fallback instead of by transient row index, so shared iTerm/Chrome targets remain stable when the Run list reorders and ambiguous Chrome focus falls back to the remembered target.
-- iTerm target focus uses the recorded session ID as the source of truth for shared tabs and treats a session focus attempt as successful only after iTerm reports that session as current.
+- Relative workspace-window focus remembers the last resolved target by tmux window ID, browser window+URL identity when available, browser URL fallback, or window ID fallback instead of by transient row index, so shared iTerm/Chrome targets remain stable when the Run list reorders and ambiguous Chrome focus falls back to the remembered target.
+- iTerm target focus selects the tracked tmux window first, then uses the recorded shared workspace session ID as the source of truth for the iTerm container.
 - Global focus hotkey activation (`cmd+shift+=`) prioritizes immediate app fronting and defers selected-workspace detail refresh to the next main-actor turn.
 - Port definitions are editable via `PortEditor` in the project detail view, the add-project form, and workspace settings.
 - Status checks are configured inline under each process in the `ProcessEditor` rather than in a separate form section; the process name is implicit from the parent row.
 - Browser sessions are editable via `BrowserSessionEditor` (`name` + URL prefix rows) in project detail, add-project form, and workspace settings.
 - The run tab displays status check results as indented sub-rows under each process with colored dots (passed=green/failed=red) instead of inline badge text.
 - In the run-tab Windows list, browser rows render a two-part label: browser-session name first (when configured) plus the matched URL in secondary text. Session names are matched to live tab URLs using env-var-expanded session URL prefixes (e.g. `$PORT` → allocated port number); when a tab URL matches multiple configured session prefixes, the longest prefix wins so the most-specific session name is shown.
-- In the run-tab Windows list, terminal rows are rendered per running process session (one row per iTerm2 tab/session), so multiple workspace processes in the same iTerm2 window still appear as separate rows.
+- In the run-tab Windows list, terminal rows are rendered per tmux window, so multiple workspace processes, agents, and manual shells in the same iTerm2 window still appear as separate rows.
 - Window cards in the Run tab and Dashboard are clickable: clicking a card calls `focusWorkspaceWindow` for that window, equivalent to the `CMD+N` keyboard shortcut.
-- Relative workspace-window focus remembers the last focused tracked row per workspace, uses the frontmost Chrome tab URL to disambiguate multiple tracked browser rows that share one Chrome window ID, and uses the frontmost iTerm session ID to distinguish coding-agent/process tabs that share one iTerm window.
+- Relative workspace-window focus remembers the last focused tracked row per workspace, uses the frontmost Chrome tab URL to disambiguate multiple tracked browser rows that share one Chrome window ID, and uses the frontmost tmux window in the workspace session to distinguish coding-agent/process/manual-shell targets that share one iTerm window.
 - Keyboard shortcut overrides for supported GUI actions are persisted in SQLite settings and editable in the GUI Settings view and CLI settings commands.
 - Tooltip overlay includes a footer hint showing the effective tooltip-toggle shortcut (`gui_tooltip_shortcut`, default `cmd+shift+i`) using the user override when configured.
 - The app provides a standard Edit menu with Copy (Cmd+C) and Select All (Cmd+A) for system clipboard support in read-only text views.
@@ -310,6 +311,7 @@ erDiagram
     INTEGER window_id
     TEXT iterm_session_id
     INTEGER iterm_tab_index
+    TEXT tmux_window_id
     INTEGER pid
     TEXT status
     TEXT log_path
@@ -333,6 +335,9 @@ erDiagram
     TEXT title
     TEXT target_url
     INTEGER window_id
+    TEXT iterm_session_id
+    INTEGER iterm_tab_index
+    TEXT tmux_window_id
     TEXT role
     INTEGER order_index
     TEXT last_seen_at
@@ -349,6 +354,7 @@ erDiagram
     TEXT provider
     TEXT label
     TEXT iterm_session_id
+    TEXT tmux_window_id
     TEXT codex_thread_id
     INTEGER window_id
     TEXT status
@@ -388,7 +394,8 @@ Port allocation details:
 Launch and capture windows:
 ```mermaid
 flowchart TD
-  launch["Launch workspace"] --> processes["Start processes in iTerm2"]
+  launch["Launch workspace"] --> attach["Attach one iTerm2 window to workspace tmux session"]
+  attach --> processes["Start processes as tmux windows"]
   processes --> browser["Open browser sessions in Chrome"]
   browser --> capture["Capture window IDs via yabai"]
   capture --> store["Store windows in DB"]
@@ -404,7 +411,7 @@ Stop or archive:
 
 Run/recovery semantics:
 - `launchWorkspace` is only for stopped workspaces. If `is_running` is set or runtime indicators already exist (`running_processes`/`windows` rows), launch fails with "use restart".
-- `launchProcesses` opens the first workspace process in a new iTerm2 window, then opens additional workspace processes as tabs in that same iTerm2 window (capturing/persisting per-session metadata for focus/close).
+- `launchProcesses` ensures one shared iTerm2 window/session per workspace, attaches it to a per-workspace tmux session, and starts each process in its own tmux window.
 - Launch waits for setup completion when setup state is `pending`/`running`; if setup state is `failed`, launch fails with the setup error message.
 - `restartWorkspace` is the explicit recovery path and always performs stop then launch for the same workspace.
 - `upWorkspace` is idempotent "ensure running": launch when stopped; if runtime is already present, restart any exited processes by default, or run full stop+launch when `restartIfRunning` is true.
@@ -430,16 +437,15 @@ Degraded runtime edge cases and handling:
 - Browser focus for live-scanned rows targets cached `(window_id + tab_index)` first, then verifies the focused active tab URL against workspace prefixes, refreshes the live scan once on mismatch, and falls back to URL matching if needed.
 - Window-scoped Chrome AppleScript operations compare `window_id` as string for reliable tab focus/close matching.
 - Live browser rows are ordered deterministically by browser-session prefix order and then tab URL so `cmd+<n>` shortcut indices stay aligned with the on-screen list even as Chrome window z-order changes.
-- Terminal focus prefers iTerm2 AppleScript session selection (with stored session ID and tab-index fallback) before generic window focus so the correct iTerm tab is activated when metadata is available.
-- GUI "Open Terminal" reuses a tracked workspace iTerm2 window when available by opening a new tab in that window; it falls back to creating a new iTerm2 window when no tracked workspace terminal exists.
-- Workspace stop/reconcile closes process-backed iTerm terminals via iTerm2 session/tab metadata first and skips the later `yabai` window-close pass for those same terminal window IDs to avoid closing unrelated tabs in shared iTerm windows.
-- The `closeSessionOrTab` AppleScript must not select the target window (`tell w to select`) before closing a session. Window selection reorders iTerm2's window list, which invalidates the index-based loop reference (`s`) and causes the wrong session to be closed. The close operates directly on the matched session reference without prior focus changes. If session close fails, the window is left open rather than risk closing unrelated tabs.
+- Terminal focus prefers tmux window selection first, then iTerm2 AppleScript focus of the shared workspace session, before falling back to generic window focus.
+- GUI "Open Terminal" reuses a tracked workspace iTerm2 window when available by adding a new tmux window to that workspace session; it falls back to creating a new iTerm2 window only when no tracked workspace terminal exists yet.
+- Workspace stop/reconcile tears down every tmux window in the workspace session, clears tracked process/agent/manual terminal rows, and closes the shared iTerm window for that workspace.
 - Optional diagnostics: `DEBUG=1` logs browser tab scan count/match/elapsed and browser focus-path timing, including indexed verification, cache hit/miss, refresh, and fallback decisions.
 - Performance benchmarking: `OrchestratorTests.testBenchmarkChromeIndexedTabFocusVsYabaiWindowFocusForExtractedTabs` uses calibrated delays (~52ms tab-index focus + ~38ms active-tab verify vs ~42ms extracted-window yabai focus) and currently reports break-even at about 15 switches after extraction setup.
-- Terminal capture uses both yabai snapshot-diff and running-process window IDs to avoid dropping terminals when window discovery lags.
+- Terminal capture uses both the shared iTerm window ID and tmux window IDs to avoid dropping terminals when window discovery lags.
 - Editor launch is user-invoked via GUI action or global shortcut.
 - Window IDs can become stale across app/desktop changes; stale rows are pruned during reconciliation paths.
-- Background refresh also re-reads live yabai title/app metadata for terminal rows that are not currently owned by any running process record, so fallback terminal labels remain current.
+- Background refresh prunes tracked process, agent, and manual terminal rows whenever their tmux window disappears from the workspace session so stale runtime does not linger in the UI.
 - The GUI starts a periodic detached utility-priority refresh loop (`refreshAllWorkspaceWindows`) so non-archived workspace window rows are reconciled in the background on a fixed interval (`PollingConstants.workspaceWindowRefreshInterval`).
 - Each background refresh pass uses a fresh orchestrator/store instance for thread-safe off-main reconciliation and keeps AppKit interaction responsive while refresh is in-flight.
 - UI data is reloaded after successful periodic refresh passes only when the user is not actively editing text fields (to avoid interrupting unsaved form edits).
@@ -450,16 +456,16 @@ Degraded runtime edge cases and handling:
 Agent window lifecycle:
 - Coding agents (Claude Code CLI in iTerm2, Codex CLI in iTerm2) register themselves with Muxy by calling `mx agent event --type init|start|waiting|done [--dir <path>] [--provider iterm2]`. Agent event commands are always explicit; `mx workspace import` and `mx workspace up` do not automatically fire any agent events.
 - Provider is auto-detected from env vars only for supported terminal hosts: Codex CLI in iTerm2 (`CODEX_THREAD_ID` + `__CFBundleIdentifier=com.googlecode.iterm2`) and Claude Code CLI in iTerm2 (`CLAUDE_CODE_ENTRYPOINT` + `__CFBundleIdentifier=com.googlecode.iterm2`) → iTerm2. Coding-agent env markers from other terminal apps are ignored.
-- `ITERM_SESSION_ID` is captured for iTerm2 agent focus/close. `CODEX_THREAD_ID` may also be recorded as agent metadata for terminal Codex sessions.
-- Agent records are stored in `agent_windows` table with one record per iTerm2 session.
+- `ITERM_SESSION_ID` is captured for the shared workspace terminal container, and the current tmux window ID is captured for the specific agent target. `CODEX_THREAD_ID` may also be recorded as agent metadata for terminal Codex sessions.
+- Agent records are stored in `agent_windows` table with one record per tmux window.
 - Status transitions: `idle` → `spinning` (active) → `waiting` (human review requested, red dot) → `done` (finished, green dot).
 - Agent windows appear in the Run tab Windows section with a spinner (spinning), red dot (waiting), or green dot (done) status indicator.
 - Agent row labels are environment-specific (`Codex CLI`, `Claude Code CLI`) so focus routes match the terminal session type.
 - Waiting agent windows trigger the workspace indicator to show `runningUnhealthy` (orange dot) in the sidebar.
 - Agent windows surfaced as Dashboard attention items when status is `waiting` or `done`.
-- Clicking an agent window row focuses the agent's iTerm2 session.
-- On workspace stop, all iTerm2 agent sessions for that workspace are closed via AppleScript; all agent window records are deleted.
-- Stale iTerm2 agent sessions are pruned during the periodic process monitoring cycle using `Iterm2Adapter.listSessionIDs()`.
+- Clicking an agent window row focuses the agent's tmux window inside the shared workspace iTerm2 session.
+- On workspace stop/restart, the full workspace tmux session is destroyed so no process, agent, or manual terminal window survives into the next run.
+- Stale agent rows are pruned during the periodic process monitoring cycle when their tmux window is no longer present in the workspace tmux session.
 - The CLI fires a `muxy.ipc.agent-hook-fired` distributed notification after each hook call; the GUI observes this to refresh the Dashboard badge and current selection without a full reload.
 
 ## Window Capture and Focus
@@ -578,19 +584,20 @@ Muxy uses 7 distinct yabai commands across 35+ call sites via `YabaiAdapter`:
 
 ## Onboarding & Prerequisites
 
-Muxy depends on iTerm2 and yabai being installed and configured before workspaces can be created or launched. On every launch, the app runs four prerequisite checks in order:
+Muxy depends on iTerm2, tmux, and yabai being installed and configured before workspaces can be created or launched. On every launch, the app runs five prerequisite checks in order:
 
 | # | Check | Passes when |
 |---|---|---|
 | 1 | iTerm2 installed | `Iterm2Adapter.isAvailable()` returns `true` |
-| 2 | yabai installed | `yabai --version` exits 0 |
-| 3 | yabai service running | `yabai -m query --spaces` returns a JSON array |
-| 4 | yabai Accessibility | `yabai -m query --windows` returns a non-empty array (Finder always has windows when AX is granted) |
+| 2 | tmux installed | `TmuxAdapter.isAvailable()` returns `true` |
+| 3 | yabai installed | `yabai --version` exits 0 |
+| 4 | yabai service running | `yabai -m query --spaces` returns a JSON array |
+| 5 | yabai Accessibility | `yabai -m query --windows` returns a non-empty array (Finder always has windows when AX is granted) |
 
 If all checks pass, the main split-view UI is shown immediately. If any check fails, a step-by-step setup view is shown in the same main window (no second window) starting at the first failing step. The setup view polls every 2 seconds and also re-checks immediately when the app becomes active (critical for the Accessibility step after the user grants permission in System Settings). Once all steps pass the main UI loads automatically.
 
 ### Key types
 
-- `SetupChecker` (`appctl`): Pure logic class that runs individual or all checks. Injectable `Iterm2Adapter` enables unit testing without real apps.
+- `SetupChecker` (`appctl`): Pure logic class that runs individual or all checks. Injectable `Iterm2Adapter` and `TmuxAdapter` enable unit testing without real apps.
 - `SetupManager` (`gui`): Builds the setup NSView, drives polling, and calls `onComplete` when all steps pass. Installed as `window.contentView` — no second window.
 - `AppKitController`: `buildShellWindow()` creates and shows the NSWindow on launch; `buildMainWindowContent()` populates it with the split-view layout (called either directly or via `SetupManager.onComplete`).
