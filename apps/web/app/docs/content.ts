@@ -38,7 +38,7 @@ export const docsPageLinks: DocsPageLink[] = [
     href: "/docs/window-management",
     title: "Window Management",
     summary:
-      "Capture the windows you need and switch context quickly, with next/previous shortcuts cycling workspaces in-app and cycling tracked browser and tmux-window targets by stable target identity inside each workspace’s shared iTerm session.",
+      "Capture the windows you need and switch context quickly, with next/previous shortcuts cycling workspaces in-app and cycling either every tracked browser/tmux target or just the active Chrome and iTerm containers inside each workspace.",
   },
   {
     href: "/docs/processes",

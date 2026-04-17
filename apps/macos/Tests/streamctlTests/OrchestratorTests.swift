@@ -515,6 +515,9 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertEqual(try orchestrator.guiOpenTerminalShortcut(), SettingsKey.defaultGUIOpenTerminalShortcut)
         XCTAssertEqual(try orchestrator.guiOpenFinderShortcut(), SettingsKey.defaultGUIOpenFinderShortcut)
         XCTAssertEqual(try orchestrator.guiOpenSettingsShortcut(), SettingsKey.defaultGUIOpenSettingsShortcut)
+        XCTAssertEqual(
+            try orchestrator.workspaceWindowCycleIndividualTargets(),
+            SettingsKey.defaultWorkspaceWindowCycleIndividualTargets)
 
         try orchestrator.setGUIHotkey("ctrl+alt+h")
         try orchestrator.setGUINextShortcut("ctrl+alt+n")
@@ -527,6 +530,7 @@ final class OrchestratorTests: XCTestCase {
         try orchestrator.setGUIOpenTerminalShortcut("ctrl+alt+t")
         try orchestrator.setGUIOpenFinderShortcut("ctrl+alt+f")
         try orchestrator.setGUIOpenSettingsShortcut("ctrl+alt+,")
+        try orchestrator.setWorkspaceWindowCycleIndividualTargets(false)
         try orchestrator.setActiveWorkspace(id: "workspace-123")
 
         XCTAssertEqual(try orchestrator.guiHotkey(), "ctrl+alt+h")
@@ -540,6 +544,7 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertEqual(try orchestrator.guiOpenTerminalShortcut(), "ctrl+alt+t")
         XCTAssertEqual(try orchestrator.guiOpenFinderShortcut(), "ctrl+alt+f")
         XCTAssertEqual(try orchestrator.guiOpenSettingsShortcut(), "ctrl+alt+,")
+        XCTAssertFalse(try orchestrator.workspaceWindowCycleIndividualTargets())
         XCTAssertEqual(try orchestrator.activeWorkspaceID(), "workspace-123")
 
         try orchestrator.setActiveWorkspace(id: nil)
@@ -1571,6 +1576,161 @@ final class OrchestratorTests: XCTestCase {
             let focusedIDs = try String(contentsOf: focusLog).split(separator: "\n").map(String.init)
             XCTAssertEqual(focusedIDs, ["101"])
         }
+    }
+
+    // Tests collapsed workspace window cycling focuses app containers instead of specific Chrome tabs or tmux windows.
+    func testFocusWindowNavigationCollapsedModeCyclesChromeAndItermContainersOnly() throws {
+        let (orchestrator, store, _, workspace, root, mockIterm, mockTmux) = try makeMockItermOrchestratorWithWorkspace()
+        let sessionName = "muxy-\(workspace.id)"
+        let firstTmuxWindow = mockTmux.addWindow(sessionName: sessionName, id: "@1", name: "shell", index: 0, isActive: true)
+        _ = mockTmux.addWindow(sessionName: sessionName, id: "@2", name: "web", index: 1, isActive: false)
+        let focusLog = root.appendingPathComponent("collapsed-cycle-focus.log")
+        let chromeLog = root.appendingPathComponent("collapsed-cycle-chrome.log")
+        let chromeActiveURL = root.appendingPathComponent("collapsed-cycle-active-url.log")
+        try "http://localhost:3001".write(to: chromeActiveURL, atomically: true, encoding: .utf8)
+
+        try orchestrator.setWorkspaceWindowCycleIndividualTargets(false)
+        try store.upsert(
+            window: WindowRecord(
+                id: UUID().uuidString, workspaceID: workspace.id, app: "iTerm2", title: "shell", windowID: 555,
+                itermSessionID: "workspace-session", tmuxWindowID: firstTmuxWindow.id, role: "terminal", orderIndex: 0, lastSeenAt: "now"))
+        try store.upsert(
+            window: WindowRecord(
+                id: UUID().uuidString, workspaceID: workspace.id, app: "Google Chrome", title: "frontend", targetURL: "http://localhost:3001",
+                windowID: 777, role: "browser", orderIndex: 1, lastSeenAt: "now"))
+        try store.upsert(
+            window: WindowRecord(
+                id: UUID().uuidString, workspaceID: workspace.id, app: "Google Chrome", title: "admin",
+                targetURL: "http://localhost:8000/admin", windowID: 777, role: "browser", orderIndex: 2, lastSeenAt: "now"))
+        try store.upsert(
+            runningProcess: RunningProcessRecord(
+                id: UUID().uuidString, workspaceID: workspace.id, templateName: "web", command: "npm run dev", terminalApp: "iTerm2", windowID: 555,
+                itermSessionID: "workspace-session", itermTabIndex: nil, tmuxWindowID: "@2", pid: 123, status: .running, logPath: nil,
+                lastOutputAt: nil, startedAt: "now", exitedAt: nil))
+
+        try withMockCommands(["yabai": Self.orchestratorYabaiMockScript, "osascript": Self.orchestratorOsaScriptMock]) {
+            try withEnv(name: "YABAI_FOCUS_LOG_FILE", value: focusLog.path) {
+                try withEnv(name: "MOCK_CHROME_FOCUS_LOG_FILE", value: chromeLog.path) {
+                    try withEnv(name: "MOCK_CHROME_ACTIVE_URL_FILE", value: chromeActiveURL.path) {
+                        try withEnv(
+                            name: "YABAI_WINDOWS_JSON",
+                            value: #"[{"id":555,"pid":11,"app":"iTerm2","title":"shell","space":1,"display":1,"is-sticky":false,"is-hidden":false,"is-visible":true,"is-native-fullscreen":false},{"id":777,"pid":22,"app":"Google Chrome","title":"frontend","space":1,"display":1,"is-sticky":false,"is-hidden":false,"is-visible":true,"is-native-fullscreen":false}]"#
+                        ) {
+                            try withEnv(name: "YABAI_FOCUSED_ID", value: "777") {
+                                try withEnv(name: "YABAI_FOCUSED_APP", value: "Google Chrome") {
+                                    try orchestrator.focusNextWindow(workspaceID: workspace.id)
+                                }
+                            }
+                            try withEnv(name: "YABAI_FOCUSED_ID", value: "555") {
+                                try withEnv(name: "YABAI_FOCUSED_APP", value: "iTerm2") {
+                                    try orchestrator.focusNextWindow(workspaceID: workspace.id)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        XCTAssertTrue(mockTmux.selectedWindowIDs.isEmpty)
+        XCTAssertEqual(mockIterm.focusSessionOrTabCallCount, 1)
+        XCTAssertEqual(mockIterm.lastWindowID, 555)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: chromeLog.path))
+        let focusedIDs = try String(contentsOf: focusLog).split(separator: "\n").map(String.init)
+        XCTAssertEqual(focusedIDs, ["777"])
+    }
+
+    // Tests collapsed workspace cycling keeps the Chrome container in the loop even when live browser-tab scans find no current workspace tab.
+    func testFocusWindowNavigationCollapsedModeKeepsChromeContainerWhenLiveScanHasNoMatches() throws {
+        let (orchestrator, store, _, workspace, root, mockIterm, mockTmux) = try makeMockItermOrchestratorWithWorkspace()
+        let sessionName = "muxy-\(workspace.id)"
+        let shellWindow = mockTmux.addWindow(sessionName: sessionName, id: "@1", name: "shell", index: 0, isActive: true)
+        let focusLog = root.appendingPathComponent("collapsed-cycle-no-live-browser-match.log")
+
+        try orchestrator.setWorkspaceWindowCycleIndividualTargets(false)
+        try store.setWorkspaceBrowserSessions(workspaceID: workspace.id, sessions: [BrowserSession(url: "http://localhost:3001")])
+        try store.upsert(
+            window: WindowRecord(
+                id: UUID().uuidString, workspaceID: workspace.id, app: "iTerm2", title: "shell", windowID: 555,
+                itermSessionID: "workspace-session", tmuxWindowID: shellWindow.id, role: "terminal", orderIndex: 0, lastSeenAt: "now"))
+        try store.upsert(
+            window: WindowRecord(
+                id: UUID().uuidString, workspaceID: workspace.id, app: "Google Chrome", title: "frontend", targetURL: "http://localhost:3001",
+                windowID: 777, role: "browser", orderIndex: 1, lastSeenAt: "now"))
+
+        try withMockCommands(["yabai": Self.orchestratorYabaiMockScript, "osascript": Self.orchestratorOsaScriptMock]) {
+            try withEnv(name: "YABAI_FOCUS_LOG_FILE", value: focusLog.path) {
+                try withEnv(
+                    name: "YABAI_WINDOWS_JSON",
+                    value: #"[{"id":555,"pid":11,"app":"iTerm2","title":"shell","space":1,"display":1,"is-sticky":false,"is-hidden":false,"is-visible":true,"is-native-fullscreen":false},{"id":777,"pid":22,"app":"Google Chrome","title":"frontend","space":1,"display":1,"is-sticky":false,"is-hidden":false,"is-visible":true,"is-native-fullscreen":false}]"#
+                ) {
+                    try withEnv(name: "YABAI_FOCUSED_ID", value: "555") {
+                        try withEnv(name: "YABAI_FOCUSED_APP", value: "iTerm2") {
+                            try withEnv(name: "MOCK_CHROME_WINDOW_MATCHES", value: "") {
+                                try orchestrator.focusNextWindow(workspaceID: workspace.id)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        XCTAssertEqual(mockIterm.focusSessionOrTabCallCount, 0)
+        let focusedIDs = try String(contentsOf: focusLog).split(separator: "\n").map(String.init)
+        XCTAssertEqual(focusedIDs, ["777"])
+    }
+
+    // Tests direct indexed focus still targets a specific Chrome tab when collapsed workspace cycling mode is enabled.
+    func testFocusWorkspaceWindowStillTargetsSpecificBrowserSessionWhenCollapsedModeIsEnabled() throws {
+        let (orchestrator, store, _, workspace, root) = try makeOrchestratorWithWorkspace()
+        let chromeLog = root.appendingPathComponent("collapsed-indexed-browser.log")
+
+        try orchestrator.setWorkspaceWindowCycleIndividualTargets(false)
+        try store.upsert(
+            window: WindowRecord(
+                id: UUID().uuidString, workspaceID: workspace.id, app: "Google Chrome", title: "frontend", targetURL: "http://localhost:3001",
+                windowID: 202, role: "browser", orderIndex: 0, lastSeenAt: "now"))
+        try store.upsert(
+            window: WindowRecord(
+                id: UUID().uuidString, workspaceID: workspace.id, app: "Google Chrome", title: "admin",
+                targetURL: "http://localhost:8000/admin", windowID: 202, role: "browser", orderIndex: 1, lastSeenAt: "now"))
+
+        try withMockCommands(["yabai": Self.orchestratorYabaiMockScript, "osascript": Self.orchestratorOsaScriptMock]) {
+            try withEnv(name: "MOCK_CHROME_FOCUS_LOG_FILE", value: chromeLog.path) {
+                try orchestrator.focusWorkspaceWindow(workspaceID: workspace.id, index: 2)
+            }
+        }
+
+        let chromeURLs = try String(contentsOf: chromeLog).split(separator: "\n").map(String.init)
+        XCTAssertEqual(chromeURLs, ["http://localhost:8000/admin"])
+    }
+
+    // Tests direct indexed focus still targets a specific tmux window when collapsed workspace cycling mode is enabled.
+    func testFocusWorkspaceWindowStillTargetsSpecificTmuxWindowWhenCollapsedModeIsEnabled() throws {
+        let (orchestrator, store, _, workspace, _, mockIterm, mockTmux) = try makeMockItermOrchestratorWithWorkspace()
+        let sessionName = "muxy-\(workspace.id)"
+        let firstTmuxWindow = mockTmux.addWindow(sessionName: sessionName, id: "@1", name: "shell", index: 0, isActive: true)
+        let secondTmuxWindow = mockTmux.addWindow(sessionName: sessionName, id: "@2", name: "web", index: 1, isActive: false)
+
+        try orchestrator.setWorkspaceWindowCycleIndividualTargets(false)
+        try store.upsert(
+            window: WindowRecord(
+                id: UUID().uuidString, workspaceID: workspace.id, app: "iTerm2", title: "shell", windowID: 555,
+                itermSessionID: "workspace-session", tmuxWindowID: firstTmuxWindow.id, role: "terminal", orderIndex: 0, lastSeenAt: "now"))
+        try store.upsert(
+            window: WindowRecord(
+                id: UUID().uuidString, workspaceID: workspace.id, app: "iTerm2", title: "web", windowID: 555,
+                itermSessionID: "workspace-session", tmuxWindowID: secondTmuxWindow.id, role: "terminal", orderIndex: 1, lastSeenAt: "now"))
+        try store.upsert(
+            runningProcess: RunningProcessRecord(
+                id: UUID().uuidString, workspaceID: workspace.id, templateName: "web", command: "npm run dev", terminalApp: "iTerm2", windowID: 555,
+                itermSessionID: "workspace-session", itermTabIndex: nil, tmuxWindowID: secondTmuxWindow.id, pid: 123, status: .running,
+                logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil))
+
+        try orchestrator.focusWorkspaceWindow(workspaceID: workspace.id, index: 2)
+
+        XCTAssertEqual(mockTmux.selectedWindowIDs, [secondTmuxWindow.id])
+        XCTAssertEqual(mockIterm.focusSessionOrTabCallCount, 1)
     }
 
     // Tests focus window navigation uses remembered target identity across shared chrome rows when the focused target cannot be resolved.

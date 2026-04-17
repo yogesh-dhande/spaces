@@ -680,7 +680,7 @@ public final class MuxyOrchestrator {
 
     private func stopWorkspaceUnlocked(workspaceID: String) throws -> WorkspaceStopOutcome {
         let (project, workspace) = try resolveWorkspace(id: workspaceID)
-        let windows = try trackedWindows(workspaceID: workspace.id)
+        let windows = try indexedWorkspaceWindows(workspaceID: workspace.id)
         let terminalWindowID = try workspaceTerminalWindowID(workspaceID: workspace.id)
         let namedPorts = try store.workspacePortsNamed(workspaceID: workspace.id)
         let env = buildWorkspaceEnv(project: project, workspace: workspace, namedPorts: namedPorts)
@@ -946,7 +946,7 @@ public final class MuxyOrchestrator {
 
     public func statusResults(processID: String) throws -> [StatusResult] { try store.statusResults(processID: processID) }
 
-    public func windows(workspaceID: String) throws -> [WindowRecord] { try trackedWindows(workspaceID: workspaceID) }
+    public func windows(workspaceID: String) throws -> [WindowRecord] { try indexedWorkspaceWindows(workspaceID: workspaceID) }
 
     public struct RefreshResult: Sendable {
         public let didMutateDB: Bool
@@ -955,7 +955,7 @@ public final class MuxyOrchestrator {
 
     @discardableResult public func refreshWorkspaceWindows(workspaceID: String) throws -> Bool {
         let syncedTmuxRuntime = try syncTrackedTmuxRuntime(workspaceID: workspaceID)
-        _ = try trackedWindows(workspaceID: workspaceID)
+        _ = try indexedWorkspaceWindows(workspaceID: workspaceID)
         let refreshedTerminalTitles = try refreshUnmanagedTerminalWindowTitles(workspaceID: workspaceID)
         let pruned = try pruneMissingWindows(workspaceID: workspaceID)
         var didMutate = syncedTmuxRuntime || refreshedTerminalTitles > 0 || pruned > 0
@@ -1003,7 +1003,7 @@ public final class MuxyOrchestrator {
             let workspaces = try store.workspaces(projectID: project.id, includeArchived: false)
             for workspace in workspaces {
                 if try refreshWorkspaceWindows(workspaceID: workspace.id) { didMutate = true }
-                let tracked = try trackedWindows(workspaceID: workspace.id)
+                let tracked = try indexedWorkspaceWindows(workspaceID: workspace.id)
                 trackedCounts[workspace.id] = tracked.count
             }
         }
@@ -1059,7 +1059,7 @@ public final class MuxyOrchestrator {
     }
 
     public func focusWorkspace(workspaceID: String) throws {
-        let windows = try trackedWindows(workspaceID: workspaceID)
+        let windows = try indexedWorkspaceWindows(workspaceID: workspaceID)
         var focused = false
         for window in windows {
             let ok = focusTrackedWindow(window, workspaceID: workspaceID)
@@ -1074,7 +1074,7 @@ public final class MuxyOrchestrator {
 
     public func focusWorkspaceWindow(workspaceID: String, index: Int) throws {
         guard index > 0 else { return }
-        let windows = try trackedWindows(workspaceID: workspaceID)
+        let windows = try indexedWorkspaceWindows(workspaceID: workspaceID)
         guard index <= windows.count else { return }
         let targetIndex = index - 1
         let ok = focusTrackedWindow(windows[targetIndex], workspaceID: workspaceID)
@@ -1126,7 +1126,7 @@ public final class MuxyOrchestrator {
     }
 
     private func focusWindowRelative(workspaceID: String, delta: Int) throws {
-        let targets = try workspaceNavigationTargets(workspaceID: workspaceID)
+        let targets = try workspaceNavigationTargets(workspaceID: workspaceID, forCycling: true)
         guard !targets.isEmpty else { return }
         let currentIndex =
             try currentFocusedNavigationTargetIndex(targets: targets, workspaceID: workspaceID)
@@ -1193,8 +1193,11 @@ public final class MuxyOrchestrator {
         return nil
     }
 
-    private func workspaceNavigationTargets(workspaceID: String) throws -> [WorkspaceNavigationTarget] {
-        let windows = try trackedWindows(workspaceID: workspaceID)
+    private func workspaceNavigationTargets(workspaceID: String, forCycling: Bool = false) throws -> [WorkspaceNavigationTarget] {
+        if forCycling, !(try workspaceWindowCycleIndividualTargets()) {
+            return try collapsedWorkspaceNavigationTargets(workspaceID: workspaceID)
+        }
+        let windows = try indexedWorkspaceWindows(workspaceID: workspaceID)
         let processes = try store.runningProcesses(workspaceID: workspaceID)
         let agentWindows = try store.agentWindows(workspaceID: workspaceID)
         let tmuxIndexByWindowID = Dictionary(uniqueKeysWithValues: try tmuxWindows(workspaceID: workspaceID).map { ($0.id, $0.index) })
@@ -1248,6 +1251,50 @@ public final class MuxyOrchestrator {
         }
 
         return targets
+    }
+
+    private func collapsedWorkspaceNavigationTargets(workspaceID: String) throws -> [WorkspaceNavigationTarget] {
+        let windows = normalizedBrowserWindowRows(try store.windows(workspaceID: workspaceID).sorted { $0.orderIndex < $1.orderIndex })
+        var targets: [WorkspaceNavigationTarget] = []
+        var seenWindowIDs = Set<Int>()
+
+        for window in windows where window.role == "browser" {
+            guard let windowID = window.windowID, !seenWindowIDs.contains(windowID) else { continue }
+            seenWindowIDs.insert(windowID)
+            targets.append(.window(collapsedNavigationWindow(from: window)))
+        }
+
+        for window in windows where window.role == "terminal" && window.app == "iTerm2" {
+            guard let windowID = window.windowID, !seenWindowIDs.contains(windowID) else { continue }
+            seenWindowIDs.insert(windowID)
+            targets.append(.window(collapsedNavigationWindow(from: window)))
+        }
+
+        for window in windows where window.role != "browser" && !(window.role == "terminal" && window.app == "iTerm2") {
+            if let windowID = window.windowID {
+                guard !seenWindowIDs.contains(windowID) else { continue }
+                seenWindowIDs.insert(windowID)
+            }
+            targets.append(.window(window))
+        }
+
+        return targets
+    }
+
+    private func collapsedNavigationWindow(from window: WindowRecord) -> WindowRecord {
+        WindowRecord(
+            id: window.id,
+            workspaceID: window.workspaceID,
+            app: window.app,
+            title: window.title,
+            targetURL: nil,
+            windowID: window.windowID,
+            itermSessionID: nil,
+            itermTabIndex: nil,
+            tmuxWindowID: nil,
+            role: window.role,
+            orderIndex: window.orderIndex,
+            lastSeenAt: window.lastSeenAt)
     }
 
     private func navigationTargetWindowID(_ target: WorkspaceNavigationTarget) -> Int? {
@@ -1720,7 +1767,7 @@ public final class MuxyOrchestrator {
         return didMutate
     }
 
-    private func trackedWindows(workspaceID: String) throws -> [WindowRecord] {
+    private func indexedWorkspaceWindows(workspaceID: String) throws -> [WindowRecord] {
         let windows = try store.windows(workspaceID: workspaceID).sorted { $0.orderIndex < $1.orderIndex }
         let normalized = normalizedBrowserWindowRows(windows)
         guard chrome.isAvailable(), let (project, workspace) = try? resolveWorkspace(id: workspaceID) else { return normalized }
@@ -2034,6 +2081,16 @@ public final class MuxyOrchestrator {
     }
 
     public func setGUITooltipShortcut(_ raw: String?) throws { try store.setSetting(key: SettingsKey.guiTooltipShortcut, value: raw) }
+
+    public func workspaceWindowCycleIndividualTargets() throws -> Bool {
+        let raw = try? store.setting(key: SettingsKey.workspaceWindowCycleIndividualTargets)
+        guard let raw else { return SettingsKey.defaultWorkspaceWindowCycleIndividualTargets }
+        return raw != "0"
+    }
+
+    public func setWorkspaceWindowCycleIndividualTargets(_ enabled: Bool) throws {
+        try store.setSetting(key: SettingsKey.workspaceWindowCycleIndividualTargets, value: enabled ? "1" : "0")
+    }
 
     public func itermFocusPulseColor() throws -> (r: Int, g: Int, b: Int) {
         let raw = (try? store.setting(key: SettingsKey.itermFocusPulseColor)) ?? SettingsKey.defaultItermFocusPulseColor

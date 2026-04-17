@@ -36,13 +36,14 @@
             - Workspace settings are seeded from project templates on creation or when missing.
             - Schema changes use additive, non-destructive migrations; existing workspace/project data must be preserved.
             - Additive migrations must backfill newly required status-check action columns (for example `on_fail`) with safe defaults for existing rows.
-        - Global preferences (`editor`, `port_range`, `iterm_focus_pulse_color`, `iterm_focus_pulse_enabled`) are stored in the SQLite `settings` table.
+        - Global preferences (`editor`, `port_range`, `iterm_focus_pulse_color`, `iterm_focus_pulse_enabled`, `workspace_window_cycle_individual_targets`) are stored in the SQLite `settings` table.
             - Old YAML files (`~/.muxy/config.yaml`) with `editor`/`port_range`/`projects:` are automatically migrated to SQLite once on first launch. The YAML file is no longer written or read after migration.
     - User preferences
         - editor: enum - None, VS Code, Cursor, Windsurf, Vim - if specified, used by Open Editor actions (GUI + shortcuts)
             - GUI settings only surface installed VS Code, Cursor, or Windsurf
         - iterm_focus_pulse_color: RGB (0–255 per channel, default `46,41,14`); the iTerm2 session background color is briefly pulsed to this color and back when an iTerm2 window is focused. Configurable via GUI Settings color well or `mx settings set --iterm-focus-pulse-color <r,g,b>`.
         - iterm_focus_pulse_enabled: bool (default `true`); enables/disables iTerm2 focus pulsing. Configurable via GUI Settings toggle or `mx settings set --iterm-focus-pulse-enabled <0|1>`.
+        - workspace_window_cycle_individual_targets: bool (default `true`); controls whether prev/next workspace-window cycling steps through every tracked Chrome tab and tmux window (`true`) or only the active Chrome/iTerm2 containers (`false`). Direct indexed focus via `cmd+<n>` or `mx workspace focus --window-index` always targets the specific tracked row.
     - Project
         - fields
             - dir: str, path of the project folder, name can be inferred from it for display in the UI

@@ -83,6 +83,7 @@ GUI interaction notes:
 - When Muxy is focused, next/previous workspace shortcuts (`cmd+shift+]` / `cmd+shift+[`) change only sidebar selection and cycle across all sidebar-visible workspaces, including stopped workspaces.
 - When Muxy is not focused, the same next/previous shortcuts resolve the workspace owning the currently focused workspace window (or fall back to the active workspace) and call relative workspace-window focus.
 - Relative workspace-window focus remembers the last resolved target by tmux window ID, browser window+URL identity when available, browser URL fallback, or window ID fallback instead of by transient row index, so shared iTerm/Chrome targets remain stable when the Run list reorders and ambiguous Chrome focus falls back to the remembered target.
+- A global setting controls whether relative workspace-window focus (`Next`/`Previous`) cycles individual tracked Chrome tabs/tmux windows or collapses them to one active Chrome container target plus one active iTerm2 container target; direct indexed focus still targets the specific tracked row.
 - iTerm target focus selects the tracked tmux window first, then uses the recorded shared workspace session ID as the source of truth for the iTerm container.
 - Global focus hotkey activation (`cmd+shift+=`) prioritizes immediate app fronting and defers selected-workspace detail refresh to the next main-actor turn.
 - Port definitions are editable via `PortEditor` in the project detail view, the add-project form, and workspace settings.

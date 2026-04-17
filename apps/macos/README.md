@@ -28,10 +28,12 @@ Global preferences are stored in the DB and configurable via `mx settings set` o
 - `port_range`: range for workspace port allocation (default `20000-30000`)
 - `iterm_focus_pulse_color`: RGB background pulse color for iTerm2 window focus (format `r,g,b`, values 0–255, default `46,41,14`). Configurable in GUI Settings via a color well or via `mx settings set --iterm-focus-pulse-color <r,g,b>`.
 - `iterm_focus_pulse_enabled`: toggle the iTerm2 focus pulse effect (`1` enabled, `0` disabled; default `1`) via `mx settings set --iterm-focus-pulse-enabled <0|1>`.
+- `workspace_window_cycle_individual_targets`: controls whether Next/Previous workspace-window cycling steps through every tracked Chrome tab and tmux window (`1`, default) or just the currently active Chrome/iTerm2 containers (`0`). Direct indexed focus still targets the specific tracked browser session or tmux window.
 
 ```
 mx settings set --editor vscode
 mx settings set --port-range 20000-30000
+mx settings set --workspace-window-cycle-individual-targets 0
 mx settings get --editor
 mx settings get --port-range
 ```

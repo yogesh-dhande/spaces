@@ -1589,6 +1589,25 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         colorRow.addArrangedSubview(resetColorButton)
         stack.addArrangedSubview(colorRow)
 
+        stack.addArrangedSubview(label(text: "Workspace window cycling"))
+        let cycleModeNote = NSTextField(
+            labelWithString:
+                "Next/Previous can either step through every tracked Chrome tab and tmux window, or just the active Chrome and iTerm2 containers so app-native shortcuts handle the rest."
+        )
+        cycleModeNote.font = .systemFont(ofSize: 11)
+        cycleModeNote.textColor = .secondaryLabelColor
+        cycleModeNote.maximumNumberOfLines = 0
+        cycleModeNote.lineBreakMode = .byWordWrapping
+        stack.addArrangedSubview(cycleModeNote)
+
+        let cycleIndividualTargetsCheckbox = NSButton(
+            checkboxWithTitle: "Cycle individual Chrome tabs and tmux windows",
+            target: self,
+            action: #selector(workspaceWindowCycleModeChanged(_:)))
+        cycleIndividualTargetsCheckbox.state =
+            ((try? orchestrator.workspaceWindowCycleIndividualTargets()) ?? SettingsKey.defaultWorkspaceWindowCycleIndividualTargets) ? .on : .off
+        stack.addArrangedSubview(cycleIndividualTargetsCheckbox)
+
         showScrollableDetailStack(stack)
     }
 
@@ -3806,6 +3825,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let g = Int((rgb.greenComponent * 255).rounded())
         let b = Int((rgb.blueComponent * 255).rounded())
         do { try orchestrator.setItermFocusPulseColor(r: r, g: g, b: b) } catch { showError(error) }
+    }
+
+    @objc private func workspaceWindowCycleModeChanged(_ sender: NSButton) {
+        do { try orchestrator.setWorkspaceWindowCycleIndividualTargets(sender.state == .on) } catch { showError(error) }
     }
 
     @objc private func addProject() { showAddProjectForm() }

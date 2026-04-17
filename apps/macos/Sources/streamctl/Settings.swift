@@ -28,6 +28,8 @@ public enum SettingsKey {
     public static let defaultGUIPreviousShortcut = "cmd+shift+["
     public static let guiTooltipShortcut = "gui_tooltip_shortcut"
     public static let defaultGUITooltipShortcut = "cmd+shift+i"
+    public static let workspaceWindowCycleIndividualTargets = "workspace_window_cycle_individual_targets"
+    public static let defaultWorkspaceWindowCycleIndividualTargets = true
     public static let itermFocusPulseColor = "iterm_focus_pulse_color"
     /// Default iTerm2 focus pulse color (8-bit RGB).
     public static let defaultItermFocusPulseColor = "46,41,14"

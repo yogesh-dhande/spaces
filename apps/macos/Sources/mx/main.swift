@@ -492,12 +492,15 @@ struct CLI {
             } else if args.contains("--iterm-focus-pulse-enabled") {
                 let enabled = try orchestrator.itermFocusPulseEnabled()
                 print("iterm-focus-pulse-enabled\t\(enabled ? "1" : "0")")
+            } else if args.contains("--workspace-window-cycle-individual-targets") {
+                let enabled = try orchestrator.workspaceWindowCycleIndividualTargets()
+                print("workspace-window-cycle-individual-targets\t\(enabled ? "1" : "0")")
             } else {
                 throw NSError(
                     domain: "mx.cli", code: 2,
                     userInfo: [
                         NSLocalizedDescriptionKey:
-                            "Missing setting flag. Use: settings get --editor|--port-range|--gui-hotkey|--gui-add-project-shortcut|--gui-add-workspace-shortcut|--gui-reload-shortcut|--gui-next-shortcut|--gui-prev-shortcut|--gui-open-editor-shortcut|--gui-open-terminal-shortcut|--gui-open-finder-shortcut|--gui-open-settings-shortcut|--iterm-focus-pulse-color|--iterm-focus-pulse-enabled"
+                            "Missing setting flag. Use: settings get --editor|--port-range|--gui-hotkey|--gui-add-project-shortcut|--gui-add-workspace-shortcut|--gui-reload-shortcut|--gui-next-shortcut|--gui-prev-shortcut|--gui-open-editor-shortcut|--gui-open-terminal-shortcut|--gui-open-finder-shortcut|--gui-open-settings-shortcut|--iterm-focus-pulse-color|--iterm-focus-pulse-enabled|--workspace-window-cycle-individual-targets"
                     ])
             }
 
@@ -575,12 +578,23 @@ struct CLI {
                 }
                 try orchestrator.setItermFocusPulseEnabled(raw == "1")
                 print("Updated iterm-focus-pulse-enabled\t\(raw)")
+            } else if let raw = optionalValue(for: "--workspace-window-cycle-individual-targets") {
+                guard raw == "0" || raw == "1" else {
+                    throw NSError(
+                        domain: "mx.cli", code: 2,
+                        userInfo: [
+                            NSLocalizedDescriptionKey:
+                                "Invalid value: \(raw). Use 1 to cycle each Chrome tab/tmux window or 0 to cycle Chrome and iTerm2 containers only."
+                        ])
+                }
+                try orchestrator.setWorkspaceWindowCycleIndividualTargets(raw == "1")
+                print("Updated workspace-window-cycle-individual-targets\t\(raw)")
             } else {
                 throw NSError(
                     domain: "mx.cli", code: 2,
                     userInfo: [
                         NSLocalizedDescriptionKey:
-                            "Missing setting flag/value. Use: settings set --editor <value>|--port-range <start>-<end>|--gui-hotkey <spec>|--gui-add-project-shortcut <spec>|--gui-add-workspace-shortcut <spec>|--gui-reload-shortcut <spec>|--gui-next-shortcut <spec>|--gui-prev-shortcut <spec>|--gui-open-editor-shortcut <spec>|--gui-open-terminal-shortcut <spec>|--gui-open-finder-shortcut <spec>|--gui-open-settings-shortcut <spec>|--iterm-focus-pulse-color <r,g,b>|--iterm-focus-pulse-enabled <0|1>"
+                            "Missing setting flag/value. Use: settings set --editor <value>|--port-range <start>-<end>|--gui-hotkey <spec>|--gui-add-project-shortcut <spec>|--gui-add-workspace-shortcut <spec>|--gui-reload-shortcut <spec>|--gui-next-shortcut <spec>|--gui-prev-shortcut <spec>|--gui-open-editor-shortcut <spec>|--gui-open-terminal-shortcut <spec>|--gui-open-finder-shortcut <spec>|--gui-open-settings-shortcut <spec>|--iterm-focus-pulse-color <r,g,b>|--iterm-focus-pulse-enabled <0|1>|--workspace-window-cycle-individual-targets <0|1>"
                     ])
             }
 
@@ -622,6 +636,11 @@ struct CLI {
             } else if args.contains("--iterm-focus-pulse-enabled") {
                 try orchestrator.setItermFocusPulseEnabled(SettingsKey.defaultItermFocusPulseEnabled)
                 print("Reset iterm-focus-pulse-enabled\t\(SettingsKey.defaultItermFocusPulseEnabled ? "1" : "0")")
+            } else if args.contains("--workspace-window-cycle-individual-targets") {
+                try orchestrator.setWorkspaceWindowCycleIndividualTargets(SettingsKey.defaultWorkspaceWindowCycleIndividualTargets)
+                print(
+                    "Reset workspace-window-cycle-individual-targets\t\(SettingsKey.defaultWorkspaceWindowCycleIndividualTargets ? "1" : "0")"
+                )
             } else if args.contains("--editor") {
                 _ = try orchestrator.updateEditorPreference(nil)
                 print("Reset editor\tnone")
@@ -633,7 +652,7 @@ struct CLI {
                     domain: "mx.cli", code: 2,
                     userInfo: [
                         NSLocalizedDescriptionKey:
-                            "Missing setting flag. Use: settings reset --editor|--port-range|--gui-hotkey|--gui-add-project-shortcut|--gui-add-workspace-shortcut|--gui-reload-shortcut|--gui-next-shortcut|--gui-prev-shortcut|--gui-open-editor-shortcut|--gui-open-terminal-shortcut|--gui-open-finder-shortcut|--gui-open-settings-shortcut|--iterm-focus-pulse-color|--iterm-focus-pulse-enabled"
+                            "Missing setting flag. Use: settings reset --editor|--port-range|--gui-hotkey|--gui-add-project-shortcut|--gui-add-workspace-shortcut|--gui-reload-shortcut|--gui-next-shortcut|--gui-prev-shortcut|--gui-open-editor-shortcut|--gui-open-terminal-shortcut|--gui-open-finder-shortcut|--gui-open-settings-shortcut|--iterm-focus-pulse-color|--iterm-focus-pulse-enabled|--workspace-window-cycle-individual-targets"
                     ])
             }
 
@@ -863,6 +882,7 @@ struct CLI {
               mx settings get --gui-open-settings-shortcut
               mx settings get --iterm-focus-pulse-color
               mx settings get --iterm-focus-pulse-enabled
+              mx settings get --workspace-window-cycle-individual-targets
               mx settings set --editor none|vscode|cursor|windsurf|vim
               mx settings set --port-range <start>-<end>
               mx settings set --gui-hotkey <spec>
@@ -877,6 +897,7 @@ struct CLI {
               mx settings set --gui-open-settings-shortcut <spec>
               mx settings set --iterm-focus-pulse-color <r,g,b>
               mx settings set --iterm-focus-pulse-enabled <0|1>
+              mx settings set --workspace-window-cycle-individual-targets <0|1>
               mx settings reset --editor
               mx settings reset --port-range
               mx settings reset --gui-hotkey
@@ -891,6 +912,7 @@ struct CLI {
               mx settings reset --gui-open-settings-shortcut
               mx settings reset --iterm-focus-pulse-color
               mx settings reset --iterm-focus-pulse-enabled
+              mx settings reset --workspace-window-cycle-individual-targets
 
               mx project list
               mx project add --dir <path>
