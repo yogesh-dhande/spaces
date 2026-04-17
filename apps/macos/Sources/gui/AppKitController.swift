@@ -100,10 +100,13 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     private var tooltipWindow: NSWindow?
     private var tooltipIPCObserver: NSObjectProtocol?
     private var agentEventIPCObserver: NSObjectProtocol?
+    private var appDidBecomeActiveObserver: NSObjectProtocol?
+    private var appDidResignActiveObserver: NSObjectProtocol?
     private var didStartBackgroundServices = false
     private var setupManager: SetupManager?
     private var sidebarReloadTask: Task<Void, Never>?
     private var pendingSidebarReloadRequest = false
+    private var activeWindowShortcutProfile: WindowShortcutProfile?
 
     private var configCache: AppConfig?
     private let defaultSplitViewWidth: CGFloat = 360
@@ -137,6 +140,24 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     /// Maps sequential CMD+N shortcut numbers (1-9) to agent window records for agent entries in the dashboard view.
     private var dashboardAgentFocusMap: [Int: AgentWindowRecord] = [:]
 
+    private struct WindowShortcutProfile {
+        let index: Int
+        let startedAt: Date
+        var routeCompletedAt: Date?
+    }
+
+    private enum WindowFocusRequest: Sendable {
+        case workspaceWindow(workspaceID: String, index: Int)
+        case workspaceProcess(workspaceID: String, processID: String)
+        case agentWindow(AgentWindowRecord)
+    }
+
+    private enum WindowShortcutExecutionOutcome: Sendable {
+        case focused(kind: String)
+        case noWorkspace
+        case noMatch
+    }
+
     private lazy var hotkeyHandlerProc: EventHandlerUPP = { _, event, userData in
         guard let userData else { return noErr }
         let controller = Unmanaged<AppKitController>.fromOpaque(userData).takeUnretainedValue()
@@ -166,6 +187,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         setupShortcutMonitor()
         setupTooltipIPCObserver()
         setupAgentEventIPCObserver()
+        setupAppActivationObservers()
 
         let mgr = SetupManager()
         mgr.onComplete = { [weak self] in
@@ -200,6 +222,14 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             DistributedNotificationCenter.default().removeObserver(agentEventIPCObserver)
             self.agentEventIPCObserver = nil
         }
+        if let appDidBecomeActiveObserver {
+            NotificationCenter.default.removeObserver(appDidBecomeActiveObserver)
+            self.appDidBecomeActiveObserver = nil
+        }
+        if let appDidResignActiveObserver {
+            NotificationCenter.default.removeObserver(appDidResignActiveObserver)
+            self.appDidResignActiveObserver = nil
+        }
     }
 
     private func setupTooltipIPCObserver() {
@@ -215,6 +245,31 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             Task { @MainActor [weak self] in
                 self?.updateDashboardSidebarBadge()
                 self?.refreshSelection()
+            }
+        }
+    }
+
+    private func setupAppActivationObservers() {
+        appDidBecomeActiveObserver = NotificationCenter.default.addObserver(
+            forName: NSApplication.didBecomeActiveNotification, object: NSApp, queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                guard let self, let profile = self.activeWindowShortcutProfile else { return }
+                let routeElapsedMS = profile.routeCompletedAt.map { self.windowShortcutElapsedMS(since: $0) } ?? -1
+                self.logWindowShortcutProfile(
+                    "stage=app_became_active index=\(profile.index) elapsed_ms=\(self.windowShortcutElapsedMS(since: profile.startedAt)) route_gap_ms=\(routeElapsedMS)"
+                )
+            }
+        }
+        appDidResignActiveObserver = NotificationCenter.default.addObserver(
+            forName: NSApplication.didResignActiveNotification, object: NSApp, queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                guard let self, let profile = self.activeWindowShortcutProfile else { return }
+                let routeElapsedMS = profile.routeCompletedAt.map { self.windowShortcutElapsedMS(since: $0) } ?? -1
+                self.logWindowShortcutProfile(
+                    "stage=app_resigned_active index=\(profile.index) elapsed_ms=\(self.windowShortcutElapsedMS(since: profile.startedAt)) route_gap_ms=\(routeElapsedMS)"
+                )
             }
         }
     }
@@ -415,10 +470,13 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     }
 
     /// Holds a click closure and serves as the NSGestureRecognizer target for clickable row views.
+    @MainActor
     private final class ClickTarget: NSObject {
-        let action: () -> Void
-        init(_ action: @escaping () -> Void) { self.action = action }
-        @objc func clicked(_ sender: NSGestureRecognizer) { action() }
+        let action: () async -> Void
+        init(_ action: @escaping () async -> Void) { self.action = action }
+        @objc func clicked(_ sender: NSGestureRecognizer) {
+            Task { await self.action() }
+        }
     }
 
     private static var clickTargetAssocKey: UInt8 = 0
@@ -512,6 +570,131 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 let orchestrator = MuxyOrchestrator(store: store)
                 try orchestrator.removeProject(dir: projectDirectory)
                 return .success(())
+            } catch { return .failure(error) }
+        }.value
+    }
+
+    nonisolated private static func performWindowFocusSnapshot(_ request: WindowFocusRequest) async -> Result<Void, Error> {
+        await Task.detached(priority: .userInitiated) {
+            do {
+                let db = try DatabaseLocator.defaultPath()
+                let store = try SQLiteStore(path: db)
+                let orchestrator = MuxyOrchestrator(store: store)
+                switch request {
+                case .workspaceWindow(let workspaceID, let index):
+                    try orchestrator.focusWorkspaceWindow(workspaceID: workspaceID, index: index)
+                case .workspaceProcess(let workspaceID, let processID):
+                    try orchestrator.focusWorkspaceProcess(workspaceID: workspaceID, processID: processID)
+                case .agentWindow(let record):
+                    try orchestrator.focusAgentWindow(record)
+                }
+                return .success(())
+            } catch { return .failure(error) }
+        }.value
+    }
+
+    nonisolated private static func focusWindowShortcutSnapshot(
+        index: Int, selectedWorkspaceID: String?, dashboardWindowTarget: (workspaceID: String, windowListIndex: Int)?,
+        dashboardAgentRecord: AgentWindowRecord?
+    ) async -> Result<WindowShortcutExecutionOutcome, Error> {
+        await Task.detached(priority: .userInitiated) {
+            do {
+                let db = try DatabaseLocator.defaultPath()
+                let store = try SQLiteStore(path: db)
+                let orchestrator = MuxyOrchestrator(store: store)
+
+                if let dashboardWindowTarget {
+                    try orchestrator.focusWorkspaceWindow(workspaceID: dashboardWindowTarget.workspaceID, index: dashboardWindowTarget.windowListIndex)
+                    return .success(.focused(kind: "dashboard_window"))
+                }
+                if let dashboardAgentRecord {
+                    try orchestrator.focusAgentWindow(dashboardAgentRecord)
+                    return .success(.focused(kind: "dashboard_agent"))
+                }
+                guard let selectedWorkspaceID else { return .success(.noWorkspace) }
+
+                let windows = try orchestrator.windows(workspaceID: selectedWorkspaceID)
+                let processes = try orchestrator.runningProcesses(workspaceID: selectedWorkspaceID)
+                let agentWindows = try orchestrator.agentWindows(workspaceID: selectedWorkspaceID)
+                let terminalTargetKeyForProcess: (RunningProcessRecord) -> String? = { process in
+                    if let sessionID = process.itermSessionID, !sessionID.isEmpty { return sessionID }
+                    if let windowID = process.windowID { return "window:\(windowID)" }
+                    return nil
+                }
+                let terminalTargetKeyForWindow: (WindowRecord) -> String? = { window in
+                    if let sessionID = window.itermSessionID, !sessionID.isEmpty { return sessionID }
+                    if let windowID = window.windowID { return "window:\(windowID)" }
+                    return nil
+                }
+                let terminalOrderByTargetID: [String: Int] = Dictionary(
+                    uniqueKeysWithValues: windows.compactMap { window in
+                        guard window.role == "terminal", let targetID = terminalTargetKeyForWindow(window) else { return nil }
+                        return (targetID, window.orderIndex)
+                    })
+                let processesByTerminalID: [String: [RunningProcessRecord]] = {
+                    var map: [String: [RunningProcessRecord]] = [:]
+                    for process in processes {
+                        guard let targetID = terminalTargetKeyForProcess(process) else { continue }
+                        map[targetID, default: []].append(process)
+                    }
+                    for (targetID, list) in map {
+                        map[targetID] = list.sorted { lhs, rhs in
+                            let lhsOrder = terminalTargetKeyForProcess(lhs).flatMap { terminalOrderByTargetID[$0] } ?? Int.max
+                            let rhsOrder = terminalTargetKeyForProcess(rhs).flatMap { terminalOrderByTargetID[$0] } ?? Int.max
+                            if lhsOrder != rhsOrder { return lhsOrder < rhsOrder }
+                            return lhs.templateName.localizedStandardCompare(rhs.templateName) == .orderedAscending
+                        }
+                    }
+                    return map
+                }()
+                let agentYabaiWindowIDs = Set(agentWindows.compactMap(\.yabaiWindowID))
+                let liveItermSessionIDs: Set<String>? = orchestrator.liveItermSessionIDs()
+
+                var shortcutCounter = 1
+                for agentWin in agentWindows {
+                    if shortcutCounter == index {
+                        try orchestrator.focusAgentWindow(agentWin)
+                        return .success(.focused(kind: "agent"))
+                    }
+                    shortcutCounter += 1
+                }
+                for (windowIdx, window) in windows.enumerated() {
+                    guard window.role == "browser" else { continue }
+                    let isAgentClaimedWindow = window.windowID != nil && agentYabaiWindowIDs.contains(window.windowID!)
+                    guard !isAgentClaimedWindow else { continue }
+                    if shortcutCounter == index {
+                        try orchestrator.focusWorkspaceWindow(workspaceID: selectedWorkspaceID, index: windowIdx + 1)
+                        return .success(.focused(kind: "browser"))
+                    }
+                    shortcutCounter += 1
+                }
+                for (windowIdx, window) in windows.enumerated() {
+                    guard window.role != "browser" else { continue }
+                    let windowProcesses = (window.role == "terminal" ? (terminalTargetKeyForWindow(window).flatMap { processesByTerminalID[$0] }) : nil) ?? []
+                    let isAgentClaimedWindow = window.windowID != nil && agentYabaiWindowIDs.contains(window.windowID!)
+                    if isAgentClaimedWindow && (window.role != "terminal" || windowProcesses.isEmpty) { continue }
+                    if window.role == "terminal", !windowProcesses.isEmpty {
+                        for process in windowProcesses {
+                            let sessionIsAlive: Bool = {
+                                if let sid = process.itermSessionID, let liveItermSessionIDs { return liveItermSessionIDs.contains(sid) }
+                                return process.status == .running
+                            }()
+                            guard sessionIsAlive else { continue }
+                            if shortcutCounter == index {
+                                try orchestrator.focusWorkspaceProcess(workspaceID: selectedWorkspaceID, processID: process.id)
+                                return .success(.focused(kind: "process"))
+                            }
+                            shortcutCounter += 1
+                        }
+                    } else if !isAgentClaimedWindow {
+                        if shortcutCounter == index {
+                            try orchestrator.focusWorkspaceWindow(workspaceID: selectedWorkspaceID, index: windowIdx + 1)
+                            return .success(.focused(kind: "window"))
+                        }
+                        shortcutCounter += 1
+                    }
+                }
+                return .success(.noMatch)
             } catch { return .failure(error) }
         }.value
     }
@@ -1116,18 +1299,18 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                         dashboardAgentFocusMap[shortcutCounter] = agentRecord
                     }
                     shortcutCounter += 1
-                    let cardAction: (() -> Void)?
+                    let cardAction: (() async -> Void)?
                     if let wli = entry.windowListIndex {
                         let wid = group.workspaceID
                         cardAction = { [weak self] in
                             guard let self else { return }
-                            do { try self.orchestrator.focusWorkspaceWindow(workspaceID: wid, index: wli) } catch {}
+                            await self.performWindowFocus(.workspaceWindow(workspaceID: wid, index: wli))
                         }
                     } else if let agentRecord = entry.agentWindowRecord {
                         let rec = agentRecord
                         cardAction = { [weak self] in
                             guard let self else { return }
-                            try? self.orchestrator.focusAgentWindow(rec)
+                            await self.performWindowFocus(.agentWindow(rec))
                         }
                     } else {
                         cardAction = nil
@@ -1146,7 +1329,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     }
 
     /// Builds a window card with all status check sub-rows below it, identical to the workspace Run tab layout.
-    private func dashboardWindowCard(entry: DashboardAttentionEntry, shortcut: String, action: (() -> Void)? = nil) -> NSView {
+    private func dashboardWindowCard(entry: DashboardAttentionEntry, shortcut: String, action: (() async -> Void)? = nil) -> NSView {
         let mainRow = windowRow(
             icon: entry.icon, iconColor: entry.iconColor, label: entry.label, detail: entry.detail, shortcut: shortcut,
             processStatus: entry.processStatus, agentStatus: entry.agentStatus, action: action)
@@ -1588,25 +1771,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         colorRow.addArrangedSubview(colorWell)
         colorRow.addArrangedSubview(resetColorButton)
         stack.addArrangedSubview(colorRow)
-
-        stack.addArrangedSubview(label(text: "Workspace window cycling"))
-        let cycleModeNote = NSTextField(
-            labelWithString:
-                "Next/Previous can either step through every tracked Chrome tab and tmux window, or just the active Chrome and iTerm2 containers so app-native shortcuts handle the rest."
-        )
-        cycleModeNote.font = .systemFont(ofSize: 11)
-        cycleModeNote.textColor = .secondaryLabelColor
-        cycleModeNote.maximumNumberOfLines = 0
-        cycleModeNote.lineBreakMode = .byWordWrapping
-        stack.addArrangedSubview(cycleModeNote)
-
-        let cycleIndividualTargetsCheckbox = NSButton(
-            checkboxWithTitle: "Cycle individual Chrome tabs and tmux windows",
-            target: self,
-            action: #selector(workspaceWindowCycleModeChanged(_:)))
-        cycleIndividualTargetsCheckbox.state =
-            ((try? orchestrator.workspaceWindowCycleIndividualTargets()) ?? SettingsKey.defaultWorkspaceWindowCycleIndividualTargets) ? .on : .off
-        stack.addArrangedSubview(cycleIndividualTargetsCheckbox)
 
         showScrollableDetailStack(stack)
     }
@@ -2478,13 +2642,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             (try? orchestrator.resolvedWorkspaceBrowserSessions(workspaceID: workspace.id)) ?? []
         }()
         let terminalTargetKeyForProcess: (RunningProcessRecord) -> String? = { process in
-            if let tmuxWindowID = process.tmuxWindowID, !tmuxWindowID.isEmpty { return tmuxWindowID }
             if let sessionID = process.itermSessionID, !sessionID.isEmpty { return sessionID }
             if let windowID = process.windowID { return "window:\(windowID)" }
             return nil
         }
         let terminalTargetKeyForWindow: (WindowRecord) -> String? = { window in
-            if let tmuxWindowID = window.tmuxWindowID, !tmuxWindowID.isEmpty { return tmuxWindowID }
             if let sessionID = window.itermSessionID, !sessionID.isEmpty { return sessionID }
             if let windowID = window.windowID { return "window:\(windowID)" }
             return nil
@@ -2544,7 +2706,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                     agentStatus: agentWin.status,
                     action: { [weak self] in
                         guard let self else { return }
-                        try? self.orchestrator.focusAgentWindow(rec)
+                        await self.performWindowFocus(.agentWindow(rec))
                     })
                 stack.addArrangedSubview(row)
                 constrainFormFieldToFillWidth(row, in: stack)
@@ -2565,37 +2727,41 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         var processRowCount = 0
 
         // Use the original 1-based index in the full windows array so CMD+N matches focusWorkspaceWindow(index:).
-        for (idx, win) in windows.enumerated() {
+        for (idx, win) in windows.enumerated() where win.role == "browser" {
+            let windowIndex = idx + 1
+            let workspaceID = workspace.id
+            let sessionLabel: String
+            let sessionDetail: String?
+            if let sessionName = browserSessionDisplayName(for: win.targetURL, sessions: configuredBrowserSessions),
+                let targetURL = win.targetURL
+            {
+                sessionLabel = sessionName
+                sessionDetail = targetURL
+            } else {
+                sessionLabel = win.targetURL ?? win.title ?? win.app
+                sessionDetail = nil
+            }
+            let rowShortcut = "CMD+\(shortcutCounter)"
+            shortcutCounter += 1
+            browserRowCount += 1
+            let row = windowRow(
+                icon: "globe", iconColor: .systemBlue, label: sessionLabel, detail: sessionDetail,
+                shortcut: rowShortcut, processStatus: nil,
+                action: { [weak self] in
+                    guard let self else { return }
+                    await self.performWindowFocus(.workspaceWindow(workspaceID: workspaceID, index: windowIndex))
+                })
+            browserStack.addArrangedSubview(row)
+            constrainFormFieldToFillWidth(row, in: browserStack)
+        }
+
+        for (idx, win) in windows.enumerated() where win.role != "browser" {
             let windowProcesses = (win.role == "terminal" ? (terminalTargetKeyForWindow(win).flatMap { processesByTerminalID[$0] }) : nil) ?? []
             let isAgentClaimedWindow = win.windowID != nil && agentYabaiWindowIDs.contains(win.windowID!)
             if isAgentClaimedWindow && (win.role != "terminal" || windowProcesses.isEmpty) { continue }
             let windowIndex = idx + 1
             let workspaceID = workspace.id
             switch win.role {
-            case "browser":
-                let sessionLabel: String
-                let sessionDetail: String?
-                if let sessionName = browserSessionDisplayName(for: win.targetURL, sessions: configuredBrowserSessions),
-                    let targetURL = win.targetURL
-                {
-                    sessionLabel = sessionName
-                    sessionDetail = targetURL
-                } else {
-                    sessionLabel = win.targetURL ?? win.title ?? win.app
-                    sessionDetail = nil
-                }
-                let rowShortcut = "CMD+\(shortcutCounter)"
-                shortcutCounter += 1
-                browserRowCount += 1
-                let row = windowRow(
-                    icon: "globe", iconColor: .systemBlue, label: sessionLabel, detail: sessionDetail,
-                    shortcut: rowShortcut, processStatus: nil,
-                    action: { [weak self] in
-                        guard let self else { return }
-                        do { try self.orchestrator.focusWorkspaceWindow(workspaceID: workspaceID, index: windowIndex) } catch {}
-                    })
-                browserStack.addArrangedSubview(row)
-                constrainFormFieldToFillWidth(row, in: browserStack)
             case "terminal":
                 if !windowProcesses.isEmpty {
                     for process in windowProcesses {
@@ -2603,9 +2769,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                         let rowShortcut = "CMD+\(shortcutCounter)"
                         shortcutCounter += 1
                         processRowCount += 1
-                        let rowAction: (() -> Void)? = { [weak self] in
+                        let rowAction: (() async -> Void)? = { [weak self] in
                             guard let self else { return }
-                            do { try self.orchestrator.focusWorkspaceProcess(workspaceID: workspaceID, processID: process.id) } catch {}
+                            await self.performWindowFocus(.workspaceProcess(workspaceID: workspaceID, processID: process.id))
                         }
                         let row = windowRow(
                             icon: "terminal", iconColor: .systemGreen, label: process.templateName,
@@ -2630,7 +2796,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                         shortcut: rowShortcut, processStatus: nil,
                         action: { [weak self] in
                             guard let self else { return }
-                            do { try self.orchestrator.focusWorkspaceWindow(workspaceID: workspaceID, index: windowIndex) } catch {}
+                            await self.performWindowFocus(.workspaceWindow(workspaceID: workspaceID, index: windowIndex))
                         })
                     processesStack.addArrangedSubview(row)
                     constrainFormFieldToFillWidth(row, in: processesStack)
@@ -2645,7 +2811,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                         label: win.title ?? win.app, detail: nil, shortcut: rowShortcut, processStatus: nil,
                         action: { [weak self] in
                             guard let self else { return }
-                            do { try self.orchestrator.focusWorkspaceWindow(workspaceID: workspaceID, index: windowIndex) } catch {}
+                            await self.performWindowFocus(.workspaceWindow(workspaceID: workspaceID, index: windowIndex))
                         })
                     processesStack.addArrangedSubview(row)
                     constrainFormFieldToFillWidth(row, in: processesStack)
@@ -2654,7 +2820,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         }
 
         // Orphaned processes (no linked window = corresponding iTerm2 session was closed by the user)
-        let orphanedProcesses = processes.filter { !matchedProcessIDs.contains($0.id) && $0.tmuxWindowID == nil }
+        let orphanedProcesses = processes.filter { !matchedProcessIDs.contains($0.id) }
         for process in orphanedProcesses {
             let statusColor: NSColor
             switch process.status {
@@ -3083,12 +3249,18 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
     private func windowRow(
         icon: String, iconColor: NSColor, label: String, detail: String? = nil, shortcut: String, processStatus: RunningProcessState? = nil,
-        agentStatus: AgentWindowStatus? = nil, action: (() -> Void)? = nil
+        agentStatus: AgentWindowStatus? = nil, action: (() async -> Void)? = nil
     ) -> NSView {
         let container = ClickableRowView(isInteractive: action != nil)
 
         if let action {
-            let target = ClickTarget(action)
+            let profiledAction = { [weak self] in
+                let startedAt = Date()
+                self?.logWindowRowClickProfile("stage=received label=\(label) shortcut=\(shortcut)")
+                await action()
+                self?.logWindowRowClickProfile("stage=completed label=\(label) shortcut=\(shortcut) elapsed_ms=\(self?.windowShortcutElapsedMS(since: startedAt) ?? 0)")
+            }
+            let target = ClickTarget(profiledAction)
             let recognizer = NSClickGestureRecognizer(target: target, action: #selector(ClickTarget.clicked(_:)))
             container.addGestureRecognizer(recognizer)
             objc_setAssociatedObject(container, &Self.clickTargetAssocKey, target, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
@@ -3209,6 +3381,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             row.topAnchor.constraint(equalTo: container.topAnchor), row.bottomAnchor.constraint(equalTo: container.bottomAnchor),
         ])
         return container
+    }
+
+    private func logWindowRowClickProfile(_ message: String) {
+        guard ProcessInfo.processInfo.environment["DEBUG"] == "1" else { return }
+        fputs("muxy: window_row_click \(message)\n", stderr)
     }
 
     private func statusCheckSubRow(name: String, color: NSColor, status: StatusCheckStatus) -> NSView {
@@ -3825,10 +4002,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let g = Int((rgb.greenComponent * 255).rounded())
         let b = Int((rgb.blueComponent * 255).rounded())
         do { try orchestrator.setItermFocusPulseColor(r: r, g: g, b: b) } catch { showError(error) }
-    }
-
-    @objc private func workspaceWindowCycleModeChanged(_ sender: NSButton) {
-        do { try orchestrator.setWorkspaceWindowCycleIndividualTargets(sender.state == .on) } catch { showError(error) }
     }
 
     @objc private func addProject() { showAddProjectForm() }
@@ -4484,7 +4657,13 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 return nil
             }
             if let windowIndex = windowShortcutIndex(for: event) {
-                self.focusWindowShortcut(index: windowIndex)
+                self.logWindowShortcutProfile("stage=monitor_schedule index=\(windowIndex)")
+                Task { @MainActor [weak self] in
+                    guard let self else { return }
+                    self.logWindowShortcutProfile("stage=monitor_dispatch index=\(windowIndex)")
+                    self.focusWindowShortcut(index: windowIndex)
+                    self.logWindowShortcutProfile("stage=monitor_after_handler index=\(windowIndex)")
+                }
                 return nil
             }
             return event
@@ -4837,89 +5016,54 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         do { try orchestrator.focusWorkspace(workspaceID: selectedWorkspaceID) } catch { showError(error) }
     }
 
+    private func performWindowFocus(_ request: WindowFocusRequest) async {
+        let result = await Self.performWindowFocusSnapshot(request)
+        if case .failure(let error) = result { showError(error) }
+    }
+
     private func focusWindowShortcut(index: Int) {
-        if showingDashboard {
-            if let target = dashboardWindowFocusMap[index] {
-                do { try orchestrator.focusWorkspaceWindow(workspaceID: target.workspaceID, index: target.windowListIndex) } catch {
-                    showError(error)
-                }
-            } else if let agentRecord = dashboardAgentFocusMap[index] {
-                try? orchestrator.focusAgentWindow(agentRecord)
-            }
-            return
-        }
-        guard let selectedWorkspaceID else { return }
-        let windows = (try? orchestrator.windows(workspaceID: selectedWorkspaceID)) ?? []
-        let processes = (try? orchestrator.runningProcesses(workspaceID: selectedWorkspaceID)) ?? []
-        let agentWindows = (try? orchestrator.agentWindows(workspaceID: selectedWorkspaceID)) ?? []
-        let processesByWindowID: [Int: [RunningProcessRecord]] = {
-            var map: [Int: [RunningProcessRecord]] = [:]
-            for process in processes {
-                guard let wid = process.windowID else { continue }
-                map[wid, default: []].append(process)
-            }
-            for (wid, list) in map {
-                map[wid] = list.sorted { lhs, rhs in
-                    let lhsTab = lhs.itermTabIndex ?? Int.max
-                    let rhsTab = rhs.itermTabIndex ?? Int.max
-                    if lhsTab != rhsTab { return lhsTab < rhsTab }
-                    return lhs.templateName.localizedStandardCompare(rhs.templateName) == .orderedAscending
-                }
-            }
-            return map
-        }()
-        let agentYabaiWindowIDs: Set<Int> = Set(agentWindows.compactMap { $0.yabaiWindowID })
-        let liveItermSessionIDs: Set<String>? = orchestrator.liveItermSessionIDs()
-        // Iterate in the same order as the Run tab display: Coding Agents → Browser Tabs → Processes.
-        var shortcutCounter = 1
-        // 1. Coding Agents
-        for agentWin in agentWindows {
-            if shortcutCounter == index {
-                try? orchestrator.focusAgentWindow(agentWin)
-                return
-            }
-            shortcutCounter += 1
-        }
-        // 2. Browser Tabs
-        for (windowIdx, window) in windows.enumerated() {
-            guard window.role == "browser" else { continue }
-            let isAgentClaimedWindow = window.windowID != nil && agentYabaiWindowIDs.contains(window.windowID!)
-            guard !isAgentClaimedWindow else { continue }
-            let windowListIndex = windowIdx + 1
-            if shortcutCounter == index {
-                do { try orchestrator.focusWorkspaceWindow(workspaceID: selectedWorkspaceID, index: windowListIndex) } catch { showError(error) }
-                return
-            }
-            shortcutCounter += 1
-        }
-        // 3. Processes (terminal windows + other non-browser windows)
-        for (windowIdx, window) in windows.enumerated() {
-            guard window.role != "browser" else { continue }
-            let windowListIndex = windowIdx + 1
-            let windowProcesses = (window.role == "terminal" ? (window.windowID.flatMap { processesByWindowID[$0] }) : nil) ?? []
-            let isAgentClaimedWindow = window.windowID != nil && agentYabaiWindowIDs.contains(window.windowID!)
-            if isAgentClaimedWindow && (window.role != "terminal" || windowProcesses.isEmpty) { continue }
-            if window.role == "terminal", !windowProcesses.isEmpty {
-                for process in windowProcesses {
-                    let sessionIsAlive: Bool = {
-                        if let sid = process.itermSessionID, let live = liveItermSessionIDs { return live.contains(sid) }
-                        return process.status == .running
-                    }()
-                    guard sessionIsAlive else { continue }
-                    if shortcutCounter == index {
-                        do { try orchestrator.focusWorkspaceProcess(workspaceID: selectedWorkspaceID, processID: process.id) } catch { showError(error) }
-                        return
-                    }
-                    shortcutCounter += 1
-                }
-            } else if !isAgentClaimedWindow {
-                if shortcutCounter == index {
-                    do { try orchestrator.focusWorkspaceWindow(workspaceID: selectedWorkspaceID, index: windowListIndex) } catch { showError(error) }
-                    return
-                }
-                shortcutCounter += 1
+        let startedAt = Date()
+        activeWindowShortcutProfile = WindowShortcutProfile(index: index, startedAt: startedAt)
+        logWindowShortcutProfile("stage=received index=\(index) dashboard=\(showingDashboard ? 1 : 0)")
+        let dashboardWindowTarget = showingDashboard ? dashboardWindowFocusMap[index] : nil
+        let dashboardAgentRecord = showingDashboard ? dashboardAgentFocusMap[index] : nil
+        Task { [weak self] in
+            guard let self else { return }
+            let routeStartedAt = Date()
+            let result = await Self.focusWindowShortcutSnapshot(
+                index: index, selectedWorkspaceID: self.selectedWorkspaceID, dashboardWindowTarget: dashboardWindowTarget,
+                dashboardAgentRecord: dashboardAgentRecord)
+            switch result {
+            case .success(.focused(let kind)):
+                self.logWindowShortcutProfile(
+                    "stage=route_done index=\(index) kind=\(kind) elapsed_ms=\(self.windowShortcutElapsedMS(since: routeStartedAt))"
+                )
+                self.activeWindowShortcutProfile?.routeCompletedAt = Date()
+                self.logWindowShortcutProfile("stage=total index=\(index) elapsed_ms=\(self.windowShortcutElapsedMS(since: startedAt))")
+            case .success(.noWorkspace):
+                self.logWindowShortcutProfile(
+                    "stage=aborted index=\(index) reason=no_workspace elapsed_ms=\(self.windowShortcutElapsedMS(since: startedAt))"
+                )
+            case .success(.noMatch):
+                self.logWindowShortcutProfile(
+                    "stage=aborted index=\(index) reason=no_match elapsed_ms=\(self.windowShortcutElapsedMS(since: startedAt))"
+                )
+            case .failure(let error):
+                self.showError(error)
+                self.logWindowShortcutProfile(
+                    "stage=aborted index=\(index) reason=error elapsed_ms=\(self.windowShortcutElapsedMS(since: startedAt))"
+                )
             }
         }
+    }
+
+    private func logWindowShortcutProfile(_ message: String) {
+        guard ProcessInfo.processInfo.environment["DEBUG"] == "1" else { return }
+        fputs("muxy: window_shortcut \(message)\n", stderr)
+    }
+
+    private func windowShortcutElapsedMS(since start: Date) -> Int {
+        max(Int(Date().timeIntervalSince(start) * 1000), 0)
     }
 
     private func windowShortcutIndex(for event: NSEvent) -> Int? {

@@ -3,7 +3,6 @@ import Foundation
 /// Identifies each prerequisite check in display order.
 public enum SetupCheckID: String, CaseIterable {
     case iterm2Installed
-    case tmuxInstalled
     case yabaiInstalled
     case yabaiServiceRunning
     case yabaiAccessibility
@@ -20,15 +19,13 @@ public struct SetupCheckResult {
     }
 }
 
-/// Runs prerequisite checks for Muxy dependencies (iTerm2, tmux, yabai).
+/// Runs prerequisite checks for Muxy dependencies (iTerm2 and yabai).
 /// Injecting custom adapter subclasses enables unit testing without real apps.
 public final class SetupChecker {
     private let iterm2: Iterm2Adapter
-    private let tmux: TmuxAdapter
 
-    public init(iterm2: Iterm2Adapter = Iterm2Adapter(), tmux: TmuxAdapter = TmuxAdapter()) {
+    public init(iterm2: Iterm2Adapter = Iterm2Adapter()) {
         self.iterm2 = iterm2
-        self.tmux = tmux
     }
 
     /// Runs a single check and returns whether it passed.
@@ -36,8 +33,6 @@ public final class SetupChecker {
         switch id {
         case .iterm2Installed:
             return isIterm2Installed()
-        case .tmuxInstalled:
-            return isTmuxInstalled()
         case .yabaiInstalled:
             return isYabaiInstalled()
         case .yabaiServiceRunning:
@@ -56,10 +51,6 @@ public final class SetupChecker {
 
     private func isIterm2Installed() -> Bool {
         iterm2.isAvailable()
-    }
-
-    private func isTmuxInstalled() -> Bool {
-        tmux.isAvailable()
     }
 
     private func isYabaiInstalled() -> Bool {

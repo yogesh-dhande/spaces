@@ -85,7 +85,7 @@ export default function HomePage() {
               Instant context switching <br /> for faster development.
             </h1>
             <p className="max-w-2xl text-base leading-7 text-foreground-soft md:text-lg">
-              A MacOS app designed to reduce context hunting, app hopping, port conflicts, and accidental interruptions.
+              Muxy orchestrates your coding setup to reduce context hunting, app hopping, port conflicts, and accidental interruptions.
             </p>
             <div className="flex flex-wrap gap-3">
               <Link

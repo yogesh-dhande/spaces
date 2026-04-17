@@ -39,14 +39,13 @@ public final class YabaiAdapter {
 
     @discardableResult public func focusWindow(id: Int) throws -> Bool {
         do {
-            _ = try Shell.runAndCapture(["yabai", "-m", "window", "--focus", String(id)])
-            return true
+            return try Shell.run(["yabai", "-m", "window", "--focus", String(id)]) == 0
         } catch { return false }
     }
 
-    public func minimizeWindow(id: Int) throws { _ = try Shell.runAndCapture(["yabai", "-m", "window", "--minimize", String(id)]) }
+    public func minimizeWindow(id: Int) throws { _ = try Shell.run(["yabai", "-m", "window", "--minimize", String(id)]) }
 
-    public func closeWindow(id: Int) throws { _ = try Shell.runAndCapture(["yabai", "-m", "window", "--close", String(id)]) }
+    public func closeWindow(id: Int) throws { _ = try Shell.run(["yabai", "-m", "window", "--close", String(id)]) }
 
     public func windowExists(id: Int) throws -> Bool {
         let windows = try listWindows()

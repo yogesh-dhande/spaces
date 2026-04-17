@@ -59,15 +59,14 @@ import Testing
             #expect(results.count == 1)
             #expect(results.first?.status == .failed)
             #expect(results.first?.checkName == "docker-container-health")
-            #expect(mockIterm.openWindowAndRunCallCount == 0)
-            #expect(mockTmux.respawnWindowCallCount == 1)
-            #expect(mockTmux.respawnedWindowIDs == ["@1"])
+            #expect(mockIterm.openWindowAndRunCallCount == 1)
+            #expect(mockTmux.respawnWindowCallCount == 0)
+            #expect(mockTmux.respawnedWindowIDs.isEmpty)
             let currentProcesses = try store.runningProcesses(workspaceID: workspace.id)
             #expect(currentProcesses.count == 1)
             let currentProcess = currentProcesses.first!
             #expect(currentProcess.status == .running)
-            #expect(currentProcess.windowID == 123)
-            #expect(currentProcess.tmuxWindowID == "@1")
+            #expect(currentProcess.tmuxWindowID == nil)
         }
     }
     @Test("Status check command success detection with docker commands")
@@ -196,12 +195,12 @@ import Testing
             }
             #expect(results.count == 1)
             #expect(results.first?.status == .failed)
-            #expect(mockIterm.openWindowAndRunCallCount == 0)
-            #expect(mockTmux.respawnWindowCallCount == 1)
+            #expect(mockIterm.openWindowAndRunCallCount == 1)
+            #expect(mockTmux.respawnWindowCallCount == 0)
             let currentProcesses = try store.runningProcesses(workspaceID: workspace.id)
             #expect(currentProcesses.count == 1)
             #expect(currentProcesses.first?.status == .running)
-            #expect(currentProcesses.first?.tmuxWindowID == "@1")
+            #expect(currentProcesses.first?.tmuxWindowID == nil)
         }
     }
 

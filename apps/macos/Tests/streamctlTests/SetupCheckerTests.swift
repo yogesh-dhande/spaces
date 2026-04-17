@@ -22,24 +22,6 @@ final class SetupCheckerTests: XCTestCase {
         XCTAssertFalse(checker.run(.iterm2Installed))
     }
 
-    // MARK: - tmux check
-
-    // Tests isTmuxInstalled returns true when tmux adapter reports availability.
-    func testIsTmuxInstalled_available() {
-        let mock = MockAvailableTmux()
-        mock.availableResult = true
-        let checker = SetupChecker(tmux: mock)
-        XCTAssertTrue(checker.run(.tmuxInstalled))
-    }
-
-    // Tests isTmuxInstalled returns false when tmux adapter reports unavailability.
-    func testIsTmuxInstalled_unavailable() {
-        let mock = MockAvailableTmux()
-        mock.availableResult = false
-        let checker = SetupChecker(tmux: mock)
-        XCTAssertFalse(checker.run(.tmuxInstalled))
-    }
-
     // MARK: - yabai installed check
 
     // Tests isYabaiInstalled returns true when yabai --version exits 0.
@@ -152,12 +134,10 @@ final class SetupCheckerTests: XCTestCase {
             """
         let mock = MockAvailableIterm2()
         mock.availableResult = true
-        let tmux = MockAvailableTmux()
-        tmux.availableResult = true
         try withMockCommands(["yabai": yabaiScript]) {
-            let checker = SetupChecker(iterm2: mock, tmux: tmux)
+            let checker = SetupChecker(iterm2: mock)
             let results = checker.runAll()
-            XCTAssertEqual(results.count, 5)
+            XCTAssertEqual(results.count, 4)
             XCTAssertTrue(results.allSatisfy(\.passed))
             let firstFail = results.firstIndex(where: { !$0.passed })
             XCTAssertNil(firstFail)
@@ -199,11 +179,6 @@ final class SetupCheckerTests: XCTestCase {
 // MARK: - Test doubles
 
 private final class MockAvailableIterm2: Iterm2Adapter, @unchecked Sendable {
-    var availableResult = false
-    override func isAvailable() -> Bool { availableResult }
-}
-
-private final class MockAvailableTmux: TmuxAdapter, @unchecked Sendable {
     var availableResult = false
     override func isAvailable() -> Bool { availableResult }
 }

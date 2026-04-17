@@ -15,11 +15,12 @@
     - muxy does **not** attempt to restore exact tab ordering inside browsers
     - muxy does **not** introspect editor internals (no VS Code extensions required)
     - muxy does **not** manage secrets beyond env vars
-- Implementation preferences
-    - GUI should be a thin wrapper written in AppKit that calls code written in swift in a separate module. This is critical to make it easy to port the GUI to a different tech stack later (e.g. tauri)
-    - Prefer automation using applescript, followed by shell commands whenever possible
-    - Prefer AppleScript if the app exposes a stable scripting dictionary (Chrome, iTerm2)
-    - Use yabai only for window IDs, space/display resolution, or when AppleScript fails (except iTerm2 window focus may use AppleScript session identifiers after tmux window selection)
+    - Implementation preferences
+        - GUI should be a thin wrapper written in AppKit that calls code written in swift in a separate module. This is critical to make it easy to port the GUI to a different tech stack later (e.g. tauri)
+        - Prefer automation using applescript, followed by shell commands whenever possible
+        - Prefer a low-overhead spawn path for non-capturing shell commands on latency-sensitive focus/navigation paths; reserve heavier captured-process execution for commands that need stdout/stderr
+        - Prefer AppleScript if the app exposes a stable scripting dictionary (Chrome, iTerm2)
+    - Use yabai as the primary source of truth for window IDs and cross-app focus
     - Ok to have yabai will be a required dependency
     - Avoid yabai SIP
     - Show useful messages and hints to the user for a smooth UX
@@ -36,14 +37,13 @@
             - Workspace settings are seeded from project templates on creation or when missing.
             - Schema changes use additive, non-destructive migrations; existing workspace/project data must be preserved.
             - Additive migrations must backfill newly required status-check action columns (for example `on_fail`) with safe defaults for existing rows.
-        - Global preferences (`editor`, `port_range`, `iterm_focus_pulse_color`, `iterm_focus_pulse_enabled`, `workspace_window_cycle_individual_targets`) are stored in the SQLite `settings` table.
+        - Global preferences (`editor`, `port_range`, `iterm_focus_pulse_color`, `iterm_focus_pulse_enabled`) are stored in the SQLite `settings` table.
             - Old YAML files (`~/.muxy/config.yaml`) with `editor`/`port_range`/`projects:` are automatically migrated to SQLite once on first launch. The YAML file is no longer written or read after migration.
     - User preferences
         - editor: enum - None, VS Code, Cursor, Windsurf, Vim - if specified, used by Open Editor actions (GUI + shortcuts)
             - GUI settings only surface installed VS Code, Cursor, or Windsurf
         - iterm_focus_pulse_color: RGB (0–255 per channel, default `46,41,14`); the iTerm2 session background color is briefly pulsed to this color and back when an iTerm2 window is focused. Configurable via GUI Settings color well or `mx settings set --iterm-focus-pulse-color <r,g,b>`.
         - iterm_focus_pulse_enabled: bool (default `true`); enables/disables iTerm2 focus pulsing. Configurable via GUI Settings toggle or `mx settings set --iterm-focus-pulse-enabled <0|1>`.
-        - workspace_window_cycle_individual_targets: bool (default `true`); controls whether prev/next workspace-window cycling steps through every tracked Chrome tab and tmux window (`true`) or only the active Chrome/iTerm2 containers (`false`). Direct indexed focus via `cmd+<n>` or `mx workspace focus --window-index` always targets the specific tracked row.
     - Project
         - fields
             - dir: str, path of the project folder, name can be inferred from it for display in the UI
@@ -102,12 +102,12 @@
             - extracted_window: optional[object], persisted runtime mapping with fields:
                 - target_url: str, resolved browser-session URL prefix used for extraction
                 - window_id: int, extracted dedicated Chrome window ID
-                - is_valid: bool, false when stale mapping is detected and disabled
+                - is_valid: bool, false when direct yabai focus fails and the stale mapping is disabled
         - behavior
             - Project templates stored in SQLite (`project_browser_sessions`)
             - Workspace copies stored in SQLite (`workspace_browser_sessions`) and editable per workspace
             - the url should be specified using named port vars made available to the workspace e.g. `$FRONTEND_PORT`. at runtime, it is decoded based on the actual values of these variables
-            - user can add multiple browser sessions to each project; on workspace launch, missing sessions open in Chrome and newly created sessions are grouped into a shared Chrome window as separate tabs when possible (while tracking each matched tab as its own workspace row) e.g. localhost:3000, localhost:3000/blog
+            - user can add multiple browser sessions to each project; on workspace launch, missing sessions open in dedicated Chrome windows and persist tracked window IDs for direct focus
     - PortDefinition
         - fields
             - name: str, the env var name for this port (e.g. `FRONTEND_PORT`, `API_PORT`). Must be a valid shell identifier.
@@ -151,10 +151,10 @@
                 - after archive is confirmed in the GUI, show a non-blocking progress indicator with archive status text while cleanup runs
                 - the app window includes a fixed one-row full-width footer that shows effective shortcut hints for next/previous workspace navigation, Settings, and tooltip toggle (reflecting user overrides)
                 - when Muxy is focused, next/previous workspace shortcuts cycle sidebar-visible workspaces (including stopped and inactive-visible ones) without focusing a workspace window; `cmd+1..9` is used to focus a specific window
-                - when Muxy is not focused, the same next/previous shortcuts cycle through the workspace's focus targets in Run-tab order (coding agents, browser tabs, then processes/other windows), falling back to the active workspace when no workspace window is focused
-                - each workspace uses one shared iTerm2 window/session plus one tmux session; coding agents, processes, and manual terminals are distinct cycle targets by tmux window ID even when they share that iTerm window
-                - repeated next/previous cycling must remember the last focus target by stable identity (tmux window ID, browser window+URL identity when available, browser URL fallback, or window ID fallback) rather than by transient row index
-                - if frontmost Chrome state does not uniquely resolve to one tracked browser row, next/previous cycling must fall back to the remembered target instead of choosing an arbitrary Chrome row
+                - `cmd+1..9` window-focus actions are scheduled asynchronously after the local key monitor returns so focus handoff to Chrome/iTerm/yabai does not block inside the key-event monitor itself
+                - when Muxy is not focused, the same next/previous shortcuts cycle through the workspace's tracked dedicated windows in Run-tab order (coding-agent windows, browser windows, then process/manual terminal windows), falling back to the active workspace when no workspace window is focused
+                - repeated next/previous cycling must remember the last focus target by stable window identity rather than by transient row index
+                - `DEBUG=1` logs full workspace-cycle timing, including target rebuild/current-target resolution and direct window focus-path timing
             - Forms
                 - In-place editors for project and workspace data
                 - Primary form actions (create/save) use a shared high-contrast style with a darker accent fill and white text/icon treatment for consistent readability
@@ -176,15 +176,13 @@
                     - Port allocation happens before setup script so named port env vars are available in setup scripts
                 - GUI creation persists the new workspace first, shows it in the UI, then runs setup in the background (setup state transitions: `pending` -> `running` -> `succeeded`/`failed`)
             - when launched
-                - start processes defined by the workspace in one shared iTerm2 window/session attached to a workspace tmux session, with one tmux window per process
-                - persist the shared iTerm2 session ID plus the tmux window ID for each process-backed terminal so focus can select the correct tmux window later
-                - when stopping, kill process-backed tmux windows instead of treating the whole iTerm window as process-owned
-                - ensure that browser tabs for the browser sessions defined for the workspace are open, and if not, open them. keep track of them so they can be focused later when looping through this workspace's windows
-            - user can open the workspace in the preferred editor, a terminal window, or Finder from the GUI; Open Terminal adds a new tmux window to the tracked workspace terminal session when available (otherwise creates a new iTerm2 window attached to that workspace tmux session)
+                - start processes defined by the workspace in tracked terminal windows and persist the resulting window IDs for direct focus later
+                - ensure that browser windows for the browser sessions defined for the workspace are open, and if not, open them. keep track of them so they can be focused later when looping through this workspace's windows
+            - user can open the workspace in the preferred editor, a terminal window, or Finder from the GUI
             - when updated while running
-                - start newly added processes as new tmux windows in the workspace tmux session
-                - restart processes whose commands change in the same tmux window when possible
-                - open newly added browser sessions immediately
+                - start newly added processes in new dedicated iTerm windows
+                - restart processes whose commands change by opening a replacement dedicated iTerm window and updating the tracked yabai window ID
+                - open newly added browser sessions immediately in dedicated Chrome windows
             - when stopped
                 - stop any processes running in this workspace
                     - signal the tracked process group first (ctrl-c equivalent before term) so child services (e.g. docker compose) shut down cleanly and do not become orphaned
@@ -206,7 +204,7 @@
             - stored in db
             - when started, each process receives the following env vars
                 - Named port env vars from the workspace's port definitions (e.g. `FRONTEND_PORT=20001`, `API_PORT=20002`) so they can be used when starting a server e.g. `PORT=$FRONTEND_PORT npm run dev`
-            - can be restarted from muxy GUI (e.g. if .env files are changed). restart attempts reuse the existing tmux window only after process exit is confirmed; otherwise muxy launches a new tmux window in the workspace session
+            - can be restarted from muxy GUI (e.g. if .env files are changed). restart attempts reuse the tracked process identity only after process exit is confirmed; otherwise muxy launches a new dedicated terminal window
     - Window
         - fields
             - workspace: Workspace
@@ -215,18 +213,18 @@
             - not specified by the user
             - application manages these
             - stored in db so that application restart does not lose pointer to existing windows open on mac; if identifying windows on the fly is robust and fast, then these may be stored in memory instead
-            - Automatically identify any chrome windows that have matching BrowserSessions open (browser url starts with BrowserSession.url) and attach those to the related workspace. User may open additional tabs or windows. all of them should be automatically identified and tracked
-            - when looping through windows, the order should be browser windows and then terminal windows; the Run tab should show one terminal row per tmux window (even when multiple rows share the same iTerm2 window)
+            - Each configured browser session is launched into and tracked as its own dedicated Chrome window via yabai window ID
+            - Each tracked process, agent, or manual terminal window is represented as its own dedicated iTerm window via yabai window ID
+            - when looping through windows, the order should be browser windows and then terminal windows
             - when GUI is focused, cmd+1 through cmd+9 focus the corresponding workspace window
-            - global next/previous window cycling must remember the last focused target per workspace by stable identity so repeated cycling through multiple tracked Chrome tabs in the same window does not collapse onto a single window id when rows reorder
-            - global next/previous window cycling must treat tmux windows as distinct targets, so coding-agent, process, and manual-shell windows in one shared iTerm window are each reachable as separate cycle steps
+            - global next/previous window cycling must remember the last focused target per workspace by stable identity so reordered rows do not disturb the cycle path
             - Window records may become stale across app restarts; muxy must re-discover windows on launch and reconcile with stored state
 - User flow
     - User installs the app
     - On app launch, muxy shows a startup loading state in the detail pane ("Loading projects and workspaces...") while initial project/workspace/git activity data is fetched in a background task so first paint remains responsive
     - Global focus hotkeys are registered during initial startup so showing/focusing muxy does not wait for background hydration to finish
     - During startup reconciliation passes, sidebar refreshes must run through background snapshot loading so workspace switching stays responsive (no main-thread blocking reload path)
-    - On every launch, check prerequisites in order: (1) iTerm2 installed, (2) tmux installed, (3) yabai installed, (4) yabai service running, (5) yabai Accessibility permission. All five are blocking — if any fail, a step-by-step setup view is shown in the main window (no second window) starting at the first failing step, with inline instructions, copy-ready commands, and deep links to System Settings. The setup view polls every 2 seconds and immediately re-checks when the app becomes active. The main UI loads automatically once all steps pass.
+    - On every launch, check prerequisites in order: (1) iTerm2 installed, (2) yabai installed, (3) yabai service running, (4) yabai Accessibility permission. All four are blocking — if any fail, a step-by-step setup view is shown in the main window (no second window) starting at the first failing step, with inline instructions, copy-ready commands, and deep links to System Settings. The setup view polls every 2 seconds and immediately re-checks when the app becomes active. The main UI loads automatically once all steps pass.
     - Once the app is configured appropriately, prompt the user to create their first project
     - Run a periodic background reconciliation pass for all non-archived workspace windows
         - this pass should prune stale window records for windows that were manually closed outside muxy
@@ -306,15 +304,11 @@
             - browser cleanup must close matching tabs only; never close an entire browser window
             - if matching tabs already exist, reuse them and include all URL-prefix matches in the workspace window list instead of opening duplicates
             - during launch/restart only, extract one matching tab per browser session into a dedicated Chrome window and persist the extracted `window_id` **only when reusing existing tabs** (not when creating new windows for new sessions)
-            - during focus, try extracted-window `yabai` focus first; if focus fails or active tab URL verification fails, mark mapping stale (`is_valid=false`) and fall back to indexed tab focus and URL-based focus (no automatic re-extraction during fallback)
-            - workspace window listing/navigation should rebuild browser rows from Chrome tabs with a configurable debounce interval (default: 10 seconds, see `PollingConstants.browserWindowScanDebounceInterval`) per workspace/prefix set, and include tabs where tab URL starts with any browser session URL
-            - during background workspace-window refresh, tracked process, agent, and manual terminal rows should be removed when their tmux window can no longer be found in the workspace tmux session
-            - if a tab matches multiple browser session URLs, include it once in the list (dedupe by window + tab URL)
-            - browser tab ordering in the list should be deterministic: browser session definition order first, then tab URL
-            - when browser rows come from a live scan, tab focus should target cached tab index first, then verify the focused active tab URL belongs to the workspace; refresh the live scan once if it does not, then fall back to URL matching if still stale
-            - window-scoped Chrome focus/close AppleScript checks should compare window id as string for reliable matching against Chrome's window-id type
-            - benchmark target for real-world parity: indexed tab focus path includes ~52ms tab-index focus + ~38ms active-tab verification delays, while extracted-window focus path models ~42ms `yabai` focus delay
-            - window display order in GUI should be browser session tabs first, then terminal windows, then other windows
+            - during focus, resolve the tracked row directly by yabai window ID whenever possible; if direct focus fails, mark the tracked window mapping stale (`is_valid=false`) and leave recovery to later refresh/relaunch flows
+            - workspace window listing/navigation should operate on tracked dedicated browser and terminal windows, not on scanned Chrome tabs or tmux sub-targets
+            - during background workspace-window refresh, tracked process, agent, and manual terminal rows should be removed when their tracked yabai window is no longer live
+            - browser ordering in the list should be deterministic: configured browser session order first, then tracked window ID as a stable tiebreaker
+            - window display order in GUI should be browser windows first, then terminal windows, then other windows
 - GUI
     - Layout
         - Two panes
@@ -337,6 +331,7 @@
                             - Show list of windows associated with the workspace
                                 - show keyboard shortcut hints for each so user can quickly focus a window if desired. generate these shortcut hints dynamically (e.g. cmd+1)
                                 - window cards are clickable: clicking a card focuses that window (same effect as the CMD+N shortcut)
+                                    - row clicks and `CMD+1`...`CMD+9` shortcut routing must resolve and execute focus work off the main actor so Muxy stays responsive while handing focus to the target app
                                 - for browser rows, show browser-session name and matching URL together (name first, URL second)
                                 - for non-browser rows, show titles and application name
                         - second
@@ -374,13 +369,13 @@
         - Codex CLI in iTerm2 (`CODEX_THREAD_ID` with `__CFBundleIdentifier=com.googlecode.iterm2`) and Claude Code CLI in iTerm2 (`CLAUDE_CODE_ENTRYPOINT` with `__CFBundleIdentifier=com.googlecode.iterm2`) → iTerm2 provider.
         - Coding-agent env markers from unsupported terminal apps are ignored (no auto-registration).
         - Can be overridden with `--provider iterm2`.
-    - iTerm2 sessions: `ITERM_SESSION_ID` is captured for the shared workspace terminal container, and the current tmux window ID is captured for the specific agent target; `CODEX_THREAD_ID` may also be recorded as metadata for Codex CLI sessions.
-    - Multiple agent tmux windows per workspace are allowed inside the shared workspace iTerm2 session.
+    - iTerm2 sessions: `ITERM_SESSION_ID` may be captured as metadata for a dedicated terminal window, and the yabai window ID is the primary focus identity; `CODEX_THREAD_ID` may also be recorded as metadata for Codex CLI sessions.
+    - Multiple agent windows per workspace are allowed, each with its own tracked dedicated terminal window.
     - Status values: `idle`, `spinning` (active, spinner animation), `waiting` (red dot, triggers workspace unhealthy indicator), `done` (green dot).
     - Agent windows appear in the Run tab Windows section with the appropriate status indicator and environment-specific labels (`Codex CLI`, `Claude Code CLI`).
     - Agent windows with `waiting` or `done` status appear on the Dashboard as attention items.
-    - Clicking an agent entry focuses the agent's tmux window inside the shared workspace iTerm2 session.
-    - On workspace stop/restart, Muxy tears down the full workspace tmux session, removes all tracked process/agent/manual terminal rows for that session, and starts clean on the next launch.
+    - Clicking an agent entry focuses the agent's tracked dedicated terminal window.
+    - On workspace stop/restart, Muxy closes tracked dedicated process, agent, manual terminal, and browser windows and starts clean on the next launch.
 
 - Auto-Update
     - `AppVersion.current` is the single source of truth for the version string (in `streamctl`)
