@@ -1,118 +1,79 @@
 # AGENTS.md
 
 ## Purpose
-- `Muxy` is a macOS Swift app for stream-based workspace orchestration.
-- The CLI is named `mx`.
-- Workspaces map to **captured window sets** managed via yabai.
-- The macOS app source lives under `apps/macos`.
-- The marketing/docs website source lives under `apps/web`.
+- Use this file for coding workflow, verification, and implementation guardrails.
+- Put product behavior in `apps/macos/spec.md`.
+- Put data flow, persistence, and module structure in `apps/macos/docs/architecture.md`.
+- Put repository development and deploy commands in `README.md`.
 
-## Contributor Contract
+## Product Constraints
+- `Muxy` is a macOS Swift app for orchestration of coding tools
+- The CLI is named `mx`.
+- Workspaces map to captured window sets managed via yabai.
 - Use yabai as the single source of truth for window IDs.
-- Avoid window-level automation outside yabai, except iTerm2 tab/session selection via iTerm2 AppleScript when focusing the correct terminal tab within iTerm2.
-- Any project setting related to workspace creation and used during workspace launch must be overridable per workspace after creation.
-- Anything configurable via the GUI must also be configurable via the CLI (`mx`). Keep the two in sync.
+- Avoid window-level automation outside yabai
+- Any project setting used during workspace creation or launch must be overridable per workspace after creation.
+- Anything configurable in the GUI must also be configurable via `mx`.
 
 ## Coding Agent Workflow
-- Use the Muxy CLI `mx` to enhance user experience with coding agents.
-- Always start by ensuring a Muxy workspace exists by running `~/projects/muxy/apps/macos/.build/debug/mx workspace import --title [text] --tooltip [text]` from the project root directory. Do NOT run `mx agent event --type start` as part of this step; agent event commands are separate and must be run explicitly.
-- Before manually launching a new Muxy app instance for debugging or profiling, close any existing Muxy instances first so only one global hotkey listener is active.
-- When you have a question for the user or need permissions, run `~/projects/muxy/apps/macos/.build/debug/mx agent event --type waiting` before asking to indicate to the user that you are blocked and waiting for their response.
-- When code changes are ready for user review, run `~/projects/muxy/apps/macos/.build/debug/mx workspace up --force-restart --tooltip [text]` to ensure the Muxy workspace is running and set a tooltip to provide sufficient context for the user about what is being worked on and the changes. Do NOT run `mx agent event --type done` as part of this step; agent event commands are separate and must be run explicitly.
+- Always start by ensuring a Muxy workspace exists by running `~/projects/muxy/apps/macos/.build/debug/mx workspace import --title [text] --tooltip [text]` from the project root.
+- Do not run `~/projects/muxy/apps/macos/.build/debug/mx agent event --type start` as part of workspace import.
+- Before manually launching a new Muxy app instance for debugging or profiling, close any existing Muxy instances so only one global hotkey listener is active.
+- When blocked on user input or permissions, run `~/projects/muxy/apps/macos/.build/debug/mx agent event --type waiting` before asking.
+- When changes are ready for review, run `~/projects/muxy/apps/macos/.build/debug/mx workspace up --force-restart --tooltip [text]`.
+- Do not run `~/projects/muxy/apps/macos/.build/debug/mx agent event --type done` as part of `workspace up`.
 
-## Data & Paths
-- DB path: `~/.muxy/muxy.db` (managed automatically).
-- Schema and architecture details live in `apps/macos/docs/architecture.md`.
+## Verification Rules
+- Always run lint and build before finalizing macOS app changes.
+- Run `scripts/coverage.sh` after changes unless the change is limited to `apps/web` or docs/comments.
+- Whenever `scripts/coverage.sh` is run, report the overall coverage percentage.
+- Always consider adding or expanding tests before finalizing code changes.
+- When fixing a bug, reproduce it first using the real system, `~/projects/muxy/apps/macos/.build/debug/mx` cli, and/or database inspection when practical, then add a test, implement the fix, and confirm both the test and the real workflow.
+- When running `git commit` via Codex, allow at least a 10-minute timeout so pre-commit checks can finish.
 
-## GUI
-- UI design should be modern and compact
-- Use icons for obvious actions (add/remove). Use text labels for actions that are not obvious.
-- Use icons instead of text for status
-- Show inline keyboard shortcuts for actions
-- respect system dark/light mode settings
-- Use labeled input fields for configuration; do not require users to enter app-specific text formats.
+## Documentation Rules
+- Keep docs short and non-overlapping.
+- Update `apps/macos/spec.md` when UX or user-visible behavior changes.
+- Update `apps/macos/docs/architecture.md` when data flow, persistence, or implementation structure changes.
+- Update `apps/macos/README.md` when development or release workflow changes.
+- Update `apps/web/app/docs/content.ts` when docs navigation or summaries need to reflect new product docs.
+- When behavior is added through the CLI, update CLI help and architecture docs in the same change.
 
-## Working Rules
-- Always run lint and build before finalizing changes to the macos app.
-- Run `scripts/coverage.sh` after making changes. Exception: when changes are limited to `apps/web` only.
-- Whenever `scripts/coverage.sh` is run, always report the overall coverage percentage in the response.
-- When running `git commit` via Codex, allow at least a 10-minute command timeout so pre-commit lint/coverage checks are not interrupted; this is a safety ceiling, not an expected runtime.
-- Always consider adding or expanding tests to increase coverage before finalizing changes.
-- Whenever changes are made to the macOS app, keep `apps/macos/spec.md`, `apps/macos/docs/architecture.md`, `apps/macos/README.md`, and the nextjs project docs (`apps/web/app/docs/content.ts`) up to date in the same change.
-- Keep changes local-first and deterministic.
-- When adding behavior, update CLI help and architecture docs in the same change.
-- Database migration safety:
-  - Never bump SQLite `schemaVersion` for additive/compatible DB changes.
-  - Use non-destructive migrations (`CREATE TABLE IF NOT EXISTS`, `ALTER TABLE`, backfills) that preserve existing user data in `~/.muxy/muxy.db`.
-  - Any destructive migration/reset path that can remove existing projects/workspaces requires explicit user approval.
-- When fixing a bug, try to recreate and understand the bug first using the real system, mx cli, and database inspection on the dev computer. Write tests to catch the bug, then implement the fix. Run the tests and the real system check to confirm the fix before concluding whether the fix is sufficient.
-## Web Color Palette
-All web colors are defined as CSS custom properties in `apps/web/app/globals.css`.
+## Data and Migration Rules
+- Database path: `~/.muxy/muxy.db`.
+- Never bump SQLite `schemaVersion` for additive or compatible changes.
+- Use additive, non-destructive migrations that preserve existing data.
+- Any destructive migration or reset path that can remove existing projects or workspaces requires explicit user approval.
 
-### Semantic tokens (light / dark)
-| Token             | Light       | Dark        | Usage                        |
-|-------------------|-------------|-------------|------------------------------|
-| `--bg`            | `#f8f7f1`   | `#0f1517`   | Page background              |
-| `--bg-soft`       | `#f1efe6`   | `#172124`   | Secondary/gradient background|
-| `--surface`       | `#ffffff`   | `#1d2a2d`   | Cards, panels, overlays      |
-| `--ink`           | `#102028`   | `#eaf0ef`   | Primary text                 |
-| `--ink-soft`      | `#3a4d57`   | `#adc0c4`   | Secondary/muted text         |
-| `--line`          | `#d5d8d3`   | `#304346`   | Borders, dividers            |
-| `--accent`        | `#0f7a76`   | `#59dbcd`   | Interactive/brand accent     |
-| `--accent-strong` | `#0d5f5d`   | `#3dc6b8`   | CTAs, hover states           |
+## GUI Rules
+- UI should feel modern and compact.
+- Use icons for obvious actions such as add or remove.
+- Use text labels for actions that are not obvious.
+- Use icons instead of text for status where practical.
+- Show inline keyboard shortcuts for actions.
+- Respect system dark and light mode.
+- Use labeled inputs for configuration; do not require app-specific text formats.
 
-### Fixed role colors (unchanged across themes)
-| Color     | Hex       | Role                          |
-|-----------|-----------|-------------------------------|
-| Blue      | `#1f73b8` | Browser pane tint             |
-| Purple    | `#7354d8` | Editor pane tint              |
-| Green     | `#19825a` | Terminal pane tint             |
-| Rose      | `#ba436f` | Stop/destructive action, decorative gradient |
-| Amber     | `#a86b00` | Restart/warning action        |
-| Term text | `#98efc7` | Terminal body text            |
-| Term bg   | `#0f1820` | Terminal body background      |
-
-### Traffic-light dots
-| Dot    | Hex       |
-|--------|-----------|
-| Red    | `#ff6f5b` |
-| Yellow | `#f8c84f` / `#f0c14b` |
-| Green  | `#35cf7a` / `#39c97b` |
-
-### Typography
-| Token         | Stack                                                  |
-|---------------|--------------------------------------------------------|
-| `--font-sans` | Avenir Next, Trebuchet MS, Segoe UI, sans-serif        |
-| `--font-mono` | SFMono-Regular, Menlo, Consolas, monospace              |
-
-When adding new UI elements, always reference these tokens instead of hard-coding hex values.
-
-## Web instructions
-- `apps/web` must stay a fully static prerendered site (`next build` with export output).
-- Use Next.js App Router with TypeScript and Tailwind CSS.
+## Web Rules
+- `apps/web` must remain a fully static prerendered Next.js site.
+- Use the shared color and typography tokens in `apps/web/app/globals.css` instead of hard-coded values.
 - Keep marketing content in `apps/web/app/page.tsx` and docs content under `apps/web/app/docs`.
-- Prefer static/server-rendered content; avoid adding runtime API dependencies unless explicitly requested.
-- When changing `apps/web`, run `npm run build` from `apps/web` to verify output.
-- When changes are limited to `apps/web`, macOS Swift build/coverage checks are not required.
+- Prefer static or server-rendered content; do not add runtime API dependencies unless explicitly requested.
 
+## Swift Rules
+- Always mark `@Observable` classes with `@MainActor`.
+- Assume strict Swift concurrency.
+- Prefer Swift-native and modern Foundation APIs.
+- Do not use C-style number formatting in SwiftUI text.
+- Prefer static member lookup where possible.
+- Do not use old-style GCD like `DispatchQueue.main.async`.
+- Filter user-entered text with `localizedStandardContains()`.
+- Avoid force unwrap and force try unless failure is unrecoverable.
 
-## Swift instructions
-Always mark @Observable classes with @MainActor.
-Assume strict Swift concurrency rules are being applied.
-Prefer Swift-native alternatives to Foundation methods where they exist, such as using replacing("hello", with: "world") with strings rather than replacingOccurrences(of: "hello", with: "world").
-Prefer modern Foundation API, for example URL.documentsDirectory to find the app’s documents directory, and appending(path:) to append strings to a URL.
-Never use C-style number formatting such as Text(String(format: "%.2f", abs(myNumber))); always use Text(abs(change), format: .number.precision(.fractionLength(2))) instead.
-Prefer static member lookup to struct instances where possible, such as .circle rather than Circle(), and .borderedProminent rather than BorderedProminentButtonStyle().
-Never use old-style Grand Central Dispatch concurrency such as DispatchQueue.main.async(). If behavior like this is needed, always use modern Swift concurrency.
-Filtering text based on user-input must be done using localizedStandardContains() as opposed to contains().
-Avoid force unwraps and force try unless it is unrecoverable.
-
-
-## Project structure
-Use a consistent project structure, with folder layout determined by app features.
-Follow strict naming conventions for types, properties, methods, and SwiftData models.
-Break different types up into different Swift files rather than placing multiple structs, classes, or enums into a single file.
-Write unit tests for core application logic.
-Only write UI tests if unit tests are not possible.
-Add code comments and documentation comments as needed.
-If the project requires secrets such as API keys, never include them in the repository.
+## Project Structure Rules
+- Organize code by feature.
+- Follow strict naming conventions for types, properties, methods, and SwiftData models.
+- Keep types split into focused files instead of combining many unrelated types in one file.
+- Prefer unit tests for core logic; use UI tests only when unit tests are not possible.
+- Add comments only where they reduce real ambiguity.
+- Never commit secrets.

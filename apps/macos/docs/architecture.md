@@ -1,598 +1,135 @@
 # Architecture
 
-## Overview
-`muxy` is a macOS Swift app for stream-based workspace orchestration. A stream is a captured set of windows tied to a workspace. SQLite is the single source of truth for all data including global preferences (`editor`, `port_range`, iTerm focus pulse settings, GUI shortcuts).
+This document describes how Muxy is built: module boundaries, storage, runtime flows, and external integrations. User-visible behavior belongs in [spec.md](/Users/yogesh/projects/muxy/apps/macos/spec.md).
 
-Key invariants:
-- SQLite is the single source of truth for all model data and global preferences.
-- Global preferences (`editor`, `port_range`, `iterm_focus_pulse_color`, `iterm_focus_pulse_enabled`, GUI shortcut overrides) are stored in the SQLite `settings` table.
-- Workspace settings are stored in SQLite and seeded from project templates; per-workspace overrides are preserved.
-- SQLite stores runtime state; schema is versioned and migrated in place with additive/non-destructive changes (currently v6).
-- yabai is the source of truth for window IDs and generic cross-app window focus.
-- Stream capture must happen before a stream is shown or focused.
-- Avoid window-level automation outside yabai, except optional iTerm2 AppleScript integration for terminal-specific niceties such as focus pulse/background handling.
-- Local key monitors must not override standard text-edit shortcuts while an input has focus.
+## System Overview
+Muxy is a macOS Swift app and CLI built around a shared orchestration layer.
 
-Test execution:
-- Coverage runs execute Swift tests with `--parallel`.
-- Coverage runs auto-detect logical CPU count for `--num-workers`.
-- `MUXY_TEST_WORKERS` can override worker concurrency for local/CI stability.
-- `MUXY_TEST_SKIP_BUILD=1` enables faster repeated local coverage reruns when no rebuild is needed.
-- Orchestrator mock scripts cap configured test delays with `MOCK_TEST_DELAY_CAP_MS` (default `25`) to reduce artificial waiting.
+Core invariants:
+- SQLite is the single source of truth for persisted model data and global preferences.
+- yabai is the source of truth for window IDs and cross-app window focus.
+- Workspace settings are seeded from project templates and preserved as per-workspace overrides.
+- Schema changes must be additive and non-destructive.
+- GUI and CLI both call the same orchestration layer instead of re-implementing behavior independently.
 
 ## Module Map
+
 ```mermaid
 flowchart LR
-  cli["muxy (CLI)"] --> stream["streamctl"]
-  guiapp["MuxyApp (App entrypoint)"] --> gui["gui (AppKit UI)"]
+  cli["mx"] --> stream["streamctl"]
+  app["MuxyApp"] --> gui["gui"]
   gui --> stream
 
-  stream --> db["SQLite DB (data + config)"]
-  stream --> appctl["appctl (system adapters)"]
-  stream --> git["Git client"]
-  stream --> editor["Editor launcher"]
+  stream --> store["SQLite store"]
+  stream --> appctl["appctl adapters"]
+  stream --> git["Git helpers"]
 
   appctl --> yabai["yabai"]
-  appctl --> iterm["iTerm2 (AppleScript)"]
-  appctl --> chrome["Chrome (AppleScript)"]
+  appctl --> iterm["iTerm2 AppleScript"]
+  appctl --> chrome["Chrome AppleScript"]
 ```
 
-Module responsibilities:
-- `appctl`: Shell + AppleScript adapters for yabai, iTerm2, Chrome, and supporting process helpers.
-- `streamctl`: Orchestration, config normalization, named port allocation (via `PortAllocator` and `PortReserver`), workspace lifecycle, and persistence.
-- `gui`: AppKit UI library that calls into `streamctl`.
-- `muxy`: CLI entrypoint that calls into `streamctl`.
-- `MuxyApp`: GUI executable entrypoint that wires `NSApplication` to the `gui` library.
+## Module Responsibilities
+- `MuxyApp`: minimal app entry point that boots AppKit.
+- `gui`: AppKit UI layer that renders state and dispatches actions into `streamctl`.
+- `mx`: CLI entry point that exposes the same orchestrator capabilities.
+- `streamctl`: core orchestration, lifecycle, validation, persistence coordination, and environment building.
+- `appctl`: system adapters for shell commands, yabai, iTerm2, Chrome, and related OS integrations.
 
-Performance note:
-- `appctl.Shell.run` uses a low-overhead spawn path for non-capturing commands (for example `yabai window --focus`) to keep workspace focus latency down; `runAndCapture` still uses `Process` + pipes for commands that need stdout/stderr.
-- GUI row-click focus and `cmd+1`...`cmd+9` shortcut routing run in detached snapshot helpers that open a fresh store/orchestrator off the main actor, so the AppKit event/gesture handlers do not block while they resolve and focus the target window.
+## Persistence
 
-The `gui` target is the reusable UI library. `MuxyApp` is the minimal executable that boots AppKit and delegates to `gui`.
+### Database
+- Path: `~/.muxy/muxy.db`
+- SQLite stores projects, workspaces, runtime state, and global settings.
+- SQLite should run in WAL mode with a busy timeout so overlapping GUI, CLI, and background work does not produce avoidable lock failures.
 
-GUI interaction notes:
-- Right-pane forms are hosted in a scroll view so long forms do not clip at smaller window heights.
-- The "new workspace" affordance is shown in project UI only when the project is a git repository.
-- Project-row plus and project-detail "New Workspace" actions open the New Workspace form.
-- `cmd+n` opens the New Workspace form for the currently selected project/workspace.
-- When the New Workspace form is already open, `cmd+n` creates a workspace immediately with generated defaults.
-- The New Workspace form header includes a `cmd+n` quick-create hint.
-- Create actions in New Workspace (button and `cmd+n` quick-create) display a non-blocking progress overlay with phase text so users see immediate feedback while create/setup tasks run.
-- In git projects, New Workspace uses progressive disclosure: branch field first, then target/title/directory/tooltip after branch input is non-empty.
-- New Project also uses progressive disclosure: source selection first, then setup script/ports/processes/browser sessions/stop script after source input is present.
-- New Project create/delete actions display a non-blocking progress overlay with context text while background create/remove work runs.
-- New Project and New Workspace forms support keyboard shortcuts (`Return` for create, `Esc` for cancel); Create labels omit shortcut text while Cancel keeps `(Esc)` in the label.
-- Primary create/save actions use shared AppKit styling (single helper) with a darker accent background and white foreground text/icons for consistent contrast.
-- Branch and tooltip remain editable via inline labels in workspace detail, title remains editable in the workspace header, and all metadata remains editable via `mx workspace update`.
-- Workspace title remains in the top header (`project / workspace`) and enters edit mode on double-click.
-- Workspace detail renders inline metadata labels for branch and tooltip below the header actions; double-clicking a label enters edit mode and shows per-field Save/Cancel buttons.
-- Workspace detail header keeps Launch/Restart, Stop, and Activate/Deactivate actions right-aligned, and the app window includes a fixed full-width footer row showing effective shortcut hints for next/previous workspace, Settings, and tooltip toggle using current user overrides.
-- Protected `main`/`master` branch labels are rendered read-only in workspace detail and do not enter edit mode on double-click.
-- Inline metadata edit mode saves when pressing `Return`.
-- Inline metadata edit mode cancels without saving when pressing `Escape` or clicking outside the field controls.
-- Branch edits in workspace detail call git branch rename in the worktree (`git branch -m`) before persisting metadata; protected `main`/`master` branch renames are rejected in both GUI and CLI.
-- Newly created branches are based on the latest commit of the selected target branch.
-- If the requested branch exists only on remote, the orchestrator fetches it into `refs/remotes/origin/*` before creating the worktree from `origin/<branch>`.
-- If the requested branch exists locally, the local branch is used as-is (no implicit pull/rebase/merge in workspace creation).
-- Workspace rows use compact card styling with status + workspace title on top.
-- Left-pane workspace status indicator semantics:
-  - Gray: workspace not running.
-  - Green: running with no exited process rows and no failed status-check result rows.
-  - Red: running with at least one exited process row or at least one failed (`failed`) status-check result.
-- Project rows in the left pane show a folder icon next to the project name.
-- Git workspace rows include ahead/behind commit counts vs the workspace target branch (the branch it was created from), merge-conflict status, and relative last-modified time (from latest tracked-file mtime) with tracked modified-file count.
-- Workspace detail metadata shows the current branch and, when present and different, appends `forked from <target branch>`.
-- Window focus shortcuts in the GUI use `cmd+1` through `cmd+9`.
-- `cmd+1` through `cmd+9` are dispatched asynchronously from the local `NSEvent` monitor so the main key-event handler can return before Muxy hands focus to yabai/Chrome/iTerm.
-- When Muxy is focused, next/previous workspace shortcuts (`cmd+shift+]` / `cmd+shift+[`) change only sidebar selection and cycle across all sidebar-visible workspaces, including stopped workspaces.
-- When Muxy is not focused, the same next/previous shortcuts resolve the workspace owning the currently focused workspace window (or fall back to the active workspace) and call relative workspace-window focus.
-- Relative workspace-window focus remembers the last resolved target by stable window identity instead of transient row index, so reordered Run rows do not disturb the cycle path.
-- With `DEBUG=1`, the orchestrator logs full workspace-cycle timing to stderr, including target-list rebuild, current-target resolution, direct window focus, and stale-window repair decisions.
-- Global focus hotkey activation (`cmd+shift+=`) prioritizes immediate app fronting and defers selected-workspace detail refresh to the next main-actor turn.
-- Port definitions are editable via `PortEditor` in the project detail view, the add-project form, and workspace settings.
-- Status checks are configured inline under each process in the `ProcessEditor` rather than in a separate form section; the process name is implicit from the parent row.
-- Browser sessions are editable via `BrowserSessionEditor` (`name` + URL prefix rows) in project detail, add-project form, and workspace settings.
-- The run tab displays status check results as indented sub-rows under each process with colored dots (passed=green/failed=red) instead of inline badge text.
-- In the run-tab Windows list, browser rows render a two-part label: browser-session name first (when configured) plus the matched URL in secondary text. Session names are matched to live tab URLs using env-var-expanded session URL prefixes (e.g. `$PORT` → allocated port number); when a tab URL matches multiple configured session prefixes, the longest prefix wins so the most-specific session name is shown.
-- In the run-tab Windows list, browser and terminal rows are ordered deterministically so shortcut indices remain aligned with what the user sees.
-- Window cards in the Run tab and Dashboard are clickable: clicking a card calls `focusWorkspaceWindow` for that window, equivalent to the `CMD+N` keyboard shortcut.
-- Relative workspace-window focus prefers direct yabai window-ID matching for both browser and terminal rows, falling back only when a tracked mapping becomes stale.
-- Keyboard shortcut overrides for supported GUI actions are persisted in SQLite settings and editable in the GUI Settings view and CLI settings commands.
-- Tooltip overlay includes a footer hint showing the effective tooltip-toggle shortcut (`gui_tooltip_shortcut`, default `cmd+shift+i`) using the user override when configured.
-- The app provides a standard Edit menu with Copy (Cmd+C) and Select All (Cmd+A) for system clipboard support in read-only text views.
-- Launch performs initial sidebar data hydration (projects/workspaces/git activity) in a detached background task; the right pane shows a spinner + status message so first render stays responsive instead of blocking the main actor.
-- The left pane includes a **Dashboard** sidebar row pinned above the Projects section header.
-- The left pane also includes a compact utility row above Dashboard with the app icon on the left and Settings/Reload buttons on the right; the Projects header includes add-project plus a show/hide inactive-workspaces toggle (inactive workspaces are hidden by default on launch).
-  - Clicking the Dashboard row opens the dashboard detail in the right pane (same navigation model as selecting a project or workspace).
-  - The row shows a red count badge when there are attention items; the badge is hidden when the count is zero.
-  - The dashboard detail shows attention items: processes that have exited or have failing (`failed`) status checks across running workspaces, plus agent windows in `waiting`/`done` status even when their workspace is not currently running.
-  - Attention items are grouped by workspace (showing `project / workspace` as the group header).
-  - Items within each group are sorted by most recent event timestamp (exited-at for exited processes; most-recent failed check run-at for check failures), most recent first; groups are sorted by their most-recent item.
-  - Each attention entry uses the same `windowRow` / `statusCheckSubRow` UI elements as the Run tab.
-  - Keyboard shortcut badges are renumbered sequentially (`CMD+1`, `CMD+2`, …) across all items in the entire dashboard view (not per-workspace) to avoid duplicates.
-  - An empty-state view (`checkmark.circle.fill`) is shown when there are no dashboard attention items.
-  - The dashboard row appearance updates to reflect the selected state; selecting any project or workspace deselects the Dashboard row and restores normal workspace card styling.
-  - When the dashboard is open, all workspace cards in the left pane are rendered without selected styling (`outlineView.reloadData()` is called when entering dashboard mode to ensure this).
-  - `CMD+Shift+D` opens the dashboard from anywhere in the app; a `⌘⇧D` hint is shown inline on the dashboard row.
-  - `CMD+1`…`CMD+9` in the dashboard focus the corresponding attention-item window. Shortcut numbers are renumbered sequentially across all groups; a `dashboardWindowFocusMap` built at render time maps each number to `(workspaceID, 1-based window list index)` so `focusWorkspaceWindow` can be called with the correct workspace and window.
-- Global hotkeys are registered during initial app boot (before hydration completes) so first-use focus remains immediate while startup loading continues.
-- Periodic startup reconciliation (window refresh/process monitor/worktree discovery) requests sidebar reloads through the same detached snapshot path, preventing main-thread stalls while users switch workspaces.
+### Migration Rules
+- Migrations must preserve existing user data.
+- Additive schema changes should use `CREATE TABLE IF NOT EXISTS`, `ALTER TABLE`, and backfills.
+- Compatible changes must not require destructive resets.
 
 ## Data Model
-Global preferences (stored in SQLite `settings` table):
-- Keys: `app_editor` (optional), `app_port_range_start`, `app_port_range_end`, `iterm_focus_pulse_color`, `iterm_focus_pulse_enabled`.
-- Default port range: 20000–30000.
-- `iterm_focus_pulse_color`: RGB string `"r,g,b"` (0–255 per channel) used as the pulse color when an iTerm2 window is focused. Default: `"46,41,14"`. Editable via the GUI Settings view color well or `mx settings set --iterm-focus-pulse-color <r,g,b>`.
-- `iterm_focus_pulse_enabled`: `"1"` or `"0"` toggle for enabling/disabling pulse-on-focus behavior. Default: `"1"`.
-- When an iTerm2 terminal window is successfully focused, `Iterm2Adapter.pulseBackground` briefly sets the session's background color to the configured pulse color then restores it (via AppleScript `delay 0.3`), dispatched as a detached background task so it does not block the focus call.
-- The GUI Settings view and `mx settings set` write `editor`, `port_range`, and iTerm focus pulse settings.
-Project data (stored in SQLite):
-- Fields: `dir`, `setup_script`, `stop_script`, `ports` (named port definitions), `processes`, `status_checks`, `browser_sessions`.
-- Browser sessions include optional `name` and required URL-prefix matching at runtime.
-- Script timing:
-  - `setup_script` runs when a workspace is created or revived.
-  - GUI creates persist workspace rows first, set setup state to `pending`, then run setup in a detached task (`running` -> `succeeded`/`failed`) so workspace rows appear without waiting for setup completion.
-  - `stop_script` runs on stop/restart/archive stop phase after automatic process termination.
-- Process on-exit behavior:
-  - Each process has an `on_exit` setting with options: `none` (default), `restart`, `notify`.
-  - When a process exits, the orchestrator detects it during status polling and applies the configured behavior.
-  - `none`: Process exit is logged but no action is taken.
-  - `notify`: A macOS notification is shown when the process exits.
-  - `restart`: The orchestrator first terminates and waits for the tracked process PID (including runtime PID-file fallback), then restarts in the existing terminal window when safe; if shutdown does not complete, it falls back to a new terminal window.
-- New projects can be created from an existing directory or by cloning a repository into a bare repo at `/Users/<username>/muxy/repos/<project_name>`.
-- Removing a project clears muxy state. For git projects, muxy first removes managed worktrees with `git worktree remove --force`, then deletes related workspace directories under `/Users/<username>/muxy/workspaces`.
-- The project directory is deleted only for git projects located under `/Users/<username>/muxy/repos` (plus legacy `/Users/<username>/muxy/projects`) for app-managed clones.
 
-Workspace settings:
-- Each workspace snapshots project `stop_script`, `ports` (named port definitions), `processes`, `status_checks`, and `browser_sessions` at creation.
-- Snapshots are stored in the runtime DB alongside other workspace data.
-- Edits to a running workspace reconcile processes and browser sessions immediately.
-- Workspace default semantics are stored on `is_default`; workspace titles are stored in `workspaces.title` and can be updated without changing default status; sidebar visibility defaults are stored on `workspaces.is_active`.
+### Projects
+Projects persist:
+- source directory and git status
+- setup and stop scripts
+- port definitions
+- process templates
+- status-check templates
+- browser-session templates
 
-Workspace identification:
-- Workspaces are uniquely identified by their directory path (`dir` field).
-- CLI commands accept `--dir <path>` (defaults to current directory) to identify workspaces.
-- `mx workspace update [--dir <path>] [--title <title>] [--branch <branch>] [--directory-name <name>|--dirname <name>|--dir-name <name>] [--tooltip <text>|--clear-tooltip] [--active|--inactive]` updates workspace metadata and persisted sidebar visibility state (except protected `main`/`master` branch renames).
-- `mx workspace up [--dir <path>] [--force-restart] [--focus] [--tooltip [<text>]]` ensures a workspace is running.
-- Default `workspace up` behavior: launch in background when stopped; if runtime is already present, restart any exited processes in the background without touching running ones.
-- `workspace up --force-restart` behavior: if runtime is already present, run stop then full launch in background; if stopped, launch in background.
-- `workspace up --focus` brings the workspace to the foreground after launch/no-op/restart completes.
-- `workspace up --tooltip [<text>]` optionally updates tooltip text when provided and displays the tooltip overlay.
-- The global tooltip shortcut resolves focused workspace windows using tracked workspace windows first, then agent-window yabai IDs so terminal agent windows can still toggle tooltip overlay.
-- `mx workspace focus` focuses the workspace window set; `--window <index>` focuses a specific tracked window.
-- `mx workspace import [--dir <path>] [--title <title>] [--tooltip <text>]` registers existing git worktrees as Muxy workspaces by inferring project, branch, and title from the worktree path when a title is not provided.
-- `mx discover` automatically discovers and registers all untracked worktrees for registered projects.
-- Discovery-created workspaces run the same setup-script flow as any other new workspace.
-- Discovery validates candidate worktrees before import (`dir` exists and is a directory, path is a git worktree, and the git common-dir resolves to the same registered project root).
-- Discovery also archives non-default workspaces when their worktree is no longer valid and refreshes stored workspace branch names from current on-disk worktree metadata.
-- Worktree paths for workspaces deleted from Muxy are persisted in `ignored_worktrees` and skipped by auto-discovery until the user explicitly recreates/imports that workspace.
+### Workspaces
+Workspaces persist:
+- directory identity
+- title, tooltip, and branch metadata
+- default and archived flags
+- active or inactive sidebar visibility state
+- seeded per-workspace copies of launch-time settings
 
-Runtime database:
-- Path: `~/.muxy/muxy.db`.
-- Schema is versioned via a `schema_version` table and upgraded in place with additive migrations (no table drops). Currently at v6.
-- Additive migrations explicitly backfill status-check `on_fail` columns for legacy DBs (`project_status_checks`, `workspace_status_checks`) with default `none`.
-- SQLite connections enable `journal_mode=WAL`, `synchronous=NORMAL`, and a busy timeout to reduce transient lock errors when GUI/CLI background tasks overlap.
+### Runtime Records
+Runtime state persists separately from project and workspace templates:
+- allocated ports
+- running processes
+- status-check results
+- tracked windows
+- tracked agent windows
 
-```mermaid
-erDiagram
-  projects ||--o{ project_port_definitions : defines
-  projects ||--o{ project_processes : templates
-  projects ||--o{ project_status_checks : templates
-  projects ||--o{ project_browser_sessions : templates
-  projects ||--o{ workspaces : has
-  workspaces ||--o{ workspace_port_definitions : defines
-  workspaces ||--o{ workspace_ports : allocates
-  workspaces ||--o{ workspace_settings : config
-  workspaces ||--o{ workspace_processes : overrides
-  workspaces ||--o{ workspace_status_checks : overrides
-  workspaces ||--o{ workspace_browser_sessions : overrides
-  workspaces ||--o{ running_processes : runs
-  running_processes ||--o{ status_results : checks
-  workspaces ||--o{ windows : captures
+This separation lets template edits coexist with current runtime state and per-workspace overrides.
 
-  projects {
-    TEXT id PK
-    TEXT name
-    TEXT dir
-    INTEGER is_git
-    TEXT default_branch
-    TEXT setup_script
-    TEXT stop_script
-  }
+## Core Flows
 
-  project_port_definitions {
-    TEXT project_id
-    TEXT name
-    INTEGER order_index
-  }
+### Workspace Creation
+1. Resolve the target project and workspace identity.
+2. Create or import the workspace directory.
+3. Persist the workspace and seed per-workspace settings from project templates.
+4. Allocate named ports.
+5. Run setup logic.
 
-  project_processes {
-    TEXT id PK
-    TEXT project_id
-    TEXT name
-    TEXT command
-    TEXT on_exit
-    TEXT kind
-    INTEGER order_index
-  }
+### Workspace Launch
+1. Validate that the workspace is launchable.
+2. Build the workspace environment, including named port variables and workspace paths.
+3. Start tracked processes in dedicated terminal contexts.
+4. Open tracked browser sessions.
+5. Capture new windows through yabai and persist the mapping.
 
-  project_status_checks {
-    TEXT id PK
-    TEXT project_id
-    TEXT name
-    TEXT process
-    TEXT command
-    INTEGER interval
-    INTEGER timeout
-    TEXT on_fail
-    INTEGER order_index
-  }
+### Workspace Stop or Archive
+1. Stop tracked processes.
+2. Run the workspace stop script when appropriate.
+3. Close tracked dedicated windows safely.
+4. Clear runtime state.
+5. Release ports.
+6. Archive git worktrees when the action requires it.
 
-  project_browser_sessions {
-    TEXT id PK
-    TEXT project_id
-    TEXT name
-    TEXT url
-    INTEGER order_index
-  }
+### Discovery and Reconciliation
+- Background worktree discovery imports valid unmanaged worktrees for known projects.
+- Background reconciliation removes stale tracked windows and refreshes persisted workspace metadata from disk where needed.
+- These passes should not block the main UI thread.
 
-  workspaces {
-    TEXT id PK
-    TEXT project_id
-    TEXT title
-    TEXT name
-    TEXT dir
-    TEXT dirname
-    TEXT branch
-    INTEGER is_default
-    INTEGER is_archived
-    INTEGER is_running
-    TEXT last_launched_at
-  }
+## Environment and Process Model
+- Named port definitions are allocated per workspace and exposed as environment variables.
+- Workspace processes also receive stable environment variables such as project and workspace directories.
+- Setup scripts, stop scripts, process commands, and status-check commands all execute against the workspace-specific environment.
 
-  workspace_port_definitions {
-    TEXT id PK
-    TEXT workspace_id
-    TEXT name
-    INTEGER order_index
-  }
+## Window and Focus Architecture
+- yabai provides stable window identity and cross-app focusing.
+- iTerm2 and Chrome AppleScript integrations add app-specific behavior on top of yabai, such as selecting the intended terminal session or browser target.
+- Tracked windows are persisted so Muxy can refocus or clean up only the windows it owns.
+- Reconciliation is required because window state can drift outside the app.
 
-  workspace_ports {
-    TEXT workspace_id PK
-    INTEGER port_index PK
-    TEXT port_name
-    INTEGER port_number
-  }
+## Agent Integration
+- Agent events are explicit CLI inputs that attach status to tracked workspace agent windows.
+- Agent windows are stored separately from regular process windows because they carry provider and lifecycle metadata.
+- Dashboard attention state is derived from runtime records rather than inferred from UI state.
 
-  workspace_settings {
-    TEXT workspace_id PK
-    TEXT updated_at
-    TEXT stop_script
-    TEXT setup_status
-    TEXT setup_error
-    TEXT setup_started_at
-    TEXT setup_finished_at
-  }
-
-  workspace_processes {
-    TEXT id PK
-    TEXT workspace_id
-    TEXT name
-    TEXT command
-    TEXT on_exit
-    INTEGER order_index
-  }
-
-  workspace_status_checks {
-    TEXT id PK
-    TEXT workspace_id
-    TEXT name
-    TEXT process
-    TEXT command
-    INTEGER interval
-    INTEGER timeout
-    TEXT on_fail
-    INTEGER order_index
-  }
-
-  workspace_browser_sessions {
-    TEXT id PK
-    TEXT workspace_id
-    TEXT name
-    TEXT url
-    TEXT extracted_target_url
-    INTEGER extracted_window_id
-    INTEGER extracted_window_valid
-    INTEGER order_index
-  }
-
-  running_processes {
-    TEXT id PK
-    TEXT workspace_id
-    TEXT template_name
-    TEXT command
-    TEXT terminal_app
-    INTEGER window_id
-    TEXT iterm_session_id
-    INTEGER iterm_tab_index
-    TEXT tmux_window_id
-    INTEGER pid
-    TEXT status
-    TEXT log_path
-    TEXT last_output_at
-    TEXT started_at
-    TEXT exited_at
-  }
-
-  status_results {
-    TEXT process_id PK
-    TEXT check_name PK
-    TEXT status
-    TEXT message
-    TEXT last_run_at
-  }
-
-  windows {
-    TEXT id PK
-    TEXT workspace_id
-    TEXT app
-    TEXT title
-    TEXT target_url
-    INTEGER window_id
-    TEXT iterm_session_id
-    INTEGER iterm_tab_index
-    TEXT tmux_window_id
-    TEXT role
-    INTEGER order_index
-    TEXT last_seen_at
-  }
-
-  settings {
-    TEXT key PK
-    TEXT value
-  }
-
-  agent_windows {
-    TEXT id PK
-    TEXT workspace_id
-    TEXT provider
-    TEXT label
-    TEXT iterm_session_id
-    TEXT tmux_window_id
-    TEXT codex_thread_id
-    INTEGER window_id
-    TEXT status
-    TEXT created_at
-    TEXT updated_at
-  }
-
-  schema_version {
-    INTEGER version
-  }
-```
-
-## Workspace Lifecycle
-Create and prepare a workspace:
-```mermaid
-flowchart TD
-  start["Create workspace"] --> git{"Project is git repo?"}
-  git -->|"yes"| dirname["Resolve dirname (override or auto-generated)"]
-  dirname --> worktree["Create or reuse worktree"]
-  git -->|"no"| dir["Use project dir"]
-  worktree --> persist["Persist workspace + seeded settings"]
-  dir --> persist
-  persist --> ports["Allocate named ports (PortReserver)"]
-  ports --> setup["Run setup_script (sync or deferred GUI task)"]
-```
-
-Port allocation details:
-- `PortAllocator.allocatePorts` accepts `definitions: [PortDefinition]` (named port definitions from the project or workspace) instead of a fixed count.
-- Ports are allocated at workspace creation and persisted in the `workspace_ports` table; they are available immediately (including during the setup script).
-- `PortReserver` (singleton) re-reserves allocated ports via OS sockets on app launch so they cannot be claimed by other processes between allocation and use.
-- Ports are released when a workspace is archived.
-- Port definitions are configured at the project level in SQLite (stored in `project_port_definitions`) and inherited by workspaces; workspaces can override definitions.
-- Named ports appear as env vars in setup scripts, stop scripts, process commands, and status check commands (e.g. `$FRONTEND_PORT`, `$API_PORT`).
-- `buildWorkspaceEnv` uses named port keys from definitions instead of anonymous `PORT0`, `PORT1`, etc.
-- `buildWorkspaceEnv` sets `MUXY_WORKSPACE_DIR` (workspace directory) and `MUXY_PROJECT_DIR` (project directory) for every workspace process.
-
-Launch and capture windows:
-```mermaid
-flowchart TD
-  launch["Launch workspace"] --> processes["Start processes in dedicated iTerm windows"]
-  processes --> browser["Open browser sessions in dedicated Chrome windows"]
-  browser --> capture["Capture window IDs via yabai"]
-  capture --> store["Store windows in DB"]
-```
-
-Stop or archive:
-- Stop: signal each tracked process group (`SIGINT` then `SIGTERM`), then run workspace `stop_script` (if set), then close tracked windows and clear runtime process state.
-- If the workspace directory is missing at stop time, stop still succeeds, runtime/window state is cleaned up, and the stop script is skipped (GUI/CLI show an informational notice).
-- Archive: reuse stop flow, run `git worktree remove --force` for git projects, release ports.
-- If the git worktree directory is already missing, archive still succeeds and workspace metadata is archived.
-- Archive never deletes the project directory for non-git projects.
-- Browser safety invariant: stop/restart/settings reconciliation closes only tracked dedicated Chrome windows, never unrelated Chrome windows.
-
-Run/recovery semantics:
-- `launchWorkspace` is only for stopped workspaces. If `is_running` is set or runtime indicators already exist (`running_processes`/`windows` rows), launch fails with "use restart".
-- `launchProcesses` opens one dedicated iTerm2 window per tracked process and persists the captured yabai window ID for direct focus later.
-- Launch waits for setup completion when setup state is `pending`/`running`; if setup state is `failed`, launch fails with the setup error message.
-- `restartWorkspace` is the explicit recovery path and always performs stop then launch for the same workspace.
-- `upWorkspace` is idempotent "ensure running": launch when stopped; if runtime is already present, restart any exited processes by default, or run full stop+launch when `restartIfRunning` is true.
-- Workspace lifecycle actions are guarded by a per-workspace in-flight lock so overlapping launch/stop/restart/archive actions cannot run concurrently for the same workspace.
-- GUI run controls are state-aware: show `Launch` when stopped and `Restart` when running.
-- AppKit launch/restart/stop/archive button handlers dispatch lifecycle work in detached background tasks (fresh orchestrator/store instances) so long-running automation does not block the UI event loop.
-- Archive uses optimistic UI removal in AppKit: once confirmed, the workspace row is removed from in-memory sidebar state immediately and a detached archive task reconciles persisted state; failures trigger a full sidebar reload to restore visibility.
-- AppKit shows a non-blocking progress overlay when archive starts so users see archive state while stop/worktree cleanup runs.
-- AppKit periodic process monitoring also runs in detached background tasks and now executes interval-based status checks for running workspaces, persisting fresh `status_results` and triggering `on_fail` actions (including restart) without requiring the run tab to be rendered.
-- Add-workspace (`cmd+n`) UX uses local branch refs and cached workspace names for immediate form display and quick-create defaults; non-blocking branch-option refresh runs in a detached task, and branch-first progressive disclosure keeps initial render minimal.
-
-Degraded runtime edge cases and handling:
-- `is_running` can drift from real OS state because users can close windows/processes manually.
-- Restart is the user-visible "bring everything back" action for partial or stale runtime state.
-- Browser session launch and focus are driven by dedicated Chrome windows keyed by tracked yabai window ID. URL metadata is still stored for labeling and stale-window recovery, but normal focus no longer scans or disambiguates tabs.
-- On launch/restart, muxy opens each missing browser session in its own dedicated Chrome window and captures that window's yabai ID.
-- Browser focus attempts direct `yabai window --focus <id>` on the tracked dedicated window; failed focus attempts mark the mapping stale and recovery is left to later refresh/relaunch flows.
-- Browser rows are ordered deterministically by configured browser-session order and then tracked window ID so `cmd+<n>` shortcut indices stay aligned with the on-screen list.
-- Terminal focus uses direct `yabai` window focus on the tracked dedicated iTerm window for processes, agent windows, and manual terminals.
-- GUI "Open Terminal" always opens a new dedicated iTerm window for that workspace and tracks its yabai window ID.
-- Workspace stop/reconcile closes tracked dedicated process, agent, and manual terminal windows and clears their runtime rows.
-- Optional diagnostics: `DEBUG=1` logs full workspace-cycle timing, including target rebuild/current-target resolution, direct window focus timing, stale-window repair, and shortcut/row-click dispatch timing.
-- Performance benchmarking now centers on direct window-ID routing and `yabai` focus latency rather than tab/tmux disambiguation paths.
-- Terminal capture relies on tracked dedicated yabai window IDs rather than shared-session or tmux sub-identities.
-- Editor launch is user-invoked via GUI action or global shortcut.
-- Window IDs can become stale across app/desktop changes; stale rows are pruned during reconciliation paths.
-- Background refresh prunes tracked process, agent, and manual terminal rows whenever their tracked yabai window disappears so stale runtime does not linger in the UI.
-- The GUI starts a periodic detached utility-priority refresh loop (`refreshAllWorkspaceWindows`) so non-archived workspace window rows are reconciled in the background on a fixed interval (`PollingConstants.workspaceWindowRefreshInterval`).
-- Each background refresh pass uses a fresh orchestrator/store instance for thread-safe off-main reconciliation and keeps AppKit interaction responsive while refresh is in-flight.
-- UI data is reloaded after successful periodic refresh passes only when the user is not actively editing text fields (to avoid interrupting unsaved form edits).
-- The GUI also runs a periodic main-actor sidebar metadata refresh loop using the same detached snapshot loader as the manual Reload button, so external CLI DB edits (for example project/workspace title changes) appear without requiring a click.
-- The GUI also runs periodic worktree discovery (`scanAndCreateWorkspacesFromWorktrees`) in a detached utility task using `PollingConstants.worktreeDiscoveryInterval`; newly discovered worktrees are registered as workspaces and trigger project setup scripts.
-- `refreshAllWorkspaceWindows` returns a `RefreshResult` containing `didMutateDB` (whether windows were pruned or workspace running flags changed) and `trackedWindowCounts` (per-workspace tracked window counts including live browser scan results); the GUI compares both against the previous snapshot and skips `reloadData()` entirely when nothing changed, avoiding unnecessary UI rebuilds.
-
-Agent window lifecycle:
-- Coding agents (Claude Code CLI in iTerm2, Codex CLI in iTerm2) register themselves with Muxy by calling `mx agent event --type init|start|waiting|done [--dir <path>] [--provider iterm2]`. Agent event commands are always explicit; `mx workspace import` and `mx workspace up` do not automatically fire any agent events.
-- Provider is auto-detected from env vars only for supported terminal hosts: Codex CLI in iTerm2 (`CODEX_THREAD_ID` + `__CFBundleIdentifier=com.googlecode.iterm2`) and Claude Code CLI in iTerm2 (`CLAUDE_CODE_ENTRYPOINT` + `__CFBundleIdentifier=com.googlecode.iterm2`) → iTerm2. Coding-agent env markers from other terminal apps are ignored.
-- `ITERM_SESSION_ID` may be captured as metadata for a dedicated terminal window, and the tracked yabai window ID is the primary focus identity. `CODEX_THREAD_ID` may also be recorded as agent metadata for terminal Codex sessions.
-- Agent records are stored in `agent_windows` table with one record per dedicated terminal window.
-- Status transitions: `idle` → `spinning` (active) → `waiting` (human review requested, red dot) → `done` (finished, green dot).
-- Agent windows appear in the Run tab Windows section with a spinner (spinning), red dot (waiting), or green dot (done) status indicator.
-- Agent row labels are environment-specific (`Codex CLI`, `Claude Code CLI`) so focus routes match the terminal session type.
-- Waiting agent windows trigger the workspace indicator to show `runningUnhealthy` (orange dot) in the sidebar.
-- Agent windows surfaced as Dashboard attention items when status is `waiting` or `done`.
-- Clicking an agent window row focuses the agent's tracked dedicated terminal window.
-- On workspace stop/restart, tracked dedicated process, agent, and manual terminal windows are closed so no runtime window survives into the next run.
-- Stale agent rows are pruned during the periodic process monitoring cycle when their tracked yabai window is no longer live.
-- The CLI fires a `muxy.ipc.agent-hook-fired` distributed notification after each hook call; the GUI observes this to refresh the Dashboard badge and current selection without a full reload.
-
-## Window Capture and Focus
-```mermaid
-sequenceDiagram
-  actor User
-  participant GUI
-  participant Orchestrator
-  participant Iterm2
-  participant Chrome
-  participant Yabai
-  participant DB
-
-  User->>GUI: Launch workspace
-  GUI->>Orchestrator: launchWorkspace(...)
-  Orchestrator->>Iterm2: open terminals (AppleScript)
-  Orchestrator->>Chrome: open sessions (AppleScript)
-  Orchestrator->>Yabai: query windows
-  Orchestrator->>DB: store window IDs
-
-  User->>GUI: Focus window (hotkey)
-  GUI->>Orchestrator: focusWorkspaceWindow(...)
-  Orchestrator->>Chrome: focus tab by target_url (browser entries)
-  Orchestrator->>Yabai: focusWindow(id) fallback
-```
-
-Terminal windows opened from the GUI (Open Terminal) are captured via yabai and stored in the
-windows table for workspace window management.
-
-## Polling Constants
-All periodic polling intervals are centralized in `PollingConstants.swift` for easy configuration:
-
-- **Browser window scan debounce**: `browserWindowScanDebounceInterval` = 10 seconds
-  - Controls how frequently Chrome tab scans are performed per workspace/browser-session-prefix combination
-  - Used to debounce expensive Chrome AppleScript queries during window navigation and focus operations
-
-- **Workspace window refresh interval**: `workspaceWindowRefreshInterval` = 10 seconds
-  - Controls how frequently the GUI background reconciliation pass refreshes stored workspace windows
-
-- **Worktree discovery interval**: `worktreeDiscoveryInterval` = 30 seconds
-  - Controls how frequently the GUI background discovery pass scans git projects for new unmanaged worktrees
-  - New worktrees discovered in this pass are registered as workspaces and run project setup scripts
-
-- **Process monitor interval**: `processStatusCheckInterval` = 10 seconds
-  - Controls how frequently the periodic background process monitor checks process state and due status checks
-
-- **Sidebar metadata refresh interval**: `sidebarMetadataRefreshInterval` = 30 seconds
-  - Controls how frequently the GUI performs a full sidebar snapshot reload (equivalent data path to the Reload button) to pick up external CLI metadata edits when no other poller-triggered reload occurs
-
-- **Status check default interval**: `statusCheckDefaultInterval` = 60 seconds
-  - Default interval between status check executions for process health monitoring
-  - User-configurable per status check in the GUI
-
-- **Status check default timeout**: `statusCheckDefaultTimeout` = 5 seconds
-  - Default timeout for status check command execution
-  - User-configurable per status check in the GUI
-
-These constants are referenced throughout the codebase to ensure consistent polling behavior.
-
-## Versioning and Auto-Update
-- `AppVersion.current` in `streamctl/AppVersion.swift` is the single source of truth for the version string.
-- `Info.plist` contains `CFBundleShortVersionString`, `CFBundleVersion`, and `CFBundleIdentifier`.
-- `UpdateChecker` (actor in `gui`) queries `https://api.github.com/repos/yogesh-dhande/agentmux/releases/latest` for new versions.
-  - Checks on app launch and every 4 hours.
-  - Caches results to avoid redundant API calls.
-  - Compares semver tag against `AppVersion.current`.
-- `AppUpdater` handles download, extraction, binary replacement, and relaunch.
-  - Downloads the `.zip` release asset from GitHub.
-  - Extracts via `ditto`, replaces the running executable, and relaunches.
-  - Creates a backup before replacement; restores on failure.
-- The app menu includes "Check for Updates..." which shows "Up to Date" or "Update Available: vX.Y.Z" based on the last check.
-- CLI: `mx --version` prints the current version.
+## Performance Principles
+- Focus and capture paths should avoid unnecessary blocking work.
+- Hot paths that do not need stdout or stderr should use lightweight process spawning.
+- Long-running GUI actions should execute off the main thread and reconcile state back into the UI afterward.
 
 ## External Dependencies
 - macOS 14+
-- `yabai` for window IDs, focus, and display/space metadata
-- iTerm2 for terminal processes
-- Google Chrome for browser sessions
-- SQLite3 for runtime persistence and global preferences
-
-### yabai Dependency Analysis
-
-Muxy uses 7 distinct yabai commands across 35+ call sites via `YabaiAdapter`:
-
-| Command | Purpose | Call Sites |
-|---------|---------|------------|
-| `query --windows` | List all windows (snapshot-diff capture) | ~13 |
-| `query --windows --window` | Get focused window | ~5 |
-| `query --windows --space <N>` | List windows in a space | ~1 |
-| `query --spaces` | List spaces across displays | 1 |
-| `query --displays` | List all displays | 1 |
-| `window --focus <ID>` | Focus a window by ID | 2 |
-| `window --close <ID>` | Close a window by ID | 1 |
-
-**Core usage patterns:**
-1. **Snapshot-diff capture** — list windows before an action, list after, diff to find newly created windows. Used for terminal, editor, and browser window capture during launch.
-2. **Window focus fallback** — after AppleScript-based browser focus attempts, yabai provides reliable cross-app window-level focus.
-3. **Window cleanup** — close tracked non-browser windows on workspace stop.
-4. **Space/display enumeration** — populate configuration UI dropdowns.
-
-**Replacement feasibility (tested against real system):**
-
-`CGWindowListCopyWindowInfo` returns the same integer window IDs as yabai (`kCGWindowNumber` == yabai `id`), so the snapshot-diff pattern could use CGWindowList for discovery. However, CGWindowList lacks `title`, `space`, `display`, `is-visible`, `is-sticky`, and `is-native-fullscreen` fields that yabai provides.
-
-| Feature | macOS API Alternative | Viable? |
-|---------|----------------------|---------|
-| Window discovery/listing | `CGWindowListCopyWindowInfo` | Partial — IDs match, but no title/space/display |
-| App-level focus | `NSRunningApplication.activate()` | Yes — but focuses app, not specific window |
-| Window-level focus | Accessibility API (AXUIElement raise) | Unreliable across apps; yabai is the only reliable option |
-| Space assignment | None (private SPI only) | No public API |
-| Display assignment | Geometry matching via `kCGWindowBounds` | Fragile workaround |
-| Window close | AX close button / AppleScript | Feasible but more complex |
-| Window title | AX `kAXTitleAttribute` | Requires Accessibility permission per app |
-
-**Conclusion:** yabai cannot be fully replaced with public macOS APIs. The critical gaps are window-level focus (vs app-level), space index assignment, and reliable cross-app window title access. The query side could be partially replaced by CGWindowList for ID-based snapshot-diff, but mutations (`--focus`, `--close`) and space/display metadata have no equivalent.
-
-## Onboarding & Prerequisites
-
-Muxy depends on iTerm2 and yabai being installed and configured before workspaces can be created or launched. On every launch, the app runs four prerequisite checks in order:
-
-| # | Check | Passes when |
-|---|---|---|
-| 1 | iTerm2 installed | `Iterm2Adapter.isAvailable()` returns `true` |
-| 2 | yabai installed | `yabai --version` exits 0 |
-| 3 | yabai service running | `yabai -m query --spaces` returns a JSON array |
-| 4 | yabai Accessibility | `yabai -m query --windows` returns a non-empty array (Finder always has windows when AX is granted) |
-
-If all checks pass, the main split-view UI is shown immediately. If any check fails, a step-by-step setup view is shown in the same main window (no second window) starting at the first failing step. The setup view polls every 2 seconds and also re-checks immediately when the app becomes active (critical for the Accessibility step after the user grants permission in System Settings). Once all steps pass the main UI loads automatically.
-
-### Key types
-
-- `SetupChecker` (`appctl`): Pure logic class that runs individual or all checks. Injectable `Iterm2Adapter` and `TmuxAdapter` enable unit testing without real apps.
-- `SetupManager` (`gui`): Builds the setup NSView, drives polling, and calls `onComplete` when all steps pass. Installed as `window.contentView` — no second window.
-- `AppKitController`: `buildShellWindow()` creates and shows the NSWindow on launch; `buildMainWindowContent()` populates it with the split-view layout (called either directly or via `SetupManager.onComplete`).
+- yabai for window identity and focus
+- iTerm2 for terminal process hosting
+- Google Chrome for browser-session automation
+- SQLite for local persistence

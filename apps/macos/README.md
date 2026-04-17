@@ -1,270 +1,55 @@
-# Muxy
+# Muxy macOS App
 
-`mx` is a local macOS control plane for workspace orchestration.
-It manages projects, workspaces, processes, and window sets so you can move between coding contexts quickly.
+`Muxy` is the macOS app and `mx` is the companion CLI for managing projects, workspaces, windows, and agent activity.
 
-## Docs
-- Architecture: `docs/architecture.md`
-- Specification: `spec.md`
+## Read This With
+- [spec.md](/Users/yogesh/projects/muxy/apps/macos/spec.md): UX and product behavior
+- [architecture.md](/Users/yogesh/projects/muxy/apps/macos/docs/architecture.md): modules, data model, and runtime structure
+- [../../README.md](/Users/yogesh/projects/muxy/README.md): repo-wide development and deploy workflows
+- `apps/web/app/docs`: user-facing docs and CLI reference
 
 ## Requirements
 - macOS 14+
-- `yabai` installed and running (window IDs and focus)
-- iTerm2 (terminal windows)
-- Google Chrome (browser sessions)
-- Accessibility permissions granted for window focus and control
+- `yabai`
+- iTerm2
+- Google Chrome
+- Accessibility permission for the app stack that needs to focus windows
 
-> **In-app onboarding:** On first launch (or any launch where a prerequisite is missing), Muxy shows a step-by-step setup guide directly in the main window. It checks for iTerm2, yabai installation, yabai service, and Accessibility permission in order — auto-advancing as each step passes. No manual setup steps are required beyond following the in-app prompts.
+The app handles missing prerequisites through its in-app setup flow. The exact onboarding behavior is specified in `spec.md`.
 
-## Configuration
-- DB: `~/.muxy/muxy.db` — all model data and global preferences (projects, templates, workspaces, ports, windows, settings, editor, port range)
-- Managed git repos (from `mx project add --git-url`): `/Users/<username>/muxy/repos/<project_name>` (bare repo)
-- Git worktrees: `/Users/<username>/muxy/workspaces/<projectname>/<dirname>` (dirname defaults to a unique food name and can be overridden on workspace creation)
-- GUI shortcuts (when focused): `cmd+1` through `cmd+9` focus workspace windows
-  - Window-focus shortcuts dispatch into a detached snapshot/orchestrator path after the local key monitor returns, so row resolution and focus work do not block the main UI thread during app-to-window activation.
+## Local Development
+Run from the repository root:
 
-Global preferences are stored in the DB and configurable via `mx settings set` or the GUI Settings (⌘,):
-- `editor`: preferred editor used by GUI "Open Editor" actions (`none`, `vscode`, `cursor`, `windsurf`, `vim`)
-- `port_range`: range for workspace port allocation (default `20000-30000`)
-- `iterm_focus_pulse_color`: RGB background pulse color for iTerm2 window focus (format `r,g,b`, values 0–255, default `46,41,14`). Configurable in GUI Settings via a color well or via `mx settings set --iterm-focus-pulse-color <r,g,b>`.
-- `iterm_focus_pulse_enabled`: toggle the iTerm2 focus pulse effect (`1` enabled, `0` disabled; default `1`) via `mx settings set --iterm-focus-pulse-enabled <0|1>`.
-
-```
-mx settings set --editor vscode
-mx settings set --port-range 20000-30000
-mx settings get --editor
-mx settings get --port-range
-```
-
-> **Note:** If you have an existing `~/.muxy/config.yaml`, its `editor`, `port_range`, and any legacy `projects:` entries are automatically migrated to the database on first launch. The YAML file is then ignored and can be deleted.
-
-SQLite startup migrations are additive and preserve existing data, including backfilling legacy status-check `on_fail` columns with default `none` when missing.
-
-Projects and all project templates (processes, status checks, browser sessions, port definitions, setup/stop scripts) are stored in the SQLite database. SQLite connections use WAL mode and a busy timeout to reduce transient `database is locked` failures during concurrent background actions. Use `mx project add` or the GUI to add projects.
-Browser sessions support optional names (same pattern as process names) so workspace window rows can show stable labels instead of only raw URLs.
-Non-capturing system commands on the hot path (for example `yabai` window focus) use a low-overhead spawn path to reduce focus latency during workspace switching.
-
-Port definitions are configured at the project level and inherited by workspaces. Each named port (e.g. `FRONTEND_PORT`) is allocated a real port number from the configured `port_range`, reserved via OS sockets so no other process can claim it. Named port env vars are available in setup scripts, stop scripts, process commands, and status check commands. Workspaces can override port definitions in their settings.
-
-Workspaces snapshot project port definitions, processes, status checks, and browser sessions at creation time into the runtime DB.
-Updates to workspace settings apply immediately when the workspace is running (new processes start, changed commands restart, and new browser sessions open).
-Workspace settings include the workspace title and tooltip. Workspace labels are stored in `workspaces.title`, default-workspace behavior is determined by `is_default` (not by the title value), and sidebar visibility defaults are stored via workspace active/inactive state (`workspaces.is_active`).
-`setup_script` runs when a workspace is created or revived. In the GUI create flow, workspace records are persisted first and setup continues in the background so new workspaces appear faster; launch waits for setup completion and surfaces setup failures. `stop_script` runs on stop/restart/archive after automatic process termination. If the workspace directory is missing, muxy still completes stop/archive cleanup and skips the stop script.
-Muxy periodically discovers and reconciles git worktrees for existing projects. Discovery auto-registers untracked valid worktrees (running the same `setup_script` flow for each new workspace), archives non-default workspaces whose worktrees are no longer valid, refreshes stored workspace branch names from on-disk worktrees, and will not auto-recreate workspaces you explicitly deleted from Muxy.
-Focused window routing is optimized around dedicated tracked Chrome and iTerm windows so `cmd+1...9`, row clicks, and relative window cycling can resolve directly by yabai window ID.
-
-## GUI
-- Two panes: projects/workspaces on the left, details on the right.
-- On startup, the details pane shows a loading message and spinner while initial projects/workspaces are loaded in the background.
-- Global hotkeys are available immediately at startup (before data hydration completes) so focus/show actions are not delayed.
-- Startup background reconciliation updates the sidebar via async snapshots to keep workspace switching responsive while launch tasks are still running.
-- Left sidebar includes a compact top utility row (Muxy app icon + settings/reload actions) above the Dashboard row; the Projects header includes add-project plus a toggle to show/hide inactive workspaces (inactive workspaces are hidden by default on launch).
-- No dialogs for add/edit; all forms are in the right pane.
-- Right-pane forms are scrollable to avoid clipping on smaller window heights.
-- New workspace `+` actions open the New Workspace form for git projects.
-- `cmd+n` opens the New Workspace form for the currently selected project/workspace.
-- On the New Workspace form, `cmd+n` quick-creates using generated defaults (suggested title/branch, auto-generated directory, default target branch).
-- The New Workspace header shows a `cmd+n` hint for quick-create with generated names.
-- Triggering create from the button or `cmd+n` quick-create shows an in-app progress overlay with phase text so users get feedback during workspace create/setup.
-- `cmd+n` form-open and quick-create paths are optimized to avoid blocking remote branch lookups; branch options are loaded from local refs first and refreshed asynchronously, and suggested workspace names come from cached local workspace state.
-- For git projects, the New Workspace form starts with only the branch input visible; target branch/title/directory/tooltip are progressively revealed after branch typing begins.
-- New Project starts with only source selection (directory picker or git URL); setup script, ports, processes, browser sessions, and stop script are shown after source input is provided.
-- Project create/delete actions show an in-app progress overlay with context text while registration/clone/removal work runs.
-- New Project and New Workspace forms support keyboard shortcuts (`Return` to create, `Esc` to cancel); Create labels omit shortcut text while Cancel keeps `(Esc)` in the label.
-- Primary create/save actions use a shared high-contrast style (darker accent background with white text/icons) for consistent readability.
-- Branch and tooltip can be edited from inline labels in workspace detail, title can be edited in the workspace header, and all metadata can be edited via `mx workspace update`.
-- Workspace title stays in the top header (`project / workspace`) and is editable there via double-click.
-- Workspace detail also shows inline branch and tooltip labels above Launch/Stop actions; double-click a label to edit and reveal small Save/Cancel controls.
-- Protected `main`/`master` branch labels are read-only in workspace detail and do not enter edit mode on double-click.
-- While editing inline metadata, pressing `Return` saves.
-- While editing inline metadata, pressing `Escape` or clicking outside the inline controls cancels without saving.
-- Changing branch name from the inline editor renames the underlying git worktree branch (not metadata-only), except protected `main`/`master` branches which cannot be renamed.
-- New branches are created from the latest commit on the selected target branch.
-- If the selected branch exists only on remote, muxy fetches it first and then creates the worktree from `origin/<branch>`.
-- If the branch exists locally, muxy uses the local branch as-is (no implicit pull/rebase/merge during workspace creation).
-- The left panel shows a **Dashboard** row pinned above the Projects section.
-  - Clicking it opens the dashboard detail in the right pane, showing attention items (exited processes and failing status checks) across running workspaces, plus coding-agent items in `waiting`/`done` status even if their workspace is not currently running.
-  - Items are grouped by workspace (`project / workspace` header), sorted most-recent-first by event timestamp.
-  - Uses the same window-row and status-check-sub-row UI as the Run tab; keyboard shortcut badges are renumbered sequentially (CMD+1, CMD+2…) across all items to avoid duplicates.
-  - A red count badge appears on the Dashboard row when there are attention items; hidden when all workspaces are healthy.
-  - An empty-state message is shown in the detail when there is nothing requiring attention.
-- Project rows in the left pane show a folder icon next to the project name.
-- Workspace rows in the left pane use compact cards with workspace status + name.
-- Left-pane workspace status indicator turns red when a running workspace has any exited process or failed status check result; healthy running workspaces remain green.
-- Git workspace rows also show ahead/behind commit counts relative to the workspace target branch (the branch the workspace branch was created from), merge-conflict status, and relative last-modified time (latest tracked-file mtime) with tracked modified-file count.
-- Workspace detail branch metadata shows `current-branch (forked from target-branch)` when a target branch exists and differs.
-- Workspace view includes:
-  - Launch/Restart/Stop/Activate-or-Deactivate/Archive buttons
-  - Launch/Restart/Stop/Archive actions run in background tasks so the UI stays responsive during long-running workspace automation
-  - Archive is optimistic in the GUI: after confirmation, the workspace row disappears immediately while stop/worktree cleanup finishes in the background
-  - Archive also shows an in-app progress overlay with status text while cleanup is in flight
-  - Open Editor/Terminal/Finder buttons
-  - Workspace window records are refreshed periodically in a background pass so stale closed windows are pruned without blocking interaction
-  - The same refresh pass removes stale tracked window rows when their underlying yabai window IDs disappear
-  - The sidebar also performs a periodic metadata reload (same snapshot path as the Reload button) so CLI edits like workspace/project title changes appear without manual refresh, unless the user is actively editing form fields
-  - Terminal focus uses direct yabai window focus for tracked iTerm windows and pulses the focused window background when enabled
-  - Browser sessions open as dedicated tracked Chrome windows and persist direct window mappings for fast focus
-  - Browser focus tries direct `yabai` window focus from the tracked window ID; failed focus attempts mark the mapping stale for later recovery
-  - If a workspace directory is missing during stop, muxy still stops the workspace and shows an informational message that stop-script execution was skipped
-  - Workspace window list/navigation operates on tracked dedicated Chrome and iTerm windows, not scanned Chrome tabs or tmux sub-targets
-  - Browser rows are sorted by configured browser-session order and then tracked window ID so shortcut indices remain stable
-  - Browser session names are optional but preferred for display labels in workspace window rows; when present, rows show `name + URL` in the same split-label style as process rows
-  - Process restarts (status-check failure or `on_exit=restart`) terminate and wait for the tracked runtime PID before relaunch; if a clean stop does not finish in time, muxy restarts in a new dedicated terminal window instead of queueing behind a still-running shell
-  - Processes with status check results shown as indented sub-rows (colored dots)
-  - Status checks run in periodic background monitoring for running workspaces (respecting each check interval), so health rows and on-fail restarts update even when the run tab is not open
-  - Agent window rows show terminal-based coding agent sessions (`Claude Code CLI`, `Codex CLI`) with a spinner (active), red dot (waiting for review), or green dot (done); clicking focuses the tracked dedicated terminal window
-  - Windows list with shortcut hints
-  - Env vars/ports tab
-  - Workspace settings tab
-- Settings view lets you choose a preferred editor from installed VS Code, Cursor, or Windsurf.
-- Settings view also lets you override default keyboard shortcuts for app actions.
-- New workspace `+` actions are shown for git projects only.
-
-Hotkeys:
-- Global focus: `cmd+shift+=`
-  - Brings muxy to front and keeps current window-selection shortcuts active; workspace-window reconciliation runs on the periodic background interval
-  - Defers selected-workspace detail refresh to the next main-actor turn so focus feels immediate
-- Next workspace/window: `cmd+shift+]`
-  - When Muxy is focused, cycles sidebar-visible workspaces and keeps Muxy focused
-  - When a tracked workspace window is focused, cycles to the next tracked workspace window in that workspace using remembered window identity instead of transient row index
-- Previous workspace/window: `cmd+shift+[`
-  - When Muxy is focused, cycles sidebar-visible workspaces and keeps Muxy focused
-  - When a tracked workspace window is focused, cycles to the previous tracked workspace window in that workspace using remembered window identity instead of transient row index
-- Open editor (global): `cmd+shift+e` (opens editor for the workspace owning the focused workspace window)
-- Open terminal: `cmd+shift+t`
-- Open Finder: `cmd+shift+f`
-- Focus workspace window 1-9: `cmd+1` through `cmd+9`
-  - Run-tab and Dashboard row clicks use the same detached focus path as `cmd+1` through `cmd+9`, so clicking a row and pressing its shortcut have the same low-latency routing behavior
-
-The app includes a full-width footer hint row that shows the effective shortcuts for Next/Previous, Settings, and Toggle Tooltip (including user overrides).
-
-When text input is focused in the GUI, standard editing shortcuts (including `cmd+v`) are handled normally.
-
-Set `DEBUG=1` when launching Muxy to log full workspace-cycle timing and direct focus-path timing (target rebuild, current-target resolution, direct window focus, stale-window repair, and shortcut/row-click dispatch timings) to stderr.
-
-For repeatable top-level regression checks, run:
-
-```bash
-scripts/profile-window-focus.sh
-```
-
-The script relaunches the debug app with `DEBUG=1`, drives the key focus paths we have been profiling so far, and prints min/avg/max totals for:
-- `muxy_to_browser`
-- `muxy_to_iterm`
-- `browser_to_browser`
-- `browser_to_iterm`
-- `iterm_to_iterm`
-- `iterm_to_browser`
-
-Update the config block at the top of [profile-window-focus.sh](/Users/yogesh/projects/muxy/scripts/profile-window-focus.sh) before running it:
-- `WORKSPACE_DIR`: workspace to profile
-- `MUXY_TO_BROWSER_INDEX` / `MUXY_TO_ITERM_INDEX`: `cmd+<n>` targets to measure from the focused Muxy app
-- `BROWSER_TO_BROWSER_START_INDEX`, `BROWSER_TO_ITERM_START_INDEX`, `ITERM_TO_ITERM_START_INDEX`, `ITERM_TO_BROWSER_START_INDEX`: starting window rows used before each `cmd+shift+]` cycle sample
-- `SAMPLE_COUNT`: samples per action
-
-The script assumes the configured row indices match the current Run-tab ordering for the target workspace.
-
-## Auto-Update
-Muxy checks for updates from the appcast feed on launch and every 4 hours. Use the app menu **Check for Updates...** to check manually.
-
-When an update is available, a CTA button appears at the top of the left panel. Clicking it downloads the DMG, installs the app to /Applications, and relaunches.
-
-From the CLI:
-```bash
-mx --version
-```
-
-## CLI
-```bash
-mx settings get --editor
-mx settings get --port-range
-mx settings set --editor vscode
-mx settings set --port-range 20000-30000
-
-mx project list
-mx project add --dir /path/to/repo
-mx project add --git-url https://github.com/org/repo.git
-mx project update --dir /path/to/repo --setup-script "cp ~/.env .env" --stop-script "docker compose down --remove-orphans"
-mx project remove --dir /path/to/repo
-mx project browser-session add --dir /path/to/repo --url http://localhost:3000 --name frontend
-mx project browser-session list --dir /path/to/repo
-mx project browser-session remove --dir /path/to/repo --url http://localhost:3000
-
-mx workspace list --project-dir /path/to/repo --all
-mx discover
-mx workspace create --project-dir /path/to/repo --name feature-x [--branch feature-branch] [--target-branch main] [--directory-name feature_branch]
-mx workspace import [--dir /path/to/worktree] [--title feature-y] [--tooltip "Working on auth"]
-mx workspace update --dir /path/to/workspace [--title feature-y] [--branch feature-y] [--directory-name feature_y] [--tooltip "Working on auth" | --clear-tooltip] [--active | --inactive]
-mx workspace launch --dir /path/to/workspace
-mx workspace restart --dir /path/to/workspace
-mx workspace up --dir /path/to/workspace [--force-restart] [--focus] [--tooltip "Working on auth flows"]
-mx workspace stop --dir /path/to/workspace
-mx workspace archive --dir /path/to/workspace
-mx workspace focus --dir /path/to/workspace [--window 2]
-
-# Agent lifecycle events (called explicitly by coding agents to report status)
-# Note: mx workspace import and mx workspace up do NOT automatically fire agent events.
-mx agent event --type init    [--dir /path/to/workspace] [--provider iterm2]
-mx agent event --type start   [--dir /path/to/workspace]
-mx agent event --type waiting [--dir /path/to/workspace]
-mx agent event --type done    [--dir /path/to/workspace]
-```
-
-Provider auto-detection uses environment context only for supported terminal hosts: Claude Code / Codex CLI in iTerm2 (`__CFBundleIdentifier=com.googlecode.iterm2` with `CLAUDE_CODE_ENTRYPOINT` or `CODEX_THREAD_ID`) map to iTerm2 so Muxy focuses the terminal session directly. Coding-agent env markers from unsupported terminal apps are ignored.
-
-For git projects, `workspace create` requires `--branch`; `--target-branch` defaults to `main`/`master` when available.
-`workspace create --directory-name` (alias: `--dirname`) is optional for git projects and must use only letters, numbers, `-`, and `_` with no spaces.
-`workspace import` supports `--title` and optional `--tooltip`.
-`workspace update` updates workspace metadata (`--title`, `--branch`, `--directory-name`/`--dirname`/`--dir-name`, and tooltip values) plus sidebar visibility default state (`--active` / `--inactive`). Default workspaces keep their fixed initial title (`default` for directory projects, `main`/`master` for git-url imports). Protected `main`/`master` branches cannot be renamed.
-`workspace up` ensures the workspace and all its processes are running. When stopped, it launches in the background. When already running, it restarts any exited processes in the background without touching healthy ones. Add `--force-restart` to force a full stop+launch. Add `--focus` to bring the workspace to the foreground. `--tooltip [text]` displays the tooltip overlay (updating tooltip text when text is provided).
-`mx discover` scans all registered git projects and reconciles worktrees by creating missing workspaces, archiving workspaces whose worktrees are no longer valid, and refreshing workspace branch names from disk.
-When tooltip overlay is shown for focused workspace, it always displays workspace title as the title; when tooltip text is set, it is shown as body content. The overlay also shows the effective tooltip-toggle shortcut (default `cmd+shift+i`, or your custom override).
-The global tooltip shortcut resolves focused tracked workspace windows and agent windows, so you can toggle the overlay from a focused coding-agent/iTerm workspace window even if the workspace is not currently marked running.
-
-Project/workspace removal behavior:
-- `mx project remove --dir <path>` removes the project from Muxy. For git projects, it first removes related managed worktrees with `git worktree remove --force`, then deletes related workspace directories under `~/muxy/workspaces`.
-- `mx project remove --dir <path>` deletes the project directory only when it is a git repo inside `~/muxy/repos` (or legacy `~/muxy/projects`) as an app-managed clone location.
-- `mx workspace archive ...` removes git worktrees via `git worktree remove` and never deletes the project directory for non-git projects.
-
-## Build
-Use the SwiftPM wrapper to keep caches inside the workspace (avoids user cache warnings in sandboxed environments).
 ```bash
 scripts/swiftpm.sh build
-```
-
-## Tests
-```bash
 scripts/swiftpm.sh test --parallel
-```
-
-## Lint
-```bash
 scripts/lint.sh
-```
-
-## Coverage
-```bash
 scripts/coverage.sh
 ```
 
-Test-speed knobs:
-- `scripts/coverage.sh` runs tests in parallel by default.
-- `scripts/coverage.sh` auto-detects logical CPU count for `--num-workers`.
-- Set `MUXY_TEST_WORKERS=<n>` to override worker count.
-- Set `MUXY_TEST_SKIP_BUILD=1` for faster repeated local coverage reruns when build artifacts are already current.
-- Set `MOCK_TEST_DELAY_CAP_MS=<ms>` to cap mock-script sleeps used by orchestrator tests.
+Useful commands:
+
+```bash
+apps/macos/.build/debug/Muxy
+apps/macos/.build/debug/mx --help
+apps/macos/.build/debug/mx workspace list --all
+```
+
+## Scope of This README
+This file intentionally does not duplicate:
+- CLI command semantics
+- UX requirements
+- database schema details
+- workspace lifecycle internals
+- update or focus-path implementation details
+
+Those belong in the spec, architecture doc, or website docs.
 
 ## Release
+Build and deploy a release from the repository root with:
 
+```bash
+scripts/release-and-deploy.sh <version>
+```
 
-The release workflow:
-1. Builds in release configuration
-2. Code-signs `Muxy` app and `mx` CLI
-3. Creates a DMG installer with app bundle and CLI installer
-4. Optionally notarizes the DMG
-5. Uploads to Firebase Hosting with long cache headers
-6. Generates and uploads appcast.xml with no-cache headers
-
-Required secrets:
-- `CODESIGN_IDENTITY`: Developer ID Application certificate
-- `APPLE_ID`, `TEAM_ID`, `APP_PASSWORD`: For notarization
+That script builds the release binaries, signs them, creates the DMG, optionally notarizes it, builds the website, and publishes the release assets.
