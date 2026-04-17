@@ -115,6 +115,8 @@ This separation lets template edits coexist with current runtime state and per-w
 - yabai provides stable window identity and cross-app focusing.
 - iTerm2 and Chrome AppleScript integrations add app-specific behavior on top of yabai, such as selecting the intended terminal session or browser target.
 - Tracked windows are persisted so Muxy can refocus or clean up only the windows it owns.
+- Direct focus requests surface typed missing-window errors so the GUI can offer targeted recovery for browser sessions and processes.
+- Window cycling is tolerant of stale tracked yabai IDs and keeps advancing until it finds the next live target.
 - Reconciliation is required because window state can drift outside the app.
 
 ## Agent Integration

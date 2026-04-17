@@ -97,7 +97,12 @@ Muxy focuses those windows; it does not decide their geometry.
 - Muxy should focus the correct window or workspace quickly, even when switching across apps.
 - Browser focus should match the intended browser session by URL, not by window title.
 - Terminal focus should land on the intended dedicated process or agent session.
-- If tracked windows become stale, Muxy should reconcile them in the background instead of forcing the user to repair state manually.
+- If tracked windows become stale during next/previous window cycling, Muxy should skip them and continue to the next live target.
+- If direct window focus from the app targets a stale browser session or process window, Muxy should show a non-modal error and offer recovery:
+  - browser sessions reopen in a new Chrome window and update tracking
+  - processes restart in a new dedicated iTerm2 window
+  - coding-agent windows only show the error state and do not offer recovery
+- Muxy should still reconcile stale tracked windows in the background instead of forcing the user to repair state manually.
 
 ## Dashboard and Health
 - The app should surface attention items across workspaces in one place.

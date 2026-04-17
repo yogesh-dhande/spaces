@@ -1,5 +1,32 @@
 import Foundation
 
+public enum MissingTrackedWindowKind: Sendable, Equatable {
+    case browserSession
+    case process
+    case codingAgent
+    case window
+}
+
+public struct MissingTrackedWindowContext: Sendable {
+    public let kind: MissingTrackedWindowKind
+    public let workspaceID: String
+    public let windowID: Int?
+    public let targetURL: String?
+    public let processID: String?
+    public let title: String
+
+    public init(
+        kind: MissingTrackedWindowKind, workspaceID: String, windowID: Int? = nil, targetURL: String? = nil, processID: String? = nil, title: String
+    ) {
+        self.kind = kind
+        self.workspaceID = workspaceID
+        self.windowID = windowID
+        self.targetURL = targetURL
+        self.processID = processID
+        self.title = title
+    }
+}
+
 public enum MuxyError: LocalizedError {
     case missingProject(dir: String)
     case projectAlreadyExists(dir: String)
@@ -11,6 +38,7 @@ public enum MuxyError: LocalizedError {
     case yabaiUnavailable(message: String)
     case dependencyMissing(message: String)
     case configError(message: String)
+    case missingTrackedWindow(MissingTrackedWindowContext)
 
     public var errorDescription: String? {
         switch self {
@@ -24,6 +52,17 @@ public enum MuxyError: LocalizedError {
         case .yabaiUnavailable(let message): return "yabai not available: \(message)"
         case .dependencyMissing(let message): return "Missing dependency: \(message)"
         case .configError(let message): return "Configuration error: \(message)"
+        case .missingTrackedWindow(let context):
+            switch context.kind {
+            case .browserSession:
+                return "Window missing: Browser session '\(context.title)' is no longer available."
+            case .process:
+                return "Window missing: Process '\(context.title)' is no longer available."
+            case .codingAgent:
+                return "Window missing: Coding agent '\(context.title)' is no longer available."
+            case .window:
+                return "Window missing: '\(context.title)' is no longer available."
+            }
         }
     }
 }

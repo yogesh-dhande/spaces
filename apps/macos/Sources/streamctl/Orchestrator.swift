@@ -978,13 +978,23 @@ public final class MuxyOrchestrator {
             windowID: capturedWindowID, itermSessionID: terminalHandle.sessionID, itermTabIndex: nil, tmuxWindowID: nil, pid: newPID,
             status: .running, logPath: process.logPath, lastOutputAt: nil, startedAt: nowISO8601(), exitedAt: nil)
         try store.upsert(runningProcess: restartedProcess)
-        if let existingWindow = try store.windows(workspaceID: workspace.id).first(where: { $0.role == "terminal" && $0.windowID == process.windowID }) {
-            try store.upsert(
-                window: WindowRecord(
-                    id: existingWindow.id, workspaceID: existingWindow.workspaceID, app: "iTerm2", title: process.templateName, targetURL: nil,
-                    windowID: capturedWindowID, itermSessionID: terminalHandle.sessionID, itermTabIndex: nil, tmuxWindowID: nil, role: "terminal",
-                    orderIndex: existingWindow.orderIndex, lastSeenAt: nowISO8601()))
-        }
+        let existingWindows = try store.windows(workspaceID: workspace.id)
+        let existingWindow = existingWindows.first(where: { $0.role == "terminal" && $0.windowID == process.windowID })
+            ?? existingWindows.first(where: { $0.role == "terminal" && $0.id == process.id })
+        let restoredWindow = WindowRecord(
+            id: existingWindow?.id ?? process.id,
+            workspaceID: workspace.id,
+            app: "iTerm2",
+            title: process.templateName,
+            targetURL: nil,
+            windowID: capturedWindowID,
+            itermSessionID: terminalHandle.sessionID,
+            itermTabIndex: nil,
+            tmuxWindowID: nil,
+            role: "terminal",
+            orderIndex: existingWindow?.orderIndex ?? Self.nextWindowOrderIndex(existing: existingWindows, role: "terminal", orderOffset: 200),
+            lastSeenAt: nowISO8601())
+        try store.upsert(window: restoredWindow)
     }
 
     private func terminateProcessForRestart(_ process: RunningProcessRecord) -> Bool {
@@ -1124,6 +1134,7 @@ public final class MuxyOrchestrator {
         logCycleProfile(
             "workspace=\(workspaceID) stage=direct_focus_target index=\(index) target=\(navigationTargetDebugName(navigationTarget(for: windows[targetIndex]))) success=\(ok ? 1 : 0) elapsed_ms=\(elapsedMS(since: focusTargetStartedAt))"
         )
+        guard ok else { throw missingTrackedWindowError(for: windows[targetIndex], workspaceID: workspaceID) }
         if ok {
             rememberNavigationTarget(navigationTarget(for: windows[targetIndex]), workspaceID: workspaceID)
             try setActiveWorkspace(id: workspaceID)
@@ -1133,12 +1144,30 @@ public final class MuxyOrchestrator {
         )
     }
 
+    public func focusWorkspaceBrowserSession(workspaceID: String, targetURL: String) throws {
+        let windows = try indexedWorkspaceWindows(workspaceID: workspaceID)
+        if let window = windows.first(where: { $0.role == "browser" && $0.targetURL == targetURL }) {
+            let focused = focusTrackedWindow(window, workspaceID: workspaceID)
+            guard focused else { throw missingTrackedWindowError(for: window, workspaceID: workspaceID) }
+            rememberNavigationTarget(navigationTarget(for: window), workspaceID: workspaceID)
+            try setActiveWorkspace(id: workspaceID)
+            return
+        }
+
+        throw MuxyError.missingTrackedWindow(
+            MissingTrackedWindowContext(
+                kind: .browserSession,
+                workspaceID: workspaceID,
+                targetURL: targetURL,
+                title: targetURL))
+    }
+
     public func focusWorkspaceProcess(workspaceID: String, processID: String) throws {
         guard let process = try store.runningProcesses(workspaceID: workspaceID).first(where: { $0.id == processID }) else { return }
-        if try focusWorkspaceProcessRecord(process, workspaceID: workspaceID) {
-            rememberNavigationTarget(.process(process), workspaceID: workspaceID)
-            try setActiveWorkspace(id: workspaceID)
-        }
+        let focused = try focusWorkspaceProcessRecord(process, workspaceID: workspaceID)
+        guard focused else { throw missingTrackedProcessError(process, workspaceID: workspaceID) }
+        rememberNavigationTarget(.process(process), workspaceID: workspaceID)
+        try setActiveWorkspace(id: workspaceID)
     }
 
     public func focusNextWindow(workspaceID: String) throws { try focusWindowRelative(workspaceID: workspaceID, delta: 1) }
@@ -1198,21 +1227,30 @@ public final class MuxyOrchestrator {
         } else {
             targetIndex = targets.count - 1
         }
-        let focusTargetStartedAt = currentDate()
-        let ok = try focusNavigationTarget(targets[targetIndex], workspaceID: workspaceID)
-        logCycleProfile(
-            "workspace=\(workspaceID) stage=focus_target direction=\(direction) index=\(targetIndex) target=\(navigationTargetDebugName(targets[targetIndex])) success=\(ok ? "1" : "0") elapsed_ms=\(elapsedMS(since: focusTargetStartedAt))"
-        )
+        var resolvedTargetIndex = targetIndex
+        var ok = false
+        for attempt in 0..<targets.count {
+            let candidateIndex = (targetIndex + (attempt * delta) + (targets.count * 4)) % targets.count
+            let focusTargetStartedAt = currentDate()
+            let candidateFocused = try focusNavigationTarget(targets[candidateIndex], workspaceID: workspaceID)
+            logCycleProfile(
+                "workspace=\(workspaceID) stage=focus_target direction=\(direction) attempt=\(attempt) index=\(candidateIndex) target=\(navigationTargetDebugName(targets[candidateIndex])) success=\(candidateFocused ? "1" : "0") elapsed_ms=\(elapsedMS(since: focusTargetStartedAt))"
+            )
+            guard candidateFocused else { continue }
+            resolvedTargetIndex = candidateIndex
+            ok = true
+            break
+        }
         if ok {
             let activeWorkspaceStartedAt = currentDate()
-            setWindowNavigationCursor(navigationCursor(for: targets[targetIndex]), workspaceID: workspaceID)
+            setWindowNavigationCursor(navigationCursor(for: targets[resolvedTargetIndex]), workspaceID: workspaceID)
             try setActiveWorkspace(id: workspaceID)
             logCycleProfile(
                 "workspace=\(workspaceID) stage=set_active direction=\(direction) elapsed_ms=\(elapsedMS(since: activeWorkspaceStartedAt))"
             )
         }
         logCycleProfile(
-            "workspace=\(workspaceID) direction=\(direction) total_ms=\(elapsedMS(since: cycleStartedAt)) target=\(navigationTargetDebugName(targets[targetIndex])) success=\(ok ? "1" : "0")"
+            "workspace=\(workspaceID) direction=\(direction) total_ms=\(elapsedMS(since: cycleStartedAt)) target=\(navigationTargetDebugName(targets[resolvedTargetIndex])) success=\(ok ? "1" : "0")"
         )
     }
 
@@ -1254,6 +1292,7 @@ public final class MuxyOrchestrator {
                 return (windowID, value.sorted { $0.templateName.localizedStandardCompare($1.templateName) == .orderedAscending })
             })
         }()
+        var matchedProcessIDs = Set<String>()
 
         var targets: [WorkspaceNavigationTarget] = []
 
@@ -1272,12 +1311,20 @@ public final class MuxyOrchestrator {
             let isAgentClaimedWindow = window.windowID != nil && agentYabaiWindowIDs.contains(window.windowID!)
             if window.role == "terminal", !windowProcesses.isEmpty {
                 for process in windowProcesses {
+                    matchedProcessIDs.insert(process.id)
                     targets.append(.process(process))
                 }
                 continue
             }
             if isAgentClaimedWindow { continue }
             targets.append(.window(window))
+        }
+
+        let orphanedProcesses = processes
+            .filter { !matchedProcessIDs.contains($0.id) }
+            .sorted { $0.templateName.localizedStandardCompare($1.templateName) == .orderedAscending }
+        for process in orphanedProcesses {
+            targets.append(.process(process))
         }
 
         logCycleProfile(
@@ -3100,10 +3147,59 @@ public final class MuxyOrchestrator {
     }
 
     public func focusAgentWindow(_ record: AgentWindowRecord) throws {
-        if try focusAgentWindowRecord(record) {
-            rememberNavigationTarget(.agent(record), workspaceID: record.workspaceID)
-            try setActiveWorkspace(id: record.workspaceID)
+        let focused = try focusAgentWindowRecord(record)
+        guard focused else { throw missingTrackedAgentError(record) }
+        rememberNavigationTarget(.agent(record), workspaceID: record.workspaceID)
+        try setActiveWorkspace(id: record.workspaceID)
+    }
+
+    public func restartWorkspaceProcess(workspaceID: String, processID: String) throws {
+        guard let process = try store.runningProcesses(workspaceID: workspaceID).first(where: { $0.id == processID }) else { return }
+        try restartProcessInTerminal(workspaceID: workspaceID, process: process)
+    }
+
+    public func recoverMissingBrowserSession(workspaceID: String, targetURL: String) throws {
+        let (project, workspace) = try resolveWorkspace(id: workspaceID)
+        let sessions = try store.workspaceBrowserSessions(workspaceID: workspace.id)
+        guard !sessions.isEmpty else {
+            throw MuxyError.invalidArgument(message: "No browser sessions are configured for this workspace.")
         }
+        guard chrome.isAvailable() else { throw MuxyError.dependencyMissing(message: "Google Chrome is required for browser sessions.") }
+
+        let namedPorts = try store.workspacePortsNamed(workspaceID: workspace.id)
+        let env = buildWorkspaceEnv(project: project, workspace: workspace, namedPorts: namedPorts)
+        let resolvedSessions = resolveBrowserSessions(sessions, env: env)
+        guard let matchedSession = resolvedSessions.filter({ targetURL.hasPrefix($0.prefix) }).max(by: { $0.prefix.count < $1.prefix.count }) else {
+            throw MuxyError.invalidArgument(message: "Browser session not found for recovery.")
+        }
+
+        let snapshot = try yabai.listWindows()
+        _ = try chrome.openWindow(url: matchedSession.prefix, background: false)
+        guard let newWindow = try captureNewAppWindow(snapshot: snapshot, appName: "Google Chrome") else {
+            throw MuxyError.invalidArgument(message: "Failed to recover browser session window.")
+        }
+
+        var updatedSessions = sessions
+        updatedSessions[matchedSession.index].extractedWindow = ExtractedBrowserWindowMapping(
+            targetURL: matchedSession.prefix, windowID: newWindow.id, isValid: true)
+        try store.setWorkspaceBrowserSessions(workspaceID: workspace.id, sessions: updatedSessions)
+
+        let trackedWindows = try store.windows(workspaceID: workspace.id)
+        let existingWindow = trackedWindows.first(where: { window in
+            guard window.role == "browser", let trackedTargetURL = window.targetURL else { return false }
+            return trackedTargetURL == matchedSession.prefix || matchedSession.prefix.hasPrefix(trackedTargetURL)
+        })
+        let storedWindow = WindowRecord(
+            id: existingWindow?.id ?? UUID().uuidString,
+            workspaceID: workspace.id,
+            app: newWindow.app,
+            title: newWindow.title,
+            targetURL: matchedSession.prefix,
+            windowID: newWindow.id,
+            role: "browser",
+            orderIndex: existingWindow?.orderIndex ?? matchedSession.index,
+            lastSeenAt: nowISO8601())
+        try store.upsert(window: storedWindow)
     }
 
     private func focusWorkspaceProcessRecord(_ process: RunningProcessRecord, workspaceID: String) throws -> Bool {
@@ -3125,6 +3221,43 @@ public final class MuxyOrchestrator {
             itermFocusPulseController.pulse(windowID: windowID, color: color, iterm: iterm)
         }
         return focused
+    }
+
+    private func missingTrackedWindowError(for window: WindowRecord, workspaceID: String) -> MuxyError {
+        if window.role == "browser" {
+            return .missingTrackedWindow(
+                MissingTrackedWindowContext(
+                    kind: .browserSession,
+                    workspaceID: workspaceID,
+                    windowID: window.windowID,
+                    targetURL: window.targetURL,
+                    title: window.targetURL ?? window.title ?? "Browser Session"))
+        }
+        return .missingTrackedWindow(
+            MissingTrackedWindowContext(
+                kind: .window,
+                workspaceID: workspaceID,
+                windowID: window.windowID,
+                title: window.title ?? window.app))
+    }
+
+    private func missingTrackedProcessError(_ process: RunningProcessRecord, workspaceID: String) -> MuxyError {
+        .missingTrackedWindow(
+            MissingTrackedWindowContext(
+                kind: .process,
+                workspaceID: workspaceID,
+                windowID: process.windowID,
+                processID: process.id,
+                title: process.templateName))
+    }
+
+    private func missingTrackedAgentError(_ record: AgentWindowRecord) -> MuxyError {
+        .missingTrackedWindow(
+            MissingTrackedWindowContext(
+                kind: .codingAgent,
+                workspaceID: record.workspaceID,
+                windowID: record.windowID ?? record.yabaiWindowID,
+                title: record.label ?? "Coding Agent CLI"))
     }
 
     private func safeFilename(_ raw: String) -> String {

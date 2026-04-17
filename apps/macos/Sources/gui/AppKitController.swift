@@ -122,6 +122,12 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     private var operationProgressOverlay: NSVisualEffectView?
     private var operationProgressOverlayTitleLabel: NSTextField?
     private var operationProgressOverlayDetailLabel: NSTextField?
+    private var windowIssueToastOverlay: NSVisualEffectView?
+    private var windowIssueToastTitleLabel: NSTextField?
+    private var windowIssueToastDetailLabel: NSTextField?
+    private var windowIssueToastActionButton: NSButton?
+    private var windowIssueToastActionHandler: (() -> Void)?
+    private var windowIssueToastDismissTask: Task<Void, Never>?
     private lazy var relativeDateFormatter: RelativeDateTimeFormatter = {
         let formatter = RelativeDateTimeFormatter()
         formatter.unitsStyle = .short
@@ -147,6 +153,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     }
 
     private enum WindowFocusRequest: Sendable {
+        case workspaceBrowserSession(workspaceID: String, targetURL: String)
         case workspaceWindow(workspaceID: String, index: Int)
         case workspaceProcess(workspaceID: String, processID: String)
         case agentWindow(AgentWindowRecord)
@@ -581,12 +588,39 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 let store = try SQLiteStore(path: db)
                 let orchestrator = MuxyOrchestrator(store: store)
                 switch request {
+                case .workspaceBrowserSession(let workspaceID, let targetURL):
+                    try orchestrator.focusWorkspaceBrowserSession(workspaceID: workspaceID, targetURL: targetURL)
                 case .workspaceWindow(let workspaceID, let index):
                     try orchestrator.focusWorkspaceWindow(workspaceID: workspaceID, index: index)
                 case .workspaceProcess(let workspaceID, let processID):
                     try orchestrator.focusWorkspaceProcess(workspaceID: workspaceID, processID: processID)
                 case .agentWindow(let record):
                     try orchestrator.focusAgentWindow(record)
+                }
+                return .success(())
+            } catch { return .failure(error) }
+        }.value
+    }
+
+    nonisolated private static func recoverMissingTrackedWindowSnapshot(_ context: MissingTrackedWindowContext) async -> Result<Void, Error> {
+        await Task.detached(priority: .userInitiated) {
+            do {
+                let db = try DatabaseLocator.defaultPath()
+                let store = try SQLiteStore(path: db)
+                let orchestrator = MuxyOrchestrator(store: store)
+                switch context.kind {
+                case .browserSession:
+                    guard let targetURL = context.targetURL else {
+                        throw MuxyError.invalidArgument(message: "Browser recovery requires a target URL.")
+                    }
+                    try orchestrator.recoverMissingBrowserSession(workspaceID: context.workspaceID, targetURL: targetURL)
+                case .process:
+                    guard let processID = context.processID else {
+                        throw MuxyError.invalidArgument(message: "Process recovery requires a process identifier.")
+                    }
+                    try orchestrator.restartWorkspaceProcess(workspaceID: context.workspaceID, processID: processID)
+                case .codingAgent, .window:
+                    throw MuxyError.invalidArgument(message: "This window cannot be recovered automatically.")
                 }
                 return .success(())
             } catch { return .failure(error) }
@@ -616,6 +650,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 let windows = try orchestrator.windows(workspaceID: selectedWorkspaceID)
                 let processes = try orchestrator.runningProcesses(workspaceID: selectedWorkspaceID)
                 let agentWindows = try orchestrator.agentWindows(workspaceID: selectedWorkspaceID)
+                let browserSessions = try orchestrator.resolvedWorkspaceBrowserSessions(workspaceID: selectedWorkspaceID)
                 let terminalTargetKeyForProcess: (RunningProcessRecord) -> String? = { process in
                     if let sessionID = process.itermSessionID, !sessionID.isEmpty { return sessionID }
                     if let windowID = process.windowID { return "window:\(windowID)" }
@@ -658,12 +693,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                     }
                     shortcutCounter += 1
                 }
-                for (windowIdx, window) in windows.enumerated() {
-                    guard window.role == "browser" else { continue }
-                    let isAgentClaimedWindow = window.windowID != nil && agentYabaiWindowIDs.contains(window.windowID!)
-                    guard !isAgentClaimedWindow else { continue }
+                for session in browserSessions {
+                    guard let targetURL = session.url, !targetURL.isEmpty else { continue }
                     if shortcutCounter == index {
-                        try orchestrator.focusWorkspaceWindow(workspaceID: selectedWorkspaceID, index: windowIdx + 1)
+                        try orchestrator.focusWorkspaceBrowserSession(workspaceID: selectedWorkspaceID, targetURL: targetURL)
                         return .success(.focused(kind: "browser"))
                     }
                     shortcutCounter += 1
@@ -1659,6 +1692,104 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     }
 
     private func hideOperationProgressOverlay() { operationProgressOverlay?.isHidden = true }
+
+    private func showWindowIssueToast(title: String, detail: String, actionTitle: String? = nil, action: (() -> Void)? = nil) {
+        guard let contentView = window?.contentView else { return }
+        let overlay: NSVisualEffectView
+        let titleLabel: NSTextField
+        let detailLabel: NSTextField
+        let actionButton: NSButton
+        if let existingOverlay = windowIssueToastOverlay, let existingTitleLabel = windowIssueToastTitleLabel,
+            let existingDetailLabel = windowIssueToastDetailLabel, let existingActionButton = windowIssueToastActionButton
+        {
+            overlay = existingOverlay
+            titleLabel = existingTitleLabel
+            detailLabel = existingDetailLabel
+            actionButton = existingActionButton
+        } else {
+            overlay = NSVisualEffectView()
+            overlay.material = .hudWindow
+            overlay.blendingMode = .withinWindow
+            overlay.state = .active
+            overlay.wantsLayer = true
+            overlay.layer?.cornerRadius = 10
+            overlay.layer?.borderWidth = 1
+            overlay.layer?.borderColor = NSColor.systemRed.withAlphaComponent(0.35).cgColor
+            overlay.translatesAutoresizingMaskIntoConstraints = false
+
+            let stack = NSStackView()
+            stack.orientation = .vertical
+            stack.alignment = .leading
+            stack.spacing = 8
+            stack.translatesAutoresizingMaskIntoConstraints = false
+
+            titleLabel = NSTextField(labelWithString: "")
+            titleLabel.font = .systemFont(ofSize: 12, weight: .semibold)
+            titleLabel.textColor = .labelColor
+            titleLabel.maximumNumberOfLines = 1
+            stack.addArrangedSubview(titleLabel)
+
+            detailLabel = NSTextField(labelWithString: "")
+            detailLabel.font = .systemFont(ofSize: 11)
+            detailLabel.textColor = .secondaryLabelColor
+            detailLabel.maximumNumberOfLines = 2
+            stack.addArrangedSubview(detailLabel)
+
+            actionButton = NSButton(title: "", target: self, action: #selector(handleWindowIssueToastAction))
+            actionButton.bezelStyle = .rounded
+            actionButton.controlSize = .small
+            actionButton.isBordered = true
+            actionButton.contentTintColor = .systemBlue
+            stack.addArrangedSubview(actionButton)
+
+            overlay.addSubview(stack)
+            contentView.addSubview(overlay)
+
+            NSLayoutConstraint.activate([
+                stack.leadingAnchor.constraint(equalTo: overlay.leadingAnchor, constant: 12),
+                stack.trailingAnchor.constraint(equalTo: overlay.trailingAnchor, constant: -12),
+                stack.topAnchor.constraint(equalTo: overlay.topAnchor, constant: 10),
+                stack.bottomAnchor.constraint(equalTo: overlay.bottomAnchor, constant: -10),
+
+                overlay.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 14),
+                overlay.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -16),
+                overlay.widthAnchor.constraint(lessThanOrEqualToConstant: 360),
+            ])
+
+            windowIssueToastOverlay = overlay
+            windowIssueToastTitleLabel = titleLabel
+            windowIssueToastDetailLabel = detailLabel
+            windowIssueToastActionButton = actionButton
+        }
+
+        titleLabel.stringValue = title
+        detailLabel.stringValue = detail
+        actionButton.title = actionTitle ?? ""
+        actionButton.isHidden = actionTitle == nil
+        windowIssueToastActionHandler = action
+        overlay.isHidden = false
+
+        windowIssueToastDismissTask?.cancel()
+        let dismissAfterSeconds: Double = actionTitle == nil ? 4 : 8
+        windowIssueToastDismissTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(dismissAfterSeconds))
+            guard !Task.isCancelled else { return }
+            self?.hideWindowIssueToast()
+        }
+    }
+
+    private func hideWindowIssueToast() {
+        windowIssueToastDismissTask?.cancel()
+        windowIssueToastDismissTask = nil
+        windowIssueToastActionHandler = nil
+        windowIssueToastOverlay?.isHidden = true
+    }
+
+    @objc private func handleWindowIssueToastAction() {
+        let action = windowIssueToastActionHandler
+        hideWindowIssueToast()
+        action?()
+    }
 
     private func showSettingsDetail() {
         clearInlineWorkspaceFieldRefs()
@@ -2715,7 +2846,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         }
 
         // --- Build Browser Tabs rows ---
-        let browserStack = NSStackView()
+                let browserStack = NSStackView()
         browserStack.orientation = .vertical
         browserStack.spacing = 4
         var browserRowCount = 0
@@ -2726,30 +2857,32 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         processesStack.spacing = 4
         var processRowCount = 0
 
-        // Use the original 1-based index in the full windows array so CMD+N matches focusWorkspaceWindow(index:).
-        for (idx, win) in windows.enumerated() where win.role == "browser" {
-            let windowIndex = idx + 1
+        let browserWindowByTargetURL: [String: WindowRecord] = windows.reduce(into: [:]) { result, window in
+            guard window.role == "browser", let targetURL = window.targetURL, result[targetURL] == nil else { return }
+            result[targetURL] = window
+        }
+        for session in configuredBrowserSessions {
+            guard let targetURL = session.url, !targetURL.isEmpty else { continue }
             let workspaceID = workspace.id
             let sessionLabel: String
             let sessionDetail: String?
-            if let sessionName = browserSessionDisplayName(for: win.targetURL, sessions: configuredBrowserSessions),
-                let targetURL = win.targetURL
-            {
+            if let sessionName = session.name?.trimmingCharacters(in: .whitespacesAndNewlines), !sessionName.isEmpty {
                 sessionLabel = sessionName
                 sessionDetail = targetURL
             } else {
-                sessionLabel = win.targetURL ?? win.title ?? win.app
+                sessionLabel = targetURL
                 sessionDetail = nil
             }
+            let isTracked = browserWindowByTargetURL[targetURL] != nil
             let rowShortcut = "CMD+\(shortcutCounter)"
             shortcutCounter += 1
             browserRowCount += 1
             let row = windowRow(
-                icon: "globe", iconColor: .systemBlue, label: sessionLabel, detail: sessionDetail,
+                icon: "globe", iconColor: isTracked ? .systemBlue : .systemOrange, label: sessionLabel, detail: sessionDetail,
                 shortcut: rowShortcut, processStatus: nil,
                 action: { [weak self] in
                     guard let self else { return }
-                    await self.performWindowFocus(.workspaceWindow(workspaceID: workspaceID, index: windowIndex))
+                    await self.performWindowFocus(.workspaceBrowserSession(workspaceID: workspaceID, targetURL: targetURL))
                 })
             browserStack.addArrangedSubview(row)
             constrainFormFieldToFillWidth(row, in: browserStack)
@@ -2828,10 +2961,15 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             case .exited: statusColor = .systemRed
             case .idle: statusColor = .tertiaryLabelColor
             }
-            // No shortcut — iTerm2 session was closed, so navigation is not possible
+            let rowShortcut = "CMD+\(shortcutCounter)"
+            shortcutCounter += 1
             let row = windowRow(
                 icon: "terminal", iconColor: statusColor, label: process.templateName,
-                detail: resolveCommand(process.command), shortcut: "", processStatus: process.status, action: nil)
+                detail: resolveCommand(process.command), shortcut: rowShortcut, processStatus: process.status,
+                action: { [weak self] in
+                    guard let self else { return }
+                    await self.performWindowFocus(.workspaceProcess(workspaceID: workspace.id, processID: process.id))
+                })
             processesStack.addArrangedSubview(row)
             constrainFormFieldToFillWidth(row, in: processesStack)
             processRowCount += 1
@@ -5018,7 +5156,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
     private func performWindowFocus(_ request: WindowFocusRequest) async {
         let result = await Self.performWindowFocusSnapshot(request)
-        if case .failure(let error) = result { showError(error) }
+        if case .failure(let error) = result { handleWindowFocusError(error) }
     }
 
     private func focusWindowShortcut(index: Int) {
@@ -5049,7 +5187,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                     "stage=aborted index=\(index) reason=no_match elapsed_ms=\(self.windowShortcutElapsedMS(since: startedAt))"
                 )
             case .failure(let error):
-                self.showError(error)
+                self.handleWindowFocusError(error)
                 self.logWindowShortcutProfile(
                     "stage=aborted index=\(index) reason=error elapsed_ms=\(self.windowShortcutElapsedMS(since: startedAt))"
                 )
@@ -5118,6 +5256,64 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 try orchestrator.focusPreviousWindow(workspaceID: workspaceID)
             }
         } catch {
+            showError(error)
+        }
+    }
+
+    private func handleWindowFocusError(_ error: Error) {
+        guard let muxyError = error as? MuxyError, case .missingTrackedWindow(let context) = muxyError else {
+            showError(error)
+            return
+        }
+        switch context.kind {
+        case .browserSession:
+            showWindowIssueToast(
+                title: "Browser window not found",
+                detail: "\(context.title) is no longer open.",
+                actionTitle: "Recover",
+                action: { [weak self] in Task { await self?.recoverMissingTrackedWindow(context) } })
+        case .process:
+            showWindowIssueToast(
+                title: "Process window not found",
+                detail: "\(context.title) is no longer open.",
+                actionTitle: "Restart",
+                action: { [weak self] in Task { await self?.recoverMissingTrackedWindow(context) } })
+        case .codingAgent:
+            showWindowIssueToast(title: "Agent window not found", detail: "\(context.title) is no longer open.")
+        case .window:
+            showWindowIssueToast(title: "Window not found", detail: "\(context.title) is no longer open.")
+        }
+    }
+
+    private func recoverMissingTrackedWindow(_ context: MissingTrackedWindowContext) async {
+        let progressTitle: String
+        let progressDetail: String
+        switch context.kind {
+        case .browserSession:
+            progressTitle = "Recovering Browser Session"
+            progressDetail = context.title
+        case .process:
+            progressTitle = "Restarting Process"
+            progressDetail = context.title
+        case .codingAgent, .window:
+            return
+        }
+
+        showOperationProgressOverlay(message: progressTitle, detail: progressDetail)
+        let result = await Self.recoverMissingTrackedWindowSnapshot(context)
+        hideOperationProgressOverlay()
+        switch result {
+        case .success:
+            reloadData()
+            switch context.kind {
+            case .browserSession:
+                showWindowIssueToast(title: "Browser session recovered", detail: "\(context.title) reopened in a new Chrome window.")
+            case .process:
+                showWindowIssueToast(title: "Process restarted", detail: "\(context.title) reopened in a new iTerm2 window.")
+            case .codingAgent, .window:
+                break
+            }
+        case .failure(let error):
             showError(error)
         }
     }

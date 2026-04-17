@@ -1490,6 +1490,183 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertEqual(focusedIDs, "202")
     }
 
+    // Tests direct browser focus throws a recoverable missing-window error when the tracked yabai window no longer exists.
+    func testFocusWorkspaceWindowThrowsRecoverableErrorForMissingBrowserWindow() throws {
+        let (orchestrator, store, _, workspace, _) = try makeOrchestratorWithWorkspace()
+
+        try store.upsert(
+            window: WindowRecord(
+                id: UUID().uuidString, workspaceID: workspace.id, app: "Google Chrome", title: "Frontend", targetURL: "http://localhost:3001",
+                windowID: 999, role: "browser", orderIndex: 0, lastSeenAt: "now"))
+
+        try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) {
+            XCTAssertThrowsError(try orchestrator.focusWorkspaceWindow(workspaceID: workspace.id, index: 1)) { error in
+                guard case .missingTrackedWindow(let context) = error as? MuxyError else {
+                    return XCTFail("Expected missingTrackedWindow, got \(error)")
+                }
+                XCTAssertEqual(context.kind, .browserSession)
+                XCTAssertEqual(context.workspaceID, workspace.id)
+                XCTAssertEqual(context.targetURL, "http://localhost:3001")
+            }
+        }
+    }
+
+    // Tests direct browser-session focus still throws a recoverable error when the configured session has no tracked window row.
+    func testFocusWorkspaceBrowserSessionThrowsRecoverableErrorWhenTrackedWindowIsMissing() throws {
+        let (orchestrator, store, _, workspace, _) = try makeOrchestratorWithWorkspace()
+        try store.setWorkspaceBrowserSessions(workspaceID: workspace.id, sessions: [BrowserSession(name: "Frontend", url: "http://localhost:3001")])
+
+        XCTAssertThrowsError(try orchestrator.focusWorkspaceBrowserSession(workspaceID: workspace.id, targetURL: "http://localhost:3001")) {
+            error in
+            guard case .missingTrackedWindow(let context) = error as? MuxyError else {
+                return XCTFail("Expected missingTrackedWindow, got \(error)")
+            }
+            XCTAssertEqual(context.kind, .browserSession)
+            XCTAssertEqual(context.targetURL, "http://localhost:3001")
+            XCTAssertEqual(context.title, "http://localhost:3001")
+        }
+    }
+
+    // Tests window cycling ignores missing browser windows and keeps moving to the next live tracked window.
+    func testFocusNextWindowIgnoresMissingBrowserWindow() throws {
+        let (orchestrator, store, _, workspace, root) = try makeOrchestratorWithWorkspace()
+        let focusLog = root.appendingPathComponent("ignore-missing-browser-focus.log")
+
+        try store.upsert(
+            window: WindowRecord(
+                id: UUID().uuidString, workspaceID: workspace.id, app: "Google Chrome", title: "Frontend", targetURL: "http://localhost:3001",
+                windowID: 999, role: "browser", orderIndex: 0, lastSeenAt: "now"))
+        try store.upsert(
+            window: WindowRecord(
+                id: UUID().uuidString, workspaceID: workspace.id, app: "iTerm2", title: "api", windowID: 101, role: "terminal", orderIndex: 200,
+                lastSeenAt: "now"))
+
+        try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) {
+            try withEnv(name: "YABAI_FOCUS_LOG_FILE", value: focusLog.path) {
+                try withEnv(name: "YABAI_FOCUSED_ID", value: "555") {
+                    try withEnv(name: "YABAI_FOCUSED_APP", value: "Finder") {
+                        try orchestrator.focusNextWindow(workspaceID: workspace.id)
+                    }
+                }
+            }
+        }
+
+        let focusedIDs = try String(contentsOf: focusLog).split(separator: "\n").map(String.init)
+        XCTAssertEqual(focusedIDs, ["101"])
+    }
+
+    // Tests direct process focus throws a recoverable missing-window error when the tracked iTerm window no longer exists.
+    func testFocusWorkspaceProcessThrowsRecoverableErrorForMissingProcessWindow() throws {
+        let (orchestrator, store, _, workspace, _) = try makeOrchestratorWithWorkspace()
+
+        let process = RunningProcessRecord(
+            id: UUID().uuidString, workspaceID: workspace.id, templateName: "api", command: "npm run api", terminalApp: "iTerm2", windowID: 999,
+            itermSessionID: "session-999", itermTabIndex: nil, tmuxWindowID: nil, pid: 1234, status: .running, logPath: nil, lastOutputAt: nil,
+            startedAt: "now", exitedAt: nil)
+        try store.upsert(runningProcess: process)
+
+        try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) {
+            XCTAssertThrowsError(try orchestrator.focusWorkspaceProcess(workspaceID: workspace.id, processID: process.id)) { error in
+                guard case .missingTrackedWindow(let context) = error as? MuxyError else {
+                    return XCTFail("Expected missingTrackedWindow, got \(error)")
+                }
+                XCTAssertEqual(context.kind, .process)
+                XCTAssertEqual(context.processID, process.id)
+                XCTAssertEqual(context.title, "api")
+            }
+        }
+    }
+
+    // Tests restarting a process recreates a tracked terminal window row even if the stale window row was already pruned.
+    func testRestartWorkspaceProcessRecreatesTrackedTerminalWindowWhenMissing() throws {
+        let (orchestrator, store, _, workspace, root) = try makeOrchestratorWithWorkspace()
+
+        let process = RunningProcessRecord(
+            id: UUID().uuidString, workspaceID: workspace.id, templateName: "api", command: "npm run api", terminalApp: "iTerm2", windowID: 999,
+            itermSessionID: "session-old", itermTabIndex: nil, tmuxWindowID: nil, pid: 1234, status: .running, logPath: nil, lastOutputAt: nil,
+            startedAt: "now", exitedAt: nil)
+        try store.upsert(runningProcess: process)
+
+        let openLog = root.appendingPathComponent("restart-process-open.log")
+        let pidFile = root.appendingPathComponent("restart-process.pid")
+        try "4321".write(to: pidFile, atomically: true, encoding: .utf8)
+
+        try withMockCommands(["yabai": Self.orchestratorYabaiMockScript, "osascript": Self.orchestratorOsaScriptMock]) {
+            try withEnv(name: "MOCK_ITERM_OPEN_LOG_FILE", value: openLog.path) {
+                try withEnv(name: "MOCK_ITERM_WINDOW_ID", value: "777") {
+                        try withEnv(name: "YABAI_WINDOWS_JSON", value: "[]") {
+                            try withEnv(name: "YABAI_CAPTURE_NEW_WINDOWS_JSON", value: #"[{"id":777,"pid":11,"app":"iTerm2","title":"api","space":1,"display":1,"is-sticky":false,"is-hidden":false,"is-visible":true,"is-native-fullscreen":false}]"#) {
+                                try withEnv(name: "MUXY_TEST_PIDFILE_API", value: pidFile.path) {
+                                    try orchestrator.restartWorkspaceProcess(workspaceID: workspace.id, processID: process.id)
+                                }
+                            }
+                        }
+                }
+            }
+        }
+
+        let restartedProcess = try XCTUnwrap(try store.runningProcesses(workspaceID: workspace.id).first(where: { $0.id == process.id }))
+        XCTAssertNotEqual(restartedProcess.windowID, process.windowID)
+        XCTAssertNotEqual(restartedProcess.itermSessionID, process.itermSessionID)
+
+        let trackedTerminal = try XCTUnwrap(try store.windows(workspaceID: workspace.id).first(where: { $0.role == "terminal" }))
+        XCTAssertEqual(trackedTerminal.windowID, restartedProcess.windowID)
+        XCTAssertEqual(trackedTerminal.itermSessionID, restartedProcess.itermSessionID)
+    }
+
+    // Tests workspace cycling includes orphaned running processes so recovered iTerm windows remain reachable even before a terminal row is rebuilt.
+    func testFocusNextWindowIncludesOrphanedRunningProcessTargets() throws {
+        let (orchestrator, store, _, workspace, root) = try makeOrchestratorWithWorkspace()
+
+        try store.upsert(
+            runningProcess: RunningProcessRecord(
+                id: UUID().uuidString, workspaceID: workspace.id, templateName: "api", command: "npm run api", terminalApp: "iTerm2", windowID: 777,
+                itermSessionID: "session-777", itermTabIndex: nil, tmuxWindowID: nil, pid: 4321, status: .running, logPath: nil, lastOutputAt: nil,
+                startedAt: "now", exitedAt: nil))
+
+        let focusLog = root.appendingPathComponent("orphaned-process-cycle-focus.log")
+
+        try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) {
+            try withEnv(name: "YABAI_FOCUS_LOG_FILE", value: focusLog.path) {
+                try withEnv(
+                    name: "YABAI_WINDOWS_JSON",
+                    value: #"[{"id":777,"pid":11,"app":"iTerm2","title":"api","space":1,"display":1,"is-sticky":false,"is-hidden":false,"is-visible":true,"is-native-fullscreen":false}]"#
+                ) {
+                    try withEnv(name: "YABAI_FOCUSED_ID", value: "999") {
+                        try withEnv(name: "YABAI_FOCUSED_APP", value: "Finder") {
+                            try orchestrator.focusNextWindow(workspaceID: workspace.id)
+                        }
+                    }
+                }
+            }
+        }
+
+        let focusedIDs = try String(contentsOf: focusLog).split(separator: "\n").map(String.init)
+        XCTAssertEqual(focusedIDs, ["777"])
+    }
+
+    // Tests direct coding-agent focus throws a missing-window error without offering process/browser recovery metadata.
+    func testFocusAgentWindowThrowsMissingWindowError() throws {
+        let (orchestrator, store, _, workspace, _) = try makeOrchestratorWithWorkspace()
+
+        let record = AgentWindowRecord(
+            id: UUID().uuidString, workspaceID: workspace.id, provider: .iterm2, label: "Codex CLI", itermSessionID: "session-agent",
+            tmuxWindowID: nil, codexThreadID: "thread-1", windowID: 999, yabaiWindowID: 999, status: .spinning, createdAt: "now", updatedAt: "now")
+        try store.upsertAgentWindow(record)
+
+        try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) {
+            XCTAssertThrowsError(try orchestrator.focusAgentWindow(record)) { error in
+                guard case .missingTrackedWindow(let context) = error as? MuxyError else {
+                    return XCTFail("Expected missingTrackedWindow, got \(error)")
+                }
+                XCTAssertEqual(context.kind, .codingAgent)
+                XCTAssertEqual(context.title, "Codex CLI")
+                XCTAssertNil(context.processID)
+                XCTAssertNil(context.targetURL)
+            }
+        }
+    }
+
     // Tests focus workspace window uses tracked chrome window id when target url is shared by arranging representative inputs and asserting the expected result.
     func testFocusWorkspaceWindowUsesTrackedChromeWindowIDWhenTargetURLIsShared() throws {
         throw XCTSkip("Multiple tracked browser tabs in one Chrome window are no longer supported.")
@@ -4268,7 +4445,14 @@ final class OrchestratorTests: XCTestCase {
                 itermSessionID: "session-557", itermTabIndex: 1, pid: 1234, status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now",
                 exitedAt: nil))
 
-        try orchestrator.focusWorkspaceWindow(workspaceID: workspace.id, index: 1)
+        try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) {
+            try withEnv(
+                name: "YABAI_WINDOWS_JSON",
+                value: #"[{"id":557,"pid":11,"app":"iTerm2","title":"api","space":1,"display":1,"is-sticky":false,"is-hidden":false,"is-visible":true,"is-native-fullscreen":false}]"#
+            ) {
+                try orchestrator.focusWorkspaceWindow(workspaceID: workspace.id, index: 1)
+            }
+        }
 
         // Allow any async pulse Task to run.
         RunLoop.current.run(until: Date().addingTimeInterval(0.2))
