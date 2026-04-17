@@ -61,7 +61,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     private var projects: [ProjectSummary] = []
     private var workspacesByProject: [String: [WorkspaceSummary]] = [:]
     private var gitActivityByWorkspaceID: [String: GitTrackedFileActivity] = [:]
-    private var workspaceIndicatorStateByID: [String: SidebarWorkspaceIndicatorState] = [:]
+    private var workspaceRuntimeStatusByID: [String: WorkspaceRuntimeStatus] = [:]
 
     private var selectedProjectID: String?
     private var selectedWorkspaceID: String?
@@ -467,13 +467,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let projects: [ProjectSummary]
         let workspacesByProject: [String: [WorkspaceSummary]]
         let gitActivityByWorkspaceID: [String: GitTrackedFileActivity]
-        let workspaceIndicatorStateByID: [String: SidebarWorkspaceIndicatorState]
-    }
-
-    private enum SidebarWorkspaceIndicatorState: Sendable, Equatable {
-        case idle
-        case runningHealthy
-        case runningUnhealthy
+        let workspaceRuntimeStatusByID: [String: WorkspaceRuntimeStatus]
     }
 
     /// Holds a click closure and serves as the NSGestureRecognizer target for clickable row views.
@@ -791,38 +785,14 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 let projects = try orchestrator.listProjects()
                 var workspacesByProject: [String: [WorkspaceSummary]] = [:]
                 var gitActivityByWorkspaceID: [String: GitTrackedFileActivity] = [:]
-                var workspaceIndicatorStateByID: [String: SidebarWorkspaceIndicatorState] = [:]
+                var workspaceRuntimeStatusByID: [String: WorkspaceRuntimeStatus] = [:]
                 for project in projects {
                     let workspaces = try orchestrator.listWorkspaces(projectID: project.id, includeArchived: false)
                     workspacesByProject[project.id] = workspaces
-                    guard project.isGitRepo else { continue }
                     for workspace in workspaces {
-                        if let activity = try orchestrator.workspaceGitTrackedFileActivity(workspaceID: workspace.id) {
+                        workspaceRuntimeStatusByID[workspace.id] = try orchestrator.workspaceRuntimeStatus(workspaceID: workspace.id)
+                        if project.isGitRepo, let activity = try orchestrator.workspaceGitTrackedFileActivity(workspaceID: workspace.id) {
                             gitActivityByWorkspaceID[workspace.id] = activity
-                        }
-                    }
-                }
-                for workspaces in workspacesByProject.values {
-                    for workspace in workspaces {
-                        let runningProcesses = try orchestrator.runningProcesses(workspaceID: workspace.id)
-                        let hasExitedProcess = runningProcesses.contains { $0.status == .exited }
-                        var hasFailedCheck = false
-                        if !hasExitedProcess {
-                            for process in runningProcesses {
-                                let results = try orchestrator.statusResults(processID: process.id)
-                                if results.contains(where: { $0.status == .failed }) {
-                                    hasFailedCheck = true
-                                    break
-                                }
-                            }
-                        }
-                        if workspace.isRunning {
-                            let agentWindowsList = (try? orchestrator.agentWindows(workspaceID: workspace.id)) ?? []
-                            let hasWaitingAgentWindow = agentWindowsList.contains { $0.status == .waiting }
-                            workspaceIndicatorStateByID[workspace.id] =
-                                (hasExitedProcess || hasFailedCheck || hasWaitingAgentWindow) ? .runningUnhealthy : .runningHealthy
-                        } else {
-                            workspaceIndicatorStateByID[workspace.id] = .idle
                         }
                     }
                 }
@@ -836,7 +806,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 return .success(
                     .init(
                         config: config, projects: projects, workspacesByProject: workspacesByProject,
-                        gitActivityByWorkspaceID: gitActivityByWorkspaceID, workspaceIndicatorStateByID: workspaceIndicatorStateByID))
+                        gitActivityByWorkspaceID: gitActivityByWorkspaceID, workspaceRuntimeStatusByID: workspaceRuntimeStatusByID))
             } catch { return .failure(error) }
         }.value
     }
@@ -1403,31 +1373,12 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             projects = try orchestrator.listProjects()
             workspacesByProject = [:]
             gitActivityByWorkspaceID = [:]
-            workspaceIndicatorStateByID = [:]
+            workspaceRuntimeStatusByID = [:]
             for project in projects {
                 let workspaces = try orchestrator.listWorkspaces(projectID: project.id, includeArchived: false)
                 workspacesByProject[project.id] = workspaces
                 for workspace in workspaces {
-                    let runningProcesses = try orchestrator.runningProcesses(workspaceID: workspace.id)
-                    let hasExitedProcess = runningProcesses.contains { $0.status == .exited }
-                    var hasFailedCheck = false
-                    if !hasExitedProcess {
-                        for process in runningProcesses {
-                            let results = try orchestrator.statusResults(processID: process.id)
-                            if results.contains(where: { $0.status == .failed }) {
-                                hasFailedCheck = true
-                                break
-                            }
-                        }
-                    }
-                    if workspace.isRunning {
-                        let agentWindowsList = (try? orchestrator.agentWindows(workspaceID: workspace.id)) ?? []
-                        let hasWaitingAgentWindow = agentWindowsList.contains { $0.status == .waiting }
-                        workspaceIndicatorStateByID[workspace.id] =
-                            (hasExitedProcess || hasFailedCheck || hasWaitingAgentWindow) ? .runningUnhealthy : .runningHealthy
-                    } else {
-                        workspaceIndicatorStateByID[workspace.id] = .idle
-                    }
+                    workspaceRuntimeStatusByID[workspace.id] = try orchestrator.workspaceRuntimeStatus(workspaceID: workspace.id)
                 }
                 guard project.isGitRepo else { continue }
                 for workspace in workspaces {
@@ -1502,7 +1453,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         projects = snapshot.projects
         workspacesByProject = snapshot.workspacesByProject
         gitActivityByWorkspaceID = snapshot.gitActivityByWorkspaceID
-        workspaceIndicatorStateByID = snapshot.workspaceIndicatorStateByID
+        workspaceRuntimeStatusByID = snapshot.workspaceRuntimeStatusByID
         outlineView.reloadData()
         outlineView.expandItem(nil, expandChildren: true)
         refreshSelection()
@@ -2514,10 +2465,24 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
         // --- Header with status dot ---
         let accentColor = sidebarThemeColor(light: (13, 95, 93), dark: (61, 198, 184))
+        let runtimeStatus = workspaceRuntimeStatusByID[workspace.id]
+            ?? WorkspaceRuntimeStatus(
+                workspaceID: workspace.id,
+                lifecycleState: WorkspaceLifecycleState(isRunning: workspace.isRunning),
+                runtimeHealth: .healthy,
+                hasTrackedRuntimeIndicators: false,
+                runningProcessCount: 0,
+                exitedProcessCount: 0,
+                failedCheckCount: 0,
+                waitingAgentWindowCount: 0,
+                missingConfiguredProcessCount: 0,
+                missingConfiguredBrowserSessionCount: 0)
+        let isLifecycleRunning = runtimeStatus.lifecycleState == .running
         let statusDot = NSImageView()
         statusDot.image = NSImage(
-            systemSymbolName: workspace.isRunning ? "circle.fill" : "circle", accessibilityDescription: workspace.isRunning ? "Running" : "Stopped")
-        statusDot.contentTintColor = workspace.isRunning ? accentColor : .tertiaryLabelColor
+            systemSymbolName: isLifecycleRunning ? "circle.fill" : "circle", accessibilityDescription: isLifecycleRunning ? "Running" : "Stopped")
+        statusDot.contentTintColor = isLifecycleRunning ? accentColor : .tertiaryLabelColor
+        statusDot.toolTip = isLifecycleRunning ? "Running" : "Stopped"
         statusDot.setContentHuggingPriority(.required, for: .horizontal)
         let projectLabel = NSTextField(labelWithString: "\(project.name) /")
         projectLabel.font = .systemFont(ofSize: 20, weight: .semibold)
@@ -2529,6 +2494,15 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         workspaceTitleLabel.textColor = sidebarPrimaryTextColor(isSelected: false, isArchived: false)
         workspaceTitleLabel.lineBreakMode = .byTruncatingTail
         workspaceTitleLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+
+        let runtimeWarningIcon = NSImageView()
+        runtimeWarningIcon.image = NSImage(systemSymbolName: "exclamationmark.triangle.fill", accessibilityDescription: "Status warning")
+        runtimeWarningIcon.contentTintColor = .systemOrange
+        runtimeWarningIcon.toolTip = runtimeStatus.warningSummary
+        runtimeWarningIcon.translatesAutoresizingMaskIntoConstraints = false
+        runtimeWarningIcon.isHidden = runtimeStatus.warningSummary == nil
+        runtimeWarningIcon.widthAnchor.constraint(equalToConstant: 12).isActive = true
+        runtimeWarningIcon.heightAnchor.constraint(equalToConstant: 12).isActive = true
 
         let workspaceTitleField = NSTextField(string: workspace.name)
         workspaceTitleField.placeholderString = "Workspace title"
@@ -2553,6 +2527,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         headerRow.addArrangedSubview(statusDot)
         headerRow.addArrangedSubview(projectLabel)
         headerRow.addArrangedSubview(workspaceTitleLabel)
+        headerRow.addArrangedSubview(runtimeWarningIcon)
         headerRow.addArrangedSubview(workspaceTitleField)
         headerRow.addArrangedSubview(titleSaveButton)
         headerRow.addArrangedSubview(titleCancelButton)
@@ -2666,6 +2641,14 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         headerAndActionsRow.spacing = 4
         headerAndActionsRow.addArrangedSubview(topActionRow)
         headerAndActionsRow.addArrangedSubview(headerRow)
+        if let warningSummary = runtimeStatus.warningSummary {
+            let warningLabel = NSTextField(labelWithString: warningSummary)
+            warningLabel.font = .systemFont(ofSize: 11)
+            warningLabel.textColor = .systemOrange
+            warningLabel.lineBreakMode = .byTruncatingTail
+            warningLabel.maximumNumberOfLines = 1
+            headerAndActionsRow.addArrangedSubview(warningLabel)
+        }
 
         // --- Tabs ---
         let tabs = NSTabView()
@@ -5438,13 +5421,22 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
         let statusIcon = NSImageView()
         statusIcon.translatesAutoresizingMaskIntoConstraints = false
-        let indicatorState = workspaceIndicatorStateByID[workspace.id] ?? (workspace.isRunning ? .runningHealthy : .idle)
-        statusIcon.image = NSImage(systemSymbolName: indicatorState == .idle ? "circle" : "circle.fill", accessibilityDescription: "Status")
-        switch indicatorState {
-        case .idle: statusIcon.contentTintColor = sidebarIdleIndicatorColor()
-        case .runningHealthy: statusIcon.contentTintColor = sidebarRunningIndicatorColor()
-        case .runningUnhealthy: statusIcon.contentTintColor = sidebarFailedIndicatorColor()
-        }
+        let runtimeStatus = workspaceRuntimeStatusByID[workspace.id]
+            ?? WorkspaceRuntimeStatus(
+                workspaceID: workspace.id,
+                lifecycleState: WorkspaceLifecycleState(isRunning: workspace.isRunning),
+                runtimeHealth: .healthy,
+                hasTrackedRuntimeIndicators: false,
+                runningProcessCount: 0,
+                exitedProcessCount: 0,
+                failedCheckCount: 0,
+                waitingAgentWindowCount: 0,
+                missingConfiguredProcessCount: 0,
+                missingConfiguredBrowserSessionCount: 0)
+        let isLifecycleRunning = runtimeStatus.lifecycleState == .running
+        statusIcon.image = NSImage(systemSymbolName: isLifecycleRunning ? "circle.fill" : "circle", accessibilityDescription: "Status")
+        statusIcon.contentTintColor = isLifecycleRunning ? sidebarRunningIndicatorColor() : sidebarIdleIndicatorColor()
+        statusIcon.toolTip = isLifecycleRunning ? "Running" : "Stopped"
         statusIcon.widthAnchor.constraint(equalToConstant: 10).isActive = true
         statusIcon.heightAnchor.constraint(equalToConstant: 10).isActive = true
 
@@ -5455,6 +5447,16 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
         titleRow.addArrangedSubview(statusIcon)
         titleRow.addArrangedSubview(nameLabel)
+        if let warningSummary = runtimeStatus.warningSummary {
+            let warningIcon = NSImageView()
+            warningIcon.image = NSImage(systemSymbolName: "exclamationmark.triangle.fill", accessibilityDescription: "Status warning")
+            warningIcon.contentTintColor = sidebarFailedIndicatorColor()
+            warningIcon.toolTip = warningSummary
+            warningIcon.translatesAutoresizingMaskIntoConstraints = false
+            warningIcon.widthAnchor.constraint(equalToConstant: 11).isActive = true
+            warningIcon.heightAnchor.constraint(equalToConstant: 11).isActive = true
+            titleRow.addArrangedSubview(warningIcon)
+        }
         contentStack.addArrangedSubview(titleRow)
 
         if project.isGitRepo {

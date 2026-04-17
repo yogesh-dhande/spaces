@@ -45,6 +45,10 @@ A workspace has:
 - a captured set of windows and runtime state
 
 Workspaces can be active or inactive in the sidebar, and can be running or stopped independently of that sidebar state.
+Running and stopped should be easy to explain:
+- `Running` means Muxy explicitly launched the workspace or another explicit workspace action marked it running.
+- `Stopped` means Muxy has not explicitly launched it, or Muxy explicitly stopped it.
+- Stale runtime leftovers should not silently change `Stopped` back to `Running`; they should surface as warnings on top of the existing lifecycle state.
 
 ### Window Set
 A workspace owns a tracked set of dedicated windows, such as:
@@ -91,6 +95,9 @@ Muxy focuses those windows; it does not decide their geometry.
 - Launch should wait for setup to finish and should surface setup failures clearly.
 - Named ports must be available to setup scripts, stop scripts, process commands, and status checks.
 - Stopping or restarting a workspace must never close unrelated user windows.
+- Runtime health is separate from lifecycle state:
+  - `Running` workspaces can be healthy or degraded
+  - `Stopped` workspaces can still have stale tracked runtime leftovers that need cleanup or recovery
 
 ## Window Management and Focus
 - Workspaces map to captured window sets managed through yabai.
@@ -103,6 +110,7 @@ Muxy focuses those windows; it does not decide their geometry.
   - processes restart in a new dedicated iTerm2 window
   - coding-agent windows only show the error state and do not offer recovery
 - Muxy should still reconcile stale tracked windows in the background instead of forcing the user to repair state manually.
+- Degraded runtime health should appear as a warning on top of the current `Running` or `Stopped` lifecycle state, not as a separate replacement state label.
 
 ## Dashboard and Health
 - The app should surface attention items across workspaces in one place.

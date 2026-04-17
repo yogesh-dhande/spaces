@@ -2525,7 +2525,7 @@ final class OrchestratorTests: XCTestCase {
     }
 
     // Tests refresh workspace windows prunes stale rows and clears running when no runtime indicators remain by arranging representative inputs and asserting the expected result.
-    func testRefreshWorkspaceWindowsPrunesStaleRowsAndClearsRunningWhenNoRuntimeIndicatorsRemain() throws {
+    func testRefreshWorkspaceWindowsPrunesStaleRowsWithoutClearingRunningLifecycleState() throws {
         let (orchestrator, store, _, workspace, _) = try makeOrchestratorWithWorkspace()
         try store.updateWorkspaceRunning(id: workspace.id, isRunning: true, launchedAt: "now")
         try store.upsert(
@@ -2534,7 +2534,7 @@ final class OrchestratorTests: XCTestCase {
                 lastSeenAt: "now"))
 
         // Mocked dependency: live yabai window inventory.
-        // Why: verify refresh prunes missing/stale tracked windows and recomputes running state from runtime indicators.
+        // Why: verify refresh prunes missing/stale tracked windows without implicitly changing lifecycle state.
         // Remaining risk: rapid concurrent open/close events can still race with a single refresh snapshot.
         var didMutate = false
         try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) {
@@ -2543,7 +2543,10 @@ final class OrchestratorTests: XCTestCase {
 
         XCTAssertTrue(didMutate)
         XCTAssertTrue(try store.windows(workspaceID: workspace.id).isEmpty)
-        XCTAssertEqual(try store.workspace(id: workspace.id)?.isRunning, false)
+        XCTAssertEqual(try store.workspace(id: workspace.id)?.isRunning, true)
+        let runtimeStatus = try orchestrator.workspaceRuntimeStatus(workspaceID: workspace.id)
+        XCTAssertEqual(runtimeStatus.lifecycleState, .running)
+        XCTAssertEqual(runtimeStatus.runtimeHealth, .healthy)
     }
 
     // Tests refresh workspace windows returns false when nothing changed by arranging representative inputs and asserting the expected result.
@@ -2558,6 +2561,60 @@ final class OrchestratorTests: XCTestCase {
 
         XCTAssertFalse(didMutate)
         XCTAssertTrue(try store.windows(workspaceID: workspace.id).isEmpty)
+    }
+
+    // Tests stopped workspaces with tracked runtime leftovers remain stopped but surface degraded runtime health.
+    func testWorkspaceRuntimeStatusMarksStoppedWorkspaceWithTrackedRuntimeLeftoversAsPartial() throws {
+        let (orchestrator, store, _, workspace, _) = try makeOrchestratorWithWorkspace()
+        try store.upsert(
+            runningProcess: RunningProcessRecord(
+                id: UUID().uuidString, workspaceID: workspace.id, templateName: "api", command: "npm run api", terminalApp: "iTerm2", windowID: 501,
+                pid: nil, status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil))
+
+        let runtimeStatus = try orchestrator.workspaceRuntimeStatus(workspaceID: workspace.id)
+        XCTAssertEqual(runtimeStatus.lifecycleState, .stopped)
+        XCTAssertEqual(runtimeStatus.runtimeHealth, .partial)
+        XCTAssertEqual(runtimeStatus.warningSummary, "tracked runtime leftovers")
+        XCTAssertEqual(try store.workspace(id: workspace.id)?.isRunning, false)
+    }
+
+    // Tests exited tracked processes are reported as exited, not missing, when the runtime record still exists.
+    func testWorkspaceRuntimeStatusDoesNotCountExitedTrackedProcessAsMissing() throws {
+        let (orchestrator, store, _, workspace, _) = try makeOrchestratorWithWorkspace()
+        try store.touchWorkspaceSettings(workspaceID: workspace.id, updatedAt: "now")
+        try store.setWorkspaceProcesses(workspaceID: workspace.id, processes: [ProcessTemplate(name: "api", command: "npm run api")])
+        try store.updateWorkspaceRunning(id: workspace.id, isRunning: true, launchedAt: "now")
+        try store.upsert(
+            runningProcess: RunningProcessRecord(
+                id: UUID().uuidString, workspaceID: workspace.id, templateName: "api", command: "npm run api", terminalApp: "iTerm2", windowID: 501,
+                pid: nil, status: .exited, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: "later"))
+
+        let runtimeStatus = try orchestrator.workspaceRuntimeStatus(workspaceID: workspace.id)
+        XCTAssertEqual(runtimeStatus.lifecycleState, .running)
+        XCTAssertEqual(runtimeStatus.runtimeHealth, .partial)
+        XCTAssertEqual(runtimeStatus.exitedProcessCount, 1)
+        XCTAssertEqual(runtimeStatus.missingConfiguredProcessCount, 0)
+        XCTAssertEqual(runtimeStatus.warningSummary, "1 exited process")
+    }
+
+    // Tests updating settings does not promote stopped workspaces to running just because tracked runtime leftovers exist.
+    func testUpdateWorkspaceSettingsDoesNotPromoteStoppedWorkspaceWithTrackedRuntimeLeftovers() throws {
+        let (orchestrator, store, _, workspace, _) = try makeOrchestratorWithWorkspace()
+        try store.upsert(
+            runningProcess: RunningProcessRecord(
+                id: UUID().uuidString, workspaceID: workspace.id, templateName: "job", command: "echo job", terminalApp: nil, windowID: nil, pid: nil,
+                status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil))
+
+        try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) {
+            try orchestrator.updateWorkspaceSettings(workspaceID: workspace.id) { settings in
+                settings.processes = [ProcessTemplate(name: "job", command: "echo job")]
+            }
+        }
+
+        XCTAssertEqual(try store.workspace(id: workspace.id)?.isRunning, false)
+        let runtimeStatus = try orchestrator.workspaceRuntimeStatus(workspaceID: workspace.id)
+        XCTAssertEqual(runtimeStatus.lifecycleState, .stopped)
+        XCTAssertEqual(runtimeStatus.runtimeHealth, .partial)
     }
 
     // Tests refresh workspace windows prunes legacy terminal rows that do not have tmux identity.
@@ -2698,8 +2755,8 @@ final class OrchestratorTests: XCTestCase {
         }
     }
 
-    // Tests update workspace settings marks workspace running when runtime indicators exist by arranging representative inputs and asserting the expected result.
-    func testUpdateWorkspaceSettingsMarksWorkspaceRunningWhenRuntimeIndicatorsExist() throws {
+    // Tests update workspace settings leaves stopped workspaces stopped when only stale runtime leftovers exist.
+    func testUpdateWorkspaceSettingsLeavesStoppedWorkspaceStoppedWhenRuntimeIndicatorsExist() throws {
         let (orchestrator, store, _, workspace, _) = try makeOrchestratorWithWorkspace()
         try store.upsert(
             runningProcess: RunningProcessRecord(
@@ -2714,8 +2771,11 @@ final class OrchestratorTests: XCTestCase {
         }
 
         let updated = try store.workspace(id: workspace.id)
-        XCTAssertEqual(updated?.isRunning, true)
-        XCTAssertTrue(try store.runningProcesses(workspaceID: workspace.id).isEmpty)
+        XCTAssertEqual(updated?.isRunning, false)
+        XCTAssertEqual(try store.runningProcesses(workspaceID: workspace.id).count, 1)
+        let runtimeStatus = try orchestrator.workspaceRuntimeStatus(workspaceID: workspace.id)
+        XCTAssertEqual(runtimeStatus.lifecycleState, .stopped)
+        XCTAssertEqual(runtimeStatus.runtimeHealth, .partial)
     }
 
     // Tests list projects returns sorted summaries by arranging representative inputs and asserting the expected result.

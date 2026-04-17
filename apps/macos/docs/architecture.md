@@ -65,6 +65,7 @@ Workspaces persist:
 - title, tooltip, and branch metadata
 - default and archived flags
 - active or inactive sidebar visibility state
+- explicit lifecycle state (`running` vs `stopped`)
 - seeded per-workspace copies of launch-time settings
 
 ### Runtime Records
@@ -76,6 +77,7 @@ Runtime state persists separately from project and workspace templates:
 - tracked agent windows
 
 This separation lets template edits coexist with current runtime state and per-workspace overrides.
+It also lets lifecycle state stay explicit while runtime health is derived from the current runtime records.
 
 ## Core Flows
 
@@ -104,6 +106,7 @@ This separation lets template edits coexist with current runtime state and per-w
 ### Discovery and Reconciliation
 - Background worktree discovery imports valid unmanaged worktrees for known projects.
 - Background reconciliation removes stale tracked windows and refreshes persisted workspace metadata from disk where needed.
+- Reconciliation may degrade runtime health, but it should not silently promote or demote workspace lifecycle state.
 - These passes should not block the main UI thread.
 
 ## Environment and Process Model
@@ -123,6 +126,11 @@ This separation lets template edits coexist with current runtime state and per-w
 - Agent events are explicit CLI inputs that attach status to tracked workspace agent windows.
 - Agent windows are stored separately from regular process windows because they carry provider and lifecycle metadata.
 - Dashboard attention state is derived from runtime records rather than inferred from UI state.
+
+## Lifecycle and Health
+- Workspace lifecycle state is explicit and persisted on the workspace record.
+- Runtime health is derived from runtime records, configured browser/process expectations, status-check failures, and agent waiting state.
+- The GUI should render lifecycle state directly and layer runtime-health warnings on top instead of inferring lifecycle from stale runtime leftovers.
 
 ## Performance Principles
 - Focus and capture paths should avoid unnecessary blocking work.

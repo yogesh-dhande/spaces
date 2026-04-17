@@ -245,14 +245,7 @@ public final class MuxyOrchestrator {
         try store.setWorkspaceStatusChecks(workspaceID: workspace.id, checks: existing.statusChecks)
         try store.setWorkspaceBrowserSessions(workspaceID: workspace.id, sessions: existing.browserSessions)
         try store.touchWorkspaceSettings(workspaceID: workspace.id, updatedAt: nowISO8601())
-        let trackedProcesses = try store.runningProcesses(workspaceID: workspace.id)
-        let trackedWindows = try store.windows(workspaceID: workspace.id)
-        let hasRuntimeIndicators = !trackedProcesses.isEmpty || !trackedWindows.isEmpty
-        if !workspace.isRunning && hasRuntimeIndicators {
-            let launchedAt = workspace.lastLaunchedAt ?? nowISO8601()
-            try store.updateWorkspaceRunning(id: workspace.id, isRunning: true, launchedAt: launchedAt)
-        }
-        if workspace.isRunning || hasRuntimeIndicators {
+        if workspace.isRunning {
             try applyWorkspaceSettingsUpdate(project: project, workspace: workspace, previous: previous, updated: existing)
         }
     }
@@ -783,7 +776,93 @@ public final class MuxyOrchestrator {
     private func hasTrackedRuntimeIndicators(workspaceID: String) throws -> Bool {
         let trackedProcesses = try store.runningProcesses(workspaceID: workspaceID)
         let trackedWindows = try store.windows(workspaceID: workspaceID)
-        return !trackedProcesses.isEmpty || !trackedWindows.isEmpty
+        let agentWindows = try store.agentWindows(workspaceID: workspaceID)
+        return !trackedProcesses.isEmpty || !trackedWindows.isEmpty || !agentWindows.isEmpty
+    }
+
+    public func workspaceRuntimeStatus(workspaceID: String) throws -> WorkspaceRuntimeStatus {
+        let (project, workspace) = try resolveWorkspace(id: workspaceID)
+        let lifecycleState = WorkspaceLifecycleState(isRunning: workspace.isRunning)
+        let runningProcesses = try store.runningProcesses(workspaceID: workspaceID)
+        let trackedWindows = try store.windows(workspaceID: workspaceID)
+        let agentWindows = try store.agentWindows(workspaceID: workspaceID)
+        let hasTrackedRuntimeIndicators = !runningProcesses.isEmpty || !trackedWindows.isEmpty || !agentWindows.isEmpty
+
+        let runningProcessCount = runningProcesses.filter { $0.status == .running }.count
+        let exitedProcessCount = runningProcesses.filter { $0.status == .exited }.count
+        let waitingAgentWindowCount = agentWindows.filter { $0.status == .waiting }.count
+
+        var failedCheckCount = 0
+        for process in runningProcesses {
+            let failedChecks = try statusResults(processID: process.id).filter { $0.status == .failed }.count
+            failedCheckCount += failedChecks
+        }
+
+        let settings = try loadWorkspaceSettings(project: project, workspace: workspace)
+        let expectedProcessKeys = (settings?.processes ?? []).map { processTemplateRuntimeKey(name: $0.name, command: $0.command) }
+        let trackedProcessKeys = runningProcesses.map { processRuntimeKey(name: $0.templateName, command: $0.command) }
+        let missingConfiguredProcessCount = missingRuntimeRecordCount(expectedKeys: expectedProcessKeys, actualKeys: trackedProcessKeys)
+
+        let expectedBrowserTargets = Set(try resolvedWorkspaceBrowserSessions(workspaceID: workspaceID).compactMap(\.url).filter { !$0.isEmpty })
+        let trackedBrowserTargets = Set(trackedWindows.filter { $0.role == "browser" }.compactMap(\.targetURL).filter { !$0.isEmpty })
+        let missingConfiguredBrowserSessionCount = expectedBrowserTargets.subtracting(trackedBrowserTargets).count
+
+        let expectsManagedRuntime = !expectedProcessKeys.isEmpty || !expectedBrowserTargets.isEmpty
+        let runtimeHealth: WorkspaceRuntimeHealth = switch lifecycleState {
+        case .stopped:
+            hasTrackedRuntimeIndicators ? .partial : .healthy
+        case .running:
+            if !hasTrackedRuntimeIndicators {
+                expectsManagedRuntime ? .missing : .healthy
+            } else if exitedProcessCount > 0 || failedCheckCount > 0 || waitingAgentWindowCount > 0 || missingConfiguredProcessCount > 0
+                || missingConfiguredBrowserSessionCount > 0
+            {
+                .partial
+            } else {
+                .healthy
+            }
+        }
+
+        return WorkspaceRuntimeStatus(
+            workspaceID: workspaceID,
+            lifecycleState: lifecycleState,
+            runtimeHealth: runtimeHealth,
+            hasTrackedRuntimeIndicators: hasTrackedRuntimeIndicators,
+            runningProcessCount: runningProcessCount,
+            exitedProcessCount: exitedProcessCount,
+            failedCheckCount: failedCheckCount,
+            waitingAgentWindowCount: waitingAgentWindowCount,
+            missingConfiguredProcessCount: missingConfiguredProcessCount,
+            missingConfiguredBrowserSessionCount: missingConfiguredBrowserSessionCount)
+    }
+
+    private func processTemplateRuntimeKey(name: String?, command: String) -> String {
+        let normalizedName = name?.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let normalizedName, !normalizedName.isEmpty { return "name:\(normalizedName)" }
+        return "command:\(command)"
+    }
+
+    private func processRuntimeKey(name: String, command: String) -> String {
+        let normalizedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !normalizedName.isEmpty { return "name:\(normalizedName)" }
+        return "command:\(command)"
+    }
+
+    private func missingRuntimeRecordCount(expectedKeys: [String], actualKeys: [String]) -> Int {
+        var actualCounts: [String: Int] = [:]
+        for key in actualKeys {
+            actualCounts[key, default: 0] += 1
+        }
+
+        var missingCount = 0
+        for key in expectedKeys {
+            if let currentCount = actualCounts[key], currentCount > 0 {
+                actualCounts[key] = currentCount - 1
+            } else {
+                missingCount += 1
+            }
+        }
+        return missingCount
     }
 
     private func withWorkspaceLifecycleLock<T>(workspaceID: String, operation: () throws -> T) throws -> T {
@@ -1020,15 +1099,7 @@ public final class MuxyOrchestrator {
         _ = try indexedWorkspaceWindows(workspaceID: workspaceID)
         let refreshedTerminalTitles = try refreshUnmanagedTerminalWindowTitles(workspaceID: workspaceID)
         let pruned = try pruneMissingWindows(workspaceID: workspaceID)
-        var didMutate = syncedTmuxRuntime || refreshedTerminalTitles > 0 || pruned > 0
-        guard let workspace = try store.workspace(id: workspaceID), workspace.isRunning else { return didMutate }
-        let hasRuntimeIndicators = try hasTrackedRuntimeIndicators(workspaceID: workspaceID)
-        if !hasRuntimeIndicators {
-            try store.updateWorkspaceRunning(id: workspaceID, isRunning: false, launchedAt: workspace.lastLaunchedAt)
-            setWindowNavigationCursor(nil, workspaceID: workspaceID)
-            didMutate = true
-        }
-        return didMutate
+        return syncedTmuxRuntime || refreshedTerminalTitles > 0 || pruned > 0
     }
 
     @discardableResult private func refreshUnmanagedTerminalWindowTitles(workspaceID: String) throws -> Int {
