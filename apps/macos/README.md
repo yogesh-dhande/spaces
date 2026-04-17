@@ -142,6 +142,28 @@ When text input is focused in the GUI, standard editing shortcuts (including `cm
 
 Set `DEBUG=1` when launching Muxy to log full workspace-cycle timing and direct focus-path timing (target rebuild, current-target resolution, direct window focus, stale-window repair, and shortcut/row-click dispatch timings) to stderr.
 
+For repeatable top-level regression checks, run:
+
+```bash
+scripts/profile-window-focus.sh
+```
+
+The script relaunches the debug app with `DEBUG=1`, drives the key focus paths we have been profiling so far, and prints min/avg/max totals for:
+- `muxy_to_browser`
+- `muxy_to_iterm`
+- `browser_to_browser`
+- `browser_to_iterm`
+- `iterm_to_iterm`
+- `iterm_to_browser`
+
+Update the config block at the top of [profile-window-focus.sh](/Users/yogesh/projects/muxy/scripts/profile-window-focus.sh) before running it:
+- `WORKSPACE_DIR`: workspace to profile
+- `MUXY_TO_BROWSER_INDEX` / `MUXY_TO_ITERM_INDEX`: `cmd+<n>` targets to measure from the focused Muxy app
+- `BROWSER_TO_BROWSER_START_INDEX`, `BROWSER_TO_ITERM_START_INDEX`, `ITERM_TO_ITERM_START_INDEX`, `ITERM_TO_BROWSER_START_INDEX`: starting window rows used before each `cmd+shift+]` cycle sample
+- `SAMPLE_COUNT`: samples per action
+
+The script assumes the configured row indices match the current Run-tab ordering for the target workspace.
+
 ## Auto-Update
 Muxy checks for updates from the appcast feed on launch and every 4 hours. Use the app menu **Check for Updates...** to check manually.
 
