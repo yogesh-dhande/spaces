@@ -181,6 +181,55 @@ open class Iterm2Adapter: @unchecked Sendable {
         _ = try? AppleScript.run(script)
     }
 
+    open func backgroundColor(windowID: Int) throws -> (r: Int, g: Int, b: Int)? {
+        let script = """
+            tell application "iTerm2"
+              repeat with w in windows
+                if id of w is \(windowID) then
+                  tell current session of w
+                    set c to background color
+                    return (item 1 of c as string) & "," & (item 2 of c as string) & "," & (item 3 of c as string)
+                  end tell
+                end if
+              end repeat
+              return ""
+            end tell
+            """
+        let output = try AppleScript.run(script).trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !output.isEmpty else { return nil }
+        let parts = output.split(separator: ",", omittingEmptySubsequences: false)
+        guard parts.count == 3,
+            let red16 = Int(parts[0]),
+            let green16 = Int(parts[1]),
+            let blue16 = Int(parts[2])
+        else {
+            return nil
+        }
+        return (r: red16 / 257, g: green16 / 257, b: blue16 / 257)
+    }
+
+    @discardableResult
+    open func setBackgroundColor(windowID: Int, color: (r: Int, g: Int, b: Int)) throws -> Bool {
+        let r = color.r * 257
+        let g = color.g * 257
+        let b = color.b * 257
+        let script = """
+            tell application "iTerm2"
+              repeat with w in windows
+                if id of w is \(windowID) then
+                  tell current session of w
+                    set background color to {\(r), \(g), \(b)}
+                  end tell
+                  return "1"
+                end if
+              end repeat
+              return ""
+            end tell
+            """
+        let output = try AppleScript.run(script).trimmingCharacters(in: .whitespacesAndNewlines)
+        return output == "1"
+    }
+
     open func listSessionIDs() throws -> Set<String> {
         let script = """
             tell application "iTerm2"

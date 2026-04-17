@@ -4276,6 +4276,59 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertEqual(mockIterm.pulseCallCount, 0)
     }
 
+    // Tests overlapping iTerm focus pulses restore the original background instead of leaving the pulse color behind.
+    func testFocusItermWindowOverlappingPulsesRestoreOriginalBackground() throws {
+        let (orchestrator, store, _, workspace, _, mockIterm, mockTmux) = try makeMockItermOrchestratorWithWorkspace()
+        let tmuxWindow = mockTmux.addWindow(sessionName: "muxy-\(workspace.id)", id: "@1", name: "api", index: 0, isActive: true)
+        mockIterm.managedPulseSupported = true
+        mockIterm.backgroundColorByWindowID[558] = (r: 12, g: 34, b: 56)
+
+        try store.upsert(
+            window: WindowRecord(
+                id: UUID().uuidString, workspaceID: workspace.id, app: "iTerm2", title: "api", windowID: 558,
+                itermSessionID: "workspace-session", tmuxWindowID: tmuxWindow.id, role: "terminal", orderIndex: 200, lastSeenAt: "now"))
+        try store.upsert(
+            runningProcess: RunningProcessRecord(
+                id: UUID().uuidString, workspaceID: workspace.id, templateName: "api", command: "npm run api", terminalApp: "iTerm2", windowID: 558,
+                itermSessionID: "workspace-session", itermTabIndex: nil, tmuxWindowID: tmuxWindow.id, pid: 1234, status: .running, logPath: nil,
+                lastOutputAt: nil, startedAt: "now", exitedAt: nil))
+
+        try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) {
+            try withEnv(
+                name: "YABAI_WINDOWS_JSON",
+                value: #"[{"id":558,"pid":11,"app":"iTerm2","title":"api","space":1,"display":1,"is-sticky":false,"is-hidden":false,"is-visible":true,"is-native-fullscreen":false}]"#
+            ) {
+                try orchestrator.focusWorkspaceWindow(workspaceID: workspace.id, index: 1)
+                try orchestrator.focusWorkspaceWindow(workspaceID: workspace.id, index: 1)
+            }
+        }
+
+        let deadline = Date().addingTimeInterval(2)
+        while mockIterm.setBackgroundColorCallCount < 3, Date() < deadline {
+            RunLoop.current.run(until: Date().addingTimeInterval(0.05))
+        }
+
+        XCTAssertEqual(mockIterm.backgroundColorReadCount, 1)
+        XCTAssertEqual(mockIterm.setBackgroundColorCallCount, 3)
+        XCTAssertEqual(mockIterm.backgroundColorWrites.count, 3)
+        XCTAssertEqual(mockIterm.backgroundColorWrites[0].windowID, 558)
+        XCTAssertEqual(mockIterm.backgroundColorWrites[0].color.r, 46)
+        XCTAssertEqual(mockIterm.backgroundColorWrites[0].color.g, 41)
+        XCTAssertEqual(mockIterm.backgroundColorWrites[0].color.b, 14)
+        XCTAssertEqual(mockIterm.backgroundColorWrites[1].windowID, 558)
+        XCTAssertEqual(mockIterm.backgroundColorWrites[1].color.r, 46)
+        XCTAssertEqual(mockIterm.backgroundColorWrites[1].color.g, 41)
+        XCTAssertEqual(mockIterm.backgroundColorWrites[1].color.b, 14)
+        XCTAssertEqual(mockIterm.backgroundColorWrites[2].windowID, 558)
+        XCTAssertEqual(mockIterm.backgroundColorWrites[2].color.r, 12)
+        XCTAssertEqual(mockIterm.backgroundColorWrites[2].color.g, 34)
+        XCTAssertEqual(mockIterm.backgroundColorWrites[2].color.b, 56)
+        XCTAssertEqual(mockIterm.backgroundColorByWindowID[558]?.r, 12)
+        XCTAssertEqual(mockIterm.backgroundColorByWindowID[558]?.g, 34)
+        XCTAssertEqual(mockIterm.backgroundColorByWindowID[558]?.b, 56)
+        XCTAssertEqual(mockIterm.pulseCallCount, 0)
+    }
+
     // MARK: - resolveEnvVars
 
     // Tests applyEnvVars substitutes a single named variable.

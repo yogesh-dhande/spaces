@@ -99,11 +99,29 @@ class MockIterm2Adapter: Iterm2Adapter, @unchecked Sendable {
     var pulseCallCount = 0
     var lastPulsedWindowID: Int?
     var lastPulseColor: (r: Int, g: Int, b: Int)?
+    var managedPulseSupported = false
+    var backgroundColorByWindowID: [Int: (r: Int, g: Int, b: Int)] = [:]
+    var backgroundColorReadCount = 0
+    var setBackgroundColorCallCount = 0
+    var backgroundColorWrites: [(windowID: Int, color: (r: Int, g: Int, b: Int))] = []
 
     override func pulseBackground(windowID: Int, pulseColor: (r: Int, g: Int, b: Int)) throws {
         pulseCallCount += 1
         lastPulsedWindowID = windowID
         lastPulseColor = pulseColor
+    }
+
+    override func backgroundColor(windowID: Int) throws -> (r: Int, g: Int, b: Int)? {
+        backgroundColorReadCount += 1
+        guard managedPulseSupported else { return nil }
+        return backgroundColorByWindowID[windowID]
+    }
+
+    override func setBackgroundColor(windowID: Int, color: (r: Int, g: Int, b: Int)) throws -> Bool {
+        setBackgroundColorCallCount += 1
+        backgroundColorWrites.append((windowID: windowID, color: color))
+        backgroundColorByWindowID[windowID] = color
+        return managedPulseSupported
     }
 
     override func listSessionIDs() throws -> Set<String> { stubbedSessionIDs }
