@@ -106,9 +106,8 @@ Muxy focuses those windows; it does not decide their geometry.
 - Browser focus should match the intended browser session by URL, not by window title.
 - Terminal focus should land on the intended dedicated process or agent session.
 - If tracked windows become stale during next/previous window cycling, Muxy should skip them and continue to the next live target.
-- If direct window focus from the app targets a stale browser session or process window, Muxy should show a non-modal error and offer recovery:
-  - browser sessions reopen in a new Chrome window and update tracking
-  - processes recover in a new dedicated iTerm2 window by reattaching to the tmux session when still running, or by restarting inside tmux when not running
+- If direct window focus from the app targets a stale browser session, Muxy should show a modal warning with `Recover (Cmd+R)` and `Cancel (Esc)`, and recovery should reopen the session in a new Chrome window and update tracking.
+- If direct window focus from the app targets a stale process window, Muxy should first try to recover silently by opening a new dedicated iTerm2 window and reattaching to the existing tmux session when the process is still running. If the process is no longer running, Muxy should show a modal warning with `Recover (Cmd+R)` and `Cancel (Esc)`, and the explicit recovery action should restart it inside tmux.
   - coding-agent windows only show the error state and do not offer recovery
 - Muxy should still reconcile stale tracked windows in the background instead of forcing the user to repair state manually.
 - Degraded runtime health should appear as a warning on top of the current `Running` or `Stopped` lifecycle state, not as a separate replacement state label.

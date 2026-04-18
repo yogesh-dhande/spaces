@@ -3279,6 +3279,11 @@ public final class MuxyOrchestrator {
         try restartProcessInTerminal(workspaceID: workspaceID, process: process)
     }
 
+    public func recoverRunningWorkspaceProcessIfPossible(workspaceID: String, processID: String) throws -> Bool {
+        guard let process = try store.runningProcesses(workspaceID: workspaceID).first(where: { $0.id == processID }) else { return false }
+        return try recoverRunningProcessTerminalIfPossible(workspaceID: workspaceID, process: process)
+    }
+
     public func recoverMissingBrowserSession(workspaceID: String, targetURL: String) throws {
         let (project, workspace) = try resolveWorkspace(id: workspaceID)
         let sessions = try store.workspaceBrowserSessions(workspaceID: workspace.id)

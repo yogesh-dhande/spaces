@@ -1651,6 +1651,57 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertTrue(mockTmux.killedSessionNames.isEmpty)
     }
 
+    // Tests running-process recovery reattaches without restarting when the tmux session is still available.
+    func testRecoverRunningWorkspaceProcessIfPossibleReattachesWithoutRestart() throws {
+        let (orchestrator, store, _, workspace, _, mockIterm, mockTmux) = try makeMockItermOrchestratorWithWorkspace()
+        mockTmux.createSession(named: "muxy-\(workspace.id)-api")
+
+        let process = RunningProcessRecord(
+            id: UUID().uuidString, workspaceID: workspace.id, templateName: "api", command: "npm run api", terminalApp: "iTerm2", windowID: 999,
+            itermSessionID: "session-old", itermTabIndex: nil, tmuxWindowID: nil, pid: Int(ProcessInfo.processInfo.processIdentifier),
+            status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil)
+        try store.upsert(runningProcess: process)
+
+        var recovered = false
+        try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) {
+            try withEnv(
+                name: "YABAI_WINDOWS_JSON",
+                value: #"[{"id":889,"pid":11,"app":"iTerm2","title":"api","space":1,"display":1,"is-sticky":false,"is-hidden":false,"is-visible":true,"is-native-fullscreen":false}]"#
+            ) {
+                try withEnv(name: "YABAI_FOCUSED_ID", value: "889") {
+                    try withEnv(name: "YABAI_FOCUSED_APP", value: "iTerm2") {
+                        recovered = try orchestrator.recoverRunningWorkspaceProcessIfPossible(workspaceID: workspace.id, processID: process.id)
+                    }
+                }
+            }
+        }
+
+        XCTAssertTrue(recovered)
+        let recoveredProcess = try XCTUnwrap(try store.runningProcesses(workspaceID: workspace.id).first(where: { $0.id == process.id }))
+        XCTAssertEqual(recoveredProcess.windowID, 889)
+        XCTAssertEqual(mockIterm.openWindowAndRunCallCount, 1)
+        XCTAssertTrue(mockIterm.lastCommand?.contains("tmux attach-session -t") == true)
+        XCTAssertTrue(mockTmux.killedSessionNames.isEmpty)
+    }
+
+    // Tests running-process recovery returns false instead of restarting when the tracked process is no longer alive.
+    func testRecoverRunningWorkspaceProcessIfPossibleReturnsFalseWhenProcessIsNotRunning() throws {
+        let (orchestrator, store, _, workspace, _, mockIterm, mockTmux) = try makeMockItermOrchestratorWithWorkspace()
+        mockTmux.createSession(named: "muxy-\(workspace.id)-api")
+
+        let process = RunningProcessRecord(
+            id: UUID().uuidString, workspaceID: workspace.id, templateName: "api", command: "npm run api", terminalApp: "iTerm2", windowID: 999,
+            itermSessionID: "session-old", itermTabIndex: nil, tmuxWindowID: nil, pid: 999_999, status: .running, logPath: nil, lastOutputAt: nil,
+            startedAt: "now", exitedAt: nil)
+        try store.upsert(runningProcess: process)
+
+        let recovered = try orchestrator.recoverRunningWorkspaceProcessIfPossible(workspaceID: workspace.id, processID: process.id)
+
+        XCTAssertFalse(recovered)
+        XCTAssertEqual(mockIterm.openWindowAndRunCallCount, 0)
+        XCTAssertTrue(mockTmux.killedSessionNames.isEmpty)
+    }
+
     // Tests workspace cycling includes orphaned running processes so recovered iTerm windows remain reachable even before a terminal row is rebuilt.
     func testFocusNextWindowIncludesOrphanedRunningProcessTargets() throws {
         let (orchestrator, store, _, workspace, root) = try makeOrchestratorWithWorkspace()

@@ -621,6 +621,20 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         }.value
     }
 
+    nonisolated private static func recoverRunningWorkspaceProcessIfPossibleSnapshot(_ context: MissingTrackedWindowContext) async -> Result<Bool, Error> {
+        await Task.detached(priority: .userInitiated) {
+            do {
+                guard context.kind == .process, let processID = context.processID else {
+                    throw MuxyError.invalidArgument(message: "Running-process recovery requires a process identifier.")
+                }
+                let db = try DatabaseLocator.defaultPath()
+                let store = try SQLiteStore(path: db)
+                let orchestrator = MuxyOrchestrator(store: store)
+                return .success(try orchestrator.recoverRunningWorkspaceProcessIfPossible(workspaceID: context.workspaceID, processID: processID))
+            } catch { return .failure(error) }
+        }.value
+    }
+
     nonisolated private static func focusWindowShortcutSnapshot(
         index: Int, selectedWorkspaceID: String?, dashboardWindowTarget: (workspaceID: String, windowListIndex: Int)?,
         dashboardAgentRecord: AgentWindowRecord?
@@ -1744,6 +1758,37 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         action?()
     }
 
+    private func showWindowIssueModal(title: String, detail: String, actionTitle: String? = nil, action: (() -> Void)? = nil) {
+        hideWindowIssueToast()
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = title
+        alert.informativeText = detail
+
+        if let actionTitle {
+            let actionButton = alert.addButton(withTitle: actionTitle)
+            actionButton.keyEquivalent = "r"
+            actionButton.keyEquivalentModifierMask = [.command]
+            let cancelButton = alert.addButton(withTitle: "Cancel (Esc)")
+            cancelButton.keyEquivalent = "\u{1b}"
+            cancelButton.keyEquivalentModifierMask = []
+        } else {
+            let okButton = alert.addButton(withTitle: "OK")
+            okButton.keyEquivalent = "\r"
+            okButton.keyEquivalentModifierMask = []
+        }
+
+        guard let window else {
+            let response = alert.runModal()
+            if actionTitle != nil, response == .alertFirstButtonReturn { action?() }
+            return
+        }
+
+        alert.beginSheetModal(for: window) { response in
+            if actionTitle != nil, response == .alertFirstButtonReturn { action?() }
+        }
+    }
+
     private func showSettingsDetail() {
         clearInlineWorkspaceFieldRefs()
         activeAddWorkspaceFormTag = nil
@@ -2846,6 +2891,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             guard window.role == "browser", let targetURL = window.targetURL, result[targetURL] == nil else { return }
             result[targetURL] = window
         }
+        let missingTrackedWindowColor = NSColor.systemRed
         for session in configuredBrowserSessions {
             guard let targetURL = session.url, !targetURL.isEmpty else { continue }
             let workspaceID = workspace.id
@@ -2863,7 +2909,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             shortcutCounter += 1
             browserRowCount += 1
             let row = windowRow(
-                icon: "globe", iconColor: isTracked ? .systemBlue : .systemOrange, label: sessionLabel, detail: sessionDetail,
+                icon: "globe", iconColor: isTracked ? .systemBlue : missingTrackedWindowColor, label: sessionLabel, detail: sessionDetail,
                 shortcut: rowShortcut, processStatus: nil,
                 action: { [weak self] in
                     guard let self else { return }
@@ -2940,16 +2986,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         // Orphaned processes (no linked window = corresponding iTerm2 session was closed by the user)
         let orphanedProcesses = processes.filter { !matchedProcessIDs.contains($0.id) }
         for process in orphanedProcesses {
-            let statusColor: NSColor
-            switch process.status {
-            case .running: statusColor = .systemGreen
-            case .exited: statusColor = .systemRed
-            case .idle: statusColor = .tertiaryLabelColor
-            }
             let rowShortcut = "CMD+\(shortcutCounter)"
             shortcutCounter += 1
             let row = windowRow(
-                icon: "terminal", iconColor: statusColor, label: process.templateName,
+                icon: "terminal", iconColor: missingTrackedWindowColor, label: process.templateName,
                 detail: resolveCommand(process.command), shortcut: rowShortcut, processStatus: process.status,
                 action: { [weak self] in
                     guard let self else { return }
@@ -5141,7 +5181,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
     private func performWindowFocus(_ request: WindowFocusRequest) async {
         let result = await Self.performWindowFocusSnapshot(request)
-        if case .failure(let error) = result { handleWindowFocusError(error) }
+        if case .failure(let error) = result { await handleWindowFocusFailure(error) }
     }
 
     private func focusWindowShortcut(index: Int) {
@@ -5172,7 +5212,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                     "stage=aborted index=\(index) reason=no_match elapsed_ms=\(self.windowShortcutElapsedMS(since: startedAt))"
                 )
             case .failure(let error):
-                self.handleWindowFocusError(error)
+                await self.handleWindowFocusFailure(error)
                 self.logWindowShortcutProfile(
                     "stage=aborted index=\(index) reason=error elapsed_ms=\(self.windowShortcutElapsedMS(since: startedAt))"
                 )
@@ -5245,6 +5285,26 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         }
     }
 
+    private func handleWindowFocusFailure(_ error: Error) async {
+        guard let muxyError = error as? MuxyError, case .missingTrackedWindow(let context) = muxyError else {
+            handleWindowFocusError(error)
+            return
+        }
+        guard context.kind == .process else {
+            handleWindowFocusError(error)
+            return
+        }
+
+        switch await Self.recoverRunningWorkspaceProcessIfPossibleSnapshot(context) {
+        case .success(true):
+            reloadData()
+        case .success(false):
+            handleWindowFocusError(error)
+        case .failure(let recoveryError):
+            showError(recoveryError)
+        }
+    }
+
     private func handleWindowFocusError(_ error: Error) {
         guard let muxyError = error as? MuxyError, case .missingTrackedWindow(let context) = muxyError else {
             showError(error)
@@ -5252,21 +5312,21 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         }
         switch context.kind {
         case .browserSession:
-            showWindowIssueToast(
+            showWindowIssueModal(
                 title: "Browser window not found",
                 detail: "\(context.title) is no longer open.",
-                actionTitle: "Recover",
+                actionTitle: "Recover (Cmd+R)",
                 action: { [weak self] in Task { await self?.recoverMissingTrackedWindow(context) } })
         case .process:
-            showWindowIssueToast(
+            showWindowIssueModal(
                 title: "Process window not found",
                 detail: "\(context.title) is no longer open.",
-                actionTitle: "Recover",
+                actionTitle: "Recover (Cmd+R)",
                 action: { [weak self] in Task { await self?.recoverMissingTrackedWindow(context) } })
         case .codingAgent:
-            showWindowIssueToast(title: "Agent window not found", detail: "\(context.title) is no longer open.")
+            showWindowIssueModal(title: "Agent window not found", detail: "\(context.title) is no longer open.")
         case .window:
-            showWindowIssueToast(title: "Window not found", detail: "\(context.title) is no longer open.")
+            showWindowIssueModal(title: "Window not found", detail: "\(context.title) is no longer open.")
         }
     }
 
