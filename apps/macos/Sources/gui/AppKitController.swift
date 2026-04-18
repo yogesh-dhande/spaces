@@ -72,6 +72,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     private var projects: [ProjectSummary] = []
     private var workspacesByProject: [String: [WorkspaceSummary]] = [:]
     private var gitActivityByWorkspaceID: [String: GitTrackedFileActivity] = [:]
+    private var isSidebarGitActivityLoading = false
     private var workspaceRuntimeStatusByID: [String: WorkspaceRuntimeStatus] = [:]
     private var dashboardGroups: [DashboardGroup] = []
 
@@ -117,6 +118,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     private var didStartBackgroundServices = false
     private var setupManager: SetupManager?
     private var sidebarReloadTask: Task<Void, Never>?
+    private var sidebarGitActivityTask: Task<Void, Never>?
+    private var sidebarGitActivityGeneration: Int = 0
     private var pendingSidebarReloadRequest = false
     private var activeWindowShortcutProfile: WindowShortcutProfile?
     private let startupProfileStartTime = startupProfileBaselineUptime
@@ -482,6 +485,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let gitActivityByWorkspaceID: [String: GitTrackedFileActivity]
         let workspaceRuntimeStatusByID: [String: WorkspaceRuntimeStatus]
         let dashboardGroups: [DashboardGroup]
+    }
+
+    private struct SidebarGitActivitySnapshot: Sendable {
+        let gitActivityByWorkspaceID: [String: GitTrackedFileActivity]
     }
 
     /// Holds a click closure and serves as the NSGestureRecognizer target for clickable row views.
@@ -973,31 +980,31 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 let projects = try orchestrator.listProjects()
                 logStartupSnapshotProfile("sidebar_snapshot_projects_ready", details: "project_count=\(projects.count)")
                 var workspacesByProject: [String: [WorkspaceSummary]] = [:]
-                var gitActivityByWorkspaceID: [String: GitTrackedFileActivity] = [:]
                 var workspaceRuntimeStatusByID: [String: WorkspaceRuntimeStatus] = [:]
                 var workspaceCount = 0
                 let workspaceScanStartedAt = ProcessInfo.processInfo.systemUptime
+                var listWorkspacesMS = 0
+                var runtimeStatusMS = 0
                 for project in projects {
+                    let listStartedAt = ProcessInfo.processInfo.systemUptime
                     let workspaces = try orchestrator.listWorkspaces(projectID: project.id, includeArchived: false)
+                    listWorkspacesMS += Int((ProcessInfo.processInfo.systemUptime - listStartedAt) * 1000)
                     workspacesByProject[project.id] = workspaces
                     for workspace in workspaces {
                         workspaceCount += 1
+                        let runtimeStatusStartedAt = ProcessInfo.processInfo.systemUptime
                         workspaceRuntimeStatusByID[workspace.id] = try orchestrator.workspaceRuntimeStatus(workspaceID: workspace.id)
-                        if project.isGitRepo, let activity = try orchestrator.workspaceGitTrackedFileActivity(workspaceID: workspace.id) {
-                            gitActivityByWorkspaceID[workspace.id] = activity
-                        }
+                        runtimeStatusMS += Int((ProcessInfo.processInfo.systemUptime - runtimeStatusStartedAt) * 1000)
                     }
                 }
+                let workspaceScanMS = Int((ProcessInfo.processInfo.systemUptime - workspaceScanStartedAt) * 1000)
+                logStartupSnapshotProfile(
+                    "sidebar_snapshot_workspace_scan_breakdown",
+                    details:
+                        "workspace_count=\(workspaceCount) list_ms=\(listWorkspacesMS) runtime_ms=\(runtimeStatusMS) git_ms=0 unaccounted_ms=\(workspaceScanMS - listWorkspacesMS - runtimeStatusMS)")
                 logStartupSnapshotProfile(
                     "sidebar_snapshot_workspace_scan_ready",
-                    details: "workspace_count=\(workspaceCount) scan_ms=\(Int((ProcessInfo.processInfo.systemUptime - workspaceScanStartedAt) * 1000))")
-                for (projectID, workspaces) in workspacesByProject {
-                    workspacesByProject[projectID] = workspaces.sorted { a, b in
-                        let aDate = gitActivityByWorkspaceID[a.id]?.latestTrackedFileModificationDate ?? .distantPast
-                        let bDate = gitActivityByWorkspaceID[b.id]?.latestTrackedFileModificationDate ?? .distantPast
-                        return aDate > bDate
-                    }
-                }
+                    details: "workspace_count=\(workspaceCount) scan_ms=\(workspaceScanMS)")
                 let dashboardGroups = try buildDashboardGroupsSnapshot(
                     orchestrator: orchestrator, projects: projects, workspacesByProject: workspacesByProject)
                 logStartupSnapshotProfile(
@@ -1009,9 +1016,33 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 return .success(
                     .init(
                         config: config, projects: projects, workspacesByProject: workspacesByProject,
-                        gitActivityByWorkspaceID: gitActivityByWorkspaceID, workspaceRuntimeStatusByID: workspaceRuntimeStatusByID,
+                        gitActivityByWorkspaceID: [:], workspaceRuntimeStatusByID: workspaceRuntimeStatusByID,
                         dashboardGroups: dashboardGroups))
             } catch { return .failure(error) }
+        }.value
+    }
+
+    nonisolated private static func sidebarGitActivitySnapshot(
+        projects: [ProjectSummary],
+        workspacesByProject: [String: [WorkspaceSummary]]
+    ) async -> Result<SidebarGitActivitySnapshot, Error> {
+        await Task.detached(priority: .utility) {
+            do {
+                let db = try DatabaseLocator.defaultPath()
+                let store = try SQLiteStore(path: db)
+                let orchestrator = MuxyOrchestrator(store: store)
+                var gitActivityByWorkspaceID: [String: GitTrackedFileActivity] = [:]
+                for project in projects where project.isGitRepo {
+                    for workspace in workspacesByProject[project.id] ?? [] {
+                        if let activity = try orchestrator.workspaceGitTrackedFileActivity(workspaceID: workspace.id) {
+                            gitActivityByWorkspaceID[workspace.id] = activity
+                        }
+                    }
+                }
+                return .success(.init(gitActivityByWorkspaceID: gitActivityByWorkspaceID))
+            } catch {
+                return .failure(error)
+            }
         }.value
     }
 
@@ -1465,25 +1496,13 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             projects = try orchestrator.listProjects()
             workspacesByProject = [:]
             gitActivityByWorkspaceID = [:]
+            isSidebarGitActivityLoading = false
             workspaceRuntimeStatusByID = [:]
             for project in projects {
                 let workspaces = try orchestrator.listWorkspaces(projectID: project.id, includeArchived: false)
                 workspacesByProject[project.id] = workspaces
                 for workspace in workspaces {
                     workspaceRuntimeStatusByID[workspace.id] = try orchestrator.workspaceRuntimeStatus(workspaceID: workspace.id)
-                }
-                guard project.isGitRepo else { continue }
-                for workspace in workspaces {
-                    if let activity = try orchestrator.workspaceGitTrackedFileActivity(workspaceID: workspace.id) {
-                        gitActivityByWorkspaceID[workspace.id] = activity
-                    }
-                }
-            }
-            for (projectID, workspaces) in workspacesByProject {
-                workspacesByProject[projectID] = workspaces.sorted { a, b in
-                    let aDate = gitActivityByWorkspaceID[a.id]?.latestTrackedFileModificationDate ?? .distantPast
-                    let bDate = gitActivityByWorkspaceID[b.id]?.latestTrackedFileModificationDate ?? .distantPast
-                    return aDate > bDate
                 }
             }
             dashboardGroups = try Self.buildDashboardGroupsSnapshot(
@@ -1492,6 +1511,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             outlineView.expandItem(nil, expandChildren: true)
             refreshSelection()
             updateDashboardSidebarBadge()
+            scheduleSidebarGitActivityRefresh(projects: projects, workspacesByProject: workspacesByProject)
         } catch { showError(error) }
     }
 
@@ -1518,6 +1538,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         periodicSidebarMetadataRefreshTask = nil
         sidebarReloadTask?.cancel()
         sidebarReloadTask = nil
+        sidebarGitActivityTask?.cancel()
+        sidebarGitActivityTask = nil
         pendingSidebarReloadRequest = false
         didStartBackgroundServices = false
     }
@@ -1607,6 +1629,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         projects = snapshot.projects
         workspacesByProject = snapshot.workspacesByProject
         gitActivityByWorkspaceID = snapshot.gitActivityByWorkspaceID
+        isSidebarGitActivityLoading = false
         workspaceRuntimeStatusByID = snapshot.workspaceRuntimeStatusByID
         dashboardGroups = snapshot.dashboardGroups
         outlineView.reloadData()
@@ -1617,6 +1640,45 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         updateDashboardSidebarBadge()
         logStartupProfile("apply_snapshot_dashboard_badge_ready", details: "group_count=\(dashboardGroups.count)")
         if showingDashboard { showDashboardDetail() }
+        scheduleSidebarGitActivityRefresh(projects: snapshot.projects, workspacesByProject: snapshot.workspacesByProject, startupProfile: true)
+    }
+
+    private func scheduleSidebarGitActivityRefresh(
+        projects: [ProjectSummary],
+        workspacesByProject: [String: [WorkspaceSummary]],
+        startupProfile: Bool = false
+    ) {
+        sidebarGitActivityTask?.cancel()
+        sidebarGitActivityTask = nil
+
+        let hasGitWorkspaces = projects.contains { project in
+            project.isGitRepo && !(workspacesByProject[project.id] ?? []).isEmpty
+        }
+        isSidebarGitActivityLoading = hasGitWorkspaces
+        guard hasGitWorkspaces else { return }
+
+        sidebarGitActivityGeneration += 1
+        let generation = sidebarGitActivityGeneration
+        if startupProfile { logStartupProfile("sidebar_git_activity_requested") }
+        sidebarGitActivityTask = Task { @MainActor [weak self] in
+            let result = await Self.sidebarGitActivitySnapshot(projects: projects, workspacesByProject: workspacesByProject)
+            guard let self, !Task.isCancelled, self.sidebarGitActivityGeneration == generation else { return }
+            self.sidebarGitActivityTask = nil
+            self.isSidebarGitActivityLoading = false
+            switch result {
+            case .success(let snapshot):
+                self.gitActivityByWorkspaceID = snapshot.gitActivityByWorkspaceID
+                if startupProfile {
+                    self.logStartupProfile(
+                        "sidebar_git_activity_ready",
+                        details: "workspace_count=\(snapshot.gitActivityByWorkspaceID.count)")
+                }
+                self.refreshSidebarGitActivityRows(workspaceIDs: Array(snapshot.gitActivityByWorkspaceID.keys))
+                self.refreshSelection()
+            case .failure(let error):
+                fputs("muxy: sidebar git activity refresh failed: \(error.localizedDescription)\n", stderr)
+            }
+        }
     }
 
     /// Update the Dashboard sidebar row badge with the current attention item count.
@@ -2768,15 +2830,15 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             let branchRow = makeInlineWorkspaceMetadataEditRow(
                 workspaceID: workspace.id, field: .branch, icon: "arrow.triangle.branch", labelText: "Branch", value: branch,
                 placeholder: "Branch name", isEditable: !isProtectedBranchName(branch))
-            let activity =
-                gitActivityByWorkspaceID[workspace.id] ?? GitTrackedFileActivity(latestTrackedFileModificationDate: nil, modifiedTrackedFileCount: 0)
             if let branchStack = branchRow as? NSStackView {
-                let countLabel = NSTextField(labelWithString: "↑\(activity.aheadCount) ↓\(activity.behindCount)")
-                countLabel.font = .monospacedDigitSystemFont(ofSize: 11, weight: .regular)
-                countLabel.textColor = .secondaryLabelColor
-                countLabel.setContentHuggingPriority(.required, for: .horizontal)
-                countLabel.setContentCompressionResistancePriority(.required, for: .horizontal)
-                branchStack.addArrangedSubview(countLabel)
+                if let branchStatusLabel = gitBranchStatusLabel(for: workspace.id) {
+                    let countLabel = NSTextField(labelWithString: branchStatusLabel)
+                    countLabel.font = .monospacedDigitSystemFont(ofSize: 11, weight: .regular)
+                    countLabel.textColor = .secondaryLabelColor
+                    countLabel.setContentHuggingPriority(.required, for: .horizontal)
+                    countLabel.setContentCompressionResistancePriority(.required, for: .horizontal)
+                    branchStack.addArrangedSubview(countLabel)
+                }
             }
             inlineBranchRow = branchRow
         } else {
@@ -5664,9 +5726,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         }
         contentStack.addArrangedSubview(titleRow)
 
-        if project.isGitRepo {
-            let activity =
-                gitActivityByWorkspaceID[workspace.id] ?? GitTrackedFileActivity(latestTrackedFileModificationDate: nil, modifiedTrackedFileCount: 0)
+        if project.isGitRepo, let activity = gitActivityByWorkspaceID[workspace.id] {
 
             let activityRow = NSView()
             activityRow.translatesAutoresizingMaskIntoConstraints = false
@@ -5778,9 +5838,14 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         return "\(relativeDate) • \(modifiedLabel)"
     }
 
-    private func workspaceSidebarLineCount(project: ProjectSummary, workspace _: WorkspaceSummary) -> Int {
+    private func gitBranchStatusLabel(for workspaceID: String) -> String? {
+        guard let activity = gitActivityByWorkspaceID[workspaceID] else { return nil }
+        return "↑\(activity.aheadCount) ↓\(activity.behindCount)"
+    }
+
+    private func workspaceSidebarLineCount(project: ProjectSummary, workspace: WorkspaceSummary) -> Int {
         var count = 1  // workspace title + status
-        if project.isGitRepo { count += 1 }  // activity
+        if project.isGitRepo, gitActivityByWorkspaceID[workspace.id] != nil { count += 1 }  // activity
         return count
     }
 
@@ -5881,6 +5946,17 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         var rowsToReload = IndexSet()
         if let previousWorkspaceID, let previousRow = rowIndex(forWorkspaceID: previousWorkspaceID) { rowsToReload.insert(previousRow) }
         if let currentWorkspaceID, let currentRow = rowIndex(forWorkspaceID: currentWorkspaceID) { rowsToReload.insert(currentRow) }
+        guard !rowsToReload.isEmpty else { return }
+        outlineView.reloadData(forRowIndexes: rowsToReload, columnIndexes: IndexSet(integer: 0))
+    }
+
+    private func refreshSidebarGitActivityRows(workspaceIDs: [String]) {
+        var rowsToReload = IndexSet()
+        for workspaceID in workspaceIDs {
+            if let row = rowIndex(forWorkspaceID: workspaceID) {
+                rowsToReload.insert(row)
+            }
+        }
         guard !rowsToReload.isEmpty else { return }
         outlineView.reloadData(forRowIndexes: rowsToReload, columnIndexes: IndexSet(integer: 0))
     }

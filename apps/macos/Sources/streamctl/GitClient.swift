@@ -1,6 +1,8 @@
 import Foundation
 import appctl
 
+private let gitActivityProfileEnabled = ProcessInfo.processInfo.environment["MUXY_STARTUP_PROFILE"] == "1"
+
 public final class GitClient {
     private let gitExecutable: String
     private let environmentOverrides: [String: String]
@@ -75,19 +77,55 @@ public final class GitClient {
     }
 
     public func trackedFileActivity(path: String, baseBranch: String? = nil) -> GitTrackedFileActivity {
+        let startedAt = ProcessInfo.processInfo.systemUptime
+        let repoCheckStartedAt = startedAt
         guard isRepo(path: path) else {
+            logTrackedFileActivityProfile(
+                path: path,
+                repoCheckMS: Int((ProcessInfo.processInfo.systemUptime - repoCheckStartedAt) * 1000),
+                trackedPathsMS: 0,
+                latestModificationMS: 0,
+                modifiedCountMS: 0,
+                baseRefMS: 0,
+                aheadBehindMS: 0,
+                mergeConflictsMS: 0,
+                totalMS: Int((ProcessInfo.processInfo.systemUptime - startedAt) * 1000))
             return GitTrackedFileActivity(
                 latestTrackedFileModificationDate: nil, modifiedTrackedFileCount: 0, aheadCount: 0, behindCount: 0,
                 comparedBaseBranch: baseBranch?.trimmingCharacters(in: .whitespacesAndNewlines), hasMergeConflicts: false)
         }
 
+        let trackedPathsStartedAt = ProcessInfo.processInfo.systemUptime
         let trackedPaths = trackedFilePaths(path: path)
+        let trackedPathsMS = Int((ProcessInfo.processInfo.systemUptime - trackedPathsStartedAt) * 1000)
+        let latestModificationStartedAt = ProcessInfo.processInfo.systemUptime
         let latestModificationDate = latestTrackedFileModificationDate(path: path, trackedPaths: trackedPaths)
+        let latestModificationMS = Int((ProcessInfo.processInfo.systemUptime - latestModificationStartedAt) * 1000)
+        let modifiedCountStartedAt = ProcessInfo.processInfo.systemUptime
         let modifiedTrackedFileCount = modifiedTrackedFileCount(path: path)
+        let modifiedCountMS = Int((ProcessInfo.processInfo.systemUptime - modifiedCountStartedAt) * 1000)
+        let baseRefStartedAt = ProcessInfo.processInfo.systemUptime
         let comparisonBaseRef = resolveComparisonBaseRef(path: path, baseBranch: baseBranch)
+        let baseRefMS = Int((ProcessInfo.processInfo.systemUptime - baseRefStartedAt) * 1000)
+        let aheadBehindStartedAt = ProcessInfo.processInfo.systemUptime
         let (aheadCount, behindCount) = aheadBehindCounts(path: path, baseRef: comparisonBaseRef)
+        let aheadBehindMS = Int((ProcessInfo.processInfo.systemUptime - aheadBehindStartedAt) * 1000)
+        let mergeConflictsStartedAt = ProcessInfo.processInfo.systemUptime
         let hasMergeConflicts = hasMergeConflicts(path: path)
+        let mergeConflictsMS = Int((ProcessInfo.processInfo.systemUptime - mergeConflictsStartedAt) * 1000)
         let comparedBaseBranch = displayBranchName(forRef: comparisonBaseRef)
+        let totalMS = Int((ProcessInfo.processInfo.systemUptime - startedAt) * 1000)
+
+        logTrackedFileActivityProfile(
+            path: path,
+            repoCheckMS: Int((ProcessInfo.processInfo.systemUptime - repoCheckStartedAt) * 1000),
+            trackedPathsMS: trackedPathsMS,
+            latestModificationMS: latestModificationMS,
+            modifiedCountMS: modifiedCountMS,
+            baseRefMS: baseRefMS,
+            aheadBehindMS: aheadBehindMS,
+            mergeConflictsMS: mergeConflictsMS,
+            totalMS: totalMS)
 
         return GitTrackedFileActivity(
             latestTrackedFileModificationDate: latestModificationDate, modifiedTrackedFileCount: modifiedTrackedFileCount, aheadCount: aheadCount,
@@ -338,6 +376,24 @@ public final class GitClient {
             }
             Thread.sleep(forTimeInterval: 0.01)
         }
+    }
+
+    private func logTrackedFileActivityProfile(
+        path: String,
+        repoCheckMS: Int,
+        trackedPathsMS: Int,
+        latestModificationMS: Int,
+        modifiedCountMS: Int,
+        baseRefMS: Int,
+        aheadBehindMS: Int,
+        mergeConflictsMS: Int,
+        totalMS: Int
+    ) {
+        guard gitActivityProfileEnabled else { return }
+        let workspaceName = URL(fileURLWithPath: path).lastPathComponent
+        fputs(
+            "muxy: git_activity workspace=\(workspaceName) repo_check_ms=\(repoCheckMS) tracked_paths_ms=\(trackedPathsMS) latest_mod_ms=\(latestModificationMS) modified_count_ms=\(modifiedCountMS) base_ref_ms=\(baseRefMS) ahead_behind_ms=\(aheadBehindMS) merge_conflicts_ms=\(mergeConflictsMS) total_ms=\(totalMS)\n",
+            stderr)
     }
 }
 

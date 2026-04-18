@@ -266,6 +266,7 @@ collect_startup_sample() {
   local shortcut_monitor_line
   local setup_complete_line
   local main_content_line
+  local workspace_scan_breakdown_line
   local workspace_scan_line
   local dashboard_snapshot_line
   local snapshot_complete_line
@@ -276,6 +277,7 @@ collect_startup_sample() {
   shortcut_monitor_line="$(wait_for_pattern "muxy: startup stage=shortcut_monitor_ready elapsed_ms=")"
   setup_complete_line="$(wait_for_pattern "muxy: startup stage=setup_complete elapsed_ms=")"
   main_content_line="$(wait_for_pattern "muxy: startup stage=main_content_ready elapsed_ms=")"
+  workspace_scan_breakdown_line="$(wait_for_pattern "muxy: startup stage=sidebar_snapshot_workspace_scan_breakdown elapsed_ms=")"
   workspace_scan_line="$(wait_for_pattern "muxy: startup stage=sidebar_snapshot_workspace_scan_ready elapsed_ms=")"
   dashboard_snapshot_line="$(wait_for_pattern "muxy: startup stage=sidebar_snapshot_dashboard_ready elapsed_ms=")"
   snapshot_complete_line="$(wait_for_pattern "muxy: startup stage=sidebar_snapshot_complete elapsed_ms=")"
@@ -284,18 +286,24 @@ collect_startup_sample() {
 
   local setup_check_metrics
   setup_check_metrics="$(collect_setup_check_sample)"
+  local git_activity_metrics
+  git_activity_metrics="$(collect_git_activity_sample)"
 
-  printf '%s %s %s %s %s %s %s %s %s %s\n' \
+  printf '%s %s %s %s %s %s %s %s %s %s %s %s %s %s\n' \
     "${setup_check_metrics}" \
     "$(extract_metric "${shell_window_line}" "elapsed_ms")" \
     "$(extract_metric "${shortcut_monitor_line}" "elapsed_ms")" \
     "$(extract_metric "${setup_complete_line}" "elapsed_ms")" \
     "$(extract_metric "${main_content_line}" "elapsed_ms")" \
+    "$(extract_metric "${workspace_scan_breakdown_line}" "list_ms")" \
+    "$(extract_metric "${workspace_scan_breakdown_line}" "runtime_ms")" \
+    "$(extract_metric "${workspace_scan_breakdown_line}" "git_ms")" \
     "$(extract_metric "${workspace_scan_line}" "elapsed_ms")" \
     "$(extract_metric "${dashboard_snapshot_line}" "elapsed_ms")" \
     "$(extract_metric "${snapshot_complete_line}" "elapsed_ms")" \
     "$(extract_metric "${apply_selection_line}" "elapsed_ms")" \
-    "${first_interaction_ms}"
+    "${first_interaction_ms}" \
+    "${git_activity_metrics}"
 }
 
 summarize_startup_samples() {
@@ -309,16 +317,29 @@ summarize_startup_samples() {
       shortcut += $13
       setup += $14
       content += $15
-      scan += $16
-      dashboard += $17
-      snapshot += $18
-      apply += $19
-      input += $20
-      scan_phase += ($16 - $15)
-      dashboard_phase += ($17 - $16)
-      snapshot_tail += ($18 - $17)
-      apply_phase += ($19 - $18)
-      interaction_tail += ($20 - $19)
+      scan_list += $16
+      scan_runtime += $17
+      scan_git += $18
+      scan += $19
+      dashboard += $20
+      snapshot += $21
+      apply += $22
+      input += $23
+      git_workspace_count += $24
+      git_repo_check += $25
+      git_tracked_paths += $26
+      git_latest_mod += $27
+      git_modified_count += $28
+      git_base_ref += $29
+      git_ahead_behind += $30
+      git_merge_conflicts += $31
+      git_total += $32
+      scan_phase += ($19 - $15)
+      scan_other += ($19 - $15 - $16 - $17 - $18)
+      dashboard_phase += ($20 - $19)
+      snapshot_tail += ($21 - $20)
+      apply_phase += ($22 - $21)
+      interaction_tail += ($23 - $22)
       count += 1
     }
     END {
@@ -333,13 +354,49 @@ summarize_startup_samples() {
       fmt("selection_ready", apply / count)
       fmt("first_interaction", input / count)
       print ""
+      fmt("phase_scan_list_workspaces", scan_list / count)
+      fmt("phase_scan_runtime_status", scan_runtime / count)
+      fmt("phase_scan_git_activity", scan_git / count)
       fmt("phase_snapshot_scan", scan_phase / count)
+      fmt("phase_scan_other", scan_other / count)
+      print ""
+      printf "%-24s avg=%6.1f\n", "git_activity_workspaces", git_workspace_count / count
+      fmt("git_activity_repo_check", git_repo_check / count)
+      fmt("git_activity_tracked_paths", git_tracked_paths / count)
+      fmt("git_activity_latest_mod", git_latest_mod / count)
+      fmt("git_activity_modified_count", git_modified_count / count)
+      fmt("git_activity_base_ref", git_base_ref / count)
+      fmt("git_activity_ahead_behind", git_ahead_behind / count)
+      fmt("git_activity_merge_conflicts", git_merge_conflicts / count)
+      fmt("git_activity_total", git_total / count)
+      print ""
       fmt("phase_dashboard_build", dashboard_phase / count)
       fmt("phase_snapshot_tail", snapshot_tail / count)
       fmt("phase_main_thread_apply", apply_phase / count)
       fmt("phase_input_after_ready", interaction_tail / count)
     }
   ' "${samples_file}"
+}
+
+collect_git_activity_sample() {
+  awk '
+    /muxy: git_activity workspace=/ {
+      count += 1
+      for (i = 1; i <= NF; i += 1) {
+        if ($i ~ /^repo_check_ms=/) repo += substr($i, 15) + 0
+        else if ($i ~ /^tracked_paths_ms=/) tracked += substr($i, 18) + 0
+        else if ($i ~ /^latest_mod_ms=/) latest += substr($i, 15) + 0
+        else if ($i ~ /^modified_count_ms=/) modified += substr($i, 19) + 0
+        else if ($i ~ /^base_ref_ms=/) base += substr($i, 13) + 0
+        else if ($i ~ /^ahead_behind_ms=/) ahead += substr($i, 17) + 0
+        else if ($i ~ /^merge_conflicts_ms=/) conflicts += substr($i, 20) + 0
+        else if ($i ~ /^total_ms=/) total += substr($i, 10) + 0
+      }
+    }
+    END {
+      printf "%s %s %s %s %s %s %s %s %s", count + 0, repo + 0, tracked + 0, latest + 0, modified + 0, base + 0, ahead + 0, conflicts + 0, total + 0
+    }
+  ' "${PROFILE_LOG}"
 }
 
 extract_passed_metric() {
