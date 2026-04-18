@@ -14,8 +14,8 @@ export default function GettingStartedDocsPage() {
       description="Start from a project directory or a Git URL, then launch a workspace with processes, browser sessions, and reserved ports."
       pagePath="/docs/getting-started"
     >
-      <article className="rounded-2xl border border-line bg-surface/82 p-5 backdrop-blur-sm">
-        <h2 className="text-xl font-semibold tracking-tight">Requirements</h2>
+      <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
+        <h2 className="text-2xl font-semibold tracking-tight">Requirements</h2>
         <ul className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
           <li>• macOS 14 or later.</li>
           <li>• `yabai` installed and running (window IDs and focus routing).</li>
@@ -25,8 +25,8 @@ export default function GettingStartedDocsPage() {
         </ul>
       </article>
 
-      <article className="rounded-2xl border border-line bg-surface/82 p-5 backdrop-blur-sm">
-        <h2 className="text-xl font-semibold tracking-tight">First Session Flow</h2>
+      <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
+        <h2 className="text-2xl font-semibold tracking-tight">First Session Flow</h2>
         <ol className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
           <li>1. Install dependencies (`yabai`, iTerm2, Google Chrome) and grant permissions.</li>
           <li>2. Add or connect a project.</li>
@@ -36,16 +36,16 @@ export default function GettingStartedDocsPage() {
         </ol>
       </article>
 
-      <article className="rounded-2xl border border-line bg-surface/82 p-5 backdrop-blur-sm">
-        <h2 className="text-xl font-semibold tracking-tight">Add Your First Project</h2>
+      <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
+        <h2 className="text-2xl font-semibold tracking-tight">Add Your First Project</h2>
         <p className="mt-2 text-sm leading-7 text-foreground-soft">
           Use either a local directory or a Git repository URL. On project add, Muxy detects
           whether the directory is a Git repository and creates a non-archivable default workspace.
         </p>
       </article>
 
-      <article className="rounded-2xl border border-line bg-surface/82 p-5 backdrop-blur-sm">
-        <h2 className="text-xl font-semibold tracking-tight">Create a Workspace</h2>
+      <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
+        <h2 className="text-2xl font-semibold tracking-tight">Create a Workspace</h2>
         <p className="mt-2 text-sm leading-7 text-foreground-soft">
           For Git projects, create a workspace by choosing a workspace name, branch, and target branch.
           Target branch defaults to `main` or `master` when available.
@@ -53,8 +53,8 @@ export default function GettingStartedDocsPage() {
         </p>
       </article>
 
-      <article className="rounded-2xl border border-line bg-surface/82 p-5 backdrop-blur-sm">
-        <h2 className="text-xl font-semibold tracking-tight">Launch and Validate</h2>
+      <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
+        <h2 className="text-2xl font-semibold tracking-tight">Launch and Validate</h2>
         <p className="mt-2 text-sm leading-7 text-foreground-soft">
           Launch is valid only for stopped workspaces. A launch allocates ports, starts configured processes,
           and opens browser sessions.
@@ -67,8 +67,8 @@ export default function GettingStartedDocsPage() {
         </ul>
       </article>
 
-      <article className="rounded-2xl border border-line bg-surface/82 p-5 backdrop-blur-sm">
-        <h2 className="text-xl font-semibold tracking-tight">Product Boundaries</h2>
+      <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
+        <h2 className="text-2xl font-semibold tracking-tight">Product Boundaries</h2>
         <ul className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
           <li>• Muxy manages workspace context and switching.</li>
           <li>• Muxy does not manage tiling geometry; keep using yabai for layout.</li>
@@ -78,7 +78,7 @@ export default function GettingStartedDocsPage() {
         </ul>
       </article>
 
-      <article className="grid gap-4 rounded-2xl border border-line bg-surface/82 p-5 backdrop-blur-sm md:grid-cols-2">
+      <article className="grid gap-4 border-t border-line/70 pt-8 first:border-t-0 first:pt-0 md:grid-cols-2">
         <ScreenshotFrame
           title="Project and Workspace Sidebar"
           caption="Projects on the left, with nested workspaces and running-state status icons."

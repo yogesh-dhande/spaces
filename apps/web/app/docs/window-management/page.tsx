@@ -14,8 +14,8 @@ export default function WindowManagementDocsPage() {
       description="Muxy maps workspace windows to captured IDs and browser URL targets so context switching stays deterministic across terminals and Chrome tabs."
       pagePath="/docs/window-management"
     >
-      <article className="rounded-2xl border border-line bg-surface/82 p-5 backdrop-blur-sm">
-        <h2 className="text-xl font-semibold tracking-tight">Window Sources</h2>
+      <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
+        <h2 className="text-2xl font-semibold tracking-tight">Window Sources</h2>
         <ul className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
           <li>• Terminal windows from workspace processes.</li>
           <li>• Browser tabs/windows discovered from browser session URL prefixes.</li>
@@ -24,8 +24,8 @@ export default function WindowManagementDocsPage() {
         </ul>
       </article>
 
-      <article className="rounded-2xl border border-line bg-surface/82 p-5 backdrop-blur-sm">
-        <h2 className="text-xl font-semibold tracking-tight">Switching Order</h2>
+      <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
+        <h2 className="text-2xl font-semibold tracking-tight">Switching Order</h2>
         <p className="mt-2 text-sm leading-7 text-foreground-soft">
           Workspace navigation is ordered for repeatability during rapid context switches.
         </p>
@@ -37,8 +37,8 @@ export default function WindowManagementDocsPage() {
         </ul>
       </article>
 
-      <article className="rounded-2xl border border-line bg-surface/82 p-5 backdrop-blur-sm">
-        <h2 className="text-xl font-semibold tracking-tight">Browser Tab Matching</h2>
+      <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
+        <h2 className="text-2xl font-semibold tracking-tight">Browser Tab Matching</h2>
         <ul className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
           <li>• Browser session matching is URL-prefix based.</li>
           <li>• Browser cleanup closes matching tabs only, never full Chrome windows.</li>
@@ -46,8 +46,8 @@ export default function WindowManagementDocsPage() {
         </ul>
       </article>
 
-      <article className="rounded-2xl border border-line bg-surface/82 p-5 backdrop-blur-sm">
-        <h2 className="text-xl font-semibold tracking-tight">Keyboard Window Focus</h2>
+      <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
+        <h2 className="text-2xl font-semibold tracking-tight">Keyboard Window Focus</h2>
         <ul className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
           <li>• `cmd+1` through `cmd+9` focus numbered windows for the selected workspace.</li>
           <li>• Window shortcut hints are shown inline in the workspace detail pane.</li>
@@ -55,9 +55,9 @@ export default function WindowManagementDocsPage() {
         </ul>
       </article>
 
-      <article className="rounded-2xl border border-line bg-surface/82 p-5 backdrop-blur-sm">
-        <h2 className="text-xl font-semibold tracking-tight">Example Window Set</h2>
-        <pre className="mt-3 w-full max-w-full min-w-0 overflow-x-auto whitespace-pre-wrap break-words rounded-xl border border-line bg-background-soft/80 p-3 text-xs leading-6 text-foreground">
+      <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
+        <h2 className="text-2xl font-semibold tracking-tight">Example Window Set</h2>
+        <pre className="mt-3 w-full max-w-full min-w-0 overflow-x-auto whitespace-pre-wrap break-words rounded-lg border border-line/70 bg-background-soft/60 p-3 text-xs leading-6 text-foreground">
           <code>{`Workspace: feat/checkout
 1. Google Chrome — http://localhost:21004/checkout
 2. Google Chrome — https://github.com/org/repo/pull/912
@@ -66,7 +66,7 @@ export default function WindowManagementDocsPage() {
         </pre>
       </article>
 
-      <article className="grid gap-4 rounded-2xl border border-line bg-surface/82 p-5 backdrop-blur-sm md:grid-cols-2">
+      <article className="grid gap-4 border-t border-line/70 pt-8 first:border-t-0 first:pt-0 md:grid-cols-2">
         <ScreenshotFrame
           title="Workspace Window List"
           caption="Window rows with inline `cmd+<n>` hints, app names, and titles/URLs."

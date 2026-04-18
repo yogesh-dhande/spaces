@@ -5,7 +5,7 @@ type ScreenshotFrameProps = {
 
 export function ScreenshotFrame({ title, caption }: ScreenshotFrameProps) {
   return (
-    <figure className="rounded-2xl border border-line bg-surface p-3 shadow-[0_18px_40px_-30px_color-mix(in_oklab,var(--ink)_40%,transparent)]">
+    <figure className="rounded-2xl border border-line/70 bg-surface/80 p-3">
       <div className="mb-3 flex items-center gap-1.5">
         <span className="h-2.5 w-2.5 rounded-full bg-[#ff6f5b]" />
         <span className="h-2.5 w-2.5 rounded-full bg-[#f8c84f]" />

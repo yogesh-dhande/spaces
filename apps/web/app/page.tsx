@@ -1,421 +1,704 @@
 import Link from "next/link";
 import { ParallelStackIllustration } from "./components/parallel-stack-illustration";
 import { AppHeroPreview } from "./components/app-hero-preview";
-
-import { ProblemSimulation } from "./components/problem-simulation";
 import { SiteHeader } from "./components/site-header";
+import { SiteFooter } from "./components/site-footer";
 
+type Feature = {
+  title: string;
+  description: string;
+  span?: "wide" | "tall";
+};
 
-const keyFeatures = [
+const keyFeatures: Feature[] = [
   {
     title: "Manager mode for coding agents",
     description:
-      "Track all your coding agents in one place. Get notified when an agent is waiting on you. Use keyboard shortcuts to quickly navigate between them.",
+      "See all your coding agents in one dashboard. Know instantly which ones are working, which ones are waiting on you, and which ones are done. Jump to any agent with a keyboard shortcut.",
+    span: "wide",
   },
   {
-    title: "Manage Git worktrees. Or not.",
+    title: "Manage Git worktrees or separate clones",
     description:
-      "Create and run isolated workspaces per branch so parallel feature work does not collide. Prefer separate checkouts instead of worktrees? Muxy works great for that too!",
+      "Spin up isolated workspaces for every branch using Git worktrees — so parallel feature work never collides. Not a worktrees person? Muxy works with separate clones just as well.",
   },
   {
-    title: "Organize work into virtual workspaces",
+    title: "Organize work into logical workspaces",
     description:
-      "Muxy organizes your terminals, browser tabs, and editors into worktree and project-specific workspaces. Switch between branches and tasks instantly—without port collisions or lost context.",
+      "Every feature, branch, or experiment becomes a workspace with its own terminals, tabs, editors, and agents. Switch between them instantly.",
   },
   {
     title: "Reserved ports per workspace",
     description:
-      "Each workspace gets named reserved ports as environment variables (e.g. $FRONTEND_PORT, $BACKEND_PORT) so services can run side by side without recurring port conflicts.",
+      "Each workspace owns its ports, exposed as named environment variables like $FRONTEND_PORT and $BACKEND_PORT. Run three instances of your app side by side — no conflicts, no `.env` edits.",
   },
   {
-    title: "Switch between workspaces with ease",
+    title: "Jump to any workspace",
     description:
-      "Jump between active workspaces quickly without needing to sort through dozens of browser/editor/terminal windows.",
+      "A global shortcut pulls up any workspace instantly — choose a window and it snaps into focus right where you left it.",
   },
   {
-    title: "Switch between windows of the current workspace",
+    title: "Cycle windows within a workspace",
     description:
-      "Cycle through the current workspace windows with deterministic shortcuts, instead of hunting across apps.",
+      "When you are working in a workspace, cycle through windows of only that workspace with keyboard shortcuts so your focus isn't interrupted by other workspaces.",
   },
   {
     title: "Context tooltips",
     description:
-      "Ask your coding agent to set a workspace tooltip so you always have context when you switch in. Press cmd+shift+i to toggle it on/off when looking at any window belonging to the workspace.",
+      "Let your coding agent leave a note about what it did, what's pending, or where things broke. Press cmd+shift+i on any window in the workspace to read it — the context is always one shortcut away.",
   },
   {
-    title: "Start and stop quickly",
+    title: "Launch and teardown on demand",
     description:
-      "No need to keep those tabs open or processes running just because it is a pain to set it all up again. Muxy manages starting and stopping for you automatically.",
-  },
-  {
-    title: "Bring your own tools",
-    description:
-      "Muxy works with your preferred stack, whether it is Claude Code CLI or Codex CLI paired with Cursor or Windsurf. You do not need to learn a new tool or settle for a weaker coding agent just for UX.",
+      "Close a workspace and Muxy shuts down its processes and closes its windows. Come back tomorrow, open it, and everything restarts exactly as it was.",
+    span: "wide",
   },
   {
     title: "Native MacOS app under 5 MB",
     description:
-      "Built with Swift and AppKit — not Electron. No bloated runtime, no sluggish UI. Muxy stays out of your way and off your CPU.",
+      "Built with Swift and AppKit — not Electron. No 200MB runtime, no sluggish UI, no fan spinning up just to show you a window list. Muxy stays out of your way and off your CPU.",
+  },
+];
+
+type FaqItem = {
+  question: string;
+  answer: React.ReactNode;
+};
+
+const faqItems: FaqItem[] = [
+  {
+    question: "How much does it cost?",
+    answer: <>Muxy is free!</>,
+  },
+  {
+    question: "What are the system requirements?",
+    answer: (
+      <ul className="ml-4 list-disc space-y-1">
+        <li>macOS 14 Sonoma or later</li>
+        <li>
+          <a
+            href="https://github.com/koekeishiya/yabai"
+            className="text-accent hover:underline"
+          >
+            yabai
+          </a>{" "}
+          — an open-source window manager used for window tracking and focus switching
+        </li>
+        <li>
+          <a href="https://iterm2.com" className="text-accent hover:underline">
+            iTerm2
+          </a>
+        </li>
+        <li>
+          <a
+            href="https://github.com/tmux/tmux"
+            className="text-accent hover:underline"
+          >
+            tmux
+          </a>{" "}
+          — used to back workspace terminal sessions
+        </li>
+      </ul>
+    ),
+  },
+  {
+    question: "What is yabai? Why does it need accessibility permissions?",
+    answer: (
+      <>
+        <a
+          href="https://github.com/koekeishiya/yabai"
+          className="text-accent hover:underline"
+        >
+          yabai
+        </a>{" "}
+        is an open-source macOS window management utility. Muxy uses it to bring
+        the right window to the front when you switch workspaces. macOS requires
+        accessibility permissions before any app can programmatically control
+        windows on behalf of other processes — yabai uses this to perform focus
+        switching on Muxy&apos;s behalf.
+      </>
+    ),
+  },
+  {
+    question: "Can I use it with CLI coding agents like Claude Code or Codex CLI?",
+    answer: (
+      <>
+        Yes. Open a terminal inside any workspace with{" "}
+        <kbd className="inline-flex items-center rounded border border-line bg-surface px-1.5 py-0.5 font-mono text-xs leading-none">
+          ⌘⇧T
+        </kbd>{" "}
+        and start your agent as normal. The terminal window is automatically
+        attached to the workspace so you can jump back to it with keyboard
+        shortcuts at any time. To let the agent set workspace tooltips and
+        signal its status, add the{" "}
+        <Link href="/docs/cli" className="text-accent hover:underline">
+          Muxy agent instructions
+        </Link>{" "}
+        to your project&apos;s AGENTS.md. See the{" "}
+        <Link href="/docs/guides" className="text-accent hover:underline">
+          cookbook guides
+        </Link>{" "}
+        for step-by-step setup.
+      </>
+    ),
+  },
+  {
+    question: "I only work on one project at a time. How will Muxy help me?",
+    answer: (
+      <ul className="ml-4 list-disc space-y-1">
+        <li>
+          Muxy is still helpful in managing windows, monitoring processes,
+          quickly spinning up or down projects
+        </li>
+        <li>
+          You can leave other projects open and running without them getting in
+          the way of the project you are focusing on.
+        </li>
+      </ul>
+    ),
+  },
+  {
+    question: "Do you collect any data?",
+    answer: (
+      <>
+        No. Muxy is a native desktop app that runs entirely on your Mac. It does
+        not send any data back to Muxy or any third party.
+      </>
+    ),
+  },
+  {
+    question: "Where do I send bug reports?",
+    answer: (
+      <>
+        Email{" "}
+        <a href="mailto:support@muxy.dev" className="text-accent hover:underline">
+          support@muxy.dev
+        </a>
+        .
+      </>
+    ),
+  },
+  {
+    question: "What does muxy mean?",
+    answer: (
+      <>
+        Multiplex your work? Or something like that. I needed a name and a
+        domain. You know how it goes.
+      </>
+    ),
+  },
+];
+
+type ComparisonStep = {
+  n: string;
+  title: string;
+  body: string;
+};
+
+const withoutMuxy: ComparisonStep[] = [
+  {
+    n: "1",
+    title: "Find the tab",
+    body: "Dig through 80 open tabs across two browser windows for the checkout page.",
+  },
+  {
+    n: "2",
+    title: "Find the editor",
+    body: "Alt-tab through four VS Code windows to find the one on the right branch.",
+  },
+  {
+    n: "3",
+    title: "Find the agent",
+    body: "Click through three terminals to figure out which one has the agent waiting on you.",
+  },
+  {
+    n: "4",
+    title: "Fix the port",
+    body: "Realize :3000 is taken by last week's project. Kill something. Update the env file. Restart.",
+  },
+];
+
+const withMuxy: ComparisonStep[] = [
+  {
+    n: "1",
+    title: "Open the workspace",
+    body: "One shortcut brings up every window for this task — tabs, terminals, editor, agent — exactly where you left them.",
+  },
+  {
+    n: "2",
+    title: "Jump between windows",
+    body: "Numbered shortcuts focus any window in the workspace instantly. No hunting, no alt-tab.",
+  },
+  {
+    n: "3",
+    title: "Switch projects without cleanup",
+    body: "Each workspace owns its own ports and env. Spin up a worktree alongside your main branch — both run, neither breaks.",
+  },
+  {
+    n: "4",
+    title: "See what needs you",
+    body: "Failed processes, failed checks, and agents waiting on a human all surface in one dashboard.",
   },
 ];
 
 export default function HomePage() {
   return (
     <div className="relative min-h-screen overflow-x-clip">
-      <div
-        aria-hidden
-        className="pointer-events-none absolute left-[-10rem] top-20 h-72 w-72 rounded-full bg-accent/16 blur-3xl"
-      />
-      <div
-        aria-hidden
-        className="pointer-events-none absolute right-[-8rem] top-10 h-64 w-64 rounded-full bg-accent/24 blur-3xl"
-      />
-
       <SiteHeader />
 
-      <main className="mx-auto flex w-full max-w-6xl flex-col gap-6 px-6 pb-20">
+      {/* ── Hero ── */}
+      <section className="relative">
+        <div
+          aria-hidden
+          className="pointer-events-none absolute left-[-8rem] top-8 h-80 w-80 rounded-full bg-accent/16 blur-3xl"
+        />
+        <div
+          aria-hidden
+          className="pointer-events-none absolute right-[-6rem] top-0 h-72 w-72 rounded-full bg-accent/20 blur-3xl"
+        />
 
-        {/* ── Hero ── */}
-        <section className="grid gap-7 rounded-3xl border border-line bg-surface/90 p-7 shadow-[0_24px_48px_-34px_color-mix(in_oklab,var(--ink)_45%,transparent)] backdrop-blur-sm md:grid-cols-[1.1fr_0.9fr] md:p-9">
-          <div className="space-y-5">
-            <p className="inline-flex rounded-full border border-line bg-background-soft px-3 py-1 font-mono text-[0.68rem] uppercase tracking-[0.14em] text-foreground-soft">
+        <div className="mx-auto grid w-full max-w-7xl grid-cols-1 items-center gap-10 px-6 pb-16 pt-16 md:pt-24 lg:grid-cols-12 lg:gap-12">
+          <div className="lg:col-span-7">
+            <p className="inline-flex items-center gap-2 font-mono text-[0.7rem] uppercase tracking-[0.18em] text-foreground-soft">
+              <span className="h-1.5 w-1.5 rounded-full bg-accent" />
               Build faster with Muxy
             </p>
-            <h1 className="max-w-2xl text-2xl font-semibold leading-tight tracking-tight md:text-3xl lg:text-4xl">
-              Instant context switching <br /> for faster development.
+            <h1 className="mt-5 text-4xl font-semibold leading-[1.05] tracking-tight md:text-5xl lg:text-[3.75rem]">
+              Instant context switching
+              <br />
+              <span className="text-foreground-soft">for faster development.</span>
             </h1>
-            <p className="max-w-2xl text-base leading-7 text-foreground-soft md:text-lg">
-              Muxy orchestrates your coding setup to reduce context hunting, app hopping, port conflicts, and accidental interruptions.
+            <p className="mt-6 max-w-xl text-base leading-7 text-foreground-soft md:text-lg md:leading-8">
+              A MacOS app designed to reduce context hunting, app hopping, port
+              conflicts, and accidental interruptions.
             </p>
-            <div className="flex flex-wrap gap-3">
+            <div className="mt-8 flex flex-wrap items-center gap-3">
               <Link
                 href="/releases/latest"
-                className="btn-primary rounded-full px-5 py-2.5 text-sm font-semibold transition-colors cursor-pointer"
+                className="btn-primary inline-flex items-center gap-2 rounded-full px-6 py-3 text-sm font-semibold"
               >
                 Download
               </Link>
               <Link
                 href="#solution"
-                className="rounded-full border border-line px-5 py-2.5 text-sm font-semibold transition-colors hover:border-accent hover:text-accent"
+                className="inline-flex items-center gap-1.5 rounded-full px-5 py-3 text-sm font-semibold text-foreground-soft transition-colors hover:text-accent"
               >
-                See How It Works
+                See how it works
+                <span aria-hidden>→</span>
               </Link>
+            </div>
 
+            <dl className="mt-12 grid max-w-xl grid-cols-3 gap-4 border-t border-line/70 pt-6 text-left">
+              <div>
+                <dt className="font-mono text-[0.62rem] uppercase tracking-[0.14em] text-foreground-soft">
+                  Size
+                </dt>
+                <dd className="mt-1 text-lg font-semibold tracking-tight">&lt; 5 MB</dd>
+              </div>
+              <div>
+                <dt className="font-mono text-[0.62rem] uppercase tracking-[0.14em] text-foreground-soft">
+                  Runtime
+                </dt>
+                <dd className="mt-1 text-lg font-semibold tracking-tight">Native Swift</dd>
+              </div>
+              <div>
+                <dt className="font-mono text-[0.62rem] uppercase tracking-[0.14em] text-foreground-soft">
+                  Price
+                </dt>
+                <dd className="mt-1 text-lg font-semibold tracking-tight">Free</dd>
+              </div>
+            </dl>
+          </div>
+
+          <div className="lg:col-span-5">
+            <div className="rounded-[1.8rem] border border-line/80 bg-surface/70 p-3 shadow-[0_30px_80px_-40px_color-mix(in_oklab,var(--ink)_55%,transparent)] backdrop-blur-sm">
+              <ParallelStackIllustration />
             </div>
           </div>
-          <ParallelStackIllustration />
-        </section>
+        </div>
+      </section>
 
-        {/* ── Problem: The Shift ── */}
-        <section
-          id="problem"
-          className="rounded-3xl border border-line bg-surface/86 p-7 backdrop-blur-sm md:p-8"
-        >
-          <h3 className="mt-3 text-2xl font-semibold tracking-tight">
-            Speed is no longer about typing code faster
-          </h3>
-          <p className="mt-1 max-w-3xl text-sm leading-6 text-foreground-soft md:text-base md:leading-7">
-            It's about managing context effectively
-          </p>
-          <div className="my-4 max-w-3xl space-y-4 text-sm leading-6 text-foreground-soft md:text-base md:leading-7">
-            <ul className="ml-4 list-disc space-y-1.5 text-sm leading-6">
-              <li>"Where is the tab for the checkout page?"</li>
-              <li>"Port 3000 is already in use."</li>
-              <li>"Which terminal is running the dev server again?"</li>
-            </ul>
-          </div>
-          <p className="font-medium text-foreground">
-            Our tools were not built for how we work today.
-          </p>
-        </section>
-
-        {/* ── Problem: The Friction ── */}
-        <section className="rounded-3xl border border-line bg-surface/86 p-7 backdrop-blur-sm md:p-8">
-          <h3 className="mt-3 text-2xl font-semibold tracking-tight">
-            Context gets scattered, then lost
-          </h3>
-          <div className="mt-5 max-w-3xl space-y-4 text-sm leading-6 text-foreground-soft md:text-base md:leading-7">
-            <p>
-              A single feature ends up scattered across terminal tabs, editor
-              windows, and browser sessions — with no shared structure tying
-              them together.
+      {/* ── Problem band ── */}
+      <section id="problem" className="border-y border-line/70 bg-background-soft/60">
+        <div className="mx-auto w-full max-w-7xl px-6 py-20">
+          <div className="mx-auto max-w-3xl text-center">
+            <p className="font-mono text-[0.7rem] uppercase tracking-[0.18em] text-foreground-soft">
+              The Problem
             </p>
-            <p>
-              Switching apps often lands you on the wrong window. Tracing a UI
-              bug becomes a reverse lookup exercise: from page → repo →
-              terminal → agent. 
-            </p>
-            <p>
-              What was I working on again? 
-            </p>
-            <p className="font-medium text-foreground">
-              Working on multiple projects is challenging. Worktrees make the problem worse.
+            <h2 className="mt-4 text-3xl font-semibold leading-tight tracking-tight md:text-5xl">
+              Speed is no longer about typing code faster.
+            </h2>
+            <p className="mt-5 text-base leading-7 text-foreground-soft md:text-lg md:leading-8">
+              The bottleneck moved. It&apos;s not the code — it&apos;s
+              everything around the code: the workspaces, the ports, the
+              windows, the branches, the agents. Managing that is the job now.
             </p>
           </div>
-        </section>
 
-        <section className="rounded-3xl border border-line bg-surface/86 p-7 backdrop-blur-sm md:p-8">
-          <h3 className="mt-3 text-2xl font-semibold tracking-tight">
-            Meanwhile, small frictions compound
-          </h3>
-          
-          <div className="mt-5 max-w-3xl space-y-4 text-sm leading-6 text-foreground-soft md:text-base md:leading-7">
-            <ul className="ml-4 list-disc space-y-1.5 text-sm leading-6">
-              <li>Port collisions quietly break local flows</li>
-              <li>Active work disappears into window chaos</li>
-              <li>Context switching erodes focus</li>
-              <li>Wrong processes get killed accidentally</li>
-              <li>Prompt is sent to the wrong coding agent</li>
-            </ul>
-            <p className="font-medium text-foreground">
-              The more parallel your workflow becomes, the more your environment
-              fights you.
-            </p>
+          <div className="mt-12 grid gap-6 md:grid-cols-3">
+            <ProblemCard
+              n="01"
+              title="Context scattered across surfaces"
+              body="A single feature lives across four terminal tabs, two editor windows, and a browser session — with nothing connecting them. Coming back after lunch means reconstructing where you were from clues."
+            />
+            <ProblemCard
+              n="02"
+              title="Every switch is a scavenger hunt"
+              body="You&rsquo;re hunting for the checkout tab across 80 open tabs in two browser windows. The dev server is running somewhere — you just can't remember which terminal. Port 3000 is taken and you don&rsquo;t know by what."
+            />
+            <ProblemCard
+              n="03"
+              title="Worktrees make it worse"
+              body="You spin up a worktree so a PR review doesn&rsquo;t kill your dev server — now you have two sets of windows to track and both want port 3000. Multiply by three projects and the desktop becomes the problem."
+            />
           </div>
-        </section>
+        </div>
+      </section>
 
-        <section className="mt-8 md:mt-16">
-          <h2 className="mt-3 text-3xl md:text-4xl font-semibold tracking-tight">
+      {/* ── Introducing Muxy ── */}
+      <section className="mx-auto w-full max-w-7xl px-6 py-20 md:py-28">
+        <div className="mx-auto max-w-3xl text-center">
+          <p className="font-mono text-[0.7rem] uppercase tracking-[0.18em] text-foreground-soft">
             Introducing Muxy
-          </h2>
-          <div className="mt-5 max-w-3xl space-y-4 text-sm leading-6 text-foreground-soft md:text-base md:leading-7">
-            <p className="text-foreground">
-              Muxy organizes your browser tabs, coding agents, code editors, terminals, and processes into logical workspaces.
-            </p>
-            <p className="text-foreground">
-              Switch between projects and tasks instantly—without port collisions or lost context.
-            </p>
-          </div>
-          <div className="mt-6">
-            <ProblemSimulation />
-          </div>
-        </section>
-
-        {/* ── How It Works ── */}
-        <section
-          id="solution"
-          className="my-8 md:my-16 rounded-3xl border border-line bg-surface/86 p-7 backdrop-blur-sm md:p-8"
-        >
-          <p className="font-mono text-xs uppercase tracking-[0.16em] text-foreground-soft">
-            How It Works
           </p>
-          <h2 className="mt-3 text-3xl font-semibold tracking-tight">
-            Three steps, one loop
+          <h2 className="mt-4 text-3xl font-semibold leading-tight tracking-tight md:text-5xl">
+            The command center for parallel development.
           </h2>
-          <p className="mt-3 max-w-3xl text-sm leading-6 text-foreground-soft md:text-base md:leading-7">
-            Muxy organizes parallel work around workspaces, then lets you
-            move through them with predictable shortcuts.
+          <p className="mt-5 text-base leading-7 text-foreground-soft md:text-lg md:leading-8">
+            Muxy groups the tabs, terminals, editors, and agents for each task
+            into a workspace you can open, switch, and close as one unit. Move
+            between projects and features without losing your place — or
+            colliding with yourself.
           </p>
-          <div className="mt-6 grid gap-4 md:grid-cols-3">
-            <article className="rounded-2xl border border-line bg-surface/75 p-5">
-              <p className="font-mono text-xs uppercase tracking-[0.12em] text-foreground-soft">
-                01 Select
+        </div>
+
+        <div className="mt-12 grid gap-6 md:grid-cols-2">
+          <ComparisonColumn
+            variant="without"
+            eyebrow="Without Muxy"
+            steps={withoutMuxy}
+            result="ten minutes of setup before you've typed a line of code."
+          />
+          <ComparisonColumn
+            variant="with"
+            eyebrow="With Muxy"
+            steps={withMuxy}
+            result="you're coding, not context-switching."
+          />
+        </div>
+      </section>
+
+      {/* ── How It Works ── */}
+      <section
+        id="solution"
+        className="border-y border-line/70 bg-background-soft/60"
+      >
+        <div className="mx-auto w-full max-w-7xl px-6 py-20">
+          <div className="mx-auto max-w-3xl text-center">
+            <p className="font-mono text-[0.7rem] uppercase tracking-[0.18em] text-foreground-soft">
+              How It Works
+            </p>
+            <h2 className="mt-4 text-3xl font-semibold leading-tight tracking-tight md:text-5xl">
+              Three primitives. One mental model.
+            </h2>
+            <p className="mt-5 text-base leading-7 text-foreground-soft md:text-lg md:leading-8">
+              Muxy works the way you already think about coding — projects
+              contain tasks, tasks have their own windows and state. It just
+              makes those layers real.
+            </p>
+          </div>
+
+          <div className="mx-auto mt-12 max-w-3xl">
+            <article className="rounded-3xl border border-line/80 bg-surface/90 p-5 shadow-[0_30px_80px_-50px_color-mix(in_oklab,var(--ink)_55%,transparent)] md:p-7">
+              <LayerHeader step="01" label="Project" icon="▤" />
+              <p className="mt-3 text-sm leading-6 text-foreground-soft md:text-base md:leading-7">
+                Point Muxy at a repo. Define your setup script, named ports,
+                browser URLs, and the processes you run. Do this once.
               </p>
-              <p className="mt-2 text-sm leading-6 text-foreground-soft">
-                Choose the workspace tied to the feature or branch you need to
-                check in on.
-              </p>
-            </article>
-            <article className="rounded-2xl border border-line bg-surface/75 p-5">
-              <p className="font-mono text-xs uppercase tracking-[0.12em] text-foreground-soft">
-                02 Jump
-              </p>
-              <p className="mt-2 text-sm leading-6 text-foreground-soft">
-                Open the right browser tab, coding agent, code editor, or terminal window for that
-                workspace instantly with a keyboard shortcut.
-              </p>
-            </article>
-            <article className="rounded-2xl border border-line bg-surface/75 p-5">
-              <p className="font-mono text-xs uppercase tracking-[0.12em] text-foreground-soft">
-                03 Continue
-              </p>
-              <p className="mt-2 text-sm leading-6 text-foreground-soft">
-                Cycle through only the windows of that workspace with keyboard
-                shortcuts.
-              </p>
+              <div className="mt-5 rounded-2xl border border-line/80 bg-background-soft/70 p-5 md:p-6">
+                <LayerHeader step="02" label="Workspace" icon="◫" />
+                <p className="mt-3 text-sm leading-6 text-foreground-soft md:text-base md:leading-7">
+                  Create a workspace for each feature, branch, or experiment.
+                  Each one gets its own directory, ports, env, and processes — isolated
+                  from the rest. Create as many as you need.
+                </p>
+                <div className="mt-5 rounded-xl border border-line/80 bg-surface/90 p-4 md:p-5">
+                  <LayerHeader step="03" label="Runtime" icon="▦" />
+                  <p className="mt-3 text-sm leading-6 text-foreground-soft md:text-base md:leading-7">
+                    With one click, start all the processes and open browser URLs of a workspace.
+                    Muxy manages the runtime environment, windows, and monitors coding agents. 
+                    You can jump to any workspace window or cycle between windows of the current workspace 
+                    using keyboard shortcuts.
+                  </p>
+                </div>
+              </div>
             </article>
           </div>
-        </section>
+        </div>
+      </section>
 
-        {/* ── App Preview ── */}
-        <section className="rounded-3xl my-8 md:my-16 ">
-          <p className="font-mono text-xs uppercase tracking-[0.16em] text-foreground-soft">
+      {/* ── In Action ── */}
+      <section className="mx-auto w-full max-w-7xl px-6 py-20 md:py-28">
+        <div className="mx-auto max-w-3xl text-center">
+          <p className="font-mono text-[0.7rem] uppercase tracking-[0.18em] text-foreground-soft">
             In Action
           </p>
-          <h2 className="mt-3 text-2xl font-semibold tracking-tight">
-            A repeatable loop, not a window hunt
+          <h2 className="mt-4 text-3xl font-semibold leading-tight tracking-tight md:text-5xl">
+            A repeatable loop, not a window hunt.
           </h2>
-          <p className="mt-3 max-w-3xl text-sm leading-6 text-foreground-soft md:text-base md:leading-7">
+          <p className="mt-5 text-base leading-7 text-foreground-soft md:text-lg md:leading-8">
             Workspace boundaries stay clear. Switching between them stays fast.
           </p>
-          <div className="mt-6">
-            <AppHeroPreview />
-          </div>
-        </section>
+        </div>
 
-        {/* ── Features ── */}
-        <section id="features" className="my-8 md:my-16 rounded-3xl border border-line bg-surface/86 p-7 backdrop-blur-sm md:p-8">
-          <p className="font-mono text-xs uppercase tracking-[0.16em] text-foreground-soft">
-            Key Features
-          </p>
-          <h2 className="mt-3 text-3xl font-semibold tracking-tight">
-            Built for parallel streams of work
-          </h2>
-          <p className="mt-3 max-w-3xl text-sm leading-6 text-foreground-soft md:text-base md:leading-7">
-            Muxy manages repos, worktrees, ports, processes, and windows. So you can focus on your work.
-          </p>
-          <div className="mt-6 grid gap-4 md:grid-cols-2">
+        <div className="mt-12 rounded-3xl border border-line/80 bg-surface/70 p-3 shadow-[0_40px_80px_-50px_color-mix(in_oklab,var(--ink)_55%,transparent)] md:p-5">
+          <AppHeroPreview />
+        </div>
+      </section>
+
+      {/* ── Features bento ── */}
+      <section
+        id="features"
+        className="border-y border-line/70 bg-background-soft/60"
+      >
+        <div className="mx-auto w-full max-w-7xl px-6 py-20 md:py-24">
+          <div className="mx-auto max-w-3xl text-center">
+            <p className="font-mono text-[0.7rem] uppercase tracking-[0.18em] text-foreground-soft">
+              Key Features
+            </p>
+            <h2 className="mt-4 text-3xl font-semibold leading-tight tracking-tight md:text-5xl">
+              Your whole dev loop, in one place
+            </h2>
+            <p className="mt-5 text-base leading-7 text-foreground-soft md:text-lg md:leading-8">
+              Muxy turns the scattered terminals, tabs, editors, agents, and worktrees into logical workspaces you can open, switch, and close as one.
+            </p>
+          </div>
+
+          <div className="mt-12 grid auto-rows-[1fr] grid-flow-dense gap-4 md:grid-cols-6">
             {keyFeatures.map((feature) => (
-              <article
-                key={feature.title}
-                className="rounded-2xl p-5"
-              >
-                <h3 className="text-base font-semibold tracking-tight">
-                  {feature.title}
-                </h3>
-                <p className="mt-2 text-sm leading-6 text-foreground-soft">
-                  {feature.description}
-                </p>
-              </article>
+              <FeatureCard key={feature.title} feature={feature} />
             ))}
           </div>
-        </section>
+        </div>
+      </section>
 
-        {/* ── FAQ ── */}
-        <section
-          id="faq"
-          className="my-8 md:my-16 rounded-3xl backdrop-blur-sm"
-        >
-          <p className="font-mono text-xs uppercase tracking-[0.16em] text-foreground-soft">
+      {/* ── FAQ ── */}
+      <section id="faq" className="mx-auto w-full max-w-7xl px-6 py-20 md:py-28">
+        <div className="mx-auto max-w-3xl text-center">
+          <p className="font-mono text-[0.7rem] uppercase tracking-[0.18em] text-foreground-soft">
             FAQ
           </p>
-          <h2 className="mt-3 text-3xl font-semibold tracking-tight">
-            You may be wondering
+          <h2 className="mt-4 text-3xl font-semibold leading-tight tracking-tight md:text-5xl">
+            You may be wondering.
           </h2>
-          <div className="mt-6 space-y-2">
-
-            <details className="group rounded-xl border border-line bg-surface/75">
-              <summary className="flex cursor-pointer select-none list-none items-center justify-between px-4 py-3.5 text-sm font-semibold text-foreground">
-                How much does it cost?
-                <span aria-hidden className="ml-3 shrink-0 text-foreground-soft transition-transform duration-200 group-open:rotate-180">▾</span>
-              </summary>
-              <div className="border-t border-line px-4 pb-4 pt-3 text-sm leading-7 text-foreground-soft">
-                Muxy is free!
-              </div>
-            </details>
-
-            <details className="group rounded-xl border border-line bg-surface/75">
-              <summary className="flex cursor-pointer select-none list-none items-center justify-between px-4 py-3.5 text-sm font-semibold text-foreground">
-                What are the system requirements?
-                <span aria-hidden className="ml-3 shrink-0 text-foreground-soft transition-transform duration-200 group-open:rotate-180">▾</span>
-              </summary>
-              <div className="border-t border-line px-4 pb-4 pt-3 text-sm leading-7 text-foreground-soft">
-                <ul className="ml-4 list-disc space-y-1">
-                  <li>macOS 14 Sonoma or later</li>
-                  <li><a href="https://github.com/koekeishiya/yabai" className="text-accent hover:underline">yabai</a> — an open-source window manager used for window tracking and focus switching</li>
-                  <li><a href="https://iterm2.com" className="text-accent hover:underline">iTerm2</a></li>
-                </ul>
-              </div>
-            </details>
-
-            <details className="group rounded-xl border border-line bg-surface/75">
-              <summary className="flex cursor-pointer select-none list-none items-center justify-between px-4 py-3.5 text-sm font-semibold text-foreground">
-                What is yabai? Why does it need accessibility permissions?
-                <span aria-hidden className="ml-3 shrink-0 text-foreground-soft transition-transform duration-200 group-open:rotate-180">▾</span>
-              </summary>
-              <div className="border-t border-line px-4 pb-4 pt-3 text-sm leading-7 text-foreground-soft">
-                <a href="https://github.com/koekeishiya/yabai" className="text-accent hover:underline">yabai</a> is an open-source macOS window management utility. Muxy uses it to bring the right window to the front when you switch workspaces.
-                macOS requires accessibility permissions before any app can programmatically control windows on behalf of other processes — yabai uses this to perform focus switching on Muxy&apos;s behalf.
-              </div>
-            </details>
-
-            <details className="group rounded-xl border border-line bg-surface/75">
-              <summary className="flex cursor-pointer select-none list-none items-center justify-between px-4 py-3.5 text-sm font-semibold text-foreground">
-                Can I use it with CLI coding agents like Claude Code or Codex CLI?
-                <span aria-hidden className="ml-3 shrink-0 text-foreground-soft transition-transform duration-200 group-open:rotate-180">▾</span>
-              </summary>
-              <div className="border-t border-line px-4 pb-4 pt-3 text-sm leading-7 text-foreground-soft">
-                Yes. Open a terminal inside any workspace with{" "}
-                <kbd className="inline-flex items-center rounded border border-line bg-surface px-1.5 py-0.5 font-mono text-xs leading-none">⌘⇧T</kbd>{" "}
-                and start your agent as normal. The terminal window is automatically attached to the workspace so you can jump back to it with keyboard shortcuts at any time.
-                To let the agent set workspace tooltips and signal its status, add the{" "}
-                <Link href="/docs/cli" className="text-accent hover:underline">Muxy agent instructions</Link>{" "}
-                to your project&apos;s AGENTS.md. See the{" "}
-                <Link href="/docs/guides" className="text-accent hover:underline">cookbook guides</Link>{" "}
-                for step-by-step setup.
-              </div>
-            </details>
-
-            <details className="group rounded-xl border border-line bg-surface/75">
-              <summary className="flex cursor-pointer select-none list-none items-center justify-between px-4 py-3.5 text-sm font-semibold text-foreground">
-                I only work on one project at a time. How will Muxy help me?
-                <span aria-hidden className="ml-3 shrink-0 text-foreground-soft transition-transform duration-200 group-open:rotate-180">▾</span>
-              </summary>
-              <div className="border-t border-line px-4 pb-4 pt-3 text-sm leading-7 text-foreground-soft">
-                <ul className="ml-4 list-disc">
-                  <li>Muxy is still helpful in managing windows, monitoring processes, quickly spinning up or down projects</li>
-                  <li>You can leave other projects open and running without them getting in the way of the project you are focusing on.</li>
-                </ul>
-              </div>
-            </details>
-
-            <details className="group rounded-xl border border-line bg-surface/75">
-              <summary className="flex cursor-pointer select-none list-none items-center justify-between px-4 py-3.5 text-sm font-semibold text-foreground">
-                Do you collect any data?
-                <span aria-hidden className="ml-3 shrink-0 text-foreground-soft transition-transform duration-200 group-open:rotate-180">▾</span>
-              </summary>
-              <div className="border-t border-line px-4 pb-4 pt-3 text-sm leading-7 text-foreground-soft">
-                No. Muxy is a native desktop app that runs entirely on your Mac. It does not send any data back to Muxy or any third party.
-              </div>
-            </details>
-
-            <details className="group rounded-xl border border-line bg-surface/75">
-              <summary className="flex cursor-pointer select-none list-none items-center justify-between px-4 py-3.5 text-sm font-semibold text-foreground">
-                Where do I send bug reports?
-                <span aria-hidden className="ml-3 shrink-0 text-foreground-soft transition-transform duration-200 group-open:rotate-180">▾</span>
-              </summary>
-              <div className="border-t border-line px-4 pb-4 pt-3 text-sm leading-7 text-foreground-soft">
-                Email <a href="mailto:support@muxy.dev" className="text-accent hover:underline">support@muxy.dev</a>.
-              </div>
-            </details>
-
-            <details className="group rounded-xl border border-line bg-surface/75">
-              <summary className="flex cursor-pointer select-none list-none items-center justify-between px-4 py-3.5 text-sm font-semibold text-foreground">
-                What does muxy mean?
-                <span aria-hidden className="ml-3 shrink-0 text-foreground-soft transition-transform duration-200 group-open:rotate-180">▾</span>
-              </summary>
-              <div className="border-t border-line px-4 pb-4 pt-3 text-sm leading-7 text-foreground-soft">
-                Multiplex your work? Or something like that. I needed a name and a domain. You know how it goes.
-              </div>
-            </details>
-
-          </div>
-        </section>
-
-        {/* ── CTA ── */}
-        <section className="rounded-3xl border border-line bg-surface/88 p-8 text-center backdrop-blur-sm md:p-10">
-          <h2 className="text-3xl font-semibold tracking-tight">
-            Build faster with Muxy
-          </h2>
-          <p className="mx-auto mt-3 max-w-3xl text-sm leading-7 text-foreground-soft md:text-base">
-            Muxy helps you build faster by managing context and reducing chaos.
+          <p className="mt-5 text-base leading-7 text-foreground-soft md:text-lg md:leading-8">
+            Common questions about setup, tools, and the app. Still stuck?{" "}
+            <a
+              href="mailto:support@muxy.dev"
+              className="text-accent hover:underline"
+            >
+              Email us.
+            </a>
           </p>
-          <div className="mt-6 flex flex-wrap justify-center gap-3">
-            <Link
-              href="/releases/latest"
-              className="btn-primary rounded-full px-5 py-2.5 text-sm font-semibold transition-colors"
-            >
-              Download
-            </Link>
-            <Link
-              href="/docs"
-              className="rounded-full border border-line px-5 py-2.5 text-sm font-semibold transition-colors hover:border-accent hover:text-accent"
-            >
-              Read Docs
-            </Link>
+        </div>
+
+        <div className="mx-auto mt-12 max-w-3xl">
+          <dl className="divide-y divide-line/70 border-y border-line/70">
+            {faqItems.map((item) => (
+              <details key={item.question} className="group py-2">
+                <summary className="flex cursor-pointer select-none list-none items-center justify-between py-3 text-base font-semibold text-foreground md:text-lg">
+                  {item.question}
+                  <span
+                    aria-hidden
+                    className="ml-4 shrink-0 font-mono text-xs text-foreground-soft transition-transform duration-200 group-open:rotate-45"
+                  >
+                    +
+                  </span>
+                </summary>
+                <div className="pb-4 pr-8 text-sm leading-7 text-foreground-soft md:text-base">
+                  {item.answer}
+                </div>
+              </details>
+            ))}
+          </dl>
+        </div>
+      </section>
+
+      {/* ── CTA ── */}
+      <section className="mx-auto w-full max-w-7xl px-6 pb-24">
+        <div className="relative overflow-hidden rounded-3xl border border-line/80 bg-surface/80 px-8 py-16 text-center md:px-16 md:py-20">
+          <div
+            aria-hidden
+            className="pointer-events-none absolute left-1/2 top-0 h-64 w-[40rem] -translate-x-1/2 rounded-full bg-accent/18 blur-3xl"
+          />
+          <div
+            aria-hidden
+            className="pointer-events-none absolute -bottom-20 left-1/2 h-48 w-[30rem] -translate-x-1/2 rounded-full bg-accent/14 blur-3xl"
+          />
+          <div className="relative">
+            <p className="font-mono text-[0.7rem] uppercase tracking-[0.18em] text-foreground-soft">
+              Ready to build faster?
+            </p>
+            <h2 className="mt-4 text-3xl font-semibold tracking-tight md:text-5xl">
+              Stop hunting. Start shipping.
+            </h2>
+            <p className="mx-auto mt-4 max-w-2xl text-base leading-7 text-foreground-soft md:text-lg">
+              Muxy helps you build faster by managing context and reducing
+              chaos.
+            </p>
+            <div className="mt-8 flex flex-wrap justify-center gap-3">
+              <Link
+                href="/releases/latest"
+                className="btn-primary inline-flex items-center gap-2 rounded-full px-6 py-3 text-sm font-semibold"
+              >
+                Download
+              </Link>
+              <Link
+                href="/docs"
+                className="inline-flex items-center gap-1.5 rounded-full border border-line px-5 py-3 text-sm font-semibold transition-colors hover:border-accent hover:text-accent"
+              >
+                Read Docs
+                <span aria-hidden>→</span>
+              </Link>
+            </div>
           </div>
-        </section>
-      </main>
+        </div>
+      </section>
+
+      <SiteFooter />
     </div>
+  );
+}
+
+type ProblemCardProps = {
+  n: string;
+  title: string;
+  body: string;
+};
+
+function ProblemCard({ n, title, body }: ProblemCardProps) {
+  return (
+    <article className="flex flex-col gap-3 rounded-2xl border border-line/80 bg-surface/80 p-5">
+      <span className="font-mono text-[0.62rem] uppercase tracking-[0.18em] text-foreground-soft">
+        {n}
+      </span>
+      <h3 className="text-lg font-semibold leading-snug tracking-tight">
+        {title}
+      </h3>
+      <p className="text-sm leading-6 text-foreground-soft">{body}</p>
+    </article>
+  );
+}
+
+type FeatureCardProps = {
+  feature: Feature;
+};
+
+type LayerHeaderProps = {
+  step: string;
+  label: string;
+  icon: string;
+};
+
+function LayerHeader({ step, label, icon }: LayerHeaderProps) {
+  return (
+    <div className="flex items-center gap-3">
+      <span
+        aria-hidden
+        className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-line/80 bg-background-soft/80 font-mono text-sm text-accent"
+      >
+        {icon}
+      </span>
+      <div className="flex min-w-0 flex-col">
+        <span className="font-mono text-[0.62rem] uppercase tracking-[0.18em] text-accent">
+          Step {step}
+        </span>
+        <span className="text-lg font-semibold tracking-tight md:text-xl">
+          {label}
+        </span>
+      </div>
+    </div>
+  );
+}
+
+type ComparisonColumnProps = {
+  variant: "without" | "with";
+  eyebrow: string;
+  steps: ComparisonStep[];
+  result: string;
+};
+
+function ComparisonColumn({
+  variant,
+  eyebrow,
+  steps,
+  result,
+}: ComparisonColumnProps) {
+  const isWith = variant === "with";
+  const containerClasses = isWith
+    ? "border-accent/40 bg-surface/90 shadow-[0_30px_80px_-50px_color-mix(in_oklab,var(--accent)_50%,transparent)]"
+    : "border-[#ff6f5b]/40 bg-[color:color-mix(in_oklab,#ff6f5b_6%,var(--surface))]";
+  const eyebrowClasses = isWith ? "text-accent" : "text-[#ff6f5b]";
+  const dotClasses = isWith ? "bg-accent" : "bg-[#ff6f5b]";
+  const numberClasses = isWith
+    ? "border-accent/40 bg-accent/10 text-accent"
+    : "border-[#ff6f5b]/40 bg-[color:color-mix(in_oklab,#ff6f5b_10%,transparent)] text-[#ff6f5b]";
+  const resultClasses = isWith ? "text-foreground" : "text-foreground-soft";
+
+  return (
+    <article
+      className={`flex flex-col gap-6 rounded-2xl border p-6 md:p-8 ${containerClasses}`}
+    >
+      <p
+        className={`inline-flex items-center gap-2 font-mono text-[0.7rem] uppercase tracking-[0.18em] ${eyebrowClasses}`}
+      >
+        <span className={`h-1.5 w-1.5 rounded-full ${dotClasses}`} />
+        {eyebrow}
+      </p>
+      <ol className="flex flex-col gap-5">
+        {steps.map((step) => (
+          <li key={step.n} className="flex gap-4">
+            <span
+              className={`inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-full border font-mono text-xs font-semibold ${numberClasses}`}
+            >
+              {step.n}
+            </span>
+            <div className="min-w-0">
+              <p className="text-sm font-semibold tracking-tight text-foreground md:text-base">
+                {step.title}
+              </p>
+              <p className="mt-1 text-sm leading-6 text-foreground-soft">
+                {step.body}
+              </p>
+            </div>
+          </li>
+        ))}
+      </ol>
+      <p
+        className={`mt-auto border-t border-line/70 pt-4 text-sm leading-6 ${resultClasses}`}
+      >
+        <span className="font-mono text-[0.62rem] uppercase tracking-[0.18em] text-foreground-soft">
+          Result
+        </span>
+        <span className="ml-2">{result}</span>
+      </p>
+    </article>
+  );
+}
+
+function FeatureCard({ feature }: FeatureCardProps) {
+  const span = feature.span === "wide" ? "md:col-span-4" : "md:col-span-2";
+
+  return (
+    <article
+      className={`group relative flex flex-col gap-2 rounded-2xl border border-line/80 bg-surface/80 p-6 transition-colors hover:border-accent/60 ${span}`}
+    >
+      <h3 className="text-base font-semibold tracking-tight md:text-[1.05rem]">
+        {feature.title}
+      </h3>
+      <p className="text-sm leading-6 text-foreground-soft">
+        {feature.description}
+      </p>
+    </article>
   );
 }

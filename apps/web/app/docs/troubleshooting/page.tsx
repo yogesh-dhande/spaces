@@ -14,8 +14,8 @@ export default function TroubleshootingDocsPage() {
       description="Diagnosis paths for common dependency, workspace lifecycle, process, and window-routing failures."
       pagePath="/docs/troubleshooting"
     >
-      <article className="rounded-2xl border border-line bg-surface/82 p-5 backdrop-blur-sm">
-        <h2 className="text-xl font-semibold tracking-tight">Quick Triage</h2>
+      <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
+        <h2 className="text-2xl font-semibold tracking-tight">Quick Triage</h2>
         <ol className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
           <li>1. Confirm dependencies: yabai, iTerm2, and Chrome are installed and running.</li>
           <li>2. Confirm accessibility permissions are granted.</li>
@@ -25,8 +25,8 @@ export default function TroubleshootingDocsPage() {
         </ol>
       </article>
 
-      <article className="rounded-2xl border border-line bg-surface/82 p-5 backdrop-blur-sm">
-        <h2 className="text-xl font-semibold tracking-tight">Workspace Creation Failures</h2>
+      <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
+        <h2 className="text-2xl font-semibold tracking-tight">Workspace Creation Failures</h2>
         <ul className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
           <li>• `Branch name is required for git projects`: provide `--branch` when creating the workspace.</li>
           <li>• `Target branch not found`: use a valid local or remote target branch.</li>
@@ -35,15 +35,15 @@ export default function TroubleshootingDocsPage() {
         </ul>
       </article>
 
-      <article className="rounded-2xl border border-line bg-surface/82 p-5 backdrop-blur-sm">
-        <h2 className="text-xl font-semibold tracking-tight">Launch/Restart/Stop Issues</h2>
+      <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
+        <h2 className="text-2xl font-semibold tracking-tight">Launch/Restart/Stop Issues</h2>
         <ul className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
           <li>• `Workspace is already running. Use restart.`: call restart to reconcile stale runtime state.</li>
           <li>• No terminals open: verify iTerm2 is installed and available.</li>
           <li>• No browser sessions open: verify Chrome is installed and session URLs are configured.</li>
           <li>• Services remain after stop: move extra teardown into workspace `stop_script`.</li>
         </ul>
-        <pre className="mt-3 w-full max-w-full min-w-0 overflow-x-auto whitespace-pre-wrap break-words rounded-xl border border-line bg-background-soft/80 p-3 text-xs leading-6 text-foreground">
+        <pre className="mt-3 w-full max-w-full min-w-0 overflow-x-auto whitespace-pre-wrap break-words rounded-lg border border-line/70 bg-background-soft/60 p-3 text-xs leading-6 text-foreground">
           <code>{`mx workspace up --dir /path/to/workspace
 mx workspace restart --dir /path/to/workspace
 mx workspace stop --dir /path/to/workspace
@@ -51,8 +51,8 @@ mx workspace launch --dir /path/to/workspace`}</code>
         </pre>
       </article>
 
-      <article className="rounded-2xl border border-line bg-surface/82 p-5 backdrop-blur-sm">
-        <h2 className="text-xl font-semibold tracking-tight">Window and Browser Routing Issues</h2>
+      <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
+        <h2 className="text-2xl font-semibold tracking-tight">Window and Browser Routing Issues</h2>
         <ul className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
           <li>• Missing window shortcut targets: open the workspace and recapture windows via launch/restart.</li>
           <li>• Browser tab not focused correctly: confirm browser sessions use stable URL prefixes.</li>
@@ -61,8 +61,8 @@ mx workspace launch --dir /path/to/workspace`}</code>
         </ul>
       </article>
 
-      <article className="rounded-2xl border border-line bg-surface/82 p-5 backdrop-blur-sm">
-        <h2 className="text-xl font-semibold tracking-tight">Status Check Issues</h2>
+      <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
+        <h2 className="text-2xl font-semibold tracking-tight">Status Check Issues</h2>
         <ul className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
           <li>• Red checks: run the check command manually inside workspace context.</li>
           <li>• Timeout failures: increase timeout if service startup is slower than expected.</li>
@@ -71,8 +71,8 @@ mx workspace launch --dir /path/to/workspace`}</code>
         </ul>
       </article>
 
-      <article className="rounded-2xl border border-line bg-surface/82 p-5 backdrop-blur-sm">
-        <h2 className="text-xl font-semibold tracking-tight">Keyboard Shortcut Issues</h2>
+      <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
+        <h2 className="text-2xl font-semibold tracking-tight">Keyboard Shortcut Issues</h2>
         <ul className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
           <li>• Global toggle shortcut does nothing: rebind in Settings if another app intercepts it.</li>
           <li>• `cmd+1..9` does not focus windows: ensure workspace has tracked windows in the Run tab list.</li>
@@ -81,7 +81,7 @@ mx workspace launch --dir /path/to/workspace`}</code>
         </ul>
       </article>
 
-      <article className="grid gap-4 rounded-2xl border border-line bg-surface/82 p-5 backdrop-blur-sm md:grid-cols-2">
+      <article className="grid gap-4 border-t border-line/70 pt-8 first:border-t-0 first:pt-0 md:grid-cols-2">
         <ScreenshotFrame
           title="Workspace Error State"
           caption="Workspace detail with visible error text and recovery action controls."

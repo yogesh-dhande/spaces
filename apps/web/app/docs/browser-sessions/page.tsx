@@ -14,8 +14,8 @@ export default function BrowserSessionsDocsPage() {
       description="Browser sessions keep URL context attached to a workspace so launch, focus, and cleanup stay deterministic."
       pagePath="/docs/browser-sessions"
     >
-      <article className="rounded-2xl border border-line bg-surface/82 p-5 backdrop-blur-sm">
-        <h2 className="text-xl font-semibold tracking-tight">Session Model</h2>
+      <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
+        <h2 className="text-2xl font-semibold tracking-tight">Session Model</h2>
         <ul className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
           <li>• Browser sessions are configured at project level and copied into workspace settings.</li>
           <li>• Each session entry has an optional name plus a URL prefix.</li>
@@ -24,8 +24,8 @@ export default function BrowserSessionsDocsPage() {
         </ul>
       </article>
 
-      <article className="rounded-2xl border border-line bg-surface/82 p-5 backdrop-blur-sm">
-        <h2 className="text-xl font-semibold tracking-tight">Launch Behavior</h2>
+      <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
+        <h2 className="text-2xl font-semibold tracking-tight">Launch Behavior</h2>
         <ul className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
           <li>• On workspace launch, Muxy ensures session URLs are open in Chrome.</li>
           <li>• Existing matching tabs are reused when possible.</li>
@@ -34,8 +34,8 @@ export default function BrowserSessionsDocsPage() {
         </ul>
       </article>
 
-      <article className="rounded-2xl border border-line bg-surface/82 p-5 backdrop-blur-sm">
-        <h2 className="text-xl font-semibold tracking-tight">Focus and Cleanup Rules</h2>
+      <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
+        <h2 className="text-2xl font-semibold tracking-tight">Focus and Cleanup Rules</h2>
         <ul className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
           <li>• Focus actions target matching tabs using URL information.</li>
           <li>• If a tab matches multiple session URLs, it appears once in workspace navigation.</li>
@@ -44,8 +44,8 @@ export default function BrowserSessionsDocsPage() {
         </ul>
       </article>
 
-      <article className="rounded-2xl border border-line bg-surface/82 p-5 backdrop-blur-sm">
-        <h2 className="text-xl font-semibold tracking-tight">Ordering and Multi-Workspace Safety</h2>
+      <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
+        <h2 className="text-2xl font-semibold tracking-tight">Ordering and Multi-Workspace Safety</h2>
         <ul className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
           <li>• Browser rows are ordered by browser session definition order, then URL.</li>
           <li>• Workspace window listings rescan Chrome tabs to keep navigation current.</li>
@@ -53,9 +53,9 @@ export default function BrowserSessionsDocsPage() {
         </ul>
       </article>
 
-      <article className="rounded-2xl border border-line bg-surface/82 p-5 backdrop-blur-sm">
-        <h2 className="text-xl font-semibold tracking-tight">Example Browser Session Config</h2>
-        <pre className="mt-3 w-full max-w-full min-w-0 overflow-x-auto whitespace-pre-wrap break-words rounded-xl border border-line bg-background-soft/80 p-3 text-xs leading-6 text-foreground">
+      <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
+        <h2 className="text-2xl font-semibold tracking-tight">Example Browser Session Config</h2>
+        <pre className="mt-3 w-full max-w-full min-w-0 overflow-x-auto whitespace-pre-wrap break-words rounded-lg border border-line/70 bg-background-soft/60 p-3 text-xs leading-6 text-foreground">
           <code>{`browser_sessions:
   - name: frontend
     url: http://localhost:$FRONTEND_PORT
@@ -67,7 +67,7 @@ export default function BrowserSessionsDocsPage() {
         </pre>
       </article>
 
-      <article className="grid gap-4 rounded-2xl border border-line bg-surface/82 p-5 backdrop-blur-sm md:grid-cols-2">
+      <article className="grid gap-4 border-t border-line/70 pt-8 first:border-t-0 first:pt-0 md:grid-cols-2">
         <ScreenshotFrame
           title="Workspace Browser Sessions"
           caption="Workspace settings tab with URL entries bound to the selected workspace."

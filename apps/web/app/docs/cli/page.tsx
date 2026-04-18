@@ -40,8 +40,8 @@ export default function CliReferencePage() {
       pagePath="/docs/cli"
     >
       {/* Agent-oriented overview */}
-      <article className="rounded-2xl border border-line bg-surface/82 p-5 backdrop-blur-sm">
-        <h2 className="text-xl font-semibold tracking-tight">Using mx from AI Agents</h2>
+      <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
+        <h2 className="text-2xl font-semibold tracking-tight">Using mx from AI Agents</h2>
         <p className="mt-3 text-sm leading-7 text-foreground-soft">
           <Cmd>mx</Cmd> is designed to be called by AI coding agents. When working on multiple
           features or bug fixes in parallel, each task should run in its own Muxy workspace. This
@@ -66,8 +66,8 @@ export default function CliReferencePage() {
       </article>
 
       {/* Installation */}
-      <article className="rounded-2xl border border-line bg-surface/82 p-5 backdrop-blur-sm">
-        <h2 className="text-xl font-semibold tracking-tight">Finding the CLI</h2>
+      <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
+        <h2 className="text-2xl font-semibold tracking-tight">Finding the CLI</h2>
         <p className="mt-3 text-sm leading-7 text-foreground-soft">
           The <Cmd>mx</Cmd> binary ships inside the Muxy.app bundle. Muxy symlinks it to{" "}
           <Cmd>/usr/local/bin/mx</Cmd> when you first launch the app so it is available on{" "}
@@ -82,8 +82,8 @@ mx --version
       </article>
 
       {/* Project commands */}
-      <article className="rounded-2xl border border-line bg-surface/82 p-5 backdrop-blur-sm">
-        <h2 className="text-xl font-semibold tracking-tight">Project Commands</h2>
+      <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
+        <h2 className="text-2xl font-semibold tracking-tight">Project Commands</h2>
         <p className="mt-3 text-sm leading-7 text-foreground-soft">
           Projects are codebases registered with Muxy. Register a project once, then create as many
           workspaces as you need from it.
@@ -127,8 +127,8 @@ mx project add --git-url https://github.com/owner/repo.git`}</CodeBlock>
       </article>
 
       {/* Ports */}
-      <article className="rounded-2xl border border-line bg-surface/82 p-5 backdrop-blur-sm">
-        <h2 className="text-xl font-semibold tracking-tight">Port Commands</h2>
+      <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
+        <h2 className="text-2xl font-semibold tracking-tight">Port Commands</h2>
         <p className="mt-3 text-sm leading-7 text-foreground-soft">
           Named ports are environment variables backed by real port numbers. Muxy allocates a unique
           port number from the configured range for each workspace, so two workspaces running at the
@@ -147,8 +147,8 @@ mx project port remove --dir /path/to/repo --name API_PORT`}</CodeBlock>
       </article>
 
       {/* Processes */}
-      <article className="rounded-2xl border border-line bg-surface/82 p-5 backdrop-blur-sm">
-        <h2 className="text-xl font-semibold tracking-tight">Process Commands</h2>
+      <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
+        <h2 className="text-2xl font-semibold tracking-tight">Process Commands</h2>
         <p className="mt-3 text-sm leading-7 text-foreground-soft">
           Processes are shell commands started in iTerm2 when a workspace launches. Named port env
           vars and <Cmd>MUXY_WORKSPACE_DIR</Cmd> / <Cmd>MUXY_PROJECT_DIR</Cmd> are injected
@@ -170,8 +170,8 @@ mx project process remove --dir /path/to/repo --name api`}</CodeBlock>
       </article>
 
       {/* Status checks */}
-      <article className="rounded-2xl border border-line bg-surface/82 p-5 backdrop-blur-sm">
-        <h2 className="text-xl font-semibold tracking-tight">Status Check Commands</h2>
+      <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
+        <h2 className="text-2xl font-semibold tracking-tight">Status Check Commands</h2>
         <p className="mt-3 text-sm leading-7 text-foreground-soft">
           Status checks run a shell command on a schedule while the workspace is running and surface
           green / red health in the Muxy run tab, nested under the associated process.
@@ -199,8 +199,8 @@ mx project status-check remove --dir /path/to/repo --name web-health`}</CodeBloc
       </article>
 
       {/* Browser sessions */}
-      <article className="rounded-2xl border border-line bg-surface/82 p-5 backdrop-blur-sm">
-        <h2 className="text-xl font-semibold tracking-tight">Browser Session Commands</h2>
+      <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
+        <h2 className="text-2xl font-semibold tracking-tight">Browser Session Commands</h2>
         <p className="mt-3 text-sm leading-7 text-foreground-soft">
           Browser sessions are URLs opened in Google Chrome when the workspace launches. Muxy tracks
           the tabs and reuses or reopens them on subsequent launches so the same pages come back
@@ -213,8 +213,8 @@ mx project browser-session remove --dir /path/to/repo --url "http://localhost:$A
       </article>
 
       {/* Workspace commands */}
-      <article className="rounded-2xl border border-line bg-surface/82 p-5 backdrop-blur-sm">
-        <h2 className="text-xl font-semibold tracking-tight">Workspace Commands</h2>
+      <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
+        <h2 className="text-2xl font-semibold tracking-tight">Workspace Commands</h2>
         <p className="mt-3 text-sm leading-7 text-foreground-soft">
           A workspace is an isolated stream of work. For Git projects each workspace corresponds to
           a branch and a git worktree directory. Multiple workspaces can run at the same time.
@@ -379,8 +379,8 @@ mx workspace focus --dir /path/to/workspace --window 2`}</CodeBlock>
       </article>
 
       {/* Settings commands */}
-      <article className="rounded-2xl border border-line bg-surface/82 p-5 backdrop-blur-sm">
-        <h2 className="text-xl font-semibold tracking-tight">Settings Commands</h2>
+      <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
+        <h2 className="text-2xl font-semibold tracking-tight">Settings Commands</h2>
         <p className="mt-3 text-sm leading-7 text-foreground-soft">
           GUI keyboard shortcuts can be read, overridden, or reset from the CLI. Hotkey specs use
           the format <Cmd>cmd+shift+x</Cmd>.
@@ -414,8 +414,8 @@ mx settings reset --iterm-focus-pulse-enabled`}</CodeBlock>
       </article>
 
       {/* AI agent recipe */}
-      <article className="rounded-2xl border border-line bg-surface/82 p-5 backdrop-blur-sm">
-        <h2 className="text-xl font-semibold tracking-tight">AI Agent Recipe</h2>
+      <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
+        <h2 className="text-2xl font-semibold tracking-tight">AI Agent Recipe</h2>
         <p className="mt-3 text-sm leading-7 text-foreground-soft">
           A complete example: register a project, configure it, create a workspace, and launch it.
         </p>
@@ -482,8 +482,8 @@ mx workspace archive`}</CodeBlock>
       </article>
 
       {/* Exit codes */}
-      <article className="rounded-2xl border border-line bg-surface/82 p-5 backdrop-blur-sm">
-        <h2 className="text-xl font-semibold tracking-tight">Exit Codes</h2>
+      <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
+        <h2 className="text-2xl font-semibold tracking-tight">Exit Codes</h2>
         <div className="mt-4 overflow-x-auto">
           <table className="w-full border-collapse text-sm">
             <thead>

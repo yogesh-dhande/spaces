@@ -8,11 +8,11 @@ export const metadata: Metadata = {
     "Cookbook guide for running a single Next.js service in Docker Compose with Muxy settings.",
 };
 
-const card = "rounded-2xl border border-line bg-surface/82 p-5 backdrop-blur-sm";
+const card = "border-t border-line/70 pt-8 first:border-t-0 first:pt-0";
 const prose = "mt-2 text-sm leading-7 text-foreground-soft";
 const list = "mt-3 space-y-2 text-sm leading-7 text-foreground-soft";
 const code =
-  "mt-3 w-full max-w-full min-w-0 overflow-x-auto whitespace-pre-wrap break-words rounded-xl border border-line bg-background-soft/80 p-3 text-xs leading-6 text-foreground";
+  "mt-3 w-full max-w-full min-w-0 overflow-x-auto whitespace-pre-wrap break-words rounded-lg border border-line/70 bg-background-soft/60 p-3 text-xs leading-6 text-foreground";
 
 export default function NextjsDockerGuidePage() {
   return (
@@ -22,7 +22,7 @@ export default function NextjsDockerGuidePage() {
       pagePath="/docs/guides"
     >
       <article className={card}>
-        <h2 className="text-xl font-semibold tracking-tight">Use Case</h2>
+        <h2 className="text-2xl font-semibold tracking-tight">Use Case</h2>
         <p className={prose}>
           Your Next.js service runs via Compose. You need branch-isolated environments,
           deterministic port mapping, and health checks that detect individual service failure.
@@ -30,7 +30,7 @@ export default function NextjsDockerGuidePage() {
       </article>
 
       <article className={card}>
-        <h2 className="text-xl font-semibold tracking-tight">Project Settings Explained</h2>
+        <h2 className="text-2xl font-semibold tracking-tight">Project Settings Explained</h2>
 
         <h3 className="mt-4 text-sm font-semibold text-foreground">Port Definitions</h3>
         <pre className={code}>
@@ -97,7 +97,7 @@ docker compose down`}</code>
       </article>
 
       <article className={card}>
-        <h2 className="text-xl font-semibold tracking-tight">Why Status Checks Matter in Compose</h2>
+        <h2 className="text-2xl font-semibold tracking-tight">Why Status Checks Matter in Compose</h2>
         <ul className={list}>
           <li>• Key use case: one service in multi-service Compose goes down, but you do not want Compose auto-restart; you still want an immediate notification.</li>
           <li>• Detect partial outage where frontend is up but backend/cache/worker has failed.</li>
@@ -108,9 +108,9 @@ docker compose down`}</code>
 
       <Link
         href="/docs/guides"
-        className="inline-flex rounded-full border border-line px-4 py-2 text-sm font-semibold transition-colors hover:border-accent hover:text-accent"
+        className="mt-4 inline-flex items-center gap-1.5 text-sm font-semibold text-accent transition-colors hover:opacity-80"
       >
-        Back to Cookbook Guides
+        ← Back to Cookbook Guides
       </Link>
     </DocsShell>
   );

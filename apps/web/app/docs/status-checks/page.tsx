@@ -14,16 +14,16 @@ export default function StatusChecksDocsPage() {
       description="Status checks run shell commands against running workspace processes and show passed/failed status indicators in the UI."
       pagePath="/docs/status-checks"
     >
-      <article className="rounded-2xl border border-line bg-surface/82 p-5 backdrop-blur-sm">
-        <h2 className="text-xl font-semibold tracking-tight">What Is a Status Check?</h2>
+      <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
+        <h2 className="text-2xl font-semibold tracking-tight">What Is a Status Check?</h2>
         <p className="mt-2 text-sm leading-7 text-foreground-soft">
           A status check is tied to a process and includes a command, check interval, timeout,
           and an action to take when the check fails (do nothing, restart the process, or notify).
         </p>
       </article>
 
-      <article className="rounded-2xl border border-line bg-surface/82 p-5 backdrop-blur-sm">
-        <h2 className="text-xl font-semibold tracking-tight">How Checks Work</h2>
+      <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
+        <h2 className="text-2xl font-semibold tracking-tight">How Checks Work</h2>
         <ul className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
           <li>• Checks are defined at the project level and inherited by each workspace.</li>
           <li>• Each workspace can customize its own checks independently.</li>
@@ -33,8 +33,8 @@ export default function StatusChecksDocsPage() {
         </ul>
       </article>
 
-      <article className="rounded-2xl border border-line bg-surface/82 p-5 backdrop-blur-sm">
-        <h2 className="text-xl font-semibold tracking-tight">GUI Configuration</h2>
+      <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
+        <h2 className="text-2xl font-semibold tracking-tight">GUI Configuration</h2>
         <ul className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
           <li>• In Workspace Settings, each status check row includes an <code>On Fail</code> selector.</li>
           <li>• <code>none</code>: store failed status only.</li>
@@ -43,8 +43,8 @@ export default function StatusChecksDocsPage() {
         </ul>
       </article>
 
-      <article className="rounded-2xl border border-line bg-surface/82 p-5 backdrop-blur-sm">
-        <h2 className="text-xl font-semibold tracking-tight">Status Output</h2>
+      <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
+        <h2 className="text-2xl font-semibold tracking-tight">Status Output</h2>
         <ul className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
           <li>• Successful check: passed status indicator (shown green in UI).</li>
           <li>• Failed check or timeout: failed status indicator (shown red in UI).</li>
@@ -53,8 +53,8 @@ export default function StatusChecksDocsPage() {
         </ul>
       </article>
 
-      <article className="rounded-2xl border border-line bg-surface/82 p-5 backdrop-blur-sm">
-        <h2 className="text-xl font-semibold tracking-tight">Related Process States</h2>
+      <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
+        <h2 className="text-2xl font-semibold tracking-tight">Related Process States</h2>
         <p className="mt-2 text-sm leading-7 text-foreground-soft">
           Status checks are one layer of visibility. Process state provides additional context.
         </p>
@@ -65,7 +65,7 @@ export default function StatusChecksDocsPage() {
         </ul>
       </article>
 
-      <article className="grid gap-4 rounded-2xl border border-line bg-surface/82 p-5 backdrop-blur-sm md:grid-cols-2">
+      <article className="grid gap-4 border-t border-line/70 pt-8 first:border-t-0 first:pt-0 md:grid-cols-2">
         <ScreenshotFrame
           title="Status Check Editor"
           caption="Workspace settings with process-linked status check definitions."

@@ -15,8 +15,8 @@ export default function InstallationDocsPage() {
       description="Download the latest release, install dependencies, and get Muxy running on your Mac."
       pagePath="/docs/installation"
     >
-      <article className="rounded-2xl border border-line bg-surface/82 p-5 backdrop-blur-sm">
-        <h2 className="text-xl font-semibold tracking-tight">Download</h2>
+      <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
+        <h2 className="text-2xl font-semibold tracking-tight">Download</h2>
         <p className="mt-2 text-sm leading-7 text-foreground-soft">
           Grab the latest release:
         </p>
@@ -30,8 +30,8 @@ export default function InstallationDocsPage() {
         </p>
       </article>
 
-      <article className="rounded-2xl border border-line bg-surface/82 p-5 backdrop-blur-sm">
-        <h2 className="text-xl font-semibold tracking-tight">Install</h2>
+      <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
+        <h2 className="text-2xl font-semibold tracking-tight">Install</h2>
         <ol className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
           <li>
             1. Download <code className="rounded bg-background-soft px-1.5 py-0.5 text-xs">Muxy-&lt;version&gt;.dmg</code> from the latest release.
@@ -51,8 +51,8 @@ export default function InstallationDocsPage() {
         </ol>
       </article>
 
-      <article className="rounded-2xl border border-line bg-surface/82 p-5 backdrop-blur-sm">
-        <h2 className="text-xl font-semibold tracking-tight">Dependencies</h2>
+      <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
+        <h2 className="text-2xl font-semibold tracking-tight">Dependencies</h2>
         <p className="mt-2 text-sm leading-7 text-foreground-soft">
           Muxy relies on three external tools. Install them before launching.
         </p>
@@ -66,8 +66,8 @@ export default function InstallationDocsPage() {
         </ul>
       </article>
 
-      <article className="rounded-2xl border border-line bg-surface/82 p-5 backdrop-blur-sm">
-        <h2 className="text-xl font-semibold tracking-tight">macOS Permissions</h2>
+      <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
+        <h2 className="text-2xl font-semibold tracking-tight">macOS Permissions</h2>
         <p className="mt-2 text-sm leading-7 text-foreground-soft">
           Muxy and yabai need Accessibility permissions to manage windows.
         </p>
@@ -79,8 +79,8 @@ export default function InstallationDocsPage() {
         </ol>
       </article>
 
-      <article className="rounded-2xl border border-line bg-surface/82 p-5 backdrop-blur-sm">
-        <h2 className="text-xl font-semibold tracking-tight">Verify</h2>
+      <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
+        <h2 className="text-2xl font-semibold tracking-tight">Verify</h2>
         <p className="mt-2 text-sm leading-7 text-foreground-soft">
           Confirm the CLI and GUI are working:
         </p>
@@ -93,15 +93,15 @@ Muxy`}
         </p>
       </article>
 
-      <article className="rounded-2xl border border-line bg-surface/82 p-5 backdrop-blur-sm">
-        <h2 className="text-xl font-semibold tracking-tight">Auto-Update</h2>
+      <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
+        <h2 className="text-2xl font-semibold tracking-tight">Auto-Update</h2>
         <p className="mt-2 text-sm leading-7 text-foreground-soft">
           Muxy includes a built-in update checker. When a new version is available, you will see a notification in the menu bar with a link to download the update.
         </p>
       </article>
 
-      <article className="rounded-2xl border border-line bg-surface/82 p-5 backdrop-blur-sm">
-        <h2 className="text-xl font-semibold tracking-tight">Uninstall</h2>
+      <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
+        <h2 className="text-2xl font-semibold tracking-tight">Uninstall</h2>
         <p className="mt-2 text-sm leading-7 text-foreground-soft">
           To remove Muxy completely:
         </p>

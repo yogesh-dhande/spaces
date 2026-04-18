@@ -14,8 +14,8 @@ export default function WorkspacesDocsPage() {
       description="A workspace is the core runtime unit in Muxy. It owns process templates, browser sessions, status checks, window tracking, and reserved ports."
       pagePath="/docs/workspaces"
     >
-      <article className="rounded-2xl border border-line bg-surface/82 p-5 backdrop-blur-sm">
-        <h2 className="text-xl font-semibold tracking-tight">What Is a Workspace?</h2>
+      <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
+        <h2 className="text-2xl font-semibold tracking-tight">What Is a Workspace?</h2>
         <p className="mt-2 text-sm leading-7 text-foreground-soft">
           A workspace belongs to a project and represents a single stream of work. For Git
           projects it is typically backed by a worktree. Each workspace holds its own copies
@@ -23,8 +23,8 @@ export default function WorkspacesDocsPage() {
         </p>
       </article>
 
-      <article className="rounded-2xl border border-line bg-surface/82 p-5 backdrop-blur-sm">
-        <h2 className="text-xl font-semibold tracking-tight">Creating a Workspace</h2>
+      <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
+        <h2 className="text-2xl font-semibold tracking-tight">Creating a Workspace</h2>
         <p className="mt-2 text-sm leading-7 text-foreground-soft">
           Create a workspace from the sidebar using the add button on a project. For Git projects,
           this is one click: Muxy creates the workspace immediately with sensible defaults.
@@ -37,8 +37,8 @@ export default function WorkspacesDocsPage() {
         </ul>
       </article>
 
-      <article className="rounded-2xl border border-line bg-surface/82 p-5 backdrop-blur-sm">
-        <h2 className="text-xl font-semibold tracking-tight">Settings Overrides</h2>
+      <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
+        <h2 className="text-2xl font-semibold tracking-tight">Settings Overrides</h2>
         <p className="mt-2 text-sm leading-7 text-foreground-soft">
           Workspace settings (processes, status checks, browser sessions, port definitions) start
           as copies of the project templates. After creation, each workspace maintains independent
@@ -56,8 +56,8 @@ export default function WorkspacesDocsPage() {
         </ul>
       </article>
 
-      <article className="rounded-2xl border border-line bg-surface/82 p-5 backdrop-blur-sm">
-        <h2 className="text-xl font-semibold tracking-tight">Ports Per Workspace</h2>
+      <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
+        <h2 className="text-2xl font-semibold tracking-tight">Ports Per Workspace</h2>
         <p className="mt-2 text-sm leading-7 text-foreground-soft">
           Each workspace receives reserved ports based on named port definitions so multiple
           workspaces can run in parallel without port conflicts.
@@ -68,15 +68,15 @@ export default function WorkspacesDocsPage() {
           <li>• Ports are reserved so they cannot be claimed by other processes between allocation and use.</li>
           <li>• Reserved ports are released when a workspace is archived.</li>
         </ul>
-        <pre className="mt-3 w-full max-w-full min-w-0 overflow-x-auto whitespace-pre-wrap break-words rounded-xl border border-line bg-background-soft/80 p-3 text-xs leading-6 text-foreground">
+        <pre className="mt-3 w-full max-w-full min-w-0 overflow-x-auto whitespace-pre-wrap break-words rounded-lg border border-line/70 bg-background-soft/60 p-3 text-xs leading-6 text-foreground">
           <code>{`Workspace: bugfix/login-timeout
 FRONTEND_PORT=21001
 API_PORT=21002`}</code>
         </pre>
       </article>
 
-      <article className="rounded-2xl border border-line bg-surface/82 p-5 backdrop-blur-sm">
-        <h2 className="text-xl font-semibold tracking-tight">Environment Variables</h2>
+      <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
+        <h2 className="text-2xl font-semibold tracking-tight">Environment Variables</h2>
         <p className="mt-2 text-sm leading-7 text-foreground-soft">
           Every workspace process receives the following environment variables at launch.
         </p>
@@ -91,8 +91,8 @@ API_PORT=21002`}</code>
         </p>
       </article>
 
-      <article className="rounded-2xl border border-line bg-surface/82 p-5 backdrop-blur-sm">
-        <h2 className="text-xl font-semibold tracking-tight">Switching Between Workspaces</h2>
+      <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
+        <h2 className="text-2xl font-semibold tracking-tight">Switching Between Workspaces</h2>
         <p className="mt-2 text-sm leading-7 text-foreground-soft">
           Switching workspaces changes active context in one action: windows, process list,
           browser session targets, and status output all follow the selected workspace.
@@ -104,7 +104,7 @@ API_PORT=21002`}</code>
         </ol>
       </article>
 
-      <article className="grid gap-4 rounded-2xl border border-line bg-surface/82 p-5 backdrop-blur-sm md:grid-cols-2">
+      <article className="grid gap-4 border-t border-line/70 pt-8 first:border-t-0 first:pt-0 md:grid-cols-2">
         <ScreenshotFrame
           title="Workspace Settings Tab"
           caption="Per-workspace overrides for processes, status checks, browser sessions, and ports."

@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import Link from "next/link";
 import { SiteHeader } from "../components/site-header";
+import { SiteFooter } from "../components/site-footer";
 import { docsPageLinks } from "./content";
 
 export const metadata: Metadata = {
@@ -46,84 +47,119 @@ export default function DocsPage() {
     <div className="relative min-h-screen overflow-x-clip">
       <SiteHeader />
 
-      <main className="mx-auto flex w-full max-w-6xl flex-col gap-8 px-6 pb-20">
-        <section className="rounded-3xl border border-line bg-surface/90 p-7 backdrop-blur-sm md:p-10">
-          <p className="font-mono text-xs uppercase tracking-[0.16em] text-foreground-soft">
+      {/* Hero */}
+      <section className="relative">
+        <div
+          aria-hidden
+          className="pointer-events-none absolute left-[-8rem] top-0 h-72 w-72 rounded-full bg-accent/16 blur-3xl"
+        />
+        <div className="mx-auto w-full max-w-7xl px-6 pb-12 pt-16 md:pt-24">
+          <p className="font-mono text-[0.7rem] uppercase tracking-[0.18em] text-foreground-soft">
             Documentation
           </p>
-          <h1 className="mt-3 max-w-4xl text-4xl font-semibold tracking-tight md:text-5xl">
+          <h1 className="mt-4 max-w-3xl text-4xl font-semibold leading-[1.05] tracking-tight md:text-6xl">
             Muxy in five minutes.
           </h1>
-          <p className="mt-4 max-w-4xl text-base leading-7 text-foreground-soft">
-            This page gives a quick mental model for how Muxy helps you run
-            and switch workspaces during parallel development.
+          <p className="mt-5 max-w-2xl text-base leading-7 text-foreground-soft md:text-lg md:leading-8">
+            A quick mental model for how Muxy helps you run and switch
+            workspaces during parallel development.
           </p>
-          <div className="mt-6 flex flex-wrap gap-3">
+          <div className="mt-8 flex flex-wrap items-center gap-3">
             <Link
               href="/"
-              className="btn-primary rounded-full px-5 py-2.5 text-sm font-semibold transition-colors"
+              className="btn-primary inline-flex items-center gap-2 rounded-full px-6 py-3 text-sm font-semibold"
             >
               Getting Started
+              <span aria-hidden>→</span>
             </Link>
             <a
               href="#docs-map"
-              className="rounded-full border border-line px-5 py-2.5 text-sm font-semibold transition-colors hover:border-accent hover:text-accent"
+              className="inline-flex items-center gap-1.5 rounded-full px-5 py-3 text-sm font-semibold text-foreground-soft transition-colors hover:text-accent"
             >
-              Jump to Overview
+              Jump to overview
+              <span aria-hidden>↓</span>
             </a>
           </div>
-        </section>
+        </div>
+      </section>
 
-        <section className="rounded-3xl border border-line bg-surface/86 p-7 backdrop-blur-sm md:p-8">
-          <h2 className="text-2xl font-semibold tracking-tight">Core Terms</h2>
-          <div className="mt-5 grid gap-4 md:grid-cols-2">
-            {terms.map((item) => (
-              <div key={item.name}>
-                <h3 className="font-mono text-xs uppercase tracking-[0.12em] text-foreground-soft">
-                  {item.name}
-                </h3>
-                <p className="mt-1 text-sm leading-7 text-foreground-soft">
-                  {item.description}
-                </p>
-              </div>
-            ))}
+      {/* Core Terms */}
+      <section className="border-y border-line/70 bg-background-soft/60">
+        <div className="mx-auto w-full max-w-7xl px-6 py-20">
+          <div className="grid gap-10 lg:grid-cols-12">
+            <div className="lg:col-span-4">
+              <p className="font-mono text-[0.7rem] uppercase tracking-[0.18em] text-foreground-soft">
+                Glossary
+              </p>
+              <h2 className="mt-4 text-3xl font-semibold tracking-tight md:text-4xl">
+                Core terms.
+              </h2>
+              <p className="mt-4 max-w-sm text-sm leading-7 text-foreground-soft">
+                The small vocabulary you need to get oriented with Muxy.
+              </p>
+            </div>
+
+            <dl className="grid gap-x-8 gap-y-6 lg:col-span-8 md:grid-cols-2">
+              {terms.map((item) => (
+                <div
+                  key={item.name}
+                  className="border-t border-line/70 pt-5"
+                >
+                  <dt className="font-mono text-[0.62rem] uppercase tracking-[0.18em] text-accent">
+                    {item.name}
+                  </dt>
+                  <dd className="mt-2 text-sm leading-7 text-foreground-soft">
+                    {item.description}
+                  </dd>
+                </div>
+              ))}
+            </dl>
           </div>
-        </section>
+        </div>
+      </section>
 
-        <section
-          id="docs-map"
-          className="rounded-3xl border border-line bg-surface/86 p-7 backdrop-blur-sm md:p-8"
-        >
-          <h2 className="text-2xl font-semibold tracking-tight">
-            Docs Overview
-          </h2>
-          <p className="mt-3 max-w-4xl text-sm leading-7 text-foreground-soft">
+      {/* Docs map */}
+      <section id="docs-map" className="mx-auto w-full max-w-7xl px-6 py-20 md:py-24">
+        <div className="flex flex-col items-start justify-between gap-6 md:flex-row md:items-end">
+          <div>
+            <p className="font-mono text-[0.7rem] uppercase tracking-[0.18em] text-foreground-soft">
+              Overview
+            </p>
+            <h2 className="mt-4 max-w-2xl text-3xl font-semibold tracking-tight md:text-4xl">
+              Docs Overview
+            </h2>
+          </div>
+          <p className="max-w-md text-sm leading-7 text-foreground-soft">
             These pages cover the most common user questions and operational
             workflows from setup through troubleshooting.
           </p>
-          <div className="mt-5 grid gap-4 md:grid-cols-2">
-            {docsPageLinks.map((page) => (
-              <article
-                key={page.href}
-                className="rounded-2xl border border-line bg-surface/75 p-4"
-              >
-                <h3 className="text-lg font-semibold tracking-tight">
-                  {page.title}
-                </h3>
-                <p className="mt-2 text-sm leading-7 text-foreground-soft">
-                  {page.summary}
-                </p>
-                <Link
-                  href={page.href}
-                  className="mt-3 inline-flex rounded-full border border-line px-4 py-2 text-xs font-semibold transition-colors hover:border-accent hover:text-accent"
-                >
-                  Read Page
-                </Link>
-              </article>
-            ))}
-          </div>
-        </section>
-      </main>
+        </div>
+
+        <div className="mt-10 grid gap-4 md:grid-cols-2 lg:grid-cols-3">
+          {docsPageLinks.map((page, i) => (
+            <Link
+              key={page.href}
+              href={page.href}
+              className="group flex flex-col gap-3 rounded-2xl border border-line/80 bg-surface/80 p-5 transition-colors hover:border-accent/60"
+            >
+              <span className="font-mono text-[0.6rem] uppercase tracking-[0.18em] text-foreground-soft">
+                {String(i + 1).padStart(2, "0")}
+              </span>
+              <h3 className="text-lg font-semibold tracking-tight">
+                {page.title}
+              </h3>
+              <p className="text-sm leading-6 text-foreground-soft">
+                {page.summary}
+              </p>
+              <span className="mt-1 inline-flex items-center gap-1 text-xs font-semibold text-accent transition-transform group-hover:translate-x-0.5">
+                Read page <span aria-hidden>→</span>
+              </span>
+            </Link>
+          ))}
+        </div>
+      </section>
+
+      <SiteFooter />
     </div>
   );
 }

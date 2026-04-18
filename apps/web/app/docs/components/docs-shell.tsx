@@ -1,6 +1,7 @@
 import Link from "next/link";
 import type { ReactNode } from "react";
 import { SiteHeader } from "../../components/site-header";
+import { SiteFooter } from "../../components/site-footer";
 import { docsPageLinks } from "../content";
 
 type DocsShellProps = {
@@ -20,49 +21,40 @@ export function DocsShell({
     <div className="relative min-h-screen overflow-x-clip">
       <SiteHeader />
 
-      <main className="mx-auto flex w-full max-w-6xl flex-col gap-6 px-6 pb-20">
-        <section className="rounded-3xl border border-line bg-surface/88 p-7 backdrop-blur-sm md:p-9">
-          <p className="font-mono text-xs uppercase tracking-[0.16em] text-foreground-soft">
-            Documentation
-          </p>
-          <h1 className="mt-3 text-4xl font-semibold tracking-tight md:text-5xl">
+      <main className="mx-auto w-full max-w-7xl px-6 pb-16">
+        {/* Breadcrumb + hero */}
+        <section className="border-b border-line/70 pb-10 pt-10 md:pt-14">
+          <nav className="flex items-center gap-1.5 font-mono text-[0.68rem] uppercase tracking-[0.18em] text-foreground-soft">
+            <Link href="/docs" className="transition-colors hover:text-foreground">
+              Docs
+            </Link>
+            <span aria-hidden>/</span>
+            <span className="text-foreground">{title}</span>
+          </nav>
+          <h1 className="mt-4 max-w-4xl text-3xl font-semibold leading-tight tracking-tight md:text-5xl">
             {title}
           </h1>
-          <p className="mt-4 max-w-4xl text-base leading-7 text-foreground-soft">
+          <p className="mt-4 max-w-3xl text-base leading-7 text-foreground-soft md:text-lg md:leading-8">
             {description}
           </p>
-          <div className="mt-6 flex flex-wrap gap-3">
-            <Link
-              href="/docs"
-              className="rounded-full bg-accent px-5 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-accent-strong"
-            >
-              Back to Docs Hub
-            </Link>
-            <Link
-              href="/"
-              className="rounded-full border border-line px-5 py-2.5 text-sm font-semibold transition-colors hover:border-accent hover:text-accent"
-            >
-              Back to Home
-            </Link>
-          </div>
         </section>
 
-        <div className="grid gap-6 lg:grid-cols-[18rem_minmax(0,1fr)]">
-          <aside className="min-w-0 rounded-3xl border border-line bg-surface/82 p-5 backdrop-blur-sm">
-            <p className="font-mono text-xs uppercase tracking-[0.14em] text-foreground-soft">
-              Doc Pages
+        <div className="grid gap-10 pt-10 lg:grid-cols-[16rem_minmax(0,1fr)]">
+          <aside className="min-w-0 lg:sticky lg:top-20 lg:self-start">
+            <p className="font-mono text-[0.62rem] uppercase tracking-[0.18em] text-foreground-soft">
+              Docs
             </p>
-            <nav className="mt-3 space-y-2">
+            <nav className="mt-3 flex flex-col gap-0.5 border-l border-line/70">
               {docsPageLinks.map((item) => {
                 const isActive = item.href === pagePath;
                 return (
                   <Link
                     key={item.href}
                     href={item.href}
-                    className={`block rounded-xl border px-3 py-2 text-sm transition-colors ${
+                    className={`-ml-px border-l-2 px-3 py-1.5 text-sm transition-colors ${
                       isActive
-                        ? "border-accent bg-accent/12 text-foreground"
-                        : "border-line bg-surface/75 text-foreground-soft hover:border-accent hover:text-foreground"
+                        ? "border-accent font-semibold text-foreground"
+                        : "border-transparent text-foreground-soft hover:border-line hover:text-foreground"
                     }`}
                   >
                     {item.title}
@@ -72,9 +64,11 @@ export function DocsShell({
             </nav>
           </aside>
 
-          <section className="min-w-0 space-y-4">{children}</section>
+          <section className="min-w-0 space-y-10">{children}</section>
         </div>
       </main>
+
+      <SiteFooter />
     </div>
   );
 }

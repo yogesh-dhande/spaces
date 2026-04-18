@@ -7,7 +7,7 @@ const beforeSteps: FlowStep[] = [
   { title: "Find UI Tab", text: "Track down the browser tab for the right feature/project." },
   { title: "Find Editor", text: "Locate the matching editor window." },
   { title: "Find Agent", text: "Figure out which terminal/agent session made the change." },
-  { title: "Port Collisions", text: "Resolve :3000 collisions and update port references for relatedservices." },
+  { title: "Port Collisions", text: "Resolve :3000 collisions and update port references for related services." },
 ];
 
 const afterSteps: FlowStep[] = [

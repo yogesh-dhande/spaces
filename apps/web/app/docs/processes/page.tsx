@@ -14,8 +14,8 @@ export default function ProcessesDocsPage() {
       description="Processes are defined as project templates, copied into workspace settings, and launched in dedicated terminal windows for each running workspace."
       pagePath="/docs/processes"
     >
-      <article className="rounded-2xl border border-line bg-surface/82 p-5 backdrop-blur-sm">
-        <h2 className="text-xl font-semibold tracking-tight">Process Model</h2>
+      <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
+        <h2 className="text-2xl font-semibold tracking-tight">Process Model</h2>
         <ul className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
           <li>• Processes are defined at the project level and inherited by each workspace.</li>
           <li>• Each workspace can customize its own process commands independently.</li>
@@ -25,8 +25,8 @@ export default function ProcessesDocsPage() {
         </ul>
       </article>
 
-      <article className="rounded-2xl border border-line bg-surface/82 p-5 backdrop-blur-sm">
-        <h2 className="text-xl font-semibold tracking-tight">GUI Configuration</h2>
+      <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
+        <h2 className="text-2xl font-semibold tracking-tight">GUI Configuration</h2>
         <ul className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
           <li>• In Workspace Settings, each process row includes an <code>On Exit</code> selector.</li>
           <li>• <code>none</code>: mark exited and do not take action.</li>
@@ -35,12 +35,12 @@ export default function ProcessesDocsPage() {
         </ul>
       </article>
 
-      <article className="rounded-2xl border border-line bg-surface/82 p-5 backdrop-blur-sm">
-        <h2 className="text-xl font-semibold tracking-tight">Environment Variables</h2>
+      <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
+        <h2 className="text-2xl font-semibold tracking-tight">Environment Variables</h2>
         <p className="mt-2 text-sm leading-7 text-foreground-soft">
           Every workspace process receives reserved ports and workspace path variables.
         </p>
-        <pre className="mt-3 w-full max-w-full min-w-0 overflow-x-auto whitespace-pre-wrap break-words rounded-xl border border-line bg-background-soft/80 p-3 text-xs leading-6 text-foreground">
+        <pre className="mt-3 w-full max-w-full min-w-0 overflow-x-auto whitespace-pre-wrap break-words rounded-lg border border-line/70 bg-background-soft/60 p-3 text-xs leading-6 text-foreground">
           <code>{`FRONTEND_PORT, API_PORT, ...   # named port definitions
 MUXY_PROJECT_DIR
 MUXY_WORKSPACE_DIR`}</code>
@@ -50,8 +50,8 @@ MUXY_WORKSPACE_DIR`}</code>
         </p>
       </article>
 
-      <article className="rounded-2xl border border-line bg-surface/82 p-5 backdrop-blur-sm">
-        <h2 className="text-xl font-semibold tracking-tight">Launch and Runtime</h2>
+      <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
+        <h2 className="text-2xl font-semibold tracking-tight">Launch and Runtime</h2>
         <ul className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
           <li>• On launch, each process starts in its own iTerm2 window.</li>
           <li>• Running processes are tracked per workspace and visible in the Run tab.</li>
@@ -59,8 +59,8 @@ MUXY_WORKSPACE_DIR`}</code>
         </ul>
       </article>
 
-      <article className="rounded-2xl border border-line bg-surface/82 p-5 backdrop-blur-sm">
-        <h2 className="text-xl font-semibold tracking-tight">Stop and Restart Behavior</h2>
+      <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
+        <h2 className="text-2xl font-semibold tracking-tight">Stop and Restart Behavior</h2>
         <ul className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
           <li>• Stop gracefully interrupts processes first, then escalates if needed.</li>
           <li>• The stop script runs after process termination (if configured).</li>
@@ -69,8 +69,8 @@ MUXY_WORKSPACE_DIR`}</code>
         </ul>
       </article>
 
-      <article className="rounded-2xl border border-line bg-surface/82 p-5 backdrop-blur-sm">
-        <h2 className="text-xl font-semibold tracking-tight">Coding Agent Detection</h2>
+      <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
+        <h2 className="text-2xl font-semibold tracking-tight">Coding Agent Detection</h2>
         <p className="mt-2 text-sm leading-7 text-foreground-soft">
           Muxy can classify agent-like process commands (for example `codex` or `claude`) and
           expose idle/busy semantics in status reporting.
@@ -82,7 +82,7 @@ MUXY_WORKSPACE_DIR`}</code>
         </ul>
       </article>
 
-      <article className="grid gap-4 rounded-2xl border border-line bg-surface/82 p-5 backdrop-blur-sm md:grid-cols-2">
+      <article className="grid gap-4 border-t border-line/70 pt-8 first:border-t-0 first:pt-0 md:grid-cols-2">
         <ScreenshotFrame
           title="Workspace Run Processes"
           caption="Process list with live status state and check summaries in the Run tab."

@@ -14,8 +14,8 @@ export default function WorkspaceLifecycleDocsPage() {
       description="How workspace state changes from create through launch, stop, restart, and archive."
       pagePath="/docs/workspace-lifecycle"
     >
-      <article className="rounded-2xl border border-line bg-surface/82 p-5 backdrop-blur-sm">
-        <h2 className="text-xl font-semibold tracking-tight">Lifecycle States</h2>
+      <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
+        <h2 className="text-2xl font-semibold tracking-tight">Lifecycle States</h2>
         <ul className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
           <li>• <strong>Default</strong>: auto-created per project and cannot be archived.</li>
           <li>• <strong>Stopped</strong>: persisted workspace with no active processes or tracked windows.</li>
@@ -24,8 +24,8 @@ export default function WorkspaceLifecycleDocsPage() {
         </ul>
       </article>
 
-      <article className="rounded-2xl border border-line bg-surface/82 p-5 backdrop-blur-sm">
-        <h2 className="text-xl font-semibold tracking-tight">Create</h2>
+      <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
+        <h2 className="text-2xl font-semibold tracking-tight">Create</h2>
         <p className="mt-2 text-sm leading-7 text-foreground-soft">
           Creating a workspace copies project templates into workspace settings, runs the setup
           script, and reserves ports based on port definitions.
@@ -37,8 +37,8 @@ export default function WorkspaceLifecycleDocsPage() {
         </ul>
       </article>
 
-      <article className="rounded-2xl border border-line bg-surface/82 p-5 backdrop-blur-sm">
-        <h2 className="text-xl font-semibold tracking-tight">Launch</h2>
+      <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
+        <h2 className="text-2xl font-semibold tracking-tight">Launch</h2>
         <p className="mt-2 text-sm leading-7 text-foreground-soft">
           Launch is allowed only when a workspace is stopped. If the workspace is already
           running, use restart instead.
@@ -50,8 +50,8 @@ export default function WorkspaceLifecycleDocsPage() {
         </ul>
       </article>
 
-      <article className="rounded-2xl border border-line bg-surface/82 p-5 backdrop-blur-sm">
-        <h2 className="text-xl font-semibold tracking-tight">Update While Running</h2>
+      <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
+        <h2 className="text-2xl font-semibold tracking-tight">Update While Running</h2>
         <ul className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
           <li>• Newly added processes start immediately in new terminal windows.</li>
           <li>• Process command changes restart the process in the same terminal window.</li>
@@ -59,8 +59,8 @@ export default function WorkspaceLifecycleDocsPage() {
         </ul>
       </article>
 
-      <article className="rounded-2xl border border-line bg-surface/82 p-5 backdrop-blur-sm">
-        <h2 className="text-xl font-semibold tracking-tight">Stop and Restart</h2>
+      <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
+        <h2 className="text-2xl font-semibold tracking-tight">Stop and Restart</h2>
         <p className="mt-2 text-sm leading-7 text-foreground-soft">
           Restart runs stop first, then launch, for the same workspace.
         </p>
@@ -76,8 +76,8 @@ export default function WorkspaceLifecycleDocsPage() {
         </p>
       </article>
 
-      <article className="rounded-2xl border border-line bg-surface/82 p-5 backdrop-blur-sm">
-        <h2 className="text-xl font-semibold tracking-tight">Archive</h2>
+      <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
+        <h2 className="text-2xl font-semibold tracking-tight">Archive</h2>
         <ul className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
           <li>• The default workspace cannot be archived.</li>
           <li>• Archive runs the same stop flow as stop/restart.</li>
@@ -87,7 +87,7 @@ export default function WorkspaceLifecycleDocsPage() {
         </ul>
       </article>
 
-      <article className="grid gap-4 rounded-2xl border border-line bg-surface/82 p-5 backdrop-blur-sm md:grid-cols-2">
+      <article className="grid gap-4 border-t border-line/70 pt-8 first:border-t-0 first:pt-0 md:grid-cols-2">
         <ScreenshotFrame
           title="Workspace Action Bar"
           caption="Launch/Restart/Stop/Archive controls with state-aware availability."
