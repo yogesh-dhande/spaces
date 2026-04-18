@@ -5,8 +5,16 @@ open class Iterm2Adapter: @unchecked Sendable {
 
     open func isAvailable() -> Bool { (try? AppleScript.run("tell application \"iTerm2\" to version")) != nil }
 
+    private func appleScriptEscaped(_ value: String) -> String {
+        value
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "\"", with: "\\\"")
+            .replacingOccurrences(of: "\r", with: "\\r")
+            .replacingOccurrences(of: "\n", with: "\\n")
+    }
+
     open func openWindowAndRun(command: String, background: Bool = false) throws -> ItermWindowInfo {
-        let escaped = command.replacingOccurrences(of: "\"", with: "\\\"")
+        let escaped = appleScriptEscaped(command)
         let activateLine = background ? "" : "activate"
         let script = """
             tell application "iTerm2"
@@ -29,7 +37,7 @@ open class Iterm2Adapter: @unchecked Sendable {
     }
 
     open func openTabInWindowAndRun(windowID: Int, command: String, background: Bool = false) throws -> ItermWindowInfo {
-        let escaped = command.replacingOccurrences(of: "\"", with: "\\\"")
+        let escaped = appleScriptEscaped(command)
         let activateLine = background ? "" : "activate"
         let script = """
             tell application "iTerm2"
@@ -68,7 +76,7 @@ open class Iterm2Adapter: @unchecked Sendable {
     }
 
     open func runInWindow(id: Int, command: String) throws {
-        let escaped = command.replacingOccurrences(of: "\"", with: "\\\"")
+        let escaped = appleScriptEscaped(command)
         let script = """
             tell application "iTerm2"
               repeat with w in windows
@@ -97,7 +105,7 @@ open class Iterm2Adapter: @unchecked Sendable {
     }
 
     open func closeSessionOrTab(preferredSessionID: String?, tabIndex: Int?, windowID: Int?) throws -> Bool {
-        let escapedSessionID = (preferredSessionID ?? "").replacingOccurrences(of: "\"", with: "\\\"")
+        let escapedSessionID = appleScriptEscaped(preferredSessionID ?? "")
         let targetTabIndex = tabIndex ?? -1
         let targetWindowID = windowID ?? -1
         let script = """

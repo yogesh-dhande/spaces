@@ -34,6 +34,13 @@ final class SetupManager: NSObject {
             action: .openURL(URL(string: "https://iterm2.com/downloads.html")!)
         ),
         SetupStep(
+            ids: [.tmuxInstalled],
+            icon: "rectangle.split.1x2",
+            title: "Install tmux",
+            body: "Muxy uses tmux to keep process sessions recoverable when iTerm2 windows close.",
+            action: .copyCommand("brew install tmux")
+        ),
+        SetupStep(
             ids: [.yabaiInstalled],
             icon: "hammer",
             title: "Install yabai",

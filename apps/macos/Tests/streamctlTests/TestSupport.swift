@@ -43,6 +43,8 @@ class MockIterm2Adapter: Iterm2Adapter, @unchecked Sendable {
     var nextSessionID: String? = "mock-session"
     var nextTabIndex: Int? = 1
     var focusSessionOrTabResult = true
+    var pairedTmux: MockTmuxAdapter?
+    var onOpenWindowAndRun: ((String) -> Void)?
     var closedSessionIDs: [String] = []
     var closedWindowIDs: [Int] = []
     var stubbedSessionIDs: Set<String> = []
@@ -50,6 +52,13 @@ class MockIterm2Adapter: Iterm2Adapter, @unchecked Sendable {
     override func openWindowAndRun(command: String, background: Bool = false) throws -> ItermWindowInfo {
         openWindowAndRunCallCount += 1
         lastCommand = command
+        if let pairedTmux, command.contains("tmux new-session -A -s") {
+            let pattern = #"muxy-[A-Za-z0-9_-]+(?:-[A-Za-z0-9_-]+)?"#
+            if let range = command.range(of: pattern, options: .regularExpression) {
+                pairedTmux.createSession(named: String(command[range]))
+            }
+        }
+        onOpenWindowAndRun?(command)
         let windowID = nextWindowID
         nextWindowID += 1
         // Don't actually open a terminal window - just return the window info
@@ -149,6 +158,7 @@ class MockTmuxAdapter: TmuxAdapter, @unchecked Sendable {
     var lastSelectedWindowID: String?
     var selectedWindowIDs: [String] = []
     var killedWindowIDs: [String] = []
+    var killedSessionNames: [String] = []
     private var nextWindowSerial = 1
 
     func createSession(named sessionName: String) {
@@ -242,6 +252,12 @@ class MockTmuxAdapter: TmuxAdapter, @unchecked Sendable {
         if currentWindowIDBySession[window.sessionName] == windowID {
             currentWindowIDBySession[window.sessionName] = windowsBySession[window.sessionName]?.sorted { $0.index < $1.index }.first?.id
         }
+    }
+
+    override func killSession(named sessionName: String) throws {
+        killedSessionNames.append(sessionName)
+        windowsBySession.removeValue(forKey: sessionName)
+        currentWindowIDBySession.removeValue(forKey: sessionName)
     }
 
     private func window(for windowID: String) -> TmuxWindowInfo? {

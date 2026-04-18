@@ -677,8 +677,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                     return map
                 }()
                 let agentYabaiWindowIDs = Set(agentWindows.compactMap(\.yabaiWindowID))
-                let liveItermSessionIDs: Set<String>? = orchestrator.liveItermSessionIDs()
-
+                var matchedProcessIDs = Set<String>()
                 var shortcutCounter = 1
                 for agentWin in agentWindows {
                     if shortcutCounter == index {
@@ -702,11 +701,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                     if isAgentClaimedWindow && (window.role != "terminal" || windowProcesses.isEmpty) { continue }
                     if window.role == "terminal", !windowProcesses.isEmpty {
                         for process in windowProcesses {
-                            let sessionIsAlive: Bool = {
-                                if let sid = process.itermSessionID, let liveItermSessionIDs { return liveItermSessionIDs.contains(sid) }
-                                return process.status == .running
-                            }()
-                            guard sessionIsAlive else { continue }
+                            matchedProcessIDs.insert(process.id)
                             if shortcutCounter == index {
                                 try orchestrator.focusWorkspaceProcess(workspaceID: selectedWorkspaceID, processID: process.id)
                                 return .success(.focused(kind: "process"))
@@ -720,6 +715,13 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                         }
                         shortcutCounter += 1
                     }
+                }
+                for process in processes where !matchedProcessIDs.contains(process.id) {
+                    if shortcutCounter == index {
+                        try orchestrator.focusWorkspaceProcess(workspaceID: selectedWorkspaceID, processID: process.id)
+                        return .success(.focused(kind: "process"))
+                    }
+                    shortcutCounter += 1
                 }
                 return .success(.noMatch)
             } catch { return .failure(error) }
@@ -5259,7 +5261,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             showWindowIssueToast(
                 title: "Process window not found",
                 detail: "\(context.title) is no longer open.",
-                actionTitle: "Restart",
+                actionTitle: "Recover",
                 action: { [weak self] in Task { await self?.recoverMissingTrackedWindow(context) } })
         case .codingAgent:
             showWindowIssueToast(title: "Agent window not found", detail: "\(context.title) is no longer open.")
@@ -5276,7 +5278,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             progressTitle = "Recovering Browser Session"
             progressDetail = context.title
         case .process:
-            progressTitle = "Restarting Process"
+            progressTitle = "Recovering Process"
             progressDetail = context.title
         case .codingAgent, .window:
             return
@@ -5292,7 +5294,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             case .browserSession:
                 showWindowIssueToast(title: "Browser session recovered", detail: "\(context.title) reopened in a new Chrome window.")
             case .process:
-                showWindowIssueToast(title: "Process restarted", detail: "\(context.title) reopened in a new iTerm2 window.")
+                showWindowIssueToast(title: "Process recovered", detail: "\(context.title) reopened in a new iTerm2 window.")
             case .codingAgent, .window:
                 break
             }

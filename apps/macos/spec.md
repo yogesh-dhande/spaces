@@ -59,7 +59,7 @@ A workspace owns a tracked set of dedicated windows, such as:
 Muxy focuses those windows; it does not decide their geometry.
 
 ## Onboarding
-- On launch, Muxy checks prerequisites in order: iTerm2 installed, yabai installed, yabai running, and required Accessibility access.
+- On launch, Muxy checks prerequisites in order: iTerm2 installed, tmux installed, yabai installed, yabai running, and required Accessibility access.
 - If any prerequisite fails, the main window shows a guided setup flow starting at the first failing step.
 - The setup flow should poll and recover automatically once the missing prerequisite is fixed.
 - If all prerequisites pass, the main UI should load without an extra setup window.
@@ -86,6 +86,7 @@ Muxy focuses those windows; it does not decide their geometry.
 
 ## Launch and Runtime Behavior
 - Launch starts the workspace's configured processes and browser sessions and captures the resulting windows.
+- Workspace processes should be launched inside tmux so Muxy can recover the terminal view without losing the underlying process when an iTerm2 window closes.
 - Stop shuts down tracked runtime state and closes tracked dedicated windows safely.
 - Restart performs a stop followed by a fresh launch.
 - `workspace up` is the idempotent "ensure running" path:
@@ -107,7 +108,7 @@ Muxy focuses those windows; it does not decide their geometry.
 - If tracked windows become stale during next/previous window cycling, Muxy should skip them and continue to the next live target.
 - If direct window focus from the app targets a stale browser session or process window, Muxy should show a non-modal error and offer recovery:
   - browser sessions reopen in a new Chrome window and update tracking
-  - processes restart in a new dedicated iTerm2 window
+  - processes recover in a new dedicated iTerm2 window by reattaching to the tmux session when still running, or by restarting inside tmux when not running
   - coding-agent windows only show the error state and do not offer recovery
 - Muxy should still reconcile stale tracked windows in the background instead of forcing the user to repair state manually.
 - Degraded runtime health should appear as a warning on top of the current `Running` or `Stopped` lifecycle state, not as a separate replacement state label.

@@ -91,7 +91,7 @@ It also lets lifecycle state stay explicit while runtime health is derived from 
 ### Workspace Launch
 1. Validate that the workspace is launchable.
 2. Build the workspace environment, including named port variables and workspace paths.
-3. Start tracked processes in dedicated terminal contexts.
+3. Start tracked processes inside tmux-backed dedicated terminal contexts.
 4. Open tracked browser sessions.
 5. Capture new windows through yabai and persist the mapping.
 
@@ -113,6 +113,7 @@ It also lets lifecycle state stay explicit while runtime health is derived from 
 - Named port definitions are allocated per workspace and exposed as environment variables.
 - Workspace processes also receive stable environment variables such as project and workspace directories.
 - Setup scripts, stop scripts, process commands, and status-check commands all execute against the workspace-specific environment.
+- Process launch and terminal recovery use tmux so the process lifetime can outlive a missing iTerm2 window and be reattached later.
 
 ## Window and Focus Architecture
 - yabai provides stable window identity and cross-app focusing.
@@ -140,6 +141,7 @@ It also lets lifecycle state stay explicit while runtime health is derived from 
 ## External Dependencies
 - macOS 14+
 - yabai for window identity and focus
+- tmux for recoverable terminal-hosted process sessions
 - iTerm2 for terminal process hosting
 - Google Chrome for browser-session automation
 - SQLite for local persistence

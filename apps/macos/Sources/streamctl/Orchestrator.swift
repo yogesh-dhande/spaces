@@ -725,6 +725,8 @@ public final class MuxyOrchestrator {
         for process in processes {
             if let pid = resolvedRuntimePID(for: process) { terminateProcessGroup(pid: pid) }
             if process.terminalApp == "iTerm2" { _ = try? closeTrackedItermTerminalContainer(process) }
+            let sessionName = processTmuxSessionName(workspaceID: workspace.id, processName: process.templateName)
+            if tmux.hasSession(named: sessionName) { try? tmux.killSession(named: sessionName) }
         }
         if let script = settings?.stopScript?.trimmingCharacters(in: .whitespacesAndNewlines), !script.isEmpty {
             if directoryExists(at: workspace.dir) {
@@ -1041,6 +1043,8 @@ public final class MuxyOrchestrator {
 
     private func restartProcessInTerminal(workspaceID: String, process: RunningProcessRecord, background: Bool = false) throws {
         let (project, workspace) = try resolveWorkspace(id: workspaceID)
+        guard iterm.isAvailable() else { throw MuxyError.dependencyMissing(message: "iTerm2 is required to launch processes.") }
+        guard tmux.isAvailable() else { throw MuxyError.dependencyMissing(message: "tmux is required to launch processes.") }
         let namedPorts = try store.workspacePortsNamed(workspaceID: workspaceID)
         let env = buildWorkspaceEnv(project: project, workspace: workspace, namedPorts: namedPorts)
         _ = terminateProcessForRestart(process)
@@ -1049,7 +1053,8 @@ public final class MuxyOrchestrator {
         let (logFile, pidFile) = try processRuntimePaths(workspaceID: workspace.id, name: process.templateName)
         let command = shellCommand(base: process.command, cwd: workspace.dir, env: env, logFile: logFile, pidFile: pidFile)
         let snapshot = try yabai.listWindows()
-        let terminalHandle = try openDedicatedItermWindow(command: command, background: background)
+        let terminalHandle = try launchProcessInTmux(
+            workspace: workspace, processName: process.templateName, command: command, background: background, replaceExistingSession: true)
         let capturedWindowID = try captureNewAppWindowID(snapshot: snapshot, appName: "iTerm2") ?? process.windowID
         let newPID = try? Int(String(contentsOfFile: pidFile).trimmingCharacters(in: .whitespacesAndNewlines))
         let restartedProcess = RunningProcessRecord(
@@ -1600,8 +1605,49 @@ public final class MuxyOrchestrator {
     }
 
     private func workspaceAttachCommand(workspace: WorkspaceRecord) -> String {
-        let escapedDir = workspace.dir.replacingOccurrences(of: "\"", with: "\\\"")
-        return "cd \"\(escapedDir)\" && exec tmux new-session -A -s \(tmuxSessionName(workspaceID: workspace.id)) -c \"\(escapedDir)\""
+        "cd \(shellSingleQuoted(workspace.dir)) && exec tmux new-session -A -s \(shellSingleQuoted(tmuxSessionName(workspaceID: workspace.id))) -c \(shellSingleQuoted(workspace.dir))"
+    }
+
+    private func processTmuxSessionName(workspaceID: String, processName: String) -> String {
+        "muxy-\(workspaceID)-\(safeFilename(processName).lowercased())"
+    }
+
+    private func shellSingleQuoted(_ raw: String) -> String {
+        "'\(raw.replacingOccurrences(of: "'", with: "'\\''"))'"
+    }
+
+    private func tmuxAttachCommand(sessionName: String, cwd: String) -> String {
+        "cd \(shellSingleQuoted(cwd)) && exec tmux attach-session -t \(shellSingleQuoted(sessionName))"
+    }
+
+    private func tmuxStartCommand(sessionName: String, cwd: String, command: String) -> String {
+        "cd \(shellSingleQuoted(cwd)) && exec tmux new-session -A -s \(shellSingleQuoted(sessionName)) -c \(shellSingleQuoted(cwd)) \(shellSingleQuoted(command))"
+    }
+
+    @discardableResult
+    private func attachProcessTmuxSession(workspace: WorkspaceRecord, processName: String, background: Bool = false) throws -> ItermWindowInfo {
+        let sessionName = processTmuxSessionName(workspaceID: workspace.id, processName: processName)
+        let windowInfo = try openDedicatedItermWindow(command: tmuxAttachCommand(sessionName: sessionName, cwd: workspace.dir), background: background)
+        guard waitForTmuxSession(named: sessionName) else {
+            throw MuxyError.invalidArgument(message: "Timed out waiting for tmux session to become available.")
+        }
+        return windowInfo
+    }
+
+    private func launchProcessInTmux(
+        workspace: WorkspaceRecord, processName: String, command: String, background: Bool = false, replaceExistingSession: Bool
+    ) throws -> ItermWindowInfo {
+        let sessionName = processTmuxSessionName(workspaceID: workspace.id, processName: processName)
+        if replaceExistingSession, tmux.hasSession(named: sessionName) {
+            try? tmux.killSession(named: sessionName)
+        }
+        let windowInfo = try openDedicatedItermWindow(
+            command: tmuxStartCommand(sessionName: sessionName, cwd: workspace.dir, command: command),
+            background: background)
+        guard waitForTmuxSession(named: sessionName) else {
+            throw MuxyError.invalidArgument(message: "Timed out waiting for tmux session to become available.")
+        }
+        return windowInfo
     }
 
     private func interactiveShellCommand(cwd: String) -> String {
@@ -2719,6 +2765,7 @@ public final class MuxyOrchestrator {
             return []
         }
         guard iterm.isAvailable() else { throw MuxyError.dependencyMissing(message: "iTerm2 is required to launch processes.") }
+        guard tmux.isAvailable() else { throw MuxyError.dependencyMissing(message: "tmux is required to launch processes.") }
         let runtimeRoot = try runtimeDirectory()
         let workspaceRuntime = URL(fileURLWithPath: runtimeRoot).appendingPathComponent(workspace.id, isDirectory: true)
         try FileManager.default.createDirectory(at: workspaceRuntime, withIntermediateDirectories: true)
@@ -2731,7 +2778,8 @@ public final class MuxyOrchestrator {
             let pidFile = workspaceRuntime.appendingPathComponent("\(safeFilename(name)).pid").path
             let command = shellCommand(base: template.command, cwd: workspace.dir, env: env, logFile: logFile, pidFile: pidFile)
             let snapshot = try yabai.listWindows()
-            let terminalHandle = try openDedicatedItermWindow(command: command, background: background)
+            let terminalHandle = try launchProcessInTmux(
+                workspace: workspace, processName: name, command: command, background: background, replaceExistingSession: true)
             let windowID = try captureNewAppWindowID(snapshot: snapshot, appName: "iTerm2") ?? terminalHandle.id
             let pid = try? Int(String(contentsOfFile: pidFile).trimmingCharacters(in: .whitespacesAndNewlines))
             let running = RunningProcessRecord(
@@ -2742,7 +2790,8 @@ public final class MuxyOrchestrator {
             terminalWindows.append(
                 WindowRecord(
                     id: UUID().uuidString, workspaceID: workspace.id, app: "iTerm2", title: name, targetURL: nil, windowID: windowID,
-                    itermSessionID: terminalHandle.sessionID, itermTabIndex: nil, tmuxWindowID: nil, role: "terminal", orderIndex: 200 + index,
+                    itermSessionID: terminalHandle.sessionID, itermTabIndex: nil, tmuxWindowID: nil, role: "terminal",
+                    orderIndex: 200 + index,
                     lastSeenAt: nowISO8601()))
         }
         return terminalWindows
@@ -3226,6 +3275,7 @@ public final class MuxyOrchestrator {
 
     public func restartWorkspaceProcess(workspaceID: String, processID: String) throws {
         guard let process = try store.runningProcesses(workspaceID: workspaceID).first(where: { $0.id == processID }) else { return }
+        if try recoverRunningProcessTerminalIfPossible(workspaceID: workspaceID, process: process) { return }
         try restartProcessInTerminal(workspaceID: workspaceID, process: process)
     }
 
@@ -3271,6 +3321,39 @@ public final class MuxyOrchestrator {
             orderIndex: existingWindow?.orderIndex ?? matchedSession.index,
             lastSeenAt: nowISO8601())
         try store.upsert(window: storedWindow)
+    }
+
+    private func recoverRunningProcessTerminalIfPossible(workspaceID: String, process: RunningProcessRecord) throws -> Bool {
+        guard process.terminalApp == "iTerm2" else { return false }
+        guard tmux.isAvailable() else { return false }
+        guard let pid = resolvedRuntimePID(for: process), isProcessAlive(pid: pid) else { return false }
+        let (_, workspace) = try resolveWorkspace(id: workspaceID)
+        let sessionName = processTmuxSessionName(workspaceID: workspace.id, processName: process.templateName)
+        guard tmux.hasSession(named: sessionName) else { return false }
+
+        let snapshot = try yabai.listWindows()
+        let terminalHandle = try attachProcessTmuxSession(workspace: workspace, processName: process.templateName, background: false)
+        let capturedWindowID = try captureNewAppWindowID(snapshot: snapshot, appName: "iTerm2") ?? terminalHandle.id
+        let now = nowISO8601()
+        try store.upsert(
+            runningProcess: RunningProcessRecord(
+                id: process.id, workspaceID: process.workspaceID, templateName: process.templateName, command: process.command,
+                terminalApp: process.terminalApp, windowID: capturedWindowID, itermSessionID: terminalHandle.sessionID, itermTabIndex: nil,
+                tmuxWindowID: nil, pid: pid, status: .running, logPath: process.logPath,
+                lastOutputAt: process.lastOutputAt, startedAt: process.startedAt, exitedAt: nil))
+
+        let existingWindow = try store.windows(workspaceID: workspace.id).first(where: { window in
+            window.role == "terminal" && (window.id == process.id || window.windowID == process.windowID || window.tmuxWindowID == process.tmuxWindowID)
+        })
+        try store.upsert(
+            window: WindowRecord(
+                id: existingWindow?.id ?? process.id, workspaceID: workspace.id, app: "iTerm2", title: process.templateName, targetURL: nil,
+                windowID: capturedWindowID, itermSessionID: terminalHandle.sessionID, itermTabIndex: nil,
+                tmuxWindowID: nil, role: "terminal",
+                orderIndex: existingWindow?.orderIndex
+                    ?? Self.nextWindowOrderIndex(existing: try store.windows(workspaceID: workspace.id), role: "terminal", orderOffset: 200),
+                lastSeenAt: now))
+        return true
     }
 
     private func focusWorkspaceProcessRecord(_ process: RunningProcessRecord, workspaceID: String) throws -> Bool {

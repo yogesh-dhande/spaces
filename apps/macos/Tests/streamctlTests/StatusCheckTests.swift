@@ -16,6 +16,7 @@ import Testing
             let store = try makeTemporaryStore()
             let mockIterm = MockIterm2Adapter()
             let mockTmux = MockTmuxAdapter()
+            mockIterm.pairedTmux = mockTmux
             let orchestrator = MuxyOrchestrator(store: store, iterm: mockIterm, tmux: mockTmux)
 
             let project = try orchestrator.addProject(dir: projectDir.path)
@@ -151,6 +152,7 @@ import Testing
             let store = try makeTemporaryStore()
             let mockIterm = MockIterm2Adapter()
             let mockTmux = MockTmuxAdapter()
+            mockIterm.pairedTmux = mockTmux
             let orchestrator = MuxyOrchestrator(store: store, iterm: mockIterm, tmux: mockTmux)
             let project = try orchestrator.addProject(dir: projectDir.path)
             let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")

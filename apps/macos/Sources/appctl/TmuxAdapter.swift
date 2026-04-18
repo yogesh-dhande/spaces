@@ -9,6 +9,8 @@ open class TmuxAdapter: @unchecked Sendable {
 
     open func hasSession(named sessionName: String) -> Bool { (try? Shell.run(["tmux", "has-session", "-t", sessionName])) == 0 }
 
+    open func killSession(named sessionName: String) throws { _ = try Shell.run(["tmux", "kill-session", "-t", sessionName]) }
+
     open func listWindows(sessionName: String) throws -> [TmuxWindowInfo] {
         guard hasSession(named: sessionName) else { return [] }
         let output = try Shell.runAndCapture(["tmux", "list-windows", "-t", sessionName, "-F", windowFormat])
