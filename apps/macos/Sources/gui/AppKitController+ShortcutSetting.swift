@@ -5,7 +5,6 @@ extension AppKitController {
     enum ShortcutSetting: CaseIterable {
         case guiHotkey
         case guiLeaderHotkey
-        case guiShowShortcut
         case guiDashboardShortcut
         case guiAddProjectShortcut
         case guiAddWorkspaceShortcut
@@ -24,7 +23,6 @@ extension AppKitController {
             switch self {
             case .guiHotkey: return "Toggle app"
             case .guiLeaderHotkey: return "Shortcut leader"
-            case .guiShowShortcut: return "Focus selected workspace"
             case .guiDashboardShortcut: return "Show dashboard"
             case .guiAddProjectShortcut: return "New project"
             case .guiAddWorkspaceShortcut: return "New workspace"
@@ -43,7 +41,7 @@ extension AppKitController {
 
         static let settingsPanelCases: [ShortcutSetting] = [
             .guiLeaderHotkey, .guiHotkey, .guiNextShortcut, .guiPreviousShortcut, .guiTooltipShortcut, .guiOpenEditorShortcut,
-            .guiDashboardShortcut, .guiShowShortcut,
+            .guiDashboardShortcut,
             .guiAddProjectShortcut, .guiAddWorkspaceShortcut, .guiReloadShortcut, .guiOpenTerminalShortcut, .guiOpenFinderShortcut,
             .guiOpenSettingsShortcut, .guiWindowShortcut, .guiWindowSequenceShortcut,
         ]
@@ -76,7 +74,6 @@ extension AppKitController {
             switch self {
             case .guiHotkey: return SettingsKey.guiHotkey
             case .guiLeaderHotkey: return SettingsKey.guiLeaderHotkey
-            case .guiShowShortcut: return SettingsKey.guiShowShortcut
             case .guiDashboardShortcut: return SettingsKey.guiDashboardShortcut
             case .guiAddProjectShortcut: return SettingsKey.guiAddProjectShortcut
             case .guiAddWorkspaceShortcut: return SettingsKey.guiAddWorkspaceShortcut
@@ -97,7 +94,6 @@ extension AppKitController {
             switch self {
             case .guiHotkey: return SettingsKey.defaultGUIHotkey
             case .guiLeaderHotkey: return SettingsKey.defaultGUILeaderHotkey
-            case .guiShowShortcut: return SettingsKey.defaultGUIShowShortcut
             case .guiDashboardShortcut: return SettingsKey.defaultGUIDashboardShortcut
             case .guiAddProjectShortcut: return SettingsKey.defaultGUIAddProjectShortcut
             case .guiAddWorkspaceShortcut: return SettingsKey.defaultGUIAddWorkspaceShortcut
@@ -118,7 +114,6 @@ extension AppKitController {
             switch settingKey {
             case SettingsKey.guiHotkey: self = .guiHotkey
             case SettingsKey.guiLeaderHotkey: self = .guiLeaderHotkey
-            case SettingsKey.guiShowShortcut: self = .guiShowShortcut
             case SettingsKey.guiDashboardShortcut: self = .guiDashboardShortcut
             case SettingsKey.guiAddProjectShortcut: self = .guiAddProjectShortcut
             case SettingsKey.guiAddWorkspaceShortcut: self = .guiAddWorkspaceShortcut

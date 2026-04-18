@@ -8,8 +8,6 @@ public enum SettingsKey {
     public static let defaultGUIHotkey = "cmd+alt+="
     public static let guiLeaderHotkey = "gui_leader_hotkey"
     public static let defaultGUILeaderHotkey = "cmd+alt"
-    public static let guiShowShortcut = "gui_show_shortcut"
-    public static let defaultGUIShowShortcut = "cmd+return"
     public static let guiDashboardShortcut = "gui_dashboard_shortcut"
     public static let defaultGUIDashboardShortcut = "d"
     public static let guiAddProjectShortcut = "gui_add_project_shortcut"

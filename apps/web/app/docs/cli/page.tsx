@@ -363,17 +363,14 @@ mx workspace archive --dir /path/to/workspace`}</CodeBlock>
           <Cmd>--all</Cmd> on <Cmd>workspace list</Cmd> to see archived workspaces.
         </p>
 
-        <h3 className="mt-5 text-base font-semibold">Focus a workspace</h3>
-        <CodeBlock>{`# Focus from current directory
-mx workspace focus
+        <h3 className="mt-5 text-base font-semibold">Focus a workspace window</h3>
+        <CodeBlock>{`# Focus a window in the current workspace
+mx workspace focus --window 2
 
-# Focus specific workspace
-mx workspace focus --dir /path/to/workspace
-
-# Focus specific window index in the workspace
+# Focus a specific window index in another workspace
 mx workspace focus --dir /path/to/workspace --window 2`}</CodeBlock>
         <p className="mt-2 text-sm leading-7 text-foreground-soft">
-          Brings the workspace windows to the front so the developer can immediately resume work.
+          Brings the specified tracked window to the front.
           Tooltip updates are managed with <Cmd>mx workspace update --tooltip ...</Cmd> or <Cmd>mx workspace up --tooltip ...</Cmd>.
         </p>
       </article>

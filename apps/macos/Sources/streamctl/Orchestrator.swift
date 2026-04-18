@@ -2160,10 +2160,6 @@ public final class MuxyOrchestrator {
 
     public func setGUILeaderHotkey(_ raw: String?) throws { try store.setSetting(key: SettingsKey.guiLeaderHotkey, value: raw) }
 
-    public func guiShowShortcut() throws -> String { try store.setting(key: SettingsKey.guiShowShortcut) ?? SettingsKey.defaultGUIShowShortcut }
-
-    public func setGUIShowShortcut(_ raw: String?) throws { try store.setSetting(key: SettingsKey.guiShowShortcut, value: raw) }
-
     public func guiDashboardShortcut() throws -> String {
         try effectiveLeaderBackedShortcut(settingKey: SettingsKey.guiDashboardShortcut, defaultValue: SettingsKey.defaultGUIDashboardShortcut)
     }

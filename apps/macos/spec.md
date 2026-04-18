@@ -128,6 +128,7 @@ Muxy focuses those windows; it does not decide their geometry.
 - The global app-toggle shortcut should hide Muxy when it is already frontmost and visible, and show it otherwise.
 - The app should expose a configurable shortcut leader that supplies the shared modifiers for leader-based shortcuts like workspace navigation, dashboard, tooltip, editor, Finder, and queued window focus.
 - Window rows in the selected workspace should expose numbered shortcuts for direct focus.
+- Workspace focus from the GUI or `mx workspace focus` should require an explicit tracked window target instead of picking an arbitrary window.
 - Window-number shortcuts should use a configurable direct-focus modifier plus digits `1` through `9`.
 - Window-number sequence shortcuts should use a separate configurable modifier plus digits `1` through `9`, then replay the queued focus actions in order when the modifiers are released.
 - Shortcut handling must not break normal text-edit shortcuts while an input is focused.

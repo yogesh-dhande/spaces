@@ -88,7 +88,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     private var shortcutLeaderModifiers: Set<HotkeyModifier> = []
     private var pendingLeaderCaptureModifiers: Set<HotkeyModifier> = []
     private var toggleShortcutSpec: HotkeySpec?
-    private var showShortcutSpec: HotkeySpec?
     private var dashboardShortcutSpec: HotkeySpec?
     private var shortcutMonitor: Any?
     private var addProjectShortcutSpec: HotkeySpec?
@@ -5165,7 +5164,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             }
             self.recordStartupInteraction(kind: "key_down")
             if self.handleShortcutCaptureEvent(event: event) { return nil }
-            if self.handleShowShortcut(event: event) { return nil }
             if self.handleAddProjectShortcut(event: event) { return nil }
             if self.handleNewWorkspaceShortcut(event: event) { return nil }
             if self.handleReloadShortcut(event: event) { return nil }
@@ -5246,12 +5244,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         guard event.keyCode == UInt16(kVK_Escape) else { return false }
         guard activeAddWorkspaceFormTag != nil || activeAddProjectFormTag != nil else { return false }
         cancelProjectForm()
-        return true
-    }
-
-    private func handleShowShortcut(event: NSEvent) -> Bool {
-        guard let showShortcutSpec, matches(event: event, spec: showShortcutSpec) else { return false }
-        focusSelectedWorkspace()
         return true
     }
 
@@ -5568,7 +5560,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             shortcutLeaderModifiers = (try? HotkeySpec.parseModifierSet(SettingsKey.defaultGUILeaderHotkey)) ?? [.cmd, .alt]
         }
         toggleShortcutSpec = loadShortcutSpec(setting: .guiHotkey)
-        showShortcutSpec = loadShortcutSpec(setting: .guiShowShortcut)
         dashboardShortcutSpec = loadShortcutSpec(setting: .guiDashboardShortcut)
         addProjectShortcutSpec = loadShortcutSpec(setting: .guiAddProjectShortcut)
         addWorkspaceShortcutSpec = loadShortcutSpec(setting: .guiAddWorkspaceShortcut)
@@ -5594,7 +5585,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         switch setting {
         case .guiHotkey: return try orchestrator.guiHotkey()
         case .guiLeaderHotkey: return try orchestrator.guiLeaderHotkey()
-        case .guiShowShortcut: return try orchestrator.guiShowShortcut()
         case .guiDashboardShortcut: return try orchestrator.guiDashboardShortcut()
         case .guiAddProjectShortcut: return try orchestrator.guiAddProjectShortcut()
         case .guiAddWorkspaceShortcut: return try orchestrator.guiAddWorkspaceShortcut()
@@ -5615,7 +5605,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         switch setting {
         case .guiHotkey: try orchestrator.setGUIHotkey(value)
         case .guiLeaderHotkey: try orchestrator.setGUILeaderHotkey(value)
-        case .guiShowShortcut: try orchestrator.setGUIShowShortcut(value)
         case .guiDashboardShortcut: try orchestrator.setGUIDashboardShortcut(value)
         case .guiAddProjectShortcut: try orchestrator.setGUIAddProjectShortcut(value)
         case .guiAddWorkspaceShortcut: try orchestrator.setGUIAddWorkspaceShortcut(value)
@@ -5636,7 +5625,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         switch setting {
         case .guiHotkey: return toggleShortcutSpec
         case .guiLeaderHotkey: return nil
-        case .guiShowShortcut: return showShortcutSpec
         case .guiDashboardShortcut: return dashboardShortcutSpec
         case .guiAddProjectShortcut: return addProjectShortcutSpec
         case .guiAddWorkspaceShortcut: return addWorkspaceShortcutSpec
@@ -5667,11 +5655,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         if flags.contains(.option) { result |= UInt32(optionKey) }
         if flags.contains(.control) { result |= UInt32(controlKey) }
         return result
-    }
-
-    private func focusSelectedWorkspace() {
-        guard let selectedWorkspaceID else { return }
-        do { try orchestrator.focusWorkspace(workspaceID: selectedWorkspaceID) } catch { showError(error) }
     }
 
     private func performWindowFocus(_ request: WindowFocusRequest) async {
