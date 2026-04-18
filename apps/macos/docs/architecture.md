@@ -119,7 +119,7 @@ It also lets lifecycle state stay explicit while runtime health is derived from 
 - yabai provides stable window identity and cross-app focusing.
 - iTerm2 and Chrome AppleScript integrations add app-specific behavior on top of yabai, such as selecting the intended terminal session or browser target.
 - Tracked windows are persisted so Muxy can refocus or clean up only the windows it owns.
-- Direct focus requests surface typed missing-window errors so the GUI can offer targeted recovery for browser sessions and processes.
+- Direct focus requests auto-recover stale browser-session windows by reopening and re-tracking them, while process and generic window failures still surface typed missing-window errors to the GUI.
 - Window cycling is tolerant of stale tracked yabai IDs and keeps advancing until it finds the next live target.
 - Reconciliation is required because window state can drift outside the app.
 
@@ -127,11 +127,20 @@ It also lets lifecycle state stay explicit while runtime health is derived from 
 - Agent events are explicit CLI inputs that attach status to tracked workspace agent windows.
 - Agent windows are stored separately from regular process windows because they carry provider and lifecycle metadata.
 - Dashboard attention state is derived from runtime records rather than inferred from UI state.
+- Dashboard dismissals are stored as a persisted set of attention-event IDs in SQLite global settings, then filtered in the GUI so workspace detail panes keep showing the underlying runtime rows.
 
 ## Lifecycle and Health
 - Workspace lifecycle state is explicit and persisted on the workspace record.
 - Runtime health is derived from runtime records, configured browser/process expectations, status-check failures, and agent waiting state.
 - The GUI should render lifecycle state directly and layer runtime-health warnings on top instead of inferring lifecycle from stale runtime leftovers.
+
+## Shortcut Architecture
+- Shortcut defaults and user overrides are stored in SQLite global settings so the GUI and `mx settings` stay in sync.
+- Global shortcuts use Carbon hotkey registration for actions that must work while Muxy is not frontmost.
+- In-app shortcuts use an AppKit event monitor so they can respect focused text inputs and support digit-family shortcuts such as window `1` through `9`.
+- Leader-based shortcuts store a suffix key spec and derive their shared modifiers from `gui_leader_hotkey`; the orchestrator resolves them to full effective hotkeys for both the GUI and CLI. Reload now uses this same leader-backed resolution path.
+- Window focus shortcuts are modeled as modifier families rather than nine separate persisted bindings: one family for direct focus and one for queued multi-focus replay.
+- The dashboard shares the same direct-focus shortcut family as workspace detail, and those focus shortcuts take precedence over dashboard-local create actions while the dashboard is visible.
 
 ## Performance Principles
 - Focus and capture paths should avoid unnecessary blocking work.

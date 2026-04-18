@@ -459,6 +459,15 @@ struct CLI {
             } else if args.contains("--gui-hotkey") {
                 let current = try orchestrator.guiHotkey()
                 print("gui-hotkey\t\(current)")
+            } else if args.contains("--gui-leader-hotkey") {
+                let current = try orchestrator.guiLeaderHotkey()
+                print("gui-leader-hotkey\t\(current)")
+            } else if args.contains("--gui-show-shortcut") {
+                let current = try orchestrator.guiShowShortcut()
+                print("gui-show-shortcut\t\(current)")
+            } else if args.contains("--gui-dashboard-shortcut") {
+                let current = try orchestrator.guiDashboardShortcut()
+                print("gui-dashboard-shortcut\t\(current)")
             } else if args.contains("--gui-add-project-shortcut") {
                 let current = try orchestrator.guiAddProjectShortcut()
                 print("gui-add-project-shortcut\t\(current)")
@@ -486,6 +495,15 @@ struct CLI {
             } else if args.contains("--gui-open-settings-shortcut") {
                 let current = try orchestrator.guiOpenSettingsShortcut()
                 print("gui-open-settings-shortcut\t\(current)")
+            } else if args.contains("--gui-tooltip-shortcut") {
+                let current = try orchestrator.guiTooltipShortcut()
+                print("gui-tooltip-shortcut\t\(current)")
+            } else if args.contains("--gui-window-shortcut") {
+                let current = try orchestrator.guiWindowShortcut()
+                print("gui-window-shortcut\t\(current)")
+            } else if args.contains("--gui-window-sequence-shortcut") {
+                let current = try orchestrator.guiWindowSequenceShortcut()
+                print("gui-window-sequence-shortcut\t\(current)")
             } else if args.contains("--iterm-focus-pulse-color") {
                 let (r, g, b) = try orchestrator.itermFocusPulseColor()
                 print("iterm-focus-pulse-color\t\(r),\(g),\(b)")
@@ -497,7 +515,7 @@ struct CLI {
                     domain: "mx.cli", code: 2,
                     userInfo: [
                         NSLocalizedDescriptionKey:
-                            "Missing setting flag. Use: settings get --editor|--port-range|--gui-hotkey|--gui-add-project-shortcut|--gui-add-workspace-shortcut|--gui-reload-shortcut|--gui-next-shortcut|--gui-prev-shortcut|--gui-open-editor-shortcut|--gui-open-terminal-shortcut|--gui-open-finder-shortcut|--gui-open-settings-shortcut|--iterm-focus-pulse-color|--iterm-focus-pulse-enabled"
+                            "Missing setting flag. Use: settings get --editor|--port-range|--gui-hotkey|--gui-leader-hotkey|--gui-show-shortcut|--gui-dashboard-shortcut|--gui-add-project-shortcut|--gui-add-workspace-shortcut|--gui-reload-shortcut|--gui-next-shortcut|--gui-prev-shortcut|--gui-open-editor-shortcut|--gui-open-terminal-shortcut|--gui-open-finder-shortcut|--gui-open-settings-shortcut|--gui-tooltip-shortcut|--gui-window-shortcut|--gui-window-sequence-shortcut|--iterm-focus-pulse-color|--iterm-focus-pulse-enabled"
                     ])
             }
 
@@ -523,6 +541,19 @@ struct CLI {
                 let spec = try HotkeySpec.parse(raw)
                 try orchestrator.setGUIHotkey(spec.normalized)
                 print("Updated gui-hotkey\t\(spec.normalized)")
+            } else if let raw = optionalValue(for: "--gui-leader-hotkey") {
+                let modifiers = try HotkeySpec.parseModifierSet(raw)
+                let normalized = HotkeySpec.normalizedModifierSet(modifiers)
+                try orchestrator.setGUILeaderHotkey(normalized)
+                print("Updated gui-leader-hotkey\t\(normalized)")
+            } else if let raw = optionalValue(for: "--gui-show-shortcut") {
+                let spec = try HotkeySpec.parse(raw)
+                try orchestrator.setGUIShowShortcut(spec.normalized)
+                print("Updated gui-show-shortcut\t\(spec.normalized)")
+            } else if let raw = optionalValue(for: "--gui-dashboard-shortcut") {
+                let spec = try HotkeySpec.parse(raw)
+                try orchestrator.setGUIDashboardShortcut(spec.normalized)
+                print("Updated gui-dashboard-shortcut\t\(try orchestrator.guiDashboardShortcut())")
             } else if let raw = optionalValue(for: "--gui-add-project-shortcut") {
                 let spec = try HotkeySpec.parse(raw)
                 try orchestrator.setGUIAddProjectShortcut(spec.normalized)
@@ -538,15 +569,15 @@ struct CLI {
             } else if let raw = optionalValue(for: "--gui-next-shortcut") {
                 let spec = try HotkeySpec.parse(raw)
                 try orchestrator.setGUINextShortcut(spec.normalized)
-                print("Updated gui-next-shortcut\t\(spec.normalized)")
+                print("Updated gui-next-shortcut\t\(try orchestrator.guiNextShortcut())")
             } else if let raw = optionalValue(for: "--gui-prev-shortcut") {
                 let spec = try HotkeySpec.parse(raw)
                 try orchestrator.setGUIPreviousShortcut(spec.normalized)
-                print("Updated gui-prev-shortcut\t\(spec.normalized)")
+                print("Updated gui-prev-shortcut\t\(try orchestrator.guiPreviousShortcut())")
             } else if let raw = optionalValue(for: "--gui-open-editor-shortcut") {
                 let spec = try HotkeySpec.parse(raw)
                 try orchestrator.setGUIOpenEditorShortcut(spec.normalized)
-                print("Updated gui-open-editor-shortcut\t\(spec.normalized)")
+                print("Updated gui-open-editor-shortcut\t\(try orchestrator.guiOpenEditorShortcut())")
             } else if let raw = optionalValue(for: "--gui-open-terminal-shortcut") {
                 let spec = try HotkeySpec.parse(raw)
                 try orchestrator.setGUIOpenTerminalShortcut(spec.normalized)
@@ -554,11 +585,23 @@ struct CLI {
             } else if let raw = optionalValue(for: "--gui-open-finder-shortcut") {
                 let spec = try HotkeySpec.parse(raw)
                 try orchestrator.setGUIOpenFinderShortcut(spec.normalized)
-                print("Updated gui-open-finder-shortcut\t\(spec.normalized)")
+                print("Updated gui-open-finder-shortcut\t\(try orchestrator.guiOpenFinderShortcut())")
             } else if let raw = optionalValue(for: "--gui-open-settings-shortcut") {
                 let spec = try HotkeySpec.parse(raw)
                 try orchestrator.setGUIOpenSettingsShortcut(spec.normalized)
                 print("Updated gui-open-settings-shortcut\t\(spec.normalized)")
+            } else if let raw = optionalValue(for: "--gui-tooltip-shortcut") {
+                let spec = try HotkeySpec.parse(raw)
+                try orchestrator.setGUITooltipShortcut(spec.normalized)
+                print("Updated gui-tooltip-shortcut\t\(try orchestrator.guiTooltipShortcut())")
+            } else if let raw = optionalValue(for: "--gui-window-shortcut") {
+                let spec = try HotkeySpec.parse(raw)
+                try orchestrator.setGUIWindowShortcut(spec.normalized)
+                print("Updated gui-window-shortcut\t\(spec.normalized)")
+            } else if let raw = optionalValue(for: "--gui-window-sequence-shortcut") {
+                let spec = try HotkeySpec.parse(raw)
+                try orchestrator.setGUIWindowSequenceShortcut(spec.normalized)
+                print("Updated gui-window-sequence-shortcut\t\(try orchestrator.guiWindowSequenceShortcut())")
             } else if let raw = optionalValue(for: "--iterm-focus-pulse-color") {
                 let parts = raw.split(separator: ",").compactMap { Int($0.trimmingCharacters(in: .whitespaces)) }
                 guard parts.count == 3, parts.allSatisfy({ $0 >= 0 && $0 <= 255 }) else {
@@ -580,7 +623,7 @@ struct CLI {
                     domain: "mx.cli", code: 2,
                     userInfo: [
                         NSLocalizedDescriptionKey:
-                            "Missing setting flag/value. Use: settings set --editor <value>|--port-range <start>-<end>|--gui-hotkey <spec>|--gui-add-project-shortcut <spec>|--gui-add-workspace-shortcut <spec>|--gui-reload-shortcut <spec>|--gui-next-shortcut <spec>|--gui-prev-shortcut <spec>|--gui-open-editor-shortcut <spec>|--gui-open-terminal-shortcut <spec>|--gui-open-finder-shortcut <spec>|--gui-open-settings-shortcut <spec>|--iterm-focus-pulse-color <r,g,b>|--iterm-focus-pulse-enabled <0|1>"
+                            "Missing setting flag/value. Use: settings set --editor <value>|--port-range <start>-<end>|--gui-hotkey <spec>|--gui-leader-hotkey <modifiers>|--gui-show-shortcut <spec>|--gui-dashboard-shortcut <spec>|--gui-add-project-shortcut <spec>|--gui-add-workspace-shortcut <spec>|--gui-reload-shortcut <spec>|--gui-next-shortcut <spec>|--gui-prev-shortcut <spec>|--gui-open-editor-shortcut <spec>|--gui-open-terminal-shortcut <spec>|--gui-open-finder-shortcut <spec>|--gui-open-settings-shortcut <spec>|--gui-tooltip-shortcut <spec>|--gui-window-shortcut <spec>|--gui-window-sequence-shortcut <spec>|--iterm-focus-pulse-color <r,g,b>|--iterm-focus-pulse-enabled <0|1>"
                     ])
             }
 
@@ -588,6 +631,15 @@ struct CLI {
             if args.contains("--gui-hotkey") {
                 try orchestrator.setGUIHotkey(nil)
                 print("Reset gui-hotkey\t\(SettingsKey.defaultGUIHotkey)")
+            } else if args.contains("--gui-leader-hotkey") {
+                try orchestrator.setGUILeaderHotkey(nil)
+                print("Reset gui-leader-hotkey\t\(SettingsKey.defaultGUILeaderHotkey)")
+            } else if args.contains("--gui-show-shortcut") {
+                try orchestrator.setGUIShowShortcut(nil)
+                print("Reset gui-show-shortcut\t\(SettingsKey.defaultGUIShowShortcut)")
+            } else if args.contains("--gui-dashboard-shortcut") {
+                try orchestrator.setGUIDashboardShortcut(nil)
+                print("Reset gui-dashboard-shortcut\t\(try orchestrator.guiDashboardShortcut())")
             } else if args.contains("--gui-add-project-shortcut") {
                 try orchestrator.setGUIAddProjectShortcut(nil)
                 print("Reset gui-add-project-shortcut\t\(SettingsKey.defaultGUIAddProjectShortcut)")
@@ -599,22 +651,31 @@ struct CLI {
                 print("Reset gui-reload-shortcut\t\(SettingsKey.defaultGUIReloadShortcut)")
             } else if args.contains("--gui-next-shortcut") {
                 try orchestrator.setGUINextShortcut(nil)
-                print("Reset gui-next-shortcut\t\(SettingsKey.defaultGUINextShortcut)")
+                print("Reset gui-next-shortcut\t\(try orchestrator.guiNextShortcut())")
             } else if args.contains("--gui-prev-shortcut") {
                 try orchestrator.setGUIPreviousShortcut(nil)
-                print("Reset gui-prev-shortcut\t\(SettingsKey.defaultGUIPreviousShortcut)")
+                print("Reset gui-prev-shortcut\t\(try orchestrator.guiPreviousShortcut())")
             } else if args.contains("--gui-open-editor-shortcut") {
                 try orchestrator.setGUIOpenEditorShortcut(nil)
-                print("Reset gui-open-editor-shortcut\t\(SettingsKey.defaultGUIOpenEditorShortcut)")
+                print("Reset gui-open-editor-shortcut\t\(try orchestrator.guiOpenEditorShortcut())")
             } else if args.contains("--gui-open-terminal-shortcut") {
                 try orchestrator.setGUIOpenTerminalShortcut(nil)
                 print("Reset gui-open-terminal-shortcut\t\(SettingsKey.defaultGUIOpenTerminalShortcut)")
             } else if args.contains("--gui-open-finder-shortcut") {
                 try orchestrator.setGUIOpenFinderShortcut(nil)
-                print("Reset gui-open-finder-shortcut\t\(SettingsKey.defaultGUIOpenFinderShortcut)")
+                print("Reset gui-open-finder-shortcut\t\(try orchestrator.guiOpenFinderShortcut())")
             } else if args.contains("--gui-open-settings-shortcut") {
                 try orchestrator.setGUIOpenSettingsShortcut(nil)
                 print("Reset gui-open-settings-shortcut\t\(SettingsKey.defaultGUIOpenSettingsShortcut)")
+            } else if args.contains("--gui-tooltip-shortcut") {
+                try orchestrator.setGUITooltipShortcut(nil)
+                print("Reset gui-tooltip-shortcut\t\(try orchestrator.guiTooltipShortcut())")
+            } else if args.contains("--gui-window-shortcut") {
+                try orchestrator.setGUIWindowShortcut(nil)
+                print("Reset gui-window-shortcut\t\(SettingsKey.defaultGUIWindowShortcut)")
+            } else if args.contains("--gui-window-sequence-shortcut") {
+                try orchestrator.setGUIWindowSequenceShortcut(nil)
+                print("Reset gui-window-sequence-shortcut\t\(try orchestrator.guiWindowSequenceShortcut())")
             } else if args.contains("--iterm-focus-pulse-color") {
                 let parts = SettingsKey.defaultItermFocusPulseColor.split(separator: ",").compactMap { Int($0) }
                 try orchestrator.setItermFocusPulseColor(r: parts[0], g: parts[1], b: parts[2])
@@ -633,7 +694,7 @@ struct CLI {
                     domain: "mx.cli", code: 2,
                     userInfo: [
                         NSLocalizedDescriptionKey:
-                            "Missing setting flag. Use: settings reset --editor|--port-range|--gui-hotkey|--gui-add-project-shortcut|--gui-add-workspace-shortcut|--gui-reload-shortcut|--gui-next-shortcut|--gui-prev-shortcut|--gui-open-editor-shortcut|--gui-open-terminal-shortcut|--gui-open-finder-shortcut|--gui-open-settings-shortcut|--iterm-focus-pulse-color|--iterm-focus-pulse-enabled"
+                            "Missing setting flag. Use: settings reset --editor|--port-range|--gui-hotkey|--gui-leader-hotkey|--gui-show-shortcut|--gui-dashboard-shortcut|--gui-add-project-shortcut|--gui-add-workspace-shortcut|--gui-reload-shortcut|--gui-next-shortcut|--gui-prev-shortcut|--gui-open-editor-shortcut|--gui-open-terminal-shortcut|--gui-open-finder-shortcut|--gui-open-settings-shortcut|--gui-tooltip-shortcut|--gui-window-shortcut|--gui-window-sequence-shortcut|--iterm-focus-pulse-color|--iterm-focus-pulse-enabled"
                     ])
             }
 
@@ -839,6 +900,9 @@ struct CLI {
               mx settings get --editor
               mx settings get --port-range
               mx settings get --gui-hotkey
+              mx settings get --gui-leader-hotkey
+              mx settings get --gui-show-shortcut
+              mx settings get --gui-dashboard-shortcut
               mx settings get --gui-add-project-shortcut
               mx settings get --gui-add-workspace-shortcut
               mx settings get --gui-reload-shortcut
@@ -848,11 +912,17 @@ struct CLI {
               mx settings get --gui-open-terminal-shortcut
               mx settings get --gui-open-finder-shortcut
               mx settings get --gui-open-settings-shortcut
+              mx settings get --gui-tooltip-shortcut
+              mx settings get --gui-window-shortcut
+              mx settings get --gui-window-sequence-shortcut
               mx settings get --iterm-focus-pulse-color
               mx settings get --iterm-focus-pulse-enabled
               mx settings set --editor none|vscode|cursor|windsurf|vim
               mx settings set --port-range <start>-<end>
               mx settings set --gui-hotkey <spec>
+              mx settings set --gui-leader-hotkey <modifiers>
+              mx settings set --gui-show-shortcut <spec>
+              mx settings set --gui-dashboard-shortcut <spec>
               mx settings set --gui-add-project-shortcut <spec>
               mx settings set --gui-add-workspace-shortcut <spec>
               mx settings set --gui-reload-shortcut <spec>
@@ -862,11 +932,17 @@ struct CLI {
               mx settings set --gui-open-terminal-shortcut <spec>
               mx settings set --gui-open-finder-shortcut <spec>
               mx settings set --gui-open-settings-shortcut <spec>
+              mx settings set --gui-tooltip-shortcut <spec>
+              mx settings set --gui-window-shortcut <spec>
+              mx settings set --gui-window-sequence-shortcut <spec>
               mx settings set --iterm-focus-pulse-color <r,g,b>
               mx settings set --iterm-focus-pulse-enabled <0|1>
               mx settings reset --editor
               mx settings reset --port-range
               mx settings reset --gui-hotkey
+              mx settings reset --gui-leader-hotkey
+              mx settings reset --gui-show-shortcut
+              mx settings reset --gui-dashboard-shortcut
               mx settings reset --gui-add-project-shortcut
               mx settings reset --gui-add-workspace-shortcut
               mx settings reset --gui-reload-shortcut
@@ -876,6 +952,9 @@ struct CLI {
               mx settings reset --gui-open-terminal-shortcut
               mx settings reset --gui-open-finder-shortcut
               mx settings reset --gui-open-settings-shortcut
+              mx settings reset --gui-tooltip-shortcut
+              mx settings reset --gui-window-shortcut
+              mx settings reset --gui-window-sequence-shortcut
               mx settings reset --iterm-focus-pulse-color
               mx settings reset --iterm-focus-pulse-enabled
 
@@ -928,9 +1007,10 @@ struct CLI {
               - `workspace update` updates workspace metadata (`--title`, `--branch`, `--directory-name`/`--dirname`/`--dir-name`, `--tooltip`) and visibility state (`--active`/`--inactive`); protected `main`/`master` branches cannot be renamed.
               - Archiving a non-git workspace never deletes the project directory.
               - Workspaces reserve named ports from the configured port range based on project/workspace port definitions.
-              - GUI window focus shortcuts: cmd+1 through cmd+9 (when GUI is focused).
-              - GUI window cycle shortcuts: cmd+shift+[ and cmd+shift+] (global, when GUI is not focused).
-              - GUI tooltip shortcut (default cmd+shift+i) is global and toggles the focused workspace tooltip for tracked workspace/agent windows.
+              - GUI window focus shortcuts use the configured direct-focus modifier plus digits 1 through 9 when the GUI is focused.
+              - GUI queued window focus uses the configured sequence modifier plus digits 1 through 9 and replays them in order on modifier release.
+              - GUI window cycle shortcuts are global and keep working when the GUI is not focused.
+              - GUI tooltip shortcut is global and toggles the focused workspace tooltip for tracked workspace/agent windows.
               - Each browser session, process, and coding agent uses its own dedicated top-level window.
               - Workspace focus and cycling use tracked yabai window IDs directly; missing browser windows are marked stale for later recovery.
               - Diagnostics: DEBUG=1 logs full workspace-cycle timing plus direct browser/window focus-path timing for dedicated-window focus flows.

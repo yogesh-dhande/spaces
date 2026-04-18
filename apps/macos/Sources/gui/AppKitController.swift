@@ -36,6 +36,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     }
 
     private struct DashboardAttentionEntry: Sendable {
+        let attentionID: String
         let icon: String
         let iconTint: DashboardIconTint
         let label: String
@@ -46,10 +47,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         /// All status checks for this process (green and red), matching Run tab display.
         let statusChecks: [StatusResult]
         let eventDate: Date?
-        /// 1-based index in the workspace's full window list; nil for orphaned processes (no captured window).
-        let windowListIndex: Int?
-        /// Non-nil for agent window entries.
-        let agentWindowRecord: AgentWindowRecord?
+        let focusRequest: WindowFocusRequest?
     }
 
     private struct DashboardGroup: Sendable {
@@ -75,6 +73,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     private var isSidebarGitActivityLoading = false
     private var workspaceRuntimeStatusByID: [String: WorkspaceRuntimeStatus] = [:]
     private var dashboardGroups: [DashboardGroup] = []
+    private var dismissedDashboardAttentionItemIDs: Set<String> = []
 
     private var selectedProjectID: String?
     private var selectedWorkspaceID: String?
@@ -86,8 +85,15 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
     private var hotkeyHandler: EventHandlerRef?
     private var hotkeyRefs: [UInt32: EventHotKeyRef] = [:]
+    private var shortcutLeaderModifiers: Set<HotkeyModifier> = []
+    private var pendingLeaderCaptureModifiers: Set<HotkeyModifier> = []
     private var toggleShortcutSpec: HotkeySpec?
+    private var showShortcutSpec: HotkeySpec?
+    private var dashboardShortcutSpec: HotkeySpec?
     private var shortcutMonitor: Any?
+    private var addProjectShortcutSpec: HotkeySpec?
+    private var addWorkspaceShortcutSpec: HotkeySpec?
+    private var reloadShortcutSpec: HotkeySpec?
     private var openEditorShortcutSpec: HotkeySpec?
     private var openTerminalShortcutSpec: HotkeySpec?
     private var openFinderShortcutSpec: HotkeySpec?
@@ -95,6 +101,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     private var nextShortcutSpec: HotkeySpec?
     private var previousShortcutSpec: HotkeySpec?
     private var tooltipShortcutSpec: HotkeySpec?
+    private var windowShortcutSpec: HotkeySpec?
+    private var windowSequenceShortcutSpec: HotkeySpec?
     private var shortcutButtonsBySetting: [String: NSButton] = [:]
     private var activeShortcutCaptureSetting: ShortcutSetting?
     private weak var pulseColorWell: NSColorWell?
@@ -158,10 +166,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     private var dashboardRowStack: NSStackView?
     private var dashboardRowBadge: NSTextField?
     private var showingDashboard = false
-    /// Maps sequential CMD+N shortcut numbers (1-9) to (workspaceID, 1-based window list index) for the current dashboard view.
-    private var dashboardWindowFocusMap: [Int: (workspaceID: String, windowListIndex: Int)] = [:]
-    /// Maps sequential CMD+N shortcut numbers (1-9) to agent window records for agent entries in the dashboard view.
-    private var dashboardAgentFocusMap: [Int: AgentWindowRecord] = [:]
+    /// Maps sequential window shortcut numbers (1-9) to focus targets for the current dashboard view.
+    private var dashboardFocusRequestMap: [Int: WindowFocusRequest] = [:]
+    private var bufferedWindowShortcutIndices: [Int] = []
 
     private struct WindowShortcutProfile {
         let index: Int
@@ -538,6 +545,31 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         }
     }
 
+    nonisolated private static func dashboardAttentionID(process: RunningProcessRecord, failedChecks: [StatusResult]) -> String {
+        if process.status == .exited {
+            return "process:\(process.id):exited:\(process.exitedAt ?? "unknown")"
+        }
+        let failedCheckNames = failedChecks.map(\.checkName).sorted().joined(separator: ",")
+        let latestFailure = failedChecks.compactMap(\.lastRunAt).max() ?? "unknown"
+        return "process:\(process.id):failed:\(failedCheckNames):\(latestFailure)"
+    }
+
+    nonisolated private static func dashboardAttentionID(agentWindow: AgentWindowRecord) -> String {
+        "agent:\(agentWindow.id):\(agentWindow.status.rawValue):\(agentWindow.updatedAt)"
+    }
+
+    nonisolated private static func dashboardFocusRequest(
+        window: WindowRecord, windowListIndex: Int, process: RunningProcessRecord, workspaceID: String
+    ) -> WindowFocusRequest {
+        if window.role == "browser", let targetURL = window.targetURL, !targetURL.isEmpty {
+            return .workspaceBrowserSession(workspaceID: workspaceID, targetURL: targetURL)
+        }
+        if window.role == "terminal" {
+            return .workspaceProcess(workspaceID: workspaceID, processID: process.id)
+        }
+        return .workspaceWindow(workspaceID: workspaceID, index: windowListIndex)
+    }
+
     nonisolated private static func refreshWorkspaceWindowsSnapshot() async -> Result<MuxyOrchestrator.RefreshResult, Error> {
         await Task.detached(priority: .utility) {
             do {
@@ -692,8 +724,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     }
 
     nonisolated private static func focusWindowShortcutSnapshot(
-        index: Int, selectedWorkspaceID: String?, dashboardWindowTarget: (workspaceID: String, windowListIndex: Int)?,
-        dashboardAgentRecord: AgentWindowRecord?
+        index: Int, selectedWorkspaceID: String?, dashboardFocusRequest: WindowFocusRequest?
     ) async -> Result<WindowShortcutExecutionOutcome, Error> {
         await Task.detached(priority: .userInitiated) {
             do {
@@ -701,13 +732,21 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 let store = try SQLiteStore(path: db)
                 let orchestrator = MuxyOrchestrator(store: store)
 
-                if let dashboardWindowTarget {
-                    try orchestrator.focusWorkspaceWindow(workspaceID: dashboardWindowTarget.workspaceID, index: dashboardWindowTarget.windowListIndex)
-                    return .success(.focused(kind: "dashboard_window"))
-                }
-                if let dashboardAgentRecord {
-                    try orchestrator.focusAgentWindow(dashboardAgentRecord)
-                    return .success(.focused(kind: "dashboard_agent"))
+                if let dashboardFocusRequest {
+                    switch dashboardFocusRequest {
+                    case .workspaceBrowserSession(let workspaceID, let targetURL):
+                        try orchestrator.focusWorkspaceBrowserSession(workspaceID: workspaceID, targetURL: targetURL)
+                        return .success(.focused(kind: "dashboard_browser"))
+                    case .workspaceWindow(let workspaceID, let index):
+                        try orchestrator.focusWorkspaceWindow(workspaceID: workspaceID, index: index)
+                        return .success(.focused(kind: "dashboard_window"))
+                    case .workspaceProcess(let workspaceID, let processID):
+                        try orchestrator.focusWorkspaceProcess(workspaceID: workspaceID, processID: processID)
+                        return .success(.focused(kind: "dashboard_process"))
+                    case .agentWindow(let record):
+                        try orchestrator.focusAgentWindow(record)
+                        return .success(.focused(kind: "dashboard_agent"))
+                    }
                 }
                 guard let selectedWorkspaceID else { return .success(.noWorkspace) }
 
@@ -916,8 +955,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                         : redChecks.compactMap { $0.lastRunAt.flatMap { iso8601Formatter.date(from: $0) } }.max()
                     items.append(
                         DashboardAttentionEntry(
-                            icon: icon, iconTint: iconTint, label: label, detail: detail, shortcut: "", processStatus: process.status,
-                            agentStatus: nil, statusChecks: allChecks, eventDate: eventDate, windowListIndex: idx + 1, agentWindowRecord: nil))
+                            attentionID: Self.dashboardAttentionID(process: process, failedChecks: redChecks), icon: icon, iconTint: iconTint,
+                            label: label, detail: detail, shortcut: "", processStatus: process.status,
+                            agentStatus: nil, statusChecks: allChecks, eventDate: eventDate,
+                            focusRequest: Self.dashboardFocusRequest(window: win, windowListIndex: idx + 1, process: process, workspaceID: workspace.id)))
                 }
 
                 for process in processes where !matchedProcessIDs.contains(process.id) {
@@ -931,18 +972,20 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                         : redChecks.compactMap { $0.lastRunAt.flatMap { iso8601Formatter.date(from: $0) } }.max()
                     items.append(
                         DashboardAttentionEntry(
-                            icon: "terminal", iconTint: .terminal, label: process.templateName, detail: process.command, shortcut: "",
-                            processStatus: process.status, agentStatus: nil, statusChecks: allChecks, eventDate: eventDate, windowListIndex: nil,
-                            agentWindowRecord: nil))
+                            attentionID: Self.dashboardAttentionID(process: process, failedChecks: redChecks), icon: "terminal",
+                            iconTint: .terminal, label: process.templateName, detail: process.command, shortcut: "", processStatus: process.status,
+                            agentStatus: nil, statusChecks: allChecks, eventDate: eventDate,
+                            focusRequest: .workspaceProcess(workspaceID: workspace.id, processID: process.id)))
                 }
 
                 for agentWin in attentionAgentWindows {
                     items.append(
                         DashboardAttentionEntry(
-                            icon: "cpu.fill", iconTint: agentWin.status == .done ? .success : .warning,
+                            attentionID: Self.dashboardAttentionID(agentWindow: agentWin), icon: "cpu.fill",
+                            iconTint: agentWin.status == .done ? .success : .warning,
                             label: agentWin.label ?? "Coding Agent CLI", detail: nil, shortcut: "", processStatus: nil,
                             agentStatus: agentWin.status, statusChecks: [],
-                            eventDate: iso8601Formatter.date(from: agentWin.updatedAt), windowListIndex: nil, agentWindowRecord: agentWin))
+                            eventDate: iso8601Formatter.date(from: agentWin.updatedAt), focusRequest: .agentWindow(agentWin)))
                 }
 
                 guard !items.isEmpty else { continue }
@@ -1243,7 +1286,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         titleLabel.font = .systemFont(ofSize: 12, weight: .medium)
         titleLabel.textColor = .labelColor
 
-        let hintLabel = NSTextField(labelWithString: "CMD+SHIFT+D")
+        let hintLabel = NSTextField(labelWithString: footerShortcutHint(for: .guiDashboardShortcut))
         hintLabel.font = .systemFont(ofSize: 10, weight: .regular)
         hintLabel.textColor = .tertiaryLabelColor
         hintLabel.setContentHuggingPriority(.required, for: .horizontal)
@@ -1303,7 +1346,44 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
     // MARK: - Dashboard content
 
-    private func buildDashboardGroups() -> [DashboardGroup] { dashboardGroups }
+    private func buildDashboardGroups() -> [DashboardGroup] {
+        dashboardGroups.compactMap { group in
+            let items = group.items.filter { !dismissedDashboardAttentionItemIDs.contains($0.attentionID) }
+            guard !items.isEmpty else { return nil }
+            return DashboardGroup(projectName: group.projectName, workspaceID: group.workspaceID, workspaceName: group.workspaceName, items: items)
+        }
+    }
+
+    private func dashboardAttentionCount() -> Int { buildDashboardGroups().reduce(0) { $0 + $1.items.count } }
+
+    private func loadDashboardDismissedAttentionItemIDs() {
+        dismissedDashboardAttentionItemIDs = (try? orchestrator.dashboardDismissedAttentionItemIDs()) ?? []
+    }
+
+    private func pruneDismissedDashboardAttentionItemIDsIfNeeded() {
+        let activeIDs = Set(dashboardGroups.flatMap { $0.items.map(\.attentionID) })
+        let prunedIDs = dismissedDashboardAttentionItemIDs.intersection(activeIDs)
+        guard prunedIDs != dismissedDashboardAttentionItemIDs else { return }
+        dismissedDashboardAttentionItemIDs = prunedIDs
+        do {
+            try orchestrator.setDashboardDismissedAttentionItemIDs(prunedIDs)
+        } catch {
+            showError(error)
+        }
+    }
+
+    private func dismissDashboardAttentionItem(_ attentionID: String) {
+        guard !dismissedDashboardAttentionItemIDs.contains(attentionID) else { return }
+        dismissedDashboardAttentionItemIDs.insert(attentionID)
+        do {
+            try orchestrator.setDashboardDismissedAttentionItemIDs(dismissedDashboardAttentionItemIDs)
+            updateDashboardSidebarBadge()
+            if showingDashboard { showDashboardDetail() }
+        } catch {
+            dismissedDashboardAttentionItemIDs.remove(attentionID)
+            showError(error)
+        }
+    }
 
     private func showDashboardDetail() {
         clearInlineWorkspaceFieldRefs()
@@ -1314,8 +1394,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let previousWorkspaceID = selectedWorkspaceID
         selectedProjectID = nil
         selectedWorkspaceID = nil
-        dashboardWindowFocusMap = [:]
-        dashboardAgentFocusMap = [:]
+        dashboardFocusRequestMap = [:]
         outlineView.deselectAll(nil)
         // Reload only the previously-selected workspace row to clear its selection styling;
         // avoid full reloadData() which would reset expand/collapse state.
@@ -1379,7 +1458,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             stack.addArrangedSubview(emptyStack)
             constrainFormFieldToFillWidth(emptyStack, in: stack)
         } else {
-            // Sequential CMD+N counter across all groups and items
+            // Sequential window shortcut counter across all groups and items.
             var shortcutCounter = 1
 
             for group in groups {
@@ -1418,25 +1497,16 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 itemsStack.translatesAutoresizingMaskIntoConstraints = false
 
                 for entry in group.items {
-                    let shortcut = shortcutCounter <= 9 ? "CMD+\(shortcutCounter)" : ""
-                    if shortcutCounter <= 9, let wli = entry.windowListIndex {
-                        dashboardWindowFocusMap[shortcutCounter] = (workspaceID: group.workspaceID, windowListIndex: wli)
-                    } else if shortcutCounter <= 9, let agentRecord = entry.agentWindowRecord {
-                        dashboardAgentFocusMap[shortcutCounter] = agentRecord
+                    let shortcut = shortcutCounter <= 9 ? windowShortcutBadgeText(index: shortcutCounter) : ""
+                    if shortcutCounter <= 9, let focusRequest = entry.focusRequest {
+                        dashboardFocusRequestMap[shortcutCounter] = focusRequest
                     }
                     shortcutCounter += 1
                     let cardAction: (() async -> Void)?
-                    if let wli = entry.windowListIndex {
-                        let wid = group.workspaceID
+                    if let focusRequest = entry.focusRequest {
                         cardAction = { [weak self] in
                             guard let self else { return }
-                            await self.performWindowFocus(.workspaceWindow(workspaceID: wid, index: wli))
-                        }
-                    } else if let agentRecord = entry.agentWindowRecord {
-                        let rec = agentRecord
-                        cardAction = { [weak self] in
-                            guard let self else { return }
-                            await self.performWindowFocus(.agentWindow(rec))
+                            await self.performWindowFocus(focusRequest)
                         }
                     } else {
                         cardAction = nil
@@ -1454,13 +1524,24 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         showScrollableDetailStack(stack)
     }
 
-    /// Builds a window card with all status check sub-rows below it, identical to the workspace Run tab layout.
+    /// Builds a dashboard card with focus and dismiss affordances while preserving the workspace Run tab rows.
     private func dashboardWindowCard(entry: DashboardAttentionEntry, shortcut: String, action: (() async -> Void)? = nil) -> NSView {
+        let dismissButton = NSButton()
+        dismissButton.title = ""
+        dismissButton.image = NSImage(systemSymbolName: "xmark", accessibilityDescription: "Dismiss")
+        dismissButton.imagePosition = .imageOnly
+        dismissButton.setButtonType(.momentaryPushIn)
+        dismissButton.isBordered = false
+        dismissButton.contentTintColor = .secondaryLabelColor
+        dismissButton.bezelStyle = .regularSquare
+        dismissButton.target = self
+        dismissButton.action = #selector(dismissDashboardAttentionItemAction(_:))
+        dismissButton.identifier = NSUserInterfaceItemIdentifier(entry.attentionID)
+        dismissButton.toolTip = "Dismiss from dashboard"
+
         let mainRow = windowRow(
             icon: entry.icon, iconColor: Self.dashboardIconColor(entry.iconTint), label: entry.label, detail: entry.detail, shortcut: shortcut,
-            processStatus: entry.processStatus, agentStatus: entry.agentStatus, action: action)
-
-        guard !entry.statusChecks.isEmpty else { return mainRow }
+            processStatus: entry.processStatus, agentStatus: entry.agentStatus, trailingAccessory: dismissButton, action: action)
 
         let container = NSStackView()
         container.orientation = .vertical
@@ -1473,11 +1554,18 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         for check in entry.statusChecks {
             let checkColor: NSColor = check.status == .passed ? .systemGreen : .systemRed
             let checkRow = statusCheckSubRow(name: check.checkName, color: checkColor, status: check.status)
+            if let action {
+                attachAsyncClickAction(to: checkRow, label: entry.label, shortcut: shortcut, action: action)
+            }
             container.addArrangedSubview(checkRow)
             constrainFormFieldToFillWidth(checkRow, in: container)
         }
-
         return container
+    }
+
+    @objc private func dismissDashboardAttentionItemAction(_ sender: NSButton) {
+        guard let attentionID = sender.identifier?.rawValue, !attentionID.isEmpty else { return }
+        dismissDashboardAttentionItem(attentionID)
     }
 
     private func makeRightPane() -> NSView {
@@ -1507,6 +1595,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             }
             dashboardGroups = try Self.buildDashboardGroupsSnapshot(
                 orchestrator: orchestrator, projects: projects, workspacesByProject: workspacesByProject)
+            loadDashboardDismissedAttentionItemIDs()
+            pruneDismissedDashboardAttentionItemIDsIfNeeded()
             outlineView.reloadData()
             outlineView.expandItem(nil, expandChildren: true)
             refreshSelection()
@@ -1632,6 +1722,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         isSidebarGitActivityLoading = false
         workspaceRuntimeStatusByID = snapshot.workspaceRuntimeStatusByID
         dashboardGroups = snapshot.dashboardGroups
+        loadDashboardDismissedAttentionItemIDs()
+        pruneDismissedDashboardAttentionItemIDsIfNeeded()
         outlineView.reloadData()
         outlineView.expandItem(nil, expandChildren: true)
         logStartupProfile("apply_snapshot_outline_ready")
@@ -1683,12 +1775,13 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
     /// Update the Dashboard sidebar row badge with the current attention item count.
     private func updateDashboardSidebarBadge() {
-        let groups = buildDashboardGroups()
-        let totalCount = groups.reduce(0) { $0 + $1.items.count }
+        let totalCount = dashboardAttentionCount()
         if let badge = dashboardRowBadge {
             badge.stringValue = "\(totalCount)"
             badge.isHidden = totalCount == 0
         }
+        NSApp.dockTile.badgeLabel = totalCount == 0 ? nil : "\(totalCount)"
+        NSApp.dockTile.display()
     }
 
     private func refreshSelection() {
@@ -2055,13 +2148,23 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         stack.addArrangedSubview(label(text: "Keyboard shortcuts"))
         let shortcutsNote = NSTextField(
             labelWithString:
-                "Click a shortcut, then press the key combination you want. Next/Previous cycle visible workspaces when Muxy is focused, and cycle workspace windows when a workspace window is focused."
+                "Click a shortcut to capture it. For Shortcut leader, hold the modifiers you want. Leader-based rows inherit that modifier chord and capture only the trailing key. For the window 1-9 rows, capture the modifier plus any digit. The queued window shortcut replays captured digits in order when you release the modifiers."
         )
         shortcutsNote.font = .systemFont(ofSize: 11)
         shortcutsNote.textColor = .secondaryLabelColor
         shortcutsNote.maximumNumberOfLines = 0
         shortcutsNote.lineBreakMode = .byWordWrapping
         stack.addArrangedSubview(shortcutsNote)
+
+        let shortcutSupportNote = NSTextField(
+            labelWithString:
+                "Supported leader modifiers: command, shift, option, control. Supported shortcut keys: letters, digits, F1-F20, arrows, return, tab, space, escape, delete, and common punctuation such as [ ] , . / \\ ; ' = - `."
+        )
+        shortcutSupportNote.font = .systemFont(ofSize: 11)
+        shortcutSupportNote.textColor = .secondaryLabelColor
+        shortcutSupportNote.maximumNumberOfLines = 0
+        shortcutSupportNote.lineBreakMode = .byWordWrapping
+        stack.addArrangedSubview(shortcutSupportNote)
 
         for setting in ShortcutSetting.settingsPanelCases {
             let row = shortcutSettingsRow(setting: setting)
@@ -3067,7 +3170,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 shortcutCounter += 1
                 let rec = agentWin
                 let row = windowRow(
-                    icon: agentIcon, iconColor: agentColor, label: agentLabel, detail: agentDetail, shortcut: "CMD+\(agentShortcutNum)",
+                    icon: agentIcon, iconColor: agentColor, label: agentLabel, detail: agentDetail,
+                    shortcut: windowShortcutBadgeText(index: agentShortcutNum),
                     agentStatus: agentWin.status,
                     action: { [weak self] in
                         guard let self else { return }
@@ -3109,7 +3213,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 sessionDetail = nil
             }
             let isTracked = browserWindowByTargetURL[targetURL] != nil
-            let rowShortcut = "CMD+\(shortcutCounter)"
+            let rowShortcut = windowShortcutBadgeText(index: shortcutCounter)
             shortcutCounter += 1
             browserRowCount += 1
             let row = windowRow(
@@ -3134,7 +3238,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 if !windowProcesses.isEmpty {
                     for process in windowProcesses {
                         matchedProcessIDs.insert(process.id)
-                        let rowShortcut = "CMD+\(shortcutCounter)"
+                        let rowShortcut = windowShortcutBadgeText(index: shortcutCounter)
                         shortcutCounter += 1
                         processRowCount += 1
                         let rowAction: (() async -> Void)? = { [weak self] in
@@ -3156,7 +3260,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                         }
                     }
                 } else if !isAgentClaimedWindow {
-                    let rowShortcut = "CMD+\(shortcutCounter)"
+                    let rowShortcut = windowShortcutBadgeText(index: shortcutCounter)
                     shortcutCounter += 1
                     processRowCount += 1
                     let row = windowRow(
@@ -3171,7 +3275,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 }
             default:
                 if !isAgentClaimedWindow {
-                    let rowShortcut = "CMD+\(shortcutCounter)"
+                    let rowShortcut = windowShortcutBadgeText(index: shortcutCounter)
                     shortcutCounter += 1
                     processRowCount += 1
                     let row = windowRow(
@@ -3190,7 +3294,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         // Orphaned processes (no linked window = corresponding iTerm2 session was closed by the user)
         let orphanedProcesses = processes.filter { !matchedProcessIDs.contains($0.id) }
         for process in orphanedProcesses {
-            let rowShortcut = "CMD+\(shortcutCounter)"
+            let rowShortcut = windowShortcutBadgeText(index: shortcutCounter)
             shortcutCounter += 1
             let row = windowRow(
                 icon: "terminal", iconColor: missingTrackedWindowColor, label: process.templateName,
@@ -3614,23 +3718,27 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         return label
     }
 
+    private func attachAsyncClickAction(to view: NSView, label: String, shortcut: String, action: @escaping () async -> Void) {
+        let profiledAction = { [weak self] in
+            let startedAt = Date()
+            self?.logWindowRowClickProfile("stage=received label=\(label) shortcut=\(shortcut)")
+            await action()
+            self?.logWindowRowClickProfile("stage=completed label=\(label) shortcut=\(shortcut) elapsed_ms=\(self?.windowShortcutElapsedMS(since: startedAt) ?? 0)")
+        }
+        let target = ClickTarget(profiledAction)
+        let recognizer = NSClickGestureRecognizer(target: target, action: #selector(ClickTarget.clicked(_:)))
+        view.addGestureRecognizer(recognizer)
+        objc_setAssociatedObject(view, &Self.clickTargetAssocKey, target, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
+    }
+
     private func windowRow(
         icon: String, iconColor: NSColor, label: String, detail: String? = nil, shortcut: String, processStatus: RunningProcessState? = nil,
-        agentStatus: AgentWindowStatus? = nil, action: (() async -> Void)? = nil
+        agentStatus: AgentWindowStatus? = nil, trailingAccessory: NSView? = nil, action: (() async -> Void)? = nil
     ) -> NSView {
         let container = ClickableRowView(isInteractive: action != nil)
 
         if let action {
-            let profiledAction = { [weak self] in
-                let startedAt = Date()
-                self?.logWindowRowClickProfile("stage=received label=\(label) shortcut=\(shortcut)")
-                await action()
-                self?.logWindowRowClickProfile("stage=completed label=\(label) shortcut=\(shortcut) elapsed_ms=\(self?.windowShortcutElapsedMS(since: startedAt) ?? 0)")
-            }
-            let target = ClickTarget(profiledAction)
-            let recognizer = NSClickGestureRecognizer(target: target, action: #selector(ClickTarget.clicked(_:)))
-            container.addGestureRecognizer(recognizer)
-            objc_setAssociatedObject(container, &Self.clickTargetAssocKey, target, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
+            attachAsyncClickAction(to: container, label: label, shortcut: shortcut, action: action)
         }
 
         let row = NSStackView()
@@ -3667,7 +3775,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         badge.setContentHuggingPriority(.required, for: .horizontal)
         badge.setContentCompressionResistancePriority(.required, for: .horizontal)
 
-        // Status indicator (spinner/dot/spacer) always placed before badge so CMD+N hints align
+        // Status indicator (spinner/dot/spacer) always placed before badge so shortcut hints align.
         if let agentStatus {
             if agentStatus == .spinning {
                 let spinner = NSProgressIndicator()
@@ -3741,6 +3849,12 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         row.addArrangedSubview(iconView)
         row.addArrangedSubview(labelField)
         row.addArrangedSubview(detailField)
+        row.addArrangedSubview(NSView())
+        if let trailingAccessory {
+            trailingAccessory.setContentHuggingPriority(.required, for: .horizontal)
+            trailingAccessory.setContentCompressionResistancePriority(.required, for: .horizontal)
+            row.addArrangedSubview(trailingAccessory)
+        }
 
         container.addSubview(row)
         NSLayoutConstraint.activate([
@@ -3909,18 +4023,30 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     }
 
     private func shortcutCaptureButtonTitle(setting: ShortcutSetting) -> String {
-        if activeShortcutCaptureSetting == setting { return "Press shortcut" }
+        if activeShortcutCaptureSetting == setting {
+            if setting.capturesModifierOnly, !pendingLeaderCaptureModifiers.isEmpty {
+                return displayShortcutText(modifiers: pendingLeaderCaptureModifiers)
+            }
+            return setting.capturesModifierOnly ? "Hold modifiers" : "Press shortcut"
+        }
         return shortcutDisplayText(for: setting)
     }
 
-    private func shortcutDisplayText(for setting: ShortcutSetting) -> String { shortcutSpec(for: setting)?.normalized ?? setting.defaultSpec }
+    private func shortcutDisplayText(for setting: ShortcutSetting) -> String {
+        if setting == .guiLeaderHotkey { return displayShortcutText(modifiers: shortcutLeaderModifiers) }
+        guard let spec = shortcutSpec(for: setting) else { return setting.defaultSpec }
+        if setting.usesDigitRangeCapture { return displayShortcutText(spec, keyText: "1-9") }
+        return spec.normalized
+    }
 
     private func actionTitle(base: String, setting: ShortcutSetting) -> String { "\(base) (\(shortcutHint(for: setting)))" }
 
     private func actionTooltip(base: String, setting: ShortcutSetting) -> String { "\(base) (\(shortcutHint(for: setting)))" }
 
     private func shortcutHint(for setting: ShortcutSetting) -> String {
+        if setting == .guiLeaderHotkey { return displayShortcut(modifiers: shortcutLeaderModifiers) }
         guard let spec = shortcutSpec(for: setting) else { return setting.defaultSpec }
+        if setting.usesDigitRangeCapture { return displayShortcut(spec, keyText: "1-9") }
         return displayShortcut(spec)
     }
 
@@ -3962,27 +4088,61 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
     private func workspaceDetailShortcutFooterSegments() -> [String] {
         [
-            "Dashboard ⌘ ⇧ D",
+            "Dashboard \(footerShortcutHint(for: .guiDashboardShortcut))",
             "Next workspace \(footerShortcutHint(for: .guiNextShortcut))", "Prev workspace \(footerShortcutHint(for: .guiPreviousShortcut))",
             "Settings \(footerShortcutHint(for: .guiOpenSettingsShortcut))", "Toggle tooltip \(footerShortcutHint(for: .guiTooltipShortcut))",
         ]
     }
 
     private func footerShortcutHint(for setting: ShortcutSetting) -> String {
+        if setting == .guiLeaderHotkey { return displayShortcut(modifiers: shortcutLeaderModifiers, separator: " ") }
         guard let spec = shortcutSpec(for: setting) else { return setting.defaultSpec }
+        if setting.usesDigitRangeCapture { return displayShortcut(spec, separator: " ", keyText: "1-9") }
         return displayShortcut(spec, separator: " ")
     }
 
     private func displayShortcut(_ spec: HotkeySpec) -> String { displayShortcut(spec, separator: "") }
 
+    private func displayShortcut(_ spec: HotkeySpec, keyText: String) -> String { displayShortcut(spec, separator: "", keyText: keyText) }
+
     private func displayShortcut(_ spec: HotkeySpec, separator: String) -> String {
+        displayShortcut(spec, separator: separator, keyText: displayShortcutKey(spec.key))
+    }
+
+    private func displayShortcut(_ spec: HotkeySpec, separator: String, keyText: String) -> String {
+        displayShortcut(modifiers: spec.modifiers, separator: separator, keyText: keyText)
+    }
+
+    private func displayShortcut(modifiers: Set<HotkeyModifier>) -> String { displayShortcut(modifiers: modifiers, separator: "") }
+
+    private func displayShortcut(modifiers: Set<HotkeyModifier>, separator: String) -> String {
+        displayShortcut(modifiers: modifiers, separator: separator, keyText: nil)
+    }
+
+    private func displayShortcut(modifiers: Set<HotkeyModifier>, separator: String, keyText: String?) -> String {
         var parts: [String] = []
-        if spec.modifiers.contains(.cmd) { parts.append("⌘") }
-        if spec.modifiers.contains(.shift) { parts.append("⇧") }
-        if spec.modifiers.contains(.alt) { parts.append("⌥") }
-        if spec.modifiers.contains(.ctrl) { parts.append("⌃") }
-        parts.append(displayShortcutKey(spec.key))
+        if modifiers.contains(.cmd) { parts.append("⌘") }
+        if modifiers.contains(.shift) { parts.append("⇧") }
+        if modifiers.contains(.alt) { parts.append("⌥") }
+        if modifiers.contains(.ctrl) { parts.append("⌃") }
+        if let keyText { parts.append(keyText) }
         return parts.joined(separator: separator)
+    }
+
+    private func displayShortcutText(_ spec: HotkeySpec, keyText: String) -> String {
+        displayShortcutText(modifiers: spec.modifiers, keyText: keyText)
+    }
+
+    private func displayShortcutText(modifiers: Set<HotkeyModifier>) -> String { displayShortcutText(modifiers: modifiers, keyText: nil) }
+
+    private func displayShortcutText(modifiers: Set<HotkeyModifier>, keyText: String?) -> String {
+        var parts: [String] = []
+        if modifiers.contains(.cmd) { parts.append("cmd") }
+        if modifiers.contains(.shift) { parts.append("shift") }
+        if modifiers.contains(.alt) { parts.append("alt") }
+        if modifiers.contains(.ctrl) { parts.append("ctrl") }
+        if let keyText { parts.append(keyText) }
+        return parts.joined(separator: "+")
     }
 
     private func displayShortcutKey(_ key: String) -> String {
@@ -4004,6 +4164,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     @objc private func beginShortcutCapture(_ sender: NSButton) {
         guard let settingKey = sender.identifier?.rawValue, let setting = ShortcutSetting(settingKey: settingKey) else { return }
 
+        pendingLeaderCaptureModifiers = []
         if activeShortcutCaptureSetting == setting { activeShortcutCaptureSetting = nil } else { activeShortcutCaptureSetting = setting }
         refreshShortcutCaptureButtons()
     }
@@ -4012,12 +4173,14 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         guard let settingKey = sender.identifier?.rawValue, let setting = ShortcutSetting(settingKey: settingKey) else { return }
 
         if activeShortcutCaptureSetting == setting {
+            pendingLeaderCaptureModifiers = []
             activeShortcutCaptureSetting = nil
             refreshShortcutCaptureButtons()
         }
 
         do {
             try setShortcutSetting(setting: setting, value: nil)
+            pendingLeaderCaptureModifiers = []
             loadShortcutSpecs()
             setupGlobalHotkey()
             refreshSelection()
@@ -4031,7 +4194,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             updateShortcutCaptureButtonText(button, text: shortcutCaptureButtonTitle(setting: setting), active: isActive)
             styleShortcutCaptureButton(button, active: isActive)
             if activeShortcutCaptureSetting == setting {
-                button.toolTip = "Press a key combination (Esc to cancel)"
+                button.toolTip = setting.capturesModifierOnly ? "Hold a modifier combination (Esc to cancel)" : "Press a key combination (Esc to cancel)"
             } else {
                 button.toolTip = "Click to capture shortcut"
             }
@@ -4995,11 +5158,17 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     }
 
     private func setupShortcutMonitor() {
-        shortcutMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+        shortcutMonitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .flagsChanged]) { [weak self] event in
             guard let self else { return event }
+            if event.type == .flagsChanged {
+                return self.handleShortcutFlagsChanged(event: event) ? nil : event
+            }
             self.recordStartupInteraction(kind: "key_down")
             if self.handleShortcutCaptureEvent(event: event) { return nil }
+            if self.handleShowShortcut(event: event) { return nil }
+            if self.handleAddProjectShortcut(event: event) { return nil }
             if self.handleNewWorkspaceShortcut(event: event) { return nil }
+            if self.handleReloadShortcut(event: event) { return nil }
             if self.handleFormCancelShortcut(event: event) { return nil }
             if self.handleDashboardShortcut(event: event) { return nil }
             if let openSettingsShortcutSpec, matches(event: event, spec: openSettingsShortcutSpec) {
@@ -5024,6 +5193,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 if let workspaceID = self.selectedWorkspaceID { self.openWorkspaceFinder(workspaceID: workspaceID) }
                 return nil
             }
+            if self.handleBufferedWindowShortcut(event: event) { return nil }
             if let windowIndex = windowShortcutIndex(for: event) {
                 self.logWindowShortcutProfile("stage=monitor_schedule index=\(windowIndex)")
                 Task { @MainActor [weak self] in
@@ -5038,6 +5208,40 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         }
     }
 
+    private func handleShortcutFlagsChanged(event: NSEvent) -> Bool {
+        if handleLeaderShortcutCaptureFlagsChanged(event: event) { return true }
+        if bufferedWindowShortcutIndices.isEmpty { return false }
+        let flags = event.modifierFlags.intersection([.command, .shift, .option, .control])
+        guard !flags.contains(.command) || !flags.contains(.shift) else { return false }
+        flushBufferedWindowShortcuts()
+        return true
+    }
+
+    private func handleLeaderShortcutCaptureFlagsChanged(event: NSEvent) -> Bool {
+        guard activeShortcutCaptureSetting == .guiLeaderHotkey else { return false }
+        let modifiers = currentPressedShortcutModifiers(fallback: event.modifierFlags)
+        if !modifiers.isEmpty {
+            pendingLeaderCaptureModifiers.formUnion(modifiers)
+            refreshShortcutCaptureButtons()
+            return true
+        }
+        guard !pendingLeaderCaptureModifiers.isEmpty else { return true }
+        do {
+            try setShortcutSetting(setting: .guiLeaderHotkey, value: HotkeySpec.normalizedModifierSet(pendingLeaderCaptureModifiers))
+            pendingLeaderCaptureModifiers = []
+            activeShortcutCaptureSetting = nil
+            loadShortcutSpecs()
+            setupGlobalHotkey()
+            refreshSelection()
+        } catch {
+            pendingLeaderCaptureModifiers = []
+            activeShortcutCaptureSetting = nil
+            refreshShortcutCaptureButtons()
+            showError(error)
+        }
+        return true
+    }
+
     private func handleFormCancelShortcut(event: NSEvent) -> Bool {
         guard event.keyCode == UInt16(kVK_Escape) else { return false }
         guard activeAddWorkspaceFormTag != nil || activeAddProjectFormTag != nil else { return false }
@@ -5045,18 +5249,27 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         return true
     }
 
+    private func handleShowShortcut(event: NSEvent) -> Bool {
+        guard let showShortcutSpec, matches(event: event, spec: showShortcutSpec) else { return false }
+        focusSelectedWorkspace()
+        return true
+    }
+
+    private func handleAddProjectShortcut(event: NSEvent) -> Bool {
+        guard let addProjectShortcutSpec, matches(event: event, spec: addProjectShortcutSpec) else { return false }
+        addProject()
+        return true
+    }
+
     private func handleDashboardShortcut(event: NSEvent) -> Bool {
-        let flags = event.modifierFlags.intersection([.command, .shift, .option, .control])
-        let key = event.charactersIgnoringModifiers?.lowercased() ?? ""
-        guard flags == [.command, .shift], key == "d" else { return false }
+        guard let dashboardShortcutSpec, matches(event: event, spec: dashboardShortcutSpec) else { return false }
         showDashboardDetail()
         return true
     }
 
     private func handleNewWorkspaceShortcut(event: NSEvent) -> Bool {
-        let flags = event.modifierFlags.intersection([.command, .shift, .option, .control])
-        let key = event.charactersIgnoringModifiers?.lowercased() ?? ""
-        guard flags == .command, key == "n" else { return false }
+        guard let addWorkspaceShortcutSpec, matches(event: event, spec: addWorkspaceShortcutSpec) else { return false }
+        if showingDashboard, windowShortcutIndex(for: event) != nil { return false }
         if let activeAddWorkspaceFormTag, let refs = AddWorkspaceFieldCache.shared.cache[activeAddWorkspaceFormTag],
             let project = projects.first(where: { $0.id == refs.projectID })
         {
@@ -5067,9 +5280,16 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         return true
     }
 
+    private func handleReloadShortcut(event: NSEvent) -> Bool {
+        guard let reloadShortcutSpec, matches(event: event, spec: reloadShortcutSpec) else { return false }
+        reloadData()
+        return true
+    }
+
     private func handleShortcutCaptureEvent(event: NSEvent) -> Bool {
         guard let setting = activeShortcutCaptureSetting else { return false }
         if event.keyCode == UInt16(kVK_Escape) {
+            pendingLeaderCaptureModifiers = []
             activeShortcutCaptureSetting = nil
             refreshShortcutCaptureButtons()
             return true
@@ -5078,18 +5298,24 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             NSSound.beep()
             return true
         }
-        guard !spec.modifiers.isEmpty else {
+        guard setting.capturesModifierOnly || !spec.modifiers.isEmpty else {
+            NSSound.beep()
+            return true
+        }
+        guard shortcutCaptureAccepts(spec: spec, setting: setting) else {
             NSSound.beep()
             return true
         }
 
         do {
-            try setShortcutSetting(setting: setting, value: spec.normalized)
+            try setShortcutSetting(setting: setting, value: normalizedShortcutSettingValue(spec: spec, setting: setting))
+            pendingLeaderCaptureModifiers = []
             activeShortcutCaptureSetting = nil
             loadShortcutSpecs()
             setupGlobalHotkey()
             refreshSelection()
         } catch {
+            pendingLeaderCaptureModifiers = []
             activeShortcutCaptureSetting = nil
             refreshShortcutCaptureButtons()
             showError(error)
@@ -5102,6 +5328,22 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         return HotkeySpec(key: key, modifiers: shortcutModifiers(from: event.modifierFlags))
     }
 
+    private func shortcutCaptureAccepts(spec: HotkeySpec, setting: ShortcutSetting) -> Bool {
+        if setting.usesDigitRangeCapture { return Int(spec.key) != nil }
+        return true
+    }
+
+    private func normalizedShortcutSettingValue(spec: HotkeySpec, setting: ShortcutSetting) -> String {
+        if setting.usesLeader {
+            let suffixModifiers =
+                spec.modifiers.isSuperset(of: shortcutLeaderModifiers) ? spec.modifiers.subtracting(shortcutLeaderModifiers) : spec.modifiers
+            let suffixKey = setting.usesDigitRangeCapture ? "1" : spec.key
+            return HotkeySpec(key: suffixKey, modifiers: suffixModifiers).normalized
+        }
+        if setting.usesDigitRangeCapture { return HotkeySpec(key: "1", modifiers: spec.modifiers).normalized }
+        return spec.normalized
+    }
+
     private func shortcutCaptureKey(for keyCode: UInt16) -> String? { AppKitController.shortcutCaptureKeyMap[keyCode] }
 
     private func shortcutModifiers(from flags: NSEvent.ModifierFlags) -> Set<HotkeyModifier> {
@@ -5112,6 +5354,23 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         if filtered.contains(.option) { modifiers.insert(.alt) }
         if filtered.contains(.control) { modifiers.insert(.ctrl) }
         return modifiers
+    }
+
+    private func currentPressedShortcutModifiers(fallback flags: NSEvent.ModifierFlags) -> Set<HotkeyModifier> {
+        let pressedModifierKeys: [(HotkeyModifier, [CGKeyCode])] = [
+            (.cmd, [CGKeyCode(kVK_Command), CGKeyCode(kVK_RightCommand)]),
+            (.shift, [CGKeyCode(kVK_Shift), CGKeyCode(kVK_RightShift)]),
+            (.alt, [CGKeyCode(kVK_Option), CGKeyCode(kVK_RightOption)]),
+            (.ctrl, [CGKeyCode(kVK_Control), CGKeyCode(kVK_RightControl)]),
+        ]
+
+        var modifiers = Set<HotkeyModifier>()
+        for (modifier, keyCodes) in pressedModifierKeys {
+            if keyCodes.contains(where: { CGEventSource.keyState(.combinedSessionState, key: $0) }) {
+                modifiers.insert(modifier)
+            }
+        }
+        return modifiers.isEmpty ? shortcutModifiers(from: flags) : modifiers
     }
 
     private static let shortcutCaptureKeyMap: [UInt16: String] = [
@@ -5155,6 +5414,13 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         }
         if flags == [.command, .shift], key == "z" { return NSApp.sendAction(Selector(("redo:")), to: nil, from: nil) }
         return false
+    }
+
+    private func handleBufferedWindowShortcut(event: NSEvent) -> Bool {
+        guard let windowIndex = bufferedWindowShortcutIndex(for: event) else { return false }
+        bufferedWindowShortcutIndices.append(windowIndex)
+        logWindowShortcutProfile("stage=buffered index=\(windowIndex) sequence=\(bufferedWindowShortcutIndices.map(String.init).joined(separator: ","))")
+        return true
     }
 
     private func handleGlobalHotkey(id: UInt32) {
@@ -5296,7 +5562,17 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     }
 
     private func loadShortcutSpecs() {
+        if let leaderRaw = try? orchestrator.guiLeaderHotkey(), let modifiers = try? HotkeySpec.parseModifierSet(leaderRaw) {
+            shortcutLeaderModifiers = modifiers
+        } else {
+            shortcutLeaderModifiers = (try? HotkeySpec.parseModifierSet(SettingsKey.defaultGUILeaderHotkey)) ?? [.cmd, .alt]
+        }
         toggleShortcutSpec = loadShortcutSpec(setting: .guiHotkey)
+        showShortcutSpec = loadShortcutSpec(setting: .guiShowShortcut)
+        dashboardShortcutSpec = loadShortcutSpec(setting: .guiDashboardShortcut)
+        addProjectShortcutSpec = loadShortcutSpec(setting: .guiAddProjectShortcut)
+        addWorkspaceShortcutSpec = loadShortcutSpec(setting: .guiAddWorkspaceShortcut)
+        reloadShortcutSpec = loadShortcutSpec(setting: .guiReloadShortcut)
         nextShortcutSpec = loadShortcutSpec(setting: .guiNextShortcut)
         previousShortcutSpec = loadShortcutSpec(setting: .guiPreviousShortcut)
         openEditorShortcutSpec = loadShortcutSpec(setting: .guiOpenEditorShortcut)
@@ -5304,6 +5580,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         openFinderShortcutSpec = loadShortcutSpec(setting: .guiOpenFinderShortcut)
         openSettingsShortcutSpec = loadShortcutSpec(setting: .guiOpenSettingsShortcut)
         tooltipShortcutSpec = loadShortcutSpec(setting: .guiTooltipShortcut)
+        windowShortcutSpec = loadShortcutSpec(setting: .guiWindowShortcut)
+        windowSequenceShortcutSpec = loadShortcutSpec(setting: .guiWindowSequenceShortcut)
         refreshWorkspaceShortcutFooterRow()
     }
 
@@ -5315,7 +5593,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     private func shortcutRawValue(for setting: ShortcutSetting) throws -> String {
         switch setting {
         case .guiHotkey: return try orchestrator.guiHotkey()
+        case .guiLeaderHotkey: return try orchestrator.guiLeaderHotkey()
         case .guiShowShortcut: return try orchestrator.guiShowShortcut()
+        case .guiDashboardShortcut: return try orchestrator.guiDashboardShortcut()
         case .guiAddProjectShortcut: return try orchestrator.guiAddProjectShortcut()
         case .guiAddWorkspaceShortcut: return try orchestrator.guiAddWorkspaceShortcut()
         case .guiReloadShortcut: return try orchestrator.guiReloadShortcut()
@@ -5326,13 +5606,17 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         case .guiOpenFinderShortcut: return try orchestrator.guiOpenFinderShortcut()
         case .guiOpenSettingsShortcut: return try orchestrator.guiOpenSettingsShortcut()
         case .guiTooltipShortcut: return try orchestrator.guiTooltipShortcut()
+        case .guiWindowShortcut: return try orchestrator.guiWindowShortcut()
+        case .guiWindowSequenceShortcut: return try orchestrator.guiWindowSequenceShortcut()
         }
     }
 
     private func setShortcutSetting(setting: ShortcutSetting, value: String?) throws {
         switch setting {
         case .guiHotkey: try orchestrator.setGUIHotkey(value)
+        case .guiLeaderHotkey: try orchestrator.setGUILeaderHotkey(value)
         case .guiShowShortcut: try orchestrator.setGUIShowShortcut(value)
+        case .guiDashboardShortcut: try orchestrator.setGUIDashboardShortcut(value)
         case .guiAddProjectShortcut: try orchestrator.setGUIAddProjectShortcut(value)
         case .guiAddWorkspaceShortcut: try orchestrator.setGUIAddWorkspaceShortcut(value)
         case .guiReloadShortcut: try orchestrator.setGUIReloadShortcut(value)
@@ -5343,16 +5627,20 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         case .guiOpenFinderShortcut: try orchestrator.setGUIOpenFinderShortcut(value)
         case .guiOpenSettingsShortcut: try orchestrator.setGUIOpenSettingsShortcut(value)
         case .guiTooltipShortcut: try orchestrator.setGUITooltipShortcut(value)
+        case .guiWindowShortcut: try orchestrator.setGUIWindowShortcut(value)
+        case .guiWindowSequenceShortcut: try orchestrator.setGUIWindowSequenceShortcut(value)
         }
     }
 
     private func shortcutSpec(for setting: ShortcutSetting) -> HotkeySpec? {
         switch setting {
         case .guiHotkey: return toggleShortcutSpec
-        case .guiShowShortcut: return nil
-        case .guiAddProjectShortcut: return nil
-        case .guiAddWorkspaceShortcut: return nil
-        case .guiReloadShortcut: return nil
+        case .guiLeaderHotkey: return nil
+        case .guiShowShortcut: return showShortcutSpec
+        case .guiDashboardShortcut: return dashboardShortcutSpec
+        case .guiAddProjectShortcut: return addProjectShortcutSpec
+        case .guiAddWorkspaceShortcut: return addWorkspaceShortcutSpec
+        case .guiReloadShortcut: return reloadShortcutSpec
         case .guiNextShortcut: return nextShortcutSpec
         case .guiPreviousShortcut: return previousShortcutSpec
         case .guiOpenEditorShortcut: return openEditorShortcutSpec
@@ -5360,6 +5648,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         case .guiOpenFinderShortcut: return openFinderShortcutSpec
         case .guiOpenSettingsShortcut: return openSettingsShortcutSpec
         case .guiTooltipShortcut: return tooltipShortcutSpec
+        case .guiWindowShortcut: return windowShortcutSpec
+        case .guiWindowSequenceShortcut: return windowSequenceShortcutSpec
         }
     }
 
@@ -5391,37 +5681,38 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
     private func focusWindowShortcut(index: Int) {
         let startedAt = Date()
+        Task { @MainActor [weak self] in
+            await self?.runWindowShortcut(index: index, startedAt: startedAt)
+        }
+    }
+
+    private func runWindowShortcut(index: Int, startedAt: Date) async {
         activeWindowShortcutProfile = WindowShortcutProfile(index: index, startedAt: startedAt)
         logWindowShortcutProfile("stage=received index=\(index) dashboard=\(showingDashboard ? 1 : 0)")
-        let dashboardWindowTarget = showingDashboard ? dashboardWindowFocusMap[index] : nil
-        let dashboardAgentRecord = showingDashboard ? dashboardAgentFocusMap[index] : nil
-        Task { [weak self] in
-            guard let self else { return }
-            let routeStartedAt = Date()
-            let result = await Self.focusWindowShortcutSnapshot(
-                index: index, selectedWorkspaceID: self.selectedWorkspaceID, dashboardWindowTarget: dashboardWindowTarget,
-                dashboardAgentRecord: dashboardAgentRecord)
-            switch result {
-            case .success(.focused(let kind)):
-                self.logWindowShortcutProfile(
-                    "stage=route_done index=\(index) kind=\(kind) elapsed_ms=\(self.windowShortcutElapsedMS(since: routeStartedAt))"
-                )
-                self.activeWindowShortcutProfile?.routeCompletedAt = Date()
-                self.logWindowShortcutProfile("stage=total index=\(index) elapsed_ms=\(self.windowShortcutElapsedMS(since: startedAt))")
-            case .success(.noWorkspace):
-                self.logWindowShortcutProfile(
-                    "stage=aborted index=\(index) reason=no_workspace elapsed_ms=\(self.windowShortcutElapsedMS(since: startedAt))"
-                )
-            case .success(.noMatch):
-                self.logWindowShortcutProfile(
-                    "stage=aborted index=\(index) reason=no_match elapsed_ms=\(self.windowShortcutElapsedMS(since: startedAt))"
-                )
-            case .failure(let error):
-                await self.handleWindowFocusFailure(error)
-                self.logWindowShortcutProfile(
-                    "stage=aborted index=\(index) reason=error elapsed_ms=\(self.windowShortcutElapsedMS(since: startedAt))"
-                )
-            }
+        let dashboardFocusRequest = showingDashboard ? dashboardFocusRequestMap[index] : nil
+        let routeStartedAt = Date()
+        let result = await Self.focusWindowShortcutSnapshot(
+            index: index, selectedWorkspaceID: selectedWorkspaceID, dashboardFocusRequest: dashboardFocusRequest)
+        switch result {
+        case .success(.focused(let kind)):
+            logWindowShortcutProfile(
+                "stage=route_done index=\(index) kind=\(kind) elapsed_ms=\(windowShortcutElapsedMS(since: routeStartedAt))"
+            )
+            activeWindowShortcutProfile?.routeCompletedAt = Date()
+            logWindowShortcutProfile("stage=total index=\(index) elapsed_ms=\(windowShortcutElapsedMS(since: startedAt))")
+        case .success(.noWorkspace):
+            logWindowShortcutProfile(
+                "stage=aborted index=\(index) reason=no_workspace elapsed_ms=\(windowShortcutElapsedMS(since: startedAt))"
+            )
+        case .success(.noMatch):
+            logWindowShortcutProfile(
+                "stage=aborted index=\(index) reason=no_match elapsed_ms=\(windowShortcutElapsedMS(since: startedAt))"
+            )
+        case .failure(let error):
+            await handleWindowFocusFailure(error)
+            logWindowShortcutProfile(
+                "stage=aborted index=\(index) reason=error elapsed_ms=\(windowShortcutElapsedMS(since: startedAt))"
+            )
         }
     }
 
@@ -5435,14 +5726,42 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     }
 
     private func windowShortcutIndex(for event: NSEvent) -> Int? {
-        guard event.modifierFlags.contains(.command), !event.modifierFlags.contains(.shift), !event.modifierFlags.contains(.option),
-            !event.modifierFlags.contains(.control)
-        else { return nil }
+        guard let windowShortcutSpec else { return nil }
+        return numberedWindowShortcutIndex(for: event, spec: windowShortcutSpec)
+    }
+
+    private func bufferedWindowShortcutIndex(for event: NSEvent) -> Int? {
+        guard !event.isARepeat else { return nil }
+        guard let windowSequenceShortcutSpec else { return nil }
+        return numberedWindowShortcutIndex(for: event, spec: windowSequenceShortcutSpec)
+    }
+
+    private func numberedWindowShortcutIndex(for event: NSEvent, spec: HotkeySpec) -> Int? {
+        guard eventModifierCarbonFlags(event) == spec.modifiersCarbon else { return nil }
         let keyMap: [UInt16: Int] = [
             UInt16(kVK_ANSI_1): 1, UInt16(kVK_ANSI_2): 2, UInt16(kVK_ANSI_3): 3, UInt16(kVK_ANSI_4): 4, UInt16(kVK_ANSI_5): 5, UInt16(kVK_ANSI_6): 6,
             UInt16(kVK_ANSI_7): 7, UInt16(kVK_ANSI_8): 8, UInt16(kVK_ANSI_9): 9,
         ]
         return keyMap[event.keyCode]
+    }
+
+    private func windowShortcutBadgeText(index: Int) -> String {
+        guard let windowShortcutSpec else { return "SHORTCUT \(index)" }
+        return displayShortcutText(windowShortcutSpec, keyText: String(index)).uppercased()
+    }
+
+    private func flushBufferedWindowShortcuts() {
+        let indices = bufferedWindowShortcutIndices
+        guard !indices.isEmpty else { return }
+        bufferedWindowShortcutIndices.removeAll()
+        logWindowShortcutProfile("stage=flush sequence=\(indices.map(String.init).joined(separator: ","))")
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            for index in indices {
+                self.logWindowShortcutProfile("stage=sequence_dispatch index=\(index)")
+                await self.runWindowShortcut(index: index, startedAt: Date())
+            }
+        }
     }
 
     private func selectNextVisibleWorkspace() {
@@ -5576,6 +5895,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
     private func toggleWindowFromHotkey() {
         guard let window else { return }
+        if NSApp.isActive, !NSApp.isHidden, window.isVisible, !window.isMiniaturized {
+            NSApp.hide(nil)
+            return
+        }
         if window.isMiniaturized { window.deminiaturize(nil) }
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)

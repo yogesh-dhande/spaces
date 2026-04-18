@@ -505,44 +505,83 @@ final class OrchestratorTests: XCTestCase {
         let orchestrator = MuxyOrchestrator(store: store)
 
         XCTAssertEqual(try orchestrator.guiHotkey(), SettingsKey.defaultGUIHotkey)
-        XCTAssertEqual(try orchestrator.guiNextShortcut(), SettingsKey.defaultGUINextShortcut)
-        XCTAssertEqual(try orchestrator.guiPreviousShortcut(), SettingsKey.defaultGUIPreviousShortcut)
+        XCTAssertEqual(try orchestrator.guiLeaderHotkey(), SettingsKey.defaultGUILeaderHotkey)
+        XCTAssertEqual(try orchestrator.guiNextShortcut(), "cmd+alt+]")
+        XCTAssertEqual(try orchestrator.guiPreviousShortcut(), "cmd+alt+[")
         XCTAssertEqual(try orchestrator.guiShowShortcut(), SettingsKey.defaultGUIShowShortcut)
+        XCTAssertEqual(try orchestrator.guiDashboardShortcut(), "cmd+alt+d")
         XCTAssertEqual(try orchestrator.guiAddProjectShortcut(), SettingsKey.defaultGUIAddProjectShortcut)
         XCTAssertEqual(try orchestrator.guiAddWorkspaceShortcut(), SettingsKey.defaultGUIAddWorkspaceShortcut)
-        XCTAssertEqual(try orchestrator.guiReloadShortcut(), SettingsKey.defaultGUIReloadShortcut)
-        XCTAssertEqual(try orchestrator.guiOpenEditorShortcut(), SettingsKey.defaultGUIOpenEditorShortcut)
+        XCTAssertEqual(try orchestrator.guiReloadShortcut(), "cmd+alt+r")
+        XCTAssertEqual(try orchestrator.guiOpenEditorShortcut(), "cmd+alt+e")
         XCTAssertEqual(try orchestrator.guiOpenTerminalShortcut(), SettingsKey.defaultGUIOpenTerminalShortcut)
-        XCTAssertEqual(try orchestrator.guiOpenFinderShortcut(), SettingsKey.defaultGUIOpenFinderShortcut)
+        XCTAssertEqual(try orchestrator.guiOpenFinderShortcut(), "cmd+alt+f")
         XCTAssertEqual(try orchestrator.guiOpenSettingsShortcut(), SettingsKey.defaultGUIOpenSettingsShortcut)
+        XCTAssertEqual(try orchestrator.guiTooltipShortcut(), "cmd+alt+i")
+        XCTAssertEqual(try orchestrator.guiWindowShortcut(), SettingsKey.defaultGUIWindowShortcut)
+        XCTAssertEqual(try orchestrator.guiWindowSequenceShortcut(), "cmd+alt+1")
         try orchestrator.setGUIHotkey("ctrl+alt+h")
-        try orchestrator.setGUINextShortcut("ctrl+alt+n")
-        try orchestrator.setGUIPreviousShortcut("ctrl+alt+p")
+        try orchestrator.setGUILeaderHotkey("ctrl+alt")
+        try orchestrator.setGUINextShortcut("n")
+        try orchestrator.setGUIPreviousShortcut("p")
         try orchestrator.setGUIShowShortcut("ctrl+alt+s")
+        try orchestrator.setGUIDashboardShortcut("d")
         try orchestrator.setGUIAddProjectShortcut("ctrl+alt+shift+n")
         try orchestrator.setGUIAddWorkspaceShortcut("ctrl+alt+w")
-        try orchestrator.setGUIReloadShortcut("ctrl+alt+r")
-        try orchestrator.setGUIOpenEditorShortcut("ctrl+alt+e")
+        try orchestrator.setGUIReloadShortcut("r")
+        try orchestrator.setGUIOpenEditorShortcut("e")
         try orchestrator.setGUIOpenTerminalShortcut("ctrl+alt+t")
-        try orchestrator.setGUIOpenFinderShortcut("ctrl+alt+f")
+        try orchestrator.setGUIOpenFinderShortcut("f")
         try orchestrator.setGUIOpenSettingsShortcut("ctrl+alt+,")
+        try orchestrator.setGUITooltipShortcut("i")
+        try orchestrator.setGUIWindowShortcut("cmd+1")
+        try orchestrator.setGUIWindowSequenceShortcut("1")
         try orchestrator.setActiveWorkspace(id: "workspace-123")
+        try orchestrator.setDashboardDismissedAttentionItemIDs(Set(["attention-2", "attention-1"]))
 
         XCTAssertEqual(try orchestrator.guiHotkey(), "ctrl+alt+h")
-        XCTAssertEqual(try orchestrator.guiNextShortcut(), "ctrl+alt+n")
-        XCTAssertEqual(try orchestrator.guiPreviousShortcut(), "ctrl+alt+p")
+        XCTAssertEqual(try orchestrator.guiLeaderHotkey(), "alt+ctrl")
+        XCTAssertEqual(try orchestrator.guiNextShortcut(), "alt+ctrl+n")
+        XCTAssertEqual(try orchestrator.guiPreviousShortcut(), "alt+ctrl+p")
         XCTAssertEqual(try orchestrator.guiShowShortcut(), "ctrl+alt+s")
+        XCTAssertEqual(try orchestrator.guiDashboardShortcut(), "alt+ctrl+d")
         XCTAssertEqual(try orchestrator.guiAddProjectShortcut(), "ctrl+alt+shift+n")
         XCTAssertEqual(try orchestrator.guiAddWorkspaceShortcut(), "ctrl+alt+w")
-        XCTAssertEqual(try orchestrator.guiReloadShortcut(), "ctrl+alt+r")
-        XCTAssertEqual(try orchestrator.guiOpenEditorShortcut(), "ctrl+alt+e")
+        XCTAssertEqual(try orchestrator.guiReloadShortcut(), "alt+ctrl+r")
+        XCTAssertEqual(try orchestrator.guiOpenEditorShortcut(), "alt+ctrl+e")
         XCTAssertEqual(try orchestrator.guiOpenTerminalShortcut(), "ctrl+alt+t")
-        XCTAssertEqual(try orchestrator.guiOpenFinderShortcut(), "ctrl+alt+f")
+        XCTAssertEqual(try orchestrator.guiOpenFinderShortcut(), "alt+ctrl+f")
         XCTAssertEqual(try orchestrator.guiOpenSettingsShortcut(), "ctrl+alt+,")
+        XCTAssertEqual(try orchestrator.guiTooltipShortcut(), "alt+ctrl+i")
+        XCTAssertEqual(try orchestrator.guiWindowShortcut(), "cmd+1")
+        XCTAssertEqual(try orchestrator.guiWindowSequenceShortcut(), "alt+ctrl+1")
         XCTAssertEqual(try orchestrator.activeWorkspaceID(), "workspace-123")
+        XCTAssertEqual(try orchestrator.dashboardDismissedAttentionItemIDs(), Set(["attention-1", "attention-2"]))
 
         try orchestrator.setActiveWorkspace(id: nil)
         XCTAssertNil(try orchestrator.activeWorkspaceID())
+    }
+
+    func testDashboardDismissedAttentionItemIDsClearsWhenEmpty() throws {
+        let store = try makeTemporaryStore()
+        let orchestrator = MuxyOrchestrator(store: store)
+
+        try orchestrator.setDashboardDismissedAttentionItemIDs(Set(["attention-1"]))
+        XCTAssertEqual(try orchestrator.dashboardDismissedAttentionItemIDs(), Set(["attention-1"]))
+
+        try orchestrator.setDashboardDismissedAttentionItemIDs([])
+        XCTAssertTrue(try orchestrator.dashboardDismissedAttentionItemIDs().isEmpty)
+        XCTAssertNil(try store.setting(key: SettingsKey.dashboardDismissedAttentionItems))
+    }
+
+    func testLeaderBackedShortcutsMigrateLegacyFullValuesToCurrentLeader() throws {
+        let store = try makeTemporaryStore()
+        let orchestrator = MuxyOrchestrator(store: store)
+
+        try orchestrator.setGUIOpenFinderShortcut("cmd+alt+shift+f")
+        try orchestrator.setGUILeaderHotkey("cmd+ctrl")
+
+        XCTAssertEqual(try orchestrator.guiOpenFinderShortcut(), "cmd+shift+ctrl+f")
     }
 
     // Tests run status checks persists results for matching processes by arranging representative inputs and asserting the expected result.
@@ -1492,41 +1531,57 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertEqual(focusedIDs, "202")
     }
 
-    // Tests direct browser focus throws a recoverable missing-window error when the tracked yabai window no longer exists.
-    func testFocusWorkspaceWindowThrowsRecoverableErrorForMissingBrowserWindow() throws {
+    // Tests direct browser focus silently recovers by opening a new tracked Chrome window when the old yabai window is stale.
+    func testFocusWorkspaceWindowRecoversMissingBrowserWindow() throws {
         let (orchestrator, store, _, workspace, _) = try makeOrchestratorWithWorkspace()
+        let chromeOpenLog = FileManager.default.temporaryDirectory.appendingPathComponent("\(UUID().uuidString)-chrome-open.log")
+
+        try store.setWorkspaceBrowserSessions(workspaceID: workspace.id, sessions: [BrowserSession(url: "http://localhost:3001")])
 
         try store.upsert(
             window: WindowRecord(
                 id: UUID().uuidString, workspaceID: workspace.id, app: "Google Chrome", title: "Frontend", targetURL: "http://localhost:3001",
                 windowID: 999, role: "browser", orderIndex: 0, lastSeenAt: "now"))
 
-        try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) {
-            XCTAssertThrowsError(try orchestrator.focusWorkspaceWindow(workspaceID: workspace.id, index: 1)) { error in
-                guard case .missingTrackedWindow(let context) = error as? MuxyError else {
-                    return XCTFail("Expected missingTrackedWindow, got \(error)")
+        try withMockCommands(["yabai": Self.orchestratorYabaiMockScript, "osascript": Self.orchestratorOsaScriptMock]) {
+            try withEnv(
+                name: "YABAI_WINDOWS_JSON",
+                value: #"[{"id":101,"pid":11,"app":"iTerm2","title":"shell","space":1,"display":1,"is-sticky":false,"is-hidden":false,"is-visible":true,"is-native-fullscreen":false},{"id":888,"pid":22,"app":"Google Chrome","title":"Frontend","space":1,"display":1,"is-sticky":false,"is-hidden":false,"is-visible":true,"is-native-fullscreen":false}]"#
+            ) {
+                try withEnv(name: "MOCK_CHROME_OPEN_LOG_FILE", value: chromeOpenLog.path) {
+                    XCTAssertNoThrow(try orchestrator.focusWorkspaceWindow(workspaceID: workspace.id, index: 1))
                 }
-                XCTAssertEqual(context.kind, .browserSession)
-                XCTAssertEqual(context.workspaceID, workspace.id)
-                XCTAssertEqual(context.targetURL, "http://localhost:3001")
             }
         }
+
+        let trackedWindow = try XCTUnwrap(try store.windows(workspaceID: workspace.id).first(where: { $0.role == "browser" }))
+        XCTAssertEqual(trackedWindow.windowID, 888)
+        let openLog = try String(contentsOf: chromeOpenLog)
+        XCTAssertTrue(openLog.contains("set URL of active tab of newWindow"))
     }
 
-    // Tests direct browser-session focus still throws a recoverable error when the configured session has no tracked window row.
-    func testFocusWorkspaceBrowserSessionThrowsRecoverableErrorWhenTrackedWindowIsMissing() throws {
+    // Tests direct browser-session focus opens a new tracked Chrome window when the configured session has no tracked window row.
+    func testFocusWorkspaceBrowserSessionRecoversWhenTrackedWindowIsMissing() throws {
         let (orchestrator, store, _, workspace, _) = try makeOrchestratorWithWorkspace()
+        let chromeOpenLog = FileManager.default.temporaryDirectory.appendingPathComponent("\(UUID().uuidString)-chrome-open.log")
         try store.setWorkspaceBrowserSessions(workspaceID: workspace.id, sessions: [BrowserSession(name: "Frontend", url: "http://localhost:3001")])
 
-        XCTAssertThrowsError(try orchestrator.focusWorkspaceBrowserSession(workspaceID: workspace.id, targetURL: "http://localhost:3001")) {
-            error in
-            guard case .missingTrackedWindow(let context) = error as? MuxyError else {
-                return XCTFail("Expected missingTrackedWindow, got \(error)")
+        try withMockCommands(["yabai": Self.orchestratorYabaiMockScript, "osascript": Self.orchestratorOsaScriptMock]) {
+            try withEnv(
+                name: "YABAI_WINDOWS_JSON",
+                value: #"[{"id":101,"pid":11,"app":"iTerm2","title":"shell","space":1,"display":1,"is-sticky":false,"is-hidden":false,"is-visible":true,"is-native-fullscreen":false},{"id":888,"pid":22,"app":"Google Chrome","title":"Frontend","space":1,"display":1,"is-sticky":false,"is-hidden":false,"is-visible":true,"is-native-fullscreen":false}]"#
+            ) {
+                try withEnv(name: "MOCK_CHROME_OPEN_LOG_FILE", value: chromeOpenLog.path) {
+                    XCTAssertNoThrow(try orchestrator.focusWorkspaceBrowserSession(workspaceID: workspace.id, targetURL: "http://localhost:3001"))
+                }
             }
-            XCTAssertEqual(context.kind, .browserSession)
-            XCTAssertEqual(context.targetURL, "http://localhost:3001")
-            XCTAssertEqual(context.title, "http://localhost:3001")
         }
+
+        let trackedWindow = try XCTUnwrap(try store.windows(workspaceID: workspace.id).first(where: { $0.role == "browser" }))
+        XCTAssertEqual(trackedWindow.targetURL, "http://localhost:3001")
+        XCTAssertEqual(trackedWindow.windowID, 888)
+        let openLog = try String(contentsOf: chromeOpenLog)
+        XCTAssertTrue(openLog.contains("set URL of active tab of newWindow"))
     }
 
     // Tests window cycling ignores missing browser windows and keeps moving to the next live tracked window.
@@ -5197,21 +5252,6 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertNil(settings?.stopScript)
         XCTAssertTrue(settings?.ports.isEmpty ?? false)
         XCTAssertTrue(settings?.processes.isEmpty ?? false)
-    }
-
-    // Tests guiTooltipShortcut and setGUITooltipShortcut round-trip by arranging representative inputs and asserting the expected result.
-    func testGUITooltipShortcutRoundTrip() throws {
-        let store = try makeTemporaryStore()
-        let orchestrator = MuxyOrchestrator(store: store)
-
-        let defaultVal = try orchestrator.guiTooltipShortcut()
-        XCTAssertFalse(defaultVal.isEmpty)
-
-        try orchestrator.setGUITooltipShortcut("ctrl+t")
-        XCTAssertEqual(try orchestrator.guiTooltipShortcut(), "ctrl+t")
-
-        try orchestrator.setGUITooltipShortcut(nil)
-        XCTAssertEqual(try orchestrator.guiTooltipShortcut(), SettingsKey.defaultGUITooltipShortcut)
     }
 
     // Tests upWorkspace allocates ports when port definitions exist but no ports are allocated by arranging representative inputs and asserting the expected result.

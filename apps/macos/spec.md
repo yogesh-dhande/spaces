@@ -108,7 +108,7 @@ Muxy focuses those windows; it does not decide their geometry.
 - Browser focus should match the intended browser session by URL, not by window title.
 - Terminal focus should land on the intended dedicated process or agent session.
 - If tracked windows become stale during next/previous window cycling, Muxy should skip them and continue to the next live target.
-- If direct window focus from the app targets a stale browser session, Muxy should show a modal warning with `Recover (Cmd+R)` and `Cancel (Esc)`, and recovery should reopen the session in a new Chrome window and update tracking.
+- If direct window focus from the app targets a stale browser session, Muxy should reopen that session in a new Chrome window and update tracking without showing an error modal first.
 - If direct window focus from the app targets a stale process window, Muxy should first try to recover silently by opening a new dedicated iTerm2 window and reattaching to the existing tmux session when the process is still running. If the process is no longer running, Muxy should show a modal warning with `Recover (Cmd+R)` and `Cancel (Esc)`, and the explicit recovery action should restart it inside tmux.
   - coding-agent windows only show the error state and do not offer recovery
 - Muxy should still reconcile stale tracked windows in the background instead of forcing the user to repair state manually.
@@ -118,13 +118,21 @@ Muxy focuses those windows; it does not decide their geometry.
 - The app should surface attention items across workspaces in one place.
 - Attention includes exited processes, failed status checks, and coding-agent states such as waiting or done.
 - A stopped workspace can still contribute attention items when that helps the user notice something actionable.
+- Dashboard attention rows should support direct window focus by click and by the numbered window shortcuts.
+- Users should be able to dismiss individual dashboard attention items so they disappear from the dashboard list and dock badge until that specific attention event changes.
+- Dismissing a dashboard attention item must not hide the underlying process, status check, or agent row from the workspace detail pane.
 
 ## Editing and Shortcuts
 - The app should support keyboard-driven use for common actions.
 - Global shortcuts should bring Muxy forward and support fast workspace switching.
+- The global app-toggle shortcut should hide Muxy when it is already frontmost and visible, and show it otherwise.
+- The app should expose a configurable shortcut leader that supplies the shared modifiers for leader-based shortcuts like workspace navigation, dashboard, tooltip, editor, Finder, and queued window focus.
 - Window rows in the selected workspace should expose numbered shortcuts for direct focus.
+- Window-number shortcuts should use a configurable direct-focus modifier plus digits `1` through `9`.
+- Window-number sequence shortcuts should use a separate configurable modifier plus digits `1` through `9`, then replay the queued focus actions in order when the modifiers are released.
 - Shortcut handling must not break normal text-edit shortcuts while an input is focused.
-- Users can override configurable shortcuts where the product exposes that behavior.
+- Recovery affordances should reserve `Cmd+R`; app-data reload should default to leader+`R` so it stays distinct from recovery modals.
+- Every keyboard shortcut the product supports must be configurable from the GUI settings panel and from `mx settings`.
 
 ## Coding-Agent Integration
 - Coding agents can explicitly report lifecycle events through `mx agent event`.

@@ -1206,7 +1206,7 @@ public final class MuxyOrchestrator {
         guard index <= windows.count else { return }
         let targetIndex = index - 1
         let focusTargetStartedAt = currentDate()
-        let ok = focusTrackedWindow(windows[targetIndex], workspaceID: workspaceID)
+        let ok = try focusTrackedWindowOrRecoverBrowserWindow(windows[targetIndex], workspaceID: workspaceID)
         logCycleProfile(
             "workspace=\(workspaceID) stage=direct_focus_target index=\(index) target=\(navigationTargetDebugName(navigationTarget(for: windows[targetIndex]))) success=\(ok ? 1 : 0) elapsed_ms=\(elapsedMS(since: focusTargetStartedAt))"
         )
@@ -1223,19 +1223,18 @@ public final class MuxyOrchestrator {
     public func focusWorkspaceBrowserSession(workspaceID: String, targetURL: String) throws {
         let windows = try indexedWorkspaceWindows(workspaceID: workspaceID)
         if let window = windows.first(where: { $0.role == "browser" && $0.targetURL == targetURL }) {
-            let focused = focusTrackedWindow(window, workspaceID: workspaceID)
+            let focused = try focusTrackedWindowOrRecoverBrowserWindow(window, workspaceID: workspaceID)
             guard focused else { throw missingTrackedWindowError(for: window, workspaceID: workspaceID) }
             rememberNavigationTarget(navigationTarget(for: window), workspaceID: workspaceID)
             try setActiveWorkspace(id: workspaceID)
             return
         }
 
-        throw MuxyError.missingTrackedWindow(
-            MissingTrackedWindowContext(
-                kind: .browserSession,
-                workspaceID: workspaceID,
-                targetURL: targetURL,
-                title: targetURL))
+        try recoverMissingBrowserSession(workspaceID: workspaceID, targetURL: targetURL)
+        if let recoveredWindow = try indexedWorkspaceWindows(workspaceID: workspaceID).first(where: { $0.role == "browser" && $0.targetURL == targetURL }) {
+            rememberNavigationTarget(navigationTarget(for: recoveredWindow), workspaceID: workspaceID)
+        }
+        try setActiveWorkspace(id: workspaceID)
     }
 
     public func focusWorkspaceProcess(workspaceID: String, processID: String) throws {
@@ -1521,6 +1520,13 @@ public final class MuxyOrchestrator {
         logBrowserFocus(
             "workspace=\(workspaceID) path=yabai window=\(id) success=\(focused ? "1" : "0") elapsed_ms=\(elapsedMS(since: focusStartedAt))")
         return focused
+    }
+
+    private func focusTrackedWindowOrRecoverBrowserWindow(_ window: WindowRecord, workspaceID: String) throws -> Bool {
+        let focused = focusTrackedWindow(window, workspaceID: workspaceID)
+        guard !focused, window.role == "browser", let targetURL = window.targetURL else { return focused }
+        try recoverMissingBrowserSession(workspaceID: workspaceID, targetURL: targetURL)
+        return true
     }
 
     private func closeTrackedItermTerminalContainer(_ process: RunningProcessRecord) throws -> Bool {
@@ -2150,9 +2156,21 @@ public final class MuxyOrchestrator {
 
     public func setGUIHotkey(_ raw: String?) throws { try store.setSetting(key: SettingsKey.guiHotkey, value: raw) }
 
+    public func guiLeaderHotkey() throws -> String { HotkeySpec.normalizedModifierSet(try guiLeaderModifiers()) }
+
+    public func setGUILeaderHotkey(_ raw: String?) throws { try store.setSetting(key: SettingsKey.guiLeaderHotkey, value: raw) }
+
     public func guiShowShortcut() throws -> String { try store.setting(key: SettingsKey.guiShowShortcut) ?? SettingsKey.defaultGUIShowShortcut }
 
     public func setGUIShowShortcut(_ raw: String?) throws { try store.setSetting(key: SettingsKey.guiShowShortcut, value: raw) }
+
+    public func guiDashboardShortcut() throws -> String {
+        try effectiveLeaderBackedShortcut(settingKey: SettingsKey.guiDashboardShortcut, defaultValue: SettingsKey.defaultGUIDashboardShortcut)
+    }
+
+    public func setGUIDashboardShortcut(_ raw: String?) throws {
+        try store.setSetting(key: SettingsKey.guiDashboardShortcut, value: try normalizeLeaderBackedShortcut(raw))
+    }
 
     public func guiAddProjectShortcut() throws -> String {
         try store.setting(key: SettingsKey.guiAddProjectShortcut) ?? SettingsKey.defaultGUIAddProjectShortcut
@@ -2166,15 +2184,21 @@ public final class MuxyOrchestrator {
 
     public func setGUIAddWorkspaceShortcut(_ raw: String?) throws { try store.setSetting(key: SettingsKey.guiAddWorkspaceShortcut, value: raw) }
 
-    public func guiReloadShortcut() throws -> String { try store.setting(key: SettingsKey.guiReloadShortcut) ?? SettingsKey.defaultGUIReloadShortcut }
-
-    public func setGUIReloadShortcut(_ raw: String?) throws { try store.setSetting(key: SettingsKey.guiReloadShortcut, value: raw) }
-
-    public func guiOpenEditorShortcut() throws -> String {
-        try store.setting(key: SettingsKey.guiOpenEditorShortcut) ?? SettingsKey.defaultGUIOpenEditorShortcut
+    public func guiReloadShortcut() throws -> String {
+        try effectiveLeaderBackedShortcut(settingKey: SettingsKey.guiReloadShortcut, defaultValue: SettingsKey.defaultGUIReloadShortcut)
     }
 
-    public func setGUIOpenEditorShortcut(_ raw: String?) throws { try store.setSetting(key: SettingsKey.guiOpenEditorShortcut, value: raw) }
+    public func setGUIReloadShortcut(_ raw: String?) throws {
+        try store.setSetting(key: SettingsKey.guiReloadShortcut, value: try normalizeLeaderBackedShortcut(raw))
+    }
+
+    public func guiOpenEditorShortcut() throws -> String {
+        try effectiveLeaderBackedShortcut(settingKey: SettingsKey.guiOpenEditorShortcut, defaultValue: SettingsKey.defaultGUIOpenEditorShortcut)
+    }
+
+    public func setGUIOpenEditorShortcut(_ raw: String?) throws {
+        try store.setSetting(key: SettingsKey.guiOpenEditorShortcut, value: try normalizeLeaderBackedShortcut(raw))
+    }
 
     public func guiOpenTerminalShortcut() throws -> String {
         try store.setting(key: SettingsKey.guiOpenTerminalShortcut) ?? SettingsKey.defaultGUIOpenTerminalShortcut
@@ -2183,10 +2207,12 @@ public final class MuxyOrchestrator {
     public func setGUIOpenTerminalShortcut(_ raw: String?) throws { try store.setSetting(key: SettingsKey.guiOpenTerminalShortcut, value: raw) }
 
     public func guiOpenFinderShortcut() throws -> String {
-        try store.setting(key: SettingsKey.guiOpenFinderShortcut) ?? SettingsKey.defaultGUIOpenFinderShortcut
+        try effectiveLeaderBackedShortcut(settingKey: SettingsKey.guiOpenFinderShortcut, defaultValue: SettingsKey.defaultGUIOpenFinderShortcut)
     }
 
-    public func setGUIOpenFinderShortcut(_ raw: String?) throws { try store.setSetting(key: SettingsKey.guiOpenFinderShortcut, value: raw) }
+    public func setGUIOpenFinderShortcut(_ raw: String?) throws {
+        try store.setSetting(key: SettingsKey.guiOpenFinderShortcut, value: try normalizeLeaderBackedShortcut(raw))
+    }
 
     public func guiOpenSettingsShortcut() throws -> String {
         try store.setting(key: SettingsKey.guiOpenSettingsShortcut) ?? SettingsKey.defaultGUIOpenSettingsShortcut
@@ -2194,21 +2220,105 @@ public final class MuxyOrchestrator {
 
     public func setGUIOpenSettingsShortcut(_ raw: String?) throws { try store.setSetting(key: SettingsKey.guiOpenSettingsShortcut, value: raw) }
 
-    public func guiNextShortcut() throws -> String { try store.setting(key: SettingsKey.guiNextShortcut) ?? SettingsKey.defaultGUINextShortcut }
+    public func guiNextShortcut() throws -> String {
+        try effectiveLeaderBackedShortcut(settingKey: SettingsKey.guiNextShortcut, defaultValue: SettingsKey.defaultGUINextShortcut)
+    }
 
-    public func setGUINextShortcut(_ raw: String?) throws { try store.setSetting(key: SettingsKey.guiNextShortcut, value: raw) }
+    public func setGUINextShortcut(_ raw: String?) throws {
+        try store.setSetting(key: SettingsKey.guiNextShortcut, value: try normalizeLeaderBackedShortcut(raw))
+    }
 
     public func guiPreviousShortcut() throws -> String {
-        try store.setting(key: SettingsKey.guiPreviousShortcut) ?? SettingsKey.defaultGUIPreviousShortcut
+        try effectiveLeaderBackedShortcut(settingKey: SettingsKey.guiPreviousShortcut, defaultValue: SettingsKey.defaultGUIPreviousShortcut)
     }
 
-    public func setGUIPreviousShortcut(_ raw: String?) throws { try store.setSetting(key: SettingsKey.guiPreviousShortcut, value: raw) }
+    public func setGUIPreviousShortcut(_ raw: String?) throws {
+        try store.setSetting(key: SettingsKey.guiPreviousShortcut, value: try normalizeLeaderBackedShortcut(raw))
+    }
 
     public func guiTooltipShortcut() throws -> String {
-        try store.setting(key: SettingsKey.guiTooltipShortcut) ?? SettingsKey.defaultGUITooltipShortcut
+        try effectiveLeaderBackedShortcut(settingKey: SettingsKey.guiTooltipShortcut, defaultValue: SettingsKey.defaultGUITooltipShortcut)
     }
 
-    public func setGUITooltipShortcut(_ raw: String?) throws { try store.setSetting(key: SettingsKey.guiTooltipShortcut, value: raw) }
+    public func setGUITooltipShortcut(_ raw: String?) throws {
+        try store.setSetting(key: SettingsKey.guiTooltipShortcut, value: try normalizeLeaderBackedShortcut(raw))
+    }
+
+    public func guiWindowShortcut() throws -> String {
+        try store.setting(key: SettingsKey.guiWindowShortcut) ?? SettingsKey.defaultGUIWindowShortcut
+    }
+
+    public func setGUIWindowShortcut(_ raw: String?) throws { try store.setSetting(key: SettingsKey.guiWindowShortcut, value: raw) }
+
+    public func guiWindowSequenceShortcut() throws -> String {
+        try effectiveLeaderBackedShortcut(
+            settingKey: SettingsKey.guiWindowSequenceShortcut, defaultValue: SettingsKey.defaultGUIWindowSequenceShortcut)
+    }
+
+    public func setGUIWindowSequenceShortcut(_ raw: String?) throws {
+        try store.setSetting(key: SettingsKey.guiWindowSequenceShortcut, value: try normalizeLeaderBackedShortcut(raw))
+    }
+
+    public func dashboardDismissedAttentionItemIDs() throws -> Set<String> {
+        guard let raw = try store.setting(key: SettingsKey.dashboardDismissedAttentionItems), !raw.isEmpty else { return [] }
+        guard let data = raw.data(using: .utf8) else { return [] }
+        let decoded = (try? JSONDecoder().decode([String].self, from: data)) ?? []
+        return Set(decoded)
+    }
+
+    public func setDashboardDismissedAttentionItemIDs(_ ids: Set<String>) throws {
+        guard !ids.isEmpty else {
+            try store.setSetting(key: SettingsKey.dashboardDismissedAttentionItems, value: nil)
+            return
+        }
+        let encoded = try JSONEncoder().encode(ids.sorted())
+        try store.setSetting(key: SettingsKey.dashboardDismissedAttentionItems, value: String(decoding: encoded, as: UTF8.self))
+    }
+
+    private enum LeaderBackedShortcutResolution {
+        case suffix(HotkeySpec)
+        case fullOverride(HotkeySpec)
+    }
+
+    private func guiLeaderModifiers() throws -> Set<HotkeyModifier> {
+        if let raw = try store.setting(key: SettingsKey.guiLeaderHotkey), let modifiers = try? HotkeySpec.parseModifierSet(raw), !modifiers.isEmpty {
+            return modifiers
+        }
+        return try HotkeySpec.parseModifierSet(SettingsKey.defaultGUILeaderHotkey)
+    }
+
+    private func effectiveLeaderBackedShortcut(settingKey: String, defaultValue: String) throws -> String {
+        let resolution = try resolveLeaderBackedShortcut(settingKey: settingKey, defaultValue: defaultValue)
+        switch resolution {
+        case .suffix(let spec):
+            return spec.adding(modifiers: try guiLeaderModifiers()).normalized
+        case .fullOverride(let spec):
+            return spec.normalized
+        }
+    }
+
+    private func resolveLeaderBackedShortcut(settingKey: String, defaultValue: String) throws -> LeaderBackedShortcutResolution {
+        let leaderModifiers = try guiLeaderModifiers()
+        let defaultLeaderModifiers = try HotkeySpec.parseModifierSet(SettingsKey.defaultGUILeaderHotkey)
+        guard let raw = try store.setting(key: settingKey), let stored = try? HotkeySpec.parse(raw) else {
+            return .suffix((try? HotkeySpec.parse(defaultValue)) ?? HotkeySpec(key: defaultValue, modifiers: []))
+        }
+        if stored.modifiers.isEmpty { return .suffix(stored) }
+        if stored.modifiers.isSuperset(of: leaderModifiers) { return .suffix(stored.removing(modifiers: leaderModifiers)) }
+        if stored.modifiers.isSuperset(of: defaultLeaderModifiers) { return .suffix(stored.removing(modifiers: defaultLeaderModifiers)) }
+        if stored.modifiers.contains(.cmd) { return .fullOverride(stored) }
+        return .suffix(stored)
+    }
+
+    private func normalizeLeaderBackedShortcut(_ raw: String?) throws -> String? {
+        guard let raw else { return nil }
+        let spec = try HotkeySpec.parse(raw)
+        let leaderModifiers = try guiLeaderModifiers()
+        if spec.modifiers.isSuperset(of: leaderModifiers) {
+            return spec.removing(modifiers: leaderModifiers).normalized
+        }
+        return spec.normalized
+    }
 
     public func itermFocusPulseColor() throws -> (r: Int, g: Int, b: Int) {
         let raw = (try? store.setting(key: SettingsKey.itermFocusPulseColor)) ?? SettingsKey.defaultItermFocusPulseColor

@@ -20,6 +20,18 @@ final class HotkeySpecTests: XCTestCase {
         XCTAssertEqual(spec.normalized, "alt+ctrl+f5")
     }
 
+    func testParseModifierSetNormalizesLeaderModifiers() throws {
+        let modifiers = try HotkeySpec.parseModifierSet("control option command")
+        XCTAssertEqual(modifiers, [.cmd, .alt, .ctrl])
+        XCTAssertEqual(HotkeySpec.normalizedModifierSet(modifiers), "cmd+alt+ctrl")
+    }
+
+    func testParseModifierSetRejectsNonModifierToken() {
+        XCTAssertThrowsError(try HotkeySpec.parseModifierSet("cmd+k")) { error in
+            XCTAssertEqual(error.localizedDescription, "Hotkey leader must contain only modifiers: k")
+        }
+    }
+
     // Tests parse supports punctuation keys by arranging representative inputs and asserting the expected result.
     func testParseSupportsPunctuationKeys() throws {
         let spec = try HotkeySpec.parse("cmd+shift+=")

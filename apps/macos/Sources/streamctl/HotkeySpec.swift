@@ -2,6 +2,8 @@ import Carbon
 import Foundation
 
 public struct HotkeySpec: Sendable, Equatable {
+    private static let modifierOrder: [HotkeyModifier] = [.cmd, .shift, .alt, .ctrl]
+
     public let key: String
     public let modifiers: Set<HotkeyModifier>
 
@@ -11,8 +13,7 @@ public struct HotkeySpec: Sendable, Equatable {
     }
 
     public var normalized: String {
-        let order: [HotkeyModifier] = [.cmd, .shift, .alt, .ctrl]
-        let parts = order.filter { modifiers.contains($0) }.map { $0.rawValue }
+        let parts = Self.modifierOrder.filter { modifiers.contains($0) }.map { $0.rawValue }
         if parts.isEmpty { return key }
         return (parts + [key]).joined(separator: "+")
     }
@@ -29,6 +30,14 @@ public struct HotkeySpec: Sendable, Equatable {
         if modifiers.contains(.alt) { result |= UInt32(optionKey) }
         if modifiers.contains(.ctrl) { result |= UInt32(controlKey) }
         return result
+    }
+
+    public func removing(modifiers: Set<HotkeyModifier>) -> HotkeySpec {
+        HotkeySpec(key: key, modifiers: self.modifiers.subtracting(modifiers))
+    }
+
+    public func adding(modifiers: Set<HotkeyModifier>) -> HotkeySpec {
+        HotkeySpec(key: key, modifiers: self.modifiers.union(modifiers))
     }
 
     public static func parse(_ raw: String) throws -> HotkeySpec {
@@ -55,6 +64,29 @@ public struct HotkeySpec: Sendable, Equatable {
         guard let key = keyToken else { throw HotkeySpecError("Hotkey is missing a key") }
 
         return HotkeySpec(key: key, modifiers: modifiers)
+    }
+
+    public static func parseModifierSet(_ raw: String) throws -> Set<HotkeyModifier> {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { throw HotkeySpecError("Hotkey leader cannot be empty") }
+
+        let normalizedRaw = trimmed.lowercased().replacingOccurrences(of: "+", with: " ").replacingOccurrences(of: "-", with: " ")
+        let tokens = normalizedRaw.split { $0 == " " || $0 == "\t" }
+        guard !tokens.isEmpty else { throw HotkeySpecError("Hotkey leader cannot be empty") }
+
+        var modifiers = Set<HotkeyModifier>()
+        for tokenSub in tokens {
+            let token = String(tokenSub)
+            guard let modifier = parseModifier(token) else { throw HotkeySpecError("Hotkey leader must contain only modifiers: \(token)") }
+            modifiers.insert(modifier)
+        }
+
+        guard !modifiers.isEmpty else { throw HotkeySpecError("Hotkey leader must contain at least one modifier") }
+        return modifiers
+    }
+
+    public static func normalizedModifierSet(_ modifiers: Set<HotkeyModifier>) -> String {
+        Self.modifierOrder.filter { modifiers.contains($0) }.map(\.rawValue).joined(separator: "+")
     }
 
     private static func parseModifier(_ token: String) -> HotkeyModifier? {
