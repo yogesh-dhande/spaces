@@ -1088,6 +1088,20 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         }.value
     }
 
+    nonisolated static func retainedSidebarGitActivity(
+        existing: [String: GitTrackedFileActivity],
+        projects: [ProjectSummary],
+        workspacesByProject: [String: [WorkspaceSummary]]
+    ) -> [String: GitTrackedFileActivity] {
+        let workspaceIDs = Set(
+            projects
+                .filter(\.isGitRepo)
+                .flatMap { project in
+                    (workspacesByProject[project.id] ?? []).map(\.id)
+                })
+        return existing.filter { workspaceIDs.contains($0.key) }
+    }
+
     private func buildMainMenu() {
         let mainMenu = NSMenu()
 
@@ -1582,7 +1596,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             loadShortcutSpecs()
             projects = try orchestrator.listProjects()
             workspacesByProject = [:]
-            gitActivityByWorkspaceID = [:]
             isSidebarGitActivityLoading = false
             workspaceRuntimeStatusByID = [:]
             for project in projects {
@@ -1592,6 +1605,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                     workspaceRuntimeStatusByID[workspace.id] = try orchestrator.workspaceRuntimeStatus(workspaceID: workspace.id)
                 }
             }
+            gitActivityByWorkspaceID = Self.retainedSidebarGitActivity(
+                existing: gitActivityByWorkspaceID,
+                projects: projects,
+                workspacesByProject: workspacesByProject)
             dashboardGroups = try Self.buildDashboardGroupsSnapshot(
                 orchestrator: orchestrator, projects: projects, workspacesByProject: workspacesByProject)
             loadDashboardDismissedAttentionItemIDs()
@@ -1717,7 +1734,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         loadShortcutSpecs()
         projects = snapshot.projects
         workspacesByProject = snapshot.workspacesByProject
-        gitActivityByWorkspaceID = snapshot.gitActivityByWorkspaceID
+        gitActivityByWorkspaceID = Self.retainedSidebarGitActivity(
+            existing: gitActivityByWorkspaceID,
+            projects: snapshot.projects,
+            workspacesByProject: snapshot.workspacesByProject)
         isSidebarGitActivityLoading = false
         workspaceRuntimeStatusByID = snapshot.workspaceRuntimeStatusByID
         dashboardGroups = snapshot.dashboardGroups

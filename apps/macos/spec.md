@@ -85,6 +85,7 @@ Muxy focuses those windows; it does not decide their geometry.
 - Newly discovered worktrees should become workspaces automatically.
 - Invalid removed worktrees should cause non-default workspaces to archive automatically.
 - Workspaces intentionally removed from Muxy should not be silently recreated by discovery.
+- Sidebar git activity should remain visible while background refresh is in flight and update in place when fresh status arrives.
 
 ## Launch and Runtime Behavior
 - Launch starts the workspace's configured processes and browser sessions and captures the resulting windows.
