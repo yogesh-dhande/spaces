@@ -59,8 +59,10 @@ A workspace owns a tracked set of dedicated windows, such as:
 Muxy focuses those windows; it does not decide their geometry.
 
 ## Onboarding
-- On launch, Muxy checks prerequisites in order: iTerm2 installed, tmux installed, yabai installed, yabai running, and required Accessibility access.
-- If any prerequisite fails, the main window shows a guided setup flow starting at the first failing step.
+- On launch, Muxy blocks only on the cheap prerequisite checks: iTerm2 installed, tmux installed, and yabai installed.
+- The slower yabai readiness step, including service-running and Accessibility validation, should be deferred until the setup flow is actually shown or another yabai-backed action needs it.
+- If a deferred yabai readiness check fails during startup, Muxy should switch into the setup flow at the yabai step instead of surfacing a raw shell error dialog.
+- If a blocking launch prerequisite fails, the main window shows a guided setup flow starting at the first failing step.
 - The setup flow should poll and recover automatically once the missing prerequisite is fixed.
 - If all prerequisites pass, the main UI should load without an extra setup window.
 

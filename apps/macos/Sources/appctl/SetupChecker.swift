@@ -1,7 +1,9 @@
 import Foundation
 
+private let setupProfileEnabled = ProcessInfo.processInfo.environment["MUXY_STARTUP_PROFILE"] == "1"
+
 /// Identifies each prerequisite check in display order.
-public enum SetupCheckID: String, CaseIterable {
+public enum SetupCheckID: String, CaseIterable, Sendable {
     case iterm2Installed
     case tmuxInstalled
     case yabaiInstalled
@@ -23,6 +25,10 @@ public struct SetupCheckResult {
 /// Runs prerequisite checks for Muxy dependencies (iTerm2, tmux, and yabai).
 /// Injecting custom adapter subclasses enables unit testing without real apps.
 public final class SetupChecker {
+    public static var startupBlockingCheckIDs: [SetupCheckID] {
+        [.iterm2Installed, .tmuxInstalled, .yabaiInstalled]
+    }
+
     private let iterm2: Iterm2Adapter
     private let tmux: TmuxAdapter
 
@@ -33,23 +39,47 @@ public final class SetupChecker {
 
     /// Runs a single check and returns whether it passed.
     public func run(_ id: SetupCheckID) -> Bool {
-        switch id {
+        let startedAt = ProcessInfo.processInfo.systemUptime
+        let passed = switch id {
         case .iterm2Installed:
-            return isIterm2Installed()
+            isIterm2Installed()
         case .tmuxInstalled:
-            return isTmuxInstalled()
+            isTmuxInstalled()
         case .yabaiInstalled:
-            return isYabaiInstalled()
+            isYabaiInstalled()
         case .yabaiServiceRunning:
-            return isYabaiServiceRunning()
+            isYabaiServiceRunning()
         case .yabaiAccessibility:
-            return hasYabaiAccessibility()
+            hasYabaiAccessibility()
         }
+        logSetupCheckProfile(id: id, passed: passed, startedAt: startedAt)
+        return passed
     }
 
     /// Runs all checks in display order and returns results.
     public func runAll() -> [SetupCheckResult] {
-        SetupCheckID.allCases.map { id in SetupCheckResult(id: id, passed: run(id)) }
+        let startedAt = ProcessInfo.processInfo.systemUptime
+        let results = run(SetupCheckID.allCases)
+        if setupProfileEnabled {
+            let elapsedMS = Int((ProcessInfo.processInfo.systemUptime - startedAt) * 1000)
+            fputs("muxy: setup_check stage=run_all elapsed_ms=\(elapsedMS)\n", stderr)
+        }
+        return results
+    }
+
+    /// Runs only the checks that should block initial app launch.
+    public func runStartupBlockingChecks() -> [SetupCheckResult] {
+        let startedAt = ProcessInfo.processInfo.systemUptime
+        let results = run(Self.startupBlockingCheckIDs)
+        if setupProfileEnabled {
+            let elapsedMS = Int((ProcessInfo.processInfo.systemUptime - startedAt) * 1000)
+            fputs("muxy: setup_check stage=startup_blocking elapsed_ms=\(elapsedMS)\n", stderr)
+        }
+        return results
+    }
+
+    private func run(_ ids: [SetupCheckID]) -> [SetupCheckResult] {
+        ids.map { id in SetupCheckResult(id: id, passed: run(id)) }
     }
 
     // MARK: - Individual checks
@@ -67,9 +97,8 @@ public final class SetupChecker {
     }
 
     private func isYabaiServiceRunning() -> Bool {
-        guard let output = try? Shell.runAndCapture(["yabai", "-m", "query", "--spaces"]) else { return false }
-        let trimmed = output.trimmingCharacters(in: .whitespacesAndNewlines)
-        return trimmed.hasPrefix("[")
+        guard (try? Shell.runAndCapture(["yabai", "-m", "signal", "--list"])) != nil else { return false }
+        return true
     }
 
     private func hasYabaiAccessibility() -> Bool {
@@ -77,5 +106,11 @@ public final class SetupChecker {
         let trimmed = output.trimmingCharacters(in: .whitespacesAndNewlines)
         // An empty array means AX is not granted; Finder always has windows when permission is granted.
         return trimmed != "[]" && trimmed.hasPrefix("[")
+    }
+
+    private func logSetupCheckProfile(id: SetupCheckID, passed: Bool, startedAt: TimeInterval) {
+        guard setupProfileEnabled else { return }
+        let elapsedMS = Int((ProcessInfo.processInfo.systemUptime - startedAt) * 1000)
+        fputs("muxy: setup_check id=\(id.rawValue) elapsed_ms=\(elapsedMS) passed=\(passed ? 1 : 0)\n", stderr)
     }
 }

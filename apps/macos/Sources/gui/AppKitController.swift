@@ -1,12 +1,23 @@
 import AppKit
 import Carbon
 import Foundation
+import appctl
 import streamctl
+
+private let startupProfileBaselineUptime = ProcessInfo.processInfo.systemUptime
 
 @MainActor
 public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineViewDataSource, NSOutlineViewDelegate, NSSplitViewDelegate,
     NSWindowDelegate, NSTextFieldDelegate
 {
+    private enum DashboardIconTint: Sendable {
+        case browser
+        case terminal
+        case code
+        case success
+        case warning
+    }
+
     private enum InlineWorkspaceDetailField {
         case title
         case branch
@@ -24,9 +35,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         var isEditing: Bool
     }
 
-    private struct DashboardAttentionEntry {
+    private struct DashboardAttentionEntry: Sendable {
         let icon: String
-        let iconColor: NSColor
+        let iconTint: DashboardIconTint
         let label: String
         let detail: String?
         let shortcut: String
@@ -41,7 +52,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let agentWindowRecord: AgentWindowRecord?
     }
 
-    private struct DashboardGroup {
+    private struct DashboardGroup: Sendable {
         let projectName: String
         let workspaceID: String
         let workspaceName: String
@@ -62,6 +73,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     private var workspacesByProject: [String: [WorkspaceSummary]] = [:]
     private var gitActivityByWorkspaceID: [String: GitTrackedFileActivity] = [:]
     private var workspaceRuntimeStatusByID: [String: WorkspaceRuntimeStatus] = [:]
+    private var dashboardGroups: [DashboardGroup] = []
 
     private var selectedProjectID: String?
     private var selectedWorkspaceID: String?
@@ -107,6 +119,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     private var sidebarReloadTask: Task<Void, Never>?
     private var pendingSidebarReloadRequest = false
     private var activeWindowShortcutProfile: WindowShortcutProfile?
+    private let startupProfileStartTime = startupProfileBaselineUptime
+    private var didLogFirstStartupInteraction = false
 
     private var configCache: AppConfig?
     private let defaultSplitViewWidth: CGFloat = 360
@@ -177,6 +191,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     }
 
     public func applicationDidFinishLaunching(_ notification: Notification) {
+        logStartupProfile("did_finish_launching")
         do {
             let db = try DatabaseLocator.defaultPath()
             let store = try SQLiteStore(path: db)
@@ -185,29 +200,27 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             showError(error)
             return
         }
+        logStartupProfile("store_ready")
 
         buildShellWindow()
+        logStartupProfile("shell_window_ready")
         NSApp.activate(ignoringOtherApps: true)
+        logStartupProfile("app_activated")
         buildMainMenu()
+        logStartupProfile("main_menu_ready")
         loadShortcutSpecs()
+        logStartupProfile("shortcut_specs_loaded")
         setupGlobalHotkey()
+        logStartupProfile("global_hotkeys_ready")
         setupShortcutMonitor()
+        logStartupProfile("shortcut_monitor_ready")
         setupTooltipIPCObserver()
         setupAgentEventIPCObserver()
         setupAppActivationObservers()
+        logStartupProfile("ipc_observers_ready")
 
-        let mgr = SetupManager()
-        mgr.onComplete = { [weak self] in
-            self?.setupManager = nil
-            self?.buildMainWindowContent()
-            self?.showLoadingPlaceholder(message: "Loading projects and workspaces...", detail: "Muxy is preparing your workspace data.")
-            Task { @MainActor [weak self] in await self?.loadInitialSidebarData() }
-        }
-        self.setupManager = mgr
-        window.contentView = mgr.makeContentView()
-        // start() skips to the first unmet requirement; if all pass it calls onComplete
-        // synchronously (before any draw cycle) so there is no visual flash of the setup UI.
-        mgr.start()
+        enterSetupFlow()
+        logStartupProfile("setup_started")
     }
 
     public func applicationWillTerminate(_ notification: Notification) {
@@ -249,10 +262,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         agentEventIPCObserver = DistributedNotificationCenter.default().addObserver(
             forName: IPCNotification.agentEventFired, object: nil, queue: .main
         ) { [weak self] _ in
-            Task { @MainActor [weak self] in
-                self?.updateDashboardSidebarBadge()
-                self?.refreshSelection()
-            }
+            Task { @MainActor [weak self] in self?.requestSidebarReload() }
         }
     }
 
@@ -295,7 +305,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                     if (refreshResult.didMutateDB || windowCountsChanged) && self.canReloadAfterBackgroundWorkspaceRefresh() {
                         self.requestSidebarReload()
                     }
-                case .failure(let error): self.showError(error)
+                case .failure(let error):
+                    if !self.handleDeferredSetupRequirementIfNeeded(error) {
+                        self.showError(error)
+                    }
                 }
                 do { try await Task.sleep(for: .seconds(PollingConstants.workspaceWindowRefreshInterval)) } catch { break }
             }
@@ -468,6 +481,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let workspacesByProject: [String: [WorkspaceSummary]]
         let gitActivityByWorkspaceID: [String: GitTrackedFileActivity]
         let workspaceRuntimeStatusByID: [String: WorkspaceRuntimeStatus]
+        let dashboardGroups: [DashboardGroup]
     }
 
     /// Holds a click closure and serves as the NSGestureRecognizer target for clickable row views.
@@ -481,6 +495,41 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     }
 
     private static var clickTargetAssocKey: UInt8 = 0
+
+    nonisolated private static func startupProfileEnabled() -> Bool {
+        ProcessInfo.processInfo.environment["MUXY_STARTUP_PROFILE"] == "1"
+    }
+
+    nonisolated private static func startupElapsedMS() -> Int { Int((ProcessInfo.processInfo.systemUptime - startupProfileBaselineUptime) * 1000) }
+
+    private func logStartupProfile(_ stage: String, details: String = "") {
+        guard Self.startupProfileEnabled() else { return }
+        let elapsedMS = Int((ProcessInfo.processInfo.systemUptime - startupProfileStartTime) * 1000)
+        let suffix = details.isEmpty ? "" : " \(details)"
+        fputs("muxy: startup stage=\(stage) elapsed_ms=\(elapsedMS)\(suffix)\n", stderr)
+    }
+
+    nonisolated private static func logStartupSnapshotProfile(_ stage: String, details: String = "") {
+        guard startupProfileEnabled() else { return }
+        let suffix = details.isEmpty ? "" : " \(details)"
+        fputs("muxy: startup stage=\(stage) elapsed_ms=\(startupElapsedMS())\(suffix)\n", stderr)
+    }
+
+    private func recordStartupInteraction(kind: String) {
+        guard !didLogFirstStartupInteraction else { return }
+        didLogFirstStartupInteraction = true
+        logStartupProfile("first_interaction", details: "kind=\(kind)")
+    }
+
+    private static func dashboardIconColor(_ tint: DashboardIconTint) -> NSColor {
+        switch tint {
+        case .browser: .systemBlue
+        case .terminal: .systemGreen
+        case .code: .systemPurple
+        case .success: .systemGreen
+        case .warning: .systemOrange
+        }
+    }
 
     nonisolated private static func refreshWorkspaceWindowsSnapshot() async -> Result<MuxyOrchestrator.RefreshResult, Error> {
         await Task.detached(priority: .utility) {
@@ -791,27 +840,157 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         }.value
     }
 
+    nonisolated private static func buildDashboardGroupsSnapshot(
+        orchestrator: MuxyOrchestrator, projects: [ProjectSummary], workspacesByProject: [String: [WorkspaceSummary]]
+    ) throws -> [DashboardGroup] {
+        let iso8601Formatter = ISO8601DateFormatter()
+        var groups: [DashboardGroup] = []
+        for project in projects {
+            let workspaces = workspacesByProject[project.id] ?? []
+            for workspace in workspaces {
+                let agentWindowsList = (try? orchestrator.agentWindows(workspaceID: workspace.id)) ?? []
+                let attentionAgentWindows = agentWindowsList.filter { $0.status == .waiting || $0.status == .done }
+                guard workspace.isRunning || !attentionAgentWindows.isEmpty else { continue }
+
+                let processes = workspace.isRunning ? ((try? orchestrator.runningProcesses(workspaceID: workspace.id)) ?? []) : []
+                let windows = workspace.isRunning ? ((try? orchestrator.windows(workspaceID: workspace.id)) ?? []) : []
+                let configuredSessions: [BrowserSession] = {
+                    guard workspace.isRunning else { return [] }
+                    return (try? orchestrator.resolvedWorkspaceBrowserSessions(workspaceID: workspace.id)) ?? []
+                }()
+                var processByWindowID: [Int: RunningProcessRecord] = [:]
+                for process in processes {
+                    if let wid = process.windowID { processByWindowID[wid] = process }
+                }
+                var statusResultsByProcessID: [String: [StatusResult]] = [:]
+                for process in processes {
+                    statusResultsByProcessID[process.id] = (try? orchestrator.statusResults(processID: process.id)) ?? []
+                }
+
+                var items: [DashboardAttentionEntry] = []
+                var matchedProcessIDs: Set<String> = []
+
+                for (idx, win) in windows.enumerated() {
+                    guard let wid = win.windowID, let process = processByWindowID[wid] else { continue }
+                    matchedProcessIDs.insert(process.id)
+                    let allChecks = statusResultsByProcessID[process.id] ?? []
+                    let hasFailedCheck = allChecks.contains { $0.status == .failed }
+                    guard process.status == .exited || hasFailedCheck else { continue }
+                    let icon: String
+                    let iconTint: DashboardIconTint
+                    let label: String
+                    let detail: String?
+                    switch win.role {
+                    case "browser":
+                        icon = "globe"
+                        iconTint = .browser
+                        if let name = Self.browserSessionDisplayName(for: win.targetURL, sessions: configuredSessions), let url = win.targetURL {
+                            label = name
+                            detail = url
+                        } else {
+                            label = win.targetURL ?? win.title ?? win.app
+                            detail = nil
+                        }
+                    case "terminal":
+                        icon = "terminal"
+                        iconTint = .terminal
+                        label = process.templateName
+                        detail = process.command
+                    default:
+                        icon = "chevron.left.forwardslash.chevron.right"
+                        iconTint = .code
+                        label = win.title ?? win.app
+                        detail = nil
+                    }
+                    let redChecks = allChecks.filter { $0.status == .failed }
+                    let eventDate: Date? =
+                        process.status == .exited
+                        ? process.exitedAt.flatMap { iso8601Formatter.date(from: $0) }
+                        : redChecks.compactMap { $0.lastRunAt.flatMap { iso8601Formatter.date(from: $0) } }.max()
+                    items.append(
+                        DashboardAttentionEntry(
+                            icon: icon, iconTint: iconTint, label: label, detail: detail, shortcut: "", processStatus: process.status,
+                            agentStatus: nil, statusChecks: allChecks, eventDate: eventDate, windowListIndex: idx + 1, agentWindowRecord: nil))
+                }
+
+                for process in processes where !matchedProcessIDs.contains(process.id) {
+                    let allChecks = statusResultsByProcessID[process.id] ?? []
+                    let hasFailedCheck = allChecks.contains { $0.status == .failed }
+                    guard process.status == .exited || hasFailedCheck else { continue }
+                    let redChecks = allChecks.filter { $0.status == .failed }
+                    let eventDate: Date? =
+                        process.status == .exited
+                        ? process.exitedAt.flatMap { iso8601Formatter.date(from: $0) }
+                        : redChecks.compactMap { $0.lastRunAt.flatMap { iso8601Formatter.date(from: $0) } }.max()
+                    items.append(
+                        DashboardAttentionEntry(
+                            icon: "terminal", iconTint: .terminal, label: process.templateName, detail: process.command, shortcut: "",
+                            processStatus: process.status, agentStatus: nil, statusChecks: allChecks, eventDate: eventDate, windowListIndex: nil,
+                            agentWindowRecord: nil))
+                }
+
+                for agentWin in attentionAgentWindows {
+                    items.append(
+                        DashboardAttentionEntry(
+                            icon: "cpu.fill", iconTint: agentWin.status == .done ? .success : .warning,
+                            label: agentWin.label ?? "Coding Agent CLI", detail: nil, shortcut: "", processStatus: nil,
+                            agentStatus: agentWin.status, statusChecks: [],
+                            eventDate: iso8601Formatter.date(from: agentWin.updatedAt), windowListIndex: nil, agentWindowRecord: agentWin))
+                }
+
+                guard !items.isEmpty else { continue }
+
+                items.sort {
+                    switch ($0.eventDate, $1.eventDate) {
+                    case (let a?, let b?): return a > b
+                    case (nil, _): return false
+                    case (_, nil): return true
+                    }
+                }
+                groups.append(DashboardGroup(projectName: project.name, workspaceID: workspace.id, workspaceName: workspace.name, items: items))
+            }
+        }
+        groups.sort {
+            switch ($0.latestDate, $1.latestDate) {
+            case (let a?, let b?): return a > b
+            case (nil, _): return false
+            case (_, nil): return true
+            }
+        }
+        return groups
+    }
+
     nonisolated private static func initialSidebarDataSnapshot() async -> Result<SidebarDataSnapshot, Error> {
         await Task.detached(priority: .userInitiated) {
             do {
+                let snapshotStartedAt = ProcessInfo.processInfo.systemUptime
                 let db = try DatabaseLocator.defaultPath()
                 let store = try SQLiteStore(path: db)
                 let orchestrator = MuxyOrchestrator(store: store)
+                logStartupSnapshotProfile("sidebar_snapshot_store_ready")
                 let config = try orchestrator.syncConfig()
+                logStartupSnapshotProfile("sidebar_snapshot_config_ready")
                 let projects = try orchestrator.listProjects()
+                logStartupSnapshotProfile("sidebar_snapshot_projects_ready", details: "project_count=\(projects.count)")
                 var workspacesByProject: [String: [WorkspaceSummary]] = [:]
                 var gitActivityByWorkspaceID: [String: GitTrackedFileActivity] = [:]
                 var workspaceRuntimeStatusByID: [String: WorkspaceRuntimeStatus] = [:]
+                var workspaceCount = 0
+                let workspaceScanStartedAt = ProcessInfo.processInfo.systemUptime
                 for project in projects {
                     let workspaces = try orchestrator.listWorkspaces(projectID: project.id, includeArchived: false)
                     workspacesByProject[project.id] = workspaces
                     for workspace in workspaces {
+                        workspaceCount += 1
                         workspaceRuntimeStatusByID[workspace.id] = try orchestrator.workspaceRuntimeStatus(workspaceID: workspace.id)
                         if project.isGitRepo, let activity = try orchestrator.workspaceGitTrackedFileActivity(workspaceID: workspace.id) {
                             gitActivityByWorkspaceID[workspace.id] = activity
                         }
                     }
                 }
+                logStartupSnapshotProfile(
+                    "sidebar_snapshot_workspace_scan_ready",
+                    details: "workspace_count=\(workspaceCount) scan_ms=\(Int((ProcessInfo.processInfo.systemUptime - workspaceScanStartedAt) * 1000))")
                 for (projectID, workspaces) in workspacesByProject {
                     workspacesByProject[projectID] = workspaces.sorted { a, b in
                         let aDate = gitActivityByWorkspaceID[a.id]?.latestTrackedFileModificationDate ?? .distantPast
@@ -819,10 +998,19 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                         return aDate > bDate
                     }
                 }
+                let dashboardGroups = try buildDashboardGroupsSnapshot(
+                    orchestrator: orchestrator, projects: projects, workspacesByProject: workspacesByProject)
+                logStartupSnapshotProfile(
+                    "sidebar_snapshot_dashboard_ready",
+                    details: "group_count=\(dashboardGroups.count) item_count=\(dashboardGroups.reduce(0) { $0 + $1.items.count })")
+                logStartupSnapshotProfile(
+                    "sidebar_snapshot_complete",
+                    details: "total_ms=\(Int((ProcessInfo.processInfo.systemUptime - snapshotStartedAt) * 1000))")
                 return .success(
                     .init(
                         config: config, projects: projects, workspacesByProject: workspacesByProject,
-                        gitActivityByWorkspaceID: gitActivityByWorkspaceID, workspaceRuntimeStatusByID: workspaceRuntimeStatusByID))
+                        gitActivityByWorkspaceID: gitActivityByWorkspaceID, workspaceRuntimeStatusByID: workspaceRuntimeStatusByID,
+                        dashboardGroups: dashboardGroups))
             } catch { return .failure(error) }
         }.value
     }
@@ -934,10 +1122,14 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         scroll.hasVerticalScroller = true
         scroll.drawsBackground = false
 
-        let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("name"))
-        column.title = "Projects"
-        outlineView.addTableColumn(column)
-        outlineView.outlineTableColumn = column
+        if outlineView.tableColumns.isEmpty {
+            let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("name"))
+            column.title = "Projects"
+            outlineView.addTableColumn(column)
+            outlineView.outlineTableColumn = column
+        } else if outlineView.outlineTableColumn == nil {
+            outlineView.outlineTableColumn = outlineView.tableColumns.first
+        }
         outlineView.headerView = nil
         outlineView.rowSizeStyle = .medium
         outlineView.style = .sourceList
@@ -1080,123 +1272,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
     // MARK: - Dashboard content
 
-    private func buildDashboardGroups() -> [DashboardGroup] {
-        var groups: [DashboardGroup] = []
-        for project in projects {
-            let workspaces = workspacesByProject[project.id] ?? []
-            for workspace in workspaces {
-                let agentWindowsList = (try? orchestrator.agentWindows(workspaceID: workspace.id)) ?? []
-                let attentionAgentWindows = agentWindowsList.filter { $0.status == .waiting || $0.status == .done }
-                guard workspace.isRunning || !attentionAgentWindows.isEmpty else { continue }
-
-                let processes = workspace.isRunning ? ((try? orchestrator.runningProcesses(workspaceID: workspace.id)) ?? []) : []
-                let windows = workspace.isRunning ? ((try? orchestrator.windows(workspaceID: workspace.id)) ?? []) : []
-                let configuredSessions: [BrowserSession] = {
-                    guard workspace.isRunning else { return [] }
-                    return (try? orchestrator.resolvedWorkspaceBrowserSessions(workspaceID: workspace.id)) ?? []
-                }()
-                var processByWindowID: [Int: RunningProcessRecord] = [:]
-                for process in processes { if let wid = process.windowID { processByWindowID[wid] = process } }
-                var statusResultsByProcessID: [String: [StatusResult]] = [:]
-                for process in processes { statusResultsByProcessID[process.id] = (try? orchestrator.statusResults(processID: process.id)) ?? [] }
-
-                var items: [DashboardAttentionEntry] = []
-                var matchedProcessIDs: Set<String> = []
-
-                // Window-linked entries (shortcut placeholder "" — renumbered in the view)
-                for (idx, win) in windows.enumerated() {
-                    guard let wid = win.windowID, let process = processByWindowID[wid] else { continue }
-                    matchedProcessIDs.insert(process.id)
-                    let allChecks = statusResultsByProcessID[process.id] ?? []
-                    let hasFailedCheck = allChecks.contains { $0.status == .failed }
-                    guard process.status == .exited || hasFailedCheck else { continue }
-                    let icon: String
-                    let iconColor: NSColor
-                    let label: String
-                    let detail: String?
-                    switch win.role {
-                    case "browser":
-                        icon = "globe"
-                        iconColor = .systemBlue
-                        if let name = browserSessionDisplayName(for: win.targetURL, sessions: configuredSessions), let url = win.targetURL {
-                            label = name
-                            detail = url
-                        } else {
-                            label = win.targetURL ?? win.title ?? win.app
-                            detail = nil
-                        }
-                    case "terminal":
-                        icon = "terminal"
-                        iconColor = .systemGreen
-                        label = process.templateName
-                        detail = process.command
-                    default:
-                        icon = "chevron.left.forwardslash.chevron.right"
-                        iconColor = .systemPurple
-                        label = win.title ?? win.app
-                        detail = nil
-                    }
-                    let redChecks = allChecks.filter { $0.status == .failed }
-                    let eventDate: Date? =
-                        process.status == .exited
-                        ? process.exitedAt.flatMap { iso8601Formatter.date(from: $0) }
-                        : redChecks.compactMap { $0.lastRunAt.flatMap { iso8601Formatter.date(from: $0) } }.max()
-                    items.append(
-                        DashboardAttentionEntry(
-                            icon: icon, iconColor: iconColor, label: label, detail: detail, shortcut: "", processStatus: process.status,
-                            agentStatus: nil, statusChecks: allChecks, eventDate: eventDate, windowListIndex: idx + 1, agentWindowRecord: nil))
-                }
-
-                // Orphaned process entries (no captured window)
-                for process in processes where !matchedProcessIDs.contains(process.id) {
-                    let allChecks = statusResultsByProcessID[process.id] ?? []
-                    let hasFailedCheck = allChecks.contains { $0.status == .failed }
-                    guard process.status == .exited || hasFailedCheck else { continue }
-                    let redChecks = allChecks.filter { $0.status == .failed }
-                    let eventDate: Date? =
-                        process.status == .exited
-                        ? process.exitedAt.flatMap { iso8601Formatter.date(from: $0) }
-                        : redChecks.compactMap { $0.lastRunAt.flatMap { iso8601Formatter.date(from: $0) } }.max()
-                    items.append(
-                        DashboardAttentionEntry(
-                            icon: "terminal", iconColor: .systemGreen, label: process.templateName, detail: process.command, shortcut: "",
-                            processStatus: process.status, agentStatus: nil, statusChecks: allChecks, eventDate: eventDate, windowListIndex: nil,
-                            agentWindowRecord: nil))
-                }
-
-                // Agent window attention items (waiting or done)
-                for agentWin in attentionAgentWindows {
-                    let agentLabel = agentWin.label ?? "Coding Agent CLI"
-                    let agentIcon = "cpu.fill"
-                    let agentIconColor: NSColor = agentWin.status == .done ? .systemGreen : .systemOrange
-                    let eventDate = ISO8601DateFormatter().date(from: agentWin.updatedAt)
-                    items.append(
-                        DashboardAttentionEntry(
-                            icon: agentIcon, iconColor: agentIconColor, label: agentLabel, detail: nil, shortcut: "", processStatus: nil,
-                            agentStatus: agentWin.status, statusChecks: [], eventDate: eventDate, windowListIndex: nil, agentWindowRecord: agentWin))
-                }
-
-                guard !items.isEmpty else { continue }
-
-                items.sort {
-                    switch ($0.eventDate, $1.eventDate) {
-                    case (let a?, let b?): return a > b
-                    case (nil, _): return false
-                    case (_, nil): return true
-                    }
-                }
-                groups.append(DashboardGroup(projectName: project.name, workspaceID: workspace.id, workspaceName: workspace.name, items: items))
-            }
-        }
-        groups.sort {
-            switch ($0.latestDate, $1.latestDate) {
-            case (let a?, let b?): return a > b
-            case (nil, _): return false
-            case (_, nil): return true
-            }
-        }
-        return groups
-    }
+    private func buildDashboardGroups() -> [DashboardGroup] { dashboardGroups }
 
     private func showDashboardDetail() {
         clearInlineWorkspaceFieldRefs()
@@ -1350,7 +1426,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     /// Builds a window card with all status check sub-rows below it, identical to the workspace Run tab layout.
     private func dashboardWindowCard(entry: DashboardAttentionEntry, shortcut: String, action: (() async -> Void)? = nil) -> NSView {
         let mainRow = windowRow(
-            icon: entry.icon, iconColor: entry.iconColor, label: entry.label, detail: entry.detail, shortcut: shortcut,
+            icon: entry.icon, iconColor: Self.dashboardIconColor(entry.iconTint), label: entry.label, detail: entry.detail, shortcut: shortcut,
             processStatus: entry.processStatus, agentStatus: entry.agentStatus, action: action)
 
         guard !entry.statusChecks.isEmpty else { return mainRow }
@@ -1410,6 +1486,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                     return aDate > bDate
                 }
             }
+            dashboardGroups = try Self.buildDashboardGroupsSnapshot(
+                orchestrator: orchestrator, projects: projects, workspacesByProject: workspacesByProject)
             outlineView.reloadData()
             outlineView.expandItem(nil, expandChildren: true)
             refreshSelection()
@@ -1427,14 +1505,70 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         startPeriodicSidebarMetadataRefresh()
     }
 
+    private func stopBackgroundServices() {
+        periodicWorkspaceRefreshTask?.cancel()
+        periodicWorkspaceRefreshTask = nil
+        periodicUpdateCheckTask?.cancel()
+        periodicUpdateCheckTask = nil
+        periodicProcessMonitorTask?.cancel()
+        periodicProcessMonitorTask = nil
+        periodicWorktreeDiscoveryTask?.cancel()
+        periodicWorktreeDiscoveryTask = nil
+        periodicSidebarMetadataRefreshTask?.cancel()
+        periodicSidebarMetadataRefreshTask = nil
+        sidebarReloadTask?.cancel()
+        sidebarReloadTask = nil
+        pendingSidebarReloadRequest = false
+        didStartBackgroundServices = false
+    }
+
+    private func enterSetupFlow(preferredInitialCheckID: SetupCheckID? = nil) {
+        stopBackgroundServices()
+        setupManager?.stop()
+        let mgr = SetupManager()
+        mgr.onComplete = { [weak self] in
+            self?.logStartupProfile("setup_complete")
+            self?.setupManager = nil
+            self?.buildMainWindowContent()
+            self?.logStartupProfile("main_content_ready")
+            self?.showLoadingPlaceholder(message: "Loading projects and workspaces...", detail: "Muxy is preparing your workspace data.")
+            self?.logStartupProfile("loading_placeholder_ready")
+            Task { @MainActor [weak self] in await self?.loadInitialSidebarData() }
+        }
+        setupManager = mgr
+        window.contentView = mgr.makeContentView()
+        // start() can complete synchronously when all required checks already pass,
+        // which avoids a visible setup flash during normal launch.
+        mgr.start(preferredInitialCheckID: preferredInitialCheckID)
+    }
+
+    private func handleDeferredSetupRequirementIfNeeded(_ error: Error) -> Bool {
+        guard shouldRouteToDeferredSetup(for: error) else { return false }
+        enterSetupFlow(preferredInitialCheckID: .yabaiServiceRunning)
+        return true
+    }
+
+    private func shouldRouteToDeferredSetup(for error: Error) -> Bool {
+        if case let MuxyError.yabaiUnavailable(message) = error {
+            return message.localizedStandardContains("failed to connect to socket")
+        }
+        let message = error.localizedDescription
+        return message.localizedStandardContains("yabai-msg")
+            && message.localizedStandardContains("failed to connect to socket")
+    }
+
     private func loadInitialSidebarData() async {
+        logStartupProfile("sidebar_snapshot_requested")
         let result = await Self.initialSidebarDataSnapshot()
         guard !Task.isCancelled else { return }
         switch result {
         case .success(let snapshot):
+            logStartupProfile("sidebar_snapshot_received")
             applySidebarDataSnapshot(snapshot)
+            logStartupProfile("sidebar_snapshot_applied")
             startBackgroundServicesIfNeeded()
         case .failure(let error):
+            if handleDeferredSetupRequirementIfNeeded(error) { return }
             showError(error)
             showPlaceholder(message: "Muxy couldn't load workspace data.")
             startBackgroundServicesIfNeeded()
@@ -1452,7 +1586,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             guard !Task.isCancelled else { return }
             switch result {
             case .success(let snapshot): self.applySidebarDataSnapshot(snapshot)
-            case .failure(let error): self.showError(error)
+            case .failure(let error):
+                if !self.handleDeferredSetupRequirementIfNeeded(error) {
+                    self.showError(error)
+                }
             }
             self.sidebarReloadTask = nil
             if self.pendingSidebarReloadRequest {
@@ -1463,6 +1600,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     }
 
     private func applySidebarDataSnapshot(_ snapshot: SidebarDataSnapshot) {
+        logStartupProfile("apply_snapshot_start")
         pendingWorktreeDiscoveryReload = false
         configCache = snapshot.config
         loadShortcutSpecs()
@@ -1470,10 +1608,14 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         workspacesByProject = snapshot.workspacesByProject
         gitActivityByWorkspaceID = snapshot.gitActivityByWorkspaceID
         workspaceRuntimeStatusByID = snapshot.workspaceRuntimeStatusByID
+        dashboardGroups = snapshot.dashboardGroups
         outlineView.reloadData()
         outlineView.expandItem(nil, expandChildren: true)
+        logStartupProfile("apply_snapshot_outline_ready")
         refreshSelection()
+        logStartupProfile("apply_snapshot_selection_ready")
         updateDashboardSidebarBadge()
+        logStartupProfile("apply_snapshot_dashboard_badge_ready", details: "group_count=\(dashboardGroups.count)")
         if showingDashboard { showDashboardDetail() }
     }
 
@@ -4666,7 +4808,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         return []
     }
 
-    private func browserSessionDisplayName(for targetURL: String?, sessions: [BrowserSession]) -> String? {
+    nonisolated private static func browserSessionDisplayName(for targetURL: String?, sessions: [BrowserSession]) -> String? {
         guard let targetURL, !targetURL.isEmpty else { return nil }
         var bestMatch: (length: Int, name: String)?
         for session in sessions {
@@ -4793,6 +4935,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     private func setupShortcutMonitor() {
         shortcutMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
             guard let self else { return event }
+            self.recordStartupInteraction(kind: "key_down")
             if self.handleShortcutCaptureEvent(event: event) { return nil }
             if self.handleNewWorkspaceShortcut(event: event) { return nil }
             if self.handleFormCancelShortcut(event: event) { return nil }

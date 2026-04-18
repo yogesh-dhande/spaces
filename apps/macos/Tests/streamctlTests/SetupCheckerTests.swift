@@ -60,12 +60,12 @@ final class SetupCheckerTests: XCTestCase {
 
     // MARK: - yabai service running check
 
-    // Tests isYabaiServiceRunning returns true when query --spaces returns valid JSON array.
+    // Tests isYabaiServiceRunning returns true when signal --list succeeds.
     func testIsYabaiServiceRunning_success() throws {
         let script = """
             #!/bin/bash
-            if [[ "$*" == *"query --spaces"* ]]; then
-              echo '[{"index":1}]'
+            if [[ "$*" == *"signal --list"* ]]; then
+              echo '[]'
               exit 0
             fi
             echo 'unhandled' >&2
@@ -77,7 +77,7 @@ final class SetupCheckerTests: XCTestCase {
         }
     }
 
-    // Tests isYabaiServiceRunning returns false when query --spaces fails.
+    // Tests isYabaiServiceRunning returns false when signal --list fails.
     func testIsYabaiServiceRunning_failure() throws {
         let script = """
             #!/bin/bash
@@ -146,7 +146,7 @@ final class SetupCheckerTests: XCTestCase {
         let yabaiScript = """
             #!/bin/bash
             if [[ "$*" == *"--version"* ]]; then echo 'yabai 7.0.0'; exit 0; fi
-            if [[ "$*" == *"query --spaces"* ]]; then echo '[{"index":1}]'; exit 0; fi
+            if [[ "$*" == *"signal --list"* ]]; then echo '[]'; exit 0; fi
             if [[ "$*" == *"query --windows"* ]]; then echo '[{"id":1}]'; exit 0; fi
             exit 1
             """
@@ -175,6 +175,26 @@ final class SetupCheckerTests: XCTestCase {
         XCTAssertEqual(results[0].id, .iterm2Installed)
         let firstFailIndex = results.firstIndex(where: { !$0.passed })
         XCTAssertEqual(firstFailIndex, 0)
+    }
+
+    // Tests runStartupBlockingChecks skips the deferred yabai readiness checks.
+    func testRunStartupBlockingChecks_skipsDeferredYabaiChecks() throws {
+        let yabaiScript = """
+            #!/bin/bash
+            if [[ "$*" == *"--version"* ]]; then echo 'yabai 7.0.0'; exit 0; fi
+            echo "unexpected command: $*" >&2
+            exit 1
+            """
+        let mock = MockAvailableIterm2()
+        mock.availableResult = true
+        try withMockCommands(["yabai": yabaiScript]) {
+            let tmux = MockAvailableTmux()
+            tmux.availableResult = true
+            let checker = SetupChecker(iterm2: mock, tmux: tmux)
+            let results = checker.runStartupBlockingChecks()
+            XCTAssertEqual(results.map(\.id), [.iterm2Installed, .tmuxInstalled, .yabaiInstalled])
+            XCTAssertTrue(results.allSatisfy(\.passed))
+        }
     }
 
     // MARK: - Helpers

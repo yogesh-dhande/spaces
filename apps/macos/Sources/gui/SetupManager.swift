@@ -2,6 +2,14 @@ import AppKit
 import Foundation
 import appctl
 
+protocol SetupChecking {
+    func run(_ id: SetupCheckID) -> Bool
+    func runAll() -> [SetupCheckResult]
+    func runStartupBlockingChecks() -> [SetupCheckResult]
+}
+
+extension SetupChecker: SetupChecking {}
+
 /// Step metadata for the onboarding UI.
 /// `ids` lists every SetupCheckID that must pass for this step to be considered done.
 private struct SetupStep {
@@ -21,7 +29,7 @@ private enum SetupStepAction {
 
 @MainActor
 final class SetupManager: NSObject {
-    private let checker = SetupChecker()
+    private let checker: any SetupChecking
 
     // Steps 3 & 4 are combined: yabai's --spaces query also requires Accessibility, so
     // "service running" and "accessibility granted" cannot be detected independently.
@@ -77,8 +85,18 @@ final class SetupManager: NSObject {
     private weak var detailCommandBox: NSView?
     private weak var detailStatusSpinner: NSProgressIndicator?
     private weak var detailStatusLabel: NSTextField?
+    private(set) var isShowingSetupFlow = false
+    var currentStepTitleForTesting: String? {
+        guard isShowingSetupFlow, currentIndex < steps.count else { return nil }
+        return steps[currentIndex].title
+    }
 
     var onComplete: (() -> Void)?
+
+    init(checker: any SetupChecking = SetupChecker()) {
+        self.checker = checker
+        super.init()
+    }
 
     // MARK: - Public API
 
@@ -122,15 +140,21 @@ final class SetupManager: NSObject {
         return container
     }
 
-    func start() {
-        let results = checker.runAll()
+    func start(preferredInitialCheckID: SetupCheckID? = nil) {
+        let results = if preferredInitialCheckID == nil {
+            checker.runStartupBlockingChecks()
+        } else {
+            checker.runAll()
+        }
         for result in results { stepStatuses[result.id] = result.passed }
 
-        guard let firstFailIndex = steps.indices.first(where: { !allIDsPassed(for: steps[$0]) }) else {
+        guard let firstFailIndex = initialFailIndex(preferredInitialCheckID: preferredInitialCheckID) else {
+            isShowingSetupFlow = false
             onComplete?()
             return
         }
 
+        isShowingSetupFlow = true
         currentIndex = firstFailIndex
         updateChecklistDisplay()
         updateDetailDisplay()
@@ -492,6 +516,7 @@ final class SetupManager: NSObject {
             updateDetailDisplay()
             startPolling()
         } else {
+            isShowingSetupFlow = false
             stop()
             onComplete?()
         }
@@ -501,6 +526,24 @@ final class SetupManager: NSObject {
 
     private func allIDsPassed(for step: SetupStep) -> Bool {
         step.ids.allSatisfy { stepStatuses[$0] ?? false }
+    }
+
+    private func hasStartupBlockingFailure(for step: SetupStep) -> Bool {
+        let blockingIDs = step.ids.filter { SetupChecker.startupBlockingCheckIDs.contains($0) }
+        guard !blockingIDs.isEmpty else { return false }
+        return blockingIDs.contains { !(stepStatuses[$0] ?? false) }
+    }
+
+    private func initialFailIndex(preferredInitialCheckID: SetupCheckID?) -> Int? {
+        if let preferredInitialCheckID,
+            let preferredStepIndex = steps.firstIndex(where: { $0.ids.contains(preferredInitialCheckID) })
+        {
+            if let preferredFailure = steps.indices.dropFirst(preferredStepIndex).first(where: { !allIDsPassed(for: steps[$0]) }) {
+                return preferredFailure
+            }
+            return steps.indices.first(where: { !allIDsPassed(for: steps[$0]) })
+        }
+        return steps.indices.first(where: { hasStartupBlockingFailure(for: steps[$0]) })
     }
 
     // MARK: - Actions
