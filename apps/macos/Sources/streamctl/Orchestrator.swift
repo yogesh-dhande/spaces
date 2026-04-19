@@ -50,53 +50,6 @@ public final class MuxyOrchestrator {
         let terminalID: String?
     }
 
-    private final class ItermFocusPulseController: @unchecked Sendable {
-        private struct PulseState {
-            let token: UUID
-            let backgroundColor: (r: Int, g: Int, b: Int)
-        }
-
-        private let lock = NSLock()
-        private var stateByWindowID: [Int: PulseState] = [:]
-
-        func pulse(windowID: Int, color: (r: Int, g: Int, b: Int), iterm: Iterm2Adapter) {
-            let baselineColor: (r: Int, g: Int, b: Int)
-            let token = UUID()
-            lock.lock()
-            if let existing = stateByWindowID[windowID] {
-                baselineColor = existing.backgroundColor
-                stateByWindowID[windowID] = PulseState(token: token, backgroundColor: baselineColor)
-                lock.unlock()
-            } else {
-                lock.unlock()
-                guard let fetchedBaseline = try? iterm.backgroundColor(windowID: windowID) else {
-                    try? iterm.pulseBackground(windowID: windowID, pulseColor: color)
-                    return
-                }
-                baselineColor = fetchedBaseline
-                lock.lock()
-                stateByWindowID[windowID] = PulseState(token: token, backgroundColor: baselineColor)
-                lock.unlock()
-            }
-
-            guard (try? iterm.setBackgroundColor(windowID: windowID, color: color)) != nil else { return }
-
-            Task.detached { [controller = self, iterm] in
-                try? await Task.sleep(for: .milliseconds(300))
-                guard let restoreColor = controller.finishPulse(windowID: windowID, token: token) else { return }
-                _ = try? iterm.setBackgroundColor(windowID: windowID, color: restoreColor)
-            }
-        }
-
-        private func finishPulse(windowID: Int, token: UUID) -> (r: Int, g: Int, b: Int)? {
-            lock.lock()
-            defer { lock.unlock() }
-            guard let current = stateByWindowID[windowID], current.token == token else { return nil }
-            stateByWindowID.removeValue(forKey: windowID)
-            return current.backgroundColor
-        }
-    }
-
     private enum WorkspaceNavigationCursor: Equatable {
         case terminal(String)
         case browserWindowURL(Int, String)
@@ -132,13 +85,14 @@ public final class MuxyOrchestrator {
     private var browserWindowScanCacheByWorkspace: [String: BrowserWindowScanCacheEntry] = [:]
     private let itermTerminalSessionLock = NSLock()
     private var itermTerminalSessionByWorkspaceAndWindowID: [String: ItermTerminalSessionMetadata] = [:]
-    private let itermFocusPulseController = ItermFocusPulseController()
+    private let terminalFocusPulseController: TerminalFocusPulseControlling
 
     public init(
         store: SQLiteStore, projectsRootDirectory: URL? = nil, workspacesRootDirectory: URL? = nil, git: GitClient = .init(),
         yabai: YabaiAdapter = .init(), iterm: Iterm2Adapter = .init(), ghostty: GhosttyAdapter = .init(), tmux: TmuxAdapter = .init(),
         chrome: ChromeAdapter = .init(),
         browserWindowScanDebounceInterval: TimeInterval = PollingConstants.browserWindowScanDebounceInterval,
+        terminalFocusPulseController: TerminalFocusPulseControlling = TerminalFocusPulseController(),
         currentDate: @escaping () -> Date = Date.init
     ) {
         self.store = store
@@ -151,6 +105,7 @@ public final class MuxyOrchestrator {
         self.chrome = chrome
         self.workspacesRootDirectoryURL = workspacesRootDirectory
         self.browserWindowScanDebounceInterval = browserWindowScanDebounceInterval
+        self.terminalFocusPulseController = terminalFocusPulseController
         self.currentDate = currentDate
         if ProcessInfo.processInfo.environment["DEBUG"] == "1" {
             fputs("muxy: DEBUG=1 enabled (browser/cycle profiling active)\n", stderr)
@@ -1546,12 +1501,7 @@ public final class MuxyOrchestrator {
         if !focused, window.role == "browser", let targetURL = window.targetURL {
             try? markBrowserWindowMissing(workspaceID: workspaceID, targetURL: targetURL, windowID: id)
         }
-        if focused, window.role == "terminal", window.app == TerminalHost.iterm2.appName,
-            (try? itermFocusPulseEnabled()) ?? SettingsKey.defaultItermFocusPulseEnabled
-        {
-            let pulseColor = (try? itermFocusPulseColor()) ?? (r: 46, g: 41, b: 14)
-            itermFocusPulseController.pulse(windowID: id, color: pulseColor, iterm: iterm)
-        }
+        if focused, window.role == "terminal" { pulseTerminalWindowIfNeeded(windowID: id) }
         logBrowserFocus(
             "workspace=\(workspaceID) path=yabai window=\(id) success=\(focused ? "1" : "0") elapsed_ms=\(elapsedMS(since: focusStartedAt))")
         return focused
@@ -1625,6 +1575,12 @@ public final class MuxyOrchestrator {
     private func terminalAppName(for terminalHost: TerminalHost) -> String { terminalHost.appName }
 
     private func isManagedTerminalApp(_ appName: String?) -> Bool { terminalHost(for: appName) != nil }
+
+    private func pulseTerminalWindowIfNeeded(windowID: Int) {
+        guard (try? itermFocusPulseEnabled()) ?? SettingsKey.defaultItermFocusPulseEnabled else { return }
+        let color = (try? itermFocusPulseColor()) ?? (r: 46, g: 41, b: 14)
+        terminalFocusPulseController.pulse(windowID: windowID, color: color, yabai: yabai)
+    }
 
     private func terminalAdapterAvailable(_ terminalHost: TerminalHost) -> Bool {
         switch terminalHost {
@@ -3661,12 +3617,7 @@ public final class MuxyOrchestrator {
         guard isManagedTerminalApp(process.terminalApp) else { return false }
         guard let trackedWindowID = process.windowID else { return false }
         let focused = (try? yabai.focusWindow(id: trackedWindowID)) ?? false
-        if focused, process.terminalApp == TerminalHost.iterm2.appName,
-            (try? itermFocusPulseEnabled()) ?? SettingsKey.defaultItermFocusPulseEnabled
-        {
-            let pulseColor = (try? itermFocusPulseColor()) ?? (r: 46, g: 41, b: 14)
-            itermFocusPulseController.pulse(windowID: trackedWindowID, color: pulseColor, iterm: iterm)
-        }
+        if focused { pulseTerminalWindowIfNeeded(windowID: trackedWindowID) }
         return focused
     }
 
@@ -3684,10 +3635,7 @@ public final class MuxyOrchestrator {
     private func focusAgentWindowRecord(_ record: AgentWindowRecord) throws -> Bool {
         guard let windowID = try trackedAgentWindowID(record) else { return false }
         let focused = (try? yabai.focusWindow(id: windowID)) ?? false
-        if focused, record.provider == .iterm2, (try? itermFocusPulseEnabled()) ?? SettingsKey.defaultItermFocusPulseEnabled {
-            let color = (try? itermFocusPulseColor()) ?? (r: 46, g: 41, b: 14)
-            itermFocusPulseController.pulse(windowID: windowID, color: color, iterm: iterm)
-        }
+        if focused { pulseTerminalWindowIfNeeded(windowID: windowID) }
         return focused
     }
 

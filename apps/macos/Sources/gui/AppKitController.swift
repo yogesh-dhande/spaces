@@ -171,6 +171,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     /// Maps sequential window shortcut numbers (1-9) to focus targets for the current dashboard view.
     private var dashboardFocusRequestMap: [Int: WindowFocusRequest] = [:]
     private var bufferedWindowShortcutIndices: [Int] = []
+    private var deferredExternalWindowHideTask: Task<Void, Never>?
 
     private struct WindowShortcutProfile {
         let index: Int
@@ -1158,6 +1159,16 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         switch action {
         case .focus, .open:
             return true
+        }
+    }
+
+    nonisolated static func hideDelayAfterSuccessfulExternalWindowAction(_ succeeded: Bool, action: ExternalWindowAction) -> Duration? {
+        guard shouldHideAfterSuccessfulExternalWindowAction(succeeded, action: action) else { return nil }
+        switch action {
+        case .focus:
+            return .milliseconds(400)
+        case .open:
+            return nil
         }
     }
 
@@ -2330,11 +2341,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             constrainFormFieldToFillWidth(row, in: stack)
         }
 
-        // --- iTerm2 focus pulse ---
-        stack.addArrangedSubview(label(text: "iTerm2 focus pulse"))
+        // --- terminal focus pulse ---
+        stack.addArrangedSubview(label(text: "Terminal focus pulse"))
         let pulseColorNote = NSTextField(
             labelWithString:
-                "Briefly changes the iTerm2 background color when a terminal window is focused. Default color: \(SettingsKey.defaultItermFocusPulseColor)."
+                "Briefly overlays the focused terminal window in iTerm2 or Ghostty. Default color: \(SettingsKey.defaultItermFocusPulseColor)."
         )
         pulseColorNote.font = .systemFont(ofSize: 11)
         pulseColorNote.textColor = .secondaryLabelColor
@@ -6083,8 +6094,19 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     }
 
     private func hideAfterSuccessfulExternalWindowAction(_ action: ExternalWindowAction) {
-        guard Self.shouldHideAfterSuccessfulExternalWindowAction(true, action: action) else { return }
+        let hideDelay = Self.hideDelayAfterSuccessfulExternalWindowAction(true, action: action)
+        guard hideDelay != nil || Self.shouldHideAfterSuccessfulExternalWindowAction(true, action: action) else { return }
+        deferredExternalWindowHideTask?.cancel()
         dismissTooltipOverlay()
+        if let hideDelay {
+            deferredExternalWindowHideTask = Task { @MainActor [weak self] in
+                try? await Task.sleep(for: hideDelay)
+                guard let self, !Task.isCancelled else { return }
+                self.deferredExternalWindowHideTask = nil
+                NSApp.hide(nil)
+            }
+            return
+        }
         NSApp.hide(nil)
     }
 

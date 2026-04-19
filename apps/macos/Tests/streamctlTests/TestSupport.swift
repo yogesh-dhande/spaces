@@ -186,6 +186,18 @@ class MockGhosttyAdapter: GhosttyAdapter, @unchecked Sendable {
     }
 }
 
+final class MockTerminalFocusPulseController: TerminalFocusPulseControlling, @unchecked Sendable {
+    var pulseCallCount = 0
+    var pulsedWindowIDs: [Int] = []
+    var pulseColors: [(r: Int, g: Int, b: Int)] = []
+
+    func pulse(windowID: Int, color: (r: Int, g: Int, b: Int), yabai _: YabaiAdapter) {
+        pulseCallCount += 1
+        pulsedWindowIDs.append(windowID)
+        pulseColors.append(color)
+    }
+}
+
 class MockTmuxAdapter: TmuxAdapter, @unchecked Sendable {
     var available = true
     var windowsBySession: [String: [TmuxWindowInfo]] = [:]

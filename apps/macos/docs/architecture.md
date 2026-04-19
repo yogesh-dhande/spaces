@@ -122,6 +122,7 @@ It also lets lifecycle state stay explicit while runtime health is derived from 
 ## Window and Focus Architecture
 - yabai provides stable window identity and cross-app focusing.
 - iTerm2, Ghostty, and Chrome AppleScript integrations add app-specific behavior on top of yabai, such as returning launch-time terminal IDs or selecting the intended browser target.
+- Terminal focus pulsing is terminal-agnostic: Muxy queries the target yabai window and briefly presents an AppKit overlay aligned to that window instead of mutating terminal-specific appearance settings.
 - Tracked windows are persisted so Muxy can refocus or clean up only the windows it owns.
 - Direct focus requests auto-recover stale browser-session windows by reopening and re-tracking them, while process and generic window failures still surface typed missing-window errors to the GUI.
 - Window cycling is tolerant of stale tracked yabai IDs and keeps advancing until it finds the next live target.

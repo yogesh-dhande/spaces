@@ -29,6 +29,13 @@ public final class YabaiAdapter {
         } catch { return nil }
     }
 
+    public func window(id: Int) throws -> YabaiWindow? {
+        do {
+            let json = try Shell.runAndCapture(["yabai", "-m", "query", "--windows", "--window", String(id)])
+            return try decodeObject(json)
+        } catch { return nil }
+    }
+
     public func validate(displayIndex: Int, spaceIndex: Int) throws -> YabaiValidation {
         let displays = try listDisplays()
         let spaces = try listSpaces()

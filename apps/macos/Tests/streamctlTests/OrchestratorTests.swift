@@ -3809,7 +3809,9 @@ final class OrchestratorTests: XCTestCase {
     }
 
     private func makeOrchestratorWithWorkspace(
-        editor: EditorPreference? = nil, browserWindowScanDebounceInterval: TimeInterval = 10, currentDate: @escaping () -> Date = Date.init
+        editor: EditorPreference? = nil, browserWindowScanDebounceInterval: TimeInterval = 10,
+        terminalFocusPulseController: TerminalFocusPulseControlling = MockTerminalFocusPulseController(),
+        currentDate: @escaping () -> Date = Date.init
     ) throws -> (MuxyOrchestrator, SQLiteStore, ProjectRecord, WorkspaceRecord, URL) {
         let root = try makeTempDirectory()
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
@@ -3817,7 +3819,8 @@ final class OrchestratorTests: XCTestCase {
         let store = try makeTemporaryStore()
         let mockTmux = MockTmuxAdapter()
         let orchestrator = MuxyOrchestrator(
-            store: store, tmux: mockTmux, browserWindowScanDebounceInterval: browserWindowScanDebounceInterval, currentDate: currentDate)
+            store: store, tmux: mockTmux, browserWindowScanDebounceInterval: browserWindowScanDebounceInterval,
+            terminalFocusPulseController: terminalFocusPulseController, currentDate: currentDate)
         if let editor { _ = try orchestrator.updateEditorPreference(editor) }
 
         let project = try orchestrator.addProject(dir: projectDir.path)
@@ -3827,7 +3830,9 @@ final class OrchestratorTests: XCTestCase {
     }
 
     private func makeMockItermOrchestratorWithWorkspace(
-        browserWindowScanDebounceInterval: TimeInterval = 10, currentDate: @escaping () -> Date = Date.init
+        browserWindowScanDebounceInterval: TimeInterval = 10,
+        terminalFocusPulseController: TerminalFocusPulseControlling = MockTerminalFocusPulseController(),
+        currentDate: @escaping () -> Date = Date.init
     ) throws -> (MuxyOrchestrator, SQLiteStore, ProjectRecord, WorkspaceRecord, URL, MockIterm2Adapter, MockTmuxAdapter) {
         let root = try makeTempDirectory()
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
@@ -3838,7 +3843,7 @@ final class OrchestratorTests: XCTestCase {
         mockIterm.pairedTmux = mockTmux
         let orchestrator = MuxyOrchestrator(
             store: store, iterm: mockIterm, tmux: mockTmux, browserWindowScanDebounceInterval: browserWindowScanDebounceInterval,
-            currentDate: currentDate)
+            terminalFocusPulseController: terminalFocusPulseController, currentDate: currentDate)
 
         let project = try orchestrator.addProject(dir: projectDir.path)
         let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
@@ -4681,9 +4686,11 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertEqual(b, 128)
     }
 
-    // Tests focus iterm window triggers background pulse by arranging representative inputs and asserting the expected result.
-    func testFocusItermWindowTriggersBackgroundPulse() throws {
-        let (orchestrator, store, _, workspace, _, mockIterm, mockTmux) = try makeMockItermOrchestratorWithWorkspace()
+    // Tests focus terminal window triggers overlay pulse for iTerm2 by arranging representative inputs and asserting the expected result.
+    func testFocusItermWindowTriggersOverlayPulse() throws {
+        let pulseController = MockTerminalFocusPulseController()
+        let (orchestrator, store, _, workspace, _, _, mockTmux) = try makeMockItermOrchestratorWithWorkspace(
+            terminalFocusPulseController: pulseController)
         let tmuxWindow = mockTmux.addWindow(sessionName: "muxy-\(workspace.id)", id: "@1", name: "api", index: 0, isActive: true)
 
         try store.upsert(
@@ -4705,20 +4712,18 @@ final class OrchestratorTests: XCTestCase {
             }
         }
 
-        // Pulse is dispatched asynchronously; allow the Task to run.
-        let deadline = Date().addingTimeInterval(2)
-        while mockIterm.pulseCallCount == 0, Date() < deadline { RunLoop.current.run(until: Date().addingTimeInterval(0.05)) }
-
-        XCTAssertEqual(mockIterm.pulseCallCount, 1)
-        XCTAssertEqual(mockIterm.lastPulsedWindowID, 555)
-        XCTAssertEqual(mockIterm.lastPulseColor?.r, 46)
-        XCTAssertEqual(mockIterm.lastPulseColor?.g, 41)
-        XCTAssertEqual(mockIterm.lastPulseColor?.b, 14)
+        XCTAssertEqual(pulseController.pulseCallCount, 1)
+        XCTAssertEqual(pulseController.pulsedWindowIDs, [555])
+        XCTAssertEqual(pulseController.pulseColors[0].r, 46)
+        XCTAssertEqual(pulseController.pulseColors[0].g, 41)
+        XCTAssertEqual(pulseController.pulseColors[0].b, 14)
     }
 
-    // Tests focus iterm window uses configured pulse color by arranging representative inputs and asserting the expected result.
-    func testFocusItermWindowUsesConfiguredPulseColor() throws {
-        let (orchestrator, store, _, workspace, _, mockIterm, mockTmux) = try makeMockItermOrchestratorWithWorkspace()
+    // Tests focus terminal window uses configured overlay pulse color by arranging representative inputs and asserting the expected result.
+    func testFocusItermWindowUsesConfiguredOverlayPulseColor() throws {
+        let pulseController = MockTerminalFocusPulseController()
+        let (orchestrator, store, _, workspace, _, _, mockTmux) = try makeMockItermOrchestratorWithWorkspace(
+            terminalFocusPulseController: pulseController)
         let tmuxWindow = mockTmux.addWindow(sessionName: "muxy-\(workspace.id)", id: "@1", name: "api", index: 0, isActive: true)
 
         try orchestrator.setItermFocusPulseColor(r: 0, g: 100, b: 200)
@@ -4741,13 +4746,10 @@ final class OrchestratorTests: XCTestCase {
             }
         }
 
-        let deadline = Date().addingTimeInterval(2)
-        while mockIterm.pulseCallCount == 0, Date() < deadline { RunLoop.current.run(until: Date().addingTimeInterval(0.05)) }
-
-        XCTAssertEqual(mockIterm.pulseCallCount, 1)
-        XCTAssertEqual(mockIterm.lastPulseColor?.r, 0)
-        XCTAssertEqual(mockIterm.lastPulseColor?.g, 100)
-        XCTAssertEqual(mockIterm.lastPulseColor?.b, 200)
+        XCTAssertEqual(pulseController.pulseCallCount, 1)
+        XCTAssertEqual(pulseController.pulseColors[0].r, 0)
+        XCTAssertEqual(pulseController.pulseColors[0].g, 100)
+        XCTAssertEqual(pulseController.pulseColors[0].b, 200)
     }
 
     // Tests iterm focus pulse enabled returns true by default when not set.
@@ -4769,7 +4771,8 @@ final class OrchestratorTests: XCTestCase {
     func testFocusItermWindowSkipsPulseWhenDisabled() throws {
         let store = try makeTemporaryStore()
         let mockIterm = MockIterm2Adapter()
-        let orchestrator = MuxyOrchestrator(store: store, iterm: mockIterm)
+        let pulseController = MockTerminalFocusPulseController()
+        let orchestrator = MuxyOrchestrator(store: store, iterm: mockIterm, terminalFocusPulseController: pulseController)
 
         let root = try makeTempDirectory()
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
@@ -4797,18 +4800,15 @@ final class OrchestratorTests: XCTestCase {
             }
         }
 
-        // Allow any async pulse Task to run.
-        RunLoop.current.run(until: Date().addingTimeInterval(0.2))
-
-        XCTAssertEqual(mockIterm.pulseCallCount, 0)
+        XCTAssertEqual(pulseController.pulseCallCount, 0)
     }
 
-    // Tests overlapping iTerm focus pulses restore the original background instead of leaving the pulse color behind.
-    func testFocusItermWindowOverlappingPulsesRestoreOriginalBackground() throws {
-        let (orchestrator, store, _, workspace, _, mockIterm, mockTmux) = try makeMockItermOrchestratorWithWorkspace()
+    // Tests overlapping focus actions dispatch overlay pulses each time instead of mutating terminal colors.
+    func testFocusItermWindowOverlappingPulsesDispatchOverlayPulses() throws {
+        let pulseController = MockTerminalFocusPulseController()
+        let (orchestrator, store, _, workspace, _, _, mockTmux) = try makeMockItermOrchestratorWithWorkspace(
+            terminalFocusPulseController: pulseController)
         let tmuxWindow = mockTmux.addWindow(sessionName: "muxy-\(workspace.id)", id: "@1", name: "api", index: 0, isActive: true)
-        mockIterm.managedPulseSupported = true
-        mockIterm.backgroundColorByWindowID[558] = (r: 12, g: 34, b: 56)
 
         try store.upsert(
             window: WindowRecord(
@@ -4830,30 +4830,44 @@ final class OrchestratorTests: XCTestCase {
             }
         }
 
-        let deadline = Date().addingTimeInterval(2)
-        while mockIterm.setBackgroundColorCallCount < 3, Date() < deadline {
-            RunLoop.current.run(until: Date().addingTimeInterval(0.05))
+        XCTAssertEqual(pulseController.pulseCallCount, 2)
+        XCTAssertEqual(pulseController.pulsedWindowIDs, [558, 558])
+    }
+
+    // Tests focus Ghostty window triggers the same overlay pulse path by arranging representative inputs and asserting the expected result.
+    func testFocusGhosttyWindowTriggersOverlayPulse() throws {
+        let store = try makeTemporaryStore()
+        let pulseController = MockTerminalFocusPulseController()
+        let orchestrator = MuxyOrchestrator(
+            store: store, ghostty: MockGhosttyAdapter(), tmux: MockTmuxAdapter(), terminalFocusPulseController: pulseController)
+
+        let root = try makeTempDirectory()
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
+
+        try store.upsert(
+            window: WindowRecord(
+                id: UUID().uuidString, workspaceID: workspace.id, app: "Ghostty", title: "api", windowID: 559, role: "terminal", orderIndex: 0,
+                lastSeenAt: "now"))
+        try store.upsert(
+            runningProcess: RunningProcessRecord(
+                id: UUID().uuidString, workspaceID: workspace.id, templateName: "api", command: "npm run api", terminalApp: "Ghostty", windowID: 559,
+                itermSessionID: nil, itermTabIndex: nil, pid: 1234, status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now",
+                exitedAt: nil))
+
+        try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) {
+            try withEnv(
+                name: "YABAI_WINDOWS_JSON",
+                value: #"[{"id":559,"pid":11,"app":"Ghostty","title":"api","space":1,"display":1,"is-sticky":false,"is-hidden":false,"is-visible":true,"is-native-fullscreen":false}]"#
+            ) {
+                try orchestrator.focusWorkspaceWindow(workspaceID: workspace.id, index: 1)
+            }
         }
 
-        XCTAssertEqual(mockIterm.backgroundColorReadCount, 1)
-        XCTAssertEqual(mockIterm.setBackgroundColorCallCount, 3)
-        XCTAssertEqual(mockIterm.backgroundColorWrites.count, 3)
-        XCTAssertEqual(mockIterm.backgroundColorWrites[0].windowID, 558)
-        XCTAssertEqual(mockIterm.backgroundColorWrites[0].color.r, 46)
-        XCTAssertEqual(mockIterm.backgroundColorWrites[0].color.g, 41)
-        XCTAssertEqual(mockIterm.backgroundColorWrites[0].color.b, 14)
-        XCTAssertEqual(mockIterm.backgroundColorWrites[1].windowID, 558)
-        XCTAssertEqual(mockIterm.backgroundColorWrites[1].color.r, 46)
-        XCTAssertEqual(mockIterm.backgroundColorWrites[1].color.g, 41)
-        XCTAssertEqual(mockIterm.backgroundColorWrites[1].color.b, 14)
-        XCTAssertEqual(mockIterm.backgroundColorWrites[2].windowID, 558)
-        XCTAssertEqual(mockIterm.backgroundColorWrites[2].color.r, 12)
-        XCTAssertEqual(mockIterm.backgroundColorWrites[2].color.g, 34)
-        XCTAssertEqual(mockIterm.backgroundColorWrites[2].color.b, 56)
-        XCTAssertEqual(mockIterm.backgroundColorByWindowID[558]?.r, 12)
-        XCTAssertEqual(mockIterm.backgroundColorByWindowID[558]?.g, 34)
-        XCTAssertEqual(mockIterm.backgroundColorByWindowID[558]?.b, 56)
-        XCTAssertEqual(mockIterm.pulseCallCount, 0)
+        XCTAssertEqual(pulseController.pulseCallCount, 1)
+        XCTAssertEqual(pulseController.pulsedWindowIDs, [559])
     }
 
     // MARK: - resolveEnvVars
