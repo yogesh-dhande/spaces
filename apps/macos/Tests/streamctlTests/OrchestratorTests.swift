@@ -955,6 +955,34 @@ final class OrchestratorTests: XCTestCase {
         let unchanged = try store.runningProcesses(workspaceID: workspace.id).first
         XCTAssertEqual(unchanged?.status, .running)
     }
+
+    // Tests check and update process statuses prefers a live tmux session pid over a stale tracked pid for managed terminals.
+    func testCheckAndUpdateProcessStatusesPrefersLiveTmuxSessionPIDForManagedProcess() throws {
+        let root = try makeTempDirectory()
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let store = try makeTemporaryStore()
+        let mockTmux = MockTmuxAdapter()
+        mockTmux.nextPanePID = Int(ProcessInfo.processInfo.processIdentifier)
+        let orchestrator = MuxyOrchestrator(store: store, ghostty: MockGhosttyAdapter(), tmux: mockTmux)
+
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
+        _ = mockTmux.addWindow(sessionName: "muxy-\(workspace.id)-web_server", id: "@1", name: "web server", index: 0, isActive: true)
+
+        let runningProcess = RunningProcessRecord(
+            id: UUID().uuidString, workspaceID: workspace.id, templateName: "web server", command: "npm run dev", terminalApp: "Ghostty",
+            windowID: 559, itermSessionID: "ghostty-terminal-1", itermTabIndex: nil, tmuxWindowID: nil, pid: 2_000_000, status: .running,
+            logPath: nil, lastOutputAt: nil, startedAt: "2026-01-01T00:00:00Z", exitedAt: nil)
+        try store.upsert(runningProcess: runningProcess)
+
+        let didUpdate = try orchestrator.checkAndUpdateProcessStatuses()
+
+        XCTAssertFalse(didUpdate)
+        let unchanged = try store.runningProcesses(workspaceID: workspace.id).first
+        XCTAssertEqual(unchanged?.status, .running)
+    }
+
     // Tests check and update process statuses only checks running processes by arranging representative inputs and asserting the expected result.
     func testCheckAndUpdateProcessStatusesOnlyChecksRunningProcesses() throws {
         let root = try makeTempDirectory()

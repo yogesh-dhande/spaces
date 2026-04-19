@@ -1559,11 +1559,22 @@ public final class MuxyOrchestrator {
 
     private func tmuxSessionName(workspaceID: String) -> String { "muxy-\(workspaceID)" }
 
-    private func terminalTargetID(process: RunningProcessRecord) -> String? { process.itermSessionID }
+    private func terminalTargetID(process: RunningProcessRecord) -> String? { process.terminalTrackingKey }
 
-    private func terminalTargetID(record: AgentWindowRecord) -> String? { record.itermSessionID }
+    private func terminalTargetID(record: AgentWindowRecord) -> String? {
+        if record.provider == .ghostty, let windowID = record.yabaiWindowID ?? record.windowID {
+            return "window:\(windowID)"
+        }
+        guard let sessionID = record.itermSessionID, !sessionID.isEmpty else {
+            if let windowID = record.yabaiWindowID ?? record.windowID {
+                return "window:\(windowID)"
+            }
+            return nil
+        }
+        return "terminal:\(sessionID)"
+    }
 
-    private func terminalTargetID(window: WindowRecord) -> String? { window.itermSessionID }
+    private func terminalTargetID(window: WindowRecord) -> String? { window.terminalTrackingKey }
 
     private func configuredTerminalHost() throws -> TerminalHost { try store.appConfig().terminalHost }
 
@@ -3220,6 +3231,9 @@ public final class MuxyOrchestrator {
     }
 
     private func resolvedRuntimePID(for process: RunningProcessRecord) -> Int? {
+        if let tmuxRuntimePID = resolvedTmuxRuntimePID(for: process) {
+            return tmuxRuntimePID
+        }
         if let pid = process.pid, pid > 0 {
             if isProcessAlive(pid: pid) { return pid }
             guard isManagedTerminalApp(process.terminalApp) else { return pid }
@@ -3230,6 +3244,15 @@ public final class MuxyOrchestrator {
         guard isManagedTerminalApp(process.terminalApp) else { return nil }
         guard let pidFile = try? processRuntimePaths(workspaceID: process.workspaceID, name: process.templateName).pidFile else { return nil }
         return runtimePID(fromFile: pidFile)
+    }
+
+    private func resolvedTmuxRuntimePID(for process: RunningProcessRecord) -> Int? {
+        guard isManagedTerminalApp(process.terminalApp) else { return nil }
+        let sessionName = processTmuxSessionName(workspaceID: process.workspaceID, processName: process.templateName)
+        guard let tmuxWindow = try? tmux.currentWindow(sessionName: sessionName), let panePID = tmuxWindow.panePID, panePID > 0,
+            isProcessAlive(pid: panePID)
+        else { return nil }
+        return panePID
     }
 
     private func runtimePID(fromFile path: String) -> Int? {

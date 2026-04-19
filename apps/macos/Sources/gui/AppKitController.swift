@@ -800,16 +800,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 let processes = try orchestrator.runningProcesses(workspaceID: selectedWorkspaceID)
                 let agentWindows = try orchestrator.agentWindows(workspaceID: selectedWorkspaceID)
                 let browserSessions = try orchestrator.resolvedWorkspaceBrowserSessions(workspaceID: selectedWorkspaceID)
-                let terminalTargetKeyForProcess: (RunningProcessRecord) -> String? = { process in
-                    if let sessionID = process.itermSessionID, !sessionID.isEmpty { return sessionID }
-                    if let windowID = process.windowID { return "window:\(windowID)" }
-                    return nil
-                }
-                let terminalTargetKeyForWindow: (WindowRecord) -> String? = { window in
-                    if let sessionID = window.itermSessionID, !sessionID.isEmpty { return sessionID }
-                    if let windowID = window.windowID { return "window:\(windowID)" }
-                    return nil
-                }
+                let terminalTargetKeyForProcess: (RunningProcessRecord) -> String? = { $0.terminalTrackingKey }
+                let terminalTargetKeyForWindow: (WindowRecord) -> String? = { $0.terminalTrackingKey }
                 let terminalOrderByTargetID: [String: Int] = Dictionary(
                     uniqueKeysWithValues: windows.compactMap { window in
                         guard window.role == "terminal", let targetID = terminalTargetKeyForWindow(window) else { return nil }
@@ -3324,16 +3316,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let configuredBrowserSessions: [BrowserSession] = {
             (try? orchestrator.resolvedWorkspaceBrowserSessions(workspaceID: workspace.id)) ?? []
         }()
-        let terminalTargetKeyForProcess: (RunningProcessRecord) -> String? = { process in
-            if let sessionID = process.itermSessionID, !sessionID.isEmpty { return sessionID }
-            if let windowID = process.windowID { return "window:\(windowID)" }
-            return nil
-        }
-        let terminalTargetKeyForWindow: (WindowRecord) -> String? = { window in
-            if let sessionID = window.itermSessionID, !sessionID.isEmpty { return sessionID }
-            if let windowID = window.windowID { return "window:\(windowID)" }
-            return nil
-        }
+        let terminalTargetKeyForProcess: (RunningProcessRecord) -> String? = { $0.terminalTrackingKey }
+        let terminalTargetKeyForWindow: (WindowRecord) -> String? = { $0.terminalTrackingKey }
         let terminalOrderByTargetID: [String: Int] = Dictionary(
             uniqueKeysWithValues: windows.compactMap { window in
                 guard window.role == "terminal", let targetID = terminalTargetKeyForWindow(window) else { return nil }
@@ -3414,11 +3398,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         processesStack.spacing = 4
         var processRowCount = 0
 
-        let browserWindowByTargetURL: [String: WindowRecord] = windows.reduce(into: [:]) { result, window in
-            guard window.role == "browser", let targetURL = window.targetURL, result[targetURL] == nil else { return }
-            result[targetURL] = window
-        }
-        let missingTrackedWindowColor = NSColor.systemRed
         for session in configuredBrowserSessions {
             guard let targetURL = session.url, !targetURL.isEmpty else { continue }
             let workspaceID = workspace.id
@@ -3431,12 +3410,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 sessionLabel = targetURL
                 sessionDetail = nil
             }
-            let isTracked = browserWindowByTargetURL[targetURL] != nil
             let rowShortcut = windowShortcutBadgeText(index: shortcutCounter)
             shortcutCounter += 1
             browserRowCount += 1
             let row = windowRow(
-                icon: "globe", iconColor: isTracked ? .systemBlue : missingTrackedWindowColor, label: sessionLabel, detail: sessionDetail,
+                icon: "globe", iconColor: .systemBlue, label: sessionLabel, detail: sessionDetail,
                 shortcut: rowShortcut, processStatus: nil,
                 action: { [weak self] in
                     guard let self else { return }
@@ -3524,7 +3502,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             let rowShortcut = windowShortcutBadgeText(index: shortcutCounter)
             shortcutCounter += 1
             let row = windowRow(
-                icon: "terminal", iconColor: missingTrackedWindowColor, label: process.templateName,
+                icon: "terminal", iconColor: .systemGreen, label: process.templateName,
                 detail: resolveCommand(process.command), shortcut: rowShortcut, processStatus: process.status,
                 action: { [weak self] in
                     guard let self else { return }
