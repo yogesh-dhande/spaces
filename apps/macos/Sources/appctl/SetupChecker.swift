@@ -30,10 +30,12 @@ public final class SetupChecker {
     }
 
     private let iterm2: Iterm2Adapter
+    private let ghostty: GhosttyAdapter
     private let tmux: TmuxAdapter
 
-    public init(iterm2: Iterm2Adapter = Iterm2Adapter(), tmux: TmuxAdapter = TmuxAdapter()) {
+    public init(iterm2: Iterm2Adapter = Iterm2Adapter(), ghostty: GhosttyAdapter = GhosttyAdapter(), tmux: TmuxAdapter = TmuxAdapter()) {
         self.iterm2 = iterm2
+        self.ghostty = ghostty
         self.tmux = tmux
     }
 
@@ -85,7 +87,7 @@ public final class SetupChecker {
     // MARK: - Individual checks
 
     private func isIterm2Installed() -> Bool {
-        iterm2.isAvailable()
+        iterm2.isAvailable() || ghostty.isAvailable()
     }
 
     private func isTmuxInstalled() -> Bool {

@@ -2286,6 +2286,23 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             stack.addArrangedSubview(note)
         }
 
+        stack.addArrangedSubview(label(text: "Terminal host"))
+        let terminalPopUp = NSPopUpButton()
+        terminalPopUp.translatesAutoresizingMaskIntoConstraints = false
+        for host in TerminalHost.allCases {
+            terminalPopUp.addItem(withTitle: host.displayName)
+            terminalPopUp.itemArray.last?.representedObject = host
+        }
+        if let currentHost = configCache?.terminalHost,
+            let item = terminalPopUp.itemArray.first(where: { ($0.representedObject as? TerminalHost) == currentHost })
+        {
+            terminalPopUp.select(item)
+        }
+        terminalPopUp.target = self
+        terminalPopUp.action = #selector(terminalHostChanged(_:))
+        stack.addArrangedSubview(terminalPopUp)
+        constrainFormFieldToFillWidth(terminalPopUp, in: stack)
+
         stack.addArrangedSubview(label(text: "Keyboard shortcuts"))
         let shortcutsNote = NSTextField(
             labelWithString:
@@ -4722,6 +4739,12 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         guard let preference = sender.selectedItem?.representedObject as? EditorPreference else { return }
         if configCache?.editor == preference { return }
         do { configCache = try orchestrator.updateEditorPreference(preference) } catch { showError(error) }
+    }
+
+    @objc private func terminalHostChanged(_ sender: NSPopUpButton) {
+        guard let terminalHost = sender.selectedItem?.representedObject as? TerminalHost else { return }
+        if configCache?.terminalHost == terminalHost { return }
+        do { configCache = try orchestrator.updateTerminalHost(terminalHost) } catch { showError(error) }
     }
 
     @objc private func itermPulseEnabledChanged(_ sender: NSButton) {

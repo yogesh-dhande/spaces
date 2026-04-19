@@ -1,4 +1,5 @@
 import XCTest
+import appctl
 
 @testable import streamctl
 
@@ -1258,6 +1259,34 @@ final class OrchestratorTests: XCTestCase {
         }
 
         XCTAssertEqual(try store.workspace(id: workspace.id)?.isRunning, true)
+    }
+
+    // Tests openWorkspaceTerminal uses Ghostty when configured as the selected terminal host.
+    func testOpenWorkspaceTerminalUsesConfiguredGhosttyHost() throws {
+        let root = try makeTempDirectory()
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let store = try makeTemporaryStore()
+        let mockGhostty = MockGhosttyAdapter()
+        mockGhostty.openWindowInfos = [GhosttyWindowInfo(windowID: "ghostty-window-22", tabID: "ghostty-tab-22", terminalID: "ghostty-terminal-22")]
+        let orchestrator = MuxyOrchestrator(store: store, ghostty: mockGhostty, tmux: MockTmuxAdapter())
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
+        try orchestrator.updateTerminalHost(.ghostty)
+
+        try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) {
+            try withEnv(name: "YABAI_FOCUSED_ID", value: "42") {
+                try withEnv(name: "YABAI_FOCUSED_APP", value: "Ghostty") {
+                    try orchestrator.openWorkspaceTerminal(workspaceID: workspace.id)
+                }
+            }
+        }
+
+        let terminalWindow = try XCTUnwrap(store.windows(workspaceID: workspace.id).first(where: { $0.role == "terminal" }))
+        XCTAssertEqual(mockGhostty.openWindowAndRunCallCount, 1)
+        XCTAssertEqual(terminalWindow.app, "Ghostty")
+        XCTAssertEqual(terminalWindow.windowID, 42)
+        XCTAssertEqual(terminalWindow.itermSessionID, "ghostty-terminal-22")
     }
 
     // Tests open workspace terminal opens a new tab in an existing tracked iTerm2 workspace window.
@@ -4954,6 +4983,17 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertEqual(updated.portRange.start, 25000)
         XCTAssertEqual(updated.portRange.end, 35000)
         XCTAssertEqual(try orchestrator.appConfig().portRange.start, 25000)
+    }
+
+    // Tests updateTerminalHost persists to the app config by arranging representative inputs and asserting the expected result.
+    func testUpdateTerminalHostPersists() throws {
+        let store = try makeTemporaryStore()
+        let orchestrator = MuxyOrchestrator(store: store)
+
+        let updated = try orchestrator.updateTerminalHost(.ghostty)
+
+        XCTAssertEqual(updated.terminalHost, .ghostty)
+        XCTAssertEqual(try orchestrator.appConfig().terminalHost, .ghostty)
     }
 
     // MARK: - listProjects

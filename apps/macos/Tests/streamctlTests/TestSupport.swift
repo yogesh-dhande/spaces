@@ -144,6 +144,48 @@ class MockIterm2Adapter: Iterm2Adapter, @unchecked Sendable {
     }
 }
 
+class MockGhosttyAdapter: GhosttyAdapter, @unchecked Sendable {
+    var available = true
+    var openWindowAndRunCallCount = 0
+    var focusTerminalCallCount = 0
+    var closeWindowCallCount = 0
+    var lastCommand: String?
+    var lastCwd: String?
+    var lastFocusedTerminalID: String?
+    var lastClosedWindowID: String?
+    var nextWindowID = "ghostty-window-1"
+    var nextTabID = "ghostty-tab-1"
+    var nextTerminalID = "ghostty-terminal-1"
+    var openWindowInfos: [GhosttyWindowInfo] = []
+
+    override func isAvailable() -> Bool { available }
+
+    override func openWindowAndRun(command: String, cwd: String, background: Bool = false) throws -> GhosttyWindowInfo {
+        openWindowAndRunCallCount += 1
+        lastCommand = command
+        lastCwd = cwd
+        if !openWindowInfos.isEmpty {
+            return openWindowInfos.removeFirst()
+        }
+        return GhosttyWindowInfo(windowID: nextWindowID, tabID: nextTabID, terminalID: nextTerminalID)
+    }
+
+    override func focusTerminal(id: String) throws -> String? {
+        focusTerminalCallCount += 1
+        lastFocusedTerminalID = id
+        return nextWindowID
+    }
+
+    override func closeWindow(id: String) throws {
+        closeWindowCallCount += 1
+        lastClosedWindowID = id
+    }
+
+    override func listWindowTabAndTerminalIDs() throws -> [(windowID: String, tabID: String, terminalID: String)] {
+        [(windowID: nextWindowID, tabID: nextTabID, terminalID: nextTerminalID)]
+    }
+}
+
 class MockTmuxAdapter: TmuxAdapter, @unchecked Sendable {
     var available = true
     var windowsBySession: [String: [TmuxWindowInfo]] = [:]

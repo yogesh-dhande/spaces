@@ -59,7 +59,7 @@ A workspace owns a tracked set of dedicated windows, such as:
 Muxy focuses those windows; it does not decide their geometry.
 
 ## Onboarding
-- On launch, Muxy blocks only on the cheap prerequisite checks: iTerm2 installed, tmux installed, and yabai installed.
+- On launch, Muxy blocks only on the cheap prerequisite checks: a supported terminal host installed (`iTerm2` or `Ghostty`), tmux installed, and yabai installed.
 - The slower yabai readiness step, including service-running and Accessibility validation, should be deferred until the setup flow is actually shown or another yabai-backed action needs it.
 - If a deferred yabai readiness check fails during startup, Muxy should switch into the setup flow at the yabai step instead of surfacing a raw shell error dialog.
 - If a blocking launch prerequisite fails, the main window shows a guided setup flow starting at the first failing step.
@@ -89,7 +89,7 @@ Muxy focuses those windows; it does not decide their geometry.
 
 ## Launch and Runtime Behavior
 - Launch starts the workspace's configured processes and browser sessions and captures the resulting windows.
-- Workspace processes should be launched inside tmux so Muxy can recover the terminal view without losing the underlying process when an iTerm2 window closes.
+- Workspace processes should be launched inside tmux so Muxy can recover the terminal view without losing the underlying process when a supported terminal-host window closes.
 - Process commands are treated as direct executable invocations with arguments.
 - If a user needs composite shell behavior such as `cd x && y`, pipes, or redirection, they should wrap it explicitly, for example `bash -lc "cd x && y"`.
 - Stop shuts down tracked runtime state and closes tracked dedicated windows safely.
@@ -110,11 +110,12 @@ Muxy focuses those windows; it does not decide their geometry.
 - Muxy should focus the correct window or workspace quickly, even when switching across apps.
 - Browser focus should match the intended browser session by URL, not by window title.
 - Terminal focus should land on the intended dedicated process or agent session.
+- Users should be able to choose the default terminal host globally, and both the GUI and CLI should respect that selection.
 - After the GUI focuses or opens an external window, Muxy should hide itself immediately so the target app stays unobstructed.
 - When a workspace detail view becomes visible, Muxy should refresh workspace windows and process state asynchronously so stale rows reconcile shortly after the page appears.
 - If tracked windows become stale during next/previous window cycling, Muxy should skip them and continue to the next live target.
 - If direct window focus from the app targets a stale browser session, Muxy should reopen that session in a new Chrome window and update tracking without showing an error modal first.
-- If direct window focus from the app targets a stale process window, Muxy should first try to recover silently by opening a new dedicated iTerm2 window and reattaching to the existing tmux session when the process is still running. If the process is no longer running, Muxy should show a modal warning with `Recover (Cmd+R)` and `Cancel (Esc)`, and the explicit recovery action should restart it inside tmux.
+- If direct window focus from the app targets a stale process window, Muxy should first try to recover silently by opening a new dedicated window in the selected terminal host and reattaching to the existing tmux session when the process is still running. If the process is no longer running, Muxy should show a modal warning with `Recover (Cmd+R)` and `Cancel (Esc)`, and the explicit recovery action should restart it inside tmux.
   - coding-agent windows only show the error state and do not offer recovery
 - Muxy should still reconcile stale tracked windows in the background instead of forcing the user to repair state manually.
 - Degraded runtime health should appear as a warning on top of the current `Running` or `Stopped` lifecycle state, not as a separate replacement state label.

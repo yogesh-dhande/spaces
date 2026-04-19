@@ -26,6 +26,7 @@ flowchart LR
 
   appctl --> yabai["yabai"]
   appctl --> iterm["iTerm2 AppleScript"]
+  appctl --> ghostty["Ghostty AppleScript"]
   appctl --> chrome["Chrome AppleScript"]
 ```
 
@@ -34,7 +35,7 @@ flowchart LR
 - `gui`: AppKit UI layer that renders state and dispatches actions into `streamctl`.
 - `mx`: CLI entry point that exposes the same orchestrator capabilities.
 - `streamctl`: core orchestration, lifecycle, validation, persistence coordination, and environment building.
-- `appctl`: system adapters for shell commands, yabai, iTerm2, Chrome, and related OS integrations.
+- `appctl`: system adapters for shell commands, yabai, iTerm2, Ghostty, Chrome, and related OS integrations.
 
 ## Persistence
 
@@ -114,12 +115,13 @@ It also lets lifecycle state stay explicit while runtime health is derived from 
 - Named port definitions are allocated per workspace and exposed as environment variables.
 - Workspace processes also receive stable environment variables such as project and workspace directories.
 - Setup scripts, stop scripts, process commands, and status-check commands all execute against the workspace-specific environment.
-- Process launch and terminal recovery use tmux so the process lifetime can outlive a missing iTerm2 window and be reattached later.
+- Process launch and terminal recovery use tmux so the process lifetime can outlive a missing terminal window and be reattached later.
+- Global app settings include the selected terminal host, and both the GUI and `mx settings` read and write the same value.
 - Process templates are parsed as direct executable invocations. If a workflow needs composite shell syntax such as `cd x && y`, pipes, or redirection, it must opt in explicitly by launching a shell command such as `bash -lc "cd x && y"`.
 
 ## Window and Focus Architecture
 - yabai provides stable window identity and cross-app focusing.
-- iTerm2 and Chrome AppleScript integrations add app-specific behavior on top of yabai, such as selecting the intended terminal session or browser target.
+- iTerm2, Ghostty, and Chrome AppleScript integrations add app-specific behavior on top of yabai, such as returning launch-time terminal IDs or selecting the intended browser target.
 - Tracked windows are persisted so Muxy can refocus or clean up only the windows it owns.
 - Direct focus requests auto-recover stale browser-session windows by reopening and re-tracking them, while process and generic window failures still surface typed missing-window errors to the GUI.
 - Window cycling is tolerant of stale tracked yabai IDs and keeps advancing until it finds the next live target.
@@ -153,6 +155,6 @@ It also lets lifecycle state stay explicit while runtime health is derived from 
 - macOS 14+
 - yabai for window identity and focus
 - tmux for recoverable terminal-hosted process sessions
-- iTerm2 for terminal process hosting
+- iTerm2 or Ghostty for terminal process hosting
 - Google Chrome for browser-session automation
 - SQLite for local persistence

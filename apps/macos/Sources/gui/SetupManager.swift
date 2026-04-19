@@ -37,15 +37,15 @@ final class SetupManager: NSObject {
         SetupStep(
             ids: [.iterm2Installed],
             icon: "terminal",
-            title: "Install iTerm2",
-            body: "Muxy opens terminal processes in iTerm2.",
-            action: .openURL(URL(string: "https://iterm2.com/downloads.html")!)
+            title: "Install a terminal",
+            body: "Muxy opens terminal processes in iTerm2 or Ghostty.",
+            action: .openURL(URL(string: "https://ghostty.org/")!)
         ),
         SetupStep(
             ids: [.tmuxInstalled],
             icon: "rectangle.split.1x2",
             title: "Install tmux",
-            body: "Muxy uses tmux to keep process sessions recoverable when iTerm2 windows close.",
+            body: "Muxy uses tmux to keep process sessions recoverable when terminal windows close.",
             action: .copyCommand("brew install tmux")
         ),
         SetupStep(
@@ -374,7 +374,7 @@ final class SetupManager: NSObject {
 
             let actionTitle: String
             switch step.ids.first {
-            case .iterm2Installed: actionTitle = "Download iTerm2"
+            case .iterm2Installed: actionTitle = "Download Ghostty"
             default: actionTitle = "Open System Settings"
             }
             let openBtn = NSButton(title: actionTitle, target: self, action: #selector(openURLPressed(_:)))

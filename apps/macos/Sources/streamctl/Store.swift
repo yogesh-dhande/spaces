@@ -629,14 +629,19 @@ public final class SQLiteStore {
 
     public func appConfig() throws -> AppConfig {
         let editor = try setting(key: SettingsKey.appEditor).flatMap { EditorPreference(rawValue: $0) }
+        let terminalHost = try setting(key: SettingsKey.appTerminalHost)
+            .flatMap(TerminalHost.init(rawValue:))
+            ?? TerminalHost(rawValue: SettingsKey.defaultAppTerminalHost)
+            ?? .iterm2
         let start = try setting(key: SettingsKey.appPortRangeStart).flatMap(Int.init) ?? 20000
         let end = try setting(key: SettingsKey.appPortRangeEnd).flatMap(Int.init) ?? 30000
         let portRange = (start <= 0 || end <= 0 || end <= start) ? PortRange(start: 20000, end: 30000) : PortRange(start: start, end: end)
-        return AppConfig(editor: editor, portRange: portRange)
+        return AppConfig(editor: editor, portRange: portRange, terminalHost: terminalHost)
     }
 
     public func setAppConfig(_ config: AppConfig) throws {
         try setSetting(key: SettingsKey.appEditor, value: config.editor?.rawValue)
+        try setSetting(key: SettingsKey.appTerminalHost, value: config.terminalHost.rawValue)
         try setSetting(key: SettingsKey.appPortRangeStart, value: String(config.portRange.start))
         try setSetting(key: SettingsKey.appPortRangeEnd, value: String(config.portRange.end))
     }

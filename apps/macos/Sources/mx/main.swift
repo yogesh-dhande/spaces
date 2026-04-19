@@ -454,6 +454,9 @@ struct CLI {
             if args.contains("--editor") {
                 let config = try orchestrator.appConfig()
                 print("editor\t\(config.editor?.rawValue ?? "none")")
+            } else if args.contains("--terminal-host") {
+                let config = try orchestrator.appConfig()
+                print("terminal-host\t\(config.terminalHost.rawValue)")
             } else if args.contains("--port-range") {
                 let config = try orchestrator.appConfig()
                 print("port-range\t\(config.portRange.start)-\(config.portRange.end)")
@@ -513,7 +516,7 @@ struct CLI {
                     domain: "mx.cli", code: 2,
                     userInfo: [
                         NSLocalizedDescriptionKey:
-                            "Missing setting flag. Use: settings get --editor|--port-range|--gui-hotkey|--gui-leader-hotkey|--gui-dashboard-shortcut|--gui-add-project-shortcut|--gui-add-workspace-shortcut|--gui-reload-shortcut|--gui-next-shortcut|--gui-prev-shortcut|--gui-open-editor-shortcut|--gui-open-terminal-shortcut|--gui-open-finder-shortcut|--gui-open-settings-shortcut|--gui-tooltip-shortcut|--gui-window-shortcut|--gui-window-sequence-shortcut|--iterm-focus-pulse-color|--iterm-focus-pulse-enabled"
+                            "Missing setting flag. Use: settings get --editor|--terminal-host|--port-range|--gui-hotkey|--gui-leader-hotkey|--gui-dashboard-shortcut|--gui-add-project-shortcut|--gui-add-workspace-shortcut|--gui-reload-shortcut|--gui-next-shortcut|--gui-prev-shortcut|--gui-open-editor-shortcut|--gui-open-terminal-shortcut|--gui-open-finder-shortcut|--gui-open-settings-shortcut|--gui-tooltip-shortcut|--gui-window-shortcut|--gui-window-sequence-shortcut|--iterm-focus-pulse-color|--iterm-focus-pulse-enabled"
                     ])
             }
 
@@ -526,6 +529,14 @@ struct CLI {
                 }
                 _ = try orchestrator.updateEditorPreference(pref == .none ? nil : pref)
                 print("Updated editor\t\(pref.rawValue)")
+            } else if let rawTerminalHost = optionalValue(for: "--terminal-host") {
+                guard let terminalHost = TerminalHost(rawValue: rawTerminalHost) else {
+                    throw NSError(
+                        domain: "mx.cli", code: 2,
+                        userInfo: [NSLocalizedDescriptionKey: "Unknown terminal host: \(rawTerminalHost). Use: iterm2|ghostty"])
+                }
+                _ = try orchestrator.updateTerminalHost(terminalHost)
+                print("Updated terminal-host\t\(terminalHost.rawValue)")
             } else if let rangeStr = optionalValue(for: "--port-range") {
                 let parts = rangeStr.split(separator: "-").compactMap { Int($0) }
                 guard parts.count == 2, parts[0] > 0, parts[1] > parts[0] else {
@@ -617,7 +628,7 @@ struct CLI {
                     domain: "mx.cli", code: 2,
                     userInfo: [
                         NSLocalizedDescriptionKey:
-                            "Missing setting flag/value. Use: settings set --editor <value>|--port-range <start>-<end>|--gui-hotkey <spec>|--gui-leader-hotkey <modifiers>|--gui-dashboard-shortcut <spec>|--gui-add-project-shortcut <spec>|--gui-add-workspace-shortcut <spec>|--gui-reload-shortcut <spec>|--gui-next-shortcut <spec>|--gui-prev-shortcut <spec>|--gui-open-editor-shortcut <spec>|--gui-open-terminal-shortcut <spec>|--gui-open-finder-shortcut <spec>|--gui-open-settings-shortcut <spec>|--gui-tooltip-shortcut <spec>|--gui-window-shortcut <spec>|--gui-window-sequence-shortcut <spec>|--iterm-focus-pulse-color <r,g,b>|--iterm-focus-pulse-enabled <0|1>"
+                            "Missing setting flag/value. Use: settings set --editor <value>|--terminal-host <iterm2|ghostty>|--port-range <start>-<end>|--gui-hotkey <spec>|--gui-leader-hotkey <modifiers>|--gui-dashboard-shortcut <spec>|--gui-add-project-shortcut <spec>|--gui-add-workspace-shortcut <spec>|--gui-reload-shortcut <spec>|--gui-next-shortcut <spec>|--gui-prev-shortcut <spec>|--gui-open-editor-shortcut <spec>|--gui-open-terminal-shortcut <spec>|--gui-open-finder-shortcut <spec>|--gui-open-settings-shortcut <spec>|--gui-tooltip-shortcut <spec>|--gui-window-shortcut <spec>|--gui-window-sequence-shortcut <spec>|--iterm-focus-pulse-color <r,g,b>|--iterm-focus-pulse-enabled <0|1>"
                     ])
             }
 
@@ -677,6 +688,9 @@ struct CLI {
             } else if args.contains("--editor") {
                 _ = try orchestrator.updateEditorPreference(nil)
                 print("Reset editor\tnone")
+            } else if args.contains("--terminal-host") {
+                _ = try orchestrator.updateTerminalHost(.iterm2)
+                print("Reset terminal-host\t\(SettingsKey.defaultAppTerminalHost)")
             } else if args.contains("--port-range") {
                 _ = try orchestrator.updatePortRange(PortRange(start: 20000, end: 30000))
                 print("Reset port-range\t20000-30000")
@@ -685,7 +699,7 @@ struct CLI {
                     domain: "mx.cli", code: 2,
                     userInfo: [
                         NSLocalizedDescriptionKey:
-                            "Missing setting flag. Use: settings reset --editor|--port-range|--gui-hotkey|--gui-leader-hotkey|--gui-dashboard-shortcut|--gui-add-project-shortcut|--gui-add-workspace-shortcut|--gui-reload-shortcut|--gui-next-shortcut|--gui-prev-shortcut|--gui-open-editor-shortcut|--gui-open-terminal-shortcut|--gui-open-finder-shortcut|--gui-open-settings-shortcut|--gui-tooltip-shortcut|--gui-window-shortcut|--gui-window-sequence-shortcut|--iterm-focus-pulse-color|--iterm-focus-pulse-enabled"
+                            "Missing setting flag. Use: settings reset --editor|--terminal-host|--port-range|--gui-hotkey|--gui-leader-hotkey|--gui-dashboard-shortcut|--gui-add-project-shortcut|--gui-add-workspace-shortcut|--gui-reload-shortcut|--gui-next-shortcut|--gui-prev-shortcut|--gui-open-editor-shortcut|--gui-open-terminal-shortcut|--gui-open-finder-shortcut|--gui-open-settings-shortcut|--gui-tooltip-shortcut|--gui-window-shortcut|--gui-window-sequence-shortcut|--iterm-focus-pulse-color|--iterm-focus-pulse-enabled"
                     ])
             }
 
@@ -718,7 +732,7 @@ struct CLI {
                 domain: "mx.cli", code: 2,
                 userInfo: [
                     NSLocalizedDescriptionKey:
-                        "Missing agent action. Use: agent event --type init|start|waiting|done|stop [--dir <path>] [--provider iterm2]"
+                        "Missing agent action. Use: agent event --type init|start|waiting|done|stop [--dir <path>] [--provider iterm2|ghostty]"
                 ])
         }
         let hookType = try value(for: "--type")
@@ -730,11 +744,13 @@ struct CLI {
         let provider: AgentProvider
         if let p = providerArg {
             guard let parsed = AgentProvider(rawValue: p) else {
-                throw NSError(domain: "mx.cli", code: 2, userInfo: [NSLocalizedDescriptionKey: "Unknown provider '\(p)'. Use: iterm2"])
+                throw NSError(domain: "mx.cli", code: 2, userInfo: [NSLocalizedDescriptionKey: "Unknown provider '\(p)'. Use: iterm2|ghostty"])
             }
             provider = parsed
         } else if bundleID == "com.googlecode.iterm2" {
             provider = .iterm2
+        } else if bundleID == "com.mitchellh.ghostty" {
+            provider = .ghostty
         } else if hasKnownCodingAgentMarkers(env: env) {
             print("Ignoring agent event: unsupported terminal host '\(bundleID.isEmpty ? "unknown" : bundleID)' for detected coding agent env.")
             return
@@ -829,6 +845,8 @@ struct CLI {
         let bundleID = env["__CFBundleIdentifier"] ?? ""
         if bundleID == "com.googlecode.iterm2", env["CODEX_THREAD_ID"] != nil { return .iterm2 }
         if bundleID == "com.googlecode.iterm2", env["CLAUDE_CODE_ENTRYPOINT"] != nil { return .iterm2 }
+        if bundleID == "com.mitchellh.ghostty", env["CODEX_THREAD_ID"] != nil { return .ghostty }
+        if bundleID == "com.mitchellh.ghostty", env["CLAUDE_CODE_ENTRYPOINT"] != nil { return .ghostty }
         return nil
     }
 
@@ -836,8 +854,10 @@ struct CLI {
 
     private func inferredAgentLabel(env: [String: String], provider: AgentProvider) -> String? {
         let bundleID = env["__CFBundleIdentifier"] ?? ""
-        if bundleID == "com.googlecode.iterm2", env["CODEX_THREAD_ID"] != nil { return "Codex CLI" }
-        if bundleID == "com.googlecode.iterm2", env["CLAUDE_CODE_ENTRYPOINT"] != nil { return "Claude Code CLI" }
+        if (bundleID == "com.googlecode.iterm2" || bundleID == "com.mitchellh.ghostty"), env["CODEX_THREAD_ID"] != nil { return "Codex CLI" }
+        if (bundleID == "com.googlecode.iterm2" || bundleID == "com.mitchellh.ghostty"), env["CLAUDE_CODE_ENTRYPOINT"] != nil {
+            return "Claude Code CLI"
+        }
         return nil
     }
 
@@ -848,6 +868,8 @@ struct CLI {
         let provider: AgentProvider
         if bundleID == "com.googlecode.iterm2" {
             provider = .iterm2
+        } else if bundleID == "com.mitchellh.ghostty" {
+            provider = .ghostty
         } else if hasKnownCodingAgentMarkers(env: env) {
             return
         } else {
@@ -889,6 +911,7 @@ struct CLI {
               mx discover
 
               mx settings get --editor
+              mx settings get --terminal-host
               mx settings get --port-range
               mx settings get --gui-hotkey
               mx settings get --gui-leader-hotkey
@@ -908,6 +931,7 @@ struct CLI {
               mx settings get --iterm-focus-pulse-color
               mx settings get --iterm-focus-pulse-enabled
               mx settings set --editor none|vscode|cursor|windsurf|vim
+              mx settings set --terminal-host iterm2|ghostty
               mx settings set --port-range <start>-<end>
               mx settings set --gui-hotkey <spec>
               mx settings set --gui-leader-hotkey <modifiers>
@@ -927,6 +951,7 @@ struct CLI {
               mx settings set --iterm-focus-pulse-color <r,g,b>
               mx settings set --iterm-focus-pulse-enabled <0|1>
               mx settings reset --editor
+              mx settings reset --terminal-host
               mx settings reset --port-range
               mx settings reset --gui-hotkey
               mx settings reset --gui-leader-hotkey
@@ -975,7 +1000,7 @@ struct CLI {
               mx workspace archive [--dir <path>]
               mx workspace focus [--dir <path>] --window <index>
 
-              mx agent event --type init|start|waiting|done|stop [--dir <path>] [--provider iterm2]
+              mx agent event --type init|start|waiting|done|stop [--dir <path>] [--provider iterm2|ghostty]
 
             Notes:
               - All settings are stored in ~/.muxy/muxy.db.

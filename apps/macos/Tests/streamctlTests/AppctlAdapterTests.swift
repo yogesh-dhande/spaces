@@ -55,8 +55,8 @@ final class AppctlAdapterTests: XCTestCase {
         }
     }
 
-    // Tests chrome and i term adapters parse apple script output by arranging representative inputs and asserting the expected result.
-    func testChromeAndITermAdaptersParseAppleScriptOutput() throws {
+    // Tests chrome, iTerm, and Ghostty adapters parse AppleScript output by arranging representative inputs and asserting the expected result.
+    func testChromeITermAndGhosttyAdaptersParseAppleScriptOutput() throws {
         // Mocked dependency: `osascript` command output for Chrome/iTerm automation.
         // Why: verify script parsing and adapter logic in a hermetic environment.
         // Remaining risk: does not execute against actual app scripting dictionaries or app availability/version differences.
@@ -112,6 +112,16 @@ final class AppctlAdapterTests: XCTestCase {
             XCTAssertNoThrow(try iterm.closeWindow(id: 77))
             XCTAssertTrue(try iterm.closeSessionOrTab(preferredSessionID: "session-77", tabIndex: 2, windowID: 77))
             XCTAssertTrue(try iterm.focusSessionOrTab(preferredSessionID: "session-77", tabIndex: 2, windowID: 77))
+
+            let ghostty = GhosttyAdapter()
+            XCTAssertTrue(ghostty.isAvailable())
+            let ghosttyWindow = try ghostty.openWindowAndRun(command: "echo hi", cwd: "/tmp")
+            XCTAssertEqual(ghosttyWindow.windowID, "ghostty-window-1")
+            XCTAssertEqual(ghosttyWindow.tabID, "ghostty-tab-1")
+            XCTAssertEqual(ghosttyWindow.terminalID, "ghostty-terminal-1")
+            XCTAssertEqual(try ghostty.focusTerminal(id: "ghostty-terminal-1"), "ghostty-window-1")
+            XCTAssertNoThrow(try ghostty.closeWindow(id: "ghostty-window-1"))
+            XCTAssertEqual(try ghostty.listWindowTabAndTerminalIDs().count, 1)
         }
     }
 
@@ -301,6 +311,11 @@ final class AppctlAdapterTests: XCTestCase {
           exit 0
         fi
 
+        if [[ "$script" == *'tell application id "com.mitchellh.ghostty" to version'* ]]; then
+          echo "1.3.1"
+          exit 0
+        fi
+
         if [[ "$script" == *'create window with default profile'* ]]; then
           echo "77|session-77|2"
           exit 0
@@ -317,6 +332,26 @@ final class AppctlAdapterTests: XCTestCase {
 
         if [[ "$script" == *'write text'* || "$script" == *'close w'* ]]; then
           echo ""
+          exit 0
+        fi
+
+        if [[ "$script" == *'tell application id "com.mitchellh.ghostty"'* && "$script" == *'new window with configuration cfg'* ]]; then
+          echo 'ghostty-window-1|ghostty-tab-1|ghostty-terminal-1'
+          exit 0
+        fi
+
+        if [[ "$script" == *'tell terminal id "ghostty-terminal-1" to focus'* ]]; then
+          echo 'ghostty-window-1'
+          exit 0
+        fi
+
+        if [[ "$script" == *'tell window id "ghostty-window-1" to close window'* ]]; then
+          echo 'ok'
+          exit 0
+        fi
+
+        if [[ "$script" == *'repeat with w in windows'* && "$script" == *'com.mitchellh.ghostty'* ]]; then
+          printf 'ghostty-window-1|ghostty-tab-1|ghostty-terminal-1\n'
           exit 0
         fi
 

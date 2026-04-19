@@ -16,7 +16,7 @@ final class AgentHookTests: XCTestCase {
 
     func testRegisterAgentWindowCreatesDedicatedWindowRecord() throws {
         let store = try makeTemporaryStore()
-        let orchestrator = MuxyOrchestrator(store: store, iterm: MockIterm2Adapter(), tmux: MockTmuxAdapter())
+        let orchestrator = MuxyOrchestrator(store: store, iterm: MockIterm2Adapter(), ghostty: MockGhosttyAdapter(), tmux: MockTmuxAdapter())
         let (_, workspace) = try makeProjectAndWorkspace(store: store)
 
         let record = try orchestrator.registerAgentWindow(
@@ -39,7 +39,7 @@ final class AgentHookTests: XCTestCase {
 
     func testRegisterAgentWindowUpdatesExistingWindowRecord() throws {
         let store = try makeTemporaryStore()
-        let orchestrator = MuxyOrchestrator(store: store, iterm: MockIterm2Adapter(), tmux: MockTmuxAdapter())
+        let orchestrator = MuxyOrchestrator(store: store, iterm: MockIterm2Adapter(), ghostty: MockGhosttyAdapter(), tmux: MockTmuxAdapter())
         let (_, workspace) = try makeProjectAndWorkspace(store: store)
 
         let first = try orchestrator.registerAgentWindow(
@@ -64,7 +64,7 @@ final class AgentHookTests: XCTestCase {
 
     func testRegisterAgentWindowKeepsSeparateDedicatedWindowsDistinct() throws {
         let store = try makeTemporaryStore()
-        let orchestrator = MuxyOrchestrator(store: store, iterm: MockIterm2Adapter(), tmux: MockTmuxAdapter())
+        let orchestrator = MuxyOrchestrator(store: store, iterm: MockIterm2Adapter(), ghostty: MockGhosttyAdapter(), tmux: MockTmuxAdapter())
         let (_, workspace) = try makeProjectAndWorkspace(store: store)
 
         let first = try orchestrator.registerAgentWindow(
@@ -86,7 +86,7 @@ final class AgentHookTests: XCTestCase {
 
     func testUpdateAgentWindowStatusMatchesExistingWindowID() throws {
         let store = try makeTemporaryStore()
-        let orchestrator = MuxyOrchestrator(store: store, iterm: MockIterm2Adapter(), tmux: MockTmuxAdapter())
+        let orchestrator = MuxyOrchestrator(store: store, iterm: MockIterm2Adapter(), ghostty: MockGhosttyAdapter(), tmux: MockTmuxAdapter())
         let (_, workspace) = try makeProjectAndWorkspace(store: store)
 
         try orchestrator.registerAgentWindow(
@@ -114,7 +114,7 @@ final class AgentHookTests: XCTestCase {
 
     func testUpdateAgentWindowStatusPrefersItermSessionMatchOverWindowID() throws {
         let store = try makeTemporaryStore()
-        let orchestrator = MuxyOrchestrator(store: store, iterm: MockIterm2Adapter(), tmux: MockTmuxAdapter())
+        let orchestrator = MuxyOrchestrator(store: store, iterm: MockIterm2Adapter(), ghostty: MockGhosttyAdapter(), tmux: MockTmuxAdapter())
         let (_, workspace) = try makeProjectAndWorkspace(store: store)
 
         let existing = try orchestrator.registerAgentWindow(
@@ -143,7 +143,7 @@ final class AgentHookTests: XCTestCase {
 
     func testUpdateAgentWindowStatusFallsBackToCodexThreadMatch() throws {
         let store = try makeTemporaryStore()
-        let orchestrator = MuxyOrchestrator(store: store, iterm: MockIterm2Adapter(), tmux: MockTmuxAdapter())
+        let orchestrator = MuxyOrchestrator(store: store, iterm: MockIterm2Adapter(), ghostty: MockGhosttyAdapter(), tmux: MockTmuxAdapter())
         let (_, workspace) = try makeProjectAndWorkspace(store: store)
 
         try orchestrator.registerAgentWindow(
@@ -170,7 +170,7 @@ final class AgentHookTests: XCTestCase {
 
     func testAgentWindowsReturnsOnlyWorkspaceRecords() throws {
         let store = try makeTemporaryStore()
-        let orchestrator = MuxyOrchestrator(store: store, iterm: MockIterm2Adapter(), tmux: MockTmuxAdapter())
+        let orchestrator = MuxyOrchestrator(store: store, iterm: MockIterm2Adapter(), ghostty: MockGhosttyAdapter(), tmux: MockTmuxAdapter())
         let (_, workspace) = try makeProjectAndWorkspace(store: store)
         let (_, workspace2) = try makeProjectAndWorkspace(store: store, projectName: "proj2", workspaceName: "ws2")
 
@@ -196,6 +196,24 @@ final class AgentHookTests: XCTestCase {
         let records = try orchestrator.agentWindows(workspaceID: workspace.id)
         XCTAssertEqual(records.count, 2)
         XCTAssertEqual(Set(records.compactMap(\.yabaiWindowID)), Set([101, 202]))
+    }
+
+    func testRegisterAgentWindowPreservesGhosttyProvider() throws {
+        let store = try makeTemporaryStore()
+        let orchestrator = MuxyOrchestrator(store: store, iterm: MockIterm2Adapter(), ghostty: MockGhosttyAdapter(), tmux: MockTmuxAdapter())
+        let (_, workspace) = try makeProjectAndWorkspace(store: store)
+
+        let record = try orchestrator.registerAgentWindow(
+            workspaceID: workspace.id,
+            provider: .ghostty,
+            label: "Claude Code",
+            itermSessionID: "ghostty-terminal-1",
+            codexThreadID: "thread-1",
+            yabaiWindowID: 303,
+            status: .waiting)
+
+        XCTAssertEqual(record.provider, .ghostty)
+        XCTAssertEqual(try XCTUnwrap(store.agentWindows(workspaceID: workspace.id).first).provider, .ghostty)
     }
 
     private func makeProjectAndWorkspace(store: SQLiteStore, projectName: String = "TestProject", workspaceName: String = "default") throws -> (

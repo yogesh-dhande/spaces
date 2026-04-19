@@ -12,7 +12,7 @@
 - macOS 14+
 - `yabai`
 - `tmux`
-- iTerm2
+- iTerm2 or Ghostty
 - Google Chrome
 - Accessibility permission for the app stack that needs to focus windows
 
