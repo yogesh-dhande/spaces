@@ -78,6 +78,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     private var selectedProjectID: String?
     private var selectedWorkspaceID: String?
     private var lastSelectedRow: Int = -1
+    private var suppressOutlineSelectionChanges = false
     private var projectHasUnsavedChanges = false
     private var workspaceHasUnsavedChanges = false
     private var showingSettings = false
@@ -451,7 +452,16 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     }
 
     private func canReloadAfterBackgroundWorkspaceRefresh() -> Bool {
-        !projectHasUnsavedChanges && !workspaceHasUnsavedChanges && !isTextInputFocused()
+        !projectHasUnsavedChanges && !workspaceHasUnsavedChanges && activeAddWorkspaceFormTag == nil && activeAddProjectFormTag == nil
+            && !isTextInputFocused()
+    }
+
+    private func canPreserveDetailPaneAfterSidebarReload() -> Bool {
+        if activeAddWorkspaceFormTag != nil || activeAddProjectFormTag != nil { return true }
+        if showingDashboard || showingSettings { return true }
+        if let selectedWorkspaceID, let (_, workspace) = findWorkspace(id: selectedWorkspaceID) { return isWorkspaceVisible(workspace) }
+        if let selectedProjectID { return projects.contains(where: { $0.id == selectedProjectID }) }
+        return false
     }
 
     private enum WorkspaceLifecycleAction {
@@ -459,6 +469,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         case restart
         case stop
         case archive
+    }
+
+    private enum AddWorkspaceBranchMode: String {
+        case existing
+        case create
     }
 
     private struct WorkspaceLifecycleOutcome: Sendable { let notice: String? }
@@ -480,6 +495,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let stopScript: String?
         let ports: [PortDefinition]
         let processes: [ProcessTemplate]
+        let terminalWindows: [TerminalWindowTemplate]
         let browserSessions: [BrowserSession]
         let statusChecks: [StatusCheckDefinition]
     }
@@ -642,6 +658,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                     project.stopScript = input.stopScript
                     project.ports = input.ports
                     project.processes = input.processes
+                    project.terminalWindows = input.terminalWindows
                     project.browserSessions = input.browserSessions
                     project.statusChecks = input.statusChecks
                 }
@@ -1703,6 +1720,18 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         }
     }
 
+    private func clearSidebarSelectionForTransientDetail() {
+        let previousWorkspaceID = selectedWorkspaceID
+        suppressOutlineSelectionChanges = true
+        selectedProjectID = nil
+        selectedWorkspaceID = nil
+        lastSelectedRow = -1
+        outlineView.deselectAll(nil)
+        suppressOutlineSelectionChanges = false
+        refreshSidebarSelectionRows(previousWorkspaceID: previousWorkspaceID, currentWorkspaceID: nil)
+        updateDashboardRowAppearance()
+    }
+
     private func requestSidebarReload() {
         if let sidebarReloadTask, !sidebarReloadTask.isCancelled {
             pendingSidebarReloadRequest = true
@@ -1713,7 +1742,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             let result = await Self.initialSidebarDataSnapshot()
             guard !Task.isCancelled else { return }
             switch result {
-            case .success(let snapshot): self.applySidebarDataSnapshot(snapshot)
+            case .success(let snapshot): self.applySidebarDataSnapshot(snapshot, preserveDetailPane: true)
             case .failure(let error):
                 if !self.handleDeferredSetupRequirementIfNeeded(error) {
                     self.showError(error)
@@ -1727,8 +1756,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         }
     }
 
-    private func applySidebarDataSnapshot(_ snapshot: SidebarDataSnapshot) {
+    private func applySidebarDataSnapshot(_ snapshot: SidebarDataSnapshot, preserveDetailPane: Bool = false) {
         logStartupProfile("apply_snapshot_start")
+        let shouldPreserveDetailPane = preserveDetailPane && canPreserveDetailPaneAfterSidebarReload()
         pendingWorktreeDiscoveryReload = false
         configCache = snapshot.config
         loadShortcutSpecs()
@@ -1746,8 +1776,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         outlineView.reloadData()
         outlineView.expandItem(nil, expandChildren: true)
         logStartupProfile("apply_snapshot_outline_ready")
-        refreshSelection()
-        logStartupProfile("apply_snapshot_selection_ready")
+        if !shouldPreserveDetailPane {
+            refreshSelection()
+            logStartupProfile("apply_snapshot_selection_ready")
+        }
         updateDashboardSidebarBadge()
         logStartupProfile("apply_snapshot_dashboard_badge_ready", details: "group_count=\(dashboardGroups.count)")
         if showingDashboard { showDashboardDetail() }
@@ -2293,11 +2325,13 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let stopView = makeEditableTextView()
         let portEditor = PortEditor()
         let processEditor = ProcessEditor()
+        let terminalWindowEditor = TerminalWindowEditor()
         let browserSessionEditor = BrowserSessionEditor()
         setupView.string = fullProject?.setupScript ?? ""
         stopView.string = fullProject?.stopScript ?? ""
         portEditor.setDefinitions(fullProject?.ports ?? [])
         processEditor.setProcessesWithChecks(fullProject?.processes ?? [], statusChecks: fullProject?.statusChecks ?? [])
+        terminalWindowEditor.setWindows(fullProject?.terminalWindows ?? [])
         browserSessionEditor.setSessions(fullProject?.browserSessions ?? [])
 
         // --- Setup script card ---
@@ -2321,6 +2355,13 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             contentViews: [processEditor.container])
         stack.addArrangedSubview(processCard)
         constrainFormFieldToFillWidth(processCard, in: stack)
+
+        let terminalWindowCard = formSectionCard(
+            icon: "uiwindow.split.2x1", title: "Terminal windows",
+            subtitle: "Optional iTerm2 windows to open with this project. Commands run from the workspace directory.",
+            contentViews: [terminalWindowEditor.container])
+        stack.addArrangedSubview(terminalWindowCard)
+        constrainFormFieldToFillWidth(terminalWindowCard, in: stack)
 
         // --- Browser sessions card ---
         let browserCard = formSectionCard(
@@ -2361,9 +2402,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
         saveButton.tag = storeProjectFields(
             projectID: project.id, setupView: setupView, stopView: stopView, portEditor: portEditor, processEditor: processEditor,
-            browserSessionEditor: browserSessionEditor)
+            terminalWindowEditor: terminalWindowEditor, browserSessionEditor: browserSessionEditor)
         registerDirtyTracking(
-            setupView: setupView, stopView: stopView, portEditor: portEditor, processEditor: processEditor, browserSessionEditor: browserSessionEditor
+            setupView: setupView, stopView: stopView, portEditor: portEditor, processEditor: processEditor,
+            terminalWindowEditor: terminalWindowEditor, browserSessionEditor: browserSessionEditor
         )
     }
 
@@ -2449,7 +2491,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         activeAddProjectFormTag = nil
         showingSettings = false
         showingDashboard = false
-        updateDashboardRowAppearance()
+        clearSidebarSelectionForTransientDetail()
         for view in detailContainer.subviews { view.removeFromSuperview() }
         detailContainer.wantsLayer = true
         detailContainer.layer?.backgroundColor = sidebarPanelBackgroundColor().cgColor
@@ -2516,6 +2558,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let stopView = makeEditableTextView()
         let portEditor = PortEditor()
         let processEditor = ProcessEditor()
+        let terminalWindowEditor = TerminalWindowEditor()
         let browserSessionEditor = BrowserSessionEditor()
         // --- Source row: popup + dir/URL input on same line ---
         let localSourceSection = NSStackView()
@@ -2594,6 +2637,13 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         processCard.isHidden = true
         stack.addArrangedSubview(processCard)
 
+        let terminalWindowCard = formSectionCard(
+            icon: "uiwindow.split.2x1", title: "Terminal windows",
+            subtitle: "Optional iTerm2 windows to open when a workspace launches.",
+            contentViews: [terminalWindowEditor.container])
+        terminalWindowCard.isHidden = true
+        stack.addArrangedSubview(terminalWindowCard)
+
         // --- Browser sessions card ---
         let browserCard = formSectionCard(
             icon: "globe", title: "Browser sessions", subtitle: "Optional names with URL prefixes to open automatically.",
@@ -2640,8 +2690,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         createButton.tag = storeAddProjectFields(
             sourcePopup: sourcePopup, localSourceSection: localSourceSection, cloneSourceSection: cloneSourceSection, dirField: dirField,
             repoURLField: repoURLField, setupView: setupView, stopView: stopView, portEditor: portEditor, processEditor: processEditor,
-            browserSessionEditor: browserSessionEditor, browseButton: browseButton,
-            progressiveInputViews: [setupCard, addPortCard, processCard, browserCard, stopCard], createButton: createButton)
+            terminalWindowEditor: terminalWindowEditor, browserSessionEditor: browserSessionEditor, browseButton: browseButton,
+            progressiveInputViews: [setupCard, addPortCard, processCard, terminalWindowCard, browserCard, stopCard], createButton: createButton)
         activeAddProjectFormTag = createButton.tag
         if let refs = AddProjectFieldCache.shared.cache[createButton.tag] { updateAddProjectSourceUI(refs) }
     }
@@ -2652,7 +2702,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         activeAddProjectFormTag = nil
         showingSettings = false
         showingDashboard = false
-        updateDashboardRowAppearance()
+        clearSidebarSelectionForTransientDetail()
         for view in detailContainer.subviews { view.removeFromSuperview() }
         detailContainer.wantsLayer = true
         detailContainer.layer?.backgroundColor = sidebarPanelBackgroundColor().cgColor
@@ -2698,6 +2748,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let suggestedName = suggestedWorkspaceNameFast(projectID: project.id)
         let nameField = NSTextField(string: project.isGitRepo ? "" : suggestedName)
         nameField.placeholderString = "workspace title"
+        let branchModePopup = NSPopUpButton()
+        branchModePopup.addItems(withTitles: ["Existing branch", "Create branch"])
+        branchModePopup.selectItem(at: 1)
+        branchModePopup.target = self
+        branchModePopup.action = #selector(addWorkspaceBranchModeChanged(_:))
         let targetBranchField = NSComboBox()
         targetBranchField.usesDataSource = false
         targetBranchField.completes = true
@@ -2707,9 +2762,18 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         if let defaultTargetBranch = defaultWorkspaceTargetBranch(project: project, branches: targetBranches) {
             targetBranchField.stringValue = defaultTargetBranch
         }
-        let branchField = NSTextField(string: "")
-        branchField.placeholderString = "branch name"
-        branchField.delegate = self
+        let existingBranchField = NSComboBox()
+        existingBranchField.usesDataSource = false
+        existingBranchField.completes = true
+        existingBranchField.numberOfVisibleItems = 10
+        existingBranchField.placeholderString = "search branches"
+        existingBranchField.addItems(withObjectValues: targetBranches)
+        if let defaultBranch = defaultWorkspaceTargetBranch(project: project, branches: targetBranches) {
+            existingBranchField.stringValue = defaultBranch
+        }
+        let newBranchField = NSTextField(string: "")
+        newBranchField.placeholderString = "new branch name"
+        newBranchField.delegate = self
         let directoryNameField = NSTextField(string: "")
         directoryNameField.placeholderString = "optional: letters, numbers, -, _"
         let tooltipField = NSTextField(string: "")
@@ -2724,10 +2788,14 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         var progressiveInputViews: [NSView] = []
 
         if project.isGitRepo {
-            contentStack.addArrangedSubview(label(text: "Branch name"))
-            contentStack.addArrangedSubview(helpTextLabel("Enter an existing branch or a new branch name to create."))
-            contentStack.addArrangedSubview(branchField)
-            constrainFormFieldToFillWidth(branchField, in: contentStack)
+            contentStack.addArrangedSubview(label(text: "Branch"))
+            contentStack.addArrangedSubview(helpTextLabel("Pick an existing branch or switch to create a new one."))
+            contentStack.addArrangedSubview(branchModePopup)
+            contentStack.addArrangedSubview(existingBranchField)
+            contentStack.addArrangedSubview(newBranchField)
+            constrainFormFieldToFillWidth(branchModePopup, in: contentStack)
+            constrainFormFieldToFillWidth(existingBranchField, in: contentStack)
+            constrainFormFieldToFillWidth(newBranchField, in: contentStack)
 
             let advancedInputStack = NSStackView()
             advancedInputStack.orientation = .vertical
@@ -2773,8 +2841,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
         // --- Buttons ---
         let createButton = actionButton(
-            title: "Create Workspace", symbol: nil, tooltip: "Create workspace (Return)", action: #selector(createWorkspace(_:)), primary: true)
+            title: "Create Workspace (Cmd+Return)", symbol: nil, tooltip: "Create workspace (Cmd+Return)", action: #selector(createWorkspace(_:)), primary: true)
         createButton.keyEquivalent = "\r"
+        createButton.keyEquivalentModifierMask = [.command]
         let cancelButton = actionButton(
             title: "Cancel (Esc)", symbol: nil, tooltip: "Cancel (Esc)", action: #selector(cancelProjectForm), primary: false)
         cancelButton.keyEquivalent = "\u{1b}"
@@ -2792,21 +2861,34 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         showScrollableDetailStack(stack)
 
         createButton.tag = storeAddWorkspaceFields(
-            projectID: project.id, isGitRepo: project.isGitRepo, targetBranchField: project.isGitRepo ? targetBranchField : nil, nameField: nameField,
-            directoryNameField: project.isGitRepo ? directoryNameField : nil, branchField: project.isGitRepo ? branchField : nil,
+            projectID: project.id, isGitRepo: project.isGitRepo, branchModePopup: project.isGitRepo ? branchModePopup : nil,
+            existingBranchField: project.isGitRepo ? existingBranchField : nil, newBranchField: project.isGitRepo ? newBranchField : nil,
+            targetBranchField: project.isGitRepo ? targetBranchField : nil, nameField: nameField,
+            directoryNameField: project.isGitRepo ? directoryNameField : nil,
             tooltipField: tooltipField, autoNameState: autoNameState, progressiveInputViews: progressiveInputViews, createButton: createButton)
         activeAddWorkspaceFormTag = createButton.tag
         if let refs = AddWorkspaceFieldCache.shared.cache[createButton.tag] {
-            updateAddWorkspaceProgressiveDisclosure(refs: refs, branchValue: refs.branchField?.stringValue ?? "")
+            updateAddWorkspaceBranchInputUI(refs: refs)
+            updateAddWorkspaceProgressiveDisclosure(refs: refs, branchValue: currentAddWorkspaceBranchValue(refs))
+        }
+        Task { @MainActor [weak self, weak newBranchField] in
+            await Task.yield()
+            guard let self else { return }
+            if project.isGitRepo {
+                self.window.makeFirstResponder(newBranchField)
+            } else {
+                self.window.makeFirstResponder(nameField)
+            }
         }
         guard project.isGitRepo else { return }
         let formTag = createButton.tag
-        Task { @MainActor [weak self, weak targetBranchField] in
+        Task { @MainActor [weak self, weak targetBranchField, weak existingBranchField] in
             guard let self else { return }
             let result = await Self.branchOptionsSnapshot(projectID: project.id)
             guard activeAddWorkspaceFormTag == formTag else { return }
             guard let targetBranchField else { return }
             guard case .success(let options) = result else { return }
+            autoNameState?.branchOptions = options
             let currentValue = targetBranchField.stringValue
             targetBranchField.removeAllItems()
             targetBranchField.addItems(withObjectValues: options)
@@ -2814,6 +2896,19 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 targetBranchField.stringValue = currentValue
             } else if let defaultBranch = defaultWorkspaceTargetBranch(project: project, branches: options) {
                 targetBranchField.stringValue = defaultBranch
+            }
+            if let existingBranchField {
+                let existingValue = existingBranchField.stringValue
+                existingBranchField.removeAllItems()
+                existingBranchField.addItems(withObjectValues: options)
+                if !existingValue.isEmpty {
+                    existingBranchField.stringValue = existingValue
+                } else if let suggested = options.first {
+                    existingBranchField.stringValue = suggested
+                }
+            }
+            if let refs = AddWorkspaceFieldCache.shared.cache[formTag] {
+                self.updateAddWorkspaceProgressiveDisclosure(refs: refs, branchValue: self.currentAddWorkspaceBranchValue(refs))
             }
         }
     }
@@ -3411,18 +3506,21 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let processEditor = ProcessEditor()
         let stopView = makeEditableTextView()
         let stopScroll = scrollableTextView(stopView, height: 90)
+        let terminalWindowEditor = TerminalWindowEditor()
         let browserSessionEditor = BrowserSessionEditor()
 
         if let config = try? orchestrator.workspaceSettings(workspaceID: workspace.id) {
             stopView.string = config.stopScript ?? ""
             portEditor.setDefinitions(config.ports)
             processEditor.setProcessesWithChecks(config.processes, statusChecks: config.statusChecks)
+            terminalWindowEditor.setWindows(config.terminalWindows)
             browserSessionEditor.setSessions(config.browserSessions)
         } else {
             let fullProject = try? orchestrator.project(id: project.id)
             stopView.string = fullProject?.stopScript ?? ""
             portEditor.setDefinitions(fullProject?.ports ?? [])
             processEditor.setProcessesWithChecks(fullProject?.processes ?? [], statusChecks: fullProject?.statusChecks ?? [])
+            terminalWindowEditor.setWindows(fullProject?.terminalWindows ?? [])
             browserSessionEditor.setSessions(fullProject?.browserSessions ?? [])
         }
         let saveButton = actionButton(
@@ -3441,6 +3539,13 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             icon: "terminal.fill", title: "Processes", subtitle: "Commands that run inside this workspace.", contentViews: [processEditor.container])
         contentStack.addArrangedSubview(processCard)
         constrainFormFieldToFillWidth(processCard, in: contentStack)
+
+        let terminalWindowCard = formSectionCard(
+            icon: "uiwindow.split.2x1", title: "Terminal windows",
+            subtitle: "Optional iTerm2 windows to open when this workspace launches.",
+            contentViews: [terminalWindowEditor.container])
+        contentStack.addArrangedSubview(terminalWindowCard)
+        constrainFormFieldToFillWidth(terminalWindowCard, in: contentStack)
 
         // --- Stop script card ---
         let stopCard = formSectionCard(
@@ -3496,9 +3601,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
         saveButton.tag = storeWorkspaceFields(
             workspaceID: workspace.id, stopView: stopView, portEditor: portEditor, processEditor: processEditor,
-            browserSessionEditor: browserSessionEditor)
+            terminalWindowEditor: terminalWindowEditor, browserSessionEditor: browserSessionEditor)
         registerWorkspaceDirtyTracking(
-            stopView: stopView, portEditor: portEditor, processEditor: processEditor, browserSessionEditor: browserSessionEditor)
+            stopView: stopView, portEditor: portEditor, processEditor: processEditor, terminalWindowEditor: terminalWindowEditor,
+            browserSessionEditor: browserSessionEditor)
 
         return insetContainerView(container)
     }
@@ -4442,35 +4548,38 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
     private func storeProjectFields(
         projectID: String, setupView: NSTextView, stopView: NSTextView, portEditor: PortEditor, processEditor: ProcessEditor,
-        browserSessionEditor: BrowserSessionEditor
+        terminalWindowEditor: TerminalWindowEditor, browserSessionEditor: BrowserSessionEditor
     ) -> Int {
         let id = projectID.hashValue
         ProjectFieldCache.shared.cache[id] = ProjectFieldRefs(
             projectID: projectID, setupView: setupView, stopView: stopView, portEditor: portEditor, processEditor: processEditor,
-            browserSessionEditor: browserSessionEditor)
+            terminalWindowEditor: terminalWindowEditor, browserSessionEditor: browserSessionEditor)
         return id
     }
 
     private func storeWorkspaceFields(
-        workspaceID: String, stopView: NSTextView, portEditor: PortEditor, processEditor: ProcessEditor, browserSessionEditor: BrowserSessionEditor
+        workspaceID: String, stopView: NSTextView, portEditor: PortEditor, processEditor: ProcessEditor,
+        terminalWindowEditor: TerminalWindowEditor, browserSessionEditor: BrowserSessionEditor
     ) -> Int {
         let id = workspaceID.hashValue
         WorkspaceFieldCache.shared.cache[id] = WorkspaceFieldRefs(
             workspaceID: workspaceID, stopView: stopView, portEditor: portEditor, processEditor: processEditor,
-            browserSessionEditor: browserSessionEditor)
+            terminalWindowEditor: terminalWindowEditor, browserSessionEditor: browserSessionEditor)
         return id
     }
 
     private func storeAddProjectFields(
         sourcePopup: NSPopUpButton, localSourceSection: NSStackView, cloneSourceSection: NSStackView, dirField: NSTextField,
         repoURLField: NSTextField, setupView: NSTextView, stopView: NSTextView, portEditor: PortEditor, processEditor: ProcessEditor,
-        browserSessionEditor: BrowserSessionEditor, browseButton: NSButton, progressiveInputViews: [NSView], createButton: NSButton
+        terminalWindowEditor: TerminalWindowEditor, browserSessionEditor: BrowserSessionEditor, browseButton: NSButton,
+        progressiveInputViews: [NSView], createButton: NSButton
     ) -> Int {
         let id = UUID().uuidString.hashValue
         AddProjectFieldCache.shared.cache[id] = AddProjectFieldRefs(
             sourcePopup: sourcePopup, localSourceSection: localSourceSection, cloneSourceSection: cloneSourceSection, dirField: dirField,
             repoURLField: repoURLField, browseButton: browseButton, progressiveInputViews: progressiveInputViews, createButton: createButton,
-            setupView: setupView, stopView: stopView, portEditor: portEditor, processEditor: processEditor, browserSessionEditor: browserSessionEditor
+            setupView: setupView, stopView: stopView, portEditor: portEditor, processEditor: processEditor,
+            terminalWindowEditor: terminalWindowEditor, browserSessionEditor: browserSessionEditor
         )
         sourcePopup.tag = id
         browseButton.tag = id
@@ -4478,15 +4587,16 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     }
 
     private func storeAddWorkspaceFields(
-        projectID: String, isGitRepo: Bool, targetBranchField: NSComboBox?, nameField: NSTextField, directoryNameField: NSTextField?,
-        branchField: NSTextField?, tooltipField: NSTextField?, autoNameState: AddWorkspaceAutoNameState?, progressiveInputViews: [NSView],
-        createButton: NSButton
+        projectID: String, isGitRepo: Bool, branchModePopup: NSPopUpButton?, existingBranchField: NSComboBox?, newBranchField: NSTextField?,
+        targetBranchField: NSComboBox?, nameField: NSTextField, directoryNameField: NSTextField?, tooltipField: NSTextField?,
+        autoNameState: AddWorkspaceAutoNameState?, progressiveInputViews: [NSView], createButton: NSButton
     ) -> Int {
         let id = UUID().uuidString.hashValue
         AddWorkspaceFieldCache.shared.cache[id] = AddWorkspaceFieldRefs(
-            projectID: projectID, isGitRepo: isGitRepo, targetBranchField: targetBranchField, nameField: nameField,
-            directoryNameField: directoryNameField, branchField: branchField, tooltipField: tooltipField, autoNameState: autoNameState,
-            progressiveInputViews: progressiveInputViews, createButton: createButton)
+            projectID: projectID, isGitRepo: isGitRepo, branchModePopup: branchModePopup, existingBranchField: existingBranchField,
+            newBranchField: newBranchField, targetBranchField: targetBranchField, nameField: nameField, directoryNameField: directoryNameField,
+            tooltipField: tooltipField, autoNameState: autoNameState, progressiveInputViews: progressiveInputViews, createButton: createButton)
+        branchModePopup?.tag = id
         return id
     }
 
@@ -4617,11 +4727,13 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         commitEditing()
         guard let refs = ProjectFieldCache.shared.cache[sender.tag] else { return }
         do {
+            let terminalWindows = try refs.terminalWindowEditor.currentWindows()
             try orchestrator.updateProjectConfig(projectID: refs.projectID) { config in
                 config.setupScript = refs.setupView.string.isEmpty ? nil : refs.setupView.string
                 config.stopScript = refs.stopView.string.isEmpty ? nil : refs.stopView.string
                 config.ports = refs.portEditor.currentDefinitions()
                 config.processes = refs.processEditor.currentProcesses()
+                config.terminalWindows = terminalWindows
                 config.browserSessions = refs.browserSessionEditor.currentSessions()
                 config.statusChecks = refs.processEditor.currentStatusChecks()
             }
@@ -4669,10 +4781,12 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         commitEditing()
         guard let refs = WorkspaceFieldCache.shared.cache[sender.tag] else { return }
         do {
+            let terminalWindows = try refs.terminalWindowEditor.currentWindows()
             try orchestrator.updateWorkspaceSettings(workspaceID: refs.workspaceID) { config in
                 config.stopScript = refs.stopView.string.isEmpty ? nil : refs.stopView.string
                 config.ports = refs.portEditor.currentDefinitions()
                 config.processes = refs.processEditor.currentProcesses()
+                config.terminalWindows = terminalWindows
                 config.browserSessions = refs.browserSessionEditor.currentSessions()
                 config.statusChecks = refs.processEditor.currentStatusChecks()
             }
@@ -4692,7 +4806,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 input = ProjectCreateInput(
                     gitURL: repoURL, directoryPath: nil, setupScript: refs.setupView.string.isEmpty ? nil : refs.setupView.string,
                     stopScript: refs.stopView.string.isEmpty ? nil : refs.stopView.string, ports: refs.portEditor.currentDefinitions(),
-                    processes: refs.processEditor.currentProcesses(), browserSessions: refs.browserSessionEditor.currentSessions(),
+                    processes: refs.processEditor.currentProcesses(), terminalWindows: try refs.terminalWindowEditor.currentWindows(),
+                    browserSessions: refs.browserSessionEditor.currentSessions(),
                     statusChecks: refs.processEditor.currentStatusChecks())
                 progressDetail = "Cloning repository and applying project settings."
             } else {
@@ -4701,7 +4816,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 input = ProjectCreateInput(
                     gitURL: nil, directoryPath: dir, setupScript: refs.setupView.string.isEmpty ? nil : refs.setupView.string,
                     stopScript: refs.stopView.string.isEmpty ? nil : refs.stopView.string, ports: refs.portEditor.currentDefinitions(),
-                    processes: refs.processEditor.currentProcesses(), browserSessions: refs.browserSessionEditor.currentSessions(),
+                    processes: refs.processEditor.currentProcesses(), terminalWindows: try refs.terminalWindowEditor.currentWindows(),
+                    browserSessions: refs.browserSessionEditor.currentSessions(),
                     statusChecks: refs.processEditor.currentStatusChecks())
                 progressDetail = "Registering project and applying project settings."
             }
@@ -4787,11 +4903,64 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         return ""
     }
 
+    private func addWorkspaceBranchMode(refs: AddWorkspaceFieldRefs) -> AddWorkspaceBranchMode {
+        guard let mode = AddWorkspaceBranchMode(rawValue: refs.branchModePopup?.selectedItem?.title == "Create branch" ? "create" : "existing") else {
+            return .existing
+        }
+        return mode
+    }
+
+    private func currentAddWorkspaceBranchValue(_ refs: AddWorkspaceFieldRefs) -> String {
+        switch addWorkspaceBranchMode(refs: refs) {
+        case .existing:
+            refs.existingBranchField?.stringValue ?? ""
+        case .create:
+            refs.newBranchField?.stringValue ?? ""
+        }
+    }
+
+    private func updateAddWorkspaceBranchDerivedFields(refs: AddWorkspaceFieldRefs, branchValue: String) {
+        guard let autoNameState = refs.autoNameState else { return }
+        let currentName = refs.nameField.stringValue
+        if currentName.isEmpty || currentName == autoNameState.lastAutoWorkspaceName {
+            refs.nameField.stringValue = branchValue
+            autoNameState.lastAutoWorkspaceName = branchValue
+        }
+        if let dirField = refs.directoryNameField {
+            let currentDir = dirField.stringValue
+            let sanitized = branchValue.replacing(/[^A-Za-z0-9\-_]/, with: "-").replacing(/\-{2,}/, with: "-").trimmingCharacters(
+                in: CharacterSet(charactersIn: "-"))
+            if currentDir.isEmpty || currentDir == autoNameState.lastAutoDirName {
+                dirField.stringValue = sanitized
+                autoNameState.lastAutoDirName = sanitized
+            }
+        }
+    }
+
+    private func updateAddWorkspaceBranchInputUI(refs: AddWorkspaceFieldRefs) {
+        let isCreatingBranch = addWorkspaceBranchMode(refs: refs) == .create
+        refs.existingBranchField?.isHidden = isCreatingBranch
+        refs.newBranchField?.isHidden = !isCreatingBranch
+    }
+
     private func updateAddWorkspaceProgressiveDisclosure(refs: AddWorkspaceFieldRefs, branchValue: String) {
         guard refs.isGitRepo else { return }
         let hasBranch = !branchValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         for view in refs.progressiveInputViews { view.isHidden = !hasBranch }
         refs.createButton.isEnabled = hasBranch
+    }
+
+    @objc private func addWorkspaceBranchModeChanged(_ sender: NSPopUpButton) {
+        guard let refs = AddWorkspaceFieldCache.shared.cache[sender.tag] else { return }
+        updateAddWorkspaceBranchInputUI(refs: refs)
+        let branchValue = currentAddWorkspaceBranchValue(refs)
+        updateAddWorkspaceProgressiveDisclosure(refs: refs, branchValue: branchValue)
+        updateAddWorkspaceBranchDerivedFields(refs: refs, branchValue: branchValue)
+        if addWorkspaceBranchMode(refs: refs) == .create {
+            window.makeFirstResponder(refs.newBranchField)
+        } else {
+            window.makeFirstResponder(refs.existingBranchField)
+        }
     }
 
     @objc private func createWorkspace(_ sender: NSButton) {
@@ -4800,18 +4969,22 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             let name = refs.nameField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !name.isEmpty else { throw MuxyError.invalidArgument(message: "Workspace title is required.") }
             let targetBranch = refs.targetBranchField?.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-            let branch = refs.branchField?.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            let branch = currentAddWorkspaceBranchValue(refs).trimmingCharacters(in: .whitespacesAndNewlines)
             let directoryName = refs.directoryNameField?.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
             let resolvedDirectoryName: String?
             if let directoryName, directoryName.isEmpty { resolvedDirectoryName = nil } else { resolvedDirectoryName = directoryName }
             let tooltip = refs.tooltipField?.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
             let resolvedTooltip: String?
             if let tooltip, tooltip.isEmpty { resolvedTooltip = nil } else { resolvedTooltip = tooltip }
-            if refs.isGitRepo, branch == nil || branch?.isEmpty == true {
+            if refs.isGitRepo, branch.isEmpty {
                 throw MuxyError.invalidArgument(message: "Branch name is required for git projects.")
             }
             if refs.isGitRepo, targetBranch == nil || targetBranch?.isEmpty == true {
                 throw MuxyError.invalidArgument(message: "Target branch is required for git projects.")
+            }
+            if refs.isGitRepo, addWorkspaceBranchMode(refs: refs) == .create, refs.autoNameState?.branchOptions.contains(branch) == true {
+                throw MuxyError.invalidArgument(
+                    message: "Branch '\(branch)' already exists. Choose it from Existing branch or enter a different new branch name.")
             }
             let input = WorkspaceCreateInput(
                 projectID: refs.projectID, name: name, branch: branch, targetBranch: targetBranch, directoryName: resolvedDirectoryName,
@@ -4858,23 +5031,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             return
         }
         for refs in AddWorkspaceFieldCache.shared.cache.values {
-            guard refs.branchField === changedField, let autoNameState = refs.autoNameState else { continue }
-            let branchValue = changedField.stringValue
+            guard refs.existingBranchField === changedField || refs.newBranchField === changedField else { continue }
+            let branchValue = currentAddWorkspaceBranchValue(refs)
             updateAddWorkspaceProgressiveDisclosure(refs: refs, branchValue: branchValue)
-            let currentName = refs.nameField.stringValue
-            if currentName.isEmpty || currentName == autoNameState.lastAutoWorkspaceName {
-                refs.nameField.stringValue = branchValue
-                autoNameState.lastAutoWorkspaceName = branchValue
-            }
-            if let dirField = refs.directoryNameField {
-                let currentDir = dirField.stringValue
-                let sanitized = branchValue.replacing(/[^A-Za-z0-9\-_]/, with: "-").replacing(/\-{2,}/, with: "-").trimmingCharacters(
-                    in: CharacterSet(charactersIn: "-"))
-                if currentDir.isEmpty || currentDir == autoNameState.lastAutoDirName {
-                    dirField.stringValue = sanitized
-                    autoNameState.lastAutoDirName = sanitized
-                }
-            }
+            updateAddWorkspaceBranchDerivedFields(refs: refs, branchValue: branchValue)
             return
         }
     }
@@ -6225,6 +6385,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     }
 
     public func outlineViewSelectionDidChange(_ notification: Notification) {
+        if suppressOutlineSelectionChanges { return }
         let row = outlineView.selectedRow
         let previousWorkspaceID = selectedWorkspaceID
         if projectHasUnsavedChanges || workspaceHasUnsavedChanges {
@@ -6322,7 +6483,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     }
 
     private func registerDirtyTracking(
-        setupView: NSTextView, stopView: NSTextView, portEditor: PortEditor, processEditor: ProcessEditor, browserSessionEditor: BrowserSessionEditor
+        setupView: NSTextView, stopView: NSTextView, portEditor: PortEditor, processEditor: ProcessEditor,
+        terminalWindowEditor: TerminalWindowEditor, browserSessionEditor: BrowserSessionEditor
     ) {
         projectHasUnsavedChanges = false
         NotificationCenter.default.addObserver(forName: NSText.didChangeNotification, object: setupView, queue: .main) { [weak self] _ in
@@ -6333,11 +6495,13 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         }
         portEditor.onDirty = { [weak self] in Task { @MainActor in self?.projectHasUnsavedChanges = true } }
         processEditor.onDirty = { [weak self] in Task { @MainActor in self?.projectHasUnsavedChanges = true } }
+        terminalWindowEditor.onDirty = { [weak self] in Task { @MainActor in self?.projectHasUnsavedChanges = true } }
         browserSessionEditor.onDirty = { [weak self] in Task { @MainActor in self?.projectHasUnsavedChanges = true } }
     }
 
     private func registerWorkspaceDirtyTracking(
-        stopView: NSTextView, portEditor: PortEditor, processEditor: ProcessEditor, browserSessionEditor: BrowserSessionEditor
+        stopView: NSTextView, portEditor: PortEditor, processEditor: ProcessEditor, terminalWindowEditor: TerminalWindowEditor,
+        browserSessionEditor: BrowserSessionEditor
     ) {
         workspaceHasUnsavedChanges = false
         NotificationCenter.default.addObserver(forName: NSText.didChangeNotification, object: stopView, queue: .main) { [weak self] _ in
@@ -6345,6 +6509,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         }
         portEditor.onDirty = { [weak self] in Task { @MainActor in self?.workspaceHasUnsavedChanges = true } }
         processEditor.onDirty = { [weak self] in Task { @MainActor in self?.workspaceHasUnsavedChanges = true } }
+        terminalWindowEditor.onDirty = { [weak self] in Task { @MainActor in self?.workspaceHasUnsavedChanges = true } }
         browserSessionEditor.onDirty = { [weak self] in Task { @MainActor in self?.workspaceHasUnsavedChanges = true } }
     }
 
@@ -6376,10 +6541,12 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let tag = selectedWorkspaceID.hashValue
         guard let refs = WorkspaceFieldCache.shared.cache[tag] else { return true }
         do {
+            let terminalWindows = try refs.terminalWindowEditor.currentWindows()
             try orchestrator.updateWorkspaceSettings(workspaceID: refs.workspaceID) { config in
                 config.stopScript = refs.stopView.string.isEmpty ? nil : refs.stopView.string
                 config.ports = refs.portEditor.currentDefinitions()
                 config.processes = refs.processEditor.currentProcesses()
+                config.terminalWindows = terminalWindows
                 config.browserSessions = refs.browserSessionEditor.currentSessions()
                 config.statusChecks = refs.processEditor.currentStatusChecks()
             }
@@ -6398,11 +6565,13 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let tag = selectedProjectID.hashValue
         guard let refs = ProjectFieldCache.shared.cache[tag] else { return true }
         do {
+            let terminalWindows = try refs.terminalWindowEditor.currentWindows()
             try orchestrator.updateProjectConfig(projectID: refs.projectID) { config in
                 config.setupScript = refs.setupView.string.isEmpty ? nil : refs.setupView.string
                 config.stopScript = refs.stopView.string.isEmpty ? nil : refs.stopView.string
                 config.ports = refs.portEditor.currentDefinitions()
                 config.processes = refs.processEditor.currentProcesses()
+                config.terminalWindows = terminalWindows
                 config.browserSessions = refs.browserSessionEditor.currentSessions()
                 config.statusChecks = refs.processEditor.currentStatusChecks()
             }

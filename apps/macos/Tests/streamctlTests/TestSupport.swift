@@ -18,7 +18,7 @@ func makeTemporaryStore() throws -> SQLiteStore {
 func makeProjectRecord(id: String = UUID().uuidString, dir: String) -> ProjectRecord {
     ProjectRecord(
         id: id, name: "Project", dir: dir, isGitRepo: false, defaultBranch: nil, setupScript: nil, stopScript: nil, ports: [], processes: [],
-        statusChecks: [], browserSessions: [])
+        terminalWindows: [], statusChecks: [], browserSessions: [])
 }
 
 func makeWorkspaceRecord(id: String = UUID().uuidString, projectID: String, name: String, dir: String) -> WorkspaceRecord {
@@ -34,6 +34,7 @@ class MockIterm2Adapter: Iterm2Adapter, @unchecked Sendable {
     var runInWindowCallCount = 0
     var focusSessionOrTabCallCount = 0
     var lastCommand: String?
+    var openedCommands: [String] = []
     var lastWindowID: Int?
     var openedTabWindowIDs: [Int] = []
     var lastFocusedSessionID: String?
@@ -52,6 +53,7 @@ class MockIterm2Adapter: Iterm2Adapter, @unchecked Sendable {
     override func openWindowAndRun(command: String, background: Bool = false) throws -> ItermWindowInfo {
         openWindowAndRunCallCount += 1
         lastCommand = command
+        openedCommands.append(command)
         if let pairedTmux, command.contains("tmux new-session -A -s") {
             let pattern = #"muxy-[A-Za-z0-9_-]+(?:-[A-Za-z0-9_-]+)?"#
             if let range = command.range(of: pattern, options: .regularExpression) {
@@ -69,6 +71,7 @@ class MockIterm2Adapter: Iterm2Adapter, @unchecked Sendable {
         openTabInWindowAndRunCallCount += 1
         openedTabWindowIDs.append(windowID)
         lastCommand = command
+        openedCommands.append(command)
         lastWindowID = windowID
         let tabIndex = (nextTabIndex ?? 1) + openTabInWindowAndRunCallCount
         let sessionID = nextSessionID.map { "\($0)-tab-\(openTabInWindowAndRunCallCount)" }

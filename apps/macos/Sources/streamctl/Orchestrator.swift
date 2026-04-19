@@ -242,6 +242,7 @@ public final class MuxyOrchestrator {
         try store.setWorkspaceStopScript(workspaceID: workspace.id, stopScript: existing.stopScript)
         try store.setWorkspacePortDefinitions(workspaceID: workspace.id, definitions: existing.ports)
         try store.setWorkspaceProcesses(workspaceID: workspace.id, processes: existing.processes)
+        try store.setWorkspaceTerminalWindows(workspaceID: workspace.id, windows: existing.terminalWindows)
         try store.setWorkspaceStatusChecks(workspaceID: workspace.id, checks: existing.statusChecks)
         try store.setWorkspaceBrowserSessions(workspaceID: workspace.id, sessions: existing.browserSessions)
         try store.touchWorkspaceSettings(workspaceID: workspace.id, updatedAt: nowISO8601())
@@ -393,7 +394,7 @@ public final class MuxyOrchestrator {
         record = ProjectRecord(
             id: normalizedID, name: record.name, dir: record.dir, isGitRepo: record.isGitRepo, defaultBranch: record.defaultBranch,
             setupScript: record.setupScript, stopScript: record.stopScript, ports: record.ports, processes: record.processes,
-            statusChecks: record.statusChecks, browserSessions: record.browserSessions)
+            terminalWindows: record.terminalWindows, statusChecks: record.statusChecks, browserSessions: record.browserSessions)
         try store.upsert(project: record)
         try ensureDefaultWorkspace(for: record)
         try syncDefaultWorkspaceSettingsIfTemplateBased(project: record, previousRecord: previousRecord, updatedRecord: record)
@@ -677,6 +678,7 @@ public final class MuxyOrchestrator {
 
         if let config {
             newWindows.append(contentsOf: try launchProcesses(workspace: workspace, templates: config.processes, env: env, background: background))
+            newWindows.append(contentsOf: try launchConfiguredTerminalWindows(workspace: workspace, templates: config.terminalWindows, background: background))
             let browserSessionResult = try ensureBrowserSessions(
                 project: project, workspace: workspace, sessions: config.browserSessions, env: env, extractOnAttach: true, background: background)
             try store.setWorkspaceBrowserSessions(workspaceID: workspace.id, sessions: browserSessionResult.sessions)
@@ -1661,6 +1663,40 @@ public final class MuxyOrchestrator {
         return #"bash -lc 'cd "\#(escapedDir)" && exec "${SHELL:-/bin/zsh}" -l'"#
     }
 
+    private func configuredTerminalWindowCommand(cwd: String, command: String?) -> String {
+        let escapedDir = cwd.replacingOccurrences(of: "\"", with: "\\\"")
+        guard let command = command?.trimmingCharacters(in: .whitespacesAndNewlines), !command.isEmpty else {
+            return interactiveShellCommand(cwd: cwd)
+        }
+        return #"cd "\#(escapedDir)" && \#(command)"#
+    }
+
+    private func launchConfiguredTerminalWindows(
+        workspace: WorkspaceRecord, templates: [TerminalWindowTemplate], background: Bool = false
+    ) throws -> [WindowRecord] {
+        guard !templates.isEmpty else { return [] }
+        guard iterm.isAvailable() else { throw MuxyError.dependencyMissing(message: "iTerm2 is required to launch terminal windows.") }
+        var snapshot = try yabai.listWindows()
+        let existingWindows = try store.windows(workspaceID: workspace.id)
+        var launched: [WindowRecord] = []
+
+        for template in templates {
+            let terminalHandle = try openDedicatedItermWindow(
+                command: configuredTerminalWindowCommand(cwd: workspace.dir, command: template.command),
+                background: background)
+            let capturedWindowID = try captureNewAppWindowID(snapshot: snapshot, appName: "iTerm2") ?? terminalHandle.id
+            snapshot = try yabai.listWindows()
+            let nextOrder = Self.nextWindowOrderIndex(existing: existingWindows + launched, role: "terminal", orderOffset: 200)
+            launched.append(
+                WindowRecord(
+                    id: UUID().uuidString, workspaceID: workspace.id, app: "iTerm2", title: template.name, targetURL: nil,
+                    windowID: capturedWindowID, itermSessionID: terminalHandle.sessionID, itermTabIndex: nil, tmuxWindowID: nil, role: "terminal",
+                    orderIndex: nextOrder, lastSeenAt: nowISO8601()))
+        }
+
+        return launched
+    }
+
     @discardableResult private func ensureWorkspaceTerminalAttached(workspace: WorkspaceRecord, background: Bool = false) throws -> ItermWindowInfo {
         if let windowID = try workspaceTerminalWindowID(workspaceID: workspace.id) {
             return ItermWindowInfo(id: windowID, sessionID: try workspaceTerminalSessionID(workspaceID: workspace.id), tabIndex: nil)
@@ -2434,11 +2470,13 @@ public final class MuxyOrchestrator {
             stopScript: try store.workspaceStopScript(workspaceID: defaultWorkspace.id),
             ports: try store.workspacePortDefinitions(workspaceID: defaultWorkspace.id),
             processes: try store.workspaceProcesses(workspaceID: defaultWorkspace.id),
+            terminalWindows: try store.workspaceTerminalWindows(workspaceID: defaultWorkspace.id),
             statusChecks: try store.workspaceStatusChecks(workspaceID: defaultWorkspace.id),
             browserSessions: try store.workspaceBrowserSessions(workspaceID: defaultWorkspace.id))
 
         let previousTemplate = WorkspaceSettings(
             stopScript: previousRecord.stopScript, ports: previousRecord.ports, processes: previousRecord.processes,
+            terminalWindows: previousRecord.terminalWindows,
             statusChecks: previousRecord.statusChecks, browserSessions: previousRecord.browserSessions)
 
         guard workspaceSettingsMatch(currentSettings, previousTemplate) else { return }
@@ -2450,6 +2488,7 @@ public final class MuxyOrchestrator {
         guard lhs.stopScript == rhs.stopScript else { return false }
         guard lhs.ports == rhs.ports else { return false }
         guard processTemplatesMatch(lhs.processes, rhs.processes) else { return false }
+        guard lhs.terminalWindows == rhs.terminalWindows else { return false }
         guard statusChecksMatch(lhs.statusChecks, rhs.statusChecks) else { return false }
         guard browserSessionsMatch(lhs.browserSessions, rhs.browserSessions) else { return false }
         return true
@@ -2483,6 +2522,7 @@ public final class MuxyOrchestrator {
         try store.setWorkspaceStopScript(workspaceID: workspace.id, stopScript: project.stopScript)
         try store.setWorkspacePortDefinitions(workspaceID: workspace.id, definitions: project.ports)
         try store.setWorkspaceProcesses(workspaceID: workspace.id, processes: project.processes)
+        try store.setWorkspaceTerminalWindows(workspaceID: workspace.id, windows: project.terminalWindows)
         try store.setWorkspaceStatusChecks(workspaceID: workspace.id, checks: project.statusChecks)
         try store.setWorkspaceBrowserSessions(workspaceID: workspace.id, sessions: project.browserSessions)
         try store.touchWorkspaceSettings(workspaceID: workspace.id, updatedAt: nowISO8601())
@@ -2507,10 +2547,12 @@ public final class MuxyOrchestrator {
         let stopScript = try store.workspaceStopScript(workspaceID: workspace.id)
         let ports = try store.workspacePortDefinitions(workspaceID: workspace.id)
         let processes = try store.workspaceProcesses(workspaceID: workspace.id)
+        let terminalWindows = try store.workspaceTerminalWindows(workspaceID: workspace.id)
         let statusChecks = try store.workspaceStatusChecks(workspaceID: workspace.id)
         let browserSessions = try store.workspaceBrowserSessions(workspaceID: workspace.id)
         return WorkspaceSettings(
-            stopScript: stopScript, ports: ports, processes: processes, statusChecks: statusChecks, browserSessions: browserSessions)
+            stopScript: stopScript, ports: ports, processes: processes, terminalWindows: terminalWindows, statusChecks: statusChecks,
+            browserSessions: browserSessions)
     }
 
     private func runScript(_ script: String, cwd: String) throws { _ = try Shell.run(["/bin/bash", "-lc", script], cwd: cwd) }
@@ -2605,6 +2647,7 @@ public final class MuxyOrchestrator {
         let env = buildWorkspaceEnv(project: project, workspace: workspace, namedPorts: namedPorts)
         try reconcileProcesses(workspace: workspace, previous: previous.processes, updated: updated.processes, env: env)
         try reconcileBrowserSessions(project: project, workspace: workspace, sessions: updated.browserSessions, env: env)
+        try store.setWorkspaceTerminalWindows(workspaceID: workspace.id, windows: updated.terminalWindows)
         try pruneMissingWindows(workspaceID: workspace.id)
     }
 

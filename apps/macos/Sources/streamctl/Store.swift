@@ -55,6 +55,12 @@ public final class SQLiteStore {
                 sql: "INSERT INTO project_processes(id, project_id, name, command, on_exit, order_index) VALUES (?, ?, ?, ?, ?, ?)",
                 bindings: [UUID().uuidString, project.id, process.name ?? "", process.command, process.onExit.rawValue, String(index)])
         }
+        try execute(sql: "DELETE FROM project_terminal_windows WHERE project_id = ?", bindings: [project.id])
+        for (index, window) in project.terminalWindows.enumerated() {
+            try execute(
+                sql: "INSERT INTO project_terminal_windows(id, project_id, name, command, order_index) VALUES (?, ?, ?, ?, ?)",
+                bindings: [UUID().uuidString, project.id, window.name, window.command ?? "", String(index)])
+        }
         try execute(sql: "DELETE FROM project_status_checks WHERE project_id = ?", bindings: [project.id])
         for (index, check) in project.statusChecks.enumerated() {
             try execute(
@@ -100,6 +106,7 @@ public final class SQLiteStore {
         try execute(sql: "DELETE FROM windows WHERE workspace_id IN (SELECT id FROM workspaces WHERE project_id = ?)", bindings: [id])
         try execute(sql: "DELETE FROM workspace_settings WHERE workspace_id IN (SELECT id FROM workspaces WHERE project_id = ?)", bindings: [id])
         try execute(sql: "DELETE FROM workspace_processes WHERE workspace_id IN (SELECT id FROM workspaces WHERE project_id = ?)", bindings: [id])
+        try execute(sql: "DELETE FROM workspace_terminal_windows WHERE workspace_id IN (SELECT id FROM workspaces WHERE project_id = ?)", bindings: [id])
         try execute(sql: "DELETE FROM workspace_status_checks WHERE workspace_id IN (SELECT id FROM workspaces WHERE project_id = ?)", bindings: [id])
         try execute(
             sql: "DELETE FROM workspace_browser_sessions WHERE workspace_id IN (SELECT id FROM workspaces WHERE project_id = ?)", bindings: [id])
@@ -114,6 +121,7 @@ public final class SQLiteStore {
         try execute(sql: "DELETE FROM workspaces WHERE project_id = ?", bindings: [id])
         try execute(sql: "DELETE FROM project_port_definitions WHERE project_id = ?", bindings: [id])
         try execute(sql: "DELETE FROM project_processes WHERE project_id = ?", bindings: [id])
+        try execute(sql: "DELETE FROM project_terminal_windows WHERE project_id = ?", bindings: [id])
         try execute(sql: "DELETE FROM project_status_checks WHERE project_id = ?", bindings: [id])
         try execute(sql: "DELETE FROM project_browser_sessions WHERE project_id = ?", bindings: [id])
         try execute(sql: "DELETE FROM ignored_worktrees WHERE project_id = ?", bindings: [id])
@@ -197,6 +205,7 @@ public final class SQLiteStore {
         try execute(sql: "DELETE FROM windows WHERE workspace_id = ?", bindings: [id])
         try execute(sql: "DELETE FROM workspace_settings WHERE workspace_id = ?", bindings: [id])
         try execute(sql: "DELETE FROM workspace_processes WHERE workspace_id = ?", bindings: [id])
+        try execute(sql: "DELETE FROM workspace_terminal_windows WHERE workspace_id = ?", bindings: [id])
         try execute(sql: "DELETE FROM workspace_status_checks WHERE workspace_id = ?", bindings: [id])
         try execute(sql: "DELETE FROM workspace_browser_sessions WHERE workspace_id = ?", bindings: [id])
         try execute(sql: "DELETE FROM status_results WHERE process_id IN (SELECT id FROM running_processes WHERE workspace_id = ?)", bindings: [id])
@@ -320,6 +329,28 @@ public final class SQLiteStore {
             let name = row[0].isEmpty ? nil : row[0]
             return ProcessTemplate(name: name, command: row[1], onExit: ProcessExitAction(rawValue: row[2]) ?? .none)
         }
+    }
+
+    public func setWorkspaceTerminalWindows(workspaceID: String, windows: [TerminalWindowTemplate]) throws {
+        try execute(sql: "DELETE FROM workspace_terminal_windows WHERE workspace_id = ?", bindings: [workspaceID])
+        for (index, window) in windows.enumerated() {
+            try execute(
+                sql: """
+                    INSERT INTO workspace_terminal_windows(id, workspace_id, name, command, order_index)
+                    VALUES (?, ?, ?, ?, ?)
+                    """, bindings: [UUID().uuidString, workspaceID, window.name, window.command ?? "", String(index)])
+        }
+    }
+
+    public func workspaceTerminalWindows(workspaceID: String) throws -> [TerminalWindowTemplate] {
+        let rows = try queryRows(
+            sql: """
+                SELECT name, command
+                FROM workspace_terminal_windows
+                WHERE workspace_id = ?
+                ORDER BY order_index
+                """, bindings: [workspaceID])
+        return rows.map { TerminalWindowTemplate(name: $0[0], command: $0[1].isEmpty ? nil : $0[1]) }
     }
 
     public func setWorkspaceStatusChecks(workspaceID: String, checks: [StatusCheckDefinition]) throws {
@@ -761,6 +792,14 @@ public final class SQLiteStore {
               order_index INTEGER NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS project_terminal_windows (
+              id TEXT PRIMARY KEY,
+              project_id TEXT NOT NULL,
+              name TEXT NOT NULL,
+              command TEXT,
+              order_index INTEGER NOT NULL
+            );
+
             CREATE TABLE IF NOT EXISTS project_status_checks (
               id TEXT PRIMARY KEY,
               project_id TEXT NOT NULL,
@@ -829,6 +868,14 @@ public final class SQLiteStore {
               name TEXT,
               command TEXT NOT NULL,
               on_exit TEXT NOT NULL DEFAULT 'none',
+              order_index INTEGER NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS workspace_terminal_windows (
+              id TEXT PRIMARY KEY,
+              workspace_id TEXT NOT NULL,
+              name TEXT NOT NULL,
+              command TEXT,
               order_index INTEGER NOT NULL
             );
 
@@ -954,8 +1001,28 @@ public final class SQLiteStore {
         try ensureColumnExists(table: "projects", name: "setup_script", definition: "setup_script TEXT")
         try ensureColumnExists(table: "projects", name: "stop_script", definition: "stop_script TEXT")
         try ensureColumnExists(table: "project_processes", name: "on_exit", definition: "on_exit TEXT NOT NULL DEFAULT 'none'")
+        try execute(
+            sql: """
+                CREATE TABLE IF NOT EXISTS project_terminal_windows (
+                  id TEXT PRIMARY KEY,
+                  project_id TEXT NOT NULL,
+                  name TEXT NOT NULL,
+                  command TEXT,
+                  order_index INTEGER NOT NULL
+                )
+                """, bindings: [])
         try ensureColumnExists(table: "project_status_checks", name: "on_fail", definition: "on_fail TEXT NOT NULL DEFAULT 'none'")
         try ensureColumnExists(table: "workspace_processes", name: "on_exit", definition: "on_exit TEXT NOT NULL DEFAULT 'none'")
+        try execute(
+            sql: """
+                CREATE TABLE IF NOT EXISTS workspace_terminal_windows (
+                  id TEXT PRIMARY KEY,
+                  workspace_id TEXT NOT NULL,
+                  name TEXT NOT NULL,
+                  command TEXT,
+                  order_index INTEGER NOT NULL
+                )
+                """, bindings: [])
         try ensureColumnExists(table: "workspace_status_checks", name: "on_exit", definition: "on_exit TEXT NOT NULL DEFAULT 'none'")
         try ensureColumnExists(table: "workspace_status_checks", name: "on_fail", definition: "on_fail TEXT NOT NULL DEFAULT 'none'")
         try ensureColumnExists(table: "workspace_ports", name: "port_name", definition: "port_name TEXT NOT NULL DEFAULT ''")
@@ -1017,6 +1084,9 @@ public final class SQLiteStore {
         let processes = try queryRows(
             sql: "SELECT name, command, on_exit FROM project_processes WHERE project_id = ? ORDER BY order_index", bindings: [id]
         ).map { row in ProcessTemplate(name: row[0].isEmpty ? nil : row[0], command: row[1], onExit: ProcessExitAction(rawValue: row[2]) ?? .none) }
+        let terminalWindows = try queryRows(
+            sql: "SELECT name, command FROM project_terminal_windows WHERE project_id = ? ORDER BY order_index", bindings: [id]
+        ).map { row in TerminalWindowTemplate(name: row[0], command: row[1].isEmpty ? nil : row[1]) }
         let statusChecks = try queryRows(
             sql: "SELECT name, process, command, interval, timeout, on_fail FROM project_status_checks WHERE project_id = ? ORDER BY order_index",
             bindings: [id]
@@ -1032,7 +1102,7 @@ public final class SQLiteStore {
         return ProjectRecord(
             id: id, name: row[1], dir: row[2], isGitRepo: row[3] == "1", defaultBranch: row[4].isEmpty ? nil : row[4],
             setupScript: row[5].isEmpty ? nil : row[5], stopScript: row[6].isEmpty ? nil : row[6], ports: ports, processes: processes,
-            statusChecks: statusChecks, browserSessions: browserSessions)
+            terminalWindows: terminalWindows, statusChecks: statusChecks, browserSessions: browserSessions)
     }
 
     private func decodeWorkspace(row: [String]) -> WorkspaceRecord? {

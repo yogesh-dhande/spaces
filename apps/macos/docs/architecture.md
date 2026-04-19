@@ -56,6 +56,7 @@ Projects persist:
 - setup and stop scripts
 - port definitions
 - process templates
+- terminal-window templates
 - status-check templates
 - browser-session templates
 
@@ -92,8 +93,9 @@ It also lets lifecycle state stay explicit while runtime health is derived from 
 1. Validate that the workspace is launchable.
 2. Build the workspace environment, including named port variables and workspace paths.
 3. Start tracked processes inside tmux-backed dedicated terminal contexts.
-4. Open tracked browser sessions.
-5. Capture new windows through yabai and persist the mapping.
+4. Open configured standalone terminal windows in iTerm2.
+5. Open tracked browser sessions.
+6. Capture new windows through yabai and persist the mapping.
 
 ### Workspace Stop or Archive
 1. Stop tracked processes.
@@ -107,6 +109,7 @@ It also lets lifecycle state stay explicit while runtime health is derived from 
 - Background worktree discovery imports valid unmanaged worktrees for known projects.
 - Background reconciliation removes stale tracked windows and refreshes persisted workspace metadata from disk where needed.
 - Reconciliation may degrade runtime health, but it should not silently promote or demote workspace lifecycle state.
+- Sidebar snapshot refresh can update the backing lists in the background without rebuilding the active detail pane when the current selection is still valid.
 - These passes should not block the main UI thread.
 
 ## Environment and Process Model

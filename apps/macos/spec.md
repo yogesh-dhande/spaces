@@ -28,6 +28,7 @@ A project is a codebase plus reusable templates:
 - setup and stop scripts
 - named port definitions
 - process templates
+- terminal-window templates
 - status checks
 - browser sessions
 
@@ -76,7 +77,7 @@ Muxy focuses those windows; it does not decide their geometry.
 
 ### Creation
 - Users can create, import, update, launch, stop, restart, focus, and archive workspaces from the GUI and CLI.
-- For git projects, new workspaces are branch-oriented and should support explicit branch, target branch, directory name, title, and tooltip inputs.
+- For git projects, new workspaces are branch-oriented and should support an existing-branch picker, a new-branch entry path, target branch, directory name, title, and tooltip inputs.
 - Workspace creation should feel fast in the GUI, with visible progress during setup.
 - Workspace settings used for launch must remain editable after creation.
 
@@ -88,7 +89,7 @@ Muxy focuses those windows; it does not decide their geometry.
 - Sidebar git activity should remain visible while background refresh is in flight and update in place when fresh status arrives.
 
 ## Launch and Runtime Behavior
-- Launch starts the workspace's configured processes and browser sessions and captures the resulting windows.
+- Launch starts the workspace's configured processes, terminal windows, and browser sessions and captures the resulting windows.
 - Workspace processes should be launched inside tmux so Muxy can recover the terminal view without losing the underlying process when an iTerm2 window closes.
 - Stop shuts down tracked runtime state and closes tracked dedicated windows safely.
 - Restart performs a stop followed by a fresh launch.
@@ -146,6 +147,7 @@ Muxy focuses those windows; it does not decide their geometry.
 - Long-running actions should show visible progress.
 - Failure states should be explicit and actionable.
 - The GUI should prefer inline guidance over silent failure or hidden background behavior.
+- Background sidebar/runtime refresh should update in place without replacing the current detail pane or resetting the selected workspace tab.
 
 ## Update Experience
 - The app should check for updates periodically and allow manual update checks.
