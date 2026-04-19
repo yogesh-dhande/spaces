@@ -112,6 +112,35 @@ final class AgentHookTests: XCTestCase {
         XCTAssertEqual(try store.agentWindows(workspaceID: workspace.id).count, 1)
     }
 
+    func testUpdateAgentWindowStatusPrefersItermSessionMatchOverWindowID() throws {
+        let store = try makeTemporaryStore()
+        let orchestrator = MuxyOrchestrator(store: store, iterm: MockIterm2Adapter(), tmux: MockTmuxAdapter())
+        let (_, workspace) = try makeProjectAndWorkspace(store: store)
+
+        let existing = try orchestrator.registerAgentWindow(
+            workspaceID: workspace.id,
+            provider: .iterm2,
+            label: "Claude Code CLI",
+            itermSessionID: "workspace-session",
+            codexThreadID: "thread-1",
+            yabaiWindowID: 101,
+            status: .idle)
+
+        let updated = try orchestrator.updateAgentWindowStatus(
+            workspaceID: workspace.id,
+            provider: .iterm2,
+            itermSessionID: "workspace-session",
+            codexThreadID: "thread-1",
+            yabaiWindowID: 202,
+            label: "Claude Code CLI",
+            status: .waiting)
+
+        XCTAssertEqual(updated.id, existing.id)
+        XCTAssertEqual(updated.yabaiWindowID, 202)
+        XCTAssertEqual(updated.status, .waiting)
+        XCTAssertEqual(try store.agentWindows(workspaceID: workspace.id).count, 1)
+    }
+
     func testUpdateAgentWindowStatusFallsBackToCodexThreadMatch() throws {
         let store = try makeTemporaryStore()
         let orchestrator = MuxyOrchestrator(store: store, iterm: MockIterm2Adapter(), tmux: MockTmuxAdapter())

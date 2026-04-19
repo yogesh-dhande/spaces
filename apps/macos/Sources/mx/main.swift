@@ -1024,7 +1024,7 @@ struct CLI {
               mx project process add --dir <path> --command <cmd> [--name <name>] [--on-exit none|restart|notify]
               mx project process remove --dir <path> --name <name>
               mx project terminal-window list --dir <path>
-              mx project terminal-window add --dir <path> --name <name> [--command <cmd>]
+              mx project terminal-window add --dir <path> --name <name> [--command <executable and args>]
               mx project terminal-window remove --dir <path> --name <name>
               mx project status-check list --dir <path>
               mx project status-check add --dir <path> --process <process> --command <cmd> [--name <name>] [--interval <seconds>] [--timeout <seconds>] [--on-fail none|restart|notify]
@@ -1044,7 +1044,7 @@ struct CLI {
               mx workspace archive [--dir <path>]
               mx workspace focus [--dir <path>] --window <index>
               mx workspace terminal-window list [--dir <path>]
-              mx workspace terminal-window add [--dir <path>] --name <name> [--command <cmd>]
+              mx workspace terminal-window add [--dir <path>] --name <name> [--command <executable and args>]
               mx workspace terminal-window remove [--dir <path>] --name <name>
 
               mx agent event --type init|start|waiting|done|stop [--dir <path>] [--provider iterm2]
@@ -1058,6 +1058,7 @@ struct CLI {
               - Workspaces snapshot project port definitions, processes, terminal windows, status checks, and browser sessions into the runtime DB on creation.
               - Project `setup_script` runs when a workspace is created/revived; GUI create persists workspace first and runs setup in background.
               - Launch waits for pending/running setup to complete and fails with the setup error if setup failed.
+              - Terminal-window `--command` values are treated as direct executable invocations with arguments; legacy shell snippets remain supported for existing configs.
               - `mx discover` reconciles git worktrees across all registered projects by creating missing workspaces, archiving workspaces whose worktrees are no longer valid, refreshing stored branch names from disk, and running the project `setup_script` for each newly created workspace.
               - Project/workspace `stop_script` runs whenever a workspace is stopped (including restart/archive stop phase), after automatic process termination attempts.
               - `workspace up` ensures a workspace and all its processes are running: launches when stopped; when already running, restarts any exited processes. Windows open without activating the app. Add `--force-restart` to force a full stop+launch. Add `--focus` to bring the workspace to the foreground after.

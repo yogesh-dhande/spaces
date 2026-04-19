@@ -1473,6 +1473,68 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertEqual(try orchestrator.activeWorkspaceID(), workspace.id)
     }
 
+    func testFocusWorkspaceWindowIndexSkipsProcessDuplicatedByAgentTerminal() throws {
+        let (orchestrator, store, _, workspace, root) = try makeOrchestratorWithWorkspace()
+        let focusLog = root.appendingPathComponent("deduped-shortcut-focus.log")
+
+        try store.upsert(
+            window: WindowRecord(
+                id: UUID().uuidString, workspaceID: workspace.id, app: "iTerm2", title: "Claude Code", windowID: 101,
+                itermSessionID: "workspace-session", role: "terminal", orderIndex: 0, lastSeenAt: "now"))
+        try store.upsert(
+            runningProcess: RunningProcessRecord(
+                id: UUID().uuidString, workspaceID: workspace.id, templateName: "Claude Code", command: "claude", terminalApp: "iTerm2",
+                windowID: 101, itermSessionID: "workspace-session", itermTabIndex: nil, tmuxWindowID: nil, pid: 123, status: .running,
+                logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil))
+        try store.upsertAgentWindow(
+            AgentWindowRecord(
+                id: UUID().uuidString, workspaceID: workspace.id, provider: .iterm2, label: "Claude Code CLI",
+                itermSessionID: "workspace-session", tmuxWindowID: nil, codexThreadID: nil, windowID: 101, yabaiWindowID: 101, status: .idle,
+                createdAt: "now", updatedAt: "now"))
+        try store.upsert(
+            window: WindowRecord(
+                id: UUID().uuidString, workspaceID: workspace.id, app: "Google Chrome", title: "frontend", targetURL: "http://localhost:3000",
+                windowID: 202, role: "browser", orderIndex: 1, lastSeenAt: "now"))
+
+        try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) {
+            try withEnv(name: "YABAI_FOCUS_LOG_FILE", value: focusLog.path) {
+                try orchestrator.focusWorkspaceWindow(workspaceID: workspace.id, index: 2)
+            }
+        }
+
+        let focusedIDs = try String(contentsOf: focusLog).split(separator: "\n").map(String.init)
+        XCTAssertEqual(focusedIDs, ["202"])
+    }
+
+    func testFocusAgentWindowUsesTrackedTerminalSessionInsteadOfStaleStoredWindowID() throws {
+        let (orchestrator, store, _, workspace, root) = try makeOrchestratorWithWorkspace()
+        let focusLog = root.appendingPathComponent("agent-session-focus.log")
+
+        try store.upsert(
+            window: WindowRecord(
+                id: UUID().uuidString, workspaceID: workspace.id, app: "Google Chrome", title: "New Tab - Google Chrome - Yogesh",
+                targetURL: nil, windowID: 202, role: "browser", orderIndex: 0, lastSeenAt: "now"))
+        let trackedTerminal = WindowRecord(
+            id: UUID().uuidString, workspaceID: workspace.id, app: "iTerm2", title: "Claude Code", targetURL: nil,
+            windowID: 101, itermSessionID: "workspace-session", role: "terminal", orderIndex: 1, lastSeenAt: "now")
+        try store.upsert(window: trackedTerminal)
+
+        let record = AgentWindowRecord(
+            id: UUID().uuidString, workspaceID: workspace.id, provider: .iterm2, label: "Claude Code CLI",
+            itermSessionID: "workspace-session", tmuxWindowID: nil, codexThreadID: "thread-1", windowID: 202, yabaiWindowID: 202,
+            status: .idle, createdAt: "now", updatedAt: "now")
+        try store.upsertAgentWindow(record)
+
+        try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) {
+            try withEnv(name: "YABAI_FOCUS_LOG_FILE", value: focusLog.path) {
+                try orchestrator.focusAgentWindow(record)
+            }
+        }
+
+        let focusedIDs = try String(contentsOf: focusLog).split(separator: "\n").map(String.init)
+        XCTAssertEqual(focusedIDs, ["101"])
+    }
+
     // Tests focus window navigation uses the current focused window and wraps by arranging representative inputs and asserting the expected result.
     func testFocusWindowNavigationUsesRelativeOrderAndWraps() throws {
         let (orchestrator, store, _, workspace, root) = try makeOrchestratorWithWorkspace()

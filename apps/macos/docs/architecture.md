@@ -93,7 +93,7 @@ It also lets lifecycle state stay explicit while runtime health is derived from 
 1. Validate that the workspace is launchable.
 2. Build the workspace environment, including named port variables and workspace paths.
 3. Start tracked processes inside tmux-backed dedicated terminal contexts.
-4. Open configured standalone terminal windows in iTerm2.
+4. Open configured standalone terminal windows in iTerm2, running any configured executable-and-args command in the workspace directory.
 5. Open tracked browser sessions.
 6. Capture new windows through yabai and persist the mapping.
 

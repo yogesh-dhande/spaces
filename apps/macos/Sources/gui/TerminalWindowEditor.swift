@@ -98,7 +98,7 @@ import streamctl
             container.alignment = .centerY
 
             nameField.placeholderString = "name"
-            commandField.placeholderString = "optional command"
+            commandField.placeholderString = "optional executable and args"
 
             let removeButton = NSButton(title: "", target: self, action: #selector(removeRow))
             removeButton.bezelStyle = .texturedRounded

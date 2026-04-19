@@ -9,7 +9,7 @@ final class TerminalWindowLaunchTests: XCTestCase {
         try orchestrator.updateWorkspaceSettings(workspaceID: workspace.id) { config in
             config.terminalWindows = [
                 TerminalWindowTemplate(name: "Shell"),
-                TerminalWindowTemplate(name: "Logs", command: "tail -f log/development.log"),
+                TerminalWindowTemplate(name: "Logs", command: #"python -m http.server --directory "Preview Assets""#),
             ]
         }
 
@@ -20,10 +20,29 @@ final class TerminalWindowLaunchTests: XCTestCase {
         XCTAssertEqual(mockIterm.openWindowAndRunCallCount, 2)
         XCTAssertEqual(mockIterm.openedCommands.count, 2)
         XCTAssertTrue(mockIterm.openedCommands[0].localizedStandardContains("exec"))
-        XCTAssertEqual(mockIterm.openedCommands[1], #"cd "\#(workspace.dir)" && tail -f log/development.log"#)
+        XCTAssertEqual(
+            mockIterm.openedCommands[1],
+            #"cd "\#(workspace.dir)" && python -m http.server --directory 'Preview Assets'"#)
 
         let terminalWindows = try store.windows(workspaceID: workspace.id).filter { $0.role == "terminal" }
         XCTAssertEqual(terminalWindows.map { $0.title }, ["Shell", "Logs"])
+    }
+
+    func testLaunchWorkspacePreservesLegacyShellTerminalCommands() throws {
+        let (orchestrator, _, workspace, mockIterm) = try makeTerminalWindowOrchestrator()
+        try orchestrator.updateWorkspaceSettings(workspaceID: workspace.id) { config in
+            config.terminalWindows = [
+                TerminalWindowTemplate(name: "Logs", command: "tail -f log/development.log && echo done")
+            ]
+        }
+
+        try withMockCommands(["yabai": Self.mockYabaiScript]) {
+            try orchestrator.launchWorkspace(workspaceID: workspace.id)
+        }
+
+        XCTAssertEqual(
+            mockIterm.openedCommands,
+            [#"cd "\#(workspace.dir)" && tail -f log/development.log && echo done"#])
     }
 
     func testWorkspaceSettingsPersistTerminalWindows() throws {

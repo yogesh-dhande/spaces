@@ -91,6 +91,7 @@ Muxy focuses those windows; it does not decide their geometry.
 ## Launch and Runtime Behavior
 - Launch starts the workspace's configured processes, terminal windows, and browser sessions and captures the resulting windows.
 - Workspace processes should be launched inside tmux so Muxy can recover the terminal view without losing the underlying process when an iTerm2 window closes.
+- Standalone terminal windows should require a name and may optionally launch a direct executable with arguments in the workspace directory.
 - Stop shuts down tracked runtime state and closes tracked dedicated windows safely.
 - Restart performs a stop followed by a fresh launch.
 - `workspace up` is the idempotent "ensure running" path:

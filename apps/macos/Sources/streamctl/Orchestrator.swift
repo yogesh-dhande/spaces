@@ -1357,7 +1357,7 @@ public final class MuxyOrchestrator {
         let windows = try indexedWorkspaceWindows(workspaceID: workspaceID)
         let processes = try store.runningProcesses(workspaceID: workspaceID)
         let agentWindows = try store.agentWindows(workspaceID: workspaceID)
-        let agentYabaiWindowIDs = Set(agentWindows.compactMap(\.yabaiWindowID))
+        let agentTerminalIDs = Set(agentWindows.compactMap { terminalTargetID(record: $0) })
         let processesByWindowID: [Int: [RunningProcessRecord]] = {
             var map: [String: [RunningProcessRecord]] = [:]
             for process in processes {
@@ -1378,16 +1378,20 @@ public final class MuxyOrchestrator {
         }
 
         for window in windows where window.role == "browser" {
-            let isAgentClaimedWindow = window.windowID != nil && agentYabaiWindowIDs.contains(window.windowID!)
+            let isAgentClaimedWindow = terminalTargetID(window: window).map(agentTerminalIDs.contains) ?? false
             guard !isAgentClaimedWindow else { continue }
             targets.append(.browser(window))
         }
 
         for window in windows where window.role != "browser" {
             let windowProcesses = (window.role == "terminal" ? processesByWindowID[window.windowID ?? -1] : nil) ?? []
-            let isAgentClaimedWindow = window.windowID != nil && agentYabaiWindowIDs.contains(window.windowID!)
-            if window.role == "terminal", !windowProcesses.isEmpty {
-                for process in windowProcesses {
+            let isAgentClaimedWindow = terminalTargetID(window: window).map(agentTerminalIDs.contains) ?? false
+            let nonAgentWindowProcesses = windowProcesses.filter { process in
+                guard let terminalID = terminalTargetID(process: process) else { return true }
+                return !agentTerminalIDs.contains(terminalID)
+            }
+            if window.role == "terminal", !nonAgentWindowProcesses.isEmpty {
+                for process in nonAgentWindowProcesses {
                     matchedProcessIDs.insert(process.id)
                     targets.append(.process(process))
                 }
@@ -1398,7 +1402,10 @@ public final class MuxyOrchestrator {
         }
 
         let orphanedProcesses = processes
-            .filter { !matchedProcessIDs.contains($0.id) }
+            .filter { process in
+                !matchedProcessIDs.contains(process.id)
+                    && terminalTargetID(process: process).map { !agentTerminalIDs.contains($0) } != false
+            }
             .sorted { $0.templateName.localizedStandardCompare($1.templateName) == .orderedAscending }
         for process in orphanedProcesses {
             targets.append(.process(process))
@@ -1412,7 +1419,7 @@ public final class MuxyOrchestrator {
 
     private func navigationTargetWindowID(_ target: WorkspaceNavigationTarget) -> Int? {
         switch target {
-        case .agent(let record): return record.windowID ?? record.yabaiWindowID
+        case .agent(let record): return try? trackedAgentWindowID(record)
         case .browser(let window), .window(let window): return window.windowID
         case .process(let process): return process.windowID
         }
@@ -1663,10 +1670,82 @@ public final class MuxyOrchestrator {
         return #"bash -lc 'cd "\#(escapedDir)" && exec "${SHELL:-/bin/zsh}" -l'"#
     }
 
+    private struct DirectTerminalCommand {
+        let executable: String
+        let arguments: [String]
+    }
+
+    private func shellQuoted(_ token: String) -> String {
+        guard !token.isEmpty else { return "''" }
+        let safe = CharacterSet(charactersIn: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-._/:")
+        if token.unicodeScalars.allSatisfy({ safe.contains($0) }) {
+            return token
+        }
+        return "'" + token.replacingOccurrences(of: "'", with: "'\\''") + "'"
+    }
+
+    private func parseDirectTerminalCommand(_ raw: String) -> DirectTerminalCommand? {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+
+        var tokens: [String] = []
+        var current = ""
+        var quote: Character?
+        var iterator = trimmed.makeIterator()
+
+        while let char = iterator.next() {
+            if let currentQuote = quote {
+                if char == currentQuote {
+                    quote = nil
+                    continue
+                }
+                if char == "\\" && currentQuote == "\"" {
+                    if let escaped = iterator.next() {
+                        current.append(escaped)
+                    } else {
+                        current.append(char)
+                    }
+                    continue
+                }
+                current.append(char)
+                continue
+            }
+
+            switch char {
+            case "'", "\"":
+                quote = char
+            case " ", "\t", "\n":
+                if !current.isEmpty {
+                    tokens.append(current)
+                    current = ""
+                }
+            case "\\":
+                if let escaped = iterator.next() {
+                    current.append(escaped)
+                } else {
+                    current.append(char)
+                }
+            case "|", "&", ";", "<", ">", "(", ")", "$", "`":
+                return nil
+            default:
+                current.append(char)
+            }
+        }
+
+        guard quote == nil else { return nil }
+        if !current.isEmpty { tokens.append(current) }
+        guard let executable = tokens.first else { return nil }
+        return DirectTerminalCommand(executable: executable, arguments: Array(tokens.dropFirst()))
+    }
+
     private func configuredTerminalWindowCommand(cwd: String, command: String?) -> String {
         let escapedDir = cwd.replacingOccurrences(of: "\"", with: "\\\"")
         guard let command = command?.trimmingCharacters(in: .whitespacesAndNewlines), !command.isEmpty else {
             return interactiveShellCommand(cwd: cwd)
+        }
+        if let direct = parseDirectTerminalCommand(command) {
+            let invocation = ([direct.executable] + direct.arguments).map(shellQuoted).joined(separator: " ")
+            return #"cd "\#(escapedDir)" && \#(invocation)"#
         }
         return #"cd "\#(escapedDir)" && \#(command)"#
     }
@@ -3397,7 +3476,9 @@ public final class MuxyOrchestrator {
     ) throws -> AgentWindowRecord {
         let now = nowISO8601()
         let allAgentWindows = try store.agentWindows(workspaceID: workspaceID)
-        let existing = yabaiWindowID.flatMap { windowID in
+        let existing = itermSessionID.flatMap { sessionID in
+            allAgentWindows.first(where: { $0.itermSessionID == sessionID })
+        } ?? yabaiWindowID.flatMap { windowID in
             allAgentWindows.first(where: { ($0.yabaiWindowID ?? $0.windowID) == windowID })
         } ?? allAgentWindows.first(where: { $0.codexThreadID == codexThreadID && codexThreadID != nil })
         if let existing {
@@ -3521,8 +3602,15 @@ public final class MuxyOrchestrator {
         return focused
     }
 
+    private func trackedAgentWindowID(_ record: AgentWindowRecord) throws -> Int? {
+        guard let sessionID = record.itermSessionID, !sessionID.isEmpty else { return nil }
+        return try store.windows(workspaceID: record.workspaceID)
+            .first(where: { $0.app == "iTerm2" && $0.role == "terminal" && $0.itermSessionID == sessionID })?
+            .windowID
+    }
+
     private func focusAgentWindowRecord(_ record: AgentWindowRecord) throws -> Bool {
-        guard let windowID = record.windowID ?? record.yabaiWindowID else { return false }
+        guard let windowID = try trackedAgentWindowID(record) else { return false }
         let focused = (try? yabai.focusWindow(id: windowID)) ?? false
         if focused, (try? itermFocusPulseEnabled()) ?? SettingsKey.defaultItermFocusPulseEnabled {
             let color = (try? itermFocusPulseColor()) ?? (r: 46, g: 41, b: 14)

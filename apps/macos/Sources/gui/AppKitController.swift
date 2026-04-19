@@ -832,7 +832,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                     }
                     return map
                 }()
-                let agentYabaiWindowIDs = Set(agentWindows.compactMap(\.yabaiWindowID))
+                let agentTerminalIDs = Set(agentWindows.compactMap(\.itermSessionID))
                 var matchedProcessIDs = Set<String>()
                 var shortcutCounter = 1
                 for agentWin in agentWindows {
@@ -853,10 +853,14 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 for (windowIdx, window) in windows.enumerated() {
                     guard window.role != "browser" else { continue }
                     let windowProcesses = (window.role == "terminal" ? (terminalTargetKeyForWindow(window).flatMap { processesByTerminalID[$0] }) : nil) ?? []
-                    let isAgentClaimedWindow = window.windowID != nil && agentYabaiWindowIDs.contains(window.windowID!)
+                    let isAgentClaimedWindow = terminalTargetKeyForWindow(window).map(agentTerminalIDs.contains) ?? false
+                    let nonAgentWindowProcesses = windowProcesses.filter { process in
+                        guard let terminalID = terminalTargetKeyForProcess(process) else { return true }
+                        return !agentTerminalIDs.contains(terminalID)
+                    }
                     if isAgentClaimedWindow && (window.role != "terminal" || windowProcesses.isEmpty) { continue }
-                    if window.role == "terminal", !windowProcesses.isEmpty {
-                        for process in windowProcesses {
+                    if window.role == "terminal", !nonAgentWindowProcesses.isEmpty {
+                        for process in nonAgentWindowProcesses {
                             matchedProcessIDs.insert(process.id)
                             if shortcutCounter == index {
                                 try orchestrator.focusWorkspaceProcess(workspaceID: selectedWorkspaceID, processID: process.id)
@@ -872,7 +876,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                         shortcutCounter += 1
                     }
                 }
-                for process in processes where !matchedProcessIDs.contains(process.id) {
+                for process in processes where !matchedProcessIDs.contains(process.id)
+                    && terminalTargetKeyForProcess(process).map({ !agentTerminalIDs.contains($0) }) != false {
                     if shortcutCounter == index {
                         try orchestrator.focusWorkspaceProcess(workspaceID: selectedWorkspaceID, processID: process.id)
                         return .success(.focused(kind: "process"))
@@ -3345,7 +3350,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         var statusResultsByProcessID: [String: [StatusResult]] = [:]
         for process in processes { statusResultsByProcessID[process.id] = (try? orchestrator.statusResults(processID: process.id)) ?? [] }
         let agentWindowsForRunTab = (try? orchestrator.agentWindows(workspaceID: workspace.id)) ?? []
-        let agentYabaiWindowIDs: Set<Int> = Set(agentWindowsForRunTab.compactMap { $0.yabaiWindowID })
+        let agentTerminalIDs: Set<String> = Set(agentWindowsForRunTab.compactMap(\.itermSessionID))
         var matchedProcessIDs: Set<String> = []
         // Shortcut counter is shared across all sections so numbers are assigned
         // in the order rows appear on screen: Coding Agents → Browser Tabs → Processes.
@@ -3354,10 +3359,14 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         // --- Build Coding Agents rows first (displayed at the top) ---
         var agentsStack: NSStackView? = nil
         if !agentWindowsForRunTab.isEmpty {
-            let linkedWindowByYabaiID: [Int: WindowRecord] = Dictionary(
-                uniqueKeysWithValues: windows.compactMap { w in
-                    guard let wid = w.windowID, agentYabaiWindowIDs.contains(wid) else { return nil }
-                    return (wid, w)
+            let windowsByItermSessionID: [String: WindowRecord] = Dictionary(
+                uniqueKeysWithValues: windows.compactMap { window in
+                    guard window.app == "iTerm2",
+                        window.role == "terminal",
+                        let sessionID = window.itermSessionID,
+                        !sessionID.isEmpty
+                    else { return nil }
+                    return (sessionID, window)
                 })
             let stack = NSStackView()
             stack.orientation = .vertical
@@ -3365,7 +3374,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             for agentWin in agentWindowsForRunTab {
                 let agentIcon = "cpu.fill"
                 let agentColor: NSColor = agentWin.status == .done ? .systemGreen : agentWin.status == .waiting ? .systemOrange : .secondaryLabelColor
-                let linkedWin = agentWin.yabaiWindowID.flatMap { linkedWindowByYabaiID[$0] }
+                let linkedWin = agentWin.itermSessionID.flatMap { windowsByItermSessionID[$0] }
                 let agentLabel = agentWin.label ?? "Coding Agent CLI"
                 let agentDetail = linkedWin?.title ?? linkedWin?.app
                 let agentShortcutNum = shortcutCounter
@@ -3431,14 +3440,18 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
         for (idx, win) in windows.enumerated() where win.role != "browser" {
             let windowProcesses = (win.role == "terminal" ? (terminalTargetKeyForWindow(win).flatMap { processesByTerminalID[$0] }) : nil) ?? []
-            let isAgentClaimedWindow = win.windowID != nil && agentYabaiWindowIDs.contains(win.windowID!)
+            let isAgentClaimedWindow = terminalTargetKeyForWindow(win).map(agentTerminalIDs.contains) ?? false
+            let nonAgentWindowProcesses = windowProcesses.filter { process in
+                guard let terminalID = terminalTargetKeyForProcess(process) else { return true }
+                return !agentTerminalIDs.contains(terminalID)
+            }
             if isAgentClaimedWindow && (win.role != "terminal" || windowProcesses.isEmpty) { continue }
             let windowIndex = idx + 1
             let workspaceID = workspace.id
             switch win.role {
             case "terminal":
-                if !windowProcesses.isEmpty {
-                    for process in windowProcesses {
+                if !nonAgentWindowProcesses.isEmpty {
+                    for process in nonAgentWindowProcesses {
                         matchedProcessIDs.insert(process.id)
                         let rowShortcut = windowShortcutBadgeText(index: shortcutCounter)
                         shortcutCounter += 1
@@ -3494,7 +3507,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         }
 
         // Orphaned processes (no linked window = corresponding iTerm2 session was closed by the user)
-        let orphanedProcesses = processes.filter { !matchedProcessIDs.contains($0.id) }
+        let orphanedProcesses = processes.filter { process in
+            !matchedProcessIDs.contains(process.id)
+                && terminalTargetKeyForProcess(process).map { !agentTerminalIDs.contains($0) } != false
+        }
         for process in orphanedProcesses {
             let rowShortcut = windowShortcutBadgeText(index: shortcutCounter)
             shortcutCounter += 1
