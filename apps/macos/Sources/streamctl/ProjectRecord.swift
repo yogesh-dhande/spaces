@@ -10,14 +10,12 @@ public struct ProjectRecord: Codable, Sendable {
     public var stopScript: String?
     public var ports: [PortDefinition]
     public var processes: [ProcessTemplate]
-    public var terminalWindows: [TerminalWindowTemplate]
     public var statusChecks: [StatusCheckDefinition]
     public var browserSessions: [BrowserSession]
 
     public init(
         id: String, name: String, dir: String, isGitRepo: Bool, defaultBranch: String?, setupScript: String? = nil, stopScript: String? = nil,
-        ports: [PortDefinition] = [], processes: [ProcessTemplate] = [], terminalWindows: [TerminalWindowTemplate] = [],
-        statusChecks: [StatusCheckDefinition] = [],
+        ports: [PortDefinition] = [], processes: [ProcessTemplate] = [], statusChecks: [StatusCheckDefinition] = [],
         browserSessions: [BrowserSession] = []
     ) {
         self.id = id
@@ -29,7 +27,6 @@ public struct ProjectRecord: Codable, Sendable {
         self.stopScript = stopScript
         self.ports = ports
         self.processes = processes
-        self.terminalWindows = terminalWindows
         self.statusChecks = statusChecks
         self.browserSessions = browserSessions
     }

@@ -512,7 +512,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let stopScript: String?
         let ports: [PortDefinition]
         let processes: [ProcessTemplate]
-        let terminalWindows: [TerminalWindowTemplate]
         let browserSessions: [BrowserSession]
         let statusChecks: [StatusCheckDefinition]
     }
@@ -689,7 +688,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                     project.stopScript = input.stopScript
                     project.ports = input.ports
                     project.processes = input.processes
-                    project.terminalWindows = input.terminalWindows
                     project.browserSessions = input.browserSessions
                     project.statusChecks = input.statusChecks
                 }
@@ -2417,13 +2415,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let stopView = makeEditableTextView()
         let portEditor = PortEditor()
         let processEditor = ProcessEditor()
-        let terminalWindowEditor = TerminalWindowEditor()
         let browserSessionEditor = BrowserSessionEditor()
         setupView.string = fullProject?.setupScript ?? ""
         stopView.string = fullProject?.stopScript ?? ""
         portEditor.setDefinitions(fullProject?.ports ?? [])
         processEditor.setProcessesWithChecks(fullProject?.processes ?? [], statusChecks: fullProject?.statusChecks ?? [])
-        terminalWindowEditor.setWindows(fullProject?.terminalWindows ?? [])
         browserSessionEditor.setSessions(fullProject?.browserSessions ?? [])
 
         // --- Setup script card ---
@@ -2447,13 +2443,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             contentViews: [processEditor.container])
         stack.addArrangedSubview(processCard)
         constrainFormFieldToFillWidth(processCard, in: stack)
-
-        let terminalWindowCard = formSectionCard(
-            icon: "uiwindow.split.2x1", title: "Terminal windows",
-            subtitle: "Optional iTerm2 windows to open with this project. Commands run from the workspace directory.",
-            contentViews: [terminalWindowEditor.container])
-        stack.addArrangedSubview(terminalWindowCard)
-        constrainFormFieldToFillWidth(terminalWindowCard, in: stack)
 
         // --- Browser sessions card ---
         let browserCard = formSectionCard(
@@ -2494,10 +2483,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
         saveButton.tag = storeProjectFields(
             projectID: project.id, setupView: setupView, stopView: stopView, portEditor: portEditor, processEditor: processEditor,
-            terminalWindowEditor: terminalWindowEditor, browserSessionEditor: browserSessionEditor)
+            browserSessionEditor: browserSessionEditor)
         registerDirtyTracking(
-            setupView: setupView, stopView: stopView, portEditor: portEditor, processEditor: processEditor,
-            terminalWindowEditor: terminalWindowEditor, browserSessionEditor: browserSessionEditor
+            setupView: setupView, stopView: stopView, portEditor: portEditor, processEditor: processEditor, browserSessionEditor: browserSessionEditor
         )
     }
 
@@ -2650,7 +2638,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let stopView = makeEditableTextView()
         let portEditor = PortEditor()
         let processEditor = ProcessEditor()
-        let terminalWindowEditor = TerminalWindowEditor()
         let browserSessionEditor = BrowserSessionEditor()
         // --- Source row: popup + dir/URL input on same line ---
         let localSourceSection = NSStackView()
@@ -2729,13 +2716,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         processCard.isHidden = true
         stack.addArrangedSubview(processCard)
 
-        let terminalWindowCard = formSectionCard(
-            icon: "uiwindow.split.2x1", title: "Terminal windows",
-            subtitle: "Optional iTerm2 windows to open when a workspace launches.",
-            contentViews: [terminalWindowEditor.container])
-        terminalWindowCard.isHidden = true
-        stack.addArrangedSubview(terminalWindowCard)
-
         // --- Browser sessions card ---
         let browserCard = formSectionCard(
             icon: "globe", title: "Browser sessions", subtitle: "Optional names with URL prefixes to open automatically.",
@@ -2782,8 +2762,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         createButton.tag = storeAddProjectFields(
             sourcePopup: sourcePopup, localSourceSection: localSourceSection, cloneSourceSection: cloneSourceSection, dirField: dirField,
             repoURLField: repoURLField, setupView: setupView, stopView: stopView, portEditor: portEditor, processEditor: processEditor,
-            terminalWindowEditor: terminalWindowEditor, browserSessionEditor: browserSessionEditor, browseButton: browseButton,
-            progressiveInputViews: [setupCard, addPortCard, processCard, terminalWindowCard, browserCard, stopCard], createButton: createButton)
+            browserSessionEditor: browserSessionEditor, browseButton: browseButton,
+            progressiveInputViews: [setupCard, addPortCard, processCard, browserCard, stopCard], createButton: createButton)
         activeAddProjectFormTag = createButton.tag
         if let refs = AddProjectFieldCache.shared.cache[createButton.tag] { updateAddProjectSourceUI(refs) }
     }
@@ -3478,8 +3458,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                     let rowShortcut = windowShortcutBadgeText(index: shortcutCounter)
                     shortcutCounter += 1
                     processRowCount += 1
+                    let rowText = Self.terminalFallbackRowText(title: win.title, app: win.app)
                     let row = windowRow(
-                        icon: "terminal", iconColor: .systemGreen, label: win.title ?? win.app, detail: nil,
+                        icon: "terminal", iconColor: .systemGreen, label: rowText.label, detail: rowText.detail,
                         shortcut: rowShortcut, processStatus: nil,
                         action: { [weak self] in
                             guard let self else { return }
@@ -3610,21 +3591,18 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let processEditor = ProcessEditor()
         let stopView = makeEditableTextView()
         let stopScroll = scrollableTextView(stopView, height: 90)
-        let terminalWindowEditor = TerminalWindowEditor()
         let browserSessionEditor = BrowserSessionEditor()
 
         if let config = try? orchestrator.workspaceSettings(workspaceID: workspace.id) {
             stopView.string = config.stopScript ?? ""
             portEditor.setDefinitions(config.ports)
             processEditor.setProcessesWithChecks(config.processes, statusChecks: config.statusChecks)
-            terminalWindowEditor.setWindows(config.terminalWindows)
             browserSessionEditor.setSessions(config.browserSessions)
         } else {
             let fullProject = try? orchestrator.project(id: project.id)
             stopView.string = fullProject?.stopScript ?? ""
             portEditor.setDefinitions(fullProject?.ports ?? [])
             processEditor.setProcessesWithChecks(fullProject?.processes ?? [], statusChecks: fullProject?.statusChecks ?? [])
-            terminalWindowEditor.setWindows(fullProject?.terminalWindows ?? [])
             browserSessionEditor.setSessions(fullProject?.browserSessions ?? [])
         }
         let saveButton = actionButton(
@@ -3643,13 +3621,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             icon: "terminal.fill", title: "Processes", subtitle: "Commands that run inside this workspace.", contentViews: [processEditor.container])
         contentStack.addArrangedSubview(processCard)
         constrainFormFieldToFillWidth(processCard, in: contentStack)
-
-        let terminalWindowCard = formSectionCard(
-            icon: "uiwindow.split.2x1", title: "Terminal windows",
-            subtitle: "Optional iTerm2 windows to open when this workspace launches.",
-            contentViews: [terminalWindowEditor.container])
-        contentStack.addArrangedSubview(terminalWindowCard)
-        constrainFormFieldToFillWidth(terminalWindowCard, in: contentStack)
 
         // --- Stop script card ---
         let stopCard = formSectionCard(
@@ -3705,10 +3676,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
         saveButton.tag = storeWorkspaceFields(
             workspaceID: workspace.id, stopView: stopView, portEditor: portEditor, processEditor: processEditor,
-            terminalWindowEditor: terminalWindowEditor, browserSessionEditor: browserSessionEditor)
-        registerWorkspaceDirtyTracking(
-            stopView: stopView, portEditor: portEditor, processEditor: processEditor, terminalWindowEditor: terminalWindowEditor,
             browserSessionEditor: browserSessionEditor)
+        registerWorkspaceDirtyTracking(
+            stopView: stopView, portEditor: portEditor, processEditor: processEditor, browserSessionEditor: browserSessionEditor)
 
         return insetContainerView(container)
     }
@@ -3958,6 +3928,14 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let recognizer = NSClickGestureRecognizer(target: target, action: #selector(ClickTarget.clicked(_:)))
         view.addGestureRecognizer(recognizer)
         objc_setAssociatedObject(view, &Self.clickTargetAssocKey, target, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
+    }
+
+    nonisolated static func terminalFallbackRowText(title: String?, app _: String) -> (label: String, detail: String?) {
+        let cleanedTitle = title?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: #"^[*-]\s*"#, with: "", options: .regularExpression)
+        let detail = cleanedTitle.flatMap { $0.isEmpty ? nil : $0 }
+        return ("Terminal", detail)
     }
 
     private func windowRow(
@@ -4652,30 +4630,30 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
     private func storeProjectFields(
         projectID: String, setupView: NSTextView, stopView: NSTextView, portEditor: PortEditor, processEditor: ProcessEditor,
-        terminalWindowEditor: TerminalWindowEditor, browserSessionEditor: BrowserSessionEditor
+        browserSessionEditor: BrowserSessionEditor
     ) -> Int {
         let id = projectID.hashValue
         ProjectFieldCache.shared.cache[id] = ProjectFieldRefs(
             projectID: projectID, setupView: setupView, stopView: stopView, portEditor: portEditor, processEditor: processEditor,
-            terminalWindowEditor: terminalWindowEditor, browserSessionEditor: browserSessionEditor)
+            browserSessionEditor: browserSessionEditor)
         return id
     }
 
     private func storeWorkspaceFields(
         workspaceID: String, stopView: NSTextView, portEditor: PortEditor, processEditor: ProcessEditor,
-        terminalWindowEditor: TerminalWindowEditor, browserSessionEditor: BrowserSessionEditor
+        browserSessionEditor: BrowserSessionEditor
     ) -> Int {
         let id = workspaceID.hashValue
         WorkspaceFieldCache.shared.cache[id] = WorkspaceFieldRefs(
             workspaceID: workspaceID, stopView: stopView, portEditor: portEditor, processEditor: processEditor,
-            terminalWindowEditor: terminalWindowEditor, browserSessionEditor: browserSessionEditor)
+            browserSessionEditor: browserSessionEditor)
         return id
     }
 
     private func storeAddProjectFields(
         sourcePopup: NSPopUpButton, localSourceSection: NSStackView, cloneSourceSection: NSStackView, dirField: NSTextField,
         repoURLField: NSTextField, setupView: NSTextView, stopView: NSTextView, portEditor: PortEditor, processEditor: ProcessEditor,
-        terminalWindowEditor: TerminalWindowEditor, browserSessionEditor: BrowserSessionEditor, browseButton: NSButton,
+        browserSessionEditor: BrowserSessionEditor, browseButton: NSButton,
         progressiveInputViews: [NSView], createButton: NSButton
     ) -> Int {
         let id = UUID().uuidString.hashValue
@@ -4683,7 +4661,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             sourcePopup: sourcePopup, localSourceSection: localSourceSection, cloneSourceSection: cloneSourceSection, dirField: dirField,
             repoURLField: repoURLField, browseButton: browseButton, progressiveInputViews: progressiveInputViews, createButton: createButton,
             setupView: setupView, stopView: stopView, portEditor: portEditor, processEditor: processEditor,
-            terminalWindowEditor: terminalWindowEditor, browserSessionEditor: browserSessionEditor
+            browserSessionEditor: browserSessionEditor
         )
         sourcePopup.tag = id
         browseButton.tag = id
@@ -4831,13 +4809,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         commitEditing()
         guard let refs = ProjectFieldCache.shared.cache[sender.tag] else { return }
         do {
-            let terminalWindows = try refs.terminalWindowEditor.currentWindows()
             try orchestrator.updateProjectConfig(projectID: refs.projectID) { config in
                 config.setupScript = refs.setupView.string.isEmpty ? nil : refs.setupView.string
                 config.stopScript = refs.stopView.string.isEmpty ? nil : refs.stopView.string
                 config.ports = refs.portEditor.currentDefinitions()
                 config.processes = refs.processEditor.currentProcesses()
-                config.terminalWindows = terminalWindows
                 config.browserSessions = refs.browserSessionEditor.currentSessions()
                 config.statusChecks = refs.processEditor.currentStatusChecks()
             }
@@ -4885,12 +4861,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         commitEditing()
         guard let refs = WorkspaceFieldCache.shared.cache[sender.tag] else { return }
         do {
-            let terminalWindows = try refs.terminalWindowEditor.currentWindows()
             try orchestrator.updateWorkspaceSettings(workspaceID: refs.workspaceID) { config in
                 config.stopScript = refs.stopView.string.isEmpty ? nil : refs.stopView.string
                 config.ports = refs.portEditor.currentDefinitions()
                 config.processes = refs.processEditor.currentProcesses()
-                config.terminalWindows = terminalWindows
                 config.browserSessions = refs.browserSessionEditor.currentSessions()
                 config.statusChecks = refs.processEditor.currentStatusChecks()
             }
@@ -4910,8 +4884,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 input = ProjectCreateInput(
                     gitURL: repoURL, directoryPath: nil, setupScript: refs.setupView.string.isEmpty ? nil : refs.setupView.string,
                     stopScript: refs.stopView.string.isEmpty ? nil : refs.stopView.string, ports: refs.portEditor.currentDefinitions(),
-                    processes: refs.processEditor.currentProcesses(), terminalWindows: try refs.terminalWindowEditor.currentWindows(),
-                    browserSessions: refs.browserSessionEditor.currentSessions(),
+                    processes: refs.processEditor.currentProcesses(), browserSessions: refs.browserSessionEditor.currentSessions(),
                     statusChecks: refs.processEditor.currentStatusChecks())
                 progressDetail = "Cloning repository and applying project settings."
             } else {
@@ -4920,8 +4893,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 input = ProjectCreateInput(
                     gitURL: nil, directoryPath: dir, setupScript: refs.setupView.string.isEmpty ? nil : refs.setupView.string,
                     stopScript: refs.stopView.string.isEmpty ? nil : refs.stopView.string, ports: refs.portEditor.currentDefinitions(),
-                    processes: refs.processEditor.currentProcesses(), terminalWindows: try refs.terminalWindowEditor.currentWindows(),
-                    browserSessions: refs.browserSessionEditor.currentSessions(),
+                    processes: refs.processEditor.currentProcesses(), browserSessions: refs.browserSessionEditor.currentSessions(),
                     statusChecks: refs.processEditor.currentStatusChecks())
                 progressDetail = "Registering project and applying project settings."
             }
@@ -6605,7 +6577,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
     private func registerDirtyTracking(
         setupView: NSTextView, stopView: NSTextView, portEditor: PortEditor, processEditor: ProcessEditor,
-        terminalWindowEditor: TerminalWindowEditor, browserSessionEditor: BrowserSessionEditor
+        browserSessionEditor: BrowserSessionEditor
     ) {
         projectHasUnsavedChanges = false
         NotificationCenter.default.addObserver(forName: NSText.didChangeNotification, object: setupView, queue: .main) { [weak self] _ in
@@ -6616,13 +6588,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         }
         portEditor.onDirty = { [weak self] in Task { @MainActor in self?.projectHasUnsavedChanges = true } }
         processEditor.onDirty = { [weak self] in Task { @MainActor in self?.projectHasUnsavedChanges = true } }
-        terminalWindowEditor.onDirty = { [weak self] in Task { @MainActor in self?.projectHasUnsavedChanges = true } }
         browserSessionEditor.onDirty = { [weak self] in Task { @MainActor in self?.projectHasUnsavedChanges = true } }
     }
 
     private func registerWorkspaceDirtyTracking(
-        stopView: NSTextView, portEditor: PortEditor, processEditor: ProcessEditor, terminalWindowEditor: TerminalWindowEditor,
-        browserSessionEditor: BrowserSessionEditor
+        stopView: NSTextView, portEditor: PortEditor, processEditor: ProcessEditor, browserSessionEditor: BrowserSessionEditor
     ) {
         workspaceHasUnsavedChanges = false
         NotificationCenter.default.addObserver(forName: NSText.didChangeNotification, object: stopView, queue: .main) { [weak self] _ in
@@ -6630,7 +6600,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         }
         portEditor.onDirty = { [weak self] in Task { @MainActor in self?.workspaceHasUnsavedChanges = true } }
         processEditor.onDirty = { [weak self] in Task { @MainActor in self?.workspaceHasUnsavedChanges = true } }
-        terminalWindowEditor.onDirty = { [weak self] in Task { @MainActor in self?.workspaceHasUnsavedChanges = true } }
         browserSessionEditor.onDirty = { [weak self] in Task { @MainActor in self?.workspaceHasUnsavedChanges = true } }
     }
 
@@ -6662,12 +6631,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let tag = selectedWorkspaceID.hashValue
         guard let refs = WorkspaceFieldCache.shared.cache[tag] else { return true }
         do {
-            let terminalWindows = try refs.terminalWindowEditor.currentWindows()
             try orchestrator.updateWorkspaceSettings(workspaceID: refs.workspaceID) { config in
                 config.stopScript = refs.stopView.string.isEmpty ? nil : refs.stopView.string
                 config.ports = refs.portEditor.currentDefinitions()
                 config.processes = refs.processEditor.currentProcesses()
-                config.terminalWindows = terminalWindows
                 config.browserSessions = refs.browserSessionEditor.currentSessions()
                 config.statusChecks = refs.processEditor.currentStatusChecks()
             }
@@ -6686,13 +6653,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let tag = selectedProjectID.hashValue
         guard let refs = ProjectFieldCache.shared.cache[tag] else { return true }
         do {
-            let terminalWindows = try refs.terminalWindowEditor.currentWindows()
             try orchestrator.updateProjectConfig(projectID: refs.projectID) { config in
                 config.setupScript = refs.setupView.string.isEmpty ? nil : refs.setupView.string
                 config.stopScript = refs.stopView.string.isEmpty ? nil : refs.stopView.string
                 config.ports = refs.portEditor.currentDefinitions()
                 config.processes = refs.processEditor.currentProcesses()
-                config.terminalWindows = terminalWindows
                 config.browserSessions = refs.browserSessionEditor.currentSessions()
                 config.statusChecks = refs.processEditor.currentStatusChecks()
             }

@@ -18,7 +18,7 @@ func makeTemporaryStore() throws -> SQLiteStore {
 func makeProjectRecord(id: String = UUID().uuidString, dir: String) -> ProjectRecord {
     ProjectRecord(
         id: id, name: "Project", dir: dir, isGitRepo: false, defaultBranch: nil, setupScript: nil, stopScript: nil, ports: [], processes: [],
-        terminalWindows: [], statusChecks: [], browserSessions: [])
+        statusChecks: [], browserSessions: [])
 }
 
 func makeWorkspaceRecord(id: String = UUID().uuidString, projectID: String, name: String, dir: String) -> WorkspaceRecord {
@@ -162,7 +162,14 @@ class MockTmuxAdapter: TmuxAdapter, @unchecked Sendable {
     var selectedWindowIDs: [String] = []
     var killedWindowIDs: [String] = []
     var killedSessionNames: [String] = []
+    var startSessionCallCount = 0
+    var lastStartedSessionName: String?
+    var lastStartedWindowName: String?
+    var lastStartedCwd: String?
+    var lastStartedEnv: [String: String] = [:]
+    var lastStartedCommand: [String] = []
     private var nextWindowSerial = 1
+    var nextPanePID = 40_000
 
     func createSession(named sessionName: String) {
         if windowsBySession[sessionName] == nil { windowsBySession[sessionName] = [] }
@@ -176,7 +183,8 @@ class MockTmuxAdapter: TmuxAdapter, @unchecked Sendable {
         let resolvedIndex = index ?? ((windowsBySession[sessionName]?.map(\.index).max() ?? -1) + 1)
         let window = TmuxWindowInfo(
             id: resolvedID, index: resolvedIndex, name: name, sessionName: sessionName,
-            isActive: isActive || currentWindowIDBySession[sessionName] == nil)
+            isActive: isActive || currentWindowIDBySession[sessionName] == nil, panePID: nextPanePID)
+        nextPanePID += 1
         updateWindow(window)
         if window.isActive { currentWindowIDBySession[sessionName] = window.id }
         return window
@@ -193,7 +201,7 @@ class MockTmuxAdapter: TmuxAdapter, @unchecked Sendable {
             .map { window in
                 TmuxWindowInfo(
                     id: window.id, index: window.index, name: window.name, sessionName: window.sessionName,
-                    isActive: currentWindowID == window.id)
+                    isActive: currentWindowID == window.id, panePID: window.panePID)
             }
     }
 
@@ -220,12 +228,29 @@ class MockTmuxAdapter: TmuxAdapter, @unchecked Sendable {
         return window
     }
 
+    override func startSession(
+        named sessionName: String, windowName: String, cwd: String, env: [String: String] = [:], command: [String]
+    ) throws -> TmuxWindowInfo {
+        startSessionCallCount += 1
+        lastStartedSessionName = sessionName
+        lastStartedWindowName = windowName
+        lastStartedCwd = cwd
+        lastStartedEnv = env
+        lastStartedCommand = command
+        createSession(named: sessionName)
+        let window = addWindow(sessionName: sessionName, name: windowName, isActive: false)
+        lastCreatedWindow = window
+        lastCreatedWindowCommand = command.joined(separator: " ")
+        return window
+    }
+
     override func renameWindow(windowID: String, name: String) throws {
         renameWindowCallCount += 1
         renamedWindowIDs.append(windowID)
         guard var window = window(for: windowID) else { return }
         window = TmuxWindowInfo(
-            id: window.id, index: window.index, name: name, sessionName: window.sessionName, isActive: window.isActive)
+            id: window.id, index: window.index, name: name, sessionName: window.sessionName, isActive: window.isActive,
+            panePID: window.panePID)
         updateWindow(window)
     }
 

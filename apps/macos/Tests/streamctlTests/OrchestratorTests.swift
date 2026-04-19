@@ -767,15 +767,6 @@ final class OrchestratorTests: XCTestCase {
             lastOutputAt: nil, startedAt: "now", exitedAt: nil)
         try store.upsert(runningProcess: runningProcess)
 
-        // Create a mock PID file to simulate the new PID after restart
-        // The PID file is stored in ~/.muxy/runtime/<workspace-id>/
-        let homeDir = FileManager.default.homeDirectoryForCurrentUser
-        let runtimeRoot = homeDir.appendingPathComponent(".muxy").appendingPathComponent("runtime")
-        let workspaceRuntime = runtimeRoot.appendingPathComponent(workspace.id, isDirectory: true)
-        try FileManager.default.createDirectory(at: workspaceRuntime, withIntermediateDirectories: true)
-        let pidFileURL = workspaceRuntime.appendingPathComponent("api.pid")
-        try "10001".write(to: pidFileURL, atomically: true, encoding: .utf8)
-
         var results: [StatusResult] = []
         try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) {
             try withEnv(
@@ -797,7 +788,8 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertEqual(currentProcess.status, .running)
         XCTAssertNotEqual(currentProcess.windowID, 123)
         XCTAssertNil(currentProcess.tmuxWindowID)
-        XCTAssertEqual(currentProcess.pid, 10001)
+        let expectedPID = try mockTmux.currentWindow(sessionName: "muxy-\(workspace.id)-api")?.panePID
+        XCTAssertEqual(currentProcess.pid, expectedPID)
     }
 
     // Tests status check on fail restart with missing pid does not crash by arranging representative inputs and asserting the expected result.
@@ -1727,7 +1719,9 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertEqual(trackedTerminal.itermSessionID, restartedProcess.itermSessionID)
         XCTAssertEqual(mockIterm.openWindowAndRunCallCount, 1)
         XCTAssertEqual(mockTmux.killedSessionNames, ["muxy-\(workspace.id)-api"])
-        XCTAssertTrue(mockIterm.lastCommand?.contains("tmux new-session -A -s") == true)
+        XCTAssertEqual(mockTmux.startSessionCallCount, 1)
+        XCTAssertEqual(mockTmux.lastStartedCommand, ["npm", "run", "api"])
+        XCTAssertTrue(mockIterm.lastCommand?.contains("tmux attach-session -t") == true)
         XCTAssertTrue(mockIterm.lastCommand?.contains("muxy-\(workspace.id)-api") == true)
     }
 
@@ -2523,7 +2517,7 @@ final class OrchestratorTests: XCTestCase {
 
     // Tests launch workspace tracks one terminal row per process-backed terminal by arranging representative inputs and asserting the expected result.
     func testLaunchWorkspaceTracksAllTerminalWindowsFromRunningProcesses() throws {
-        let (orchestrator, _, _, workspace, _, mockIterm, _) = try makeMockItermOrchestratorWithWorkspace()
+        let (orchestrator, _, _, workspace, _, mockIterm, mockTmux) = try makeMockItermOrchestratorWithWorkspace()
 
         try orchestrator.updateWorkspaceSettings(workspaceID: workspace.id) { settings in
             settings.processes = [ProcessTemplate(name: "api", command: "npm run api")]
@@ -2550,8 +2544,36 @@ final class OrchestratorTests: XCTestCase {
         let windows = try orchestrator.windows(workspaceID: workspace.id)
         XCTAssertEqual(windows.filter { $0.role == "terminal" }.count, 1)
         XCTAssertEqual(mockIterm.openWindowAndRunCallCount, 1)
-        XCTAssertTrue(mockIterm.lastCommand?.contains("tmux new-session -A -s") == true)
+        XCTAssertEqual(mockTmux.startSessionCallCount, 1)
+        XCTAssertEqual(mockTmux.lastStartedCommand, ["npm", "run", "api"])
+        XCTAssertTrue(mockIterm.lastCommand?.contains("tmux attach-session -t") == true)
         XCTAssertTrue(mockIterm.lastCommand?.contains("muxy-\(workspace.id)-api") == true)
+    }
+
+    func testLaunchWorkspaceProcessesInjectEnvWithoutShellWrapping() throws {
+        let (orchestrator, _, _, workspace, _, mockIterm, mockTmux) = try makeMockItermOrchestratorWithWorkspace()
+
+        try orchestrator.updateWorkspaceSettings(workspaceID: workspace.id) { settings in
+            settings.processes = [ProcessTemplate(name: "web", command: "WORKSPACE=$MUXY_WORKSPACE_DIR npm run dev")]
+        }
+
+        try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) {
+            try withEnv(
+                name: "YABAI_WINDOWS_JSON",
+                value: #"[{"id":445,"pid":11,"app":"iTerm2","title":"web","space":1,"display":1,"is-sticky":false,"is-hidden":false,"is-visible":true,"is-native-fullscreen":false}]"#
+            ) {
+                try withEnv(name: "YABAI_FOCUSED_ID", value: "445") {
+                    try withEnv(name: "YABAI_FOCUSED_APP", value: "iTerm2") {
+                        try orchestrator.launchWorkspace(workspaceID: workspace.id)
+                    }
+                }
+            }
+        }
+
+        XCTAssertEqual(mockTmux.lastStartedCommand, ["npm", "run", "dev"])
+        XCTAssertEqual(mockTmux.lastStartedEnv["WORKSPACE"], workspace.dir)
+        XCTAssertTrue(mockIterm.lastCommand?.contains("tmux attach-session -t") == true)
+        XCTAssertFalse(mockIterm.lastCommand?.contains("bash -lc") == true)
     }
 
     // Tests launch workspace does not auto open editor by arranging representative inputs and asserting the expected result.

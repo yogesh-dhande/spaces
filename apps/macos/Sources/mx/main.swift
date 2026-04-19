@@ -40,14 +40,13 @@ struct CLI {
                 domain: "mx.cli", code: 2,
                 userInfo: [
                     NSLocalizedDescriptionKey:
-                        "Missing project action. Use: project list|add|update|remove|port|process|terminal-window|status-check|browser-session"
+                        "Missing project action. Use: project list|add|update|remove|port|process|status-check|browser-session"
                 ])
         }
 
         switch args[2] {
         case "port": try runProjectPortSubcommand(orchestrator: orchestrator)
         case "process": try runProjectProcessSubcommand(orchestrator: orchestrator)
-        case "terminal-window": try runProjectTerminalWindowSubcommand(orchestrator: orchestrator)
         case "status-check": try runProjectStatusCheckSubcommand(orchestrator: orchestrator)
         case "browser-session": try runProjectBrowserSessionSubcommand(orchestrator: orchestrator)
         case "list":
@@ -156,38 +155,6 @@ struct CLI {
         }
     }
 
-    private func runProjectTerminalWindowSubcommand(orchestrator: MuxyOrchestrator) throws {
-        guard args.count >= 4 else {
-            throw NSError(
-                domain: "mx.cli", code: 2,
-                userInfo: [NSLocalizedDescriptionKey: "Missing action. Use: project terminal-window add|remove|list --dir <path>"])
-        }
-        let dir = try value(for: "--dir")
-        let projectID = normalizePath(dir)
-        switch args[3] {
-        case "add":
-            let name = try value(for: "--name")
-            let command = optionalValue(for: "--command")
-            try orchestrator.updateProjectConfig(projectID: projectID) { config in
-                config.terminalWindows.append(TerminalWindowTemplate(name: name, command: command))
-            }
-            print("Added terminal window \(name) to \(dir)")
-        case "remove":
-            let name = try value(for: "--name")
-            try orchestrator.updateProjectConfig(projectID: projectID) { config in config.terminalWindows.removeAll { $0.name == name } }
-            print("Removed terminal window \(name) from \(dir)")
-        case "list":
-            guard let project = try orchestrator.project(id: projectID) else {
-                throw NSError(domain: "mx.cli", code: 2, userInfo: [NSLocalizedDescriptionKey: "Project not found for dir \(dir)"])
-            }
-            for window in project.terminalWindows { print("\(window.name)\t\(window.command ?? "-")") }
-        default:
-            throw NSError(
-                domain: "mx.cli", code: 2,
-                userInfo: [NSLocalizedDescriptionKey: "Unknown action: \(args[3]). Use: project terminal-window add|remove|list"])
-        }
-    }
-
     private func runProjectStatusCheckSubcommand(orchestrator: MuxyOrchestrator) throws {
         guard args.count >= 4 else {
             throw NSError(
@@ -291,12 +258,10 @@ struct CLI {
                 domain: "mx.cli", code: 2,
                 userInfo: [
                     NSLocalizedDescriptionKey:
-                        "Missing workspace action. Use: workspace list|create|import|update|launch|restart|up|stop|archive|focus|terminal-window"
+                        "Missing workspace action. Use: workspace list|create|import|update|launch|restart|up|stop|archive|focus"
                 ])
         }
         switch args[2] {
-        case "terminal-window":
-            try runWorkspaceTerminalWindowSubcommand(orchestrator: orchestrator)
         case "list":
             let projectDir = try value(for: "--project-dir")
             let projectID = normalizePath(projectDir)
@@ -449,37 +414,6 @@ struct CLI {
             try orchestrator.focusWorkspaceWindow(workspaceID: id, index: windowIndex)
             print("Focused workspace window \(windowIndex) for workspace \(id)")
         default: throw NSError(domain: "mx.cli", code: 2, userInfo: [NSLocalizedDescriptionKey: "Unknown workspace action: \(args[2])"])
-        }
-    }
-
-    private func runWorkspaceTerminalWindowSubcommand(orchestrator: MuxyOrchestrator) throws {
-        guard args.count >= 4 else {
-            throw NSError(
-                domain: "mx.cli", code: 2,
-                userInfo: [NSLocalizedDescriptionKey: "Missing action. Use: workspace terminal-window add|remove|list [--dir <path>]"])
-        }
-        let id = try workspaceID(orchestrator: orchestrator)
-        switch args[3] {
-        case "add":
-            let name = try value(for: "--name")
-            let command = optionalValue(for: "--command")
-            try orchestrator.updateWorkspaceSettings(workspaceID: id) { config in
-                config.terminalWindows.append(TerminalWindowTemplate(name: name, command: command))
-            }
-            print("Added terminal window \(name) to workspace \(id)")
-        case "remove":
-            let name = try value(for: "--name")
-            try orchestrator.updateWorkspaceSettings(workspaceID: id) { config in config.terminalWindows.removeAll { $0.name == name } }
-            print("Removed terminal window \(name) from workspace \(id)")
-        case "list":
-            guard let settings = try orchestrator.workspaceSettings(workspaceID: id) else {
-                throw NSError(domain: "mx.cli", code: 2, userInfo: [NSLocalizedDescriptionKey: "Workspace settings not found for \(id)"])
-            }
-            for window in settings.terminalWindows { print("\(window.name)\t\(window.command ?? "-")") }
-        default:
-            throw NSError(
-                domain: "mx.cli", code: 2,
-                userInfo: [NSLocalizedDescriptionKey: "Unknown action: \(args[3]). Use: workspace terminal-window add|remove|list"])
         }
     }
 
@@ -1023,9 +957,6 @@ struct CLI {
               mx project process list --dir <path>
               mx project process add --dir <path> --command <cmd> [--name <name>] [--on-exit none|restart|notify]
               mx project process remove --dir <path> --name <name>
-              mx project terminal-window list --dir <path>
-              mx project terminal-window add --dir <path> --name <name> [--command <executable and args>]
-              mx project terminal-window remove --dir <path> --name <name>
               mx project status-check list --dir <path>
               mx project status-check add --dir <path> --process <process> --command <cmd> [--name <name>] [--interval <seconds>] [--timeout <seconds>] [--on-fail none|restart|notify]
               mx project status-check remove --dir <path> --name <name>
@@ -1043,9 +974,6 @@ struct CLI {
               mx workspace stop [--dir <path>]
               mx workspace archive [--dir <path>]
               mx workspace focus [--dir <path>] --window <index>
-              mx workspace terminal-window list [--dir <path>]
-              mx workspace terminal-window add [--dir <path>] --name <name> [--command <executable and args>]
-              mx workspace terminal-window remove [--dir <path>] --name <name>
 
               mx agent event --type init|start|waiting|done|stop [--dir <path>] [--provider iterm2]
 
@@ -1055,10 +983,9 @@ struct CLI {
               - Runtime state is stored in ~/.muxy/muxy.db and migrated in place with additive schema changes.
               - Removing a git project first removes managed worktrees via `git worktree remove --force`, then deletes related workspace directories under ~/muxy/workspaces.
               - Removing a project deletes only muxy state unless it is a muxy-cloned git repo under ~/muxy/repos (or legacy ~/muxy/projects); those managed repository directories are deleted.
-              - Workspaces snapshot project port definitions, processes, terminal windows, status checks, and browser sessions into the runtime DB on creation.
+              - Workspaces snapshot project port definitions, processes, status checks, and browser sessions into the runtime DB on creation.
               - Project `setup_script` runs when a workspace is created/revived; GUI create persists workspace first and runs setup in background.
               - Launch waits for pending/running setup to complete and fails with the setup error if setup failed.
-              - Terminal-window `--command` values are treated as direct executable invocations with arguments; legacy shell snippets remain supported for existing configs.
               - `mx discover` reconciles git worktrees across all registered projects by creating missing workspaces, archiving workspaces whose worktrees are no longer valid, refreshing stored branch names from disk, and running the project `setup_script` for each newly created workspace.
               - Project/workspace `stop_script` runs whenever a workspace is stopped (including restart/archive stop phase), after automatic process termination attempts.
               - `workspace up` ensures a workspace and all its processes are running: launches when stopped; when already running, restarts any exited processes. Windows open without activating the app. Add `--force-restart` to force a full stop+launch. Add `--focus` to bring the workspace to the foreground after.

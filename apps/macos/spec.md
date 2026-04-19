@@ -28,7 +28,6 @@ A project is a codebase plus reusable templates:
 - setup and stop scripts
 - named port definitions
 - process templates
-- terminal-window templates
 - status checks
 - browser sessions
 
@@ -89,9 +88,10 @@ Muxy focuses those windows; it does not decide their geometry.
 - Sidebar git activity should remain visible while background refresh is in flight and update in place when fresh status arrives.
 
 ## Launch and Runtime Behavior
-- Launch starts the workspace's configured processes, terminal windows, and browser sessions and captures the resulting windows.
+- Launch starts the workspace's configured processes and browser sessions and captures the resulting windows.
 - Workspace processes should be launched inside tmux so Muxy can recover the terminal view without losing the underlying process when an iTerm2 window closes.
-- Standalone terminal windows should require a name and may optionally launch a direct executable with arguments in the workspace directory.
+- Process commands are treated as direct executable invocations with arguments.
+- If a user needs composite shell behavior such as `cd x && y`, pipes, or redirection, they should wrap it explicitly, for example `bash -lc "cd x && y"`.
 - Stop shuts down tracked runtime state and closes tracked dedicated windows safely.
 - Restart performs a stop followed by a fresh launch.
 - `workspace up` is the idempotent "ensure running" path:

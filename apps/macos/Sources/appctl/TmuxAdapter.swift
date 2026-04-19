@@ -1,7 +1,7 @@
 import Foundation
 
 open class TmuxAdapter: @unchecked Sendable {
-    private let windowFormat = "#{window_id}\t#{window_index}\t#{window_name}\t#{session_name}\t#{window_active}"
+    private let windowFormat = "#{window_id}\t#{window_index}\t#{window_name}\t#{session_name}\t#{window_active}\t#{pane_pid}"
 
     public init() {}
 
@@ -40,6 +40,21 @@ open class TmuxAdapter: @unchecked Sendable {
         return window
     }
 
+    open func startSession(
+        named sessionName: String, windowName: String, cwd: String, env: [String: String] = [:], command: [String]
+    ) throws -> TmuxWindowInfo {
+        var arguments = ["tmux", "new-session", "-d", "-P", "-F", windowFormat, "-s", sessionName, "-n", windowName, "-c", cwd]
+        for (key, value) in env.sorted(by: { $0.key < $1.key }) {
+            arguments += ["-e", "\(key)=\(value)"]
+        }
+        arguments.append(contentsOf: command)
+        let output = try Shell.runAndCapture(arguments)
+        guard let window = parseWindow(line: output.trimmingCharacters(in: .whitespacesAndNewlines)) else {
+            throw NSError(domain: "muxy.tmux", code: 1, userInfo: [NSLocalizedDescriptionKey: "Failed to create tmux session."])
+        }
+        return window
+    }
+
     open func renameWindow(windowID: String, name: String) throws {
         _ = try Shell.run(["tmux", "rename-window", "-t", windowID, name])
     }
@@ -60,6 +75,8 @@ open class TmuxAdapter: @unchecked Sendable {
         guard !line.isEmpty else { return nil }
         let parts = line.split(separator: "\t", omittingEmptySubsequences: false).map(String.init)
         guard parts.count >= 5, let index = Int(parts[1]) else { return nil }
-        return TmuxWindowInfo(id: parts[0], index: index, name: parts[2], sessionName: parts[3], isActive: parts[4] == "1")
+        return TmuxWindowInfo(
+            id: parts[0], index: index, name: parts[2], sessionName: parts[3], isActive: parts[4] == "1",
+            panePID: parts.count > 5 ? Int(parts[5]) : nil)
     }
 }

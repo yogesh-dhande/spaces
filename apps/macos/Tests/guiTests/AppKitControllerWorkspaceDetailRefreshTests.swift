@@ -3,6 +3,18 @@ import Testing
 @testable import gui
 
 @Suite struct AppKitControllerWorkspaceDetailRefreshTests {
+    @Test func terminalFallbackRowTextUsesTerminalNameAndShellDetail() {
+        let row = AppKitController.terminalFallbackRowText(title: "* zsh", app: "iTerm2")
+        #expect(row.label == "Terminal")
+        #expect(row.detail == "zsh")
+    }
+
+    @Test func terminalFallbackRowTextOmitsDetailWhenTitleMissing() {
+        let row = AppKitController.terminalFallbackRowText(title: nil, app: "iTerm2")
+        #expect(row.label == "Terminal")
+        #expect(row.detail == nil)
+    }
+
     @Test func visibleWorkspaceDetailRefreshRequiresSelectedExistingWorkspace() {
         #expect(
             AppKitController.shouldRefreshVisibleWorkspaceDetail(

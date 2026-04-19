@@ -56,7 +56,6 @@ Projects persist:
 - setup and stop scripts
 - port definitions
 - process templates
-- terminal-window templates
 - status-check templates
 - browser-session templates
 
@@ -93,9 +92,8 @@ It also lets lifecycle state stay explicit while runtime health is derived from 
 1. Validate that the workspace is launchable.
 2. Build the workspace environment, including named port variables and workspace paths.
 3. Start tracked processes inside tmux-backed dedicated terminal contexts.
-4. Open configured standalone terminal windows in iTerm2, running any configured executable-and-args command in the workspace directory.
-5. Open tracked browser sessions.
-6. Capture new windows through yabai and persist the mapping.
+4. Open tracked browser sessions.
+5. Capture new windows through yabai and persist the mapping.
 
 ### Workspace Stop or Archive
 1. Stop tracked processes.
@@ -117,6 +115,7 @@ It also lets lifecycle state stay explicit while runtime health is derived from 
 - Workspace processes also receive stable environment variables such as project and workspace directories.
 - Setup scripts, stop scripts, process commands, and status-check commands all execute against the workspace-specific environment.
 - Process launch and terminal recovery use tmux so the process lifetime can outlive a missing iTerm2 window and be reattached later.
+- Process templates are parsed as direct executable invocations. If a workflow needs composite shell syntax such as `cd x && y`, pipes, or redirection, it must opt in explicitly by launching a shell command such as `bash -lc "cd x && y"`.
 
 ## Window and Focus Architecture
 - yabai provides stable window identity and cross-app focusing.
