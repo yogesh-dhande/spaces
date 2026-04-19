@@ -112,6 +112,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     private var periodicWorktreeDiscoveryTask: Task<Void, Never>?
     private var periodicSidebarMetadataRefreshTask: Task<Void, Never>?
     private var deferredHotkeySelectionRefreshTask: Task<Void, Never>?
+    private var visibleWorkspaceDetailRefreshTask: Task<Void, Never>?
+    private var visibleWorkspaceDetailRefreshWorkspaceID: String?
     private var pendingWorktreeDiscoveryReload = false
     private var lastTrackedWindowCounts: [String: Int] = [:]
     private let updateChecker = UpdateChecker()
@@ -286,11 +288,14 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             forName: NSApplication.didBecomeActiveNotification, object: NSApp, queue: .main
         ) { [weak self] _ in
             Task { @MainActor [weak self] in
-                guard let self, let profile = self.activeWindowShortcutProfile else { return }
-                let routeElapsedMS = profile.routeCompletedAt.map { self.windowShortcutElapsedMS(since: $0) } ?? -1
-                self.logWindowShortcutProfile(
-                    "stage=app_became_active index=\(profile.index) elapsed_ms=\(self.windowShortcutElapsedMS(since: profile.startedAt)) route_gap_ms=\(routeElapsedMS)"
-                )
+                guard let self else { return }
+                if let profile = self.activeWindowShortcutProfile {
+                    let routeElapsedMS = profile.routeCompletedAt.map { self.windowShortcutElapsedMS(since: $0) } ?? -1
+                    self.logWindowShortcutProfile(
+                        "stage=app_became_active index=\(profile.index) elapsed_ms=\(self.windowShortcutElapsedMS(since: profile.startedAt)) route_gap_ms=\(routeElapsedMS)"
+                    )
+                }
+                self.requestVisibleWorkspaceDetailRefreshIfNeeded(reason: "app_became_active")
             }
         }
         appDidResignActiveObserver = NotificationCenter.default.addObserver(
@@ -483,6 +488,13 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
     private struct WorkspaceLifecycleOutcome: Sendable { let notice: String? }
 
+    private struct VisibleWorkspaceDetailRefreshOutcome: Sendable {
+        let didMutateWindows: Bool
+        let didUpdateProcesses: Bool
+
+        var didChangeVisibleState: Bool { didMutateWindows || didUpdateProcesses }
+    }
+
     private struct WorkspaceCreateInput: Sendable {
         let projectID: String
         let name: String
@@ -598,6 +610,20 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 let orchestrator = MuxyOrchestrator(store: store)
                 let result = try orchestrator.refreshAllWorkspaceWindows()
                 return .success(result)
+            } catch { return .failure(error) }
+        }.value
+    }
+
+    nonisolated private static func refreshVisibleWorkspaceDetailSnapshot(workspaceID: String) async -> Result<VisibleWorkspaceDetailRefreshOutcome, Error> {
+        await Task.detached(priority: .utility) {
+            do {
+                let db = try DatabaseLocator.defaultPath()
+                let store = try SQLiteStore(path: db)
+                let orchestrator = MuxyOrchestrator(store: store)
+                let didMutateWindows = try orchestrator.refreshWorkspaceWindows(workspaceID: workspaceID)
+                let didUpdateProcesses = try orchestrator.checkAndUpdateProcessStatuses()
+                    || orchestrator.runDueStatusChecksForRunningWorkspaces()
+                return .success(.init(didMutateWindows: didMutateWindows, didUpdateProcesses: didUpdateProcesses))
             } catch { return .failure(error) }
         }.value
     }
@@ -1130,6 +1156,17 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         case .focus, .open:
             return true
         }
+    }
+
+    nonisolated static func shouldRefreshVisibleWorkspaceDetail(
+        selectedWorkspaceID: String?,
+        showingDashboard: Bool,
+        showingSettings: Bool,
+        workspaceExists: Bool
+    ) -> Bool {
+        guard selectedWorkspaceID != nil else { return false }
+        guard !showingDashboard, !showingSettings else { return false }
+        return workspaceExists
     }
 
     private func buildMainMenu() {
@@ -1875,6 +1912,43 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             return
         }
         showDashboardDetail()
+    }
+
+    private func requestVisibleWorkspaceDetailRefreshIfNeeded(reason _: String) {
+        guard let workspaceID = selectedWorkspaceID else { return }
+        guard Self.shouldRefreshVisibleWorkspaceDetail(
+            selectedWorkspaceID: selectedWorkspaceID,
+            showingDashboard: showingDashboard,
+            showingSettings: showingSettings,
+            workspaceExists: findWorkspace(id: workspaceID) != nil)
+        else { return }
+        if visibleWorkspaceDetailRefreshWorkspaceID == workspaceID, let task = visibleWorkspaceDetailRefreshTask, !task.isCancelled { return }
+
+        visibleWorkspaceDetailRefreshTask?.cancel()
+        visibleWorkspaceDetailRefreshWorkspaceID = workspaceID
+        visibleWorkspaceDetailRefreshTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            let result = await Self.refreshVisibleWorkspaceDetailSnapshot(workspaceID: workspaceID)
+            guard !Task.isCancelled else { return }
+            defer {
+                if self.visibleWorkspaceDetailRefreshWorkspaceID == workspaceID {
+                    self.visibleWorkspaceDetailRefreshWorkspaceID = nil
+                    self.visibleWorkspaceDetailRefreshTask = nil
+                }
+            }
+
+            guard self.selectedWorkspaceID == workspaceID, !self.showingDashboard, !self.showingSettings else { return }
+            switch result {
+            case .success(let outcome):
+                guard outcome.didChangeVisibleState else { return }
+                guard self.canReloadAfterBackgroundWorkspaceRefresh() else { return }
+                self.reloadData()
+            case .failure(let error):
+                if !self.handleDeferredSetupRequirementIfNeeded(error) {
+                    self.showError(error)
+                }
+            }
+        }
     }
 
     private func showPlaceholder(message: String = "Select a project or workspace.") {
@@ -2927,6 +3001,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     }
 
     private func showWorkspaceDetail(project: ProjectSummary, workspace: WorkspaceSummary) {
+        requestVisibleWorkspaceDetailRefreshIfNeeded(reason: "workspace_detail_shown")
         clearInlineWorkspaceFieldRefs()
         activeAddWorkspaceFormTag = nil
         activeAddProjectFormTag = nil

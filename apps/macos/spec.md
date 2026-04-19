@@ -110,6 +110,7 @@ Muxy focuses those windows; it does not decide their geometry.
 - Browser focus should match the intended browser session by URL, not by window title.
 - Terminal focus should land on the intended dedicated process or agent session.
 - After the GUI focuses or opens an external window, Muxy should hide itself immediately so the target app stays unobstructed.
+- When a workspace detail view becomes visible, Muxy should refresh workspace windows and process state asynchronously so stale rows reconcile shortly after the page appears.
 - If tracked windows become stale during next/previous window cycling, Muxy should skip them and continue to the next live target.
 - If direct window focus from the app targets a stale browser session, Muxy should reopen that session in a new Chrome window and update tracking without showing an error modal first.
 - If direct window focus from the app targets a stale process window, Muxy should first try to recover silently by opening a new dedicated iTerm2 window and reattaching to the existing tmux session when the process is still running. If the process is no longer running, Muxy should show a modal warning with `Recover (Cmd+R)` and `Cancel (Esc)`, and the explicit recovery action should restart it inside tmux.
