@@ -508,7 +508,7 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertEqual(try orchestrator.guiLeaderHotkey(), SettingsKey.defaultGUILeaderHotkey)
         XCTAssertEqual(try orchestrator.guiNextShortcut(), "cmd+alt+]")
         XCTAssertEqual(try orchestrator.guiPreviousShortcut(), "cmd+alt+[")
-        XCTAssertEqual(try orchestrator.guiDashboardShortcut(), "cmd+alt+d")
+        XCTAssertEqual(try orchestrator.guiDashboardShortcut(), "cmd+alt+g")
         XCTAssertEqual(try orchestrator.guiAddProjectShortcut(), SettingsKey.defaultGUIAddProjectShortcut)
         XCTAssertEqual(try orchestrator.guiAddWorkspaceShortcut(), SettingsKey.defaultGUIAddWorkspaceShortcut)
         XCTAssertEqual(try orchestrator.guiReloadShortcut(), "cmd+alt+r")
