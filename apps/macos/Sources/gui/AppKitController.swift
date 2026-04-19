@@ -183,6 +183,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         case agentWindow(AgentWindowRecord)
     }
 
+    enum ExternalWindowAction: Sendable {
+        case focus
+        case open
+    }
+
     private enum WindowShortcutExecutionOutcome: Sendable {
         case focused(kind: String)
         case noWorkspace
@@ -1117,6 +1122,14 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                     (workspacesByProject[project.id] ?? []).map(\.id)
                 })
         return existing.filter { workspaceIDs.contains($0.key) }
+    }
+
+    nonisolated static func shouldHideAfterSuccessfulExternalWindowAction(_ succeeded: Bool, action: ExternalWindowAction) -> Bool {
+        guard succeeded else { return false }
+        switch action {
+        case .focus, .open:
+            return true
+        }
     }
 
     private func buildMainMenu() {
@@ -5242,6 +5255,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         do {
             try orchestrator.openWorkspaceEditor(workspaceID: workspaceID)
             reloadData()
+            hideAfterSuccessfulExternalWindowAction(.open)
         } catch { showError(error) }
     }
 
@@ -5249,13 +5263,16 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         do {
             try orchestrator.openWorkspaceTerminal(workspaceID: workspaceID)
             reloadData()
+            hideAfterSuccessfulExternalWindowAction(.open)
         } catch { showError(error) }
     }
 
     private func openWorkspaceFinder(workspaceID: String) {
         guard let (_, workspace) = findWorkspace(id: workspaceID) else { return }
         let url = URL(fileURLWithPath: workspace.dir, isDirectory: true)
-        NSWorkspace.shared.open(url)
+        if NSWorkspace.shared.open(url) {
+            hideAfterSuccessfulExternalWindowAction(.open)
+        }
     }
 
     private func findWorkspace(id: String) -> (ProjectSummary, WorkspaceSummary)? {
@@ -5839,7 +5856,12 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
     private func performWindowFocus(_ request: WindowFocusRequest) async {
         let result = await Self.performWindowFocusSnapshot(request)
-        if case .failure(let error) = result { await handleWindowFocusFailure(error) }
+        switch result {
+        case .success:
+            hideAfterSuccessfulExternalWindowAction(.focus)
+        case .failure(let error):
+            await handleWindowFocusFailure(error)
+        }
     }
 
     private func focusWindowShortcut(index: Int) {
@@ -5863,6 +5885,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             )
             activeWindowShortcutProfile?.routeCompletedAt = Date()
             logWindowShortcutProfile("stage=total index=\(index) elapsed_ms=\(windowShortcutElapsedMS(since: startedAt))")
+            hideAfterSuccessfulExternalWindowAction(.focus)
         case .success(.noWorkspace):
             logWindowShortcutProfile(
                 "stage=aborted index=\(index) reason=no_workspace elapsed_ms=\(windowShortcutElapsedMS(since: startedAt))"
@@ -5967,9 +5990,16 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             } else {
                 try orchestrator.focusPreviousWindow(workspaceID: workspaceID)
             }
+            hideAfterSuccessfulExternalWindowAction(.focus)
         } catch {
             showError(error)
         }
+    }
+
+    private func hideAfterSuccessfulExternalWindowAction(_ action: ExternalWindowAction) {
+        guard Self.shouldHideAfterSuccessfulExternalWindowAction(true, action: action) else { return }
+        dismissTooltipOverlay()
+        NSApp.hide(nil)
     }
 
     private func handleWindowFocusFailure(_ error: Error) async {

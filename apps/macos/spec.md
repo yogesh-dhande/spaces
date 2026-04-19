@@ -109,6 +109,7 @@ Muxy focuses those windows; it does not decide their geometry.
 - Muxy should focus the correct window or workspace quickly, even when switching across apps.
 - Browser focus should match the intended browser session by URL, not by window title.
 - Terminal focus should land on the intended dedicated process or agent session.
+- After the GUI focuses or opens an external window, Muxy should hide itself immediately so the target app stays unobstructed.
 - If tracked windows become stale during next/previous window cycling, Muxy should skip them and continue to the next live target.
 - If direct window focus from the app targets a stale browser session, Muxy should reopen that session in a new Chrome window and update tracking without showing an error modal first.
 - If direct window focus from the app targets a stale process window, Muxy should first try to recover silently by opening a new dedicated iTerm2 window and reattaching to the existing tmux session when the process is still running. If the process is no longer running, Muxy should show a modal warning with `Recover (Cmd+R)` and `Cancel (Esc)`, and the explicit recovery action should restart it inside tmux.
@@ -135,6 +136,7 @@ Muxy focuses those windows; it does not decide their geometry.
 - Window-number sequence shortcuts should use a separate configurable modifier plus digits `1` through `9`, then replay the queued focus actions in order when the modifiers are released.
 - Shortcut handling must not break normal text-edit shortcuts while an input is focused.
 - Recovery affordances should reserve `Cmd+R`; app-data reload should default to leader+`R` so it stays distinct from recovery modals.
+- Dashboard should default to leader+`G` so it does not conflict with the macOS Dock toggle shortcut.
 - Every keyboard shortcut the product supports must be configurable from the GUI settings panel and from `mx settings`.
 
 ## Coding-Agent Integration
