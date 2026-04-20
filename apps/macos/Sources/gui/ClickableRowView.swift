@@ -1,4 +1,5 @@
 import AppKit
+import appctl
 
 /// A rounded row view that stays visually flat until hover indicates interactivity.
 /// Use `isInteractive = true` when a click action is attached; hover effects are skipped otherwise.
@@ -16,7 +17,7 @@ final class ClickableRowView: NSView {
         self.isInteractive = isInteractive
         super.init(frame: .zero)
         wantsLayer = true
-        layer?.cornerRadius = 6
+        layer?.cornerRadius = UIRadius.compact
         layer?.borderWidth = 0
         translatesAutoresizingMaskIntoConstraints = false
         updateBackgroundColor()

@@ -113,7 +113,7 @@ public final class TerminalFocusPulseController: @unchecked Sendable, TerminalFo
             overlay.collectionBehavior = [.transient, .ignoresCycle]
             overlay.contentView = NSView(frame: NSRect(origin: .zero, size: frame.size))
             overlay.contentView?.wantsLayer = true
-            overlay.contentView?.layer?.cornerRadius = 8
+            overlay.contentView?.layer?.cornerRadius = UIRadius.regular
             overlayStore.overlaysByWindowID[windowID] = overlay
         }
 

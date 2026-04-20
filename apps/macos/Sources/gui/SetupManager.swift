@@ -340,7 +340,7 @@ final class SetupManager: NSObject {
         switch step.action {
         case .copyCommand(let cmd):
             box.isHidden = false
-            box.layer?.cornerRadius = 6
+            box.layer?.cornerRadius = UIRadius.compact
             box.layer?.backgroundColor = NSColor.quaternaryLabelColor.cgColor
 
             let label = NSTextField(labelWithString: cmd)
@@ -401,7 +401,7 @@ final class SetupManager: NSObject {
             // Command row
             let cmdContainer = NSView()
             cmdContainer.wantsLayer = true
-            cmdContainer.layer?.cornerRadius = 6
+            cmdContainer.layer?.cornerRadius = UIRadius.compact
             cmdContainer.layer?.backgroundColor = NSColor.quaternaryLabelColor.cgColor
             cmdContainer.translatesAutoresizingMaskIntoConstraints = false
 

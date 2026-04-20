@@ -1512,7 +1512,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         badge.alignment = .center
         badge.wantsLayer = true
         badge.layer?.backgroundColor = sidebarFailedIndicatorColor().cgColor
-        badge.layer?.cornerRadius = 7
+        badge.layer?.cornerRadius = UIRadius.pill(forHeight: 14)
         badge.isBordered = false
         badge.isEditable = false
         badge.drawsBackground = false
@@ -1529,7 +1529,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         stack.spacing = 6
         stack.edgeInsets = NSEdgeInsets(top: 7, left: 8, bottom: 7, right: 8)
         stack.wantsLayer = true
-        stack.layer?.cornerRadius = 8
+        stack.layer?.cornerRadius = UIRadius.regular
         stack.translatesAutoresizingMaskIntoConstraints = false
         stack.addArrangedSubview(titleLabel)
         stack.addArrangedSubview(hintLabel)
@@ -2179,7 +2179,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             overlay.blendingMode = .withinWindow
             overlay.state = .active
             overlay.wantsLayer = true
-            overlay.layer?.cornerRadius = 10
+            overlay.layer?.cornerRadius = UIRadius.large
             overlay.layer?.borderWidth = 1
             overlay.layer?.borderColor = sidebarCardBorderColor(isSelected: false).cgColor
             overlay.translatesAutoresizingMaskIntoConstraints = false
@@ -2262,7 +2262,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             overlay.blendingMode = .withinWindow
             overlay.state = .active
             overlay.wantsLayer = true
-            overlay.layer?.cornerRadius = 10
+            overlay.layer?.cornerRadius = UIRadius.large
             overlay.layer?.borderWidth = 1
             overlay.layer?.borderColor = NSColor.systemRed.withAlphaComponent(0.35).cgColor
             overlay.translatesAutoresizingMaskIntoConstraints = false
@@ -3866,7 +3866,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         row.translatesAutoresizingMaskIntoConstraints = false
         if field == .tooltip, !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             row.wantsLayer = true
-            row.layer?.cornerRadius = 6
+            row.layer?.cornerRadius = UIRadius.compact
             row.layer?.borderWidth = 1
             row.layer?.borderColor = sidebarCardBorderColor(isSelected: false).cgColor
             row.layer?.backgroundColor = sidebarThemeColor(light: (241, 239, 230), dark: (23, 33, 36)).cgColor
@@ -4521,7 +4521,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
     private func styleShortcutCaptureButton(_ button: NSButton, active: Bool) {
         button.wantsLayer = true
-        button.layer?.cornerRadius = 6
+        button.layer?.cornerRadius = UIRadius.compact
         button.layer?.borderWidth = 1
         button.layer?.backgroundColor = shortcutKeycapBackgroundColor(active: active).cgColor
         button.layer?.borderColor = shortcutKeycapBorderColor(active: active).cgColor
@@ -4691,7 +4691,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         scroll.contentView.drawsBackground = true
         scroll.contentView.backgroundColor = inputBg
         scroll.wantsLayer = true
-        scroll.layer?.cornerRadius = 6
+        scroll.layer?.cornerRadius = UIRadius.compact
         scroll.layer?.borderWidth = 1
         scroll.layer?.borderColor = sidebarCardBorderColor(isSelected: false).cgColor
         textView.drawsBackground = true
@@ -5896,7 +5896,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let contentView = NSView(frame: NSRect(x: 0, y: 0, width: contentWidth, height: contentHeight))
         contentView.wantsLayer = true
         contentView.layer?.backgroundColor = NSColor.black.cgColor
-        contentView.layer?.cornerRadius = 12
+        contentView.layer?.cornerRadius = UIRadius.large
 
         let titleX = (contentWidth - titleField.frame.width) / 2
         let bodyX = (contentWidth - bodyField.frame.width) / 2
@@ -6360,7 +6360,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let rowBackground = NSView()
         rowBackground.translatesAutoresizingMaskIntoConstraints = false
         rowBackground.wantsLayer = true
-        rowBackground.layer?.cornerRadius = 9
+        rowBackground.layer?.cornerRadius = UIRadius.regular
         rowBackground.layer?.borderWidth = isSelected ? 1 : 0
         rowBackground.layer?.borderColor = sidebarCardBorderColor(isSelected: true).cgColor
         rowBackground.layer?.backgroundColor = isSelected
@@ -6427,7 +6427,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let cardView = NSView()
         cardView.translatesAutoresizingMaskIntoConstraints = false
         cardView.wantsLayer = true
-        cardView.layer?.cornerRadius = 8
+        cardView.layer?.cornerRadius = UIRadius.regular
         cardView.layer?.borderWidth = isSelected ? 1 : 0
         cardView.layer?.borderColor = sidebarCardBorderColor(isSelected: true).cgColor
         cardView.layer?.backgroundColor = isSelected ? sidebarSelectedCardBackgroundColor().cgColor : NSColor.clear.cgColor
