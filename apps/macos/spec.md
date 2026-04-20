@@ -21,6 +21,21 @@ Muxy provides a desktop app and a CLI for power users and coding agents.
 - Muxy does not manage secrets beyond environment variables needed for the app to function.
 - Muxy only supports the browser and terminal integrations it explicitly implements.
 
+## Key Design Decisions
+- Separate window per process or browser session URL.
+  This keeps each focus target stable because Muxy cannot predict which two or more terminals or browser sessions a user may want to see side by side later.
+- Focus Chrome by window only, not by tab matching as the primary path.
+  AppleScript tab matching is too slow when Muxy cannot assume tab indexes remain stable, and must resort to searching/matching by URL. So tracked window identity must be the fast path.
+- Launch workspace processes inside tmux.
+  This lets Muxy recover the terminal view without losing the underlying process when a supported terminal-host window is closed or needs to be recreated.
+- Keep workspace lifecycle separate from runtime health.
+  `Running` and `Stopped` should stay easy to explain, while failed processes, failed checks, or stale tracked windows surface as warnings on top of that lifecycle state.
+- Require explicit tracked-window targets for workspace focus.
+  Workspace focus should not guess which window the user meant, because arbitrary focus becomes unpredictable as workspaces collect multiple windows.
+  Example: one workspace may have a frontend browser, an admin browser, an API terminal, and a coding-agent terminal all open at once. If the user runs `mx workspace focus` or clicks Focus in the GUI, Muxy should not silently pick whichever window was captured first or happened to survive most recently. The user may want the admin browser now and the coding-agent terminal five seconds later. Requiring an explicit tracked window target keeps focus behavior deterministic and keeps `workspace focus` from changing meaning as the workspace evolves.
+- Keep coding-agent events explicit.
+  `mx workspace import` and `mx workspace up` must not infer agent lifecycle, because only the agent can accurately report when it actually started, is waiting, or is done.
+
 ## Core Concepts
 
 ### Project
