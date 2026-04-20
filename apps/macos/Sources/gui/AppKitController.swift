@@ -8,7 +8,7 @@ private let startupProfileBaselineUptime = ProcessInfo.processInfo.systemUptime
 
 @MainActor
 public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineViewDataSource, NSOutlineViewDelegate, NSSplitViewDelegate,
-    NSWindowDelegate, NSTextFieldDelegate
+    NSWindowDelegate, NSTextFieldDelegate, NSTabViewDelegate
 {
     private enum DashboardIconTint: Sendable {
         case browser
@@ -74,6 +74,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     private var workspaceRuntimeStatusByID: [String: WorkspaceRuntimeStatus] = [:]
     private var dashboardGroups: [DashboardGroup] = []
     private var dismissedDashboardAttentionItemIDs: Set<String> = []
+    private var selectedWorkspaceDetailTabIdentifierByWorkspaceID: [String: String] = [:]
+    private var visibleDetailWorkspaceID: String?
 
     private var selectedProjectID: String?
     private var selectedWorkspaceID: String?
@@ -588,6 +590,33 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
     nonisolated private static func dashboardAttentionID(agentWindow: AgentWindowRecord) -> String {
         "agent:\(agentWindow.id):\(agentWindow.status.rawValue):\(agentWindow.updatedAt)"
+    }
+
+    nonisolated static func restoredWorkspaceDetailTabIdentifier(savedIdentifier: String?) -> String {
+        switch savedIdentifier {
+        case "env", "settings":
+            savedIdentifier ?? "run"
+        default:
+            "run"
+        }
+    }
+
+    static func selectedWorkspaceDetailTabIdentifier(in view: NSView) -> String? {
+        if let tabView = view as? NSTabView, let identifier = tabView.selectedTabViewItem?.identifier as? String {
+            return identifier
+        }
+        for subview in view.subviews {
+            if let identifier = selectedWorkspaceDetailTabIdentifier(in: subview) {
+                return identifier
+            }
+        }
+        return nil
+    }
+
+    private func captureVisibleWorkspaceDetailTabSelectionIfNeeded() {
+        guard let workspaceID = visibleDetailWorkspaceID else { return }
+        guard let identifier = Self.selectedWorkspaceDetailTabIdentifier(in: detailContainer) else { return }
+        selectedWorkspaceDetailTabIdentifierByWorkspaceID[workspaceID] = identifier
     }
 
     nonisolated private static func dashboardFocusRequest(
@@ -1551,9 +1580,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     }
 
     private func showDashboardDetail() {
+        captureVisibleWorkspaceDetailTabSelectionIfNeeded()
         clearInlineWorkspaceFieldRefs()
         activeAddWorkspaceFormTag = nil
         activeAddProjectFormTag = nil
+        visibleDetailWorkspaceID = nil
         showingSettings = false
         showingDashboard = true
         let previousWorkspaceID = selectedWorkspaceID
@@ -1952,7 +1983,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                         details: "workspace_count=\(snapshot.gitActivityByWorkspaceID.count)")
                 }
                 self.refreshSidebarGitActivityRows(workspaceIDs: Array(snapshot.gitActivityByWorkspaceID.keys))
-                self.refreshSelection()
             case .failure(let error):
                 fputs("muxy: sidebar git activity refresh failed: \(error.localizedDescription)\n", stderr)
             }
@@ -2040,6 +2070,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         clearInlineWorkspaceFieldRefs()
         activeAddWorkspaceFormTag = nil
         activeAddProjectFormTag = nil
+        visibleDetailWorkspaceID = nil
         showingSettings = false
         showingDashboard = false
         updateDashboardRowAppearance()
@@ -2060,6 +2091,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         clearInlineWorkspaceFieldRefs()
         activeAddWorkspaceFormTag = nil
         activeAddProjectFormTag = nil
+        visibleDetailWorkspaceID = nil
         showingSettings = false
         showingDashboard = false
         updateDashboardRowAppearance()
@@ -2310,9 +2342,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     }
 
     private func showSettingsDetail() {
+        captureVisibleWorkspaceDetailTabSelectionIfNeeded()
         clearInlineWorkspaceFieldRefs()
         activeAddWorkspaceFormTag = nil
         activeAddProjectFormTag = nil
+        visibleDetailWorkspaceID = nil
         showingSettings = true
         showingDashboard = false
         updateDashboardRowAppearance()
@@ -2452,9 +2486,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     }
 
     private func showProjectDetail(project: ProjectSummary) {
+        captureVisibleWorkspaceDetailTabSelectionIfNeeded()
         clearInlineWorkspaceFieldRefs()
         activeAddWorkspaceFormTag = nil
         activeAddProjectFormTag = nil
+        visibleDetailWorkspaceID = nil
         showingSettings = false
         showingDashboard = false
         updateDashboardRowAppearance()
@@ -3086,9 +3122,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
     private func showWorkspaceDetail(project: ProjectSummary, workspace: WorkspaceSummary) {
         requestVisibleWorkspaceDetailRefreshIfNeeded(reason: "workspace_detail_shown")
+        captureVisibleWorkspaceDetailTabSelectionIfNeeded()
         clearInlineWorkspaceFieldRefs()
         activeAddWorkspaceFormTag = nil
         activeAddProjectFormTag = nil
+        visibleDetailWorkspaceID = workspace.id
         showingSettings = false
         showingDashboard = false
         updateDashboardRowAppearance()
@@ -3294,6 +3332,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let tabs = NSTabView()
         tabs.translatesAutoresizingMaskIntoConstraints = false
         tabs.tabViewType = .topTabsBezelBorder
+        tabs.delegate = self
         let runTab = NSTabViewItem(identifier: "run")
         runTab.label = "Run"
         runTab.view = workspaceRunView(project: project, workspace: workspace)
@@ -3306,6 +3345,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         tabs.addTabViewItem(runTab)
         tabs.addTabViewItem(envTab)
         tabs.addTabViewItem(settingsTab)
+        let selectedTabIdentifier = Self.restoredWorkspaceDetailTabIdentifier(
+            savedIdentifier: selectedWorkspaceDetailTabIdentifierByWorkspaceID[workspace.id])
+        if let restoredTab = tabs.tabViewItems.first(where: { ($0.identifier as? String) == selectedTabIdentifier }) {
+            tabs.selectTabViewItem(restoredTab)
+        }
 
         stack.addArrangedSubview(headerAndActionsRow)
         if let inlineBranchRow {
@@ -3341,6 +3385,12 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             tabs.heightAnchor.constraint(equalToConstant: 460), tabs.widthAnchor.constraint(equalTo: stack.widthAnchor),
         ])
         detailContainer.layoutSubtreeIfNeeded()
+    }
+
+    public func tabView(_ tabView: NSTabView, didSelect tabViewItem: NSTabViewItem?) {
+        guard let workspaceID = selectedWorkspaceID else { return }
+        guard let identifier = tabViewItem?.identifier as? String else { return }
+        selectedWorkspaceDetailTabIdentifierByWorkspaceID[workspaceID] = identifier
     }
 
     private func workspaceRunView(project: ProjectSummary, workspace: WorkspaceSummary) -> NSView {

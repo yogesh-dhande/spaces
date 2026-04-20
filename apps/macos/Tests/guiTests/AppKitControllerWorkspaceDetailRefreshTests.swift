@@ -1,3 +1,4 @@
+import AppKit
 import Testing
 
 @testable import gui
@@ -50,4 +51,35 @@ import Testing
                 showingSettings: true,
                 workspaceExists: true))
     }
+
+    @Test func restoredWorkspaceDetailTabIdentifierDefaultsToRunForUnknownSelection() {
+        #expect(AppKitController.restoredWorkspaceDetailTabIdentifier(savedIdentifier: nil) == "run")
+        #expect(AppKitController.restoredWorkspaceDetailTabIdentifier(savedIdentifier: "run") == "run")
+        #expect(AppKitController.restoredWorkspaceDetailTabIdentifier(savedIdentifier: "unknown") == "run")
+    }
+
+    @Test func restoredWorkspaceDetailTabIdentifierKeepsEnvAndSettingsTabs() {
+        #expect(AppKitController.restoredWorkspaceDetailTabIdentifier(savedIdentifier: "env") == "env")
+        #expect(AppKitController.restoredWorkspaceDetailTabIdentifier(savedIdentifier: "settings") == "settings")
+    }
+
+    @MainActor @Test func selectedWorkspaceDetailTabIdentifierFindsNestedSelectedTab() {
+        let container = NSView()
+        let nested = NSView()
+        let tabs = NSTabView()
+        let runTab = NSTabViewItem(identifier: "run")
+        runTab.label = "Run"
+        runTab.view = NSView()
+        let settingsTab = NSTabViewItem(identifier: "settings")
+        settingsTab.label = "Settings"
+        settingsTab.view = NSView()
+        tabs.addTabViewItem(runTab)
+        tabs.addTabViewItem(settingsTab)
+        tabs.selectTabViewItem(settingsTab)
+        nested.addSubview(tabs)
+        container.addSubview(nested)
+
+        #expect(AppKitController.selectedWorkspaceDetailTabIdentifier(in: container) == "settings")
+    }
+
 }
