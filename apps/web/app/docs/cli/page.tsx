@@ -410,27 +410,27 @@ mx workspace focus --dir /path/to/workspace --window 2`}</CodeBlock>
 mx settings get --gui-hotkey
 mx settings get --gui-next-shortcut
 mx settings get --gui-prev-shortcut
-mx settings get --iterm-focus-pulse-color
-mx settings get --iterm-focus-pulse-enabled
+mx settings get --window-focus-pulse-color
+mx settings get --window-focus-pulse-enabled
 
 # Set
 mx settings set --gui-hotkey cmd+shift+m
 mx settings set --gui-next-shortcut ctrl+tab
 mx settings set --gui-prev-shortcut ctrl+shift+tab
-mx settings set --iterm-focus-pulse-color 46,41,14
-mx settings set --iterm-focus-pulse-enabled 0
+mx settings set --window-focus-pulse-color 72,98,110
+mx settings set --window-focus-pulse-enabled 0
 
 # Reset to default
 mx settings reset --gui-hotkey
 mx settings reset --gui-next-shortcut
-mx settings reset --iterm-focus-pulse-color
-mx settings reset --iterm-focus-pulse-enabled`}</CodeBlock>
+mx settings reset --window-focus-pulse-color
+mx settings reset --window-focus-pulse-enabled`}</CodeBlock>
         <p className="mt-3 text-sm leading-7 text-foreground-soft">
           Additional keys: <Cmd>--gui-add-project-shortcut</Cmd>,{" "}
           <Cmd>--gui-add-workspace-shortcut</Cmd>, <Cmd>--gui-reload-shortcut</Cmd>,{" "}
           <Cmd>--gui-open-editor-shortcut</Cmd>, <Cmd>--gui-open-terminal-shortcut</Cmd>,{" "}
           <Cmd>--gui-open-finder-shortcut</Cmd>, <Cmd>--gui-open-settings-shortcut</Cmd>,{" "}
-          <Cmd>--iterm-focus-pulse-color</Cmd>, and <Cmd>--iterm-focus-pulse-enabled</Cmd>.
+          <Cmd>--window-focus-pulse-color</Cmd>, and <Cmd>--window-focus-pulse-enabled</Cmd>.
         </p>
       </article>
 

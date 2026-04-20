@@ -111,6 +111,7 @@ Muxy focuses those windows; it does not decide their geometry.
 - Browser focus should match the intended browser session by URL, not by window title.
 - Terminal focus should land on the intended dedicated process or agent session.
 - Focusing a tracked terminal window should flash a short semitransparent overlay on top of the target window in both iTerm2 and Ghostty.
+- The focus-pulse overlay color should be configured as a shared window-level setting from both the GUI and `mx settings`.
 - Users should be able to choose the default terminal host globally, and both the GUI and CLI should respect that selection.
 - After the GUI focuses or opens an external window, Muxy should hide itself immediately so the target app stays unobstructed.
 - When a workspace detail view becomes visible, Muxy should refresh workspace windows and process state asynchronously so stale rows reconcile shortly after the page appears.

@@ -4740,30 +4740,30 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertEqual(project2Workspaces.count, 2)
     }
 
-    // Tests iterm focus pulse color returns default when not set by arranging representative inputs and asserting the expected result.
-    func testItermFocusPulseColorReturnsDefaultWhenNotSet() throws {
+    // Tests window focus pulse color returns the configured default when not set.
+    func testWindowFocusPulseColorReturnsDefaultWhenNotSet() throws {
         let (orchestrator, _, _, _, _) = try makeOrchestratorWithWorkspace()
-        let (r, g, b) = try orchestrator.itermFocusPulseColor()
-        XCTAssertEqual(r, 46)
-        XCTAssertEqual(g, 41)
-        XCTAssertEqual(b, 14)
+        let (r, g, b) = try orchestrator.windowFocusPulseColor()
+        XCTAssertEqual(r, 72)
+        XCTAssertEqual(g, 98)
+        XCTAssertEqual(b, 110)
     }
 
-    // Tests iterm focus pulse color round trips by arranging representative inputs and asserting the expected result.
-    func testItermFocusPulseColorRoundTrip() throws {
+    // Tests window focus pulse color round trips through the store.
+    func testWindowFocusPulseColorRoundTrip() throws {
         let (orchestrator, _, _, _, _) = try makeOrchestratorWithWorkspace()
-        try orchestrator.setItermFocusPulseColor(r: 10, g: 128, b: 200)
-        let (r, g, b) = try orchestrator.itermFocusPulseColor()
+        try orchestrator.setWindowFocusPulseColor(r: 10, g: 128, b: 200)
+        let (r, g, b) = try orchestrator.windowFocusPulseColor()
         XCTAssertEqual(r, 10)
         XCTAssertEqual(g, 128)
         XCTAssertEqual(b, 200)
     }
 
-    // Tests iterm focus pulse color clamps values to 0-255 by arranging representative inputs and asserting the expected result.
-    func testItermFocusPulseColorClampsValues() throws {
+    // Tests window focus pulse color clamps values to 0-255.
+    func testWindowFocusPulseColorClampsValues() throws {
         let (orchestrator, _, _, _, _) = try makeOrchestratorWithWorkspace()
-        try orchestrator.setItermFocusPulseColor(r: -10, g: 300, b: 128)
-        let (r, g, b) = try orchestrator.itermFocusPulseColor()
+        try orchestrator.setWindowFocusPulseColor(r: -10, g: 300, b: 128)
+        let (r, g, b) = try orchestrator.windowFocusPulseColor()
         XCTAssertEqual(r, 0)
         XCTAssertEqual(g, 255)
         XCTAssertEqual(b, 128)
@@ -4797,9 +4797,9 @@ final class OrchestratorTests: XCTestCase {
 
         XCTAssertEqual(pulseController.pulseCallCount, 1)
         XCTAssertEqual(pulseController.pulsedWindowIDs, [555])
-        XCTAssertEqual(pulseController.pulseColors[0].r, 46)
-        XCTAssertEqual(pulseController.pulseColors[0].g, 41)
-        XCTAssertEqual(pulseController.pulseColors[0].b, 14)
+        XCTAssertEqual(pulseController.pulseColors[0].r, 72)
+        XCTAssertEqual(pulseController.pulseColors[0].g, 98)
+        XCTAssertEqual(pulseController.pulseColors[0].b, 110)
     }
 
     // Tests focus terminal window uses configured overlay pulse color by arranging representative inputs and asserting the expected result.
@@ -4809,7 +4809,7 @@ final class OrchestratorTests: XCTestCase {
             terminalFocusPulseController: pulseController)
         let tmuxWindow = mockTmux.addWindow(sessionName: "muxy-\(workspace.id)", id: "@1", name: "api", index: 0, isActive: true)
 
-        try orchestrator.setItermFocusPulseColor(r: 0, g: 100, b: 200)
+        try orchestrator.setWindowFocusPulseColor(r: 0, g: 100, b: 200)
         try store.upsert(
             window: WindowRecord(
                 id: UUID().uuidString, workspaceID: workspace.id, app: "iTerm2", title: "api", windowID: 556,
@@ -4835,18 +4835,18 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertEqual(pulseController.pulseColors[0].b, 200)
     }
 
-    // Tests iterm focus pulse enabled returns true by default when not set.
-    func testItermFocusPulseEnabledDefaultsToTrue() throws {
+    // Tests window focus pulse enabled returns true by default when not set.
+    func testWindowFocusPulseEnabledDefaultsToTrue() throws {
         let (orchestrator, _, _, _, _) = try makeOrchestratorWithWorkspace()
-        let enabled = try orchestrator.itermFocusPulseEnabled()
+        let enabled = try orchestrator.windowFocusPulseEnabled()
         XCTAssertTrue(enabled)
     }
 
-    // Tests iterm focus pulse enabled round-trips false.
-    func testItermFocusPulseEnabledRoundTripFalse() throws {
+    // Tests window focus pulse enabled round-trips false.
+    func testWindowFocusPulseEnabledRoundTripFalse() throws {
         let (orchestrator, _, _, _, _) = try makeOrchestratorWithWorkspace()
-        try orchestrator.setItermFocusPulseEnabled(false)
-        let enabled = try orchestrator.itermFocusPulseEnabled()
+        try orchestrator.setWindowFocusPulseEnabled(false)
+        let enabled = try orchestrator.windowFocusPulseEnabled()
         XCTAssertFalse(enabled)
     }
 
@@ -4863,7 +4863,7 @@ final class OrchestratorTests: XCTestCase {
         let project = try orchestrator.addProject(dir: projectDir.path)
         let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
 
-        try orchestrator.setItermFocusPulseEnabled(false)
+        try orchestrator.setWindowFocusPulseEnabled(false)
         try store.upsert(
             window: WindowRecord(
                 id: UUID().uuidString, workspaceID: workspace.id, app: "iTerm2", title: "api", windowID: 557, role: "terminal", orderIndex: 0,
@@ -5042,31 +5042,31 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertEqual(resolved, "cd /workspaces/myapp/dev && npm start")
     }
 
-    // Tests setItermFocusPulseColor clamps values to 0–255 by arranging representative inputs and asserting the expected result.
-    func testItermFocusPulseColorClamps() throws {
+    // Tests setWindowFocusPulseColor clamps values to 0–255.
+    func testWindowFocusPulseColorClamps() throws {
         let store = try makeTemporaryStore()
         let orchestrator = MuxyOrchestrator(store: store)
 
-        try orchestrator.setItermFocusPulseColor(r: -10, g: 300, b: 128)
-        let clamped = try orchestrator.itermFocusPulseColor()
+        try orchestrator.setWindowFocusPulseColor(r: -10, g: 300, b: 128)
+        let clamped = try orchestrator.windowFocusPulseColor()
         XCTAssertEqual(clamped.r, 0)
         XCTAssertEqual(clamped.g, 255)
         XCTAssertEqual(clamped.b, 128)
     }
 
-    // Tests itermFocusPulseEnabled round-trips through store by arranging representative inputs and asserting the expected result.
-    func testItermFocusPulseEnabledRoundTrip() throws {
+    // Tests windowFocusPulseEnabled round-trips through store.
+    func testWindowFocusPulseEnabledRoundTrip() throws {
         let store = try makeTemporaryStore()
         let orchestrator = MuxyOrchestrator(store: store)
 
         // Default is enabled.
-        XCTAssertTrue(try orchestrator.itermFocusPulseEnabled())
+        XCTAssertTrue(try orchestrator.windowFocusPulseEnabled())
 
-        try orchestrator.setItermFocusPulseEnabled(false)
-        XCTAssertFalse(try orchestrator.itermFocusPulseEnabled())
+        try orchestrator.setWindowFocusPulseEnabled(false)
+        XCTAssertFalse(try orchestrator.windowFocusPulseEnabled())
 
-        try orchestrator.setItermFocusPulseEnabled(true)
-        XCTAssertTrue(try orchestrator.itermFocusPulseEnabled())
+        try orchestrator.setWindowFocusPulseEnabled(true)
+        XCTAssertTrue(try orchestrator.windowFocusPulseEnabled())
     }
 
     // MARK: - updatePortRange

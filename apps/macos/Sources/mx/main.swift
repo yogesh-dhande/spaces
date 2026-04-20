@@ -889,16 +889,16 @@ struct CLI {
                 try output.emit(text: "gui-window-shortcut\t\(snapshot.guiWindowShortcut)", json: SettingValuePayload(name: "gui-window-shortcut", value: snapshot.guiWindowShortcut))
             } else if args.contains("--gui-window-sequence-shortcut") {
                 try output.emit(text: "gui-window-sequence-shortcut\t\(snapshot.guiWindowSequenceShortcut)", json: SettingValuePayload(name: "gui-window-sequence-shortcut", value: snapshot.guiWindowSequenceShortcut))
-            } else if args.contains("--iterm-focus-pulse-color") {
-                try output.emit(text: "iterm-focus-pulse-color\t\(snapshot.itermFocusPulseColor)", json: SettingValuePayload(name: "iterm-focus-pulse-color", value: snapshot.itermFocusPulseColor))
-            } else if args.contains("--iterm-focus-pulse-enabled") {
-                try output.emit(text: "iterm-focus-pulse-enabled\t\(snapshot.itermFocusPulseEnabled ? "1" : "0")", json: SettingValuePayload(name: "iterm-focus-pulse-enabled", value: snapshot.itermFocusPulseEnabled ? "1" : "0"))
+            } else if args.contains("--window-focus-pulse-color") {
+                try output.emit(text: "window-focus-pulse-color\t\(snapshot.windowFocusPulseColor)", json: SettingValuePayload(name: "window-focus-pulse-color", value: snapshot.windowFocusPulseColor))
+            } else if args.contains("--window-focus-pulse-enabled") {
+                try output.emit(text: "window-focus-pulse-enabled\t\(snapshot.windowFocusPulseEnabled ? "1" : "0")", json: SettingValuePayload(name: "window-focus-pulse-enabled", value: snapshot.windowFocusPulseEnabled ? "1" : "0"))
             } else {
                 throw NSError(
                     domain: "mx.cli", code: 2,
                     userInfo: [
                         NSLocalizedDescriptionKey:
-                            "Missing setting flag. Use: settings get --all|--editor|--terminal-host|--port-range|--gui-hotkey|--gui-leader-hotkey|--gui-dashboard-shortcut|--gui-add-project-shortcut|--gui-add-workspace-shortcut|--gui-reload-shortcut|--gui-next-shortcut|--gui-prev-shortcut|--gui-open-editor-shortcut|--gui-open-terminal-shortcut|--gui-open-finder-shortcut|--gui-open-settings-shortcut|--gui-tooltip-shortcut|--gui-window-shortcut|--gui-window-sequence-shortcut|--iterm-focus-pulse-color|--iterm-focus-pulse-enabled"
+                            "Missing setting flag. Use: settings get --all|--editor|--terminal-host|--port-range|--gui-hotkey|--gui-leader-hotkey|--gui-dashboard-shortcut|--gui-add-project-shortcut|--gui-add-workspace-shortcut|--gui-reload-shortcut|--gui-next-shortcut|--gui-prev-shortcut|--gui-open-editor-shortcut|--gui-open-terminal-shortcut|--gui-open-finder-shortcut|--gui-open-settings-shortcut|--gui-tooltip-shortcut|--gui-window-shortcut|--gui-window-sequence-shortcut|--window-focus-pulse-color|--window-focus-pulse-enabled"
                     ])
             }
 
@@ -996,28 +996,28 @@ struct CLI {
                 try orchestrator.setGUIWindowSequenceShortcut(spec.normalized)
                 let value = try orchestrator.guiWindowSequenceShortcut()
                 try output.emit(text: "Updated gui-window-sequence-shortcut\t\(value)", json: SettingValuePayload(name: "gui-window-sequence-shortcut", value: value))
-            } else if let raw = optionalValue(for: "--iterm-focus-pulse-color") {
+            } else if let raw = optionalValue(for: "--window-focus-pulse-color") {
                 let parts = raw.split(separator: ",").compactMap { Int($0.trimmingCharacters(in: .whitespaces)) }
                 guard parts.count == 3, parts.allSatisfy({ $0 >= 0 && $0 <= 255 }) else {
                     throw NSError(
                         domain: "mx.cli", code: 2,
                         userInfo: [NSLocalizedDescriptionKey: "Invalid color: \(raw). Format: r,g,b with values 0–255 e.g. 0,128,255"])
                 }
-                try orchestrator.setItermFocusPulseColor(r: parts[0], g: parts[1], b: parts[2])
-                try output.emit(text: "Updated iterm-focus-pulse-color\t\(parts[0]),\(parts[1]),\(parts[2])", json: SettingValuePayload(name: "iterm-focus-pulse-color", value: "\(parts[0]),\(parts[1]),\(parts[2])"))
-            } else if let raw = optionalValue(for: "--iterm-focus-pulse-enabled") {
+                try orchestrator.setWindowFocusPulseColor(r: parts[0], g: parts[1], b: parts[2])
+                try output.emit(text: "Updated window-focus-pulse-color\t\(parts[0]),\(parts[1]),\(parts[2])", json: SettingValuePayload(name: "window-focus-pulse-color", value: "\(parts[0]),\(parts[1]),\(parts[2])"))
+            } else if let raw = optionalValue(for: "--window-focus-pulse-enabled") {
                 guard raw == "0" || raw == "1" else {
                     throw NSError(
                         domain: "mx.cli", code: 2, userInfo: [NSLocalizedDescriptionKey: "Invalid value: \(raw). Use 1 to enable or 0 to disable."])
                 }
-                try orchestrator.setItermFocusPulseEnabled(raw == "1")
-                try output.emit(text: "Updated iterm-focus-pulse-enabled\t\(raw)", json: SettingValuePayload(name: "iterm-focus-pulse-enabled", value: raw))
+                try orchestrator.setWindowFocusPulseEnabled(raw == "1")
+                try output.emit(text: "Updated window-focus-pulse-enabled\t\(raw)", json: SettingValuePayload(name: "window-focus-pulse-enabled", value: raw))
             } else {
                 throw NSError(
                     domain: "mx.cli", code: 2,
                     userInfo: [
                         NSLocalizedDescriptionKey:
-                            "Missing setting flag/value. Use: settings set --editor <value>|--terminal-host <iterm2|ghostty>|--port-range <start>-<end>|--gui-hotkey <spec>|--gui-leader-hotkey <modifiers>|--gui-dashboard-shortcut <spec>|--gui-add-project-shortcut <spec>|--gui-add-workspace-shortcut <spec>|--gui-reload-shortcut <spec>|--gui-next-shortcut <spec>|--gui-prev-shortcut <spec>|--gui-open-editor-shortcut <spec>|--gui-open-terminal-shortcut <spec>|--gui-open-finder-shortcut <spec>|--gui-open-settings-shortcut <spec>|--gui-tooltip-shortcut <spec>|--gui-window-shortcut <spec>|--gui-window-sequence-shortcut <spec>|--iterm-focus-pulse-color <r,g,b>|--iterm-focus-pulse-enabled <0|1>"
+                            "Missing setting flag/value. Use: settings set --editor <value>|--terminal-host <iterm2|ghostty>|--port-range <start>-<end>|--gui-hotkey <spec>|--gui-leader-hotkey <modifiers>|--gui-dashboard-shortcut <spec>|--gui-add-project-shortcut <spec>|--gui-add-workspace-shortcut <spec>|--gui-reload-shortcut <spec>|--gui-next-shortcut <spec>|--gui-prev-shortcut <spec>|--gui-open-editor-shortcut <spec>|--gui-open-terminal-shortcut <spec>|--gui-open-finder-shortcut <spec>|--gui-open-settings-shortcut <spec>|--gui-tooltip-shortcut <spec>|--gui-window-shortcut <spec>|--gui-window-sequence-shortcut <spec>|--window-focus-pulse-color <r,g,b>|--window-focus-pulse-enabled <0|1>"
                     ])
             }
 
@@ -1074,13 +1074,13 @@ struct CLI {
                 try orchestrator.setGUIWindowSequenceShortcut(nil)
                 let value = try orchestrator.guiWindowSequenceShortcut()
                 try output.emit(text: "Reset gui-window-sequence-shortcut\t\(value)", json: SettingValuePayload(name: "gui-window-sequence-shortcut", value: value))
-            } else if args.contains("--iterm-focus-pulse-color") {
-                let parts = SettingsKey.defaultItermFocusPulseColor.split(separator: ",").compactMap { Int($0) }
-                try orchestrator.setItermFocusPulseColor(r: parts[0], g: parts[1], b: parts[2])
-                try output.emit(text: "Reset iterm-focus-pulse-color\t\(SettingsKey.defaultItermFocusPulseColor)", json: SettingValuePayload(name: "iterm-focus-pulse-color", value: SettingsKey.defaultItermFocusPulseColor))
-            } else if args.contains("--iterm-focus-pulse-enabled") {
-                try orchestrator.setItermFocusPulseEnabled(SettingsKey.defaultItermFocusPulseEnabled)
-                try output.emit(text: "Reset iterm-focus-pulse-enabled\t\(SettingsKey.defaultItermFocusPulseEnabled ? "1" : "0")", json: SettingValuePayload(name: "iterm-focus-pulse-enabled", value: SettingsKey.defaultItermFocusPulseEnabled ? "1" : "0"))
+            } else if args.contains("--window-focus-pulse-color") {
+                let parts = SettingsKey.defaultWindowFocusPulseColor.split(separator: ",").compactMap { Int($0) }
+                try orchestrator.setWindowFocusPulseColor(r: parts[0], g: parts[1], b: parts[2])
+                try output.emit(text: "Reset window-focus-pulse-color\t\(SettingsKey.defaultWindowFocusPulseColor)", json: SettingValuePayload(name: "window-focus-pulse-color", value: SettingsKey.defaultWindowFocusPulseColor))
+            } else if args.contains("--window-focus-pulse-enabled") {
+                try orchestrator.setWindowFocusPulseEnabled(SettingsKey.defaultWindowFocusPulseEnabled)
+                try output.emit(text: "Reset window-focus-pulse-enabled\t\(SettingsKey.defaultWindowFocusPulseEnabled ? "1" : "0")", json: SettingValuePayload(name: "window-focus-pulse-enabled", value: SettingsKey.defaultWindowFocusPulseEnabled ? "1" : "0"))
             } else if args.contains("--editor") {
                 _ = try orchestrator.updateEditorPreference(nil)
                 try output.emit(text: "Reset editor\tnone", json: SettingValuePayload(name: "editor", value: "none"))
@@ -1095,7 +1095,7 @@ struct CLI {
                     domain: "mx.cli", code: 2,
                     userInfo: [
                         NSLocalizedDescriptionKey:
-                            "Missing setting flag. Use: settings reset --editor|--terminal-host|--port-range|--gui-hotkey|--gui-leader-hotkey|--gui-dashboard-shortcut|--gui-add-project-shortcut|--gui-add-workspace-shortcut|--gui-reload-shortcut|--gui-next-shortcut|--gui-prev-shortcut|--gui-open-editor-shortcut|--gui-open-terminal-shortcut|--gui-open-finder-shortcut|--gui-open-settings-shortcut|--gui-tooltip-shortcut|--gui-window-shortcut|--gui-window-sequence-shortcut|--iterm-focus-pulse-color|--iterm-focus-pulse-enabled"
+                            "Missing setting flag. Use: settings reset --editor|--terminal-host|--port-range|--gui-hotkey|--gui-leader-hotkey|--gui-dashboard-shortcut|--gui-add-project-shortcut|--gui-add-workspace-shortcut|--gui-reload-shortcut|--gui-next-shortcut|--gui-prev-shortcut|--gui-open-editor-shortcut|--gui-open-terminal-shortcut|--gui-open-finder-shortcut|--gui-open-settings-shortcut|--gui-tooltip-shortcut|--gui-window-shortcut|--gui-window-sequence-shortcut|--window-focus-pulse-color|--window-focus-pulse-enabled"
                     ])
             }
 
@@ -1331,9 +1331,9 @@ struct CLI {
               mx discover
               mx dashboard [--json]
 
-              mx settings get --all|--editor|--terminal-host|--port-range|--gui-hotkey|--gui-leader-hotkey|--gui-dashboard-shortcut|--gui-add-project-shortcut|--gui-add-workspace-shortcut|--gui-reload-shortcut|--gui-next-shortcut|--gui-prev-shortcut|--gui-open-editor-shortcut|--gui-open-terminal-shortcut|--gui-open-finder-shortcut|--gui-open-settings-shortcut|--gui-tooltip-shortcut|--gui-window-shortcut|--gui-window-sequence-shortcut|--iterm-focus-pulse-color|--iterm-focus-pulse-enabled
-              mx settings set --editor none|vscode|cursor|windsurf|vim|--terminal-host iterm2|ghostty|--port-range <start>-<end>|--gui-hotkey <spec>|--gui-leader-hotkey <modifiers>|--gui-dashboard-shortcut <spec>|--gui-add-project-shortcut <spec>|--gui-add-workspace-shortcut <spec>|--gui-reload-shortcut <spec>|--gui-next-shortcut <spec>|--gui-prev-shortcut <spec>|--gui-open-editor-shortcut <spec>|--gui-open-terminal-shortcut <spec>|--gui-open-finder-shortcut <spec>|--gui-open-settings-shortcut <spec>|--gui-tooltip-shortcut <spec>|--gui-window-shortcut <spec>|--gui-window-sequence-shortcut <spec>|--iterm-focus-pulse-color <r,g,b>|--iterm-focus-pulse-enabled <0|1>
-              mx settings reset --editor|--terminal-host|--port-range|--gui-hotkey|--gui-leader-hotkey|--gui-dashboard-shortcut|--gui-add-project-shortcut|--gui-add-workspace-shortcut|--gui-reload-shortcut|--gui-next-shortcut|--gui-prev-shortcut|--gui-open-editor-shortcut|--gui-open-terminal-shortcut|--gui-open-finder-shortcut|--gui-open-settings-shortcut|--gui-tooltip-shortcut|--gui-window-shortcut|--gui-window-sequence-shortcut|--iterm-focus-pulse-color|--iterm-focus-pulse-enabled
+              mx settings get --all|--editor|--terminal-host|--port-range|--gui-hotkey|--gui-leader-hotkey|--gui-dashboard-shortcut|--gui-add-project-shortcut|--gui-add-workspace-shortcut|--gui-reload-shortcut|--gui-next-shortcut|--gui-prev-shortcut|--gui-open-editor-shortcut|--gui-open-terminal-shortcut|--gui-open-finder-shortcut|--gui-open-settings-shortcut|--gui-tooltip-shortcut|--gui-window-shortcut|--gui-window-sequence-shortcut|--window-focus-pulse-color|--window-focus-pulse-enabled
+              mx settings set --editor none|vscode|cursor|windsurf|vim|--terminal-host iterm2|ghostty|--port-range <start>-<end>|--gui-hotkey <spec>|--gui-leader-hotkey <modifiers>|--gui-dashboard-shortcut <spec>|--gui-add-project-shortcut <spec>|--gui-add-workspace-shortcut <spec>|--gui-reload-shortcut <spec>|--gui-next-shortcut <spec>|--gui-prev-shortcut <spec>|--gui-open-editor-shortcut <spec>|--gui-open-terminal-shortcut <spec>|--gui-open-finder-shortcut <spec>|--gui-open-settings-shortcut <spec>|--gui-tooltip-shortcut <spec>|--gui-window-shortcut <spec>|--gui-window-sequence-shortcut <spec>|--window-focus-pulse-color <r,g,b>|--window-focus-pulse-enabled <0|1>
+              mx settings reset --editor|--terminal-host|--port-range|--gui-hotkey|--gui-leader-hotkey|--gui-dashboard-shortcut|--gui-add-project-shortcut|--gui-add-workspace-shortcut|--gui-reload-shortcut|--gui-next-shortcut|--gui-prev-shortcut|--gui-open-editor-shortcut|--gui-open-terminal-shortcut|--gui-open-finder-shortcut|--gui-open-settings-shortcut|--gui-tooltip-shortcut|--gui-window-shortcut|--gui-window-sequence-shortcut|--window-focus-pulse-color|--window-focus-pulse-enabled
 
               mx project list
               mx project get --dir <path>

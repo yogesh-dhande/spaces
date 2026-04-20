@@ -1631,8 +1631,8 @@ public final class MuxyOrchestrator {
     }
 
     private func pulseTerminalWindowIfNeeded(windowID: Int) {
-        guard (try? itermFocusPulseEnabled()) ?? SettingsKey.defaultItermFocusPulseEnabled else { return }
-        let color = (try? itermFocusPulseColor()) ?? (r: 46, g: 41, b: 14)
+        guard (try? windowFocusPulseEnabled()) ?? SettingsKey.defaultWindowFocusPulseEnabled else { return }
+        let color = (try? windowFocusPulseColor()) ?? defaultWindowFocusPulseColor()
         terminalFocusPulseController.pulse(windowID: windowID, color: color, yabai: yabai)
     }
 
@@ -2512,26 +2512,32 @@ public final class MuxyOrchestrator {
         return spec.normalized
     }
 
-    public func itermFocusPulseColor() throws -> (r: Int, g: Int, b: Int) {
-        let raw = (try? store.setting(key: SettingsKey.itermFocusPulseColor)) ?? SettingsKey.defaultItermFocusPulseColor
+    public func windowFocusPulseColor() throws -> (r: Int, g: Int, b: Int) {
+        let raw = (try? store.setting(key: SettingsKey.windowFocusPulseColor)) ?? SettingsKey.defaultWindowFocusPulseColor
         let parts = raw.split(separator: ",").compactMap { Int($0.trimmingCharacters(in: .whitespaces)) }
         guard parts.count == 3 else { return (r: 0, g: 0, b: 0) }
         return (r: parts[0], g: parts[1], b: parts[2])
     }
 
-    public func setItermFocusPulseColor(r: Int, g: Int, b: Int) throws {
+    public func setWindowFocusPulseColor(r: Int, g: Int, b: Int) throws {
         let clamped = (r: max(0, min(255, r)), g: max(0, min(255, g)), b: max(0, min(255, b)))
-        try store.setSetting(key: SettingsKey.itermFocusPulseColor, value: "\(clamped.r),\(clamped.g),\(clamped.b)")
+        try store.setSetting(key: SettingsKey.windowFocusPulseColor, value: "\(clamped.r),\(clamped.g),\(clamped.b)")
     }
 
-    public func itermFocusPulseEnabled() throws -> Bool {
-        let raw = try? store.setting(key: SettingsKey.itermFocusPulseEnabled)
-        guard let raw else { return SettingsKey.defaultItermFocusPulseEnabled }
+    public func windowFocusPulseEnabled() throws -> Bool {
+        let raw = try? store.setting(key: SettingsKey.windowFocusPulseEnabled)
+        guard let raw else { return SettingsKey.defaultWindowFocusPulseEnabled }
         return raw != "0"
     }
 
-    public func setItermFocusPulseEnabled(_ enabled: Bool) throws {
-        try store.setSetting(key: SettingsKey.itermFocusPulseEnabled, value: enabled ? "1" : "0")
+    public func setWindowFocusPulseEnabled(_ enabled: Bool) throws {
+        try store.setSetting(key: SettingsKey.windowFocusPulseEnabled, value: enabled ? "1" : "0")
+    }
+
+    private func defaultWindowFocusPulseColor() -> (r: Int, g: Int, b: Int) {
+        let parts = SettingsKey.defaultWindowFocusPulseColor.split(separator: ",").compactMap { Int($0) }
+        guard parts.count == 3 else { return (r: 0, g: 0, b: 0) }
+        return (r: parts[0], g: parts[1], b: parts[2])
     }
 
     /// Returns the set of iTerm2 session IDs that are currently alive.

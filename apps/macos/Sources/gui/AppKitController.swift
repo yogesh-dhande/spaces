@@ -2412,11 +2412,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             constrainFormFieldToFillWidth(row, in: stack)
         }
 
-        // --- terminal focus pulse ---
-        stack.addArrangedSubview(label(text: "Terminal focus pulse"))
+        // --- window focus pulse ---
+        stack.addArrangedSubview(label(text: "Window focus pulse"))
         let pulseColorNote = NSTextField(
             labelWithString:
-                "Briefly overlays the focused terminal window in iTerm2 or Ghostty. Default color: \(SettingsKey.defaultItermFocusPulseColor)."
+                "Briefly overlays focused supported windows, currently iTerm2 and Ghostty terminals. Default color: \(SettingsKey.defaultWindowFocusPulseColor)."
         )
         pulseColorNote.font = .systemFont(ofSize: 11)
         pulseColorNote.textColor = .secondaryLabelColor
@@ -2424,21 +2424,21 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         pulseColorNote.lineBreakMode = .byWordWrapping
         stack.addArrangedSubview(pulseColorNote)
 
-        let pulseEnabledCheckbox = NSButton(checkboxWithTitle: "Enable focus pulse", target: self, action: #selector(itermPulseEnabledChanged(_:)))
-        pulseEnabledCheckbox.state = ((try? orchestrator.itermFocusPulseEnabled()) ?? SettingsKey.defaultItermFocusPulseEnabled) ? .on : .off
+        let pulseEnabledCheckbox = NSButton(checkboxWithTitle: "Enable focus pulse", target: self, action: #selector(windowPulseEnabledChanged(_:)))
+        pulseEnabledCheckbox.state = ((try? orchestrator.windowFocusPulseEnabled()) ?? SettingsKey.defaultWindowFocusPulseEnabled) ? .on : .off
         stack.addArrangedSubview(pulseEnabledCheckbox)
 
-        let (pulseR, pulseG, pulseB) = (try? orchestrator.itermFocusPulseColor()) ?? (r: 46, g: 41, b: 14)
+        let (pulseR, pulseG, pulseB) = (try? orchestrator.windowFocusPulseColor()) ?? (r: 72, g: 98, b: 110)
         let colorWell = NSColorWell()
         colorWell.color = NSColor(red: CGFloat(pulseR) / 255, green: CGFloat(pulseG) / 255, blue: CGFloat(pulseB) / 255, alpha: 1)
         colorWell.translatesAutoresizingMaskIntoConstraints = false
         colorWell.target = self
-        colorWell.action = #selector(itermPulseColorChanged(_:))
+        colorWell.action = #selector(windowPulseColorChanged(_:))
         pulseColorWell = colorWell
 
         let resetColorButton = actionButton(
-            title: "Reset", symbol: nil, tooltip: "Reset to default color (\(SettingsKey.defaultItermFocusPulseColor))",
-            action: #selector(resetItermPulseColor(_:)), primary: false)
+            title: "Reset", symbol: nil, tooltip: "Reset to default color (\(SettingsKey.defaultWindowFocusPulseColor))",
+            action: #selector(resetWindowPulseColor(_:)), primary: false)
 
         let colorRow = NSStackView()
         colorRow.orientation = .horizontal
@@ -4754,25 +4754,25 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         do { configCache = try orchestrator.updateTerminalHost(terminalHost) } catch { showError(error) }
     }
 
-    @objc private func itermPulseEnabledChanged(_ sender: NSButton) {
-        do { try orchestrator.setItermFocusPulseEnabled(sender.state == .on) } catch { showError(error) }
+    @objc private func windowPulseEnabledChanged(_ sender: NSButton) {
+        do { try orchestrator.setWindowFocusPulseEnabled(sender.state == .on) } catch { showError(error) }
     }
 
-    @objc private func resetItermPulseColor(_ sender: NSButton) {
-        let parts = SettingsKey.defaultItermFocusPulseColor.split(separator: ",").compactMap { Int($0) }
+    @objc private func resetWindowPulseColor(_ sender: NSButton) {
+        let parts = SettingsKey.defaultWindowFocusPulseColor.split(separator: ",").compactMap { Int($0) }
         guard parts.count == 3 else { return }
         do {
-            try orchestrator.setItermFocusPulseColor(r: parts[0], g: parts[1], b: parts[2])
+            try orchestrator.setWindowFocusPulseColor(r: parts[0], g: parts[1], b: parts[2])
             pulseColorWell?.color = NSColor(red: CGFloat(parts[0]) / 255, green: CGFloat(parts[1]) / 255, blue: CGFloat(parts[2]) / 255, alpha: 1)
         } catch { showError(error) }
     }
 
-    @objc private func itermPulseColorChanged(_ sender: NSColorWell) {
+    @objc private func windowPulseColorChanged(_ sender: NSColorWell) {
         guard let rgb = sender.color.usingColorSpace(.deviceRGB) else { return }
         let r = Int((rgb.redComponent * 255).rounded())
         let g = Int((rgb.greenComponent * 255).rounded())
         let b = Int((rgb.blueComponent * 255).rounded())
-        do { try orchestrator.setItermFocusPulseColor(r: r, g: g, b: b) } catch { showError(error) }
+        do { try orchestrator.setWindowFocusPulseColor(r: r, g: g, b: b) } catch { showError(error) }
     }
 
     @objc private func addProject() { showAddProjectForm() }

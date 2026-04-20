@@ -92,14 +92,16 @@ struct SettingsSnapshot: Encodable {
     let guiTooltipShortcut: String
     let guiWindowShortcut: String
     let guiWindowSequenceShortcut: String
-    let itermFocusPulseColor: String
-    let itermFocusPulseEnabled: Bool
+    let windowFocusPulseColor: String
+    let windowFocusPulseEnabled: Bool
 }
 
 extension SettingsSnapshot {
     static func load(from orchestrator: MuxyOrchestrator) throws -> SettingsSnapshot {
         let config = try orchestrator.appConfig()
-        let pulseColor = try orchestrator.itermFocusPulseColor()
+        let pulseColor = try orchestrator.windowFocusPulseColor()
+        let pulseColorValue = "\(pulseColor.0),\(pulseColor.1),\(pulseColor.2)"
+        let pulseEnabled = try orchestrator.windowFocusPulseEnabled()
         return SettingsSnapshot(
             editor: config.editor?.rawValue,
             terminalHost: config.terminalHost.rawValue,
@@ -119,8 +121,8 @@ extension SettingsSnapshot {
             guiTooltipShortcut: try orchestrator.guiTooltipShortcut(),
             guiWindowShortcut: try orchestrator.guiWindowShortcut(),
             guiWindowSequenceShortcut: try orchestrator.guiWindowSequenceShortcut(),
-            itermFocusPulseColor: "\(pulseColor.0),\(pulseColor.1),\(pulseColor.2)",
-            itermFocusPulseEnabled: try orchestrator.itermFocusPulseEnabled())
+            windowFocusPulseColor: pulseColorValue,
+            windowFocusPulseEnabled: pulseEnabled)
     }
 }
 

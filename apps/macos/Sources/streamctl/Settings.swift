@@ -37,9 +37,9 @@ public enum SettingsKey {
     public static let guiWindowSequenceShortcut = "gui_window_sequence_shortcut"
     public static let defaultGUIWindowSequenceShortcut = "1"
     public static let dashboardDismissedAttentionItems = "dashboard_dismissed_attention_items"
-    public static let itermFocusPulseColor = "iterm_focus_pulse_color"
-    /// Default terminal focus pulse overlay color (8-bit RGB).
-    public static let defaultItermFocusPulseColor = "46,41,14"
-    public static let itermFocusPulseEnabled = "iterm_focus_pulse_enabled"
-    public static let defaultItermFocusPulseEnabled = true
+    public static let windowFocusPulseColor = "window_focus_pulse_color"
+    /// Default window focus pulse overlay color (8-bit RGB).
+    public static let defaultWindowFocusPulseColor = "72,98,110"
+    public static let windowFocusPulseEnabled = "window_focus_pulse_enabled"
+    public static let defaultWindowFocusPulseEnabled = true
 }

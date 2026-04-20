@@ -120,6 +120,7 @@ It also lets lifecycle state stay explicit while runtime health is derived from 
 - Setup scripts, stop scripts, process commands, and status-check commands all execute against the workspace-specific environment.
 - Process launch and terminal recovery use tmux so the process lifetime can outlive a missing terminal window and be reattached later.
 - Global app settings include the selected terminal host, and both the GUI and `mx settings` read and write the same value.
+- Global settings also store the shared window focus pulse color and enabled state behind window-scoped keys.
 - Process templates are parsed as direct executable invocations. If a workflow needs composite shell syntax such as `cd x && y`, pipes, or redirection, it must opt in explicitly by launching a shell command such as `bash -lc "cd x && y"`.
 
 ## Window and Focus Architecture
