@@ -800,31 +800,13 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 let processes = try orchestrator.runningProcesses(workspaceID: selectedWorkspaceID)
                 let agentWindows = try orchestrator.agentWindows(workspaceID: selectedWorkspaceID)
                 let browserSessions = try orchestrator.resolvedWorkspaceBrowserSessions(workspaceID: selectedWorkspaceID)
-                let terminalTargetKeyForProcess: (RunningProcessRecord) -> String? = { $0.terminalTrackingKey }
-                let terminalTargetKeyForWindow: (WindowRecord) -> String? = { $0.terminalTrackingKey }
-                let terminalOrderByTargetID: [String: Int] = Dictionary(
-                    uniqueKeysWithValues: windows.compactMap { window in
-                        guard window.role == "terminal", let targetID = terminalTargetKeyForWindow(window) else { return nil }
-                        return (targetID, window.orderIndex)
-                    })
-                let processesByTerminalID: [String: [RunningProcessRecord]] = {
-                    var map: [String: [RunningProcessRecord]] = [:]
-                    for process in processes {
-                        guard let targetID = terminalTargetKeyForProcess(process) else { continue }
-                        map[targetID, default: []].append(process)
-                    }
-                    for (targetID, list) in map {
-                        map[targetID] = list.sorted { lhs, rhs in
-                            let lhsOrder = terminalTargetKeyForProcess(lhs).flatMap { terminalOrderByTargetID[$0] } ?? Int.max
-                            let rhsOrder = terminalTargetKeyForProcess(rhs).flatMap { terminalOrderByTargetID[$0] } ?? Int.max
-                            if lhsOrder != rhsOrder { return lhsOrder < rhsOrder }
-                            return lhs.templateName.localizedStandardCompare(rhs.templateName) == .orderedAscending
-                        }
-                    }
-                    return map
-                }()
-                let agentTerminalIDs = Set(agentWindows.compactMap(\.itermSessionID))
-                var matchedProcessIDs = Set<String>()
+                let configuredProcesses = try orchestrator.workspaceSettings(workspaceID: selectedWorkspaceID)?.processes ?? []
+                let processEntries = orderedWorkspaceRunProcessEntries(
+                    configuredProcesses: configuredProcesses,
+                    windows: windows,
+                    processes: processes,
+                    agentWindows: agentWindows)
+                let processesByID = Dictionary(uniqueKeysWithValues: processes.map { ($0.id, $0) })
                 var shortcutCounter = 1
                 for agentWin in agentWindows {
                     if shortcutCounter == index {
@@ -841,39 +823,23 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                     }
                     shortcutCounter += 1
                 }
-                for (windowIdx, window) in windows.enumerated() {
-                    guard window.role != "browser" else { continue }
-                    let windowProcesses = (window.role == "terminal" ? (terminalTargetKeyForWindow(window).flatMap { processesByTerminalID[$0] }) : nil) ?? []
-                    let isAgentClaimedWindow = terminalTargetKeyForWindow(window).map(agentTerminalIDs.contains) ?? false
-                    let nonAgentWindowProcesses = windowProcesses.filter { process in
-                        guard let terminalID = terminalTargetKeyForProcess(process) else { return true }
-                        return !agentTerminalIDs.contains(terminalID)
-                    }
-                    if isAgentClaimedWindow && (window.role != "terminal" || windowProcesses.isEmpty) { continue }
-                    if window.role == "terminal", !nonAgentWindowProcesses.isEmpty {
-                        for process in nonAgentWindowProcesses {
-                            matchedProcessIDs.insert(process.id)
-                            if shortcutCounter == index {
-                                try orchestrator.focusWorkspaceProcess(workspaceID: selectedWorkspaceID, processID: process.id)
-                                return .success(.focused(kind: "process"))
-                            }
-                            shortcutCounter += 1
-                        }
-                    } else if !isAgentClaimedWindow {
+                for entry in processEntries {
+                    switch entry.kind {
+                    case .process:
+                        guard let processID = entry.processID, processesByID[processID] != nil else { continue }
                         if shortcutCounter == index {
-                            try orchestrator.focusWorkspaceWindow(workspaceID: selectedWorkspaceID, index: windowIdx + 1)
+                            try orchestrator.focusWorkspaceProcess(workspaceID: selectedWorkspaceID, processID: processID)
+                            return .success(.focused(kind: "process"))
+                        }
+                        shortcutCounter += 1
+                    case .window:
+                        guard let windowListIndex = entry.windowListIndex else { continue }
+                        if shortcutCounter == index {
+                            try orchestrator.focusWorkspaceWindow(workspaceID: selectedWorkspaceID, index: windowListIndex + 1)
                             return .success(.focused(kind: "window"))
                         }
                         shortcutCounter += 1
                     }
-                }
-                for process in processes where !matchedProcessIDs.contains(process.id)
-                    && terminalTargetKeyForProcess(process).map({ !agentTerminalIDs.contains($0) }) != false {
-                    if shortcutCounter == index {
-                        try orchestrator.focusWorkspaceProcess(workspaceID: selectedWorkspaceID, processID: process.id)
-                        return .success(.focused(kind: "process"))
-                    }
-                    shortcutCounter += 1
                 }
                 return .success(.noMatch)
             } catch { return .failure(error) }
@@ -1173,6 +1139,118 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         guard selectedWorkspaceID != nil else { return false }
         guard !showingDashboard, !showingSettings else { return false }
         return workspaceExists
+    }
+
+    struct WorkspaceRunProcessEntry: Sendable {
+        enum Kind: Sendable, Equatable {
+            case process
+            case window
+        }
+
+        let kind: Kind
+        let processID: String?
+        let windowListIndex: Int?
+    }
+
+    nonisolated static func processTemplateKey(for template: ProcessTemplate) -> String {
+        let name = template.name?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let command = template.command.trimmingCharacters(in: .whitespacesAndNewlines)
+        return name.isEmpty ? command : name
+    }
+
+    nonisolated static func agentTerminalTrackingKey(for record: AgentWindowRecord) -> String? {
+        if record.provider == .ghostty, let windowID = record.yabaiWindowID ?? record.windowID {
+            return "window:\(windowID)"
+        }
+        guard let sessionID = record.itermSessionID, !sessionID.isEmpty else {
+            if let windowID = record.yabaiWindowID ?? record.windowID {
+                return "window:\(windowID)"
+            }
+            return nil
+        }
+        return "terminal:\(sessionID)"
+    }
+
+    nonisolated static func orderedWorkspaceRunProcessEntries(
+        configuredProcesses: [ProcessTemplate],
+        windows: [WindowRecord],
+        processes: [RunningProcessRecord],
+        agentWindows: [AgentWindowRecord]
+    ) -> [WorkspaceRunProcessEntry] {
+        let terminalOrderByTargetID: [String: Int] = Dictionary(
+            uniqueKeysWithValues: windows.compactMap { window in
+                guard window.role == "terminal", let targetID = window.terminalTrackingKey else { return nil }
+                return (targetID, window.orderIndex)
+            })
+        let processesByTerminalID: [String: [RunningProcessRecord]] = {
+            var map: [String: [RunningProcessRecord]] = [:]
+            for process in processes {
+                guard let targetID = process.terminalTrackingKey else { continue }
+                map[targetID, default: []].append(process)
+            }
+            for (targetID, list) in map {
+                map[targetID] = list.sorted { lhs, rhs in
+                    let lhsOrder = lhs.terminalTrackingKey.flatMap { terminalOrderByTargetID[$0] } ?? Int.max
+                    let rhsOrder = rhs.terminalTrackingKey.flatMap { terminalOrderByTargetID[$0] } ?? Int.max
+                    if lhsOrder != rhsOrder { return lhsOrder < rhsOrder }
+                    return lhs.templateName.localizedStandardCompare(rhs.templateName) == .orderedAscending
+                }
+            }
+            return map
+        }()
+        let agentTerminalIDs = Set(agentWindows.compactMap { agentTerminalTrackingKey(for: $0) })
+        let eligibleProcesses = processes.filter { process in
+            process.terminalTrackingKey.map { !agentTerminalIDs.contains($0) } != false
+        }
+        var processQueuesByKey: [String: [RunningProcessRecord]] = [:]
+        for process in eligibleProcesses {
+            processQueuesByKey[process.templateName, default: []].append(process)
+        }
+        for (key, list) in processQueuesByKey {
+            processQueuesByKey[key] = list.sorted { lhs, rhs in
+                let lhsOrder = lhs.terminalTrackingKey.flatMap { terminalOrderByTargetID[$0] } ?? Int.max
+                let rhsOrder = rhs.terminalTrackingKey.flatMap { terminalOrderByTargetID[$0] } ?? Int.max
+                if lhsOrder != rhsOrder { return lhsOrder < rhsOrder }
+                return lhs.templateName.localizedStandardCompare(rhs.templateName) == .orderedAscending
+            }
+        }
+
+        var entries: [WorkspaceRunProcessEntry] = []
+        var matchedProcessIDs = Set<String>()
+        for template in configuredProcesses {
+            let key = processTemplateKey(for: template)
+            guard var queue = processQueuesByKey[key], let process = queue.first else { continue }
+            queue.removeFirst()
+            processQueuesByKey[key] = queue.isEmpty ? nil : queue
+            matchedProcessIDs.insert(process.id)
+            entries.append(WorkspaceRunProcessEntry(kind: .process, processID: process.id, windowListIndex: nil))
+        }
+
+        for (windowIdx, window) in windows.enumerated() where window.role != "browser" {
+            let windowProcesses = (window.role == "terminal" ? (window.terminalTrackingKey.flatMap { processesByTerminalID[$0] }) : nil) ?? []
+            let isAgentClaimedWindow = window.terminalTrackingKey.map(agentTerminalIDs.contains) ?? false
+            let nonAgentWindowProcesses = windowProcesses.filter { process in
+                guard let terminalID = process.terminalTrackingKey else { return true }
+                return !agentTerminalIDs.contains(terminalID)
+            }
+            if isAgentClaimedWindow && (window.role != "terminal" || windowProcesses.isEmpty) { continue }
+            if window.role == "terminal", !nonAgentWindowProcesses.isEmpty {
+                for process in nonAgentWindowProcesses where !matchedProcessIDs.contains(process.id) {
+                    matchedProcessIDs.insert(process.id)
+                    entries.append(WorkspaceRunProcessEntry(kind: .process, processID: process.id, windowListIndex: nil))
+                }
+                continue
+            }
+            if !isAgentClaimedWindow {
+                entries.append(WorkspaceRunProcessEntry(kind: .window, processID: nil, windowListIndex: windowIdx))
+            }
+        }
+
+        for process in eligibleProcesses where !matchedProcessIDs.contains(process.id) {
+            matchedProcessIDs.insert(process.id)
+            entries.append(WorkspaceRunProcessEntry(kind: .process, processID: process.id, windowListIndex: nil))
+        }
+        return entries
     }
 
     private func buildMainMenu() {
@@ -3314,37 +3392,19 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         // --- Windows grouped into Browser Tabs / Coding Agents / Processes ---
         let processes = (try? orchestrator.runningProcesses(workspaceID: workspace.id)) ?? []
         let windows = (try? orchestrator.windows(workspaceID: workspace.id)) ?? []
+        let configuredProcesses = (try? orchestrator.workspaceSettings(workspaceID: workspace.id)?.processes) ?? []
         let configuredBrowserSessions: [BrowserSession] = {
             (try? orchestrator.resolvedWorkspaceBrowserSessions(workspaceID: workspace.id)) ?? []
-        }()
-        let terminalTargetKeyForProcess: (RunningProcessRecord) -> String? = { $0.terminalTrackingKey }
-        let terminalTargetKeyForWindow: (WindowRecord) -> String? = { $0.terminalTrackingKey }
-        let terminalOrderByTargetID: [String: Int] = Dictionary(
-            uniqueKeysWithValues: windows.compactMap { window in
-                guard window.role == "terminal", let targetID = terminalTargetKeyForWindow(window) else { return nil }
-                return (targetID, window.orderIndex)
-            })
-        let processesByTerminalID: [String: [RunningProcessRecord]] = {
-            var map: [String: [RunningProcessRecord]] = [:]
-            for process in processes {
-                guard let targetID = terminalTargetKeyForProcess(process) else { continue }
-                map[targetID, default: []].append(process)
-            }
-            for (targetID, list) in map {
-                map[targetID] = list.sorted { lhs, rhs in
-                    let lhsOrder = terminalTargetKeyForProcess(lhs).flatMap { terminalOrderByTargetID[$0] } ?? Int.max
-                    let rhsOrder = terminalTargetKeyForProcess(rhs).flatMap { terminalOrderByTargetID[$0] } ?? Int.max
-                    if lhsOrder != rhsOrder { return lhsOrder < rhsOrder }
-                    return lhs.templateName.localizedStandardCompare(rhs.templateName) == .orderedAscending
-                }
-            }
-            return map
         }()
         var statusResultsByProcessID: [String: [StatusResult]] = [:]
         for process in processes { statusResultsByProcessID[process.id] = (try? orchestrator.statusResults(processID: process.id)) ?? [] }
         let agentWindowsForRunTab = (try? orchestrator.agentWindows(workspaceID: workspace.id)) ?? []
-        let agentTerminalIDs: Set<String> = Set(agentWindowsForRunTab.compactMap(\.itermSessionID))
-        var matchedProcessIDs: Set<String> = []
+        let processEntries = Self.orderedWorkspaceRunProcessEntries(
+            configuredProcesses: configuredProcesses,
+            windows: windows,
+            processes: processes,
+            agentWindows: agentWindowsForRunTab)
+        let processesByID = Dictionary(uniqueKeysWithValues: processes.map { ($0.id, $0) })
         // Shortcut counter is shared across all sections so numbers are assigned
         // in the order rows appear on screen: Coding Agents → Browser Tabs → Processes.
         var shortcutCounter = 1
@@ -3425,100 +3485,57 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             constrainFormFieldToFillWidth(row, in: browserStack)
         }
 
-        for (idx, win) in windows.enumerated() where win.role != "browser" {
-            let windowProcesses = (win.role == "terminal" ? (terminalTargetKeyForWindow(win).flatMap { processesByTerminalID[$0] }) : nil) ?? []
-            let isAgentClaimedWindow = terminalTargetKeyForWindow(win).map(agentTerminalIDs.contains) ?? false
-            let nonAgentWindowProcesses = windowProcesses.filter { process in
-                guard let terminalID = terminalTargetKeyForProcess(process) else { return true }
-                return !agentTerminalIDs.contains(terminalID)
-            }
-            if isAgentClaimedWindow && (win.role != "terminal" || windowProcesses.isEmpty) { continue }
-            let windowIndex = idx + 1
+        for entry in processEntries {
+            let rowShortcut = windowShortcutBadgeText(index: shortcutCounter)
+            shortcutCounter += 1
             let workspaceID = workspace.id
-            switch win.role {
-            case "terminal":
-                if !nonAgentWindowProcesses.isEmpty {
-                    for process in nonAgentWindowProcesses {
-                        matchedProcessIDs.insert(process.id)
-                        let rowShortcut = windowShortcutBadgeText(index: shortcutCounter)
-                        shortcutCounter += 1
-                        processRowCount += 1
-                        let rowAction: (() async -> Void)? = { [weak self] in
-                            guard let self else { return }
-                            await self.performWindowFocus(.workspaceProcess(workspaceID: workspaceID, processID: process.id))
-                        }
-                        let row = windowRow(
-                            icon: "terminal", iconColor: .systemGreen, label: process.templateName,
-                            detail: resolveCommand(process.command), shortcut: rowShortcut, processStatus: process.status, action: rowAction)
-                        processesStack.addArrangedSubview(row)
-                        constrainFormFieldToFillWidth(row, in: processesStack)
-                        let checks = statusResultsByProcessID[process.id] ?? []
-                        for check in checks {
-                            let isHealthy = check.status == .passed && process.status != .exited
-                            let checkColor: NSColor = isHealthy ? .systemGreen : .systemRed
-                            let checkRow = statusCheckSubRow(name: check.checkName, color: checkColor, status: check.status)
-                            processesStack.addArrangedSubview(checkRow)
-                            constrainFormFieldToFillWidth(checkRow, in: processesStack)
-                        }
-                    }
-                } else if !isAgentClaimedWindow {
-                    let rowShortcut = windowShortcutBadgeText(index: shortcutCounter)
-                    shortcutCounter += 1
-                    processRowCount += 1
+            switch entry.kind {
+            case .process:
+                guard let processID = entry.processID, let process = processesByID[processID] else { continue }
+                processRowCount += 1
+                let row = windowRow(
+                    icon: "terminal", iconColor: .systemGreen, label: process.templateName,
+                    detail: resolveCommand(process.command), shortcut: rowShortcut, processStatus: process.status,
+                    action: { [weak self] in
+                        guard let self else { return }
+                        await self.performWindowFocus(.workspaceProcess(workspaceID: workspaceID, processID: process.id))
+                    })
+                processesStack.addArrangedSubview(row)
+                constrainFormFieldToFillWidth(row, in: processesStack)
+                let checks = statusResultsByProcessID[process.id] ?? []
+                for check in checks {
+                    let isHealthy = check.status == .passed && process.status != .exited
+                    let checkColor: NSColor = isHealthy ? .systemGreen : .systemRed
+                    let checkRow = statusCheckSubRow(name: check.checkName, color: checkColor, status: check.status)
+                    processesStack.addArrangedSubview(checkRow)
+                    constrainFormFieldToFillWidth(checkRow, in: processesStack)
+                }
+            case .window:
+                guard let windowListIndex = entry.windowListIndex, windowListIndex < windows.count else { continue }
+                let win = windows[windowListIndex]
+                processRowCount += 1
+                if win.role == "terminal" {
                     let rowText = Self.terminalFallbackRowText(title: win.title, app: win.app)
                     let row = windowRow(
                         icon: "terminal", iconColor: .systemGreen, label: rowText.label, detail: rowText.detail,
                         shortcut: rowShortcut, processStatus: nil,
                         action: { [weak self] in
                             guard let self else { return }
-                            await self.performWindowFocus(.workspaceWindow(workspaceID: workspaceID, index: windowIndex))
+                            await self.performWindowFocus(.workspaceWindow(workspaceID: workspaceID, index: windowListIndex + 1))
                         })
                     processesStack.addArrangedSubview(row)
                     constrainFormFieldToFillWidth(row, in: processesStack)
-                }
-            default:
-                if !isAgentClaimedWindow {
-                    let rowShortcut = windowShortcutBadgeText(index: shortcutCounter)
-                    shortcutCounter += 1
-                    processRowCount += 1
+                } else {
                     let row = windowRow(
                         icon: "chevron.left.forwardslash.chevron.right", iconColor: .systemPurple,
                         label: win.title ?? win.app, detail: nil, shortcut: rowShortcut, processStatus: nil,
                         action: { [weak self] in
                             guard let self else { return }
-                            await self.performWindowFocus(.workspaceWindow(workspaceID: workspaceID, index: windowIndex))
+                            await self.performWindowFocus(.workspaceWindow(workspaceID: workspaceID, index: windowListIndex + 1))
                         })
                     processesStack.addArrangedSubview(row)
                     constrainFormFieldToFillWidth(row, in: processesStack)
                 }
-            }
-        }
-
-        // Orphaned processes (no linked window = corresponding iTerm2 session was closed by the user)
-        let orphanedProcesses = processes.filter { process in
-            !matchedProcessIDs.contains(process.id)
-                && terminalTargetKeyForProcess(process).map { !agentTerminalIDs.contains($0) } != false
-        }
-        for process in orphanedProcesses {
-            let rowShortcut = windowShortcutBadgeText(index: shortcutCounter)
-            shortcutCounter += 1
-            let row = windowRow(
-                icon: "terminal", iconColor: .systemGreen, label: process.templateName,
-                detail: resolveCommand(process.command), shortcut: rowShortcut, processStatus: process.status,
-                action: { [weak self] in
-                    guard let self else { return }
-                    await self.performWindowFocus(.workspaceProcess(workspaceID: workspace.id, processID: process.id))
-                })
-            processesStack.addArrangedSubview(row)
-            constrainFormFieldToFillWidth(row, in: processesStack)
-            processRowCount += 1
-            let checks = statusResultsByProcessID[process.id] ?? []
-            for check in checks {
-                let isHealthy = check.status == .passed && process.status != .exited
-                let checkColor: NSColor = isHealthy ? .systemGreen : .systemRed
-                let checkRow = statusCheckSubRow(name: check.checkName, color: checkColor, status: check.status)
-                processesStack.addArrangedSubview(checkRow)
-                constrainFormFieldToFillWidth(checkRow, in: processesStack)
             }
         }
 

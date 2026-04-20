@@ -136,6 +136,7 @@ Muxy focuses those windows; it does not decide their geometry.
 - Summoning Muxy from the global app-toggle shortcut should raise the main window above other apps and onto the active space.
 - The app should expose a configurable shortcut leader that supplies the shared modifiers for leader-based shortcuts like workspace navigation, dashboard, tooltip, editor, Finder, and queued window focus.
 - Window rows in the selected workspace should expose numbered shortcuts for direct focus.
+- Workspace Run-tab rows and their numbered focus shortcuts should keep the saved workspace-settings order for configured browser sessions and processes, and append newly added ad-hoc windows after those configured rows.
 - Workspace focus from the GUI or `mx workspace focus` should require an explicit tracked window target instead of picking an arbitrary window.
 - Window-number shortcuts should use a configurable direct-focus modifier plus digits `1` through `9`.
 - Window-number sequence shortcuts should use a separate configurable modifier plus digits `1` through `9`, then replay the queued focus actions in order when the modifiers are released.
