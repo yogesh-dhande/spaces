@@ -1386,7 +1386,6 @@ final class OrchestratorTests: XCTestCase {
 
     // Tests focus workspace window prefers i term session/tab focus for terminal windows by arranging representative inputs and asserting the expected result.
     func testFocusWorkspaceWindowPrefersItermSessionFocusForTerminal() throws {
-        throw XCTSkip("Terminal focus now uses dedicated yabai window IDs directly.")
         let (orchestrator, store, _, workspace, root) = try makeOrchestratorWithWorkspace()
         let yabaiFocusLog = root.appendingPathComponent("terminal-yabai-focus.log")
         let itermFocusLog = root.appendingPathComponent("terminal-iterm-focus.log")
@@ -1556,7 +1555,7 @@ final class OrchestratorTests: XCTestCase {
     }
 
     func testFocusAgentWindowUsesTrackedTerminalSessionInsteadOfStaleStoredWindowID() throws {
-        let (orchestrator, store, _, workspace, root) = try makeOrchestratorWithWorkspace()
+        let (orchestrator, store, _, workspace, root, mockIterm, _) = try makeMockItermOrchestratorWithWorkspace()
         let focusLog = root.appendingPathComponent("agent-session-focus.log")
 
         try store.upsert(
@@ -1580,8 +1579,9 @@ final class OrchestratorTests: XCTestCase {
             }
         }
 
-        let focusedIDs = try String(contentsOf: focusLog).split(separator: "\n").map(String.init)
-        XCTAssertEqual(focusedIDs, ["101"])
+        XCTAssertEqual(mockIterm.focusSessionOrTabCallCount, 1)
+        XCTAssertEqual(mockIterm.focusedSessionIDs.compactMap { $0 }, ["workspace-session"])
+        XCTAssertFalse(FileManager.default.fileExists(atPath: focusLog.path))
     }
 
     // Tests focus window navigation uses the current focused window and wraps by arranging representative inputs and asserting the expected result.
@@ -1742,6 +1742,60 @@ final class OrchestratorTests: XCTestCase {
         }
     }
 
+    func testFocusWorkspaceProcessPrefersTrackedTerminalWindowMetadataOverStaleProcessIDs() throws {
+        let (orchestrator, store, _, workspace, _, mockIterm, _) = try makeMockItermOrchestratorWithWorkspace()
+
+        let process = RunningProcessRecord(
+            id: UUID().uuidString, workspaceID: workspace.id, templateName: "api", command: "npm run api", terminalApp: "iTerm2", windowID: 999,
+            itermSessionID: "session-stale", itermTabIndex: nil, tmuxWindowID: nil, pid: 1234, status: .running, logPath: nil, lastOutputAt: nil,
+            startedAt: "now", exitedAt: nil)
+        try store.upsert(runningProcess: process)
+        try store.upsert(
+            window: WindowRecord(
+                id: process.id, workspaceID: workspace.id, app: "iTerm2", title: "api", targetURL: nil, windowID: 555,
+                itermSessionID: "session-live", itermTabIndex: nil, tmuxWindowID: nil, role: "terminal", orderIndex: 0, lastSeenAt: "now"))
+
+        try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) {
+            try withEnv(
+                name: "YABAI_WINDOWS_JSON",
+                value: #"[{"id":555,"pid":11,"app":"iTerm2","title":"api","space":1,"display":1,"is-sticky":false,"is-hidden":false,"is-visible":true,"is-native-fullscreen":false}]"#
+            ) {
+                try orchestrator.focusWorkspaceProcess(workspaceID: workspace.id, processID: process.id)
+            }
+        }
+
+        XCTAssertEqual(mockIterm.focusSessionOrTabCallCount, 1)
+        XCTAssertEqual(mockIterm.lastFocusedSessionID, "session-live")
+        XCTAssertEqual(mockIterm.lastWindowID, 555)
+    }
+
+    func testFocusWorkspaceProcessFallsBackToYabaiWhenAdapterFocusFails() throws {
+        let (orchestrator, store, _, workspace, root, mockIterm, _) = try makeMockItermOrchestratorWithWorkspace()
+        mockIterm.focusSessionOrTabResult = false
+        let focusLog = root.appendingPathComponent("process-focus-fallback.log")
+
+        let process = RunningProcessRecord(
+            id: UUID().uuidString, workspaceID: workspace.id, templateName: "api", command: "npm run api", terminalApp: "iTerm2", windowID: 555,
+            itermSessionID: "session-live", itermTabIndex: nil, tmuxWindowID: nil, pid: 1234, status: .running, logPath: nil, lastOutputAt: nil,
+            startedAt: "now", exitedAt: nil)
+        try store.upsert(runningProcess: process)
+
+        try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) {
+            try withEnv(name: "YABAI_FOCUS_LOG_FILE", value: focusLog.path) {
+                try withEnv(
+                    name: "YABAI_WINDOWS_JSON",
+                    value: #"[{"id":555,"pid":11,"app":"iTerm2","title":"api","space":1,"display":1,"is-sticky":false,"is-hidden":false,"is-visible":true,"is-native-fullscreen":false}]"#
+                ) {
+                    try orchestrator.focusWorkspaceProcess(workspaceID: workspace.id, processID: process.id)
+                }
+            }
+        }
+
+        XCTAssertEqual(mockIterm.focusSessionOrTabCallCount, 1)
+        let focusedIDs = try String(contentsOf: focusLog).split(separator: "\n").map(String.init)
+        XCTAssertEqual(focusedIDs, ["555"])
+    }
+
     // Tests restarting a process recreates a tracked terminal window row even if the stale window row was already pruned.
     func testRestartWorkspaceProcessRecreatesTrackedTerminalWindowWhenMissing() throws {
         let (orchestrator, store, _, workspace, _, mockIterm, mockTmux) = try makeMockItermOrchestratorWithWorkspace()
@@ -1869,7 +1923,7 @@ final class OrchestratorTests: XCTestCase {
 
     // Tests workspace cycling includes orphaned running processes so recovered iTerm windows remain reachable even before a terminal row is rebuilt.
     func testFocusNextWindowIncludesOrphanedRunningProcessTargets() throws {
-        let (orchestrator, store, _, workspace, root) = try makeOrchestratorWithWorkspace()
+        let (orchestrator, store, _, workspace, root, mockIterm, _) = try makeMockItermOrchestratorWithWorkspace()
 
         try store.upsert(
             runningProcess: RunningProcessRecord(
@@ -1894,8 +1948,9 @@ final class OrchestratorTests: XCTestCase {
             }
         }
 
-        let focusedIDs = try String(contentsOf: focusLog).split(separator: "\n").map(String.init)
-        XCTAssertEqual(focusedIDs, ["777"])
+        XCTAssertEqual(mockIterm.focusSessionOrTabCallCount, 1)
+        XCTAssertEqual(mockIterm.focusedSessionIDs.compactMap { $0 }, ["session-777"])
+        XCTAssertFalse(FileManager.default.fileExists(atPath: focusLog.path))
     }
 
     // Tests direct coding-agent focus throws a missing-window error without offering process/browser recovery metadata.
@@ -6127,7 +6182,6 @@ final class OrchestratorTests: XCTestCase {
 
     // Tests focusAgentWindow calls iTerm2 focus and pulse for an iterm2 provider record by arranging representative inputs and asserting the expected result.
     func testFocusAgentWindowCallsItermFocusForIterm2Provider() throws {
-        throw XCTSkip("Agent focus now uses dedicated yabai window IDs directly.")
         let (orchestrator, store, _, workspace, _, mockIterm, mockTmux) = try makeMockItermOrchestratorWithWorkspace()
         mockIterm.focusSessionOrTabResult = true
         let agentWindow = mockTmux.addWindow(sessionName: "muxy-\(workspace.id)", id: "@2", name: "agent", index: 1, isActive: true)
@@ -6150,13 +6204,8 @@ final class OrchestratorTests: XCTestCase {
             }
         }
 
-        XCTAssertEqual(mockTmux.selectWindowCallCount, 1)
-        XCTAssertEqual(mockTmux.lastSelectedWindowID, agentWindow.id)
         XCTAssertEqual(mockIterm.focusSessionOrTabCallCount, 1)
         XCTAssertEqual(mockIterm.lastFocusedSessionID, "workspace-session")
-        // focusPulseEnabled defaults to true; windowID is non-nil and focus succeeded so pulse runs.
-        XCTAssertEqual(mockIterm.pulseCallCount, 1)
-        XCTAssertEqual(mockIterm.lastPulsedWindowID, 42)
     }
 
     // Tests syncDefaultWorkspaceSettings reseeds missing settings when updateProjectConfig is called by arranging representative inputs and asserting the expected result.

@@ -82,3 +82,23 @@ open class GhosttyAdapter: @unchecked Sendable {
             }
     }
 }
+
+extension GhosttyAdapter: TerminalAdapter {
+    public var appName: String { "Ghostty" }
+    public var bundleIdentifier: String { "com.mitchellh.ghostty" }
+
+    public func openWindowAndRun(command: String, cwd: String, background: Bool) throws -> TerminalLaunchResult {
+        let window: GhosttyWindowInfo = try self.openWindowAndRun(command: command, cwd: cwd, background: background)
+        return TerminalLaunchResult(
+            terminalID: window.terminalID,
+            containerID: window.windowID,
+            fallbackWindowID: nil)
+    }
+
+    public func focusTrackedTerminal(_ target: TerminalFocusTarget) throws -> Bool {
+        guard let terminalID = target.terminalID, !terminalID.isEmpty else { return false }
+        return try focusTerminal(id: terminalID) != nil
+    }
+
+    public func listLiveTerminalIDs() throws -> Set<String> { Set(try listWindowTabAndTerminalIDs().map(\.terminalID)) }
+}

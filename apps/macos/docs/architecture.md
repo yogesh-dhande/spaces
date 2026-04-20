@@ -128,6 +128,62 @@ It also lets lifecycle state stay explicit while runtime health is derived from 
 - Window cycling is tolerant of stale tracked yabai IDs and keeps advancing until it finds the next live target.
 - Reconciliation is required because window state can drift outside the app.
 
+### Terminal Integration Contract
+Muxy currently supports iTerm2 and Ghostty. A future terminal integration should plug into the same orchestration flow instead of adding one-off launch and focus paths.
+
+Target shape:
+
+```swift
+protocol TerminalAdapter: Sendable {
+    var appName: String { get }
+    var bundleIdentifier: String { get }
+
+    func isAvailable() -> Bool
+    func openWindowAndRun(command: String, cwd: String, background: Bool) throws -> TerminalLaunchResult
+    func focusTrackedTerminal(_ target: TerminalFocusTarget) throws -> Bool
+    func listLiveTerminalIDs() throws -> Set<String>
+}
+
+struct TerminalLaunchResult: Sendable {
+    let terminalID: String?
+    let containerID: String?
+    let fallbackYabaiWindowID: Int?
+    let tabIndex: Int?
+}
+
+struct TerminalFocusTarget: Sendable {
+    let terminalID: String?
+    let windowID: Int?
+    let tabIndex: Int?
+}
+```
+
+Required behavior:
+- Availability: expose a cheap `isAvailable()` check so setup validation and host selection can reject unsupported terminals early.
+- Launch: create a new dedicated terminal context and run the provided command without requiring Muxy to synthesize terminal-specific shell glue outside the adapter.
+- Identity: return a stable terminal-specific identifier that Muxy can persist on `RunningProcessRecord`, `WindowRecord`, and `AgentWindowRecord`.
+- Focus: refocus the tracked terminal target, not just the containing yabai window, so tabbed terminals reopen the exact tracked session or surface when possible.
+- Reconciliation: enumerate live terminal identifiers so Muxy can detect stale runtime records after users close windows manually.
+
+Identity rules:
+- yabai remains the source of truth for window IDs and cross-app focus.
+- The terminal adapter may use a richer native identity for tracking, but that identity must be stable enough to survive normal reconciliation and refocus flows.
+- If the terminal cannot provide a durable session identifier, the integration must still provide a deterministic fallback that maps back to the yabai-managed window.
+- Current examples:
+  `iTerm2` tracks sessions primarily by session ID and falls back to a yabai window ID.
+  `Ghostty` tracks by terminal/window identity and currently resolves persisted focus through the yabai window path.
+
+Operational requirements:
+- Workspace shell launch and process launch must both work through the same adapter surface.
+- Process sessions must still run under tmux so terminal closure does not kill the underlying process.
+- The adapter must tolerate background launch (`background: true`) because `mx workspace up` and recovery flows may avoid stealing focus.
+- The integration must not introduce window management outside yabai; any native terminal APIs are only for terminal-local actions such as opening, closing, or selecting a terminal target.
+
+Implementation note:
+- The shared launch and discovery contract now lives in `appctl` as `TerminalAdapter`, and `MuxyOrchestrator` resolves `TerminalHost` to a concrete adapter through one registry.
+- The shared focus contract now also requires host-specific refocus by tracked terminal identity. iTerm2 implements that with session/tab selection, while Ghostty uses terminal identity.
+- Richer iTerm2-only helpers can still exist outside the shared interface, but a new terminal should first conform to `TerminalAdapter` so launch, focus, and discovery all follow one path.
+
 ## Agent Integration
 - Agent events are explicit CLI inputs that attach status to tracked workspace agent windows.
 - Agent windows are stored separately from regular process windows because they carry provider and lifecycle metadata.

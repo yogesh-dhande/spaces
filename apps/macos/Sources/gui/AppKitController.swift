@@ -1207,6 +1207,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let rect = NSRect(x: 200, y: 200, width: 1100, height: 700)
         window = NSWindow(contentRect: rect, styleMask: [.titled, .resizable, .closable], backing: .buffered, defer: false)
         window.title = "Muxy"
+        window.collectionBehavior.insert(.moveToActiveSpace)
         window.center()
         window.delegate = self
         window.makeKeyAndOrderFront(nil)
@@ -6178,9 +6179,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             NSApp.hide(nil)
             return
         }
-        if window.isMiniaturized { window.deminiaturize(nil) }
-        window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
+        NSApp.unhide(nil)
+        if window.isMiniaturized { window.deminiaturize(nil) }
+        window.orderFrontRegardless()
+        window.makeKey()
         scheduleDeferredHotkeySelectionRefresh()
     }
 

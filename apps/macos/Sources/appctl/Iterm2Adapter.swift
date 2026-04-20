@@ -348,3 +348,23 @@ open class Iterm2Adapter: @unchecked Sendable {
         return !output.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 }
+
+extension Iterm2Adapter: TerminalAdapter {
+    public var appName: String { "iTerm2" }
+    public var bundleIdentifier: String { "com.googlecode.iterm2" }
+
+    public func openWindowAndRun(command: String, cwd _: String, background: Bool) throws -> TerminalLaunchResult {
+        let window = try openWindowAndRun(command: command, background: background)
+        return TerminalLaunchResult(
+            terminalID: window.sessionID,
+            containerID: String(window.id),
+            fallbackWindowID: window.id,
+            tabIndex: window.tabIndex)
+    }
+
+    public func focusTrackedTerminal(_ target: TerminalFocusTarget) throws -> Bool {
+        try focusSessionOrTab(preferredSessionID: target.terminalID, tabIndex: target.tabIndex, windowID: target.windowID)
+    }
+
+    public func listLiveTerminalIDs() throws -> Set<String> { try listSessionIDs() }
+}

@@ -75,6 +75,7 @@ public final class MuxyOrchestrator {
     private let currentDate: () -> Date
     private let projectsRootDirectoryURL: URL?
     private let workspacesRootDirectoryURL: URL?
+    private let terminalAdaptersByHost: [TerminalHost: any TerminalAdapter]
     private let workspaceLifecycleLock = NSLock()
     private var workspaceLifecycleInFlight: Set<String> = []
     private let workspaceSetupLock = NSLock()
@@ -104,6 +105,7 @@ public final class MuxyOrchestrator {
         self.tmux = tmux
         self.chrome = chrome
         self.workspacesRootDirectoryURL = workspacesRootDirectory
+        terminalAdaptersByHost = [.iterm2: iterm, .ghostty: ghostty]
         self.browserWindowScanDebounceInterval = browserWindowScanDebounceInterval
         self.terminalFocusPulseController = terminalFocusPulseController
         self.currentDate = currentDate
@@ -1496,8 +1498,16 @@ public final class MuxyOrchestrator {
 
     private func focusTrackedWindow(_ window: WindowRecord, workspaceID: String) -> Bool {
         let focusStartedAt = currentDate()
-        guard let id = window.windowID else { return false }
-        let focused = (try? yabai.focusWindow(id: id)) ?? false
+        let terminalID = resolvedTerminalID(for: window, workspaceID: workspaceID)
+        let adapterFocused = focusManagedTerminal(
+            terminalApp: window.app,
+            terminalID: terminalID,
+            windowID: window.windowID,
+            tabIndex: window.itermTabIndex)
+        let focused = adapterFocused == true
+            ? true
+            : ((window.windowID.flatMap { try? yabai.focusWindow(id: $0) }) ?? false)
+        guard let id = window.windowID else { return focused }
         if !focused, window.role == "browser", let targetURL = window.targetURL {
             try? markBrowserWindowMissing(workspaceID: workspaceID, targetURL: targetURL, windowID: id)
         }
@@ -1587,6 +1597,39 @@ public final class MuxyOrchestrator {
 
     private func isManagedTerminalApp(_ appName: String?) -> Bool { terminalHost(for: appName) != nil }
 
+    private func terminalAdapter(for terminalHost: TerminalHost) -> (any TerminalAdapter)? { terminalAdaptersByHost[terminalHost] }
+
+    private func resolvedTerminalID(for window: WindowRecord, workspaceID: String) -> String? {
+        if let terminalID = window.itermSessionID, !terminalID.isEmpty { return terminalID }
+        guard window.role == "terminal" else { return nil }
+        if let windowID = window.windowID {
+            if let processTerminalID = try? store.runningProcesses(workspaceID: workspaceID)
+                .first(where: { $0.windowID == windowID && $0.terminalApp == window.app && ($0.itermSessionID?.isEmpty == false) })?
+                .itermSessionID
+            {
+                return processTerminalID
+            }
+            if let agentTerminalID = try? store.agentWindows(workspaceID: workspaceID)
+                .first(where: {
+                    TerminalHost(rawValue: $0.provider.rawValue)?.appName == window.app
+                        && (($0.yabaiWindowID ?? $0.windowID) == windowID)
+                        && ($0.itermSessionID?.isEmpty == false)
+                })?.itermSessionID
+            {
+                return agentTerminalID
+            }
+        }
+        return nil
+    }
+
+    private func focusManagedTerminal(terminalApp: String?, terminalID: String?, windowID: Int?, tabIndex: Int?) -> Bool? {
+        guard let terminalHost = terminalHost(for: terminalApp), let terminalAdapter = terminalAdapter(for: terminalHost) else { return nil }
+        let hasPreciseTarget = (terminalID?.isEmpty == false) || tabIndex != nil
+        guard hasPreciseTarget else { return nil }
+        let target = TerminalFocusTarget(terminalID: terminalID, windowID: windowID, tabIndex: tabIndex)
+        return try? terminalAdapter.focusTrackedTerminal(target)
+    }
+
     private func pulseTerminalWindowIfNeeded(windowID: Int) {
         guard (try? itermFocusPulseEnabled()) ?? SettingsKey.defaultItermFocusPulseEnabled else { return }
         let color = (try? itermFocusPulseColor()) ?? (r: 46, g: 41, b: 14)
@@ -1594,10 +1637,7 @@ public final class MuxyOrchestrator {
     }
 
     private func terminalAdapterAvailable(_ terminalHost: TerminalHost) -> Bool {
-        switch terminalHost {
-        case .iterm2: return iterm.isAvailable()
-        case .ghostty: return ghostty.isAvailable()
-        }
+        terminalAdapter(for: terminalHost)?.isAvailable() == true
     }
 
     private func missingTerminalDependencyMessage(for terminalHost: TerminalHost, operation: String) -> String {
@@ -1607,14 +1647,11 @@ public final class MuxyOrchestrator {
     private func openManagedTerminalWindow(
         terminalHost: TerminalHost, command: String, cwd: String, background: Bool = false
     ) throws -> ManagedTerminalHandle {
-        switch terminalHost {
-        case .iterm2:
-            let windowInfo = try iterm.openWindowAndRun(command: command, background: background)
-            return ManagedTerminalHandle(fallbackWindowID: windowInfo.id, terminalID: windowInfo.sessionID)
-        case .ghostty:
-            let windowInfo = try ghostty.openWindowAndRun(command: command, cwd: cwd, background: background)
-            return ManagedTerminalHandle(fallbackWindowID: nil, terminalID: windowInfo.terminalID)
+        guard let terminalAdapter = terminalAdapter(for: terminalHost) else {
+            throw MuxyError.invalidArgument(message: "Unsupported terminal host: \(terminalHost.rawValue)")
         }
+        let result = try terminalAdapter.openWindowAndRun(command: command, cwd: cwd, background: background)
+        return ManagedTerminalHandle(fallbackWindowID: result.fallbackWindowID, terminalID: result.terminalID)
     }
 
     private func workspaceTerminalWindowID(workspaceID: String) throws -> Int? {
@@ -2499,7 +2536,10 @@ public final class MuxyOrchestrator {
 
     /// Returns the set of iTerm2 session IDs that are currently alive.
     /// Returns nil if iTerm2 is not running or the query fails.
-    public func liveItermSessionIDs() -> Set<String>? { try? iterm.listSessionIDs() }
+    public func liveItermSessionIDs() -> Set<String>? {
+        guard let terminalAdapter = terminalAdapter(for: .iterm2) else { return nil }
+        return try? terminalAdapter.listLiveTerminalIDs()
+    }
 
     public func activeWorkspaceID() throws -> String? { try store.setting(key: "active_workspace_id") }
 
@@ -3638,10 +3678,34 @@ public final class MuxyOrchestrator {
 
     private func focusWorkspaceProcessRecord(_ process: RunningProcessRecord, workspaceID: String) throws -> Bool {
         guard isManagedTerminalApp(process.terminalApp) else { return false }
-        guard let trackedWindowID = process.windowID else { return false }
-        let focused = (try? yabai.focusWindow(id: trackedWindowID)) ?? false
+        let target = try resolvedProcessTerminalFocusTarget(process, workspaceID: workspaceID)
+        guard let trackedWindowID = target.windowID else { return false }
+        let adapterFocused = focusManagedTerminal(
+            terminalApp: process.terminalApp,
+            terminalID: target.terminalID,
+            windowID: trackedWindowID,
+            tabIndex: target.tabIndex)
+        let focused = adapterFocused == true
+            ? true
+            : ((try? yabai.focusWindow(id: trackedWindowID)) ?? false)
         if focused { pulseTerminalWindowIfNeeded(windowID: trackedWindowID) }
         return focused
+    }
+
+    private func resolvedProcessTerminalFocusTarget(_ process: RunningProcessRecord, workspaceID: String) throws -> TerminalFocusTarget {
+        let windows = try store.windows(workspaceID: workspaceID)
+        let trackedWindow = windows.first(where: { window in
+            guard window.role == "terminal", window.app == process.terminalApp else { return false }
+            if window.id == process.id { return true }
+            if let tmuxWindowID = process.tmuxWindowID, window.tmuxWindowID == tmuxWindowID { return true }
+            if let terminalID = process.itermSessionID, !terminalID.isEmpty, window.itermSessionID == terminalID { return true }
+            if let windowID = process.windowID, window.windowID == windowID { return true }
+            return false
+        })
+        return TerminalFocusTarget(
+            terminalID: trackedWindow?.itermSessionID ?? process.itermSessionID,
+            windowID: trackedWindow?.windowID ?? process.windowID,
+            tabIndex: trackedWindow?.itermTabIndex ?? process.itermTabIndex)
     }
 
     private func trackedAgentWindowID(_ record: AgentWindowRecord) throws -> Int? {
@@ -3656,8 +3720,13 @@ public final class MuxyOrchestrator {
     }
 
     private func focusAgentWindowRecord(_ record: AgentWindowRecord) throws -> Bool {
-        guard let windowID = try trackedAgentWindowID(record) else { return false }
-        let focused = (try? yabai.focusWindow(id: windowID)) ?? false
+        let windowID = try trackedAgentWindowID(record) ?? record.yabaiWindowID ?? record.windowID
+        guard let windowID else { return false }
+        let terminalApp = TerminalHost(rawValue: record.provider.rawValue)?.appName
+        let adapterFocused = focusManagedTerminal(terminalApp: terminalApp, terminalID: record.itermSessionID, windowID: windowID, tabIndex: nil)
+        let focused = adapterFocused == true
+            ? true
+            : ((try? yabai.focusWindow(id: windowID)) ?? false)
         if focused { pulseTerminalWindowIfNeeded(windowID: windowID) }
         return focused
     }
