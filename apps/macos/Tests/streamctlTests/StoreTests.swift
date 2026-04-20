@@ -4,119 +4,76 @@ import XCTest
 @testable import streamctl
 
 final class StoreTests: XCTestCase {
-    // Tests schema migration from legacy version preserves data by arranging representative inputs and asserting the expected result.
-    func testSchemaMigrationFromLegacyVersionPreservesData() throws {
+    // Tests a fresh store bootstraps the current schema and version by arranging an empty DB path and asserting the resulting shape.
+    func testFreshStoreBootstrapsCurrentSchema() throws {
         let root = try makeTempDirectory()
-        let dbURL = root.appendingPathComponent("legacy.db")
+        let dbURL = root.appendingPathComponent("fresh.db")
+
+        _ = try SQLiteStore(path: dbURL.path)
+
+        let version = try readSingleInteger(dbURL: dbURL, sql: "SELECT version FROM schema_version")
+        let workspaceColumns = try readTableColumns(dbURL: dbURL, table: "workspaces")
+        let projectColumns = try readTableColumns(dbURL: dbURL, table: "projects")
+        let workspaceSettingsColumns = try readTableColumns(dbURL: dbURL, table: "workspace_settings")
+        let workspaceStatusColumns = try readTableColumns(dbURL: dbURL, table: "workspace_status_checks")
+        XCTAssertEqual(version, 1)
+        XCTAssertTrue(workspaceColumns.contains("title"))
+        XCTAssertTrue(workspaceColumns.contains("is_active"))
+        XCTAssertTrue(projectColumns.contains("is_collapsed"))
+        XCTAssertFalse(workspaceSettingsColumns.contains("updated_at"))
+        XCTAssertFalse(workspaceStatusColumns.contains("on_exit"))
+        XCTAssertTrue(try readTableColumns(dbURL: dbURL, table: "project_terminal_windows").isEmpty)
+        XCTAssertTrue(try readTableColumns(dbURL: dbURL, table: "workspace_terminal_windows").isEmpty)
+    }
+
+    // Tests v6 migration preserves live data while removing dead schema by arranging a representative v6 DB and asserting the current v1 result.
+    func testSchemaMigrationFromV6ToCurrentSchemaPreservesData() throws {
+        let root = try makeTempDirectory()
+        let dbURL = root.appendingPathComponent("v6.db")
         try runSQLiteExec(
             dbURL: dbURL,
             sql: """
                 CREATE TABLE projects (
                   id TEXT PRIMARY KEY,
                   name TEXT NOT NULL,
-                  dir TEXT NOT NULL,
+                  dir TEXT NOT NULL UNIQUE,
                   is_git INTEGER NOT NULL,
                   default_branch TEXT,
+                  is_collapsed INTEGER NOT NULL DEFAULT 0,
                   setup_script TEXT,
                   stop_script TEXT
                 );
-                CREATE TABLE workspaces (
+                CREATE TABLE project_terminal_windows (
                   id TEXT PRIMARY KEY,
                   project_id TEXT NOT NULL,
                   name TEXT NOT NULL,
+                  command TEXT,
+                  order_index INTEGER NOT NULL
+                );
+                CREATE TABLE workspaces (
+                  id TEXT PRIMARY KEY,
+                  project_id TEXT NOT NULL,
+                  title TEXT NOT NULL,
                   dir TEXT NOT NULL,
                   dirname TEXT,
                   branch TEXT,
+                  target_branch TEXT,
                   is_default INTEGER NOT NULL,
                   is_archived INTEGER NOT NULL,
+                  is_active INTEGER NOT NULL DEFAULT 1,
                   is_running INTEGER NOT NULL,
                   last_launched_at TEXT,
                   tooltip TEXT,
-                  UNIQUE(project_id, name)
+                  UNIQUE(project_id, title)
                 );
-                CREATE TABLE schema_version (version INTEGER NOT NULL);
-                INSERT INTO projects(id, name, dir, is_git, default_branch, setup_script, stop_script)
-                VALUES ('legacy-project', 'Legacy Project', '/tmp/legacy-project', 0, '', '', '');
-                INSERT INTO workspaces(id, project_id, name, dir, dirname, branch, is_default, is_archived, is_running, last_launched_at, tooltip)
-                VALUES ('legacy-workspace', 'legacy-project', 'default', '/tmp/legacy-project', '', '', 1, 0, 0, '', '');
-                INSERT INTO schema_version(version) VALUES (5);
-                """)
-
-        let store = try SQLiteStore(path: dbURL.path)
-        XCTAssertEqual(try store.project(id: "legacy-project")?.name, "Legacy Project")
-        XCTAssertEqual(try store.project(id: "legacy-project")?.isCollapsed, false)
-        XCTAssertEqual(try store.workspace(id: "legacy-workspace")?.name, "default")
-        let workspaceColumns = try readTableColumns(dbURL: dbURL, table: "workspaces")
-        let projectColumns = try readTableColumns(dbURL: dbURL, table: "projects")
-        XCTAssertTrue(workspaceColumns.contains("title"))
-        XCTAssertTrue(projectColumns.contains("is_collapsed"))
-        XCTAssertEqual(try readSingleText(dbURL: dbURL, sql: "SELECT title FROM workspaces WHERE id = 'legacy-workspace'"), "default")
-
-        try store.markIgnoredWorktree(path: "/tmp/legacy-project", projectID: "legacy-project")
-        XCTAssertTrue(try store.isIgnoredWorktree(path: "/tmp/legacy-project"))
-
-        let version = try readSingleInteger(dbURL: dbURL, sql: "SELECT version FROM schema_version")
-        XCTAssertEqual(version, 6)
-    }
-
-    // Tests additive migrations run when schema version already current by arranging representative inputs and asserting the expected result.
-    func testAdditiveMigrationsRunWhenSchemaVersionAlreadyCurrent() throws {
-        let root = try makeTempDirectory()
-        let dbURL = root.appendingPathComponent("current-version-missing-columns.db")
-        try runSQLiteExec(
-            dbURL: dbURL,
-            sql: """
-                CREATE TABLE projects (
-                  id TEXT PRIMARY KEY,
-                  name TEXT NOT NULL,
-                  dir TEXT NOT NULL UNIQUE,
-                  is_git INTEGER NOT NULL,
-                  default_branch TEXT
-                );
-                CREATE TABLE schema_version (version INTEGER NOT NULL);
-                INSERT INTO schema_version(version) VALUES (6);
-                """)
-
-        _ = try SQLiteStore(path: dbURL.path)
-        let columns = try readTableColumns(dbURL: dbURL, table: "projects")
-        XCTAssertTrue(columns.contains("setup_script"))
-        XCTAssertTrue(columns.contains("stop_script"))
-        XCTAssertTrue(columns.contains("is_collapsed"))
-    }
-
-    // Tests additive migrations backfill on_fail columns by arranging legacy status-check tables and asserting current schema compatibility.
-    func testAdditiveMigrationsBackfillStatusCheckOnFailColumns() throws {
-        let root = try makeTempDirectory()
-        let dbURL = root.appendingPathComponent("current-version-missing-on-fail.db")
-        try runSQLiteExec(
-            dbURL: dbURL,
-            sql: """
-                CREATE TABLE projects (
-                  id TEXT PRIMARY KEY,
-                  name TEXT NOT NULL,
-                  dir TEXT NOT NULL UNIQUE,
-                  is_git INTEGER NOT NULL,
-                  default_branch TEXT
-                );
-                CREATE TABLE workspaces (
-                  id TEXT PRIMARY KEY,
-                  project_id TEXT NOT NULL,
-                  name TEXT NOT NULL,
-                  dir TEXT NOT NULL,
-                  is_default INTEGER NOT NULL,
-                  is_archived INTEGER NOT NULL,
-                  is_running INTEGER NOT NULL,
-                  UNIQUE(project_id, name)
-                );
-                CREATE TABLE project_status_checks (
-                  id TEXT PRIMARY KEY,
-                  project_id TEXT NOT NULL,
-                  name TEXT,
-                  process TEXT NOT NULL,
-                  command TEXT NOT NULL,
-                  interval INTEGER NOT NULL,
-                  timeout INTEGER NOT NULL,
-                  order_index INTEGER NOT NULL
+                CREATE TABLE workspace_settings (
+                  workspace_id TEXT PRIMARY KEY,
+                  updated_at TEXT NOT NULL,
+                  stop_script TEXT,
+                  setup_status TEXT NOT NULL DEFAULT 'succeeded',
+                  setup_error TEXT,
+                  setup_started_at TEXT,
+                  setup_finished_at TEXT
                 );
                 CREATE TABLE workspace_status_checks (
                   id TEXT PRIMARY KEY,
@@ -126,39 +83,60 @@ final class StoreTests: XCTestCase {
                   command TEXT NOT NULL,
                   interval INTEGER NOT NULL,
                   timeout INTEGER NOT NULL,
+                  on_exit TEXT NOT NULL DEFAULT 'none',
+                  on_fail TEXT NOT NULL DEFAULT 'none',
+                  order_index INTEGER NOT NULL
+                );
+                CREATE TABLE workspace_terminal_windows (
+                  id TEXT PRIMARY KEY,
+                  workspace_id TEXT NOT NULL,
+                  name TEXT NOT NULL,
+                  command TEXT,
                   order_index INTEGER NOT NULL
                 );
                 CREATE TABLE schema_version (version INTEGER NOT NULL);
-                INSERT INTO projects(id, name, dir, is_git, default_branch)
-                VALUES ('legacy-project', 'Legacy Project', '/tmp/legacy-project', 0, '');
-                INSERT INTO workspaces(id, project_id, name, dir, is_default, is_archived, is_running)
-                VALUES ('legacy-workspace', 'legacy-project', 'default', '/tmp/legacy-project', 1, 0, 0);
-                INSERT INTO project_status_checks(id, project_id, name, process, command, interval, timeout, order_index)
-                VALUES ('project-check', 'legacy-project', 'api health', 'api', 'echo ok', 10, 3, 0);
-                INSERT INTO workspace_status_checks(id, workspace_id, name, process, command, interval, timeout, order_index)
-                VALUES ('workspace-check', 'legacy-workspace', 'api health', 'api', 'echo ok', 10, 3, 0);
+                INSERT INTO projects(id, name, dir, is_git, default_branch, is_collapsed, setup_script, stop_script)
+                VALUES ('project-1', 'Project', '/tmp/project', 0, '', 0, '', '');
+                INSERT INTO workspaces(id, project_id, title, dir, dirname, branch, target_branch, is_default, is_archived, is_active, is_running, last_launched_at, tooltip)
+                VALUES ('workspace-1', 'project-1', 'feature', '/tmp/project/feature', 'feature', 'feature', 'main', 0, 0, 1, 0, '', '');
+                INSERT INTO workspace_settings(workspace_id, updated_at, stop_script, setup_status, setup_error, setup_started_at, setup_finished_at)
+                VALUES ('workspace-1', '2026-01-01T00:00:00Z', 'echo stop', 'failed', 'boom', 'start', 'end');
+                INSERT INTO workspace_status_checks(id, workspace_id, name, process, command, interval, timeout, on_exit, on_fail, order_index)
+                VALUES ('workspace-check', 'workspace-1', 'api health', 'api', 'echo ok', 10, 3, 'none', 'restart', 0);
+                INSERT INTO project_terminal_windows(id, project_id, name, command, order_index)
+                VALUES ('project-term', 'project-1', 'dev', 'echo dev', 0);
+                INSERT INTO workspace_terminal_windows(id, workspace_id, name, command, order_index)
+                VALUES ('workspace-term', 'workspace-1', 'dev', 'echo dev', 0);
                 INSERT INTO schema_version(version) VALUES (6);
                 """)
 
         let store = try SQLiteStore(path: dbURL.path)
-
-        let projectStatusColumns = try readTableColumns(dbURL: dbURL, table: "project_status_checks")
         let workspaceStatusColumns = try readTableColumns(dbURL: dbURL, table: "workspace_status_checks")
-        let workspaceColumns = try readTableColumns(dbURL: dbURL, table: "workspaces")
-        XCTAssertTrue(projectStatusColumns.contains("on_fail"))
-        XCTAssertTrue(workspaceStatusColumns.contains("on_fail"))
-        XCTAssertTrue(workspaceColumns.contains("title"))
+        let workspaceSettingsColumns = try readTableColumns(dbURL: dbURL, table: "workspace_settings")
+        let version = try readSingleInteger(dbURL: dbURL, sql: "SELECT version FROM schema_version")
 
-        let project = try XCTUnwrap(store.project(id: "legacy-project"))
-        let workspaceChecks = try store.workspaceStatusChecks(workspaceID: "legacy-workspace")
-        XCTAssertEqual(project.statusChecks.first?.onFail, OnFailAction.none)
-        XCTAssertEqual(workspaceChecks.first?.onFail, OnFailAction.none)
+        XCTAssertEqual(version, 1)
+        XCTAssertTrue(workspaceStatusColumns.contains("on_fail"))
+        XCTAssertFalse(workspaceStatusColumns.contains("on_exit"))
+        XCTAssertFalse(workspaceSettingsColumns.contains("updated_at"))
+        XCTAssertTrue(try readTableColumns(dbURL: dbURL, table: "project_terminal_windows").isEmpty)
+        XCTAssertTrue(try readTableColumns(dbURL: dbURL, table: "workspace_terminal_windows").isEmpty)
+
+        XCTAssertEqual(try store.workspaceStopScript(workspaceID: "workspace-1"), "echo stop")
+        let setupState = try store.workspaceSetupState(workspaceID: "workspace-1")
+        XCTAssertEqual(setupState?.status, .failed)
+        XCTAssertEqual(setupState?.errorMessage, "boom")
+        XCTAssertEqual(setupState?.startedAt, "start")
+        XCTAssertEqual(setupState?.finishedAt, "end")
+        let workspaceChecks = try store.workspaceStatusChecks(workspaceID: "workspace-1")
+        XCTAssertEqual(workspaceChecks.count, 1)
+        XCTAssertEqual(workspaceChecks.first?.onFail, .restart)
     }
 
-    // Tests workspace active state persists and migrations backfill active column by arranging representative inputs and asserting defaults and updates.
-    func testWorkspaceActiveStatePersistsAndBackfills() throws {
+    // Tests unsupported schema versions fail fast by arranging an older DB version and asserting initialization rejects it.
+    func testUnsupportedSchemaVersionFailsFast() throws {
         let root = try makeTempDirectory()
-        let dbURL = root.appendingPathComponent("workspace-active-state.db")
+        let dbURL = root.appendingPathComponent("unsupported.db")
         try runSQLiteExec(
             dbURL: dbURL,
             sql: """
@@ -174,31 +152,18 @@ final class StoreTests: XCTestCase {
                   project_id TEXT NOT NULL,
                   title TEXT NOT NULL,
                   dir TEXT NOT NULL,
-                  dirname TEXT,
-                  branch TEXT,
-                  target_branch TEXT,
                   is_default INTEGER NOT NULL,
                   is_archived INTEGER NOT NULL,
                   is_running INTEGER NOT NULL,
-                  last_launched_at TEXT,
-                  tooltip TEXT,
                   UNIQUE(project_id, title)
                 );
                 CREATE TABLE schema_version (version INTEGER NOT NULL);
-                INSERT INTO projects(id, name, dir, is_git, default_branch)
-                VALUES ('p1', 'Project', '/tmp/project', 0, '');
-                INSERT INTO workspaces(id, project_id, title, dir, dirname, branch, target_branch, is_default, is_archived, is_running, last_launched_at, tooltip)
-                VALUES ('w1', 'p1', 'feature', '/tmp/project/feature', '', '', '', 0, 0, 0, '', '');
-                INSERT INTO schema_version(version) VALUES (6);
+                INSERT INTO schema_version(version) VALUES (5);
                 """)
 
-        let store = try SQLiteStore(path: dbURL.path)
-        let migrated = try XCTUnwrap(store.workspace(id: "w1"))
-        XCTAssertTrue(migrated.isActive)
-
-        try store.updateWorkspaceActive(id: "w1", isActive: false)
-        let updated = try XCTUnwrap(store.workspace(id: "w1"))
-        XCTAssertFalse(updated.isActive)
+        XCTAssertThrowsError(try SQLiteStore(path: dbURL.path)) { error in
+            XCTAssertTrue(error.localizedDescription.contains("Unsupported database schema version 5"))
+        }
     }
 
     // Tests workspace collections round trip and replacement by arranging representative inputs and asserting the expected result.
@@ -287,29 +252,14 @@ final class StoreTests: XCTestCase {
         XCTAssertEqual(try store.workspacePortDefinitions(workspaceID: workspace.id)[0].name, "DB_PORT")
     }
 
-    // Tests project collapsed state persists and migrations backfill default false by arranging representative inputs and asserting round-trip behavior.
-    func testProjectCollapsedStatePersistsAndBackfills() throws {
+    // Tests project collapsed state persists on the current schema by arranging a current-store project and asserting round-trip behavior.
+    func testProjectCollapsedStatePersists() throws {
         let root = try makeTempDirectory()
         let dbURL = root.appendingPathComponent("project-collapsed-state.db")
-        try runSQLiteExec(
-            dbURL: dbURL,
-            sql: """
-                CREATE TABLE projects (
-                  id TEXT PRIMARY KEY,
-                  name TEXT NOT NULL,
-                  dir TEXT NOT NULL UNIQUE,
-                  is_git INTEGER NOT NULL,
-                  default_branch TEXT,
-                  setup_script TEXT,
-                  stop_script TEXT
-                );
-                CREATE TABLE schema_version (version INTEGER NOT NULL);
-                INSERT INTO projects(id, name, dir, is_git, default_branch, setup_script, stop_script)
-                VALUES ('p1', 'Project', '/tmp/project', 0, '', '', '');
-                INSERT INTO schema_version(version) VALUES (6);
-                """)
-
         let store = try SQLiteStore(path: dbURL.path)
+        let project = makeProjectRecord(id: "p1", dir: "/tmp/project")
+        try store.upsert(project: project)
+
         XCTAssertEqual(try store.project(id: "p1")?.isCollapsed, false)
 
         try store.updateProjectCollapsed(id: "p1", isCollapsed: true)

@@ -30,8 +30,6 @@ public enum SettingsKey {
     public static let defaultGUINextShortcut = "]"
     public static let guiPreviousShortcut = "gui_previous_shortcut"
     public static let defaultGUIPreviousShortcut = "["
-    public static let guiTooltipShortcut = "gui_tooltip_shortcut"
-    public static let defaultGUITooltipShortcut = "i"
     public static let guiWindowShortcut = "gui_window_shortcut"
     public static let defaultGUIWindowShortcut = "cmd+1"
     public static let guiWindowSequenceShortcut = "gui_window_sequence_shortcut"

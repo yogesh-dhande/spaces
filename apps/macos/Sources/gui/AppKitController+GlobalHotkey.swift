@@ -5,7 +5,6 @@ extension AppKitController {
         case toggle = 1
         case next = 2
         case previous = 3
-        case tooltip = 4
-        case openEditor = 5
+        case openEditor = 4
     }
 }

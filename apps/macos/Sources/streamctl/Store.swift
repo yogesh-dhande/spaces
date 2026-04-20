@@ -4,7 +4,7 @@ import appctl
 
 public final class SQLiteStore {
     private let db: OpaquePointer
-    private let schemaVersion = 6
+    private let schemaVersion = 1
     private let busyTimeoutMS: Int32 = 5000
     private let busyRetryAttempts = 10
     private let busyRetryDelaySeconds: TimeInterval = 0.02
@@ -24,7 +24,7 @@ public final class SQLiteStore {
             throw NSError(domain: "muxy.store", code: 1, userInfo: [NSLocalizedDescriptionKey: "Failed configuring sqlite busy timeout: \(message)"])
         }
         try configureConnectionPragmas()
-        try rebuildSchemaIfNeeded()
+        try initializeSchema()
     }
 
     deinit { sqlite3_close(db) }
@@ -107,7 +107,6 @@ public final class SQLiteStore {
         try execute(sql: "DELETE FROM windows WHERE workspace_id IN (SELECT id FROM workspaces WHERE project_id = ?)", bindings: [id])
         try execute(sql: "DELETE FROM workspace_settings WHERE workspace_id IN (SELECT id FROM workspaces WHERE project_id = ?)", bindings: [id])
         try execute(sql: "DELETE FROM workspace_processes WHERE workspace_id IN (SELECT id FROM workspaces WHERE project_id = ?)", bindings: [id])
-        try execute(sql: "DELETE FROM workspace_terminal_windows WHERE workspace_id IN (SELECT id FROM workspaces WHERE project_id = ?)", bindings: [id])
         try execute(sql: "DELETE FROM workspace_status_checks WHERE workspace_id IN (SELECT id FROM workspaces WHERE project_id = ?)", bindings: [id])
         try execute(
             sql: "DELETE FROM workspace_browser_sessions WHERE workspace_id IN (SELECT id FROM workspaces WHERE project_id = ?)", bindings: [id])
@@ -122,7 +121,6 @@ public final class SQLiteStore {
         try execute(sql: "DELETE FROM workspaces WHERE project_id = ?", bindings: [id])
         try execute(sql: "DELETE FROM project_port_definitions WHERE project_id = ?", bindings: [id])
         try execute(sql: "DELETE FROM project_processes WHERE project_id = ?", bindings: [id])
-        try execute(sql: "DELETE FROM project_terminal_windows WHERE project_id = ?", bindings: [id])
         try execute(sql: "DELETE FROM project_status_checks WHERE project_id = ?", bindings: [id])
         try execute(sql: "DELETE FROM project_browser_sessions WHERE project_id = ?", bindings: [id])
         try execute(sql: "DELETE FROM ignored_worktrees WHERE project_id = ?", bindings: [id])
@@ -206,7 +204,6 @@ public final class SQLiteStore {
         try execute(sql: "DELETE FROM windows WHERE workspace_id = ?", bindings: [id])
         try execute(sql: "DELETE FROM workspace_settings WHERE workspace_id = ?", bindings: [id])
         try execute(sql: "DELETE FROM workspace_processes WHERE workspace_id = ?", bindings: [id])
-        try execute(sql: "DELETE FROM workspace_terminal_windows WHERE workspace_id = ?", bindings: [id])
         try execute(sql: "DELETE FROM workspace_status_checks WHERE workspace_id = ?", bindings: [id])
         try execute(sql: "DELETE FROM workspace_browser_sessions WHERE workspace_id = ?", bindings: [id])
         try execute(sql: "DELETE FROM status_results WHERE process_id IN (SELECT id FROM running_processes WHERE workspace_id = ?)", bindings: [id])
@@ -341,12 +338,12 @@ public final class SQLiteStore {
         for (index, check) in checks.enumerated() {
             try execute(
                 sql: """
-                    INSERT INTO workspace_status_checks(id, workspace_id, name, process, command, interval, timeout, on_exit, on_fail, order_index)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    INSERT INTO workspace_status_checks(id, workspace_id, name, process, command, interval, timeout, on_fail, order_index)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                 bindings: [
                     UUID().uuidString, workspaceID, check.name ?? "", check.process, check.command, String(check.interval), String(check.timeout),
-                    "none", check.onFail.rawValue, String(index),
+                    check.onFail.rawValue, String(index),
                 ])
         }
     }
@@ -414,8 +411,8 @@ public final class SQLiteStore {
     ) throws {
         try execute(
             sql: """
-                INSERT INTO workspace_settings(workspace_id, updated_at, setup_status, setup_error, setup_started_at, setup_finished_at)
-                VALUES (?, '', ?, ?, ?, ?)
+                INSERT INTO workspace_settings(workspace_id, setup_status, setup_error, setup_started_at, setup_finished_at)
+                VALUES (?, ?, ?, ?, ?)
                 ON CONFLICT(workspace_id) DO UPDATE SET
                   setup_status = excluded.setup_status,
                   setup_error = excluded.setup_error,
@@ -427,19 +424,19 @@ public final class SQLiteStore {
     public func setWorkspaceStopScript(workspaceID: String, stopScript: String?) throws {
         try execute(
             sql: """
-                INSERT INTO workspace_settings(workspace_id, updated_at, stop_script)
-                VALUES (?, '', ?)
+                INSERT INTO workspace_settings(workspace_id, stop_script)
+                VALUES (?, ?)
                 ON CONFLICT(workspace_id) DO UPDATE SET stop_script = excluded.stop_script
                 """, bindings: [workspaceID, stopScript ?? ""])
     }
 
-    public func touchWorkspaceSettings(workspaceID: String, updatedAt: String) throws {
+    public func touchWorkspaceSettings(workspaceID: String, updatedAt _: String) throws {
         try execute(
             sql: """
-                INSERT INTO workspace_settings(workspace_id, updated_at)
-                VALUES (?, ?)
-                ON CONFLICT(workspace_id) DO UPDATE SET updated_at = excluded.updated_at
-                """, bindings: [workspaceID, updatedAt])
+                INSERT INTO workspace_settings(workspace_id)
+                VALUES (?)
+                ON CONFLICT(workspace_id) DO NOTHING
+                """, bindings: [workspaceID])
     }
 
     public func workspaceBrowserSessions(workspaceID: String) throws -> [BrowserSession] {
@@ -790,14 +787,6 @@ public final class SQLiteStore {
               order_index INTEGER NOT NULL
             );
 
-            CREATE TABLE IF NOT EXISTS project_terminal_windows (
-              id TEXT PRIMARY KEY,
-              project_id TEXT NOT NULL,
-              name TEXT NOT NULL,
-              command TEXT,
-              order_index INTEGER NOT NULL
-            );
-
             CREATE TABLE IF NOT EXISTS project_status_checks (
               id TEXT PRIMARY KEY,
               project_id TEXT NOT NULL,
@@ -852,7 +841,6 @@ public final class SQLiteStore {
 
             CREATE TABLE IF NOT EXISTS workspace_settings (
               workspace_id TEXT PRIMARY KEY,
-              updated_at TEXT NOT NULL,
               stop_script TEXT,
               setup_status TEXT NOT NULL DEFAULT 'succeeded',
               setup_error TEXT,
@@ -869,14 +857,6 @@ public final class SQLiteStore {
               order_index INTEGER NOT NULL
             );
 
-            CREATE TABLE IF NOT EXISTS workspace_terminal_windows (
-              id TEXT PRIMARY KEY,
-              workspace_id TEXT NOT NULL,
-              name TEXT NOT NULL,
-              command TEXT,
-              order_index INTEGER NOT NULL
-            );
-
             CREATE TABLE IF NOT EXISTS workspace_status_checks (
               id TEXT PRIMARY KEY,
               workspace_id TEXT NOT NULL,
@@ -885,7 +865,6 @@ public final class SQLiteStore {
               command TEXT NOT NULL,
               interval INTEGER NOT NULL,
               timeout INTEGER NOT NULL,
-              on_exit TEXT NOT NULL DEFAULT 'none',
               on_fail TEXT NOT NULL DEFAULT 'none',
               order_index INTEGER NOT NULL
             );
@@ -971,15 +950,37 @@ public final class SQLiteStore {
             CREATE TABLE IF NOT EXISTS schema_version (
               version INTEGER NOT NULL
             );
-            """
+        """
         try executeBatch(sql: sql)
     }
 
-    private func rebuildSchemaIfNeeded() throws {
-        try createSchema()
-        try applyAdditiveMigrations()
-        let currentVersion = try schemaVersionValue()
-        if currentVersion != schemaVersion { try setSchemaVersion(schemaVersion) }
+    private func initializeSchema() throws {
+        let existingTables = try userTableNames()
+        if existingTables.isEmpty {
+            try createSchema()
+            try setSchemaVersion(schemaVersion)
+            return
+        }
+
+        guard let currentVersion = try schemaVersionValue() else {
+            throw NSError(
+                domain: "muxy.store", code: 9,
+                userInfo: [NSLocalizedDescriptionKey: "Unsupported database schema: missing schema version."])
+        }
+
+        switch currentVersion {
+        case schemaVersion:
+            try createSchema()
+            return
+        case 6:
+            try migrateSchemaFromV6ToV7()
+            try createSchema()
+            try setSchemaVersion(schemaVersion)
+        default:
+            throw NSError(
+                domain: "muxy.store", code: 10,
+                userInfo: [NSLocalizedDescriptionKey: "Unsupported database schema version \(currentVersion)."])
+        }
     }
 
     private func schemaVersionValue() throws -> Int? {
@@ -995,84 +996,106 @@ public final class SQLiteStore {
         try execute(sql: "INSERT INTO schema_version(version) VALUES (?)", bindings: [String(version)])
     }
 
-    private func applyAdditiveMigrations() throws {
-        try ensureColumnExists(table: "projects", name: "setup_script", definition: "setup_script TEXT")
-        try ensureColumnExists(table: "projects", name: "stop_script", definition: "stop_script TEXT")
-        try ensureColumnExists(table: "projects", name: "is_collapsed", definition: "is_collapsed INTEGER NOT NULL DEFAULT 0")
-        try execute(sql: "UPDATE projects SET is_collapsed = 0 WHERE is_collapsed IS NULL", bindings: [])
-        try ensureColumnExists(table: "project_processes", name: "on_exit", definition: "on_exit TEXT NOT NULL DEFAULT 'none'")
-        try execute(
-            sql: """
-                CREATE TABLE IF NOT EXISTS project_terminal_windows (
-                  id TEXT PRIMARY KEY,
-                  project_id TEXT NOT NULL,
-                  name TEXT NOT NULL,
-                  command TEXT,
-                  order_index INTEGER NOT NULL
-                )
-                """, bindings: [])
-        try ensureColumnExists(table: "project_status_checks", name: "on_fail", definition: "on_fail TEXT NOT NULL DEFAULT 'none'")
-        try ensureColumnExists(table: "workspace_processes", name: "on_exit", definition: "on_exit TEXT NOT NULL DEFAULT 'none'")
-        try execute(
-            sql: """
-                CREATE TABLE IF NOT EXISTS workspace_terminal_windows (
-                  id TEXT PRIMARY KEY,
-                  workspace_id TEXT NOT NULL,
-                  name TEXT NOT NULL,
-                  command TEXT,
-                  order_index INTEGER NOT NULL
-                )
-                """, bindings: [])
-        try ensureColumnExists(table: "workspace_status_checks", name: "on_exit", definition: "on_exit TEXT NOT NULL DEFAULT 'none'")
-        try ensureColumnExists(table: "workspace_status_checks", name: "on_fail", definition: "on_fail TEXT NOT NULL DEFAULT 'none'")
-        try ensureColumnExists(table: "workspace_ports", name: "port_name", definition: "port_name TEXT NOT NULL DEFAULT ''")
-        try ensureColumnExists(table: "workspaces", name: "dirname", definition: "dirname TEXT")
-        try ensureColumnExists(table: "workspaces", name: "branch", definition: "branch TEXT")
-        try ensureColumnExists(table: "workspaces", name: "target_branch", definition: "target_branch TEXT")
-        try ensureColumnExists(table: "workspaces", name: "tooltip", definition: "tooltip TEXT")
-        try ensureColumnExists(table: "workspaces", name: "is_active", definition: "is_active INTEGER NOT NULL DEFAULT 1")
-        try execute(sql: "UPDATE workspaces SET is_active = 1 WHERE is_active IS NULL", bindings: [])
-        let workspaceColumns = try queryRows(sql: "PRAGMA table_info(workspaces)").compactMap { $0.count > 1 ? $0[1] : nil }
-        if !workspaceColumns.contains("title") {
-            try ensureColumnExists(table: "workspaces", name: "title", definition: "title TEXT NOT NULL DEFAULT ''")
+    private func migrateSchemaFromV6ToV7() throws {
+        try executeBatch(sql: "BEGIN IMMEDIATE;")
+        do {
+            try execute(sql: "DROP TABLE IF EXISTS project_terminal_windows", bindings: [])
+            try execute(sql: "DROP TABLE IF EXISTS workspace_terminal_windows", bindings: [])
+            if try tableExists("workspace_settings") {
+                try migrateWorkspaceSettingsFromV6ToV7()
+            }
+            if try tableExists("workspace_status_checks") {
+                try migrateWorkspaceStatusChecksFromV6ToV7()
+            }
+            try executeBatch(sql: "COMMIT;")
+        } catch {
+            try? executeBatch(sql: "ROLLBACK;")
+            throw error
         }
-        if workspaceColumns.contains("name") { try execute(sql: "UPDATE workspaces SET title = name WHERE title = ''", bindings: []) }
-        try execute(sql: "CREATE UNIQUE INDEX IF NOT EXISTS idx_workspaces_project_title_unique ON workspaces(project_id, title)", bindings: [])
-        try ensureColumnExists(table: "project_browser_sessions", name: "name", definition: "name TEXT")
-        try ensureColumnExists(table: "workspace_browser_sessions", name: "name", definition: "name TEXT")
-        try ensureColumnExists(table: "workspace_browser_sessions", name: "extracted_target_url", definition: "extracted_target_url TEXT")
-        try ensureColumnExists(table: "workspace_browser_sessions", name: "extracted_window_id", definition: "extracted_window_id INTEGER")
-        try ensureColumnExists(
-            table: "workspace_browser_sessions", name: "extracted_window_valid", definition: "extracted_window_valid INTEGER NOT NULL DEFAULT 0")
-        try ensureColumnExists(table: "workspace_settings", name: "setup_status", definition: "setup_status TEXT NOT NULL DEFAULT 'succeeded'")
-        try ensureColumnExists(table: "workspace_settings", name: "setup_error", definition: "setup_error TEXT")
-        try ensureColumnExists(table: "workspace_settings", name: "setup_started_at", definition: "setup_started_at TEXT")
-        try ensureColumnExists(table: "workspace_settings", name: "setup_finished_at", definition: "setup_finished_at TEXT")
-        try execute(sql: "UPDATE workspace_settings SET setup_status = 'succeeded' WHERE COALESCE(setup_status, '') = ''", bindings: [])
-        try ensureColumnExists(table: "status_results", name: "message", definition: "message TEXT")
-        try ensureColumnExists(table: "status_results", name: "last_run_at", definition: "last_run_at TEXT")
-        try ensureColumnExists(table: "running_processes", name: "last_output_at", definition: "last_output_at TEXT")
-        try ensureColumnExists(table: "running_processes", name: "started_at", definition: "started_at TEXT")
-        try ensureColumnExists(table: "running_processes", name: "exited_at", definition: "exited_at TEXT")
-        try ensureColumnExists(table: "running_processes", name: "iterm_session_id", definition: "iterm_session_id TEXT")
-        try ensureColumnExists(table: "running_processes", name: "iterm_tab_index", definition: "iterm_tab_index INTEGER")
-        try ensureColumnExists(table: "running_processes", name: "tmux_window_id", definition: "tmux_window_id TEXT")
-        try ensureColumnExists(table: "windows", name: "iterm_session_id", definition: "iterm_session_id TEXT")
-        try ensureColumnExists(table: "windows", name: "iterm_tab_index", definition: "iterm_tab_index INTEGER")
-        try ensureColumnExists(table: "windows", name: "tmux_window_id", definition: "tmux_window_id TEXT")
-        try ensureColumnExists(table: "agent_windows", name: "tmux_window_id", definition: "tmux_window_id TEXT")
-        try ensureColumnExists(table: "agent_windows", name: "yabai_window_id", definition: "yabai_window_id INTEGER")
-        // Legacy Codex desktop records cannot be focused once terminal-only agent support is enabled.
-        try execute(sql: "DELETE FROM agent_windows WHERE provider = 'codex'", bindings: [])
-        // Migrate legacy color-based status values to semantic names
-        try execute(sql: "UPDATE status_results SET status = 'passed' WHERE status = 'green'", bindings: [])
-        try execute(sql: "UPDATE status_results SET status = 'failed' WHERE status = 'red'", bindings: [])
     }
 
-    private func ensureColumnExists(table: String, name: String, definition: String) throws {
-        let existing = try queryRows(sql: "PRAGMA table_info(\(table))").compactMap { $0.count > 1 ? $0[1] : nil }
-        if existing.contains(name) { return }
-        try execute(sql: "ALTER TABLE \(table) ADD COLUMN \(definition)", bindings: [])
+    private func migrateWorkspaceSettingsFromV6ToV7() throws {
+        try execute(sql: "ALTER TABLE workspace_settings RENAME TO workspace_settings_v6", bindings: [])
+        try execute(
+            sql: """
+                CREATE TABLE workspace_settings (
+                  workspace_id TEXT PRIMARY KEY,
+                  stop_script TEXT,
+                  setup_status TEXT NOT NULL DEFAULT 'succeeded',
+                  setup_error TEXT,
+                  setup_started_at TEXT,
+                  setup_finished_at TEXT
+                )
+                """, bindings: [])
+        try execute(
+            sql: """
+                INSERT INTO workspace_settings(workspace_id, stop_script, setup_status, setup_error, setup_started_at, setup_finished_at)
+                SELECT
+                  workspace_id,
+                  stop_script,
+                  CASE WHEN COALESCE(setup_status, '') = '' THEN 'succeeded' ELSE setup_status END,
+                  setup_error,
+                  setup_started_at,
+                  setup_finished_at
+                FROM workspace_settings_v6
+                """, bindings: [])
+        try execute(sql: "DROP TABLE workspace_settings_v6", bindings: [])
+    }
+
+    private func migrateWorkspaceStatusChecksFromV6ToV7() throws {
+        try execute(sql: "ALTER TABLE workspace_status_checks RENAME TO workspace_status_checks_v6", bindings: [])
+        try execute(
+            sql: """
+                CREATE TABLE workspace_status_checks (
+                  id TEXT PRIMARY KEY,
+                  workspace_id TEXT NOT NULL,
+                  name TEXT,
+                  process TEXT NOT NULL,
+                  command TEXT NOT NULL,
+                  interval INTEGER NOT NULL,
+                  timeout INTEGER NOT NULL,
+                  on_fail TEXT NOT NULL DEFAULT 'none',
+                  order_index INTEGER NOT NULL
+                )
+                """, bindings: [])
+        try execute(
+            sql: """
+                INSERT INTO workspace_status_checks(id, workspace_id, name, process, command, interval, timeout, on_fail, order_index)
+                SELECT
+                  id,
+                  workspace_id,
+                  name,
+                  process,
+                  command,
+                  interval,
+                  timeout,
+                  CASE WHEN COALESCE(on_fail, '') = '' THEN 'none' ELSE on_fail END,
+                  order_index
+                FROM workspace_status_checks_v6
+                """, bindings: [])
+        try execute(sql: "DROP TABLE workspace_status_checks_v6", bindings: [])
+    }
+
+    private func userTableNames() throws -> [String] {
+        try queryRows(
+            sql: """
+                SELECT name
+                FROM sqlite_master
+                WHERE type = 'table'
+                  AND name NOT LIKE 'sqlite_%'
+                ORDER BY name
+                """)
+            .compactMap(\.first)
+    }
+
+    private func tableExists(_ name: String) throws -> Bool {
+        try queryRow(
+            sql: """
+                SELECT 1
+                FROM sqlite_master
+                WHERE type = 'table' AND name = ?
+                LIMIT 1
+                """, bindings: [name]) != nil
     }
 
     private func decodeProjectWithTemplates(row: [String]) throws -> ProjectRecord? {

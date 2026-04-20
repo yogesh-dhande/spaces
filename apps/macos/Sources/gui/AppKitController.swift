@@ -119,7 +119,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     private var openSettingsShortcutSpec: HotkeySpec?
     private var nextShortcutSpec: HotkeySpec?
     private var previousShortcutSpec: HotkeySpec?
-    private var tooltipShortcutSpec: HotkeySpec?
     private var windowShortcutSpec: HotkeySpec?
     private var windowSequenceShortcutSpec: HotkeySpec?
     private var shortcutButtonsBySetting: [String: NSButton] = [:]
@@ -140,8 +139,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     private let appUpdater = AppUpdater()
     private var checkForUpdatesMenuItem: NSMenuItem?
     private var availableUpdate: UpdateInfo?
-    private var tooltipWindow: NSWindow?
-    private var tooltipIPCObserver: NSObjectProtocol?
     private var agentEventIPCObserver: NSObjectProtocol?
     private var appDidBecomeActiveObserver: NSObjectProtocol?
     private var appDidResignActiveObserver: NSObjectProtocol?
@@ -252,7 +249,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         logStartupProfile("global_hotkeys_ready")
         setupShortcutMonitor()
         logStartupProfile("shortcut_monitor_ready")
-        setupTooltipIPCObserver()
         setupAgentEventIPCObserver()
         setupAppActivationObservers()
         logStartupProfile("ipc_observers_ready")
@@ -272,10 +268,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         teardownInlineWorkspaceOutsideClickMonitor()
         teardownGlobalHotkey()
         if let shortcutMonitor { NSEvent.removeMonitor(shortcutMonitor) }
-        if let tooltipIPCObserver {
-            DistributedNotificationCenter.default().removeObserver(tooltipIPCObserver)
-            self.tooltipIPCObserver = nil
-        }
         if let agentEventIPCObserver {
             DistributedNotificationCenter.default().removeObserver(agentEventIPCObserver)
             self.agentEventIPCObserver = nil
@@ -288,12 +280,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             NotificationCenter.default.removeObserver(appDidResignActiveObserver)
             self.appDidResignActiveObserver = nil
         }
-    }
-
-    private func setupTooltipIPCObserver() {
-        tooltipIPCObserver = DistributedNotificationCenter.default().addObserver(
-            forName: IPCNotification.showTooltipOverlay, object: nil, queue: .main
-        ) { [weak self] _ in Task { @MainActor [weak self] in self?.refreshTooltipOverlay() } }
     }
 
     private func setupAgentEventIPCObserver() {
@@ -407,7 +393,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 do { try await Task.sleep(for: .seconds(PollingConstants.sidebarMetadataRefreshInterval)) } catch { break }
                 if Task.isCancelled { break }
                 guard self.canReloadAfterBackgroundWorkspaceRefresh() else { continue }
-                // Catch external CLI edits (for example title/tooltip changes) that do not trigger other poller reloads.
+                // Catch external CLI edits (for example title changes) that do not trigger other poller reloads.
                 self.requestSidebarReload()
             }
         }
@@ -4416,7 +4402,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         [
             "Dashboard \(footerShortcutHint(for: .guiDashboardShortcut))",
             "Next window \(footerShortcutHint(for: .guiNextShortcut))", "Prev window \(footerShortcutHint(for: .guiPreviousShortcut))",
-            "Settings \(footerShortcutHint(for: .guiOpenSettingsShortcut))", "Toggle tooltip \(footerShortcutHint(for: .guiTooltipShortcut))",
+            "Settings \(footerShortcutHint(for: .guiOpenSettingsShortcut))",
         ]
     }
 
@@ -5522,9 +5508,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         registerHotkey(spec: toggle, id: GlobalHotkey.toggle.rawValue, signature: signature, target: target)
         if let next { registerHotkey(spec: next, id: GlobalHotkey.next.rawValue, signature: signature, target: target) }
         if let previous { registerHotkey(spec: previous, id: GlobalHotkey.previous.rawValue, signature: signature, target: target) }
-        if let tooltipSpec = tooltipShortcutSpec {
-            registerHotkey(spec: tooltipSpec, id: GlobalHotkey.tooltip.rawValue, signature: signature, target: target)
-        }
         if let openEditorShortcutSpec {
             registerHotkey(spec: openEditorShortcutSpec, id: GlobalHotkey.openEditor.rawValue, signature: signature, target: target)
         }
@@ -5882,7 +5865,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         case .toggle: toggleWindowFromHotkey()
         case .next: if NSApp.isActive { selectNextVisibleWorkspace() } else { focusGlobalWindowNavigation(direction: 1) }
         case .previous: if NSApp.isActive { selectPreviousVisibleWorkspace() } else { focusGlobalWindowNavigation(direction: -1) }
-        case .tooltip: toggleTooltipDisplay()
         case .openEditor: openGlobalEditorFromHotkey()
         }
     }
@@ -5899,119 +5881,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         return nil
     }
 
-    private func toggleTooltipDisplay() {
-        if let tooltipWindow, tooltipWindow.isVisible {
-            dismissTooltipOverlay()
-            return
-        }
-        showTooltipOverlayIfHidden()
-    }
-
-    private func refreshTooltipOverlay() {
-        dismissTooltipOverlay()
-        showTooltipOverlayIfHidden()
-    }
-
-    private func dismissTooltipOverlay() {
-        guard let tooltipWindow else { return }
-        tooltipWindow.orderOut(nil)
-        self.tooltipWindow = nil
-    }
-
-    private func showTooltipOverlayIfHidden() {
-        if let tooltipWindow, tooltipWindow.isVisible { return }
-
-        guard let focusedWorkspaceID = try? orchestrator.workspaceIDForFocusedWindow() else { return }
-        guard let workspace = try? orchestrator.store.workspace(id: focusedWorkspaceID) else { return }
-        let tooltip = workspace.tooltip?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        let hasTooltipBody = !tooltip.isEmpty
-        let toggleHint = "Press \(shortcutHint(for: .guiTooltipShortcut)) to hide"
-
-        guard let screen = NSScreen.main else { return }
-        let screenFrame = screen.frame
-
-        let titleField = NSTextField(labelWithString: workspace.name)
-        titleField.font = .systemFont(ofSize: 22, weight: .semibold)
-        titleField.textColor = .white
-        titleField.alignment = .center
-        titleField.lineBreakMode = .byTruncatingTail
-        titleField.maximumNumberOfLines = 1
-
-        let bodyField = NSTextField(labelWithString: tooltip)
-        bodyField.font = .systemFont(ofSize: 17, weight: .regular)
-        bodyField.textColor = NSColor.white.withAlphaComponent(0.92)
-        bodyField.alignment = .center
-        bodyField.lineBreakMode = .byWordWrapping
-        bodyField.maximumNumberOfLines = 0
-
-        let hintField = NSTextField(labelWithString: toggleHint)
-        hintField.font = .systemFont(ofSize: 12, weight: .medium)
-        hintField.textColor = NSColor.white.withAlphaComponent(0.75)
-        hintField.alignment = .center
-        hintField.lineBreakMode = .byTruncatingTail
-        hintField.maximumNumberOfLines = 1
-
-        let maxWidth: CGFloat = 640
-        let horizontalPadding: CGFloat = 40
-        let verticalPadding: CGFloat = 32
-        let titleToBodySpacing: CGFloat = 12
-        let bodyToHintSpacing: CGFloat = 14
-
-        titleField.preferredMaxLayoutWidth = maxWidth - horizontalPadding * 2
-        titleField.sizeToFit()
-        if hasTooltipBody {
-            bodyField.preferredMaxLayoutWidth = maxWidth - horizontalPadding * 2
-            bodyField.sizeToFit()
-        } else {
-            bodyField.frame = .zero
-        }
-        hintField.preferredMaxLayoutWidth = maxWidth - horizontalPadding * 2
-        hintField.sizeToFit()
-
-        let contentWidth = max(titleField.frame.width, bodyField.frame.width, hintField.frame.width) + horizontalPadding * 2
-        let contentHeight: CGFloat
-        if hasTooltipBody {
-            contentHeight =
-                titleField.frame.height + titleToBodySpacing + bodyField.frame.height + bodyToHintSpacing + hintField.frame.height + verticalPadding
-                * 2
-        } else {
-            contentHeight = titleField.frame.height + bodyToHintSpacing + hintField.frame.height + verticalPadding * 2
-        }
-        let contentView = NSView(frame: NSRect(x: 0, y: 0, width: contentWidth, height: contentHeight))
-        contentView.wantsLayer = true
-        contentView.layer?.backgroundColor = NSColor.black.cgColor
-        contentView.layer?.cornerRadius = UIRadius.large
-
-        let titleX = (contentWidth - titleField.frame.width) / 2
-        let bodyX = (contentWidth - bodyField.frame.width) / 2
-        let hintX = (contentWidth - hintField.frame.width) / 2
-        let hintY = verticalPadding
-        let bodyY = hintY + hintField.frame.height + bodyToHintSpacing
-        let titleY: CGFloat
-        if hasTooltipBody { titleY = bodyY + bodyField.frame.height + titleToBodySpacing } else { titleY = bodyY }
-
-        titleField.frame.origin = NSPoint(x: titleX, y: titleY)
-        if hasTooltipBody { bodyField.frame.origin = NSPoint(x: bodyX, y: bodyY) }
-        hintField.frame.origin = NSPoint(x: hintX, y: hintY)
-        contentView.addSubview(titleField)
-        if hasTooltipBody { contentView.addSubview(bodyField) }
-        contentView.addSubview(hintField)
-
-        let windowWidth = contentView.frame.width
-        let windowHeight = contentView.frame.height
-        let windowX = screenFrame.origin.x + (screenFrame.width - windowWidth) / 2
-        let windowY = screenFrame.origin.y + (screenFrame.height - windowHeight) / 2
-
-        let window = NSWindow(
-            contentRect: NSRect(x: windowX, y: windowY, width: windowWidth, height: windowHeight), styleMask: [.borderless], backing: .buffered,
-            defer: false)
-        window.backgroundColor = .clear
-        window.isOpaque = false
-        window.hasShadow = true
-        window.level = .floating
-        window.contentView = contentView
-        window.makeKeyAndOrderFront(nil)
-        self.tooltipWindow = window
+    nonisolated static func activationWorkspaceID(focusedWorkspaceID: String?, selectedWorkspaceID: String?) -> String? {
+        focusedWorkspaceID ?? selectedWorkspaceID
     }
 
     private func loadShortcutSpecs() {
@@ -6031,7 +5902,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         openTerminalShortcutSpec = loadShortcutSpec(setting: .guiOpenTerminalShortcut)
         openFinderShortcutSpec = loadShortcutSpec(setting: .guiOpenFinderShortcut)
         openSettingsShortcutSpec = loadShortcutSpec(setting: .guiOpenSettingsShortcut)
-        tooltipShortcutSpec = loadShortcutSpec(setting: .guiTooltipShortcut)
         windowShortcutSpec = loadShortcutSpec(setting: .guiWindowShortcut)
         windowSequenceShortcutSpec = loadShortcutSpec(setting: .guiWindowSequenceShortcut)
         refreshWorkspaceShortcutFooterRow()
@@ -6056,7 +5926,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         case .guiOpenTerminalShortcut: return try orchestrator.guiOpenTerminalShortcut()
         case .guiOpenFinderShortcut: return try orchestrator.guiOpenFinderShortcut()
         case .guiOpenSettingsShortcut: return try orchestrator.guiOpenSettingsShortcut()
-        case .guiTooltipShortcut: return try orchestrator.guiTooltipShortcut()
         case .guiWindowShortcut: return try orchestrator.guiWindowShortcut()
         case .guiWindowSequenceShortcut: return try orchestrator.guiWindowSequenceShortcut()
         }
@@ -6076,7 +5945,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         case .guiOpenTerminalShortcut: try orchestrator.setGUIOpenTerminalShortcut(value)
         case .guiOpenFinderShortcut: try orchestrator.setGUIOpenFinderShortcut(value)
         case .guiOpenSettingsShortcut: try orchestrator.setGUIOpenSettingsShortcut(value)
-        case .guiTooltipShortcut: try orchestrator.setGUITooltipShortcut(value)
         case .guiWindowShortcut: try orchestrator.setGUIWindowShortcut(value)
         case .guiWindowSequenceShortcut: try orchestrator.setGUIWindowSequenceShortcut(value)
         }
@@ -6096,7 +5964,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         case .guiOpenTerminalShortcut: return openTerminalShortcutSpec
         case .guiOpenFinderShortcut: return openFinderShortcutSpec
         case .guiOpenSettingsShortcut: return openSettingsShortcutSpec
-        case .guiTooltipShortcut: return tooltipShortcutSpec
         case .guiWindowShortcut: return windowShortcutSpec
         case .guiWindowSequenceShortcut: return windowSequenceShortcutSpec
         }
@@ -6264,7 +6131,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let hideDelay = Self.hideDelayAfterSuccessfulExternalWindowAction(true, action: action)
         guard hideDelay != nil || Self.shouldHideAfterSuccessfulExternalWindowAction(true, action: action) else { return }
         deferredExternalWindowHideTask?.cancel()
-        dismissTooltipOverlay()
         if let hideDelay {
             deferredExternalWindowHideTask = Task { @MainActor [weak self] in
                 try? await Task.sleep(for: hideDelay)
@@ -6367,13 +6233,14 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             NSApp.hide(nil)
             return
         }
+        let focusedWorkspaceID = try? orchestrator.workspaceIDForFocusedWindow()
         NSApp.activate(ignoringOtherApps: true)
         NSApp.unhide(nil)
         if window.isMiniaturized { window.deminiaturize(nil) }
         prepareWindowForActiveSpaceSummon(window)
         window.orderFrontRegardless()
         window.makeKey()
-        scheduleDeferredHotkeySelectionRefresh()
+        scheduleDeferredHotkeySelectionRefresh(focusedWorkspaceID: focusedWorkspaceID ?? nil)
     }
 
     private func prepareWindowForActiveSpaceSummon(_ window: NSWindow) {
@@ -6399,14 +6266,26 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         return updated
     }
 
-    private func scheduleDeferredHotkeySelectionRefresh() {
+    private func scheduleDeferredHotkeySelectionRefresh(focusedWorkspaceID: String?) {
         deferredHotkeySelectionRefreshTask?.cancel()
-        guard selectedWorkspaceID != nil else { return }
         deferredHotkeySelectionRefreshTask = Task { @MainActor [weak self] in
             await Task.yield()
             guard let self, !Task.isCancelled else { return }
-            self.refreshSelection()
+            self.refreshWorkspaceSelectionForActivation(focusedWorkspaceID: focusedWorkspaceID)
         }
+    }
+
+    private func refreshWorkspaceSelectionForActivation(focusedWorkspaceID: String?) {
+        let targetWorkspaceID = Self.activationWorkspaceID(
+            focusedWorkspaceID: focusedWorkspaceID,
+            selectedWorkspaceID: selectedWorkspaceID)
+        guard let targetWorkspaceID else { return }
+        guard let (_, workspace) = findWorkspace(id: targetWorkspaceID) else { return }
+        if selectedWorkspaceID == targetWorkspaceID, !showingDashboard, !showingSettings {
+            refreshSelection()
+            return
+        }
+        selectWorkspace(workspace)
     }
 
     public func outlineView(_ outlineView: NSOutlineView, numberOfChildrenOfItem item: Any?) -> Int {

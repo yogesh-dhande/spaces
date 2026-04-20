@@ -89,7 +89,6 @@ struct SettingsSnapshot: Encodable {
     let guiOpenTerminalShortcut: String
     let guiOpenFinderShortcut: String
     let guiOpenSettingsShortcut: String
-    let guiTooltipShortcut: String
     let guiWindowShortcut: String
     let guiWindowSequenceShortcut: String
     let windowFocusPulseColor: String
@@ -118,7 +117,6 @@ extension SettingsSnapshot {
             guiOpenTerminalShortcut: try orchestrator.guiOpenTerminalShortcut(),
             guiOpenFinderShortcut: try orchestrator.guiOpenFinderShortcut(),
             guiOpenSettingsShortcut: try orchestrator.guiOpenSettingsShortcut(),
-            guiTooltipShortcut: try orchestrator.guiTooltipShortcut(),
             guiWindowShortcut: try orchestrator.guiWindowShortcut(),
             guiWindowSequenceShortcut: try orchestrator.guiWindowSequenceShortcut(),
             windowFocusPulseColor: pulseColorValue,

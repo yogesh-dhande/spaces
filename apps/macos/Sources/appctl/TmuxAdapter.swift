@@ -7,7 +7,7 @@ open class TmuxAdapter: @unchecked Sendable {
 
     open func isAvailable() -> Bool { (try? Shell.runAndCapture(["tmux", "-V"])) != nil }
 
-    open func hasSession(named sessionName: String) -> Bool { (try? Shell.run(["tmux", "has-session", "-t", sessionName])) == 0 }
+    open func hasSession(named sessionName: String) -> Bool { (try? Shell.runAndCapture(["tmux", "has-session", "-t", sessionName])) != nil }
 
     open func killSession(named sessionName: String) throws { _ = try Shell.run(["tmux", "kill-session", "-t", sessionName]) }
 

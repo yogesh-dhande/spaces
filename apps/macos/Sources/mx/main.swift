@@ -392,7 +392,6 @@ struct CLI {
             let normalizedImportDir = normalizePath(dir)
             let workspace: WorkspaceRecord
             if let existing = try orchestrator.store.workspace(dir: normalizedImportDir), !existing.isArchived {
-                // Workspace already exists — update title/tooltip in place.
                 if title != nil || tooltip != nil {
                     try orchestrator.updateWorkspaceMetadata(workspaceID: existing.id, title: title, tooltip: tooltip != nil ? .some(tooltip) : nil)
                 }
@@ -487,10 +486,6 @@ struct CLI {
             let id = try workspaceID(orchestrator: orchestrator)
             let shouldRestartIfRunning = args.contains("--force-restart")
             let shouldFocus = args.contains("--focus")
-            let tooltipFlagPresent = args.contains("--tooltip")
-            if let tooltip = optionalValueAllowingMissingValue(for: "--tooltip") {
-                try orchestrator.updateWorkspaceTooltip(workspaceID: id, tooltip: tooltip)
-            }
             try orchestrator.upWorkspace(workspaceID: id, restartIfRunning: shouldRestartIfRunning, background: !shouldFocus)
             if shouldFocus { try orchestrator.focusWorkspace(workspaceID: id) }
             guard let workspace = try orchestrator.store.workspace(id: id) else {
@@ -499,7 +494,6 @@ struct CLI {
             try output.emit(
                 text: "Workspace is running \(id)",
                 json: MutationResultPayload(message: "Workspace is running.", resource: workspace))
-            if tooltipFlagPresent { requestTooltipOverlayDisplay() }
         case "stop":
             let id = try workspaceID(orchestrator: orchestrator)
             let outcome = try orchestrator.stopWorkspace(workspaceID: id)
@@ -883,8 +877,6 @@ struct CLI {
                 try output.emit(text: "gui-open-finder-shortcut\t\(snapshot.guiOpenFinderShortcut)", json: SettingValuePayload(name: "gui-open-finder-shortcut", value: snapshot.guiOpenFinderShortcut))
             } else if args.contains("--gui-open-settings-shortcut") {
                 try output.emit(text: "gui-open-settings-shortcut\t\(snapshot.guiOpenSettingsShortcut)", json: SettingValuePayload(name: "gui-open-settings-shortcut", value: snapshot.guiOpenSettingsShortcut))
-            } else if args.contains("--gui-tooltip-shortcut") {
-                try output.emit(text: "gui-tooltip-shortcut\t\(snapshot.guiTooltipShortcut)", json: SettingValuePayload(name: "gui-tooltip-shortcut", value: snapshot.guiTooltipShortcut))
             } else if args.contains("--gui-window-shortcut") {
                 try output.emit(text: "gui-window-shortcut\t\(snapshot.guiWindowShortcut)", json: SettingValuePayload(name: "gui-window-shortcut", value: snapshot.guiWindowShortcut))
             } else if args.contains("--gui-window-sequence-shortcut") {
@@ -895,10 +887,10 @@ struct CLI {
                 try output.emit(text: "window-focus-pulse-enabled\t\(snapshot.windowFocusPulseEnabled ? "1" : "0")", json: SettingValuePayload(name: "window-focus-pulse-enabled", value: snapshot.windowFocusPulseEnabled ? "1" : "0"))
             } else {
                 throw NSError(
-                    domain: "mx.cli", code: 2,
-                    userInfo: [
-                        NSLocalizedDescriptionKey:
-                            "Missing setting flag. Use: settings get --all|--editor|--terminal-host|--port-range|--gui-hotkey|--gui-leader-hotkey|--gui-dashboard-shortcut|--gui-add-project-shortcut|--gui-add-workspace-shortcut|--gui-reload-shortcut|--gui-next-shortcut|--gui-prev-shortcut|--gui-open-editor-shortcut|--gui-open-terminal-shortcut|--gui-open-finder-shortcut|--gui-open-settings-shortcut|--gui-tooltip-shortcut|--gui-window-shortcut|--gui-window-sequence-shortcut|--window-focus-pulse-color|--window-focus-pulse-enabled"
+                        domain: "mx.cli", code: 2,
+                        userInfo: [
+                            NSLocalizedDescriptionKey:
+                            "Missing setting flag. Use: settings get --all|--editor|--terminal-host|--port-range|--gui-hotkey|--gui-leader-hotkey|--gui-dashboard-shortcut|--gui-add-project-shortcut|--gui-add-workspace-shortcut|--gui-reload-shortcut|--gui-next-shortcut|--gui-prev-shortcut|--gui-open-editor-shortcut|--gui-open-terminal-shortcut|--gui-open-finder-shortcut|--gui-open-settings-shortcut|--gui-window-shortcut|--gui-window-sequence-shortcut|--window-focus-pulse-color|--window-focus-pulse-enabled"
                     ])
             }
 
@@ -982,11 +974,6 @@ struct CLI {
                 let spec = try HotkeySpec.parse(raw)
                 try orchestrator.setGUIOpenSettingsShortcut(spec.normalized)
                 try output.emit(text: "Updated gui-open-settings-shortcut\t\(spec.normalized)", json: SettingValuePayload(name: "gui-open-settings-shortcut", value: spec.normalized))
-            } else if let raw = optionalValue(for: "--gui-tooltip-shortcut") {
-                let spec = try HotkeySpec.parse(raw)
-                try orchestrator.setGUITooltipShortcut(spec.normalized)
-                let value = try orchestrator.guiTooltipShortcut()
-                try output.emit(text: "Updated gui-tooltip-shortcut\t\(value)", json: SettingValuePayload(name: "gui-tooltip-shortcut", value: value))
             } else if let raw = optionalValue(for: "--gui-window-shortcut") {
                 let spec = try HotkeySpec.parse(raw)
                 try orchestrator.setGUIWindowShortcut(spec.normalized)
@@ -1014,10 +1001,10 @@ struct CLI {
                 try output.emit(text: "Updated window-focus-pulse-enabled\t\(raw)", json: SettingValuePayload(name: "window-focus-pulse-enabled", value: raw))
             } else {
                 throw NSError(
-                    domain: "mx.cli", code: 2,
-                    userInfo: [
-                        NSLocalizedDescriptionKey:
-                            "Missing setting flag/value. Use: settings set --editor <value>|--terminal-host <iterm2|ghostty>|--port-range <start>-<end>|--gui-hotkey <spec>|--gui-leader-hotkey <modifiers>|--gui-dashboard-shortcut <spec>|--gui-add-project-shortcut <spec>|--gui-add-workspace-shortcut <spec>|--gui-reload-shortcut <spec>|--gui-next-shortcut <spec>|--gui-prev-shortcut <spec>|--gui-open-editor-shortcut <spec>|--gui-open-terminal-shortcut <spec>|--gui-open-finder-shortcut <spec>|--gui-open-settings-shortcut <spec>|--gui-tooltip-shortcut <spec>|--gui-window-shortcut <spec>|--gui-window-sequence-shortcut <spec>|--window-focus-pulse-color <r,g,b>|--window-focus-pulse-enabled <0|1>"
+                        domain: "mx.cli", code: 2,
+                        userInfo: [
+                            NSLocalizedDescriptionKey:
+                            "Missing setting flag/value. Use: settings set --editor <value>|--terminal-host <iterm2|ghostty>|--port-range <start>-<end>|--gui-hotkey <spec>|--gui-leader-hotkey <modifiers>|--gui-dashboard-shortcut <spec>|--gui-add-project-shortcut <spec>|--gui-add-workspace-shortcut <spec>|--gui-reload-shortcut <spec>|--gui-next-shortcut <spec>|--gui-prev-shortcut <spec>|--gui-open-editor-shortcut <spec>|--gui-open-terminal-shortcut <spec>|--gui-open-finder-shortcut <spec>|--gui-open-settings-shortcut <spec>|--gui-window-shortcut <spec>|--gui-window-sequence-shortcut <spec>|--window-focus-pulse-color <r,g,b>|--window-focus-pulse-enabled <0|1>"
                     ])
             }
 
@@ -1063,10 +1050,6 @@ struct CLI {
             } else if args.contains("--gui-open-settings-shortcut") {
                 try orchestrator.setGUIOpenSettingsShortcut(nil)
                 try output.emit(text: "Reset gui-open-settings-shortcut\t\(SettingsKey.defaultGUIOpenSettingsShortcut)", json: SettingValuePayload(name: "gui-open-settings-shortcut", value: SettingsKey.defaultGUIOpenSettingsShortcut))
-            } else if args.contains("--gui-tooltip-shortcut") {
-                try orchestrator.setGUITooltipShortcut(nil)
-                let value = try orchestrator.guiTooltipShortcut()
-                try output.emit(text: "Reset gui-tooltip-shortcut\t\(value)", json: SettingValuePayload(name: "gui-tooltip-shortcut", value: value))
             } else if args.contains("--gui-window-shortcut") {
                 try orchestrator.setGUIWindowShortcut(nil)
                 try output.emit(text: "Reset gui-window-shortcut\t\(SettingsKey.defaultGUIWindowShortcut)", json: SettingValuePayload(name: "gui-window-shortcut", value: SettingsKey.defaultGUIWindowShortcut))
@@ -1092,10 +1075,10 @@ struct CLI {
                 try output.emit(text: "Reset port-range\t20000-30000", json: SettingValuePayload(name: "port-range", value: "20000-30000"))
             } else {
                 throw NSError(
-                    domain: "mx.cli", code: 2,
-                    userInfo: [
-                        NSLocalizedDescriptionKey:
-                            "Missing setting flag. Use: settings reset --editor|--terminal-host|--port-range|--gui-hotkey|--gui-leader-hotkey|--gui-dashboard-shortcut|--gui-add-project-shortcut|--gui-add-workspace-shortcut|--gui-reload-shortcut|--gui-next-shortcut|--gui-prev-shortcut|--gui-open-editor-shortcut|--gui-open-terminal-shortcut|--gui-open-finder-shortcut|--gui-open-settings-shortcut|--gui-tooltip-shortcut|--gui-window-shortcut|--gui-window-sequence-shortcut|--window-focus-pulse-color|--window-focus-pulse-enabled"
+                        domain: "mx.cli", code: 2,
+                        userInfo: [
+                            NSLocalizedDescriptionKey:
+                            "Missing setting flag. Use: settings reset --editor|--terminal-host|--port-range|--gui-hotkey|--gui-leader-hotkey|--gui-dashboard-shortcut|--gui-add-project-shortcut|--gui-add-workspace-shortcut|--gui-reload-shortcut|--gui-next-shortcut|--gui-prev-shortcut|--gui-open-editor-shortcut|--gui-open-terminal-shortcut|--gui-open-finder-shortcut|--gui-open-settings-shortcut|--gui-window-shortcut|--gui-window-sequence-shortcut|--window-focus-pulse-color|--window-focus-pulse-enabled"
                     ])
             }
 
@@ -1314,11 +1297,6 @@ struct CLI {
         fireAgentEventNotification()
     }
 
-    private func requestTooltipOverlayDisplay() {
-        DistributedNotificationCenter.default().postNotificationName(
-            IPCNotification.showTooltipOverlay, object: nil, userInfo: nil, options: [.deliverImmediately])
-    }
-
     private func normalizePath(_ path: String) -> String { URL(fileURLWithPath: path).resolvingSymlinksInPath().standardizedFileURL.path }
 
     private func printHelp() {
@@ -1331,9 +1309,9 @@ struct CLI {
               mx discover
               mx dashboard [--json]
 
-              mx settings get --all|--editor|--terminal-host|--port-range|--gui-hotkey|--gui-leader-hotkey|--gui-dashboard-shortcut|--gui-add-project-shortcut|--gui-add-workspace-shortcut|--gui-reload-shortcut|--gui-next-shortcut|--gui-prev-shortcut|--gui-open-editor-shortcut|--gui-open-terminal-shortcut|--gui-open-finder-shortcut|--gui-open-settings-shortcut|--gui-tooltip-shortcut|--gui-window-shortcut|--gui-window-sequence-shortcut|--window-focus-pulse-color|--window-focus-pulse-enabled
-              mx settings set --editor none|vscode|cursor|windsurf|vim|--terminal-host iterm2|ghostty|--port-range <start>-<end>|--gui-hotkey <spec>|--gui-leader-hotkey <modifiers>|--gui-dashboard-shortcut <spec>|--gui-add-project-shortcut <spec>|--gui-add-workspace-shortcut <spec>|--gui-reload-shortcut <spec>|--gui-next-shortcut <spec>|--gui-prev-shortcut <spec>|--gui-open-editor-shortcut <spec>|--gui-open-terminal-shortcut <spec>|--gui-open-finder-shortcut <spec>|--gui-open-settings-shortcut <spec>|--gui-tooltip-shortcut <spec>|--gui-window-shortcut <spec>|--gui-window-sequence-shortcut <spec>|--window-focus-pulse-color <r,g,b>|--window-focus-pulse-enabled <0|1>
-              mx settings reset --editor|--terminal-host|--port-range|--gui-hotkey|--gui-leader-hotkey|--gui-dashboard-shortcut|--gui-add-project-shortcut|--gui-add-workspace-shortcut|--gui-reload-shortcut|--gui-next-shortcut|--gui-prev-shortcut|--gui-open-editor-shortcut|--gui-open-terminal-shortcut|--gui-open-finder-shortcut|--gui-open-settings-shortcut|--gui-tooltip-shortcut|--gui-window-shortcut|--gui-window-sequence-shortcut|--window-focus-pulse-color|--window-focus-pulse-enabled
+              mx settings get --all|--editor|--terminal-host|--port-range|--gui-hotkey|--gui-leader-hotkey|--gui-dashboard-shortcut|--gui-add-project-shortcut|--gui-add-workspace-shortcut|--gui-reload-shortcut|--gui-next-shortcut|--gui-prev-shortcut|--gui-open-editor-shortcut|--gui-open-terminal-shortcut|--gui-open-finder-shortcut|--gui-open-settings-shortcut|--gui-window-shortcut|--gui-window-sequence-shortcut|--window-focus-pulse-color|--window-focus-pulse-enabled
+              mx settings set --editor none|vscode|cursor|windsurf|vim|--terminal-host iterm2|ghostty|--port-range <start>-<end>|--gui-hotkey <spec>|--gui-leader-hotkey <modifiers>|--gui-dashboard-shortcut <spec>|--gui-add-project-shortcut <spec>|--gui-add-workspace-shortcut <spec>|--gui-reload-shortcut <spec>|--gui-next-shortcut <spec>|--gui-prev-shortcut <spec>|--gui-open-editor-shortcut <spec>|--gui-open-terminal-shortcut <spec>|--gui-open-finder-shortcut <spec>|--gui-open-settings-shortcut <spec>|--gui-window-shortcut <spec>|--gui-window-sequence-shortcut <spec>|--window-focus-pulse-color <r,g,b>|--window-focus-pulse-enabled <0|1>
+              mx settings reset --editor|--terminal-host|--port-range|--gui-hotkey|--gui-leader-hotkey|--gui-dashboard-shortcut|--gui-add-project-shortcut|--gui-add-workspace-shortcut|--gui-reload-shortcut|--gui-next-shortcut|--gui-prev-shortcut|--gui-open-editor-shortcut|--gui-open-terminal-shortcut|--gui-open-finder-shortcut|--gui-open-settings-shortcut|--gui-window-shortcut|--gui-window-sequence-shortcut|--window-focus-pulse-color|--window-focus-pulse-enabled
 
               mx project list
               mx project get --dir <path>
@@ -1361,7 +1339,7 @@ struct CLI {
               mx workspace update [--dir <path>] [--title <title>] [--branch <branch>] [--directory-name <name>|--dirname <name>|--dir-name <name>] [--tooltip <text>|--clear-tooltip] [--active|--inactive]
               mx workspace launch [--dir <path>]
               mx workspace restart [--dir <path>]
-              mx workspace up [--dir <path>] [--force-restart] [--focus] [--tooltip [<text>]]
+              mx workspace up [--dir <path>] [--force-restart] [--focus]
               mx workspace stop [--dir <path>]
               mx workspace archive [--dir <path>]
               mx workspace focus [--dir <path>] --window <index>
@@ -1397,7 +1375,6 @@ struct CLI {
               - GUI window focus shortcuts use the configured direct-focus modifier plus digits 1 through 9 when the GUI is focused.
               - GUI queued window focus uses the configured sequence modifier plus digits 1 through 9 and replays them in order on modifier release.
               - GUI window cycle shortcuts are global and keep working when the GUI is not focused.
-              - GUI tooltip shortcut is global and toggles the focused workspace tooltip for tracked workspace/agent windows.
               - Each browser session, process, and coding agent uses its own dedicated top-level window.
               - Workspace focus and cycling use tracked yabai window IDs directly; missing browser windows are marked stale for later recovery.
               - Diagnostics: DEBUG=1 logs full workspace-cycle timing plus direct browser/window focus-path timing for dedicated-window focus flows.

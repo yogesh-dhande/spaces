@@ -15,7 +15,6 @@ extension AppKitController {
         case guiOpenTerminalShortcut
         case guiOpenFinderShortcut
         case guiOpenSettingsShortcut
-        case guiTooltipShortcut
         case guiWindowShortcut
         case guiWindowSequenceShortcut
 
@@ -33,14 +32,13 @@ extension AppKitController {
             case .guiOpenTerminalShortcut: return "Open terminal"
             case .guiOpenFinderShortcut: return "Open Finder"
             case .guiOpenSettingsShortcut: return "Open settings"
-            case .guiTooltipShortcut: return "Toggle tooltip"
             case .guiWindowShortcut: return "Focus window 1-9"
             case .guiWindowSequenceShortcut: return "Queue windows 1-9"
             }
         }
 
         static let settingsPanelCases: [ShortcutSetting] = [
-            .guiLeaderHotkey, .guiHotkey, .guiNextShortcut, .guiPreviousShortcut, .guiTooltipShortcut, .guiOpenEditorShortcut,
+            .guiLeaderHotkey, .guiHotkey, .guiNextShortcut, .guiPreviousShortcut, .guiOpenEditorShortcut,
             .guiDashboardShortcut,
             .guiAddProjectShortcut, .guiAddWorkspaceShortcut, .guiReloadShortcut, .guiOpenTerminalShortcut, .guiOpenFinderShortcut,
             .guiOpenSettingsShortcut, .guiWindowShortcut, .guiWindowSequenceShortcut,
@@ -48,7 +46,7 @@ extension AppKitController {
 
         var usesLeader: Bool {
             switch self {
-            case .guiDashboardShortcut, .guiNextShortcut, .guiPreviousShortcut, .guiOpenEditorShortcut, .guiOpenFinderShortcut, .guiTooltipShortcut,
+            case .guiDashboardShortcut, .guiNextShortcut, .guiPreviousShortcut, .guiOpenEditorShortcut, .guiOpenFinderShortcut,
                 .guiReloadShortcut, .guiWindowSequenceShortcut:
                 return true
             default:
@@ -84,7 +82,6 @@ extension AppKitController {
             case .guiOpenTerminalShortcut: return SettingsKey.guiOpenTerminalShortcut
             case .guiOpenFinderShortcut: return SettingsKey.guiOpenFinderShortcut
             case .guiOpenSettingsShortcut: return SettingsKey.guiOpenSettingsShortcut
-            case .guiTooltipShortcut: return SettingsKey.guiTooltipShortcut
             case .guiWindowShortcut: return SettingsKey.guiWindowShortcut
             case .guiWindowSequenceShortcut: return SettingsKey.guiWindowSequenceShortcut
             }
@@ -104,7 +101,6 @@ extension AppKitController {
             case .guiOpenTerminalShortcut: return SettingsKey.defaultGUIOpenTerminalShortcut
             case .guiOpenFinderShortcut: return SettingsKey.defaultGUIOpenFinderShortcut
             case .guiOpenSettingsShortcut: return SettingsKey.defaultGUIOpenSettingsShortcut
-            case .guiTooltipShortcut: return SettingsKey.defaultGUITooltipShortcut
             case .guiWindowShortcut: return SettingsKey.defaultGUIWindowShortcut
             case .guiWindowSequenceShortcut: return SettingsKey.defaultGUIWindowSequenceShortcut
             }
@@ -124,7 +120,6 @@ extension AppKitController {
             case SettingsKey.guiOpenTerminalShortcut: self = .guiOpenTerminalShortcut
             case SettingsKey.guiOpenFinderShortcut: self = .guiOpenFinderShortcut
             case SettingsKey.guiOpenSettingsShortcut: self = .guiOpenSettingsShortcut
-            case SettingsKey.guiTooltipShortcut: self = .guiTooltipShortcut
             case SettingsKey.guiWindowShortcut: self = .guiWindowShortcut
             case SettingsKey.guiWindowSequenceShortcut: self = .guiWindowSequenceShortcut
             default: return nil

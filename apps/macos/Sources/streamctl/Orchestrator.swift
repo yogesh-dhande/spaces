@@ -2433,14 +2433,6 @@ public final class MuxyOrchestrator {
         try store.setSetting(key: SettingsKey.guiPreviousShortcut, value: try normalizeLeaderBackedShortcut(raw))
     }
 
-    public func guiTooltipShortcut() throws -> String {
-        try effectiveLeaderBackedShortcut(settingKey: SettingsKey.guiTooltipShortcut, defaultValue: SettingsKey.defaultGUITooltipShortcut)
-    }
-
-    public func setGUITooltipShortcut(_ raw: String?) throws {
-        try store.setSetting(key: SettingsKey.guiTooltipShortcut, value: try normalizeLeaderBackedShortcut(raw))
-    }
-
     public func guiWindowShortcut() throws -> String {
         try store.setting(key: SettingsKey.guiWindowShortcut) ?? SettingsKey.defaultGUIWindowShortcut
     }
