@@ -35,11 +35,15 @@ final class SetupManager: NSObject {
     // "service running" and "accessibility granted" cannot be detected independently.
     private let steps: [SetupStep] = [
         SetupStep(
-            ids: [.iterm2Installed],
+            ids: [.terminalInstalled],
             icon: "terminal",
             title: "Install a terminal",
-            body: "Muxy opens terminal processes in iTerm2 or Ghostty.",
-            action: .openURL(URL(string: "https://ghostty.org/")!)
+            body: "Muxy opens terminal processes in iTerm2 or Ghostty. If neither is installed, install Ghostty with Homebrew or from the Ghostty website.",
+            action: .commandAndURL(
+                command: "brew install --cask ghostty",
+                url: URL(string: "https://ghostty.org/")!,
+                urlLabel: "Open Ghostty Website"
+            )
         ),
         SetupStep(
             ids: [.tmuxInstalled],
@@ -374,7 +378,7 @@ final class SetupManager: NSObject {
 
             let actionTitle: String
             switch step.ids.first {
-            case .iterm2Installed: actionTitle = "Download Ghostty"
+            case .terminalInstalled: actionTitle = "Download Ghostty"
             default: actionTitle = "Open System Settings"
             }
             let openBtn = NSButton(title: actionTitle, target: self, action: #selector(openURLPressed(_:)))

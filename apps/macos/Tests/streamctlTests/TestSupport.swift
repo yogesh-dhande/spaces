@@ -9,10 +9,10 @@ func makeTempDirectory() throws -> URL {
     return base
 }
 
-func makeTemporaryStore() throws -> SQLiteStore {
+func makeTemporaryStore(defaultTerminalHostResolver: @escaping @Sendable () -> TerminalHost = { .iterm2 }) throws -> SQLiteStore {
     let dir = try makeTempDirectory()
     let dbURL = dir.appendingPathComponent("muxy-test.db")
-    return try SQLiteStore(path: dbURL.path)
+    return try SQLiteStore(path: dbURL.path, defaultTerminalHostResolver: defaultTerminalHostResolver)
 }
 
 func makeProjectRecord(id: String = UUID().uuidString, dir: String) -> ProjectRecord {

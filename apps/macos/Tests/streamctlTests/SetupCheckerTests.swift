@@ -6,32 +6,32 @@ final class SetupCheckerTests: XCTestCase {
 
     // MARK: - iTerm2 check
 
-    // Tests isIterm2Installed returns true when iTerm2 adapter reports availability.
-    func testIsIterm2Installed_available() {
+    // Tests terminalInstalled returns true when iTerm2 adapter reports availability.
+    func testTerminalInstalled_available() {
         let mock = MockAvailableIterm2()
         mock.availableResult = true
         let checker = SetupChecker(iterm2: mock, ghostty: MockAvailableGhostty())
-        XCTAssertTrue(checker.run(.iterm2Installed))
+        XCTAssertTrue(checker.run(.terminalInstalled))
     }
 
-    // Tests isIterm2Installed returns false when iTerm2 adapter reports unavailability.
-    func testIsIterm2Installed_unavailable() {
+    // Tests terminalInstalled returns false when both supported terminal adapters report unavailability.
+    func testTerminalInstalled_unavailable() {
         let mock = MockAvailableIterm2()
         mock.availableResult = false
         let ghostty = MockAvailableGhostty()
         ghostty.availableResult = false
         let checker = SetupChecker(iterm2: mock, ghostty: ghostty)
-        XCTAssertFalse(checker.run(.iterm2Installed))
+        XCTAssertFalse(checker.run(.terminalInstalled))
     }
 
     // Tests the terminal prerequisite passes when Ghostty is available even if iTerm2 is not.
-    func testIsIterm2Installed_passesWhenGhosttyAvailable() {
+    func testTerminalInstalled_passesWhenGhosttyAvailable() {
         let iterm = MockAvailableIterm2()
         iterm.availableResult = false
         let ghostty = MockAvailableGhostty()
         ghostty.availableResult = true
         let checker = SetupChecker(iterm2: iterm, ghostty: ghostty)
-        XCTAssertTrue(checker.run(.iterm2Installed))
+        XCTAssertTrue(checker.run(.terminalInstalled))
     }
 
     // MARK: - tmux check
@@ -184,7 +184,7 @@ final class SetupCheckerTests: XCTestCase {
         let checker = SetupChecker(iterm2: mock, ghostty: MockAvailableGhostty())
         let results = checker.runAll()
         XCTAssertFalse(results[0].passed)
-        XCTAssertEqual(results[0].id, .iterm2Installed)
+        XCTAssertEqual(results[0].id, .terminalInstalled)
         let firstFailIndex = results.firstIndex(where: { !$0.passed })
         XCTAssertEqual(firstFailIndex, 0)
     }
@@ -204,7 +204,7 @@ final class SetupCheckerTests: XCTestCase {
             tmux.availableResult = true
             let checker = SetupChecker(iterm2: mock, ghostty: MockAvailableGhostty(), tmux: tmux)
             let results = checker.runStartupBlockingChecks()
-            XCTAssertEqual(results.map(\.id), [.iterm2Installed, .tmuxInstalled, .yabaiInstalled])
+            XCTAssertEqual(results.map(\.id), [.terminalInstalled, .tmuxInstalled, .yabaiInstalled])
             XCTAssertTrue(results.allSatisfy(\.passed))
         }
     }

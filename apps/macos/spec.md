@@ -75,6 +75,7 @@ Muxy focuses those windows; it does not decide their geometry.
 
 ## Onboarding
 - On launch, Muxy blocks only on the cheap prerequisite checks: a supported terminal host installed (`iTerm2` or `Ghostty`), tmux installed, and yabai installed.
+- During first-run setup, either `iTerm2` or `Ghostty` satisfies the terminal prerequisite. If both are installed, Muxy should default the terminal host preference to `Ghostty`. If neither is installed, setup should direct the user to install `Ghostty` via Homebrew or the Ghostty website.
 - The slower yabai readiness step, including service-running and Accessibility validation, should be deferred until the setup flow is actually shown or another yabai-backed action needs it.
 - If a deferred yabai readiness check fails during startup, Muxy should switch into the setup flow at the yabai step instead of surfacing a raw shell error dialog.
 - If a blocking launch prerequisite fails, the main window shows a guided setup flow starting at the first failing step.

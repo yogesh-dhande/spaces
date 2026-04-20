@@ -4,7 +4,7 @@ private let setupProfileEnabled = ProcessInfo.processInfo.environment["MUXY_STAR
 
 /// Identifies each prerequisite check in display order.
 public enum SetupCheckID: String, CaseIterable, Sendable {
-    case iterm2Installed
+    case terminalInstalled
     case tmuxInstalled
     case yabaiInstalled
     case yabaiServiceRunning
@@ -26,7 +26,7 @@ public struct SetupCheckResult {
 /// Injecting custom adapter subclasses enables unit testing without real apps.
 public final class SetupChecker {
     public static var startupBlockingCheckIDs: [SetupCheckID] {
-        [.iterm2Installed, .tmuxInstalled, .yabaiInstalled]
+        [.terminalInstalled, .tmuxInstalled, .yabaiInstalled]
     }
 
     private let terminalAdapters: [any TerminalAdapter]
@@ -41,8 +41,8 @@ public final class SetupChecker {
     public func run(_ id: SetupCheckID) -> Bool {
         let startedAt = ProcessInfo.processInfo.systemUptime
         let passed = switch id {
-        case .iterm2Installed:
-            isIterm2Installed()
+        case .terminalInstalled:
+            isTerminalInstalled()
         case .tmuxInstalled:
             isTmuxInstalled()
         case .yabaiInstalled:
@@ -84,7 +84,7 @@ public final class SetupChecker {
 
     // MARK: - Individual checks
 
-    private func isIterm2Installed() -> Bool {
+    private func isTerminalInstalled() -> Bool {
         terminalAdapters.contains { $0.isAvailable() }
     }
 

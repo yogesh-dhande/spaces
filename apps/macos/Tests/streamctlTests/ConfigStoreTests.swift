@@ -13,6 +13,13 @@ final class AppConfigStoreTests: XCTestCase {
         XCTAssertEqual(config.portRange.end, 30000)
     }
 
+    // Tests first-run config prefers Ghostty when no terminal host setting has been saved yet.
+    func testDefaultsPreferGhosttyOnFirstRun() throws {
+        let store = try makeTemporaryStore(defaultTerminalHostResolver: { .ghostty })
+        let config = try store.appConfig()
+        XCTAssertEqual(config.terminalHost, .ghostty)
+    }
+
     // Tests round trip by arranging representative inputs and asserting the expected result.
     func testRoundTrip() throws {
         let store = try makeTemporaryStore()

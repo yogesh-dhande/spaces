@@ -7,12 +7,12 @@ import appctl
     @Test func startupSkipsDeferredYabaiFailure() {
         let manager = SetupManager(checker: MockSetupChecker(
             startupBlockingResults: [
-                .init(id: .iterm2Installed, passed: true),
+                .init(id: .terminalInstalled, passed: true),
                 .init(id: .tmuxInstalled, passed: true),
                 .init(id: .yabaiInstalled, passed: true),
             ],
             allResults: [
-                .init(id: .iterm2Installed, passed: true),
+                .init(id: .terminalInstalled, passed: true),
                 .init(id: .tmuxInstalled, passed: true),
                 .init(id: .yabaiInstalled, passed: true),
                 .init(id: .yabaiServiceRunning, passed: false),
@@ -32,12 +32,12 @@ import appctl
     @Test func deferredStartShowsYabaiStep() {
         let manager = SetupManager(checker: MockSetupChecker(
             startupBlockingResults: [
-                .init(id: .iterm2Installed, passed: true),
+                .init(id: .terminalInstalled, passed: true),
                 .init(id: .tmuxInstalled, passed: true),
                 .init(id: .yabaiInstalled, passed: true),
             ],
             allResults: [
-                .init(id: .iterm2Installed, passed: true),
+                .init(id: .terminalInstalled, passed: true),
                 .init(id: .tmuxInstalled, passed: true),
                 .init(id: .yabaiInstalled, passed: true),
                 .init(id: .yabaiServiceRunning, passed: false),

@@ -1,5 +1,6 @@
 import Foundation
 import SQLite3
+import appctl
 
 public final class SQLiteStore {
     private let db: OpaquePointer
@@ -7,8 +8,9 @@ public final class SQLiteStore {
     private let busyTimeoutMS: Int32 = 5000
     private let busyRetryAttempts = 10
     private let busyRetryDelaySeconds: TimeInterval = 0.02
+    private let defaultTerminalHostResolver: @Sendable () -> TerminalHost
 
-    public init(path: String) throws {
+    public init(path: String, defaultTerminalHostResolver: (@Sendable () -> TerminalHost)? = nil) throws {
         var handle: OpaquePointer?
         let openFlags = SQLITE_OPEN_CREATE | SQLITE_OPEN_READWRITE | SQLITE_OPEN_FULLMUTEX
         if sqlite3_open_v2(path, &handle, openFlags, nil) != SQLITE_OK {
@@ -16,6 +18,7 @@ public final class SQLiteStore {
         }
         guard let handle else { throw NSError(domain: "muxy.store", code: 1, userInfo: [NSLocalizedDescriptionKey: "DB handle is nil"]) }
         db = handle
+        self.defaultTerminalHostResolver = defaultTerminalHostResolver ?? SQLiteStore.detectDefaultTerminalHost
         guard sqlite3_busy_timeout(db, busyTimeoutMS) == SQLITE_OK else {
             let message = String(cString: sqlite3_errmsg(db))
             throw NSError(domain: "muxy.store", code: 1, userInfo: [NSLocalizedDescriptionKey: "Failed configuring sqlite busy timeout: \(message)"])
@@ -631,8 +634,7 @@ public final class SQLiteStore {
         let editor = try setting(key: SettingsKey.appEditor).flatMap { EditorPreference(rawValue: $0) }
         let terminalHost = try setting(key: SettingsKey.appTerminalHost)
             .flatMap(TerminalHost.init(rawValue:))
-            ?? TerminalHost(rawValue: SettingsKey.defaultAppTerminalHost)
-            ?? .iterm2
+            ?? defaultTerminalHostResolver()
         let start = try setting(key: SettingsKey.appPortRangeStart).flatMap(Int.init) ?? 20000
         let end = try setting(key: SettingsKey.appPortRangeEnd).flatMap(Int.init) ?? 30000
         let portRange = (start <= 0 || end <= 0 || end <= start) ? PortRange(start: 20000, end: 30000) : PortRange(start: start, end: end)
@@ -644,6 +646,16 @@ public final class SQLiteStore {
         try setSetting(key: SettingsKey.appTerminalHost, value: config.terminalHost.rawValue)
         try setSetting(key: SettingsKey.appPortRangeStart, value: String(config.portRange.start))
         try setSetting(key: SettingsKey.appPortRangeEnd, value: String(config.portRange.end))
+    }
+
+    private static func detectDefaultTerminalHost() -> TerminalHost {
+        if GhosttyAdapter().isAvailable() {
+            return .ghostty
+        }
+        if Iterm2Adapter().isAvailable() {
+            return .iterm2
+        }
+        return TerminalHost(rawValue: SettingsKey.defaultAppTerminalHost) ?? .iterm2
     }
 
     // MARK: - Agent Windows
