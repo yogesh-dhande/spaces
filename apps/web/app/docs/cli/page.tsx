@@ -60,9 +60,16 @@ export default function CliReferencePage() {
           <li>6. Archive the workspace when the task is done (<Cmd>mx workspace archive</Cmd>).</li>
         </ol>
         <p className="mt-3 text-sm leading-7 text-foreground-soft">
-          All commands print machine-readable output (tab-separated fields, no ANSI colour) and exit
-          with a non-zero code on failure, making them safe to use in scripts and pipelines.
+          Human-readable output stays concise for terminal use, while app and automation clients
+          should append <Cmd>--json</Cmd> to consume the canonical machine-facing API contract.
+          Commands exit non-zero on failure.
         </p>
+        <CodeBlock>{`# Machine-facing reads
+mx project list --json
+mx workspace get --dir /path/to/workspace --json
+mx workspace runtime --dir /path/to/workspace --json
+mx dashboard --json
+mx settings get --all --json`}</CodeBlock>
       </article>
 
       {/* Installation */}
@@ -94,6 +101,13 @@ mx --version
         <p className="mt-2 text-sm leading-7 text-foreground-soft">
           Prints one project per line: <Cmd>name</Cmd>, <Cmd>dir</Cmd>, <Cmd>git=yes|no</Cmd>,{" "}
           <Cmd>default_branch=&lt;branch|-&gt;</Cmd>.
+        </p>
+
+        <h3 className="mt-5 text-base font-semibold">Get one project</h3>
+        <CodeBlock>{`mx project get --dir /path/to/repo --json`}</CodeBlock>
+        <p className="mt-2 text-sm leading-7 text-foreground-soft">
+          Returns the persisted Muxy project record, including scripts, ports, processes, status
+          checks, and browser sessions.
         </p>
 
         <h3 className="mt-5 text-base font-semibold">Add a project</h3>
@@ -229,6 +243,16 @@ mx workspace list --project-dir /path/to/repo --all`}</CodeBlock>
         <p className="mt-2 text-sm leading-7 text-foreground-soft">
           Output columns: name, dir, flags (<Cmd>default</Cmd>, <Cmd>running</Cmd>,{" "}
           <Cmd>archived</Cmd>).
+        </p>
+
+        <h3 className="mt-5 text-base font-semibold">Get workspace state</h3>
+        <CodeBlock>{`mx workspace get --dir /path/to/workspace --json
+mx workspace runtime --dir /path/to/workspace --json
+mx workspace settings get --dir /path/to/workspace --json`}</CodeBlock>
+        <p className="mt-2 text-sm leading-7 text-foreground-soft">
+          These JSON reads are the recommended way for alternate clients to load persisted
+          workspace metadata, runtime status, and per-workspace launch overrides without querying
+          the database directly.
         </p>
 
         <h3 className="mt-5 text-base font-semibold">Create a workspace</h3>

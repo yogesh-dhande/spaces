@@ -1,0 +1,45 @@
+:root {
+  --canvas: #f6f0e5;
+  --panel: rgba(255, 251, 245, 0.94);
+  --panel-muted: #f0e7d6;
+  --line: rgba(28, 44, 58, 0.12);
+  --text-strong: #173042;
+  --text-soft: #5b6f7d;
+  --accent: #b26431;
+  --accent-soft: rgba(178, 100, 49, 0.12);
+  --accent-strong: #8b4f27;
+  --shadow: 0 18px 42px rgba(28, 38, 44, 0.08);
+  font-family: "Avenir Next", "Segoe UI", sans-serif;
+  color: var(--text-strong);
+  background: var(--canvas);
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-width: 320px;
+  background: var(--canvas);
+}
+
+button {
+  font: inherit;
+  padding: 0.72rem 0.95rem;
+}
+
+h1,
+h2,
+h3,
+p {
+  margin: 0;
+}
+
+a {
+  color: inherit;
+}

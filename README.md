@@ -1,9 +1,10 @@
 # Muxy Monorepo
 
-Muxy is a macOS workspace orchestrator with a Swift app and CLI (`mx`), plus a static Next.js marketing and docs site.
+Muxy is a macOS workspace orchestrator with a Swift app and CLI (`mx`), a Tauri proof-of-concept desktop client, and a static Next.js marketing and docs site.
 
 ## Repo Layout
 - `apps/macos`: macOS app, `mx` CLI, Swift sources, tests, product docs
+- `apps/tauri`: Tauri proof-of-concept client built on top of `mx --json`
 - `apps/web`: static marketing site and user-facing docs
 - `scripts`: root wrappers for build, test, coverage, release, and deploy workflows
 
@@ -39,6 +40,15 @@ Run from `apps/web`:
 ```bash
 npm run dev
 npm run build
+```
+
+### Tauri proof of concept
+Run from `apps/tauri`:
+
+```bash
+npm install
+npm run build
+cargo check --manifest-path src-tauri/Cargo.toml
 ```
 
 ## Deploys
