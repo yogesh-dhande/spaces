@@ -142,6 +142,7 @@ struct ProjectSummaryPayload: Encodable {
     let dir: String
     let isGitRepo: Bool
     let defaultBranch: String?
+    let isCollapsed: Bool
 }
 
 extension ProjectSummaryPayload {
@@ -151,6 +152,7 @@ extension ProjectSummaryPayload {
         dir = value.dir
         isGitRepo = value.isGitRepo
         defaultBranch = value.defaultBranch
+        isCollapsed = value.isCollapsed
     }
 }
 

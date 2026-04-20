@@ -57,6 +57,7 @@ flowchart LR
 ### Projects
 Projects persist:
 - source directory and git status
+- sidebar collapsed state
 - setup and stop scripts
 - port definitions
 - process templates

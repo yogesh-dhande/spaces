@@ -32,19 +32,20 @@ public final class SQLiteStore {
     public func upsert(project: ProjectRecord) throws {
         try execute(
             sql: """
-                INSERT INTO projects(id, name, dir, is_git, default_branch, setup_script, stop_script)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO projects(id, name, dir, is_git, default_branch, is_collapsed, setup_script, stop_script)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(id) DO UPDATE SET
                   name = excluded.name,
                   dir = excluded.dir,
                   is_git = excluded.is_git,
                   default_branch = excluded.default_branch,
+                  is_collapsed = excluded.is_collapsed,
                   setup_script = excluded.setup_script,
                   stop_script = excluded.stop_script
                 """,
             bindings: [
-                project.id, project.name, project.dir, project.isGitRepo ? "1" : "0", project.defaultBranch ?? "", project.setupScript ?? "",
-                project.stopScript ?? "",
+                project.id, project.name, project.dir, project.isGitRepo ? "1" : "0", project.defaultBranch ?? "", project.isCollapsed ? "1" : "0",
+                project.setupScript ?? "", project.stopScript ?? "",
             ])
         try execute(sql: "DELETE FROM project_port_definitions WHERE project_id = ?", bindings: [project.id])
         for (index, definition) in project.ports.enumerated() {
@@ -81,7 +82,8 @@ public final class SQLiteStore {
     public func project(id: String) throws -> ProjectRecord? {
         guard
             let row = try queryRow(
-                sql: "SELECT id, name, dir, is_git, default_branch, setup_script, stop_script FROM projects WHERE id = ?", bindings: [id])
+                sql: "SELECT id, name, dir, is_git, default_branch, is_collapsed, setup_script, stop_script FROM projects WHERE id = ?",
+                bindings: [id])
         else { return nil }
         return try decodeProjectWithTemplates(row: row)
     }
@@ -89,13 +91,15 @@ public final class SQLiteStore {
     public func project(dir: String) throws -> ProjectRecord? {
         guard
             let row = try queryRow(
-                sql: "SELECT id, name, dir, is_git, default_branch, setup_script, stop_script FROM projects WHERE dir = ?", bindings: [dir])
+                sql: "SELECT id, name, dir, is_git, default_branch, is_collapsed, setup_script, stop_script FROM projects WHERE dir = ?",
+                bindings: [dir])
         else { return nil }
         return try decodeProjectWithTemplates(row: row)
     }
 
     public func projects() throws -> [ProjectRecord] {
-        let rows = try queryRows(sql: "SELECT id, name, dir, is_git, default_branch, setup_script, stop_script FROM projects ORDER BY name")
+        let rows = try queryRows(
+            sql: "SELECT id, name, dir, is_git, default_branch, is_collapsed, setup_script, stop_script FROM projects ORDER BY name")
         return try rows.compactMap { try decodeProjectWithTemplates(row: $0) }
     }
 
@@ -258,6 +262,10 @@ public final class SQLiteStore {
 
     public func updateWorkspaceDirname(id: String, dirname: String?) throws {
         try execute(sql: "UPDATE workspaces SET dirname = ? WHERE id = ?", bindings: [dirname ?? "", id])
+    }
+
+    public func updateProjectCollapsed(id: String, isCollapsed: Bool) throws {
+        try execute(sql: "UPDATE projects SET is_collapsed = ? WHERE id = ?", bindings: [isCollapsed ? "1" : "0", id])
     }
 
     public func updateWorkspaceName(id: String, name: String) throws {
@@ -761,6 +769,7 @@ public final class SQLiteStore {
               dir TEXT NOT NULL UNIQUE,
               is_git INTEGER NOT NULL,
               default_branch TEXT,
+              is_collapsed INTEGER NOT NULL DEFAULT 0,
               setup_script TEXT,
               stop_script TEXT
             );
@@ -989,6 +998,8 @@ public final class SQLiteStore {
     private func applyAdditiveMigrations() throws {
         try ensureColumnExists(table: "projects", name: "setup_script", definition: "setup_script TEXT")
         try ensureColumnExists(table: "projects", name: "stop_script", definition: "stop_script TEXT")
+        try ensureColumnExists(table: "projects", name: "is_collapsed", definition: "is_collapsed INTEGER NOT NULL DEFAULT 0")
+        try execute(sql: "UPDATE projects SET is_collapsed = 0 WHERE is_collapsed IS NULL", bindings: [])
         try ensureColumnExists(table: "project_processes", name: "on_exit", definition: "on_exit TEXT NOT NULL DEFAULT 'none'")
         try execute(
             sql: """
@@ -1065,7 +1076,7 @@ public final class SQLiteStore {
     }
 
     private func decodeProjectWithTemplates(row: [String]) throws -> ProjectRecord? {
-        guard row.count >= 7 else { return nil }
+        guard row.count >= 8 else { return nil }
         let id = row[0]
         let ports = try queryRows(sql: "SELECT name FROM project_port_definitions WHERE project_id = ? ORDER BY order_index", bindings: [id]).map {
             PortDefinition(name: $0[0])
@@ -1086,8 +1097,8 @@ public final class SQLiteStore {
             sql: "SELECT name, url FROM project_browser_sessions WHERE project_id = ? ORDER BY order_index", bindings: [id]
         ).map { row in BrowserSession(name: row[0].isEmpty ? nil : row[0], url: row[1].isEmpty ? nil : row[1]) }
         return ProjectRecord(
-            id: id, name: row[1], dir: row[2], isGitRepo: row[3] == "1", defaultBranch: row[4].isEmpty ? nil : row[4],
-            setupScript: row[5].isEmpty ? nil : row[5], stopScript: row[6].isEmpty ? nil : row[6], ports: ports, processes: processes,
+            id: id, name: row[1], dir: row[2], isGitRepo: row[3] == "1", defaultBranch: row[4].isEmpty ? nil : row[4], isCollapsed: row[5] == "1",
+            setupScript: row[6].isEmpty ? nil : row[6], stopScript: row[7].isEmpty ? nil : row[7], ports: ports, processes: processes,
             statusChecks: statusChecks, browserSessions: browserSessions)
     }
 

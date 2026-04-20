@@ -44,9 +44,12 @@ final class StoreTests: XCTestCase {
 
         let store = try SQLiteStore(path: dbURL.path)
         XCTAssertEqual(try store.project(id: "legacy-project")?.name, "Legacy Project")
+        XCTAssertEqual(try store.project(id: "legacy-project")?.isCollapsed, false)
         XCTAssertEqual(try store.workspace(id: "legacy-workspace")?.name, "default")
         let workspaceColumns = try readTableColumns(dbURL: dbURL, table: "workspaces")
+        let projectColumns = try readTableColumns(dbURL: dbURL, table: "projects")
         XCTAssertTrue(workspaceColumns.contains("title"))
+        XCTAssertTrue(projectColumns.contains("is_collapsed"))
         XCTAssertEqual(try readSingleText(dbURL: dbURL, sql: "SELECT title FROM workspaces WHERE id = 'legacy-workspace'"), "default")
 
         try store.markIgnoredWorktree(path: "/tmp/legacy-project", projectID: "legacy-project")
@@ -78,6 +81,7 @@ final class StoreTests: XCTestCase {
         let columns = try readTableColumns(dbURL: dbURL, table: "projects")
         XCTAssertTrue(columns.contains("setup_script"))
         XCTAssertTrue(columns.contains("stop_script"))
+        XCTAssertTrue(columns.contains("is_collapsed"))
     }
 
     // Tests additive migrations backfill on_fail columns by arranging legacy status-check tables and asserting current schema compatibility.
@@ -281,6 +285,36 @@ final class StoreTests: XCTestCase {
         try store.setWorkspacePortDefinitions(workspaceID: workspace.id, definitions: [PortDefinition(name: "DB_PORT")])
         XCTAssertEqual(try store.workspacePortDefinitions(workspaceID: workspace.id).count, 1)
         XCTAssertEqual(try store.workspacePortDefinitions(workspaceID: workspace.id)[0].name, "DB_PORT")
+    }
+
+    // Tests project collapsed state persists and migrations backfill default false by arranging representative inputs and asserting round-trip behavior.
+    func testProjectCollapsedStatePersistsAndBackfills() throws {
+        let root = try makeTempDirectory()
+        let dbURL = root.appendingPathComponent("project-collapsed-state.db")
+        try runSQLiteExec(
+            dbURL: dbURL,
+            sql: """
+                CREATE TABLE projects (
+                  id TEXT PRIMARY KEY,
+                  name TEXT NOT NULL,
+                  dir TEXT NOT NULL UNIQUE,
+                  is_git INTEGER NOT NULL,
+                  default_branch TEXT,
+                  setup_script TEXT,
+                  stop_script TEXT
+                );
+                CREATE TABLE schema_version (version INTEGER NOT NULL);
+                INSERT INTO projects(id, name, dir, is_git, default_branch, setup_script, stop_script)
+                VALUES ('p1', 'Project', '/tmp/project', 0, '', '', '');
+                INSERT INTO schema_version(version) VALUES (6);
+                """)
+
+        let store = try SQLiteStore(path: dbURL.path)
+        XCTAssertEqual(try store.project(id: "p1")?.isCollapsed, false)
+
+        try store.updateProjectCollapsed(id: "p1", isCollapsed: true)
+        XCTAssertEqual(try store.project(id: "p1")?.isCollapsed, true)
+        XCTAssertEqual(try readSingleInteger(dbURL: dbURL, sql: "SELECT is_collapsed FROM projects WHERE id = 'p1'"), 1)
     }
 
     // Tests store write waits for transient database lock and succeeds by arranging an external immediate transaction and asserting write completion.

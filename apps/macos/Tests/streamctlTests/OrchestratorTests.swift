@@ -3158,6 +3158,17 @@ final class OrchestratorTests: XCTestCase {
 
         XCTAssertEqual(projects.map(\.name), ["alpha", "beta"])
         XCTAssertEqual(projects.map(\.isGitRepo), [false, false])
+        XCTAssertEqual(projects.map(\.isCollapsed), [false, false])
+    }
+
+    // Tests project collapsed state updates through orchestrator and is exposed in summaries by arranging representative inputs and asserting the expected result.
+    func testSetProjectCollapsedPersistsToProjectAndSummary() throws {
+        let (orchestrator, _, project, _, _) = try makeOrchestratorWithWorkspace()
+
+        try orchestrator.setProjectCollapsed(projectID: project.id, isCollapsed: true)
+
+        XCTAssertEqual(try orchestrator.project(id: project.id)?.isCollapsed, true)
+        XCTAssertEqual(try orchestrator.listProjects().first(where: { $0.id == project.id })?.isCollapsed, true)
     }
 
     // Tests update project config and read back project config by arranging representative inputs and asserting the expected result.

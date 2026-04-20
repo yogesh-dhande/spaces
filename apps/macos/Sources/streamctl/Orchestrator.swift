@@ -134,11 +134,16 @@ public final class MuxyOrchestrator {
 
     public func listProjects() throws -> [ProjectSummary] {
         return try store.projects().map {
-            ProjectSummary(id: $0.id, name: $0.name, dir: $0.dir, isGitRepo: $0.isGitRepo, defaultBranch: $0.defaultBranch)
+            ProjectSummary(
+                id: $0.id, name: $0.name, dir: $0.dir, isGitRepo: $0.isGitRepo, defaultBranch: $0.defaultBranch, isCollapsed: $0.isCollapsed)
         }
     }
 
     public func project(id: String) throws -> ProjectRecord? { try store.project(id: id) }
+
+    public func setProjectCollapsed(projectID: String, isCollapsed: Bool) throws {
+        try store.updateProjectCollapsed(id: projectID, isCollapsed: isCollapsed)
+    }
 
     @discardableResult public func updateEditorPreference(_ editor: EditorPreference?) throws -> AppConfig {
         var config = try store.appConfig()

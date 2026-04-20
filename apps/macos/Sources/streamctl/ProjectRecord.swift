@@ -6,6 +6,7 @@ public struct ProjectRecord: Codable, Sendable {
     public let dir: String
     public let isGitRepo: Bool
     public let defaultBranch: String?
+    public var isCollapsed: Bool
     public var setupScript: String?
     public var stopScript: String?
     public var ports: [PortDefinition]
@@ -14,7 +15,8 @@ public struct ProjectRecord: Codable, Sendable {
     public var browserSessions: [BrowserSession]
 
     public init(
-        id: String, name: String, dir: String, isGitRepo: Bool, defaultBranch: String?, setupScript: String? = nil, stopScript: String? = nil,
+        id: String, name: String, dir: String, isGitRepo: Bool, defaultBranch: String?, isCollapsed: Bool = false, setupScript: String? = nil,
+        stopScript: String? = nil,
         ports: [PortDefinition] = [], processes: [ProcessTemplate] = [], statusChecks: [StatusCheckDefinition] = [],
         browserSessions: [BrowserSession] = []
     ) {
@@ -23,6 +25,7 @@ public struct ProjectRecord: Codable, Sendable {
         self.dir = dir
         self.isGitRepo = isGitRepo
         self.defaultBranch = defaultBranch
+        self.isCollapsed = isCollapsed
         self.setupScript = setupScript
         self.stopScript = stopScript
         self.ports = ports

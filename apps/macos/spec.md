@@ -88,6 +88,7 @@ Muxy focuses those windows; it does not decide their geometry.
 - Non-git projects should create one default workspace for the project directory.
 - Project creation and deletion should show progress without freezing the UI.
 - Sidebar project rows should use the leading chevron/name area to expand or collapse workspace lists.
+- Sidebar project row collapsed state should persist across app restarts and sidebar refreshes.
 - Sidebar project rows should expose a dedicated settings action that opens project settings in the detail pane.
 
 ## Workspaces

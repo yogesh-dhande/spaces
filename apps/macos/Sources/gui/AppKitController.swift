@@ -1812,7 +1812,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             loadDashboardDismissedAttentionItemIDs()
             pruneDismissedDashboardAttentionItemIDsIfNeeded()
             outlineView.reloadData()
-            outlineView.expandItem(nil, expandChildren: true)
+            applySidebarProjectExpansionState()
             refreshSelection()
             updateDashboardSidebarBadge()
             scheduleSidebarGitActivityRefresh(projects: projects, workspacesByProject: workspacesByProject)
@@ -1960,7 +1960,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         loadDashboardDismissedAttentionItemIDs()
         pruneDismissedDashboardAttentionItemIDsIfNeeded()
         outlineView.reloadData()
-        outlineView.expandItem(nil, expandChildren: true)
+        applySidebarProjectExpansionState()
         logStartupProfile("apply_snapshot_outline_ready")
         if !shouldPreserveDetailPane {
             refreshSelection()
@@ -5241,7 +5241,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         showInactiveWorkspaces.toggle()
         refreshInactiveVisibilityButton()
         outlineView.reloadData()
-        outlineView.expandItem(nil, expandChildren: true)
+        applySidebarProjectExpansionState()
         if let selectedWorkspaceID, let (_, workspace) = findWorkspace(id: selectedWorkspaceID), !isWorkspaceVisible(workspace) {
             self.selectedWorkspaceID = nil
             workspaceHasUnsavedChanges = false
@@ -5474,7 +5474,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             workspaceHasUnsavedChanges = false
         }
         outlineView.reloadData()
-        outlineView.expandItem(nil, expandChildren: true)
+        applySidebarProjectExpansionState()
         refreshSelection()
         return true
     }
@@ -6754,12 +6754,39 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
     private func toggleProjectExpanded(projectID: String) {
         guard let row = rowIndex(forProjectID: projectID), let item = outlineView.item(atRow: row) else { return }
-        if outlineView.isItemExpanded(item) {
+        let isCollapsed = outlineView.isItemExpanded(item)
+        do {
+            try orchestrator.setProjectCollapsed(projectID: projectID, isCollapsed: isCollapsed)
+            updateProjectCollapsedStateInMemory(projectID: projectID, isCollapsed: isCollapsed)
+        } catch {
+            showError(error)
+            return
+        }
+        if isCollapsed {
             outlineView.collapseItem(item)
         } else {
             outlineView.expandItem(item)
         }
         outlineView.reloadData(forRowIndexes: IndexSet(integer: row), columnIndexes: IndexSet(integer: 0))
+    }
+
+    private func applySidebarProjectExpansionState() {
+        for project in projects {
+            guard let row = rowIndex(forProjectID: project.id), let item = outlineView.item(atRow: row) else { continue }
+            if project.isCollapsed {
+                outlineView.collapseItem(item)
+            } else {
+                outlineView.expandItem(item)
+            }
+        }
+    }
+
+    private func updateProjectCollapsedStateInMemory(projectID: String, isCollapsed: Bool) {
+        guard let index = projects.firstIndex(where: { $0.id == projectID }) else { return }
+        let project = projects[index]
+        projects[index] = ProjectSummary(
+            id: project.id, name: project.name, dir: project.dir, isGitRepo: project.isGitRepo, defaultBranch: project.defaultBranch,
+            isCollapsed: isCollapsed)
     }
 
 
