@@ -4415,7 +4415,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     private func workspaceDetailShortcutFooterSegments() -> [String] {
         [
             "Dashboard \(footerShortcutHint(for: .guiDashboardShortcut))",
-            "Next workspace \(footerShortcutHint(for: .guiNextShortcut))", "Prev workspace \(footerShortcutHint(for: .guiPreviousShortcut))",
+            "Next window \(footerShortcutHint(for: .guiNextShortcut))", "Prev window \(footerShortcutHint(for: .guiPreviousShortcut))",
             "Settings \(footerShortcutHint(for: .guiOpenSettingsShortcut))", "Toggle tooltip \(footerShortcutHint(for: .guiTooltipShortcut))",
         ]
     }
