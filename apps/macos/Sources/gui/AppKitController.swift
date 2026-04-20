@@ -69,6 +69,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         case warning
     }
 
+    enum SidebarArrowSelectionTarget: Equatable, Sendable {
+        case dashboard
+        case workspace(String)
+    }
+
     private var window: NSWindow!
     private var splitView: NSSplitView?
     private let outlineView = SidebarOutlineView()
@@ -1423,6 +1428,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 return true
             }
             return false
+        }
+        outlineView.onArrowNavigation = { [weak self] direction in
+            self?.navigateSidebarSelection(direction: direction) ?? false
         }
         outlineView.delegate = self
         outlineView.dataSource = self
@@ -5552,6 +5560,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             }
             if self.handleFocusedTextInputShortcut(event: event) { return nil }
             if self.isTextInputFocused() { return event }
+            if self.handleSidebarArrowNavigation(event: event) { return nil }
             if let nextShortcutSpec, matches(event: event, spec: nextShortcutSpec) {
                 self.selectNextVisibleWorkspace()
                 return nil
@@ -5783,6 +5792,81 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         }
         if flags == [.command, .shift], key == "z" { return NSApp.sendAction(Selector(("redo:")), to: nil, from: nil) }
         return false
+    }
+
+    private func navigateSidebarSelection(direction: Int) -> Bool {
+        guard let target = Self.sidebarArrowSelectionTarget(
+            visibleWorkspaceIDsByProject: projects.map { project in
+                let visibleWorkspaceIDs = project.isCollapsed ? [] : visibleWorkspaces(projectID: project.id).map(\.id)
+                return (project.id, visibleWorkspaceIDs)
+            },
+            selectedProjectID: selectedProjectID,
+            selectedWorkspaceID: selectedWorkspaceID,
+            showingDashboard: showingDashboard,
+            direction: direction)
+        else {
+            return false
+        }
+        switch target {
+        case .dashboard:
+            showDashboardDetail()
+        case .workspace(let workspaceID):
+            guard let (_, workspace) = findWorkspace(id: workspaceID) else { return false }
+            selectWorkspace(workspace)
+        }
+        return true
+    }
+
+    private func handleSidebarArrowNavigation(event: NSEvent) -> Bool {
+        let flags = event.modifierFlags.intersection([.command, .shift, .option, .control])
+        guard flags.isEmpty else { return false }
+        let direction: Int
+        switch event.keyCode {
+        case UInt16(kVK_UpArrow):
+            direction = -1
+        case UInt16(kVK_DownArrow):
+            direction = 1
+        default:
+            return false
+        }
+        return navigateSidebarSelection(direction: direction)
+    }
+
+    nonisolated static func sidebarArrowSelectionTarget(
+        visibleWorkspaceIDsByProject: [(projectID: String, workspaceIDs: [String])],
+        selectedProjectID: String?,
+        selectedWorkspaceID: String?,
+        showingDashboard: Bool,
+        direction: Int
+    ) -> SidebarArrowSelectionTarget? {
+        guard direction == -1 || direction == 1 else { return nil }
+        let visibleWorkspaceIDs = visibleWorkspaceIDsByProject.flatMap(\.workspaceIDs)
+        if showingDashboard {
+            guard direction > 0, let firstWorkspaceID = visibleWorkspaceIDs.first else { return nil }
+            return .workspace(firstWorkspaceID)
+        }
+        if let selectedWorkspaceID, let currentIndex = visibleWorkspaceIDs.firstIndex(of: selectedWorkspaceID) {
+            let targetIndex = currentIndex + direction
+            if targetIndex < 0 { return .dashboard }
+            guard targetIndex < visibleWorkspaceIDs.count else { return nil }
+            return .workspace(visibleWorkspaceIDs[targetIndex])
+        }
+        guard let selectedProjectID,
+              let projectIndex = visibleWorkspaceIDsByProject.firstIndex(where: { $0.projectID == selectedProjectID })
+        else {
+            return nil
+        }
+        if direction < 0 {
+            let priorProjects = visibleWorkspaceIDsByProject[..<projectIndex].reversed()
+            for project in priorProjects {
+                if let workspaceID = project.workspaceIDs.last { return .workspace(workspaceID) }
+            }
+            return .dashboard
+        }
+        for project in visibleWorkspaceIDsByProject[(projectIndex + 1)...] {
+            if let workspaceID = project.workspaceIDs.first { return .workspace(workspaceID) }
+        }
+        return nil
     }
 
     private func handleBufferedWindowShortcut(event: NSEvent) -> Bool {
@@ -6826,6 +6910,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     private func toggleProjectExpanded(projectID: String) {
         guard let row = rowIndex(forProjectID: projectID), let item = outlineView.item(atRow: row) else { return }
         let isCollapsed = outlineView.isItemExpanded(item)
+        let previousProjectID = selectedProjectID
+        let previousWorkspaceID = selectedWorkspaceID
         do {
             try orchestrator.setProjectCollapsed(projectID: projectID, isCollapsed: isCollapsed)
             updateProjectCollapsedStateInMemory(projectID: projectID, isCollapsed: isCollapsed)
@@ -6837,6 +6923,26 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             outlineView.collapseItem(item)
         } else {
             outlineView.expandItem(item)
+        }
+        if isCollapsed,
+           let selectedWorkspaceID,
+           let (project, _) = findWorkspace(id: selectedWorkspaceID),
+           project.id == projectID
+        {
+            self.selectedWorkspaceID = nil
+            self.selectedProjectID = projectID
+            lastSelectedRow = row
+            suppressOutlineSelectionChanges = true
+            outlineView.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
+            suppressOutlineSelectionChanges = false
+            if let refreshedProject = projects.first(where: { $0.id == projectID }) {
+                showProjectDetail(project: refreshedProject)
+            }
+            refreshSidebarSelectionRows(
+                previousProjectID: previousProjectID,
+                currentProjectID: selectedProjectID,
+                previousWorkspaceID: previousWorkspaceID,
+                currentWorkspaceID: selectedWorkspaceID)
         }
         outlineView.reloadData(forRowIndexes: IndexSet(integer: row), columnIndexes: IndexSet(integer: 0))
     }
