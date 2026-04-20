@@ -33,6 +33,10 @@ Muxy provides a desktop app and a CLI for power users and coding agents.
 - Require explicit tracked-window targets for workspace focus.
   Workspace focus should not guess which window the user meant, because arbitrary focus becomes unpredictable as workspaces collect multiple windows.
   Example: one workspace may have a frontend browser, an admin browser, an API terminal, and a coding-agent terminal all open at once. If the user runs `mx workspace focus` or clicks Focus in the GUI, Muxy should not silently pick whichever window was captured first or happened to survive most recently. The user may want the admin browser now and the coding-agent terminal five seconds later. Requiring an explicit tracked window target keeps focus behavior deterministic and keeps `workspace focus` from changing meaning as the workspace evolves.
+- Never resize or reposition tracked windows unless initiated by the user.
+  Muxy should respect where the user placed each tracked window, because it cannot infer whether the user wants side-by-side windows, overlapping windows, or some other layout that includes non-Muxy windows.
+- Never control windows that Muxy does not explicitly track.
+  Muxy should not hide, move, resize, or otherwise manipulate unrelated windows, because the user may intentionally keep an untracked window visible next to a tracked workspace window.
 - Keep coding-agent events explicit.
   `mx workspace import` and `mx workspace up` must not infer agent lifecycle, because only the agent can accurately report when it actually started, is waiting, or is done.
 
