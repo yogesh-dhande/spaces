@@ -126,6 +126,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     private var periodicWorktreeDiscoveryTask: Task<Void, Never>?
     private var periodicSidebarMetadataRefreshTask: Task<Void, Never>?
     private var deferredHotkeySelectionRefreshTask: Task<Void, Never>?
+    private var activeSpaceSummonCleanupTask: Task<Void, Never>?
     private var visibleWorkspaceDetailRefreshTask: Task<Void, Never>?
     private var visibleWorkspaceDetailRefreshWorkspaceID: String?
     private var pendingWorktreeDiscoveryReload = false
@@ -1326,7 +1327,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let rect = NSRect(x: 200, y: 200, width: 1100, height: 700)
         window = NSWindow(contentRect: rect, styleMask: [.titled, .resizable, .closable], backing: .buffered, defer: false)
         window.title = "Muxy"
-        window.collectionBehavior.insert(.moveToActiveSpace)
         window.center()
         window.delegate = self
         window.makeKeyAndOrderFront(nil)
@@ -6286,9 +6286,33 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         NSApp.activate(ignoringOtherApps: true)
         NSApp.unhide(nil)
         if window.isMiniaturized { window.deminiaturize(nil) }
+        prepareWindowForActiveSpaceSummon(window)
         window.orderFrontRegardless()
         window.makeKey()
         scheduleDeferredHotkeySelectionRefresh()
+    }
+
+    private func prepareWindowForActiveSpaceSummon(_ window: NSWindow) {
+        activeSpaceSummonCleanupTask?.cancel()
+        window.collectionBehavior = Self.collectionBehaviorForActiveSpaceSummon(window.collectionBehavior)
+        activeSpaceSummonCleanupTask = Task { @MainActor [weak self, weak window] in
+            await Task.yield()
+            guard let self, !Task.isCancelled, let window else { return }
+            window.collectionBehavior = Self.collectionBehaviorAfterActiveSpaceSummon(window.collectionBehavior)
+            self.activeSpaceSummonCleanupTask = nil
+        }
+    }
+
+    nonisolated static func collectionBehaviorForActiveSpaceSummon(_ behavior: NSWindow.CollectionBehavior) -> NSWindow.CollectionBehavior {
+        var updated = behavior
+        updated.insert(.moveToActiveSpace)
+        return updated
+    }
+
+    nonisolated static func collectionBehaviorAfterActiveSpaceSummon(_ behavior: NSWindow.CollectionBehavior) -> NSWindow.CollectionBehavior {
+        var updated = behavior
+        updated.remove(.moveToActiveSpace)
+        return updated
     }
 
     private func scheduleDeferredHotkeySelectionRefresh() {
