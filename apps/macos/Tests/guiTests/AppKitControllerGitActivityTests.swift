@@ -57,4 +57,40 @@ import streamctl
         #expect(result["workspace-removed"] == nil)
         #expect(result["workspace-non-git"] == nil)
     }
+
+    @Test func sidebarGitActivityPresentationUsesExistingActivityDuringRefresh() {
+        let activity = GitTrackedFileActivity(
+            latestTrackedFileModificationDate: nil,
+            modifiedTrackedFileCount: 2,
+            hasMergeConflicts: true)
+
+        let presentation = AppKitController.sidebarGitActivityPresentation(
+            projectIsGitRepo: true,
+            activity: activity,
+            isLoading: true)
+
+        #expect(presentation?.label == "No tracked files • 2 uncommitted files")
+        #expect(presentation?.statusSymbol == "exclamationmark.triangle.fill")
+        #expect(presentation?.statusColorStyle == .warning)
+    }
+
+    @Test func sidebarGitActivityPresentationShowsPlaceholderWhileRefreshingWithoutActivity() {
+        let presentation = AppKitController.sidebarGitActivityPresentation(
+            projectIsGitRepo: true,
+            activity: nil,
+            isLoading: true)
+
+        #expect(presentation?.label == "Refreshing git status…")
+        #expect(presentation?.statusSymbol == "ellipsis.circle")
+        #expect(presentation?.statusColorStyle == .metadata)
+    }
+
+    @Test func sidebarGitActivityPresentationHidesPlaceholderWhenIdleWithoutActivity() {
+        let presentation = AppKitController.sidebarGitActivityPresentation(
+            projectIsGitRepo: true,
+            activity: nil,
+            isLoading: false)
+
+        #expect(presentation == nil)
+    }
 }

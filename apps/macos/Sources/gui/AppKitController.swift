@@ -58,6 +58,17 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         var latestDate: Date? { items.compactMap(\.eventDate).max() }
     }
 
+    struct SidebarGitActivityPresentation: Sendable {
+        let label: String
+        let statusSymbol: String
+        let statusColorStyle: StatusColorStyle
+    }
+
+    enum StatusColorStyle: Sendable {
+        case metadata
+        case warning
+    }
+
     private var window: NSWindow!
     private var splitView: NSSplitView?
     private let outlineView = SidebarOutlineView()
@@ -6473,7 +6484,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         }
         contentStack.addArrangedSubview(titleRow)
 
-        if project.isGitRepo, let activity = gitActivityByWorkspaceID[workspace.id] {
+        if let activityPresentation = sidebarGitActivityPresentation(project: project, workspaceID: workspace.id) {
 
             let activityRow = NSView()
             activityRow.translatesAutoresizingMaskIntoConstraints = false
@@ -6483,16 +6494,20 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             clockIcon.contentTintColor = sidebarMetadataTextColor(isSelected: isSelected)
             clockIcon.translatesAutoresizingMaskIntoConstraints = false
 
-            let activityLabel = NSTextField(labelWithString: gitActivitySummaryLabel(activity))
+            let activityLabel = NSTextField(labelWithString: activityPresentation.label)
             activityLabel.font = .systemFont(ofSize: 11)
             activityLabel.textColor = sidebarMetadataTextColor(isSelected: isSelected)
             activityLabel.lineBreakMode = .byTruncatingTail
             activityLabel.translatesAutoresizingMaskIntoConstraints = false
 
-            let conflictSymbol = activity.hasMergeConflicts ? "exclamationmark.triangle.fill" : "checkmark.circle"
-            let conflictColor: NSColor = activity.hasMergeConflicts ? sidebarFailedIndicatorColor() : sidebarMetadataTextColor(isSelected: isSelected)
+            let conflictColor: NSColor = switch activityPresentation.statusColorStyle {
+            case .metadata:
+                sidebarMetadataTextColor(isSelected: isSelected)
+            case .warning:
+                sidebarFailedIndicatorColor()
+            }
             let conflictIcon = NSImageView()
-            conflictIcon.image = NSImage(systemSymbolName: conflictSymbol, accessibilityDescription: nil)
+            conflictIcon.image = NSImage(systemSymbolName: activityPresentation.statusSymbol, accessibilityDescription: nil)
             conflictIcon.contentTintColor = conflictColor
             conflictIcon.translatesAutoresizingMaskIntoConstraints = false
 
@@ -6576,13 +6591,45 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     }
 
     private func gitActivitySummaryLabel(_ activity: GitTrackedFileActivity) -> String {
+        Self.gitActivitySummaryLabel(activity, relativeTo: Date())
+    }
+
+    nonisolated static func gitActivitySummaryLabel(_ activity: GitTrackedFileActivity, relativeTo referenceDate: Date) -> String {
         let modifiedLabel =
             if activity.modifiedTrackedFileCount == 1 { "1 uncommitted file" } else { "\(activity.modifiedTrackedFileCount) uncommitted files" }
 
         guard let latestModificationDate = activity.latestTrackedFileModificationDate else { return "No tracked files • \(modifiedLabel)" }
 
-        let relativeDate = relativeDateFormatter.localizedString(for: latestModificationDate, relativeTo: Date())
+        let formatter = RelativeDateTimeFormatter()
+        formatter.unitsStyle = .short
+        let relativeDate = formatter.localizedString(for: latestModificationDate, relativeTo: referenceDate)
         return "\(relativeDate) • \(modifiedLabel)"
+    }
+
+    private func sidebarGitActivityPresentation(project: ProjectSummary, workspaceID: String) -> SidebarGitActivityPresentation? {
+        Self.sidebarGitActivityPresentation(
+            projectIsGitRepo: project.isGitRepo,
+            activity: gitActivityByWorkspaceID[workspaceID],
+            isLoading: isSidebarGitActivityLoading)
+    }
+
+    nonisolated static func sidebarGitActivityPresentation(
+        projectIsGitRepo: Bool,
+        activity: GitTrackedFileActivity?,
+        isLoading: Bool
+    ) -> SidebarGitActivityPresentation? {
+        guard projectIsGitRepo else { return nil }
+        if let activity {
+            return SidebarGitActivityPresentation(
+                label: gitActivitySummaryLabel(activity, relativeTo: Date()),
+                statusSymbol: activity.hasMergeConflicts ? "exclamationmark.triangle.fill" : "checkmark.circle",
+                statusColorStyle: activity.hasMergeConflicts ? .warning : .metadata)
+        }
+        guard isLoading else { return nil }
+        return SidebarGitActivityPresentation(
+            label: "Refreshing git status…",
+            statusSymbol: "ellipsis.circle",
+            statusColorStyle: .metadata)
     }
 
     private func gitBranchStatusLabel(for workspaceID: String) -> String? {
@@ -6592,7 +6639,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
     private func workspaceSidebarLineCount(project: ProjectSummary, workspace: WorkspaceSummary) -> Int {
         var count = 1  // workspace title + status
-        if project.isGitRepo, gitActivityByWorkspaceID[workspace.id] != nil { count += 1 }  // activity
+        if sidebarGitActivityPresentation(project: project, workspaceID: workspace.id) != nil { count += 1 }  // activity
         return count
     }
 
