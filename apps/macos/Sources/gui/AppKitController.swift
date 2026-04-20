@@ -60,7 +60,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
     private var window: NSWindow!
     private var splitView: NSSplitView?
-    private let outlineView = NSOutlineView()
+    private let outlineView = SidebarOutlineView()
     private let detailContainer = NSView()
     private weak var workspaceShortcutFooterRowView: NSStackView?
     private var workspaceShortcutFooterLabels: [NSTextField] = []
@@ -68,6 +68,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
     private var orchestrator: MuxyOrchestrator!
     private var projects: [ProjectSummary] = []
+    private var outlineItemRefCache: [String: OutlineItemRef] = [:]
     private var workspacesByProject: [String: [WorkspaceSummary]] = [:]
     private var gitActivityByWorkspaceID: [String: GitTrackedFileActivity] = [:]
     private var isSidebarGitActivityLoading = false
@@ -1400,10 +1401,18 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         }
         outlineView.headerView = nil
         outlineView.rowSizeStyle = .medium
-        outlineView.style = .sourceList
+        outlineView.style = .plain
         outlineView.selectionHighlightStyle = .none
         outlineView.backgroundColor = .clear
         outlineView.indentationPerLevel = 0
+        outlineView.onRowMouseDown = { [weak self] row in
+            guard let self, let ref = self.outlineView.item(atRow: row) as? OutlineItemRef else { return false }
+            if case .project(let project) = ref.item {
+                self.toggleProjectExpanded(projectID: project.id)
+                return true
+            }
+            return false
+        }
         outlineView.delegate = self
         outlineView.dataSource = self
 
@@ -1415,19 +1424,20 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         container.addSubview(scroll)
 
         NSLayoutConstraint.activate([
-            topBarRow.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 4),
-            topBarRow.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -4),
+            topBarRow.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 8),
+            topBarRow.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -8),
             topBarRow.topAnchor.constraint(equalTo: container.topAnchor, constant: 8),
 
-            dashboardRow.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 4),
-            dashboardRow.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -4),
+            dashboardRow.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 8),
+            dashboardRow.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -8),
             dashboardRow.topAnchor.constraint(equalTo: topBarRow.bottomAnchor, constant: 8),
 
-            sectionHeader.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 12),
-            sectionHeader.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -12),
+            sectionHeader.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 16),
+            sectionHeader.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -16),
             sectionHeader.topAnchor.constraint(equalTo: dashboardRow.bottomAnchor, constant: 10),
 
-            scroll.leadingAnchor.constraint(equalTo: container.leadingAnchor), scroll.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+            scroll.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 4),
+            scroll.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -4),
             scroll.topAnchor.constraint(equalTo: sectionHeader.bottomAnchor, constant: 6),
             scroll.bottomAnchor.constraint(equalTo: container.bottomAnchor),
         ])
@@ -1587,6 +1597,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         visibleDetailWorkspaceID = nil
         showingSettings = false
         showingDashboard = true
+        let previousProjectID = selectedProjectID
         let previousWorkspaceID = selectedWorkspaceID
         selectedProjectID = nil
         selectedWorkspaceID = nil
@@ -1594,7 +1605,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         outlineView.deselectAll(nil)
         // Reload only the previously-selected workspace row to clear its selection styling;
         // avoid full reloadData() which would reset expand/collapse state.
-        refreshSidebarSelectionRows(previousWorkspaceID: previousWorkspaceID, currentWorkspaceID: nil)
+        refreshSidebarSelectionRows(
+            previousProjectID: previousProjectID,
+            currentProjectID: nil,
+            previousWorkspaceID: previousWorkspaceID,
+            currentWorkspaceID: nil)
         updateDashboardRowAppearance()
 
         for view in detailContainer.subviews { view.removeFromSuperview() }
@@ -1887,6 +1902,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     }
 
     private func clearSidebarSelectionForTransientDetail() {
+        let previousProjectID = selectedProjectID
         let previousWorkspaceID = selectedWorkspaceID
         suppressOutlineSelectionChanges = true
         selectedProjectID = nil
@@ -1894,7 +1910,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         lastSelectedRow = -1
         outlineView.deselectAll(nil)
         suppressOutlineSelectionChanges = false
-        refreshSidebarSelectionRows(previousWorkspaceID: previousWorkspaceID, currentWorkspaceID: nil)
+        refreshSidebarSelectionRows(
+            previousProjectID: previousProjectID,
+            currentProjectID: nil,
+            previousWorkspaceID: previousWorkspaceID,
+            currentWorkspaceID: nil)
         updateDashboardRowAppearance()
     }
 
@@ -2625,14 +2645,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     }
 
     private func formSectionCard(icon: String, title: String, subtitle: String, trailingView: NSView? = nil, contentViews: [NSView]) -> NSView {
-        let card = NSView()
-        card.wantsLayer = true
-        card.layer?.cornerRadius = 10
-        card.layer?.borderWidth = 1
-        card.layer?.borderColor = sidebarCardBorderColor(isSelected: false).cgColor
-        card.layer?.backgroundColor = sidebarCardBackgroundColor(isArchived: false).cgColor
-        card.translatesAutoresizingMaskIntoConstraints = false
-        card.setContentHuggingPriority(.required, for: .vertical)
+        let section = NSView()
+        section.translatesAutoresizingMaskIntoConstraints = false
+        section.setContentHuggingPriority(.required, for: .vertical)
 
         let accentColor = sidebarThemeColor(light: (13, 95, 93), dark: (61, 198, 184))
 
@@ -2646,11 +2661,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         NSLayoutConstraint.activate([iconView.widthAnchor.constraint(equalToConstant: 20), iconView.heightAnchor.constraint(equalToConstant: 20)])
 
         let titleLabel = NSTextField(labelWithString: title)
-        titleLabel.font = .systemFont(ofSize: 13, weight: .semibold)
+        titleLabel.font = .systemFont(ofSize: 14, weight: .semibold)
         titleLabel.textColor = .labelColor
 
         let subtitleLabel = NSTextField(labelWithString: subtitle)
-        subtitleLabel.font = .systemFont(ofSize: 11)
+        subtitleLabel.font = .systemFont(ofSize: 12)
         subtitleLabel.textColor = .secondaryLabelColor
         subtitleLabel.lineBreakMode = .byWordWrapping
         subtitleLabel.maximumNumberOfLines = 2
@@ -2678,17 +2693,28 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let innerStack = NSStackView()
         innerStack.orientation = .vertical
         innerStack.alignment = .leading
-        innerStack.spacing = 10
+        innerStack.spacing = 12
         innerStack.translatesAutoresizingMaskIntoConstraints = false
         innerStack.addArrangedSubview(headerRow)
         for view in contentViews { innerStack.addArrangedSubview(view) }
 
-        card.addSubview(innerStack)
+        let divider = NSView()
+        divider.translatesAutoresizingMaskIntoConstraints = false
+        divider.wantsLayer = true
+        divider.layer?.backgroundColor = sidebarCardBorderColor(isSelected: false).withAlphaComponent(0.55).cgColor
+
+        section.addSubview(innerStack)
+        section.addSubview(divider)
         NSLayoutConstraint.activate([
-            innerStack.leadingAnchor.constraint(equalTo: card.leadingAnchor, constant: 16),
-            innerStack.trailingAnchor.constraint(equalTo: card.trailingAnchor, constant: -16),
-            innerStack.topAnchor.constraint(equalTo: card.topAnchor, constant: 14),
-            innerStack.bottomAnchor.constraint(equalTo: card.bottomAnchor, constant: -14),
+            innerStack.leadingAnchor.constraint(equalTo: section.leadingAnchor),
+            innerStack.trailingAnchor.constraint(equalTo: section.trailingAnchor),
+            innerStack.topAnchor.constraint(equalTo: section.topAnchor, constant: 4),
+
+            divider.leadingAnchor.constraint(equalTo: section.leadingAnchor),
+            divider.trailingAnchor.constraint(equalTo: section.trailingAnchor),
+            divider.topAnchor.constraint(equalTo: innerStack.bottomAnchor, constant: 18),
+            divider.heightAnchor.constraint(equalToConstant: 1),
+            divider.bottomAnchor.constraint(equalTo: section.bottomAnchor),
         ])
         headerRow.translatesAutoresizingMaskIntoConstraints = false
         headerRow.widthAnchor.constraint(equalTo: innerStack.widthAnchor).isActive = true
@@ -2697,7 +2723,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             view.widthAnchor.constraint(equalTo: innerStack.widthAnchor).isActive = true
         }
 
-        return card
+        return section
     }
 
     private func showAddProjectForm() {
@@ -6115,8 +6141,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
     private func selectWorkspace(_ workspace: WorkspaceSummary) {
         for row in 0..<outlineView.numberOfRows {
-            if let item = outlineView.item(atRow: row) as? OutlineItem {
-                if case .workspace(_, let ws) = item, ws.id == workspace.id {
+            if let ref = outlineView.item(atRow: row) as? OutlineItemRef {
+                if case .workspace(_, let ws) = ref.item, ws.id == workspace.id {
                     outlineView.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
                     break
                 }
@@ -6266,62 +6292,115 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
     public func outlineView(_ outlineView: NSOutlineView, numberOfChildrenOfItem item: Any?) -> Int {
         if item == nil { return projects.count }
-        if case .project(let project) = item as? OutlineItem { return visibleWorkspaces(projectID: project.id).count }
+        if case .project(let project) = (item as? OutlineItemRef)?.item { return visibleWorkspaces(projectID: project.id).count }
         return 0
     }
 
     public func outlineView(_ outlineView: NSOutlineView, isItemExpandable item: Any) -> Bool {
-        if case .project = item as? OutlineItem { return true }
+        if case .project = (item as? OutlineItemRef)?.item { return true }
         return false
     }
 
+    public func outlineView(_ outlineView: NSOutlineView, shouldShowOutlineCellForItem item: Any) -> Bool { true }
+
+    public func outlineView(_ outlineView: NSOutlineView, shouldSelectItem item: Any) -> Bool {
+        return true
+    }
+
     public func outlineView(_ outlineView: NSOutlineView, child index: Int, ofItem item: Any?) -> Any {
-        if item == nil { return OutlineItem.project(projects[index]) }
-        if case .project(let project) = item as? OutlineItem {
+        if item == nil { return outlineItemRef(for: .project(projects[index])) }
+        if case .project(let project) = (item as? OutlineItemRef)?.item {
             let visible = visibleWorkspaces(projectID: project.id)
             let workspace =
                 (index >= 0 && index < visible.count ? visible[index] : nil)
                 ?? WorkspaceSummary(
                     id: "", name: "", branch: nil, targetBranch: nil, dir: "", isRunning: false, isArchived: false, isActive: true, isDefault: false)
-            return OutlineItem.workspace(project, workspace)
+            return outlineItemRef(for: .workspace(project, workspace))
         }
-        return OutlineItem.project(projects[0])
+        return outlineItemRef(for: .project(projects[0]))
+    }
+
+    private func outlineItemRef(for item: OutlineItem) -> OutlineItemRef {
+        let key = item.cacheKey
+        if let existing = outlineItemRefCache[key] {
+            existing.item = item
+            return existing
+        }
+        let ref = OutlineItemRef(item)
+        outlineItemRefCache[key] = ref
+        return ref
     }
 
     public func outlineView(_ outlineView: NSOutlineView, viewFor tableColumn: NSTableColumn?, item: Any) -> NSView? {
-        if case .project(let project) = item as? OutlineItem { return projectRowCell(project: project) }
-        if case .workspace(let project, let workspace) = item as? OutlineItem {
+        guard let ref = item as? OutlineItemRef else { return nil }
+        switch ref.item {
+        case .project(let project):
+            return projectRowCell(
+                project: project,
+                isSelected: selectedProjectID == project.id && selectedWorkspaceID == nil)
+        case .workspace(let project, let workspace):
             return workspaceRowCell(project: project, workspace: workspace, isSelected: selectedWorkspaceID == workspace.id)
         }
-        return nil
     }
 
-    private func projectRowCell(project: ProjectSummary) -> NSTableCellView {
+    private func projectRowCell(project: ProjectSummary, isSelected: Bool) -> NSTableCellView {
         let cell = NSTableCellView()
-        let icon = NSImageView()
-        icon.translatesAutoresizingMaskIntoConstraints = false
-        icon.image = NSImage(systemSymbolName: "folder.fill", accessibilityDescription: "Project")
-        icon.contentTintColor = .secondaryLabelColor
-        let text = NSTextField(labelWithString: project.name)
-        text.font = .systemFont(ofSize: 13, weight: .semibold)
-        text.translatesAutoresizingMaskIntoConstraints = false
+
+        let rowBackground = NSView()
+        rowBackground.translatesAutoresizingMaskIntoConstraints = false
+        rowBackground.wantsLayer = true
+        rowBackground.layer?.cornerRadius = 9
+        rowBackground.layer?.borderWidth = isSelected ? 1 : 0
+        rowBackground.layer?.borderColor = sidebarCardBorderColor(isSelected: true).cgColor
+        rowBackground.layer?.backgroundColor = isSelected
+            ? sidebarSelectedCardBackgroundColor().cgColor
+            : NSColor.clear.cgColor
+
+        let titleLabel = NSTextField(labelWithString: project.name)
+        titleLabel.font = .systemFont(ofSize: 13, weight: .semibold)
+        titleLabel.textColor = sidebarPrimaryTextColor(isSelected: isSelected, isArchived: false)
+        titleLabel.lineBreakMode = .byTruncatingTail
+
+        let leadingStack = NSStackView()
+        leadingStack.orientation = .horizontal
+        leadingStack.alignment = .centerY
+        leadingStack.spacing = 8
+        leadingStack.translatesAutoresizingMaskIntoConstraints = false
+        leadingStack.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        leadingStack.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        leadingStack.addArrangedSubview(titleLabel)
+
         let accessoryStack = NSStackView()
         accessoryStack.orientation = .horizontal
         accessoryStack.alignment = .centerY
         accessoryStack.spacing = 4
         accessoryStack.translatesAutoresizingMaskIntoConstraints = false
         accessoryStack.setContentHuggingPriority(.required, for: .horizontal)
-        cell.addSubview(text)
-        cell.addSubview(icon)
-        cell.addSubview(accessoryStack)
+        let settingsButton = sidebarRowIconButton(symbol: "gearshape", tooltip: "Project settings for \(project.name)", action: #selector(showProjectSettings(_:)))
+        settingsButton.identifier = NSUserInterfaceItemIdentifier(project.id)
+        accessoryStack.addArrangedSubview(settingsButton)
+
+        let contentRow = NSStackView()
+        contentRow.orientation = .horizontal
+        contentRow.alignment = .centerY
+        contentRow.spacing = 8
+        contentRow.translatesAutoresizingMaskIntoConstraints = false
+        contentRow.addArrangedSubview(leadingStack)
+        contentRow.addArrangedSubview(NSView())
+        contentRow.addArrangedSubview(accessoryStack)
+
+        rowBackground.addSubview(contentRow)
+        cell.addSubview(rowBackground)
         NSLayoutConstraint.activate([
-            icon.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 12), icon.centerYAnchor.constraint(equalTo: cell.centerYAnchor),
-            icon.widthAnchor.constraint(equalToConstant: 10), icon.heightAnchor.constraint(equalToConstant: 10),
-            text.leadingAnchor.constraint(equalTo: icon.trailingAnchor, constant: 6),
-            text.trailingAnchor.constraint(lessThanOrEqualTo: accessoryStack.leadingAnchor, constant: -6),
-            text.centerYAnchor.constraint(equalTo: cell.centerYAnchor),
-            accessoryStack.trailingAnchor.constraint(equalTo: cell.trailingAnchor, constant: -6),
-            accessoryStack.centerYAnchor.constraint(equalTo: cell.centerYAnchor),
+            rowBackground.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 8),
+            rowBackground.trailingAnchor.constraint(equalTo: cell.trailingAnchor),
+            rowBackground.topAnchor.constraint(equalTo: cell.topAnchor, constant: 3),
+            rowBackground.bottomAnchor.constraint(equalTo: cell.bottomAnchor, constant: -3),
+
+            contentRow.leadingAnchor.constraint(equalTo: rowBackground.leadingAnchor, constant: 4),
+            contentRow.trailingAnchor.constraint(equalTo: rowBackground.trailingAnchor, constant: -12),
+            contentRow.topAnchor.constraint(equalTo: rowBackground.topAnchor, constant: 7),
+            contentRow.bottomAnchor.constraint(equalTo: rowBackground.bottomAnchor, constant: -7),
         ])
         if project.isGitRepo {
             let addButton = sidebarRowIconButton(symbol: "plus", tooltip: "New workspace in \(project.name)", action: #selector(addWorkspace(_:)))
@@ -6337,14 +6416,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let cardView = NSView()
         cardView.translatesAutoresizingMaskIntoConstraints = false
         cardView.wantsLayer = true
-        cardView.layer?.cornerRadius = 10
-        cardView.layer?.borderWidth = 1
-        cardView.layer?.borderColor = sidebarCardBorderColor(isSelected: isSelected).cgColor
-        if isSelected {
-            cardView.layer?.backgroundColor = sidebarSelectedCardBackgroundColor().cgColor
-        } else {
-            cardView.layer?.backgroundColor = sidebarCardBackgroundColor(isArchived: workspace.isArchived).cgColor
-        }
+        cardView.layer?.cornerRadius = 8
+        cardView.layer?.borderWidth = isSelected ? 1 : 0
+        cardView.layer?.borderColor = sidebarCardBorderColor(isSelected: true).cgColor
+        cardView.layer?.backgroundColor = isSelected ? sidebarSelectedCardBackgroundColor().cgColor : NSColor.clear.cgColor
 
         let contentStack = NSStackView()
         contentStack.orientation = .vertical
@@ -6449,15 +6524,15 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         cell.addSubview(cardView)
 
         NSLayoutConstraint.activate([
-            cardView.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 4),
-            cardView.trailingAnchor.constraint(equalTo: cell.trailingAnchor, constant: -4),
+            cardView.leadingAnchor.constraint(equalTo: cell.leadingAnchor),
+            cardView.trailingAnchor.constraint(equalTo: cell.trailingAnchor),
             cardView.topAnchor.constraint(equalTo: cell.topAnchor, constant: 2),
-            cardView.bottomAnchor.constraint(equalTo: cell.bottomAnchor, constant: -4),
+            cardView.bottomAnchor.constraint(equalTo: cell.bottomAnchor, constant: -2),
 
-            contentStack.leadingAnchor.constraint(equalTo: cardView.leadingAnchor, constant: 10),
-            contentStack.trailingAnchor.constraint(equalTo: cardView.trailingAnchor, constant: -10),
-            contentStack.topAnchor.constraint(equalTo: cardView.topAnchor, constant: 8),
-            contentStack.bottomAnchor.constraint(equalTo: cardView.bottomAnchor, constant: -8),
+            contentStack.leadingAnchor.constraint(equalTo: cardView.leadingAnchor, constant: 12),
+            contentStack.trailingAnchor.constraint(equalTo: cardView.trailingAnchor, constant: -12),
+            contentStack.topAnchor.constraint(equalTo: cardView.topAnchor, constant: 7),
+            contentStack.bottomAnchor.constraint(equalTo: cardView.bottomAnchor, constant: -7),
         ])
 
         return cell
@@ -6522,11 +6597,14 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     }
 
     public func outlineView(_ outlineView: NSOutlineView, heightOfRowByItem item: Any) -> CGFloat {
-        if case .workspace(let project, let workspace) = item as? OutlineItem {
+        guard let ref = item as? OutlineItemRef else { return 24 }
+        switch ref.item {
+        case .project(let project):
+            return selectedProjectID == project.id && selectedWorkspaceID == nil ? 38 : 34
+        case .workspace(let project, let workspace):
             let lineCount = workspaceSidebarLineCount(project: project, workspace: workspace)
             return max(52, CGFloat(22 + (lineCount * 18)))
         }
-        return 24
     }
 
     private func sidebarPanelBackgroundColor() -> NSColor { sidebarThemeColor(light: (248, 247, 241), dark: (15, 21, 23)) }
@@ -6573,6 +6651,29 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     public func outlineViewSelectionDidChange(_ notification: Notification) {
         if suppressOutlineSelectionChanges { return }
         let row = outlineView.selectedRow
+        guard row >= 0, let ref = outlineView.item(atRow: row) as? OutlineItemRef else {
+            let previousProjectID = selectedProjectID
+            let previousWorkspaceID = selectedWorkspaceID
+            selectedProjectID = nil
+            selectedWorkspaceID = nil
+            showingSettings = false
+            if !showingDashboard { showPlaceholder() }
+            refreshSidebarSelectionRows(
+                previousProjectID: previousProjectID,
+                currentProjectID: selectedProjectID,
+                previousWorkspaceID: previousWorkspaceID,
+                currentWorkspaceID: selectedWorkspaceID)
+            return
+        }
+        let item = ref.item
+        if case .project = item {
+            suppressOutlineSelectionChanges = true
+            outlineView.deselectAll(nil)
+            suppressOutlineSelectionChanges = false
+            return
+        }
+
+        let previousProjectID = selectedProjectID
         let previousWorkspaceID = selectedWorkspaceID
         if projectHasUnsavedChanges || workspaceHasUnsavedChanges {
             let response = unsavedChangesPrompt()
@@ -6589,16 +6690,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 workspaceHasUnsavedChanges = false
             }
         }
-        guard row >= 0, let item = outlineView.item(atRow: row) as? OutlineItem else {
-            selectedProjectID = nil
-            selectedWorkspaceID = nil
-            showingSettings = false
-            // Don't replace the detail pane if we're navigating to the dashboard;
-            // showDashboardDetail() called deselectAll() intentionally.
-            if !showingDashboard { showPlaceholder() }
-            refreshSidebarSelectionRows(previousWorkspaceID: previousWorkspaceID, currentWorkspaceID: selectedWorkspaceID)
-            return
-        }
         lastSelectedRow = row
         switch item {
         case .project(let project):
@@ -6612,11 +6703,22 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             showingSettings = false
             showWorkspaceDetail(project: project, workspace: workspace)
         }
-        refreshSidebarSelectionRows(previousWorkspaceID: previousWorkspaceID, currentWorkspaceID: selectedWorkspaceID)
+        refreshSidebarSelectionRows(
+            previousProjectID: previousProjectID,
+            currentProjectID: selectedProjectID,
+            previousWorkspaceID: previousWorkspaceID,
+            currentWorkspaceID: selectedWorkspaceID)
     }
 
-    private func refreshSidebarSelectionRows(previousWorkspaceID: String?, currentWorkspaceID: String?) {
+    private func refreshSidebarSelectionRows(
+        previousProjectID: String?,
+        currentProjectID: String?,
+        previousWorkspaceID: String?,
+        currentWorkspaceID: String?
+    ) {
         var rowsToReload = IndexSet()
+        if let previousProjectID, let previousRow = rowIndex(forProjectID: previousProjectID) { rowsToReload.insert(previousRow) }
+        if let currentProjectID, let currentRow = rowIndex(forProjectID: currentProjectID) { rowsToReload.insert(currentRow) }
         if let previousWorkspaceID, let previousRow = rowIndex(forWorkspaceID: previousWorkspaceID) { rowsToReload.insert(previousRow) }
         if let currentWorkspaceID, let currentRow = rowIndex(forWorkspaceID: currentWorkspaceID) { rowsToReload.insert(currentRow) }
         guard !rowsToReload.isEmpty else { return }
@@ -6636,10 +6738,60 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
     private func rowIndex(forWorkspaceID workspaceID: String) -> Int? {
         for row in 0..<outlineView.numberOfRows {
-            guard let item = outlineView.item(atRow: row) as? OutlineItem else { continue }
-            if case .workspace(_, let workspace) = item, workspace.id == workspaceID { return row }
+            guard let ref = outlineView.item(atRow: row) as? OutlineItemRef else { continue }
+            if case .workspace(_, let workspace) = ref.item, workspace.id == workspaceID { return row }
         }
         return nil
+    }
+
+    private func rowIndex(forProjectID projectID: String) -> Int? {
+        for row in 0..<outlineView.numberOfRows {
+            guard let ref = outlineView.item(atRow: row) as? OutlineItemRef else { continue }
+            if case .project(let project) = ref.item, project.id == projectID { return row }
+        }
+        return nil
+    }
+
+    private func toggleProjectExpanded(projectID: String) {
+        guard let row = rowIndex(forProjectID: projectID), let item = outlineView.item(atRow: row) else { return }
+        if outlineView.isItemExpanded(item) {
+            outlineView.collapseItem(item)
+        } else {
+            outlineView.expandItem(item)
+        }
+        outlineView.reloadData(forRowIndexes: IndexSet(integer: row), columnIndexes: IndexSet(integer: 0))
+    }
+
+
+    @objc private func showProjectSettings(_ sender: NSButton) {
+        guard let projectID = sender.identifier?.rawValue, let project = projects.first(where: { $0.id == projectID }) else { return }
+        let previousProjectID = selectedProjectID
+        let previousWorkspaceID = selectedWorkspaceID
+        if projectHasUnsavedChanges || workspaceHasUnsavedChanges {
+            let response = unsavedChangesPrompt()
+            if response == .alertFirstButtonReturn {
+                if !saveCurrentDetail() { return }
+            } else if response == .alertThirdButtonReturn {
+                return
+            } else {
+                projectHasUnsavedChanges = false
+                workspaceHasUnsavedChanges = false
+            }
+        }
+
+        suppressOutlineSelectionChanges = true
+        outlineView.deselectAll(nil)
+        suppressOutlineSelectionChanges = false
+        lastSelectedRow = -1
+        selectedProjectID = project.id
+        selectedWorkspaceID = nil
+        showingSettings = false
+        showProjectDetail(project: project)
+        refreshSidebarSelectionRows(
+            previousProjectID: previousProjectID,
+            currentProjectID: selectedProjectID,
+            previousWorkspaceID: previousWorkspaceID,
+            currentWorkspaceID: selectedWorkspaceID)
     }
 
     public func splitViewDidResizeSubviews(_ notification: Notification) {}

@@ -87,6 +87,8 @@ Muxy focuses those windows; it does not decide their geometry.
 - Git imports should create an app-managed clone and default workspace.
 - Non-git projects should create one default workspace for the project directory.
 - Project creation and deletion should show progress without freezing the UI.
+- Sidebar project rows should use the leading chevron/name area to expand or collapse workspace lists.
+- Sidebar project rows should expose a dedicated settings action that opens project settings in the detail pane.
 
 ## Workspaces
 
@@ -148,6 +150,7 @@ Muxy focuses those windows; it does not decide their geometry.
 
 ## Editing and Shortcuts
 - The app should support keyboard-driven use for common actions.
+- Project and workspace detail screens should prefer flat section layouts with spacing and dividers over nested bordered cards.
 - Global shortcuts should bring Muxy forward and support fast workspace switching.
 - The global app-toggle shortcut should hide Muxy when it is already frontmost and visible, and show it otherwise.
 - Summoning Muxy from the global app-toggle shortcut should raise the main window above other apps and onto the active space.

@@ -1,6 +1,6 @@
 import AppKit
 
-/// A rounded card view that brightens its background and shows a pointer cursor on hover.
+/// A rounded row view that stays visually flat until hover indicates interactivity.
 /// Use `isInteractive = true` when a click action is attached; hover effects are skipped otherwise.
 final class ClickableRowView: NSView {
     var isInteractive: Bool {
@@ -17,6 +17,7 @@ final class ClickableRowView: NSView {
         super.init(frame: .zero)
         wantsLayer = true
         layer?.cornerRadius = 6
+        layer?.borderWidth = 0
         translatesAutoresizingMaskIntoConstraints = false
         updateBackgroundColor()
     }
@@ -28,11 +29,10 @@ final class ClickableRowView: NSView {
     private func updateBackgroundColor() { layer?.backgroundColor = resolvedBackground().cgColor }
 
     private func resolvedBackground() -> NSColor {
-        guard isInteractive && isHovered else { return .quaternaryLabelColor }
-        // A step above quaternaryLabelColor so the hover is noticeable but stays subtle.
+        guard isInteractive && isHovered else { return .clear }
         return NSColor(name: nil) { appearance in
             let isDark = appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
-            return isDark ? NSColor(white: 1.0, alpha: 0.18) : NSColor(white: 0.0, alpha: 0.10)
+            return isDark ? NSColor(white: 1.0, alpha: 0.08) : NSColor(white: 0.0, alpha: 0.05)
         }
     }
 
