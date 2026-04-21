@@ -145,7 +145,9 @@ final class AppctlAdapterTests: XCTestCase {
         setenv("PATH", updatedPath, 1)
         defer { setenv("PATH", originalPath, 1) }
 
-        try run()
+        try withTestAppleScriptOptIn(enabled: commands.keys.contains("osascript")) {
+            try run()
+        }
     }
 
     private func withEnv(name: String, value: String, run: () throws -> Void) throws {

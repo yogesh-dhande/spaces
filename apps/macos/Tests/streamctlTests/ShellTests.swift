@@ -50,9 +50,40 @@ final class ShellTests: XCTestCase {
         }
     }
 
+    // Tests AppleScript.run fails fast in XCTest when the test has not installed an osascript mock.
+    func testAppleScriptRunRequiresMockDuringTests() {
+        XCTAssertThrowsError(try AppleScript.run("return \"hello\"")) { error in
+            let nsError = error as NSError
+            XCTAssertEqual(nsError.domain, "muxy.applescript")
+            XCTAssertTrue(nsError.localizedDescription.contains("Unmocked AppleScript call during tests"))
+        }
+    }
+
     // Tests run(lines:) joins lines with newlines and executes the resulting script.
     func testAppleScriptRunJoinsLines() throws {
-        let result = try AppleScript.run(lines: ["return \"hello\""])
-        XCTAssertEqual(result, "hello")
+        try withMockCommands(["osascript": "#!/bin/bash\necho 'hello'\n"]) {
+            let result = try AppleScript.run(lines: ["return \"hello\""])
+            XCTAssertEqual(result, "hello")
+        }
+    }
+
+    private func withMockCommands(_ commands: [String: String], run: () throws -> Void) throws {
+        let directory = try makeTempDirectory()
+        for (name, script) in commands {
+            let file = directory.appendingPathComponent(name)
+            try script.write(to: file, atomically: true, encoding: .utf8)
+            try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: file.path)
+        }
+
+        sharedPathMutationLock.lock()
+        defer { sharedPathMutationLock.unlock() }
+        let originalPath = ProcessInfo.processInfo.environment["PATH"] ?? ""
+        let updatedPath = originalPath.isEmpty ? directory.path : "\(directory.path):\(originalPath)"
+        setenv("PATH", updatedPath, 1)
+        defer { setenv("PATH", originalPath, 1) }
+
+        try withTestAppleScriptOptIn(enabled: commands.keys.contains("osascript")) {
+            try run()
+        }
     }
 }

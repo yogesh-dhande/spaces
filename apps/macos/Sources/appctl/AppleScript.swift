@@ -2,6 +2,16 @@ import Foundation
 
 public enum AppleScript {
     @discardableResult public static func run(_ script: String) throws -> String {
+        if NSClassFromString("XCTest") != nil,
+            ProcessInfo.processInfo.environment["MUXY_ALLOW_TEST_APPLESCRIPT"] != "1"
+        {
+            throw NSError(
+                domain: "muxy.applescript",
+                code: 1,
+                userInfo: [
+                    NSLocalizedDescriptionKey: "Unmocked AppleScript call during tests. Install an `osascript` mock before invoking AppleScript.run."
+                ])
+        }
         do {
             let output = try Shell.runAndCapture(["osascript", "-e", script])
             return output.trimmingCharacters(in: .whitespacesAndNewlines)

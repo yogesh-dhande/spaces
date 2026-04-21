@@ -1391,7 +1391,7 @@ final class OrchestratorTests: XCTestCase {
         // Mocked dependency: `yabai` focus command.
         // Why: verify indexed window focus and active workspace tracking.
         // Remaining risk: real-time focus transitions and stale snapshots are not represented.
-        try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) {
+        try withMockCommands(["yabai": Self.orchestratorYabaiMockScript, "osascript": Self.orchestratorOsaScriptMock]) {
             try withEnv(name: "YABAI_FOCUS_LOG_FILE", value: focusLog.path) {
                 try orchestrator.focusWorkspaceWindow(workspaceID: workspace.id, index: 2)
             }
@@ -2837,7 +2837,9 @@ final class OrchestratorTests: XCTestCase {
         setenv("PATH", updatedPath, 1)
         defer { setenv("PATH", originalPath, 1) }
 
-        try run()
+        try withTestAppleScriptOptIn(enabled: commands.keys.contains("osascript")) {
+            try run()
+        }
     }
 
     private func withEnv(name: String, value: String, run: () throws -> Void) throws {
