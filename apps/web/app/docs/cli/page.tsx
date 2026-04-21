@@ -53,13 +53,12 @@ export default function CliReferencePage() {
           <li>5. Archive when you&apos;re done (<Cmd>mx workspace archive</Cmd>).</li>
         </ol>
         <p className="mt-3 text-sm leading-7 text-foreground-soft">
-          Every command accepts <Cmd>--json</Cmd> for scripting. Commands exit non-zero on failure and print an error to stderr.
+          Commands exit non-zero on failure and print errors to stderr.
         </p>
-        <CodeBlock>{`mx project list --json
-mx workspace get --dir /path/to/workspace --json
-mx workspace runtime --dir /path/to/workspace --json
-mx dashboard --json
-mx settings get --all --json`}</CodeBlock>
+        <CodeBlock>{`mx project list
+mx workspace get --dir /path/to/workspace
+mx workspace runtime --dir /path/to/workspace
+mx workspace settings get --dir /path/to/workspace`}</CodeBlock>
       </article>
 
       {/* Installation */}
@@ -93,10 +92,9 @@ mx --version
         </p>
 
         <h3 className="mt-5 text-base font-semibold">Get one project</h3>
-        <CodeBlock>{`mx project get --dir /path/to/repo --json`}</CodeBlock>
+        <CodeBlock>{`mx project get --dir /path/to/repo`}</CodeBlock>
         <p className="mt-2 text-sm leading-7 text-foreground-soft">
-          Returns the persisted Muxy project record, including scripts, ports, processes, status
-          checks, and browser sessions.
+          Prints the project name and canonical directory path.
         </p>
 
         <h3 className="mt-5 text-base font-semibold">Add a project</h3>
@@ -235,13 +233,12 @@ mx workspace list --project-dir /path/to/repo --all`}</CodeBlock>
         </p>
 
         <h3 className="mt-5 text-base font-semibold">Get workspace state</h3>
-        <CodeBlock>{`mx workspace get --dir /path/to/workspace --json
-mx workspace runtime --dir /path/to/workspace --json
-mx workspace settings get --dir /path/to/workspace --json`}</CodeBlock>
+        <CodeBlock>{`mx workspace get --dir /path/to/workspace
+mx workspace runtime --dir /path/to/workspace
+mx workspace settings get --dir /path/to/workspace`}</CodeBlock>
         <p className="mt-2 text-sm leading-7 text-foreground-soft">
-          These JSON reads are the recommended way for alternate clients to load persisted
-          workspace metadata, runtime status, and per-workspace launch overrides without querying
-          the database directly.
+          These commands print the persisted workspace metadata, runtime summary, and per-workspace
+          launch overrides in a text format that is easy to inspect from a terminal.
         </p>
 
         <h3 className="mt-5 text-base font-semibold">Create a workspace</h3>

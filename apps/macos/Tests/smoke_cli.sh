@@ -29,16 +29,17 @@ TEST_REPO="$(mktemp -d /tmp/muxy-smoke-repo.XXXXXX)"
 LIST_OUT="$($BIN project list)"
 echo "$LIST_OUT" | grep -q "$(basename "$TEST_REPO")"
 
-JSON_LIST_OUT="$($BIN project list --json)"
-echo "$JSON_LIST_OUT" | grep -q '"ok" : true'
-echo "$JSON_LIST_OUT" | grep -q "\"name\" : \"$(basename "$TEST_REPO")\""
-
-"$BIN" workspace create --project-dir "$TEST_REPO" --name s1 --branch smoke/s1 >/dev/null
+JSON_ERR="$(mktemp)"
+if "$BIN" project list --json >/dev/null 2>"$JSON_ERR"; then
+  echo "expected --json to fail"
+  exit 1
+fi
+grep -q -- "--json" "$JSON_ERR"
 
 WS_LIST="$($BIN workspace list --project-dir "$TEST_REPO" --all)"
-echo "$WS_LIST" | grep -q "^s1"
+echo "$WS_LIST" | grep -q "^default"
 
-WS_JSON="$($BIN workspace get --dir "$TEST_REPO" --json)"
-echo "$WS_JSON" | grep -q '"title" : "'
+WS_GET="$($BIN workspace get --dir "$TEST_REPO")"
+echo "$WS_GET" | grep -q "^default"
 
 echo "smoke_cli.sh: PASS"

@@ -11,8 +11,6 @@ Core invariants:
 - Workspace settings are seeded from project templates and preserved as per-workspace overrides.
 - Schema changes must be additive and non-destructive.
 - GUI and CLI both call the same orchestration layer instead of re-implementing behavior independently.
-- `mx --json` is the supported contract for alternate clients that need Muxy-owned state or actions.
-- Non-Muxy machine inspection, such as git queries or whether third-party apps are installed, remains client-owned.
 
 ## Module Map
 
@@ -36,7 +34,6 @@ flowchart LR
 - `MuxyApp`: minimal app entry point that boots AppKit.
 - `gui`: AppKit UI layer that renders state and dispatches actions into `streamctl`.
 - `mx`: CLI entry point that exposes the same orchestrator capabilities.
-- external clients: Tauri or other frontends that invoke `mx --json` instead of reading SQLite directly.
 - `streamctl`: core orchestration, lifecycle, validation, persistence coordination, and environment building.
 - `appctl`: system adapters for shell commands, yabai, iTerm2, Ghostty, Chrome, and related OS integrations.
 
@@ -217,15 +214,6 @@ Implementation note:
 - Focus and capture paths should avoid unnecessary blocking work.
 - Hot paths that do not need stdout or stderr should use lightweight process spawning.
 - Long-running GUI actions should execute off the main thread and reconcile state back into the UI afterward.
-
-## External Client Boundary
-- External clients must treat `mx --json` as the API for Muxy-owned state and mutations.
-- JSON support is additive in shape evolution: new fields or commands may be added, but existing JSON fields should remain stable.
-- Anything not strictly derived from Muxy persistence or orchestration stays outside the CLI contract.
-- Examples of client-owned responsibilities:
-  git branch discovery, tracked-file activity, and other git inspection
-  checking whether iTerm2, Ghostty, tmux, or yabai are installed
-  client-specific onboarding or prerequisite UX
 
 ## External Dependencies
 - macOS 14+

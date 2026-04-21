@@ -4,10 +4,16 @@ import streamctl
 
 struct CLI {
     let args: [String]
-    private var wantsJSON: Bool { args.contains("--json") }
-    private var output: CLITextOrJSONOutput { .init(wantsJSON: wantsJSON) }
+    private let output = CLITextOrJSONOutput()
 
     func run() throws {
+        if args.contains("--json") {
+            throw NSError(
+                domain: "mx.cli",
+                code: 2,
+                userInfo: [NSLocalizedDescriptionKey: "`--json` is no longer supported."])
+        }
+
         guard args.count >= 2 else {
             printHelp()
             return
@@ -33,10 +39,10 @@ struct CLI {
         case "workspace": try runWorkspaceSubcommand(orchestrator: orchestrator)
         case "discover": try runDiscover(orchestrator: orchestrator)
         case "dashboard":
-            let payload = try DashboardPayloadBuilder.build(orchestrator: orchestrator)
-            try output.emit(
-                text: "Dashboard command is only available with --json.",
-                json: payload)
+            throw NSError(
+                domain: "mx.cli",
+                code: 2,
+                userInfo: [NSLocalizedDescriptionKey: "`mx dashboard` was removed with the Tauri proof of concept."])
         case "agent": try runAgentSubcommand(orchestrator: orchestrator)
         default: printHelp()
         }
@@ -536,19 +542,19 @@ struct CLI {
             let status = try orchestrator.workspaceRuntimeStatus(workspaceID: id)
             let processes = try orchestrator.runningProcesses(workspaceID: id)
             let windows = try orchestrator.windows(workspaceID: id)
-            var resultsByProcessID: [String: [StatusResultPayload]] = [:]
+            let agentWindows = try orchestrator.agentWindows(workspaceID: id)
+            var resultsByProcessID: [String: [StatusResult]] = [:]
             for process in processes {
-                resultsByProcessID[process.id] = try orchestrator.statusResults(processID: process.id).map(StatusResultPayload.init)
+                resultsByProcessID[process.id] = try orchestrator.statusResults(processID: process.id)
             }
-            let payload = WorkspaceRuntimePayload(
-                status: .init(status),
-                processes: processes,
-                windows: windows.map(WindowRecordPayload.init),
-                statusResultsByProcessID: resultsByProcessID,
-                agentWindows: try orchestrator.agentWindows(workspaceID: id))
             try output.emit(
-                text: "Workspace runtime is only available with --json.",
-                json: payload)
+                text: CLITextRenderer.workspaceRuntimeLines(
+                    status: status,
+                    processes: processes,
+                    windows: windows,
+                    statusResultsByProcessID: resultsByProcessID,
+                    agentWindows: agentWindows),
+                json: "")
         default: throw NSError(domain: "mx.cli", code: 2, userInfo: [NSLocalizedDescriptionKey: "Unknown workspace action: \(args[2])"])
         }
     }
@@ -587,8 +593,8 @@ struct CLI {
         guard args.count >= 4 else {
             let settings = try workspaceSettings(orchestrator: orchestrator)
             try output.emit(
-                text: "Workspace settings are only available with --json.",
-                json: WorkspaceSettingsPayload(settings))
+                text: CLITextRenderer.workspaceSettingsLines(settings),
+                json: "")
             return
         }
 
@@ -596,8 +602,8 @@ struct CLI {
         case "get":
             let settings = try workspaceSettings(orchestrator: orchestrator)
             try output.emit(
-                text: "Workspace settings are only available with --json.",
-                json: WorkspaceSettingsPayload(settings))
+                text: CLITextRenderer.workspaceSettingsLines(settings),
+                json: "")
         case "update":
             let workspace = try workspaceRecord(orchestrator: orchestrator)
             let stopScript = optionalValue(for: "--stop-script")
@@ -1048,7 +1054,6 @@ struct CLI {
             Usage:
               mx --version
               mx discover
-              mx dashboard [--json]
 
               mx project list
               mx project get --dir <path>
@@ -1091,7 +1096,6 @@ struct CLI {
               mx agent event --type init|start|waiting|done|stop [--dir <path>] [--provider iterm2|ghostty]
 
             Notes:
-              - Append `--json` to any Muxy command to receive the canonical machine-facing API response.
               - All settings are stored in ~/.muxy/muxy.db.
               - GUI settings (⌘,) let you pick a preferred editor (VS Code, Cursor, Windsurf).
               - Runtime state is stored in ~/.muxy/muxy.db and migrated in place with additive schema changes.
@@ -1121,6 +1125,6 @@ struct CLI {
 }
 
 do { try CLI(args: CommandLine.arguments).run() } catch {
-    CLITextOrJSONOutput.emitError(error, wantsJSON: CommandLine.arguments.contains("--json"))
+    CLITextOrJSONOutput.emitError(error, wantsJSON: false)
     exit(1)
 }

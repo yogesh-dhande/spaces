@@ -1,75 +1,78 @@
 import Foundation
 import streamctl
 
-struct JSONEnvelope<Payload: Encodable>: Encodable {
-    let ok = true
-    let data: Payload
-}
-
-struct JSONErrorEnvelope: Encodable {
-    struct JSONError: Encodable {
-        let code: String
-        let message: String
-    }
-
-    let ok = false
-    let error: JSONError
-}
-
 struct CLITextOrJSONOutput {
-    let wantsJSON: Bool
-
-    func emit<Payload: Encodable>(text: @autoclosure () -> String, json: @autoclosure () -> Payload) throws {
-        if wantsJSON {
-            try printJSON(JSONEnvelope(data: json()))
-        } else {
-            print(text())
-        }
+    func emit<Payload>(text: @autoclosure () -> String, json: @autoclosure () -> Payload) throws {
+        print(text())
     }
 
-    func emitLines<Payload: Encodable>(text: @autoclosure () -> [String], json: @autoclosure () -> Payload) throws {
-        if wantsJSON {
-            try printJSON(JSONEnvelope(data: json()))
-        } else {
-            for line in text() { print(line) }
-        }
-    }
-
-    func printJSON<Payload: Encodable>(_ payload: Payload) throws {
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        let data = try encoder.encode(payload)
-        guard let text = String(data: data, encoding: .utf8) else {
-            throw NSError(domain: "mx.cli", code: 2, userInfo: [NSLocalizedDescriptionKey: "Failed to encode JSON output."])
-        }
-        print(text)
+    func emitLines<Payload>(text: @autoclosure () -> [String], json: @autoclosure () -> Payload) throws {
+        for line in text() { print(line) }
     }
 
     static func emitError(_ error: Error, wantsJSON: Bool) {
-        guard wantsJSON else {
-            fputs("Error: \(error.localizedDescription)\n", stderr)
-            return
-        }
+        fputs("Error: \(error.localizedDescription)\n", stderr)
+    }
+}
 
-        let nsError = error as NSError
-        let payload = JSONErrorEnvelope(
-            error: .init(code: stableErrorCode(for: nsError), message: nsError.localizedDescription))
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        if let data = try? encoder.encode(payload), let text = String(data: data, encoding: .utf8) {
-            fputs("\(text)\n", stderr)
-        } else {
-            fputs("{\"ok\":false,\"error\":{\"code\":\"mx.cli.encoding_failed\",\"message\":\"\(nsError.localizedDescription)\"}}\n", stderr)
-        }
+enum CLITextRenderer {
+    static func workspaceSettingsLines(_ settings: WorkspaceSettings) -> String {
+        var lines = ["stop-script\t\(settings.stopScript ?? "-")"]
+        lines.append(contentsOf: settings.ports.isEmpty ? ["port\t-"] : settings.ports.map { "port\t\($0.name)" })
+        lines.append(
+            contentsOf: settings.processes.isEmpty
+                ? ["process\t-"]
+                : settings.processes.map { "process\t\($0.name ?? "-")\t\($0.command)\ton-exit=\($0.onExit.rawValue)" })
+        lines.append(
+            contentsOf: settings.statusChecks.isEmpty
+                ? ["status-check\t-"]
+                : settings.statusChecks.map {
+                    "status-check\t\($0.name ?? "-")\tprocess=\($0.process)\tcommand=\($0.command)\tinterval=\($0.interval)\ttimeout=\($0.timeout)\ton-fail=\($0.onFail.rawValue)"
+                })
+        lines.append(
+            contentsOf: settings.browserSessions.isEmpty
+                ? ["browser-session\t-"]
+                : settings.browserSessions.map { "browser-session\t\($0.name ?? "-")\t\($0.url ?? "-")" })
+        return lines.joined(separator: "\n")
     }
 
-    private static func stableErrorCode(for error: NSError) -> String {
-        let rawDomain = error.domain.isEmpty ? "mx.error" : error.domain
-        let normalizedDomain = rawDomain
-            .lowercased()
-            .replacingOccurrences(of: " ", with: "_")
-            .replacingOccurrences(of: "/", with: ".")
-        return "\(normalizedDomain).\(error.code)"
+    static func workspaceRuntimeLines(
+        status: WorkspaceRuntimeStatus,
+        processes: [RunningProcessRecord],
+        windows: [WindowRecord],
+        statusResultsByProcessID: [String: [StatusResult]],
+        agentWindows: [AgentWindowRecord]
+    ) -> String {
+        var lines = [
+            "status\tlifecycle=\(status.lifecycleState.rawValue)\truntime-health=\(status.runtimeHealth.rawValue)\trunning-processes=\(status.runningProcessCount)\texited-processes=\(status.exitedProcessCount)\tfailed-checks=\(status.failedCheckCount)\twaiting-agents=\(status.waitingAgentWindowCount)\tmissing-processes=\(status.missingConfiguredProcessCount)\tmissing-browser-sessions=\(status.missingConfiguredBrowserSessionCount)\twarning=\(status.warningSummary ?? "-")"
+        ]
+        lines.append(
+            contentsOf: processes.isEmpty
+                ? ["process\t-"]
+                : processes.map {
+                    "process\t\($0.templateName)\tstatus=\($0.status.rawValue)\tpid=\($0.pid.map(String.init) ?? "-")\twindow=\($0.windowID.map(String.init) ?? "-")\tstarted=\($0.startedAt ?? "-")\texited=\($0.exitedAt ?? "-")\tcommand=\($0.command)"
+                })
+        lines.append(
+            contentsOf: windows.isEmpty
+                ? ["window\t-"]
+                : windows.map {
+                    "window\trole=\($0.role)\tapp=\($0.app)\tname=\($0.name ?? "-")\tdetail=\($0.detail ?? "-")\twindow=\($0.windowID.map(String.init) ?? "-")\tlast-seen=\($0.lastSeenAt)"
+                })
+
+        let checks = processes.flatMap { process in
+            (statusResultsByProcessID[process.id] ?? []).map { result in
+                "status-check\tprocess=\(process.templateName)\tname=\(result.checkName)\tstatus=\(result.status.rawValue)\tmessage=\(result.message ?? "-")\tlast-run=\(result.lastRunAt ?? "-")"
+            }
+        }
+        lines.append(contentsOf: checks.isEmpty ? ["status-check\t-"] : checks)
+
+        lines.append(
+            contentsOf: agentWindows.isEmpty
+                ? ["agent\t-"]
+                : agentWindows.map {
+                    "agent\t\($0.label ?? "\($0.provider.rawValue) agent")\tstatus=\($0.status.rawValue)\twindow=\($0.yabaiWindowID.map(String.init) ?? "-")\tupdated=\($0.updatedAt)"
+                })
+        return lines.joined(separator: "\n")
     }
 }
 
