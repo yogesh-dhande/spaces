@@ -1,5 +1,4 @@
 import type { Metadata } from "next";
-import { ScreenshotFrame } from "../../components/screenshot-frame";
 import { DocsShell } from "../components/docs-shell";
 
 export const metadata: Metadata = {
@@ -17,79 +16,41 @@ export default function TroubleshootingDocsPage() {
       <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
         <h2 className="text-2xl font-semibold tracking-tight">Quick Triage</h2>
         <ol className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
-          <li>1. Confirm dependencies: yabai, iTerm2, and Chrome are installed and running.</li>
-          <li>2. Confirm accessibility permissions are granted.</li>
-          <li>3. Confirm workspace is not archived and has valid settings.</li>
-          <li>4. If launch reports existing runtime state, run <code>mx workspace up --force-restart</code> instead of launch.</li>
-          <li>5. Re-open workspace detail to refresh live browser-tab and window state.</li>
+          <li>1. Check that yabai, tmux, Ghostty or iTerm2, and Chrome are installed.</li>
+          <li>2. Check that Muxy and yabai have Accessibility permission in System Settings.</li>
+          <li>3. Confirm the workspace isn&apos;t archived.</li>
+          <li>4. If launch complains about existing runtime, run <code>mx workspace up --force-restart</code>.</li>
         </ol>
       </article>
 
       <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
-        <h2 className="text-2xl font-semibold tracking-tight">Workspace Creation Failures</h2>
+        <h2 className="text-2xl font-semibold tracking-tight">Launch / Stop / Restart Issues</h2>
         <ul className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
-          <li>• `Branch name is required for git projects`: provide `--branch` when creating the workspace.</li>
-          <li>• `Target branch not found`: use a valid local or remote target branch.</li>
-          <li>• Workspace name conflict: use a unique workspace name or archive/delete old workspace state.</li>
-          <li>• Project directory errors: confirm the project path exists and is accessible.</li>
-        </ul>
-      </article>
-
-      <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
-        <h2 className="text-2xl font-semibold tracking-tight">Launch/Restart/Stop Issues</h2>
-        <ul className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
-          <li>• `Workspace is already running. Use restart.`: call restart to reconcile stale runtime state.</li>
-          <li>• No terminals open: verify iTerm2 is installed and available.</li>
-          <li>• No browser sessions open: verify Chrome is installed and session URLs are configured.</li>
-          <li>• Services remain after stop: move extra teardown into workspace `stop_script`.</li>
+          <li>• <strong>&ldquo;Workspace is already running&rdquo;</strong> &mdash; use restart, or <code>mx workspace up --force-restart</code>, to reset state.</li>
+          <li>• <strong>No terminal windows appear</strong> &mdash; confirm your processes are running.</li>
+          <li>• <strong>No browser windows appear</strong> &mdash; confirm Chrome is installed and the workspace has browser sessions configured.</li>
+          <li>• <strong>Something is left running after stop</strong> &mdash; add the teardown command to the project or workspace stop script to clean up state not managed by Muxy.</li>
         </ul>
         <pre className="mt-3 w-full max-w-full min-w-0 overflow-x-auto whitespace-pre-wrap break-words rounded-lg border border-line/70 bg-background-soft/60 p-3 text-xs leading-6 text-foreground">
-          <code>{`mx workspace up --dir /path/to/workspace
+          <code>{`mx workspace up      --dir /path/to/workspace
 mx workspace restart --dir /path/to/workspace
-mx workspace stop --dir /path/to/workspace
-mx workspace launch --dir /path/to/workspace`}</code>
+mx workspace stop    --dir /path/to/workspace`}</code>
         </pre>
-      </article>
-
-      <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
-        <h2 className="text-2xl font-semibold tracking-tight">Window and Browser Routing Issues</h2>
-        <ul className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
-          <li>• Missing window shortcut targets: open the workspace and recapture windows via launch/restart.</li>
-          <li>• Browser tab not focused correctly: confirm browser sessions use stable URL prefixes.</li>
-          <li>• Shared Chrome window confusion: keep workspace session URLs distinct where possible.</li>
-          <li>• Stale state after app restart: select workspace and trigger refresh/restart flow.</li>
-        </ul>
       </article>
 
       <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
         <h2 className="text-2xl font-semibold tracking-tight">Status Check Issues</h2>
         <ul className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
-          <li>• Red checks: run the check command manually inside workspace context.</li>
-          <li>• Timeout failures: increase timeout if service startup is slower than expected.</li>
-          <li>• No checks shown: confirm the check `process` field matches a process template name.</li>
-          <li>• Unexpected output: verify check command handles auth headers and local routing.</li>
+          <li>• <strong>Check is red</strong> &mdash; run the command yourself inside the workspace directory to see what it prints.</li>
+          <li>• <strong>Times out</strong> &mdash; raise the timeout if your service is slow to start.</li>
         </ul>
       </article>
 
       <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
         <h2 className="text-2xl font-semibold tracking-tight">Keyboard Shortcut Issues</h2>
         <ul className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
-          <li>• Global toggle shortcut does nothing: rebind in Settings if another app intercepts it.</li>
-          <li>• `cmd+1..9` does not focus windows: ensure workspace has tracked windows in the Run tab list.</li>
-          <li>• Next/previous cycles wrong context: select the intended workspace in Muxy before cycling.</li>
-          <li>• Text input edits blocked: verify focus is inside a text field before using edit shortcuts.</li>
+          <li>• <strong>Global toggle (<code>cmd+alt+=</code>) or another global shortcut does nothing</strong> &mdash; another app may own the combo. Rebind it in Settings.</li>
         </ul>
-      </article>
-
-      <article className="grid gap-4 border-t border-line/70 pt-8 first:border-t-0 first:pt-0 md:grid-cols-2">
-        <ScreenshotFrame
-          title="Workspace Error State"
-          caption="Workspace detail with visible error text and recovery action controls."
-        />
-        <ScreenshotFrame
-          title="Status and Window Diagnostics"
-          caption="Run tab showing process check output and current tracked window list."
-        />
       </article>
     </DocsShell>
   );

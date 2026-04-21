@@ -39,33 +39,23 @@ export default function CliReferencePage() {
       description="The mx command-line interface is the primary way AI agents and human developers create, launch, and manage Muxy workspaces from scripts, terminals, and automated pipelines."
       pagePath="/docs/cli"
     >
-      {/* Agent-oriented overview */}
+      {/* Overview */}
       <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
-        <h2 className="text-2xl font-semibold tracking-tight">Using mx from AI Agents</h2>
+        <h2 className="text-2xl font-semibold tracking-tight">Overview</h2>
         <p className="mt-3 text-sm leading-7 text-foreground-soft">
-          <Cmd>mx</Cmd> is designed to be called by AI coding agents. When working on multiple
-          features or bug fixes in parallel, each task should run in its own Muxy workspace. This
-          keeps terminal sessions, browser tabs, reserved ports, and editor windows fully isolated
-          so the developer can switch context instantly without losing state.
-        </p>
-        <p className="mt-3 text-sm leading-7 text-foreground-soft">
-          A complete agent workflow — from a bare directory to a running workspace — looks like this:
+          Use <Cmd>mx</Cmd> to register projects, configure them, and create and run workspaces from scripts, a terminal, or a coding agent. A typical flow from a bare repo to a running workspace looks like this:
         </p>
         <ol className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
-          <li>1. Add the project (<Cmd>mx project add</Cmd>).</li>
-          <li>2. Configure ports, processes, status checks, browser sessions, and scripts via <Cmd>mx project port|process|status-check|browser-session</Cmd> and <Cmd>mx project update</Cmd>.</li>
+          <li>1. Register the project (<Cmd>mx project add</Cmd>).</li>
+          <li>2. Configure ports, processes, status checks, and browser sessions (<Cmd>mx project port|process|status-check|browser-session</Cmd>) and scripts (<Cmd>mx project update</Cmd>).</li>
           <li>3. Create a workspace for the branch or task (<Cmd>mx workspace create</Cmd>).</li>
-          <li>4. Launch the workspace — ports are reserved, processes start, browser sessions open (<Cmd>mx workspace launch</Cmd>).</li>
-          <li>5. Do the work. Switch context, run more workspaces in parallel.</li>
-          <li>6. Archive the workspace when the task is done (<Cmd>mx workspace archive</Cmd>).</li>
+          <li>4. Launch it — ports reserved, processes started, browser sessions opened (<Cmd>mx workspace launch</Cmd>).</li>
+          <li>5. Archive when you&apos;re done (<Cmd>mx workspace archive</Cmd>).</li>
         </ol>
         <p className="mt-3 text-sm leading-7 text-foreground-soft">
-          Human-readable output stays concise for terminal use, while app and automation clients
-          should append <Cmd>--json</Cmd> to consume the canonical machine-facing API contract.
-          Commands exit non-zero on failure.
+          Every command accepts <Cmd>--json</Cmd> for scripting. Commands exit non-zero on failure and print an error to stderr.
         </p>
-        <CodeBlock>{`# Machine-facing reads
-mx project list --json
+        <CodeBlock>{`mx project list --json
 mx workspace get --dir /path/to/workspace --json
 mx workspace runtime --dir /path/to/workspace --json
 mx dashboard --json
@@ -76,15 +66,14 @@ mx settings get --all --json`}</CodeBlock>
       <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
         <h2 className="text-2xl font-semibold tracking-tight">Finding the CLI</h2>
         <p className="mt-3 text-sm leading-7 text-foreground-soft">
-          The <Cmd>mx</Cmd> binary ships inside the Muxy.app bundle. Muxy symlinks it to{" "}
-          <Cmd>/usr/local/bin/mx</Cmd> when you first launch the app so it is available on{" "}
-          <Cmd>$PATH</Cmd> immediately.
+          The <Cmd>mx</Cmd> binary ships with Muxy. After installation, verify it is available on{" "}
+          <Cmd>$PATH</Cmd> before you automate against it.
         </p>
 <CodeBlock>{`# Verify installation
 mx --version
 `}</CodeBlock>
         <p className="mt-3 text-sm leading-7 text-foreground-soft">
-          If the command is not found, open Muxy.app once — it will install the symlink.
+          If the command is not found, launch the app and confirm the CLI install step completed.
         </p>
       </article>
 
@@ -124,7 +113,7 @@ mx project add --git-url https://github.com/owner/repo.git`}</CodeBlock>
 
         <h3 className="mt-5 text-base font-semibold">Set setup and stop scripts</h3>
         <CodeBlock>{`mx project update --dir /path/to/repo \\
-  --setup-script "cp /shared/.env .env && npm install" \\
+  --setup-script "cp .env.example .env && npm install" \\
   --stop-script "docker compose down --remove-orphans"`}</CodeBlock>
         <ul className="mt-2 space-y-1">
           <Flag name="--setup-script <cmd>" description="Runs once when a workspace is created or revived from archive. Named port env vars are available." />
@@ -164,7 +153,7 @@ mx project port remove --dir /path/to/repo --name API_PORT`}</CodeBlock>
       <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
         <h2 className="text-2xl font-semibold tracking-tight">Process Commands</h2>
         <p className="mt-3 text-sm leading-7 text-foreground-soft">
-          Processes are shell commands started in iTerm2 when a workspace launches. Named port env
+          Processes are commands started in the selected terminal host when a workspace launches. Named port env
           vars and <Cmd>MUXY_WORKSPACE_DIR</Cmd> / <Cmd>MUXY_PROJECT_DIR</Cmd> are injected
           automatically.
         </p>
@@ -179,7 +168,7 @@ mx project process remove --dir /path/to/repo --name api`}</CodeBlock>
           <Flag name="--on-exit <action>" description="Action when process exits: none | restart | notify. Default: none." />
         </ul>
         <p className="mt-3 text-sm leading-7 text-foreground-soft">
-          <Cmd>--on-exit restart</Cmd> attempts a clean terminate/wait of the previous runtime PID before relaunching.
+          Process commands are treated as direct executable invocations. If you need shell composition such as <Cmd>cd x &amp;&amp; y</Cmd>, wrap it explicitly with something like <Cmd>bash -lc &quot;cd x &amp;&amp; y&quot;</Cmd>. <Cmd>--on-exit restart</Cmd> attempts a clean terminate/wait of the previous runtime PID before relaunching.
         </p>
       </article>
 
@@ -279,7 +268,7 @@ mx workspace create \\
           <Flag name="--branch <branch>" description="Git branch name. Created from --target-branch if it does not exist. Required for git projects." />
           <Flag name="--target-branch <branch>" description="Base branch for the new branch. Defaults to main or master." />
           <Flag name="--dirname <name>" description="Override the git worktree directory name. Letters, numbers, - and _ only." />
-          <Flag name="--tooltip <text>" description="Optional context about what you're working on. Display with cmd+shift+i global hotkey." />
+          <Flag name="--tooltip <text>" description="Optional context about what you're working on. Shown on hover in the sidebar." />
         </ul>
         <p className="mt-3 text-sm leading-7 text-foreground-soft">
           On creation, the workspace snapshots port definitions, processes, status checks, and browser
@@ -334,9 +323,7 @@ mx workspace launch
 # Launch from specific workspace directory
 mx workspace launch --dir /path/to/workspace`}</CodeBlock>
         <p className="mt-2 text-sm leading-7 text-foreground-soft">
-          Starts configured processes in iTerm2 and opens browser sessions in Chrome. Only valid
-          for stopped workspaces. When run without arguments, uses the current directory to
-          identify the workspace.
+          Starts the workspace&apos;s processes in your terminal and opens its browser sessions in Chrome. Only valid for stopped workspaces. When run without <code>--dir</code>, Muxy infers the workspace from the current directory.
         </p>
 
         <h3 className="mt-5 text-base font-semibold">Stop a workspace</h3>
@@ -366,14 +353,13 @@ mx workspace up --dir /path/to/workspace
 # Ensure running and force restart if already running/stale
 mx workspace up --dir /path/to/workspace --force-restart
 
-# Ensure running, focus, and show tooltip overlay
-mx workspace up --dir /path/to/workspace --tooltip "Reviewing auth callback"`}</CodeBlock>
+# Ensure running, then focus the workspace
+mx workspace up --dir /path/to/workspace --focus`}</CodeBlock>
         <p className="mt-2 text-sm leading-7 text-foreground-soft">
           Idempotent run command: launches when stopped. If already running (or runtime indicators
           exist), it restarts exited processes by default; pass <Cmd>--force-restart</Cmd> to run
           stop then launch. Use <Cmd>--focus</Cmd> when you want to bring the workspace to the
-          foreground after ensuring runtime. With <Cmd>--tooltip [text]</Cmd>, Muxy shows the
-          tooltip overlay and updates tooltip text when text is provided.
+          foreground after ensuring runtime.
         </p>
 
         <h3 className="mt-5 text-base font-semibold">Archive a workspace</h3>
@@ -395,7 +381,7 @@ mx workspace focus --window 2
 mx workspace focus --dir /path/to/workspace --window 2`}</CodeBlock>
         <p className="mt-2 text-sm leading-7 text-foreground-soft">
           Brings the specified tracked window to the front.
-          Tooltip updates are managed with <Cmd>mx workspace update --tooltip ...</Cmd> or <Cmd>mx workspace up --tooltip ...</Cmd>.
+          Muxy requires <Cmd>--window &lt;index&gt;</Cmd> so focus targets stay explicit.
         </p>
       </article>
 
@@ -434,14 +420,14 @@ mx settings reset --window-focus-pulse-enabled`}</CodeBlock>
         </p>
       </article>
 
-      {/* AI agent recipe */}
+      {/* End-to-end recipe */}
       <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
-        <h2 className="text-2xl font-semibold tracking-tight">AI Agent Recipe</h2>
+        <h2 className="text-2xl font-semibold tracking-tight">End-to-End Recipe</h2>
         <p className="mt-3 text-sm leading-7 text-foreground-soft">
-          A complete example: register a project, configure it, create a workspace, and launch it.
+          A complete script: register a project, configure it, create a workspace, and launch it.
         </p>
         <CodeBlock>{`#!/usr/bin/env bash
-# Full project setup and workspace launch for an AI agent.
+# Register a project, configure it, and launch a workspace.
 # Usage: ./start.sh /path/to/repo feat/my-feature
 set -euo pipefail
 
@@ -461,7 +447,7 @@ mx project update --dir "$REPO" \\
 mx project port add --dir "$REPO" --name FRONTEND_PORT
 mx project port add --dir "$REPO" --name API_PORT
 
-# 4. Add processes (started in iTerm2 on launch)
+# 4. Add processes
 mx project process add --dir "$REPO" --name frontend --command "PORT=\$FRONTEND_PORT npm run dev"
 mx project process add --dir "$REPO" --name api      --command "PORT=\$API_PORT npm run api"
 
@@ -487,8 +473,8 @@ WORKSPACE_DIR="$HOME/muxy/workspaces/\${NAME}"
 cd "$WORKSPACE_DIR"
 mx workspace launch
 
-# 9. Ensure running, focus, and set tooltip in one command (agent context update)
-mx workspace up --tooltip "Next.js: implementing \${BRANCH}"
+# 9. Ensure runtime, then focus if needed
+mx workspace up --focus
 
 # 10. Focus a specific tracked window
 mx workspace focus --window 2

@@ -1,5 +1,4 @@
 import type { Metadata } from "next";
-import { ScreenshotFrame } from "../../components/screenshot-frame";
 import { DocsShell } from "../components/docs-shell";
 
 export const metadata: Metadata = {
@@ -17,80 +16,58 @@ export default function ProjectsDocsPage() {
       <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
         <h2 className="text-2xl font-semibold tracking-tight">What Is a Project?</h2>
         <p className="mt-2 text-sm leading-7 text-foreground-soft">
-          A project points to a local directory. Muxy detects whether the directory is a Git
-          repository and adjusts workspace behavior accordingly.
+          A project points at a directory on your Mac. If the directory is a Git repo, Muxy treats each workspace as a branch worktree. Otherwise, each workspace points at the project directory directly.
         </p>
-        <ul className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
-          <li>• Git detection runs when a project is added and at application startup.</li>
-          <li>• Project configuration can be shared across machines.</li>
-        </ul>
       </article>
 
       <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
         <h2 className="text-2xl font-semibold tracking-tight">Project Settings</h2>
         <ul className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
-          <li>• <strong>Directory</strong> &mdash; the project folder. The display name is inferred from the directory name.</li>
-          <li>• <strong>Setup script</strong> &mdash; a shell script that runs once when a new workspace is created (e.g. copy environment files into a worktree).</li>
-          <li>• <strong>Stop script</strong> &mdash; a shell script that runs whenever a workspace is stopped (including restart and archive), after processes are terminated.</li>
+          <li>• <strong>Directory</strong> &mdash; the project folder. Muxy uses the folder name as the display name.</li>
+          <li>• <strong>Setup script</strong> &mdash; runs once when a new workspace is created. A good place for <code>npm install</code> or copying a shared <code>.env</code> file into the workspace.</li>
+          <li>• <strong>Stop script</strong> &mdash; runs whenever a workspace is stopped (including on restart and archive), after Muxy shuts its processes down. Use it to tear down any extra services the workspace left behind.</li>
         </ul>
       </article>
 
       <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
         <h2 className="text-2xl font-semibold tracking-tight">Project Templates</h2>
         <p className="mt-2 text-sm leading-7 text-foreground-soft">
-          Projects define templates that are copied into each workspace on creation. After
-          creation, each workspace maintains its own independent overrides.
+          You configure processes, status checks, browser sessions, and named ports once on the project. New workspaces start from those templates. Each workspace can edit its own copy without affecting the project or other workspaces.
         </p>
         <ul className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
-          <li>• <strong>Processes</strong> &mdash; commands to run in terminal windows (servers, workers, coding agents).</li>
-          <li>• <strong>Status Checks</strong> &mdash; health commands that run at intervals and update status indicators.</li>
-          <li>• <strong>Browser Sessions</strong> &mdash; URLs opened in Chrome at workspace launch and tracked for focus cycling.</li>
-          <li>• <strong>Port Definitions</strong> &mdash; named env vars (e.g. `FRONTEND_PORT`, `API_PORT`) that receive reserved port numbers per workspace.</li>
+          <li>• <strong>Processes</strong> &mdash; commands Muxy runs alongside the workspace (servers, workers, coding agents).</li>
+          <li>• <strong>Status Checks</strong> &mdash; shell commands that run on a schedule and show passed/failed next to a process.</li>
+          <li>• <strong>Browser Sessions</strong> &mdash; URLs Muxy opens in Chrome when the workspace launches.</li>
+          <li>• <strong>Named Ports</strong> &mdash; placeholder names like <code>FRONTEND_PORT</code> and <code>API_PORT</code>. Muxy assigns each workspace a unique port number per name so two workspaces never clash.</li>
         </ul>
       </article>
 
       <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
         <h2 className="text-2xl font-semibold tracking-tight">Adding a Project</h2>
         <p className="mt-2 text-sm leading-7 text-foreground-soft">
-          Add a project by pointing to a local directory or providing a Git repository URL.
-          Git URLs are cloned into a Muxy-managed location.
+          Add a project by pointing at a local directory or pasting a Git URL. For a Git URL, Muxy clones into <code className="rounded bg-background-soft px-1.5 py-0.5 text-xs">~/muxy/repos</code>. Either way, Muxy creates a default workspace for you automatically.
         </p>
-        <ul className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
-          <li>• On add, Muxy checks whether the directory is a Git repo and creates a default workspace automatically.</li>
-          <li>• You can then configure processes, status checks, browser sessions, and port definitions.</li>
-        </ul>
       </article>
 
       <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
         <h2 className="text-2xl font-semibold tracking-tight">Default Workspace</h2>
         <p className="mt-2 text-sm leading-7 text-foreground-soft">
-          Every project gets a non-archivable default workspace created automatically.
+          Every project has a default workspace:
         </p>
         <ul className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
-          <li>• <strong>Git projects</strong> &mdash; default workspace corresponds to the `main` or `master` branch.</li>
-          <li>• <strong>Non-Git projects</strong> &mdash; default workspace corresponds to the project directory itself.</li>
-          <li>• The default workspace cannot be archived.</li>
+          <li>• <strong>Git projects</strong> &mdash; the default workspace tracks <code>main</code> or <code>master</code>.</li>
+          <li>• <strong>Non-Git projects</strong> &mdash; the default workspace points at the project directory.</li>
+          <li>• The default workspace can&apos;t be archived but you can delete a project entirely.</li>
         </ul>
       </article>
 
       <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
         <h2 className="text-2xl font-semibold tracking-tight">Removing a Project</h2>
         <ul className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
-          <li>• Removing a project cleans up related workspaces and workspace directories.</li>
-          <li>• For Git projects cloned by Muxy, the cloned directory is also removed.</li>
-          <li>• Projects pointing to directories you manage yourself are never deleted from disk.</li>
+          <li>• Muxy cleans up the project&apos;s workspaces and their worktree directories.</li>
+          <li>• If Muxy cloned the repo (via Git URL), the clone under <code>~/muxy/repos</code> is removed too.</li>
+          <li>• Directories you pointed Muxy at yourself are left alone.</li>
         </ul>
-      </article>
-
-      <article className="grid gap-4 border-t border-line/70 pt-8 first:border-t-0 first:pt-0 md:grid-cols-2">
-        <ScreenshotFrame
-          title="Add Project Form"
-          caption="Local directory or Git URL input with port definitions and process templates."
-        />
-        <ScreenshotFrame
-          title="Project Detail View"
-          caption="Project settings with inline editors for scripts, ports, processes, and browser sessions."
-        />
       </article>
     </DocsShell>
   );

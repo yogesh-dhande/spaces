@@ -52,11 +52,12 @@ export default function NextjsDockerGuidePage() {
 
         <h3 className="mt-4 text-sm font-semibold text-foreground">Setup Script</h3>
         <pre className={code}>
-          <code>{`cp /shared/.env .env`}</code>
+          <code>{`cp .env.example .env`}</code>
         </pre>
         <p className={prose}>
           Copying <code>.env</code> gives each workspace an isolated env file.
           Symlink can reduce duplication, but one edit impacts all linked workspaces.
+          Point <code>cp</code> at whatever seed file your repo keeps — Muxy does not provide a built-in shared env file.
         </p>
 
         <h3 className="mt-4 text-sm font-semibold text-foreground">Processes</h3>
@@ -89,10 +90,10 @@ docker compose down`}</code>
 
         <h3 className="mt-4 text-sm font-semibold text-foreground">Status Checks</h3>
         <pre className={code}>
-          <code>{`docker ps | grep -q myapp_web`}</code>
+          <code>{`curl -fsS http://localhost:$FRONTEND_PORT`}</code>
         </pre>
         <p className={prose}>
-          Status checks make service health explicit in UI and can notify or restart on failure.
+          An HTTP probe against the workspace-reserved host port is the most reliable signal: it succeeds only when Compose is up and the container is serving traffic. Status checks make service health explicit in the UI and can notify or restart on failure.
         </p>
       </article>
 

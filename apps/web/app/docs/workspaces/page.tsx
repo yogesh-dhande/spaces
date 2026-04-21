@@ -1,5 +1,4 @@
 import type { Metadata } from "next";
-import { ScreenshotFrame } from "../../components/screenshot-frame";
 import { DocsShell } from "../components/docs-shell";
 
 export const metadata: Metadata = {
@@ -17,56 +16,51 @@ export default function WorkspacesDocsPage() {
       <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
         <h2 className="text-2xl font-semibold tracking-tight">What Is a Workspace?</h2>
         <p className="mt-2 text-sm leading-7 text-foreground-soft">
-          A workspace belongs to a project and represents a single stream of work. For Git
-          projects it is typically backed by a worktree. Each workspace holds its own copies
-          of process, status check, browser session, and port definition settings.
+          A workspace is one stream of work — a feature, a bug fix, an experiment. It belongs to a project, has its own directory (a git worktree for Git projects), and keeps its own copy of the project&apos;s processes, status checks, browser sessions, and ports.
         </p>
       </article>
 
       <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
         <h2 className="text-2xl font-semibold tracking-tight">Creating a Workspace</h2>
         <p className="mt-2 text-sm leading-7 text-foreground-soft">
-          Create a workspace from the sidebar using the add button on a project. For Git projects,
-          this is one click: Muxy creates the workspace immediately with sensible defaults.
+          Open the New Workspace form from the <code>+</code> on any project or workspace row, or press <code>cmd+n</code>. For a Git project you&apos;ll fill in:
         </p>
         <ul className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
-          <li>• <strong>Workspace title + Branch</strong> &mdash; both start from Muxy&apos;s suggested workspace name.</li>
-          <li>• <strong>Target branch</strong> &mdash; defaults from project default branch, then `main`/`master` fallback.</li>
-          <li>• <strong>Directory name</strong> &mdash; auto-generated for the worktree and editable later.</li>
-          <li>• <strong>Tooltip</strong> &mdash; optional workspace context you can set after creation.</li>
+          <li>• <strong>Title</strong> &mdash; the display name in the sidebar.</li>
+          <li>• <strong>Branch</strong> &mdash; pick an existing branch or enter a name to create a new one.</li>
+          <li>• <strong>Target branch</strong> &mdash; the base for a new branch. Defaults to the project&apos;s default, falling back to <code>main</code> or <code>master</code>.</li>
+          <li>• <strong>Directory name</strong> &mdash; the folder name for the worktree. Auto-generated, editable later.</li>
+          <li>• <strong>Tooltip</strong> &mdash; optional context you can edit any time or ask a coding agent to keep in sync with the work.</li>
+        </ul>
+        <p className="mt-3 text-sm leading-7 text-foreground-soft">
+          For a non-Git project, the workspace uses the project directory itself and doesn&apos;t need a branch.
+        </p>
+      </article>
+
+      <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
+        <h2 className="text-2xl font-semibold tracking-tight">Per-Workspace Settings</h2>
+        <p className="mt-2 text-sm leading-7 text-foreground-soft">
+          A new workspace inherits the project&apos;s processes, status checks, browser sessions, and ports. From there, each workspace edits its own copy — the project&apos;s templates stay unchanged.
+        </p>
+        <ul className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
+          <li>• Double-click the title, branch, or tooltip to rename them inline. <code>Escape</code> or click away to cancel.</li>
+          <li>• Renaming the branch inline renames the underlying git branch.</li>
+          <li>• Add, remove, or rename named ports per workspace.</li>
+          <li>• Edit a process command while the workspace is running and Muxy restarts just that process.</li>
+          <li>• Add a browser session and Muxy opens it right away if the workspace is already running.</li>
+          <li>• <code>mx workspace update</code> edits title, branch, directory name, and tooltip from the CLI. Ports, processes, and browser sessions have their own <code>mx workspace</code> subcommands.</li>
         </ul>
       </article>
 
       <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
-        <h2 className="text-2xl font-semibold tracking-tight">Settings Overrides</h2>
+        <h2 className="text-2xl font-semibold tracking-tight">Named Ports</h2>
         <p className="mt-2 text-sm leading-7 text-foreground-soft">
-          Workspace settings (processes, status checks, browser sessions, port definitions) start
-          as copies of the project templates. After creation, each workspace maintains independent
-          overrides that do not affect the project templates.
+          Name the ports your project uses (for example <code>FRONTEND_PORT</code>, <code>API_PORT</code>) and Muxy gives each workspace its own port number behind those names. Two workspaces can run the same project at the same time without fighting over a port.
         </p>
         <ul className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
-          <li>• The project/workspace <code>+</code> opens the New Workspace form.</li>
-          <li>• <code>cmd+n</code> opens the New Workspace form for the currently selected project/workspace.</li>
-          <li>• When the New Workspace form is open, <code>cmd+n</code> creates a workspace immediately with generated defaults.</li>
-          <li>• Update title by double-clicking the top header name, and update branch/tooltip by double-clicking inline labels; press <code>Escape</code> or click outside the inline controls to cancel edits. You can also use <code>mx workspace update</code>.</li>
-          <li>• Renaming a workspace branch from the inline editor renames the underlying git worktree branch.</li>
-          <li>• Add, remove, or rename port definitions per workspace.</li>
-          <li>• Edit process commands; changes restart the process immediately if the workspace is running.</li>
-          <li>• Add browser sessions that open immediately when the workspace is running.</li>
-        </ul>
-      </article>
-
-      <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
-        <h2 className="text-2xl font-semibold tracking-tight">Ports Per Workspace</h2>
-        <p className="mt-2 text-sm leading-7 text-foreground-soft">
-          Each workspace receives reserved ports based on named port definitions so multiple
-          workspaces can run in parallel without port conflicts.
-        </p>
-        <ul className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
-          <li>• Port definitions are configured at the project level (e.g. `FRONTEND_PORT`, `API_PORT`) and inherited by workspaces.</li>
-          <li>• Each definition is exposed as an environment variable to every workspace process.</li>
-          <li>• Ports are reserved so they cannot be claimed by other processes between allocation and use.</li>
-          <li>• Reserved ports are released when a workspace is archived.</li>
+          <li>• Each named port is exposed as an environment variable to every workspace process, plus the setup and stop scripts.</li>
+          <li>• Muxy reserves the port number while the workspace exists, so nothing else on your Mac can grab it.</li>
+          <li>• Ports are released when the workspace is archived.</li>
         </ul>
         <pre className="mt-3 w-full max-w-full min-w-0 overflow-x-auto whitespace-pre-wrap break-words rounded-lg border border-line/70 bg-background-soft/60 p-3 text-xs leading-6 text-foreground">
           <code>{`Workspace: bugfix/login-timeout
@@ -78,41 +72,26 @@ API_PORT=21002`}</code>
       <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
         <h2 className="text-2xl font-semibold tracking-tight">Environment Variables</h2>
         <p className="mt-2 text-sm leading-7 text-foreground-soft">
-          Every workspace process receives the following environment variables at launch.
+          Every workspace process, setup script, stop script, and status check runs with:
         </p>
         <ul className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
-          <li>• Named port env vars from the workspace&apos;s port definitions (e.g. `FRONTEND_PORT=20001`, `API_PORT=20002`).</li>
-          <li>• `MUXY_PROJECT_DIR` &mdash; the project directory.</li>
-          <li>• `MUXY_WORKSPACE_DIR` &mdash; the workspace directory.</li>
+          <li>• The workspace&apos;s named ports (for example <code>FRONTEND_PORT=20001</code>, <code>API_PORT=20002</code>).</li>
+          <li>• <code>MUXY_PROJECT_DIR</code> &mdash; the project directory.</li>
+          <li>• <code>MUXY_WORKSPACE_DIR</code> &mdash; this workspace&apos;s directory.</li>
         </ul>
-        <p className="mt-3 text-sm leading-7 text-foreground-soft">
-          These variables are available in setup scripts, stop scripts, process commands,
-          and status check commands.
-        </p>
       </article>
 
       <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
         <h2 className="text-2xl font-semibold tracking-tight">Switching Between Workspaces</h2>
         <p className="mt-2 text-sm leading-7 text-foreground-soft">
-          Switching workspaces changes active context in one action: windows, process list,
-          browser session targets, and status output all follow the selected workspace.
+          Selecting another workspace swaps the whole context — its windows, processes, and status output all follow you.
         </p>
-        <ol className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
-          <li>1. Select another running workspace from the sidebar or with next/previous shortcuts.</li>
-          <li>2. Use `cmd+1..9` or click a tracked window row when you want a specific window.</li>
-          <li>3. Continue cycling within that workspace using next/previous shortcuts.</li>
-        </ol>
-      </article>
-
-      <article className="grid gap-4 border-t border-line/70 pt-8 first:border-t-0 first:pt-0 md:grid-cols-2">
-        <ScreenshotFrame
-          title="Workspace Settings Tab"
-          caption="Per-workspace overrides for processes, status checks, browser sessions, and ports."
-        />
-        <ScreenshotFrame
-          title="Workspace Env Tab"
-          caption="Named port env vars and built-in Muxy env vars for the selected workspace."
-        />
+        <ul className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
+          <li>• <code>cmd+alt+=</code> from anywhere brings Muxy forward; pick the workspace you want.</li>
+          <li>• Inside Muxy, <code>cmd+alt+]</code> / <code>cmd+alt+[</code> step between workspaces.</li>
+          <li>• <code>cmd+1</code> through <code>cmd+9</code> focus a specific window of the selected workspace.</li>
+          <li>• Click any workspace in the sidebar or window row in the workspace run tab to jump directly.</li>
+        </ul>
       </article>
     </DocsShell>
   );

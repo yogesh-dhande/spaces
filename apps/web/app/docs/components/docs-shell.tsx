@@ -2,7 +2,7 @@ import Link from "next/link";
 import type { ReactNode } from "react";
 import { SiteHeader } from "../../components/site-header";
 import { SiteFooter } from "../../components/site-footer";
-import { docsPageLinks } from "../content";
+import { cookbookGuides, docsPageLinks } from "../content";
 
 type DocsShellProps = {
   title: string;
@@ -17,6 +17,9 @@ export function DocsShell({
   pagePath,
   children,
 }: DocsShellProps) {
+  const isOnGuideSubpage =
+    pagePath.startsWith("/docs/guides/") && pagePath !== "/docs/guides";
+
   return (
     <div className="relative min-h-screen overflow-x-clip">
       <SiteHeader />
@@ -29,6 +32,17 @@ export function DocsShell({
               Docs
             </Link>
             <span aria-hidden>/</span>
+            {isOnGuideSubpage ? (
+              <>
+                <Link
+                  href="/docs/guides"
+                  className="transition-colors hover:text-foreground"
+                >
+                  Cookbook Guides
+                </Link>
+                <span aria-hidden>/</span>
+              </>
+            ) : null}
             <span className="text-foreground">{title}</span>
           </nav>
           <h1 className="mt-4 max-w-4xl text-3xl font-semibold leading-tight tracking-tight md:text-5xl">
@@ -47,18 +61,41 @@ export function DocsShell({
             <nav className="mt-3 flex flex-col gap-0.5 border-l border-line/70">
               {docsPageLinks.map((item) => {
                 const isActive = item.href === pagePath;
+                const isGuidesIndex = item.href === "/docs/guides";
                 return (
-                  <Link
-                    key={item.href}
-                    href={item.href}
-                    className={`-ml-px border-l-2 px-3 py-1.5 text-sm transition-colors ${
-                      isActive
-                        ? "border-accent font-semibold text-foreground"
-                        : "border-transparent text-foreground-soft hover:border-line hover:text-foreground"
-                    }`}
-                  >
-                    {item.title}
-                  </Link>
+                  <div key={item.href} className="flex flex-col gap-0.5">
+                    <Link
+                      href={item.href}
+                      className={`-ml-px border-l-2 px-3 py-1.5 text-sm transition-colors ${
+                        isActive
+                          ? "border-accent font-semibold text-foreground"
+                          : "border-transparent text-foreground-soft hover:border-line hover:text-foreground"
+                      }`}
+                    >
+                      {item.title}
+                    </Link>
+                    {isGuidesIndex ? (
+                      <ul className="flex flex-col gap-0.5 pl-3">
+                        {cookbookGuides.map((guide) => {
+                          const isGuideActive = guide.href === pagePath;
+                          return (
+                            <li key={guide.href}>
+                              <Link
+                                href={guide.href}
+                                className={`-ml-px block border-l-2 px-3 py-1 text-xs transition-colors ${
+                                  isGuideActive
+                                    ? "border-accent font-semibold text-foreground"
+                                    : "border-transparent text-foreground-soft hover:border-line hover:text-foreground"
+                                }`}
+                              >
+                                {guide.title}
+                              </Link>
+                            </li>
+                          );
+                        })}
+                      </ul>
+                    ) : null}
+                  </div>
                 );
               })}
             </nav>

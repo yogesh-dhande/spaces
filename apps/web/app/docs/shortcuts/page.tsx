@@ -1,5 +1,4 @@
 import type { Metadata } from "next";
-import { ScreenshotFrame } from "../../components/screenshot-frame";
 import { DocsShell } from "../components/docs-shell";
 
 export const metadata: Metadata = {
@@ -8,13 +7,16 @@ export const metadata: Metadata = {
 };
 
 const shortcutRows = [
-  { shortcut: "cmd+shift+=", action: "Toggle/focus Muxy window", scope: "Global" },
-  { shortcut: "cmd+shift+]", action: "Next workspace (or next window for active workspace)", scope: "Global + App" },
-  { shortcut: "cmd+shift+[", action: "Previous workspace (or previous window for active workspace)", scope: "Global + App" },
-  { shortcut: "cmd+shift+e", action: "Open editor for workspace owning focused window", scope: "Global" },
-  { shortcut: "cmd+shift+t", action: "Open selected workspace terminal", scope: "App" },
-  { shortcut: "cmd+shift+f", action: "Open selected workspace in Finder", scope: "App" },
-  { shortcut: "cmd+1 ... cmd+9", action: "Focus workspace window by index", scope: "App" },
+  { shortcut: "cmd+alt+=", action: "Show or hide Muxy", scope: "Global" },
+  { shortcut: "cmd+alt+]", action: "Next window in the current workspace (cycles workspaces when Muxy is frontmost)", scope: "Global + App" },
+  { shortcut: "cmd+alt+[", action: "Previous window in the current workspace (cycles workspaces when Muxy is frontmost)", scope: "Global + App" },
+  { shortcut: "cmd+alt+g", action: "Open the dashboard", scope: "App" },
+  { shortcut: "cmd+n", action: "New workspace for the selected project", scope: "App" },
+  { shortcut: "cmd+alt+e", action: "Open the selected workspace in your configured editor", scope: "Global + App" },
+  { shortcut: "cmd+t", action: "Open a terminal for the selected workspace", scope: "App" },
+  { shortcut: "cmd+alt+f", action: "Reveal the selected workspace in Finder", scope: "App" },
+  { shortcut: "cmd+1 … cmd+9", action: "Focus workspace window by number", scope: "App" },
+  { shortcut: "cmd+alt+1 … 9", action: "Queue windows, then release to focus them in order", scope: "App" },
 ];
 
 export default function ShortcutsDocsPage() {
@@ -49,46 +51,17 @@ export default function ShortcutsDocsPage() {
       </article>
 
       <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
-        <h2 className="text-2xl font-semibold tracking-tight">Workspace vs Window Navigation</h2>
-        <ul className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
-          <li>• In-app next/previous cycles only running workspaces.</li>
-          <li>• Selecting a workspace in the app sets it as the target for direct window shortcuts.</li>
-          <li>• When Muxy is not focused, next/previous cycles windows for the active or focused workspace.</li>
-          <li>• Browser window disambiguation uses active tab URL matching in addition to window ID.</li>
-        </ul>
+        <h2 className="text-2xl font-semibold tracking-tight">The Leader</h2>
+        <p className="mt-2 text-sm leading-7 text-foreground-soft">
+          The leader is the shared modifier — <code>cmd+alt</code> by default — used for workspace and app shortcuts like next/previous workspace, dashboard, editor, Finder, and queued window focus. Change the leader once and all of those move with it.
+        </p>
       </article>
 
       <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
         <h2 className="text-2xl font-semibold tracking-tight">Customization</h2>
         <p className="mt-2 text-sm leading-7 text-foreground-soft">
-          Keyboard bindings can be overridden in the Settings view and through CLI settings commands.
+          Every shortcut is configurable from Settings (<code>cmd+,</code>) Menu
         </p>
-        <pre className="mt-3 w-full max-w-full min-w-0 overflow-x-auto whitespace-pre-wrap break-words rounded-lg border border-line/70 bg-background-soft/60 p-3 text-xs leading-6 text-foreground">
-          <code>{`mx settings get --gui-hotkey
-mx settings set --gui-hotkey cmd+shift+9
-mx settings set --gui-next-shortcut cmd+shift+]
-mx settings set --gui-prev-shortcut cmd+shift+[
-mx settings reset --gui-hotkey`}</code>
-        </pre>
-      </article>
-
-      <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
-        <h2 className="text-2xl font-semibold tracking-tight">Text Input Safety</h2>
-        <p className="mt-2 text-sm leading-7 text-foreground-soft">
-          When a text field is focused, Muxy does not intercept standard text-edit shortcuts
-          such as copy, cut, paste, undo, redo, and select-all.
-        </p>
-      </article>
-
-      <article className="grid gap-4 border-t border-line/70 pt-8 first:border-t-0 first:pt-0 md:grid-cols-2">
-        <ScreenshotFrame
-          title="Settings Shortcuts Panel"
-          caption="Shortcut capture buttons and reset actions in the Settings view."
-        />
-        <ScreenshotFrame
-          title="Workspace Inline Shortcut Hints"
-          caption="Run tab showing action labels and dynamic `cmd+<n>` window hints."
-        />
       </article>
     </DocsShell>
   );

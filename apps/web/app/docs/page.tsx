@@ -18,7 +18,7 @@ const terms = [
   {
     name: "Workspace",
     description:
-      "An isolated stream of work for a feature, fix, or experiment.",
+      "An isolated stream of work for a feature, fix, or experiment consisting of git branch, processes, terminal and browser windows.",
   },
   {
     name: "Process",
@@ -28,17 +28,17 @@ const terms = [
   {
     name: "Browser Session",
     description:
-      "Pages you want tied to a workspace so you can return to the same context.",
+      "URLs you want tied to a workspace (e.g. localhost:3000, github.com/owner/repo) so you can return to them quickly.",
   },
   {
     name: "Reserved Ports",
     description:
-      "Named port definitions allocated per workspace so parallel streams never collide on the same local port.",
+      "Named port definitions allocated per workspace so parallel work never collides on the same local port.",
   },
   {
     name: "Status Check",
     description:
-      "A periodic shell command that tests a running process and surfaces green/red health in the UI.",
+      "A periodic check for the running process that surfaces its health.",
   },
 ];
 

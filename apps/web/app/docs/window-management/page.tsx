@@ -1,5 +1,4 @@
 import type { Metadata } from "next";
-import { ScreenshotFrame } from "../../components/screenshot-frame";
 import { DocsShell } from "../components/docs-shell";
 
 export const metadata: Metadata = {
@@ -11,47 +10,39 @@ export default function WindowManagementDocsPage() {
   return (
     <DocsShell
       title="Window Management"
-      description="Muxy maps workspace windows to captured IDs and browser URL targets so context switching stays deterministic across terminals and Chrome tabs."
+      description="Muxy captures the windows a workspace opens and jumps you back to any one of them with a keystroke. It doesn't move or resize them."
       pagePath="/docs/window-management"
     >
       <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
-        <h2 className="text-2xl font-semibold tracking-tight">Window Sources</h2>
-        <ul className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
-          <li>• Terminal windows from workspace processes.</li>
-          <li>• Browser tabs/windows discovered from browser session URL prefixes.</li>
-          <li>• Terminal windows opened from workspace action buttons.</li>
-          <li>• Reconciled window records persisted with workspace state.</li>
-        </ul>
-      </article>
-
-      <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
-        <h2 className="text-2xl font-semibold tracking-tight">Switching Order</h2>
+        <h2 className="text-2xl font-semibold tracking-tight">What Muxy Tracks</h2>
         <p className="mt-2 text-sm leading-7 text-foreground-soft">
-          Workspace navigation is ordered for repeatability during rapid context switches.
+          When a workspace launches, Muxy opens one window per thing it runs and remembers each one:
         </p>
         <ul className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
-          <li>• Browser session tabs first.</li>
-          <li>• Terminal windows second.</li>
-          <li>• Other captured windows third.</li>
-          <li>• Subsequent next/previous navigation continues from remembered cycle position.</li>
+          <li>• A terminal window per process or coding agent</li>
+          <li>• A Chrome window per browser session.</li>
+        </ul>
+        <p className="mt-3 text-sm leading-7 text-foreground-soft">
+          Place those windows wherever you want. Muxy never moves, resizes, or tiles them without explicit user action — and never touches windows it didn&apos;t open.
+        </p>
+      </article>
+
+      <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
+        <h2 className="text-2xl font-semibold tracking-tight">Focusing a Window</h2>
+        <ul className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
+          <li>• <code>cmd+1</code> through <code>cmd+9</code> focus windows 1 through 9 of the selected workspace.</li>
+          <li>• Hold <code>cmd+alt</code> and tap digits to queue a sequence of windows, then release — Muxy focuses them in order. Use this to see multiple windows at once.</li>
+          <li>• Click a row in the workspace&apos;s window list to focus that window.</li>
+          <li>• A brief color pulse (optional) flashes on terminal windows so you can see where focus landed.</li>
         </ul>
       </article>
 
       <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
-        <h2 className="text-2xl font-semibold tracking-tight">Browser Tab Matching</h2>
+        <h2 className="text-2xl font-semibold tracking-tight">Recovery</h2>
         <ul className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
-          <li>• Browser session matching is URL-prefix based.</li>
-          <li>• Browser cleanup closes matching tabs only, never full Chrome windows.</li>
-          <li>• If tabs already match session URLs, Muxy reuses them instead of opening duplicates.</li>
-        </ul>
-      </article>
-
-      <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
-        <h2 className="text-2xl font-semibold tracking-tight">Keyboard Window Focus</h2>
-        <ul className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
-          <li>• `cmd+1` through `cmd+9` focus numbered windows for the selected workspace.</li>
-          <li>• Window shortcut hints are shown inline in the workspace detail pane.</li>
-          <li>• `cmd+shift+]` and `cmd+shift+[` cycle workspace windows forward/backward.</li>
+          <li>• If you close a tracked browser window, focusing it reopens the URL in a new Chrome window.</li>
+          <li>• If you close a tracked terminal window, Muxy reopens it and reattaches to the still-running process.</li>
+          <li>• If the underlying process is gone, Muxy prompts you before restarting it (<code>Cmd+R</code> to recover, <code>Esc</code> to cancel).</li>
         </ul>
       </article>
 
@@ -59,22 +50,12 @@ export default function WindowManagementDocsPage() {
         <h2 className="text-2xl font-semibold tracking-tight">Example Window Set</h2>
         <pre className="mt-3 w-full max-w-full min-w-0 overflow-x-auto whitespace-pre-wrap break-words rounded-lg border border-line/70 bg-background-soft/60 p-3 text-xs leading-6 text-foreground">
           <code>{`Workspace: feat/checkout
-1. Google Chrome — http://localhost:21004/checkout
-2. Google Chrome — https://github.com/org/repo/pull/912
-3. iTerm2 — web process
-4. iTerm2 — worker process`}</code>
+1. frontend — http://localhost:21004
+2. admin panel — http://localhost:21005/admin
+3. GitHub — https://github.com/org/repo
+4. web server — npm run dev
+5. worker — npm run worker`}</code>
         </pre>
-      </article>
-
-      <article className="grid gap-4 border-t border-line/70 pt-8 first:border-t-0 first:pt-0 md:grid-cols-2">
-        <ScreenshotFrame
-          title="Workspace Window List"
-          caption="Window rows with inline `cmd+<n>` hints, app names, and titles/URLs."
-        />
-        <ScreenshotFrame
-          title="Browser Session Focus"
-          caption="Tracked browser entries focusing the matching tab by URL prefix."
-        />
       </article>
     </DocsShell>
   );

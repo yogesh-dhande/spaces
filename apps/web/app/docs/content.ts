@@ -9,7 +9,7 @@ export const docsPageLinks: DocsPageLink[] = [
     href: "/docs/installation",
     title: "Installation & Setup",
     summary:
-      "Get Muxy installed, permissions configured, and your environment verified. Muxy guides you through any missing prerequisites (iTerm2 or Ghostty, yabai, Accessibility) with a step-by-step in-app setup flow on first launch.",
+      "Get Muxy installed, permissions configured, and your environment verified. Muxy guides you through any missing prerequisites with a step-by-step in-app setup flow on first launch.",
   },
   {
     href: "/docs/getting-started",
@@ -20,37 +20,37 @@ export const docsPageLinks: DocsPageLink[] = [
     href: "/docs/projects",
     title: "Projects",
     summary:
-      "Configure a codebase once so every workspace you create starts with the same processes, ports, and dedicated browser windows.",
+      "Configure a codebase once so every workspace you create starts with all of the configured processes running on their reserved ports, and dedicated browser windows.",
   },
   {
     href: "/docs/workspaces",
     title: "Workspaces",
     summary:
-      "Create, name, activate/deactivate, and switch between isolated streams of work, each with its own windows, branch, and settings, with GUI sidebar metadata periodically syncing CLI edits.",
+      "Create, name, and switch between isolated streams of work, each with its own git branch, windows, processes, and settings.",
   },
   {
     href: "/docs/workspace-lifecycle",
     title: "Workspace Lifecycle",
     summary:
-      "Launch, stop, restart, and archive workspaces—including automated bring-up from the CLI and AI agents, with restart paths reopening dedicated tracked terminal and browser windows when needed.",
+      "Launch, stop, restart, and archive workspaces from the GUI, the CLI, or a coding agent.",
   },
   {
     href: "/docs/window-management",
     title: "Window Management",
     summary:
-      "Capture the windows you need and switch context quickly, with next/previous shortcuts cycling workspaces in-app and cycling tracked dedicated workspace windows with low-latency yabai focus paths and DEBUG=1 timing logs for the full cycle path.",
+      "Muxy automatically tracks the windows a workspace opens and lets you jump to any one of them with a keyboard shortcut.",
   },
   {
     href: "/docs/processes",
     title: "Processes",
     summary:
-      "Run app servers, workers, and AI agents alongside each workspace so they start and stop together, with tracked terminal windows that can be focused directly and cleaned up on stop.",
+      "Run servers, workers, and coding agents alongside each workspace so they start and stop together.",
   },
   {
     href: "/docs/browser-sessions",
     title: "Browser Sessions",
     summary:
-      "Tie browser routes to a workspace so local references reopen together, with dedicated tracked Chrome windows used for fast focus and stale window mappings recovered lazily.",
+      "Attach Chrome URLs to a workspace so the pages you need reopen with it and stay focusable by keyboard shortcuts.",
   },
   {
     href: "/docs/status-checks",
@@ -62,7 +62,7 @@ export const docsPageLinks: DocsPageLink[] = [
     href: "/docs/shortcuts",
     title: "Keyboard Shortcuts",
     summary:
-      "Jump between workspaces, cycle tracked workspace windows, and trigger common actions, including the global workspace tooltip toggle, without lifting your hands from the keyboard; window-focus shortcuts and row clicks dispatch through detached focus helpers to keep activation handoff snappy, and a full-width app footer shows live shortcut hints for navigation, Settings, and tooltip toggle.",
+      "Jump between workspaces, focus windows, and trigger common actions with shortcuts you can configure.",
   },
   {
     href: "/docs/troubleshooting",
@@ -80,7 +80,52 @@ export const docsPageLinks: DocsPageLink[] = [
     href: "/docs/cli",
     title: "CLI Reference",
     summary:
-      "Drive every Muxy action from the terminal or automate workspace management from scripts and AI pipelines, including terminal-agent hooks for Claude Code and Codex CLI.",
+      "Drive every Muxy action from the terminal or ask a coding agent to do it for you.",
+  },
+];
+
+export type CookbookGuideLink = {
+  href: string;
+  title: string;
+  summary: string;
+  stack: readonly string[];
+};
+
+export const cookbookGuides: CookbookGuideLink[] = [
+  {
+    href: "/docs/guides/nextjs-host",
+    title: "Next.js (No Docker)",
+    summary:
+      "Single-repo frontend running directly on host with Muxy-managed ports and status checks.",
+    stack: ["Next.js", "Host"],
+  },
+  {
+    href: "/docs/guides/nextjs-docker",
+    title: "Next.js (Docker Compose)",
+    summary:
+      "Single frontend service in Compose, with notes on stop vs down and container-level health checks.",
+    stack: ["Next.js", "Docker"],
+  },
+  {
+    href: "/docs/guides/nextjs-django-monorepo-host",
+    title: "Next.js + Django Monorepo (No Docker)",
+    summary:
+      "Frontend and backend processes from one repo, each with dedicated reserved ports.",
+    stack: ["Next.js", "Django", "Monorepo", "Host"],
+  },
+  {
+    href: "/docs/guides/nextjs-django-monorepo-docker",
+    title: "Next.js + Django Monorepo (Docker)",
+    summary:
+      "Containerized full-stack setup with host port mapping per workspace.",
+    stack: ["Next.js", "Django", "Monorepo", "Docker"],
+  },
+  {
+    href: "/docs/guides/nextjs-django-separate-repos",
+    title: "Next.js + Django (Separate Repos)",
+    summary:
+      "Cross-project pattern using workspace overrides to run both services in one context.",
+    stack: ["Next.js", "Django", "Multi-repo"],
   },
 ];
 

@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import Link from "next/link";
 import { DocsShell } from "../components/docs-shell";
+import { cookbookGuides } from "../content";
 
 export const metadata: Metadata = {
   title: "Cookbook Guides",
@@ -8,43 +9,7 @@ export const metadata: Metadata = {
     "End-to-end project setup recipes you can copy and adapt for common stacks.",
 };
 
-const guides = [
-  {
-    href: "/docs/guides/nextjs-host",
-    title: "Next.js (No Docker)",
-    summary:
-      "Single-repo frontend running directly on host with Muxy-managed ports and status checks.",
-    stack: ["Next.js", "Host"],
-  },
-  {
-    href: "/docs/guides/nextjs-docker",
-    title: "Next.js (Docker Compose)",
-    summary:
-      "Single frontend service in Compose, with notes on stop vs down and container-level health checks.",
-    stack: ["Next.js", "Docker"],
-  },
-  {
-    href: "/docs/guides/nextjs-django-monorepo-host",
-    title: "Next.js + Django Monorepo (No Docker)",
-    summary:
-      "Frontend and backend processes from one repo, each with dedicated reserved ports.",
-    stack: ["Next.js", "Django", "Monorepo", "Host"],
-  },
-  {
-    href: "/docs/guides/nextjs-django-monorepo-docker",
-    title: "Next.js + Django Monorepo (Docker)",
-    summary:
-      "Containerized full-stack setup with host port mapping per workspace.",
-    stack: ["Next.js", "Django", "Monorepo", "Docker"],
-  },
-  {
-    href: "/docs/guides/nextjs-django-separate-repos",
-    title: "Next.js + Django (Separate Repos)",
-    summary:
-      "Cross-project pattern using workspace overrides to run both services in one context.",
-    stack: ["Next.js", "Django", "Multi-repo"],
-  },
-] as const;
+const guides = cookbookGuides;
 
 export default function GuidesDocsPage() {
   return (

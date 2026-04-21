@@ -37,16 +37,16 @@ export default function InstallationDocsPage() {
             1. Download <code className="rounded bg-background-soft px-1.5 py-0.5 text-xs">Muxy-&lt;version&gt;.dmg</code> from the latest release.
           </li>
           <li>
-            2. Double-click the DMG file to mount it.
+            2. Double-click the DMG to mount it.
           </li>
           <li>
-            3. Drag the <code className="rounded bg-background-soft px-1.5 py-0.5 text-xs">Muxy.app</code> to your <strong>Applications</strong> folder.
+            3. Drag <code className="rounded bg-background-soft px-1.5 py-0.5 text-xs">Muxy.app</code> to your <strong>Applications</strong> folder.
           </li>
           <li>
-            4. Double-click the <code className="rounded bg-background-soft px-1.5 py-0.5 text-xs">Install mx CLI</code> script in the DMG to install the command-line tool.
+            4. Double-click <code className="rounded bg-background-soft px-1.5 py-0.5 text-xs">Install mx CLI</code> in the DMG to install the <code className="rounded bg-background-soft px-1.5 py-0.5 text-xs">mx</code> command.
           </li>
           <li>
-            5. Eject the DMG volume.
+            5. Eject the DMG.
           </li>
         </ol>
       </article>
@@ -54,28 +54,30 @@ export default function InstallationDocsPage() {
       <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
         <h2 className="text-2xl font-semibold tracking-tight">Dependencies</h2>
         <p className="mt-2 text-sm leading-7 text-foreground-soft">
-          Muxy relies on three external tools. Install them before launching.
+          Muxy relies on a few external tools. Install them before launching.
         </p>
         <ul className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
           <li>
-            • <strong>yabai</strong> — window management and focus routing.
+            • <strong>yabai</strong> — used to focus workspace windows.
             <pre className="mt-1 rounded-lg bg-background-soft p-3 text-xs leading-6">brew install koekeishiya/formulae/yabai</pre>
           </li>
-          <li>• <strong>iTerm2</strong> — process terminals. Download from <a href="https://iterm2.com" className="text-accent hover:underline" target="_blank" rel="noopener noreferrer">iterm2.com</a> or install via <code className="rounded bg-background-soft px-1.5 py-0.5 text-xs">brew install --cask iterm2</code>.</li>
-          <li>• <strong>Google Chrome</strong> — browser sessions. Download from <a href="https://www.google.com/chrome/" className="text-accent hover:underline" target="_blank" rel="noopener noreferrer">google.com/chrome</a> or install via <code className="rounded bg-background-soft px-1.5 py-0.5 text-xs">brew install --cask google-chrome</code>.</li>
+          <li>• <strong>tmux</strong> — keeps workspace processes alive when their terminal window is closed. Install with <code className="rounded bg-background-soft px-1.5 py-0.5 text-xs">brew install tmux</code>.</li>
+          <li>• <strong>Ghostty or iTerm2</strong> — the terminal app Muxy uses for workspace processes. If both are installed, Muxy defaults to Ghostty. Install Ghostty with <code className="rounded bg-background-soft px-1.5 py-0.5 text-xs">brew install --cask ghostty</code> or iTerm2 from <a href="https://iterm2.com" className="text-accent hover:underline" target="_blank" rel="noopener noreferrer">iterm2.com</a> / <code className="rounded bg-background-soft px-1.5 py-0.5 text-xs">brew install --cask iterm2</code>.</li>
+          <li>• <strong>Google Chrome</strong> — required for browser sessions. Download from <a href="https://www.google.com/chrome/" className="text-accent hover:underline" target="_blank" rel="noopener noreferrer">google.com/chrome</a> or install with <code className="rounded bg-background-soft px-1.5 py-0.5 text-xs">brew install --cask google-chrome</code>.</li>
         </ul>
+        <p className="mt-3 text-sm leading-7 text-foreground-soft">
+          On first launch, Muxy walks you through anything that is missing in a guided setup flow.
+        </p>
       </article>
 
       <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
         <h2 className="text-2xl font-semibold tracking-tight">macOS Permissions</h2>
         <p className="mt-2 text-sm leading-7 text-foreground-soft">
-          Muxy and yabai need Accessibility permissions to manage windows.
+          Muxy and yabai need Accessibility permission to focus windows. Muxy&apos;s setup flow will open the right System Settings pane on first launch, but you can also grant it manually:
         </p>
         <ol className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
           <li>1. Open <strong>System Settings → Privacy &amp; Security → Accessibility</strong>.</li>
-          <li>2. Click the lock icon and authenticate.</li>
-          <li>3. Add <code className="rounded bg-background-soft px-1.5 py-0.5 text-xs">Muxy</code>, <code className="rounded bg-background-soft px-1.5 py-0.5 text-xs">yabai</code>, and <code className="rounded bg-background-soft px-1.5 py-0.5 text-xs">iTerm2</code> to the list.</li>
-          <li>4. Ensure each entry has its toggle enabled.</li>
+          <li>2. Enable <code className="rounded bg-background-soft px-1.5 py-0.5 text-xs">Muxy</code> and <code className="rounded bg-background-soft px-1.5 py-0.5 text-xs">yabai</code>, plus your terminal app if macOS prompts for it.</li>
         </ol>
       </article>
 
@@ -86,17 +88,17 @@ export default function InstallationDocsPage() {
         </p>
         <pre className="mt-3 rounded-lg bg-background-soft p-3 text-xs leading-6">
 {`mx --version
-Muxy`}
+open -a Muxy`}
         </pre>
         <p className="mt-2 text-sm leading-7 text-foreground-soft">
-          The first command prints the installed version. The second launches the menu bar app.
+          The first command prints the installed version. The second launches the app.
         </p>
       </article>
 
       <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
-        <h2 className="text-2xl font-semibold tracking-tight">Auto-Update</h2>
+        <h2 className="text-2xl font-semibold tracking-tight">Updates</h2>
         <p className="mt-2 text-sm leading-7 text-foreground-soft">
-          Muxy includes a built-in update checker. When a new version is available, you will see a notification in the menu bar with a link to download the update.
+          Muxy checks for updates on its own. When a new version is available, you can install it from inside the app.
         </p>
       </article>
 
@@ -106,9 +108,13 @@ Muxy`}
           To remove Muxy completely:
         </p>
         <pre className="mt-3 rounded-lg bg-background-soft p-3 text-xs leading-6">
-{`rm /usr/local/bin/Muxy /usr/local/bin/mx
-rm -rf ~/.muxy/`}
+{`rm -rf /Applications/Muxy.app
+rm -f /usr/local/bin/mx ~/.local/bin/mx
+rm -rf ~/.muxy ~/muxy`}
         </pre>
+        <p className="mt-2 text-sm leading-7 text-foreground-soft">
+          <code className="rounded bg-background-soft px-1.5 py-0.5 text-xs">~/.muxy</code> holds Muxy&apos;s local database; <code className="rounded bg-background-soft px-1.5 py-0.5 text-xs">~/muxy</code> holds any git repos Muxy cloned for you and its workspace worktrees. Leave them alone if you want to keep that state.
+        </p>
       </article>
     </DocsShell>
   );

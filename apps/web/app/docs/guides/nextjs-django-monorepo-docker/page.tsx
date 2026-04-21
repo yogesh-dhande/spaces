@@ -56,10 +56,10 @@ API_PORT`}</code>
 
         <h3 className="mt-4 text-sm font-semibold text-foreground">Setup Script</h3>
         <pre className={code}>
-          <code>{`cp /shared/.env .env`}</code>
+          <code>{`cp .env.example .env`}</code>
         </pre>
         <p className={prose}>
-          Keeps workspace configuration deterministic. Copy vs symlink tradeoff is the same: isolation vs centralized updates.
+          Keeps workspace configuration deterministic. Copy vs symlink tradeoff is the same: isolation vs centralized updates. Point <code>cp</code> at whatever seed file your repo keeps — Muxy does not provide a built-in shared env file.
         </p>
 
         <h3 className="mt-4 text-sm font-semibold text-foreground">Process</h3>
@@ -71,8 +71,15 @@ API_PORT`}</code>
         </p>
 
         <h3 className="mt-4 text-sm font-semibold text-foreground">Browser Sessions</h3>
+        <p className={prose}>
+          Add two browser sessions — one URL per entry — so both open when the workspace launches.
+        </p>
         <pre className={code}>
-          <code>{`http://localhost:$FRONTEND_PORT
+          <code>{`# frontend browser session
+http://localhost:$FRONTEND_PORT`}</code>
+        </pre>
+        <pre className={code}>
+          <code>{`# backend browser session
 http://localhost:$API_PORT/admin`}</code>
         </pre>
         <p className={prose}>
@@ -93,9 +100,16 @@ docker compose down`}</code>
         </p>
 
         <h3 className="mt-4 text-sm font-semibold text-foreground">Status Checks</h3>
+        <p className={prose}>
+          Add two status checks — one per service — so partial failure surfaces distinctly. HTTP probes against the reserved host ports are more reliable than matching container names, which depend on the Compose project prefix and instance suffix and vary across setups.
+        </p>
         <pre className={code}>
-          <code>{`docker ps | grep -q monorepo_frontend
-docker ps | grep -q monorepo_backend`}</code>
+          <code>{`# frontend status check
+curl -fsS http://localhost:$FRONTEND_PORT`}</code>
+        </pre>
+        <pre className={code}>
+          <code>{`# backend status check
+curl -fsS http://localhost:$API_PORT/health`}</code>
         </pre>
         <p className={prose}>
           Per-service checks reveal partial failure that is otherwise hidden when only the parent Compose process appears alive.

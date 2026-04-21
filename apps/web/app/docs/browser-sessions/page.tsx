@@ -1,5 +1,4 @@
 import type { Metadata } from "next";
-import { ScreenshotFrame } from "../../components/screenshot-frame";
 import { DocsShell } from "../components/docs-shell";
 
 export const metadata: Metadata = {
@@ -15,67 +14,35 @@ export default function BrowserSessionsDocsPage() {
       pagePath="/docs/browser-sessions"
     >
       <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
-        <h2 className="text-2xl font-semibold tracking-tight">Session Model</h2>
+        <h2 className="text-2xl font-semibold tracking-tight">What Is a Browser Session?</h2>
+        <p className="mt-2 text-sm leading-7 text-foreground-soft">
+          A browser session is a URL you want open whenever the workspace is running — your local app, an admin page, a PR, a runbook. Configure them on the project and Muxy opens them for every workspace.
+        </p>
         <ul className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
-          <li>• Browser sessions are configured at project level and copied into workspace settings.</li>
-          <li>• Each session entry has an optional name plus a URL prefix.</li>
-          <li>• Sessions can use named port variables like `$FRONTEND_PORT` or `$API_PORT`.</li>
-          <li>• Multiple session URLs can be attached to one workspace.</li>
+          <li>• Each session has a URL and an optional name.</li>
+          <li>• URLs can reference your named ports, for example <code>http://localhost:$FRONTEND_PORT</code>.</li>
+          <li>• Attach as many as you need to a workspace.</li>
         </ul>
       </article>
 
       <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
-        <h2 className="text-2xl font-semibold tracking-tight">Launch Behavior</h2>
+        <h2 className="text-2xl font-semibold tracking-tight">When the Workspace Launches</h2>
         <ul className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
-          <li>• On workspace launch, Muxy ensures session URLs are open in Chrome.</li>
-          <li>• Existing matching tabs are reused when possible.</li>
-          <li>• Matching is based on URL prefix, not window title.</li>
-          <li>• Matching browser tabs are attached to workspace window navigation.</li>
+          <li>• Muxy opens each session in its own Chrome window.</li>
+          <li>• Session rows show up in the workspace&apos;s window list, focusable with <code>cmd+1</code>…<code>cmd+9</code>.</li>
+          <li>• If you close a session&apos;s Chrome window and then focus it again, Muxy reopens it.</li>
+          <li>• Stopping the workspace closes the windows Muxy opened.</li>
         </ul>
       </article>
 
       <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
-        <h2 className="text-2xl font-semibold tracking-tight">Focus and Cleanup Rules</h2>
-        <ul className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
-          <li>• Focus actions target matching tabs using URL information.</li>
-          <li>• If a tab matches multiple session URLs, it appears once in workspace navigation.</li>
-          <li>• Browser cleanup closes matching tabs only.</li>
-          <li>• Muxy does not close full Chrome windows during workspace cleanup.</li>
-        </ul>
-      </article>
-
-      <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
-        <h2 className="text-2xl font-semibold tracking-tight">Ordering and Multi-Workspace Safety</h2>
-        <ul className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
-          <li>• Browser rows are ordered by browser session definition order, then URL.</li>
-          <li>• Workspace window listings rescan Chrome tabs to keep navigation current.</li>
-          <li>• This avoids routing global next/previous shortcuts to the wrong workspace.</li>
-        </ul>
-      </article>
-
-      <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
-        <h2 className="text-2xl font-semibold tracking-tight">Example Browser Session Config</h2>
+        <h2 className="text-2xl font-semibold tracking-tight">Example</h2>
         <pre className="mt-3 w-full max-w-full min-w-0 overflow-x-auto whitespace-pre-wrap break-words rounded-lg border border-line/70 bg-background-soft/60 p-3 text-xs leading-6 text-foreground">
-          <code>{`browser_sessions:
-  - name: frontend
-    url: http://localhost:$FRONTEND_PORT
-  - name: admin
-    url: http://localhost:$FRONTEND_PORT/admin
-  - name: pr-review
-    url: https://github.com/org/repo/pull/912
-  - url: https://docs.example.com/runbook/checkout`}</code>
+          <code>{`frontend   http://localhost:$FRONTEND_PORT
+admin      http://localhost:$FRONTEND_PORT/admin
+pr-review  https://github.com/org/repo/pull/912
+           https://docs.example.com/runbook/checkout`}</code>
         </pre>
-      </article>
-
-      <article className="grid gap-4 border-t border-line/70 pt-8 first:border-t-0 first:pt-0 md:grid-cols-2">
-        <ScreenshotFrame
-          title="Workspace Browser Sessions"
-          caption="Workspace settings tab with URL entries bound to the selected workspace."
-        />
-        <ScreenshotFrame
-          title="Run Tab Browser Window Rows"
-          caption="Browser rows in window list showing URL-oriented titles and keyboard indices."
-        />
       </article>
     </DocsShell>
   );

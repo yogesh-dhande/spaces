@@ -29,40 +29,19 @@ export default function NextjsDjangoSeparateReposGuidePage() {
       </article>
 
       <article className={card}>
-        <h2 className="text-2xl font-semibold tracking-tight">Project Settings Explained</h2>
-
+        <h2 className="text-2xl font-semibold tracking-tight">Project Settings</h2>
+        <p className={prose}>
+          The frontend workspace must own both frontend and backend ports and run both processes if it is the central context for both services.
+        </p>
         <h3 className="mt-4 text-sm font-semibold text-foreground">Frontend Project Template</h3>
         <pre className={code}>
           <code>{`Ports: FRONTEND_PORT, BACKEND_PORT
-Process: API_URL=http://localhost:$BACKEND_PORT PORT=$FRONTEND_PORT npm run dev
+Frontend Server: API_URL=http://localhost:$BACKEND_PORT PORT=$FRONTEND_PORT npm run dev
+Backend Server: bash -lc "cd /path/to/backend-project && python manage.py runserver 0.0.0.0:\$BACKEND_PORT"
 Browser Session: http://localhost:$FRONTEND_PORT`}</code>
         </pre>
         <p className={prose}>
-          The frontend workspace must own both ports if it is the central context for both services.
-        </p>
-
-        <h3 className="mt-4 text-sm font-semibold text-foreground">Workspace Override Process</h3>
-        <pre className={code}>
-          <code>{`cd /path/to/backend-project && python manage.py runserver 0.0.0.0:$BACKEND_PORT`}</code>
-        </pre>
-        <p className={prose}>
-          Add this as a workspace-level process in the frontend workspace so both processes receive the same reserved env vars.
-        </p>
-
-        <h3 className="mt-4 text-sm font-semibold text-foreground">Why This Works</h3>
-        <ul className={list}>
-          <li>• Named ports are workspace-scoped, not cross-project global variables.</li>
-          <li>• Workspace overrides let one workspace run commands from another repo while staying in one orchestration context.</li>
-          <li>• Browser sessions can still use <code>http://localhost:$FRONTEND_PORT</code> and backend/admin URLs consistently.</li>
-        </ul>
-
-        <h3 className="mt-4 text-sm font-semibold text-foreground">Status Checks</h3>
-        <pre className={code}>
-          <code>{`curl -fsS http://localhost:$FRONTEND_PORT
-curl -fsS http://localhost:$BACKEND_PORT/health`}</code>
-        </pre>
-        <p className={prose}>
-          Detects partial outage early and helps avoid chasing frontend symptoms caused by backend failure.
+          The backend server is started from the frontend workspace so both processes can receive the same reserved env vars.
         </p>
       </article>
 

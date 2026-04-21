@@ -1,5 +1,4 @@
 import type { Metadata } from "next";
-import { ScreenshotFrame } from "../../components/screenshot-frame";
 import { DocsShell } from "../components/docs-shell";
 
 export const metadata: Metadata = {
@@ -17,63 +16,23 @@ export default function StatusChecksDocsPage() {
       <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
         <h2 className="text-2xl font-semibold tracking-tight">What Is a Status Check?</h2>
         <p className="mt-2 text-sm leading-7 text-foreground-soft">
-          A status check is tied to a process and includes a command, check interval, timeout,
-          and an action to take when the check fails (do nothing, restart the process, or notify).
+          A status check is a shell command Muxy runs on a schedule while the workspace is running. Exit code <code>0</code> means healthy; anything else (or a timeout) means unhealthy. The result shows up as a green or red dot next to the linked process.
         </p>
-      </article>
-
-      <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
-        <h2 className="text-2xl font-semibold tracking-tight">How Checks Work</h2>
-        <ul className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
-          <li>• Checks are defined at the project level and inherited by each workspace.</li>
-          <li>• Each workspace can customize its own checks independently.</li>
-          <li>• Edits to checks in a running workspace apply immediately.</li>
-          <li>• Checks run in periodic background monitoring for running workspaces.</li>
-          <li>• A process may have multiple checks.</li>
-        </ul>
-      </article>
-
-      <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
-        <h2 className="text-2xl font-semibold tracking-tight">GUI Configuration</h2>
-        <ul className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
-          <li>• In Workspace Settings, each status check row includes an <code>On Fail</code> selector.</li>
-          <li>• <code>none</code>: store failed status only.</li>
-          <li>• <code>notify</code>: store failed status and send a desktop notification.</li>
-          <li>• <code>restart</code>: store failed status and restart the linked process.</li>
-        </ul>
-      </article>
-
-      <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
-        <h2 className="text-2xl font-semibold tracking-tight">Status Output</h2>
-        <ul className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
-          <li>• Successful check: passed status indicator (shown green in UI).</li>
-          <li>• Failed check or timeout: failed status indicator (shown red in UI).</li>
-          <li>• Check output is available for inspection.</li>
-          <li>• Process rows in the Run tab display check summaries.</li>
-        </ul>
-      </article>
-
-      <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
-        <h2 className="text-2xl font-semibold tracking-tight">Related Process States</h2>
         <p className="mt-2 text-sm leading-7 text-foreground-soft">
-          Status checks are one layer of visibility. Process state provides additional context.
+          Each check has a command, an interval, a timeout, and the process it belongs to. A process can have more than one check.
         </p>
-        <ul className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
-          <li>• <strong>Running</strong>: process is alive.</li>
-          <li>• <strong>Exited</strong>: process has stopped.</li>
-          <li>• <strong>Idle</strong>: agent process is alive but no output for the configured interval.</li>
-        </ul>
       </article>
 
-      <article className="grid gap-4 border-t border-line/70 pt-8 first:border-t-0 first:pt-0 md:grid-cols-2">
-        <ScreenshotFrame
-          title="Status Check Editor"
-          caption="Workspace settings with process-linked status check definitions."
-        />
-        <ScreenshotFrame
-          title="Run Tab Status Summary"
-          caption="Running process rows with passed/failed check results."
-        />
+      <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
+        <h2 className="text-2xl font-semibold tracking-tight">On Failure</h2>
+        <p className="mt-2 text-sm leading-7 text-foreground-soft">
+          Pick what Muxy should do when a check fails:
+        </p>
+        <ul className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
+          <li>• <strong>none</strong> &mdash; just mark it red.</li>
+          <li>• <strong>notify</strong> &mdash; send a macOS notification.</li>
+          <li>• <strong>restart</strong> &mdash; restart the linked process.</li>
+        </ul>
       </article>
     </DocsShell>
   );

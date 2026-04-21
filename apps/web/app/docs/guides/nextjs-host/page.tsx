@@ -44,13 +44,14 @@ export default function NextjsHostGuidePage() {
         <h3 className="mt-4 text-sm font-semibold text-foreground">Setup Script</h3>
         <pre className={code}>
           <code>{`npm i
-cp /shared/.env .env`}</code>
+cp .env.example .env`}</code>
         </pre>
         <p className={prose}>
           <code>npm i</code> ensures dependencies are present in new workspaces.
           <code>cp</code> creates an independent <code>.env</code> copy per workspace.
           Copy is safer when you want branch-local env edits.
           A symlink keeps one source of truth, but changes affect all workspaces and can cause surprising cross-branch coupling.
+          Swap <code>.env.example</code> for any real path you maintain — Muxy does not provide a built-in shared env file.
         </p>
 
         <h3 className="mt-4 text-sm font-semibold text-foreground">Processes</h3>
