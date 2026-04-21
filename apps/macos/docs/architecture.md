@@ -129,6 +129,7 @@ It also lets lifecycle state stay explicit while runtime health is derived from 
 - iTerm2, Ghostty, and Chrome AppleScript integrations add app-specific behavior on top of yabai, such as returning launch-time terminal IDs or selecting the intended browser target.
 - Browser sessions are stored as workspace configuration and only become tracked windows after an explicit focus action opens them.
 - Browser-session focus uses the tracked Chrome window plus tab `1` as the fast path, instead of rescanning Chrome tabs on every focus.
+- CLI workspace focus resolves explicit names instead of numeric window indexes. Those names come from the same workspace-level focus model used for browser sessions, running processes, and agent terminals, and the names must stay unique within a workspace.
 - Terminal focus pulsing is terminal-agnostic: Muxy queries the target yabai window and briefly presents an AppKit overlay aligned to that window instead of mutating terminal-specific appearance settings.
 - Tracked windows are persisted so Muxy can refocus or clean up only the windows it owns.
 - Direct focus requests auto-recover stale browser-session windows by reopening and re-tracking them, while process and generic window failures still surface typed missing-window errors to the GUI.
@@ -180,6 +181,7 @@ Identity rules:
 - Current examples:
   `iTerm2` tracks sessions primarily by session ID and falls back to a yabai window ID.
   `Ghostty` tracks by terminal/window identity and currently resolves persisted focus through the yabai window path.
+- `WindowRecord` stores a stable `name` for focus identity separately from a display `detail`, so CLI focus targets can stay deterministic while GUI rows still show live browser URLs, process commands, or terminal window titles.
 
 Operational requirements:
 - Workspace shell launch and process launch must both work through the same adapter surface.

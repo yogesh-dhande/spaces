@@ -4,14 +4,20 @@ import Testing
 @testable import gui
 
 @Suite struct AppKitControllerWorkspaceDetailRefreshTests {
-    @Test func terminalFallbackRowTextUsesTerminalNameAndShellDetail() {
-        let row = AppKitController.terminalFallbackRowText(title: "* zsh", app: "iTerm2")
+    @Test func terminalFallbackRowTextUsesNameAndLiveTitle() {
+        let row = AppKitController.terminalFallbackRowText(name: "shell-1", detail: "* zsh", app: "iTerm2")
+        #expect(row.label == "shell-1")
+        #expect(row.detail == "zsh")
+    }
+
+    @Test func terminalFallbackRowTextFallsBackToTerminalLabelWhenNameMissing() {
+        let row = AppKitController.terminalFallbackRowText(name: nil, detail: "* zsh", app: "iTerm2")
         #expect(row.label == "Terminal")
         #expect(row.detail == "zsh")
     }
 
     @Test func terminalFallbackRowTextOmitsDetailWhenTitleMissing() {
-        let row = AppKitController.terminalFallbackRowText(title: nil, app: "iTerm2")
+        let row = AppKitController.terminalFallbackRowText(name: nil, detail: nil, app: "iTerm2")
         #expect(row.label == "Terminal")
         #expect(row.detail == nil)
     }

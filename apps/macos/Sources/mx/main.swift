@@ -485,8 +485,16 @@ struct CLI {
             let id = try workspaceID(orchestrator: orchestrator)
             let shouldRestartIfRunning = args.contains("--force-restart")
             let shouldFocus = args.contains("--focus")
+            let focusName = optionalValueAllowingMissingValue(for: "--focus")
+            if shouldFocus, focusName == nil {
+                let availableNames = try orchestrator.workspaceFocusableWindowNames(workspaceID: id)
+                let suffix = availableNames.isEmpty ? "" : " Available names: \(availableNames.joined(separator: ", "))"
+                throw NSError(
+                    domain: "mx.cli", code: 2,
+                    userInfo: [NSLocalizedDescriptionKey: "`mx workspace up --focus` requires a window name. Use `--focus <name>`.\(suffix)"])
+            }
             try orchestrator.upWorkspace(workspaceID: id, restartIfRunning: shouldRestartIfRunning, background: !shouldFocus)
-            if shouldFocus { try orchestrator.focusWorkspace(workspaceID: id) }
+            if let focusName { try orchestrator.focusWorkspaceWindow(workspaceID: id, name: focusName) }
             guard let workspace = try orchestrator.store.workspace(id: id) else {
                 throw NSError(domain: "mx.cli", code: 2, userInfo: [NSLocalizedDescriptionKey: "Workspace not found for id \(id)"])
             }
@@ -522,22 +530,19 @@ struct CLI {
                 json: MutationResultPayload<WorkspaceRecord>(message: "Archived workspace \(id).", resource: resource))
         case "focus":
             let id = try workspaceID(orchestrator: orchestrator)
-            guard let rawWindowIndex = optionalValue(for: "--window") else {
+            guard let windowName = optionalValueAllowingMissingValue(for: "--window") else {
+                let availableNames = try orchestrator.workspaceFocusableWindowNames(workspaceID: id)
+                let suffix = availableNames.isEmpty ? "" : " Available names: \(availableNames.joined(separator: ", "))"
                 throw NSError(
                     domain: "mx.cli", code: 2,
-                    userInfo: [NSLocalizedDescriptionKey: "`mx workspace focus` requires --window <index> so focus targets stay explicit."])
+                    userInfo: [NSLocalizedDescriptionKey: "`mx workspace focus` requires --window <name> so focus targets stay explicit.\(suffix)"])
             }
-            guard let windowIndex = Int(rawWindowIndex), windowIndex > 0 else {
-                throw NSError(
-                    domain: "mx.cli", code: 2,
-                    userInfo: [NSLocalizedDescriptionKey: "Invalid --window '\(rawWindowIndex)'. Must be a positive integer."])
-            }
-            try orchestrator.focusWorkspaceWindow(workspaceID: id, index: windowIndex)
+            try orchestrator.focusWorkspaceWindow(workspaceID: id, name: windowName)
             try output.emit(
-                text: "Focused workspace window \(windowIndex) for workspace \(id)",
+                text: "Focused workspace window \(windowName) for workspace \(id)",
                 json: MutationResultPayload(
-                    message: "Focused workspace window \(windowIndex).",
-                    resource: ["workspaceID": id, "windowIndex": String(windowIndex)]))
+                    message: "Focused workspace window \(windowName).",
+                    resource: ["workspaceID": id, "windowName": windowName]))
         case "runtime":
             let id = try workspaceID(orchestrator: orchestrator)
             let status = try orchestrator.workspaceRuntimeStatus(workspaceID: id)
@@ -1083,10 +1088,10 @@ struct CLI {
               mx workspace update [--dir <path>] [--title <title>] [--branch <branch>] [--directory-name <name>|--dirname <name>|--dir-name <name>] [--tooltip <text>|--clear-tooltip] [--active|--inactive]
               mx workspace launch [--dir <path>]
               mx workspace restart [--dir <path>]
-              mx workspace up [--dir <path>] [--force-restart] [--focus]
+              mx workspace up [--dir <path>] [--force-restart] [--focus <name>]
               mx workspace stop [--dir <path>]
               mx workspace archive [--dir <path>]
-              mx workspace focus [--dir <path>] --window <index>
+              mx workspace focus [--dir <path>] --window <name>
               mx workspace runtime [--dir <path>]
               mx workspace settings [get] [--dir <path>]
               mx workspace settings update [--dir <path>] [--stop-script <script>|--clear-stop-script]
@@ -1109,7 +1114,7 @@ struct CLI {
               - Launch waits for pending/running setup to complete and fails with the setup error if setup failed.
               - `mx discover` reconciles git worktrees across all registered projects by creating missing workspaces, archiving workspaces whose worktrees are no longer valid, refreshing stored branch names from disk, and running the project `setup_script` for each newly created workspace.
               - Project/workspace `stop_script` runs whenever a workspace is stopped (including restart/archive stop phase), after automatic process termination attempts.
-              - `workspace up` ensures a workspace and all its processes are running: launches when stopped; when already running, restarts any exited processes. Windows open without activating the app. Add `--force-restart` to force a full stop+launch. Add `--focus` to bring the workspace to the foreground after.
+              - `workspace up` ensures a workspace and all its processes are running: launches when stopped; when already running, restarts any exited processes. Windows open without activating the app. Add `--force-restart` to force a full stop+launch. Add `--focus <name>` to bring one named workspace window to the foreground after launch.
               - If a workspace directory is missing during stop, muxy still stops the workspace, skips `stop_script`, and prints a note.
               - For git projects, `workspace create` requires `--branch`; `--target-branch` defaults to main/master if available.
               - `workspace create --directory-name` (or `--dirname`) overrides the auto-generated git worktree directory name; allowed characters are letters, numbers, '-', and '_', with no spaces.

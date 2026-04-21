@@ -34,7 +34,7 @@ Muxy provides a desktop app and a CLI for power users and coding agents.
   `Running` and `Stopped` should stay easy to explain, while failed processes, failed checks, or stale tracked windows surface as warnings on top of that lifecycle state.
 - Require explicit tracked-window targets for workspace focus.
   Workspace focus should not guess which window the user meant, because arbitrary focus becomes unpredictable as workspaces collect multiple windows.
-  Example: one workspace may have a frontend browser, an admin browser, an API terminal, and a coding-agent terminal all open at once. If the user runs `mx workspace focus` or clicks Focus in the GUI, Muxy should not silently pick whichever window was captured first or happened to survive most recently. The user may want the admin browser now and the coding-agent terminal five seconds later. Requiring an explicit tracked window target keeps focus behavior deterministic and keeps `workspace focus` from changing meaning as the workspace evolves.
+  Example: one workspace may have a frontend browser, an admin browser, an API terminal, and a coding-agent terminal all open at once. If the user runs `mx workspace focus` or clicks Focus in the GUI, Muxy should not silently pick whichever window was captured first or happened to survive most recently. The user may want the admin browser now and the coding-agent terminal five seconds later. Requiring an explicit tracked window target keeps focus behavior deterministic and keeps `workspace focus` from changing meaning as the workspace evolves. CLI focus targets should be selected by unique window names rather than numeric positions.
 - Never resize or reposition tracked windows unless initiated by the user.
   Muxy should respect where the user placed each tracked window, because it cannot infer whether the user wants side-by-side windows, overlapping windows, or some other layout that includes non-Muxy windows.
 - Never control windows that Muxy does not explicitly track.
@@ -169,7 +169,10 @@ Muxy focuses those windows; it does not decide their geometry.
 - Window rows in the selected workspace should expose numbered shortcuts for direct focus.
 - Workspace Run-tab rows and their numbered focus shortcuts should keep the saved workspace-settings order for configured browser sessions and processes, and append newly added ad-hoc windows after those configured rows.
 - Browser-session rows should appear in the Run tab only while the workspace is running.
+- Run-tab rows should show the tracked window or process name as the primary label and the target detail, such as a browser URL or process command, as secondary text.
+- Ad-hoc terminal rows should keep their generated focus name as the primary label and use the live terminal window title as secondary text.
 - Workspace focus from the GUI or `mx workspace focus` should require an explicit tracked window target instead of picking an arbitrary window.
+- CLI workspace focus should use unique names across focusable browser sessions, processes, and coding-agent terminals, and `mx workspace up --focus` should require one of those names explicitly.
 - Window-number shortcuts should use a configurable direct-focus modifier plus digits `1` through `9`.
 - Window-number sequence shortcuts should use a separate configurable modifier plus digits `1` through `9`, then replay the queued focus actions in order when the modifiers are released.
 - Shortcut handling must not break normal text-edit shortcuts while an input is focused.

@@ -1270,6 +1270,7 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertEqual(terminalWindows.first?.itermSessionID, "mock-session")
         XCTAssertEqual(terminalWindows.first?.tmuxWindowID, mockTmux.lastCreatedWindow?.id)
         XCTAssertEqual(terminalWindows.first?.title, "shell-1")
+        XCTAssertNil(terminalWindows.first?.detail)
     }
 
     // Tests that opening a terminal for a not-running workspace marks it as running so the UI shows Restart instead of Launch.
@@ -1284,6 +1285,51 @@ final class OrchestratorTests: XCTestCase {
         }
 
         XCTAssertEqual(try store.workspace(id: workspace.id)?.isRunning, true)
+    }
+
+    func testOpenWorkspaceTerminalUsesNextGeneratedUniqueName() throws {
+        let (orchestrator, store, _, workspace, _) = try makeOrchestratorWithWorkspace()
+        try store.setWorkspaceProcesses(
+            workspaceID: workspace.id,
+            processes: [ProcessTemplate(name: "shell-1", command: "echo process")])
+
+        try withMockCommands(["yabai": Self.orchestratorYabaiMockScript, "osascript": Self.orchestratorOsaScriptMock]) {
+            try withEnv(name: "YABAI_FOCUSED_ID", value: "777") {
+                try withEnv(name: "YABAI_FOCUSED_APP", value: "iTerm2") {
+                    try withEnv(
+                        name: "YABAI_WINDOWS_JSON",
+                        value: #"[{"id":888,"pid":11,"app":"iTerm2","title":"zsh","space":1,"display":1,"is-sticky":false,"is-hidden":false,"is-visible":true,"is-native-fullscreen":false}]"#
+                    ) {
+                        try orchestrator.openWorkspaceTerminal(workspaceID: workspace.id)
+                    }
+                }
+            }
+        }
+
+        let terminalWindow = try XCTUnwrap(try store.windows(workspaceID: workspace.id).first(where: { $0.role == "terminal" }))
+        XCTAssertEqual(terminalWindow.title, "shell-2")
+        XCTAssertNil(terminalWindow.detail)
+    }
+
+    func testRefreshWorkspaceWindowsPreservesGeneratedAdHocTerminalName() throws {
+        let (orchestrator, store, _, workspace, _) = try makeOrchestratorWithWorkspace()
+        try store.upsert(
+            window: WindowRecord(
+                id: UUID().uuidString, workspaceID: workspace.id, app: "iTerm2", title: "shell-1", windowID: 101, itermSessionID: "session-1",
+                role: "terminal", orderIndex: 200, lastSeenAt: "now"))
+
+        try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) {
+            try withEnv(
+                name: "YABAI_WINDOWS_JSON",
+                value: #"[{"id":101,"pid":11,"app":"iTerm2","title":"zsh","space":1,"display":1,"is-sticky":false,"is-hidden":false,"is-visible":true,"is-native-fullscreen":false}]"#
+            ) {
+                _ = try orchestrator.refreshWorkspaceWindows(workspaceID: workspace.id)
+            }
+        }
+
+        let terminalWindow = try XCTUnwrap(try store.windows(workspaceID: workspace.id).first(where: { $0.role == "terminal" }))
+        XCTAssertEqual(terminalWindow.title, "shell-1")
+        XCTAssertEqual(terminalWindow.detail, "zsh")
     }
 
     // Tests openWorkspaceTerminal uses Ghostty when configured as the selected terminal host.
@@ -1634,6 +1680,67 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertEqual(try orchestrator.activeWorkspaceID(), workspace.id)
         let focusedIDs = try String(contentsOf: focusLog).trimmingCharacters(in: .whitespacesAndNewlines)
         XCTAssertEqual(focusedIDs, "202")
+    }
+
+    func testWorkspaceFocusableWindowNamesIncludeConfiguredNames() throws {
+        let (orchestrator, store, _, workspace, _) = try makeOrchestratorWithWorkspace()
+        try store.setWorkspaceProcesses(
+            workspaceID: workspace.id,
+            processes: [ProcessTemplate(name: "API", command: "npm run api")])
+        try store.setWorkspaceBrowserSessions(
+            workspaceID: workspace.id,
+            sessions: [BrowserSession(name: "Frontend", url: "http://localhost:3001")])
+
+        let names = try orchestrator.workspaceFocusableWindowNames(workspaceID: workspace.id)
+
+        XCTAssertEqual(names, ["Frontend", "API"])
+    }
+
+    func testFocusWorkspaceWindowByNameTargetsProcessSession() throws {
+        let (orchestrator, store, _, workspace, root) = try makeOrchestratorWithWorkspace()
+        let itermFocusLog = root.appendingPathComponent("named-process-focus.log")
+
+        try store.upsert(
+            window: WindowRecord(
+                id: UUID().uuidString, workspaceID: workspace.id, app: "iTerm2", title: "api", windowID: 101, role: "terminal", orderIndex: 0,
+                lastSeenAt: "now"))
+        try store.upsert(
+            runningProcess: RunningProcessRecord(
+                id: UUID().uuidString, workspaceID: workspace.id, templateName: "api", command: "npm run api", terminalApp: "iTerm2", windowID: 101,
+                itermSessionID: "session-101", itermTabIndex: 1, tmuxWindowID: nil, pid: 1234, status: .running, logPath: nil,
+                lastOutputAt: nil, startedAt: "now", exitedAt: nil))
+
+        try withMockCommands(["yabai": Self.orchestratorYabaiMockScript, "osascript": Self.orchestratorOsaScriptMock]) {
+            try withEnv(name: "MOCK_ITERM_FOCUS_LOG_FILE", value: itermFocusLog.path) {
+                try orchestrator.focusWorkspaceWindow(workspaceID: workspace.id, name: "api")
+            }
+        }
+
+        XCTAssertEqual(try orchestrator.activeWorkspaceID(), workspace.id)
+        let focusEntry = try String(contentsOf: itermFocusLog).trimmingCharacters(in: .whitespacesAndNewlines)
+        XCTAssertEqual(focusEntry, "session-101|1|101")
+    }
+
+    func testFocusWorkspaceWindowByNameRecoversConfiguredBrowserSession() throws {
+        let (orchestrator, store, _, workspace, _) = try makeOrchestratorWithWorkspace()
+        let chromeOpenLog = FileManager.default.temporaryDirectory.appendingPathComponent("\(UUID().uuidString)-chrome-open.log")
+
+        try store.setWorkspaceBrowserSessions(workspaceID: workspace.id, sessions: [BrowserSession(name: "Frontend", url: "http://localhost:3001")])
+
+        try withMockCommands(["yabai": Self.orchestratorYabaiMockScript, "osascript": Self.orchestratorOsaScriptMock]) {
+            try withEnv(
+                name: "YABAI_WINDOWS_JSON",
+                value: #"[{"id":888,"pid":22,"app":"Google Chrome","title":"Frontend","space":1,"display":1,"is-sticky":false,"is-hidden":false,"is-visible":true,"is-native-fullscreen":false}]"#
+            ) {
+                try withEnv(name: "MOCK_CHROME_OPEN_LOG_FILE", value: chromeOpenLog.path) {
+                    try orchestrator.focusWorkspaceWindow(workspaceID: workspace.id, name: "Frontend")
+                }
+            }
+        }
+
+        let trackedWindow = try XCTUnwrap(try store.windows(workspaceID: workspace.id).first(where: { $0.role == "browser" }))
+        XCTAssertEqual(trackedWindow.targetURL, "http://localhost:3001")
+        XCTAssertEqual(trackedWindow.windowID, 888)
     }
 
     // Tests direct browser focus silently recovers by opening a new tracked Chrome window when the old yabai window is stale.
@@ -5685,6 +5792,38 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertTrue(remaining.contains(where: { $0.itermSessionID == "stale-session" }))
         XCTAssertTrue(remaining.contains(where: { $0.itermSessionID == nil }))
         XCTAssertTrue(remaining.contains(where: { $0.itermSessionID == "live-session" }))
+    }
+
+    func testUpdateWorkspaceSettingsRejectsDuplicateFocusNamesAcrossProcessAndBrowserSession() throws {
+        let (orchestrator, _, _, workspace, _) = try makeOrchestratorWithWorkspace()
+
+        XCTAssertThrowsError(try orchestrator.updateWorkspaceSettings(workspaceID: workspace.id) { settings in
+            settings.processes = [ProcessTemplate(name: "Frontend", command: "npm run api")]
+            settings.browserSessions = [BrowserSession(name: "Frontend", url: "http://localhost:3001")]
+        }) { error in
+            guard case MuxyError.invalidArgument(let message) = error else {
+                return XCTFail("Expected invalidArgument, got \(error)")
+            }
+            XCTAssertTrue(message.contains("unique"))
+            XCTAssertTrue(message.contains("Frontend"))
+        }
+    }
+
+    func testRegisterAgentWindowRejectsDuplicateFocusName() throws {
+        let (orchestrator, store, _, workspace, _) = try makeOrchestratorWithWorkspace()
+        try store.setWorkspaceProcesses(
+            workspaceID: workspace.id,
+            processes: [ProcessTemplate(name: "Claude", command: "claude")])
+
+        XCTAssertThrowsError(
+            try orchestrator.registerAgentWindow(workspaceID: workspace.id, provider: .iterm2, label: "Claude", itermSessionID: "agent-session")
+        ) { error in
+            guard case MuxyError.invalidArgument(let message) = error else {
+                return XCTFail("Expected invalidArgument, got \(error)")
+            }
+            XCTAssertTrue(message.contains("unique"))
+            XCTAssertTrue(message.contains("Claude"))
+        }
     }
 
     // Tests addProject throws when directory does not exist by arranging representative inputs and asserting the expected result.

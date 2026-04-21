@@ -981,8 +981,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                             label = name
                             detail = url
                         } else {
-                            label = win.targetURL ?? win.title ?? win.app
-                            detail = nil
+                            label = win.name ?? win.targetURL ?? win.app
+                            detail = win.detail
                         }
                     case "terminal":
                         icon = "terminal"
@@ -992,8 +992,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                     default:
                         icon = "chevron.left.forwardslash.chevron.right"
                         iconTint = .code
-                        label = win.title ?? win.app
-                        detail = nil
+                        label = win.name ?? win.app
+                        detail = win.detail
                     }
                     let redChecks = allChecks.filter { $0.status == .failed }
                     let eventDate: Date? =
@@ -3516,7 +3516,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 let agentColor: NSColor = agentWin.status == .done ? .systemGreen : agentWin.status == .waiting ? .systemOrange : .secondaryLabelColor
                 let linkedWin = agentWin.itermSessionID.flatMap { windowsByItermSessionID[$0] }
                 let agentLabel = agentWin.label ?? "Coding Agent CLI"
-                let agentDetail = linkedWin?.title ?? linkedWin?.app
+                let agentDetail = linkedWin?.detail ?? linkedWin?.app
                 let agentShortcutNum = shortcutCounter
                 shortcutCounter += 1
                 let rec = agentWin
@@ -3602,7 +3602,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 let win = windows[windowListIndex]
                 processRowCount += 1
                 if win.role == "terminal" {
-                    let rowText = Self.terminalFallbackRowText(title: win.title, app: win.app)
+                    let rowText = Self.terminalFallbackRowText(name: win.name, detail: win.detail, app: win.app)
                     let row = windowRow(
                         icon: "terminal", iconColor: .systemGreen, label: rowText.label, detail: rowText.detail,
                         shortcut: rowShortcut, processStatus: nil,
@@ -3615,7 +3615,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 } else {
                     let row = windowRow(
                         icon: "chevron.left.forwardslash.chevron.right", iconColor: .systemPurple,
-                        label: win.title ?? win.app, detail: nil, shortcut: rowShortcut, processStatus: nil,
+                        label: win.name ?? win.app, detail: win.detail, shortcut: rowShortcut, processStatus: nil,
                         action: { [weak self] in
                             guard let self else { return }
                             await self.performWindowFocus(.workspaceWindow(workspaceID: workspaceID, index: windowListIndex + 1))
@@ -4041,12 +4041,14 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         objc_setAssociatedObject(view, &Self.clickTargetAssocKey, target, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
     }
 
-    nonisolated static func terminalFallbackRowText(title: String?, app _: String) -> (label: String, detail: String?) {
-        let cleanedTitle = title?
+    nonisolated static func terminalFallbackRowText(name: String?, detail: String?, app _: String) -> (label: String, detail: String?) {
+        let cleanedName = name?
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .replacingOccurrences(of: #"^[*-]\s*"#, with: "", options: .regularExpression)
-        let detail = cleanedTitle.flatMap { $0.isEmpty ? nil : $0 }
-        return ("Terminal", detail)
+        let cleanedDetail = detail?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: #"^[*-]\s*"#, with: "", options: .regularExpression)
+        return (cleanedName?.isEmpty == false ? cleanedName! : "Terminal", cleanedDetail?.isEmpty == false ? cleanedDetail : nil)
     }
 
     private func windowRow(

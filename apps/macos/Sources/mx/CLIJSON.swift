@@ -171,7 +171,8 @@ struct WindowRecordPayload: Encodable {
     let id: String
     let workspaceID: String
     let app: String
-    let title: String?
+    let name: String?
+    let detail: String?
     let targetURL: String?
     let windowID: Int?
     let itermSessionID: String?
@@ -187,7 +188,8 @@ extension WindowRecordPayload {
         id = value.id
         workspaceID = value.workspaceID
         app = value.app
-        title = value.title
+        name = value.name
+        detail = value.detail
         targetURL = value.targetURL
         windowID = value.windowID
         itermSessionID = value.itermSessionID
@@ -473,11 +475,11 @@ enum DashboardPayloadBuilder {
             if let name = browserSessionDisplayName(for: window.targetURL, sessions: configuredSessions), let url = window.targetURL {
                 return ("globe", name, url)
             }
-            return ("globe", window.targetURL ?? window.title ?? window.app, nil)
+            return ("globe", window.name ?? window.targetURL ?? window.app, window.detail)
         case "terminal":
             return ("terminal", process.templateName, process.command)
         default:
-            return ("chevron.left.forwardslash.chevron.right", window.title ?? window.app, nil)
+            return ("chevron.left.forwardslash.chevron.right", window.name ?? window.app, window.detail)
         }
     }
 

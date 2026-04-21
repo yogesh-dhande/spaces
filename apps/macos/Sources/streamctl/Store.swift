@@ -555,12 +555,13 @@ public final class SQLiteStore {
         try execute(
             sql: """
                 INSERT INTO windows(
-                  id, workspace_id, app, title, target_url, window_id, iterm_session_id, iterm_tab_index, tmux_window_id, role, order_index, last_seen_at
+                  id, workspace_id, app, name, detail, target_url, window_id, iterm_session_id, iterm_tab_index, tmux_window_id, role, order_index, last_seen_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(id) DO UPDATE SET
                   app = excluded.app,
-                  title = excluded.title,
+                  name = excluded.name,
+                  detail = excluded.detail,
                   target_url = excluded.target_url,
                   window_id = excluded.window_id,
                   iterm_session_id = excluded.iterm_session_id,
@@ -571,16 +572,16 @@ public final class SQLiteStore {
                   last_seen_at = excluded.last_seen_at
                 """,
             bindings: [
-                window.id, window.workspaceID, window.app, window.title ?? "", window.targetURL ?? "", window.windowID.map(String.init) ?? "",
-                window.itermSessionID ?? "", window.itermTabIndex.map(String.init) ?? "", window.tmuxWindowID ?? "", window.role,
-                String(window.orderIndex), window.lastSeenAt,
+                window.id, window.workspaceID, window.app, window.name ?? "", window.detail ?? "", window.targetURL ?? "",
+                window.windowID.map(String.init) ?? "", window.itermSessionID ?? "", window.itermTabIndex.map(String.init) ?? "",
+                window.tmuxWindowID ?? "", window.role, String(window.orderIndex), window.lastSeenAt,
             ])
     }
 
     public func windows(workspaceID: String) throws -> [WindowRecord] {
         let rows = try queryRows(
             sql: """
-                SELECT id, workspace_id, app, title, target_url, window_id, iterm_session_id, iterm_tab_index, tmux_window_id, role, order_index, last_seen_at
+                SELECT id, workspace_id, app, name, detail, target_url, window_id, iterm_session_id, iterm_tab_index, tmux_window_id, role, order_index, last_seen_at
                 FROM windows WHERE workspace_id = ?
                 ORDER BY order_index
                 """, bindings: [workspaceID])
@@ -590,7 +591,7 @@ public final class SQLiteStore {
     public func windows(windowID: Int) throws -> [WindowRecord] {
         let rows = try queryRows(
             sql: """
-                SELECT id, workspace_id, app, title, target_url, window_id, iterm_session_id, iterm_tab_index, tmux_window_id, role, order_index, last_seen_at
+                SELECT id, workspace_id, app, name, detail, target_url, window_id, iterm_session_id, iterm_tab_index, tmux_window_id, role, order_index, last_seen_at
                 FROM windows
                 WHERE window_id = ?
                 ORDER BY last_seen_at DESC, order_index
@@ -911,7 +912,8 @@ public final class SQLiteStore {
               id TEXT PRIMARY KEY,
               workspace_id TEXT NOT NULL,
               app TEXT NOT NULL,
-              title TEXT,
+              name TEXT,
+              detail TEXT,
               target_url TEXT,
               window_id INTEGER,
               iterm_session_id TEXT,
@@ -958,6 +960,7 @@ public final class SQLiteStore {
         let existingTables = try userTableNames()
         if existingTables.isEmpty {
             try createSchema()
+            try ensureWindowsTableColumns()
             try setSchemaVersion(schemaVersion)
             return
         }
@@ -971,10 +974,12 @@ public final class SQLiteStore {
         switch currentVersion {
         case schemaVersion:
             try createSchema()
+            try ensureWindowsTableColumns()
             return
         case 6:
             try migrateSchemaFromV6ToV7()
             try createSchema()
+            try ensureWindowsTableColumns()
             try setSchemaVersion(schemaVersion)
         default:
             throw NSError(
@@ -1098,6 +1103,25 @@ public final class SQLiteStore {
                 """, bindings: [name]) != nil
     }
 
+    private func tableColumnNames(_ name: String) throws -> Set<String> {
+        let escapedName = name.replacingOccurrences(of: "\"", with: "\"\"")
+        return Set(try queryRows(sql: "PRAGMA table_info(\"\(escapedName)\")").compactMap { row in
+            guard row.count >= 2 else { return nil }
+            return row[1]
+        })
+    }
+
+    private func ensureWindowsTableColumns() throws {
+        guard try tableExists("windows") else { return }
+        let columns = try tableColumnNames("windows")
+        if !columns.contains("name") {
+            try execute(sql: "ALTER TABLE windows ADD COLUMN name TEXT", bindings: [])
+        }
+        if !columns.contains("detail") {
+            try execute(sql: "ALTER TABLE windows ADD COLUMN detail TEXT", bindings: [])
+        }
+    }
+
     private func decodeProjectWithTemplates(row: [String]) throws -> ProjectRecord? {
         guard row.count >= 8 else { return nil }
         let id = row[0]
@@ -1143,11 +1167,12 @@ public final class SQLiteStore {
     }
 
     private func decodeWindow(row: [String]) -> WindowRecord? {
-        guard row.count >= 12 else { return nil }
+        guard row.count >= 13 else { return nil }
         return WindowRecord(
-            id: row[0], workspaceID: row[1], app: row[2], title: row[3].isEmpty ? nil : row[3], targetURL: row[4].isEmpty ? nil : row[4],
-            windowID: Int(row[5]), itermSessionID: row[6].isEmpty ? nil : row[6], itermTabIndex: Int(row[7]),
-            tmuxWindowID: row[8].isEmpty ? nil : row[8], role: row[9], orderIndex: Int(row[10]) ?? 0, lastSeenAt: row[11])
+            id: row[0], workspaceID: row[1], app: row[2], name: row[3].isEmpty ? nil : row[3], detail: row[4].isEmpty ? nil : row[4],
+            targetURL: row[5].isEmpty ? nil : row[5], windowID: Int(row[6]), itermSessionID: row[7].isEmpty ? nil : row[7],
+            itermTabIndex: Int(row[8]), tmuxWindowID: row[9].isEmpty ? nil : row[9], role: row[10], orderIndex: Int(row[11]) ?? 0,
+            lastSeenAt: row[12])
     }
 
     private func executeBatch(sql: String) throws {
