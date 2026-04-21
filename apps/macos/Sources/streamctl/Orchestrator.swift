@@ -2976,7 +2976,7 @@ public final class MuxyOrchestrator {
                 if currentDate().timeIntervalSince(waitStartedAt) > 900 {
                     throw MuxyError.invalidArgument(
                         message:
-                            "Timed out waiting for workspace setup to finish. Retry launch after setup completes or run mx workspace up --force-restart."
+                            "Timed out waiting for workspace setup to finish. Retry launch after setup completes or run mx workspace up --restart."
                     )
                 }
                 Thread.sleep(forTimeInterval: 0.2)

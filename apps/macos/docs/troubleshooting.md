@@ -33,7 +33,7 @@ mx workspace import --title "debug" --tooltip "Local troubleshooting session"
 
 Force a clean runtime restart:
 ```bash
-mx workspace up --force-restart
+mx workspace up --restart
 ```
 
 ## Runtime Logs

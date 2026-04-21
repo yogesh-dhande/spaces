@@ -40,7 +40,7 @@ Muxy provides a desktop app and a CLI for power users and coding agents.
 - Never control windows that Muxy does not explicitly track.
   Muxy should not hide, move, resize, or otherwise manipulate unrelated windows, because the user may intentionally keep an untracked window visible next to a tracked workspace window.
 - Keep coding-agent events explicit.
-  `mx workspace import` and `mx workspace up` must not infer agent lifecycle, because only the agent can accurately report when it actually started, is waiting, or is done.
+  `mx workspace import` and `mx workspace up` must not infer agent lifecycle, because only the agent can accurately report when it actually initialized, started active work, is waiting, is done, or exited.
 
 ## Core Concepts
 
@@ -101,7 +101,7 @@ Muxy focuses those windows; it does not decide their geometry.
 
 ### Creation
 - Users can create, update, focus, stop, restart, and archive workspaces from the GUI.
-- The CLI should stay minimal and support `workspace import`, `workspace up`, and `agent event`.
+- The CLI should stay minimal and support `workspace import`, `workspace update`, `workspace up`, and `agent event`.
 - For git projects, new workspaces are branch-oriented and should support an existing-branch picker, a new-branch entry path, target branch, directory name, title, and tooltip inputs.
 - Workspace creation should feel fast in the GUI, with visible progress during setup.
 - Workspace settings used for launch must remain editable after creation.
@@ -124,7 +124,8 @@ Muxy focuses those windows; it does not decide their geometry.
 - `workspace up` is the idempotent "ensure running" path:
   - if stopped, it launches the workspace
   - if running, it restores failed or exited runtime as defined by the command mode
-  - `--force-restart` forces a full restart
+  - `--restart` forces a full restart
+- `workspace update` should own post-creation workspace metadata edits such as title and tooltip.
 - Launch should wait for setup to finish and should surface setup failures clearly.
 - Named ports must be available to setup scripts, stop scripts, process commands, and status checks.
 - Stopping or restarting a workspace must never close unrelated user windows.
@@ -174,6 +175,7 @@ Muxy focuses those windows; it does not decide their geometry.
 - Ad-hoc terminal rows should keep their generated focus name as the primary label and use the live terminal window title as secondary text.
 - CLI-driven focus through `mx workspace up --focus` should require an explicit tracked window target instead of picking an arbitrary window.
 - CLI focus should use unique names across focusable browser sessions, processes, and coding-agent terminals, and `mx workspace up --focus` should require one of those names explicitly.
+- Focus target discovery may remain GUI-centric; the CLI does not need a separate read-only discovery command.
 - Window-number shortcuts should use a configurable direct-focus modifier plus digits `1` through `9`.
 - Window-number sequence shortcuts should use a separate configurable modifier plus digits `1` through `9`, then replay the queued focus actions in order when the modifiers are released.
 - Shortcut handling must not break normal text-edit shortcuts while an input is focused.
@@ -184,6 +186,8 @@ Muxy focuses those windows; it does not decide their geometry.
 ## Coding-Agent Integration
 - Coding agents can explicitly report lifecycle events through `mx agent event`.
 - Agent events are not implied by `workspace import` or `workspace up`.
+- `mx agent event` should support explicit `init`, `start`, `waiting`, `done`, and `exit` events.
+- Agent events from unsupported terminal hosts should be dropped instead of recorded.
 - Agent windows should appear as tracked workspace windows with visible status.
 - Waiting and done states should surface in dashboard attention views.
 

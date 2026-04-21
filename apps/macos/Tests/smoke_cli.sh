@@ -26,24 +26,24 @@ TEST_REPO="$(mktemp -d /tmp/muxy-smoke-repo.XXXXXX)"
 )
 
 IMPORT_ERR="$(mktemp)"
-if "$BIN" workspace import --dir "$TEST_REPO" --title "smoke" --tooltip "smoke test" >/dev/null 2>"$IMPORT_ERR"; then
+if "$BIN" workspace import "$TEST_REPO" --title "smoke" --tooltip "smoke test" >/dev/null 2>"$IMPORT_ERR"; then
   echo "expected import without a registered project to fail"
   exit 1
 fi
 grep -q -- "Add the project in the app" "$IMPORT_ERR"
 
-JSON_ERR="$(mktemp)"
-if "$BIN" workspace import --json >/dev/null 2>"$JSON_ERR"; then
-  echo "expected --json to fail"
-  exit 1
-fi
-grep -q -- "--json" "$JSON_ERR"
-
 UP_ERR="$(mktemp)"
-if "$BIN" workspace up --dir "$TEST_REPO" >/dev/null 2>"$UP_ERR"; then
+if "$BIN" workspace up "$TEST_REPO" >/dev/null 2>"$UP_ERR"; then
   echo "expected up without a registered workspace to fail"
   exit 1
 fi
-grep -q -- "Workspace not found" "$UP_ERR"
+grep -q -- "Run \`mx workspace import \\[path\\]\` first" "$UP_ERR"
+
+UPDATE_ERR="$(mktemp)"
+if "$BIN" workspace update "$TEST_REPO" >/dev/null 2>"$UPDATE_ERR"; then
+  echo "expected update without metadata flags to fail"
+  exit 1
+fi
+grep -q -- "at least one field" "$UPDATE_ERR"
 
 echo "smoke_cli.sh: PASS"

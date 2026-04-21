@@ -35,7 +35,7 @@ flowchart LR
 - `MuxyApp`: minimal app entry point that boots AppKit.
 - `gui`: AppKit UI layer that renders state and dispatches actions into `streamctl`.
 - `mx`: executable shim that boots the declarative CLI parser.
-- `mxcli`: declarative `swift-argument-parser` command tree for `mx`, including command help, leaf validation, removed-command handling, and translation from CLI inputs into orchestration calls.
+- `mxcli`: declarative `swift-argument-parser` command tree for `mx`, including command help, leaf validation, and translation from CLI inputs into orchestration calls.
 - `streamctl`: core orchestration, lifecycle, validation, persistence coordination, and environment building.
 - `appctl`: system adapters for shell commands, yabai, iTerm2, Ghostty, Chrome, and related OS integrations.
 
@@ -129,6 +129,7 @@ It also lets lifecycle state stay explicit while runtime health is derived from 
 - Browser sessions are stored as workspace configuration and only become tracked windows after an explicit focus action opens them.
 - Browser-session focus uses the tracked Chrome window plus tab `1` as the fast path, instead of rescanning Chrome tabs on every focus.
 - CLI workspace focus resolves explicit names instead of numeric window indexes. Those names come from the same workspace-level focus model used for browser sessions, running processes, and agent terminals, and the names must stay unique within a workspace.
+- The CLI stays path-based: commands target the current working directory by default or accept an explicit workspace path argument.
 - Terminal focus pulsing is terminal-agnostic: Muxy queries the target yabai window and briefly presents an AppKit overlay aligned to that window instead of mutating terminal-specific appearance settings.
 - Tracked windows are persisted so Muxy can refocus or clean up only the windows it owns.
 - Direct focus requests auto-recover stale browser-session windows by reopening and re-tracking them, while process and generic window failures still surface typed missing-window errors to the GUI.
@@ -195,6 +196,7 @@ Implementation note:
 
 ## Agent Integration
 - Agent events are explicit CLI inputs that attach status to tracked workspace agent windows.
+- `mx agent event` infers the terminal host from the environment and drops events from unsupported hosts instead of persisting them.
 - Agent windows are stored separately from regular process windows because they carry provider and lifecycle metadata.
 - Dashboard attention state is derived from runtime records rather than inferred from UI state.
 - Dashboard dismissals are stored as a persisted set of attention-event IDs in SQLite global settings, then filtered in the GUI so workspace detail panes keep showing the underlying runtime rows.

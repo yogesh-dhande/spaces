@@ -1,6 +1,6 @@
 # Muxy macOS App
 
-`Muxy` is the macOS app and `mx` is the companion CLI for workspace import, idempotent workspace launch, and agent activity.
+`Muxy` is the macOS app and `mx` is the companion CLI for workspace import, metadata updates, idempotent workspace launch, and agent activity.
 
 ## Read This With
 - [spec.md](/Users/yogesh/projects/muxy/apps/macos/spec.md): UX and product behavior
@@ -34,7 +34,8 @@ Useful commands:
 apps/macos/.build/debug/Muxy
 apps/macos/.build/debug/mx --help
 apps/macos/.build/debug/mx workspace import --title "debug" --tooltip "Local debug session"
-apps/macos/.build/debug/mx workspace up --force-restart
+apps/macos/.build/debug/mx workspace update --tooltip "Ready for review"
+apps/macos/.build/debug/mx workspace up --restart
 ```
 
 ## Scope of This README

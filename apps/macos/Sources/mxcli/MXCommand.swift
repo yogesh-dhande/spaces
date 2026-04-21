@@ -6,42 +6,34 @@ import streamctl
 public struct MXCommand: ParsableCommand {
     public static let configuration = CommandConfiguration(
         commandName: "mx",
-        abstract: "Workspace import, launch, and coding-agent lifecycle commands for Muxy.",
+        abstract: "Workspace registration, runtime, and coding-agent lifecycle commands for Muxy.",
         discussion: """
         Notes:
           - All settings are stored in ~/.muxy/muxy.db.
           - Runtime state is stored in ~/.muxy/muxy.db and migrated in place with additive schema changes.
-          - Launch waits for pending/running setup to complete and fails with the setup error if setup failed.
-          - `workspace up` ensures a workspace and all its processes are running: launches when stopped; when already running, restarts any exited processes. Windows open without activating the app. Add `--force-restart` to force a full stop+launch. Add `--focus <name>` to bring one named workspace window to the foreground after launch.
-          - `workspace import` registers the current directory by default, or another directory via `--dir`.
-          - Agent events stay explicit. `workspace import` and `workspace up` do not imply agent lifecycle.
+          - Paths default to the current directory when omitted.
+          - `workspace import` registers the current directory by default and can apply `--title` or `--tooltip` when creating or re-importing a workspace.
+          - `workspace update` mutates workspace metadata after creation.
+          - `workspace up` waits for pending/running setup to complete and fails with the setup error if setup failed. It ensures a workspace and all its processes are running: launches when stopped; when already running, restarts any exited processes. Windows open without activating the app. Add `--restart` to force a full stop+launch. Add `--focus <name>` to bring one named workspace window to the foreground after launch.
+          - Agent events stay explicit. `workspace import` and `workspace up` do not imply agent lifecycle. Events from unsupported terminal hosts are dropped.
         """,
         version: AppVersion.current,
         subcommands: [
             WorkspaceCommand.self,
-            AgentCommand.self,
-            DashboardRemovedCommand.self
+            AgentCommand.self
         ]
     )
 
-    @Flag(name: .long, help: .hidden)
-    var json = false
-
     public init() {}
-
-    public func validate() throws {
-        if json {
-            throw ValidationError("`--json` is no longer supported.")
-        }
-    }
 }
 
 struct WorkspaceCommand: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "workspace",
-        abstract: "Import and launch workspaces.",
+        abstract: "Import, update, and launch workspaces.",
         subcommands: [
             WorkspaceImportCommand.self,
+            WorkspaceUpdateCommand.self,
             WorkspaceUpCommand.self
         ]
     )
@@ -53,8 +45,8 @@ struct WorkspaceImportCommand: ParsableCommand {
         abstract: "Register a workspace for the current directory or a provided path."
     )
 
-    @Option(name: .long, help: "Workspace directory. Defaults to the current directory.")
-    var dir: String?
+    @Argument(help: "Workspace directory. Defaults to the current directory.")
+    var path: String?
 
     @Option(name: .long, help: "Workspace title override.")
     var title: String?
@@ -65,7 +57,7 @@ struct WorkspaceImportCommand: ParsableCommand {
     func run() throws {
         let context = CLIContext()
         let orchestrator = try context.makeOrchestrator()
-        let importDirectory = dir ?? context.currentDirectoryPath()
+        let importDirectory = path ?? context.currentDirectoryPath()
         let normalizedImportDirectory = context.normalizePath(importDirectory)
         let workspace: WorkspaceRecord
 
@@ -100,36 +92,69 @@ struct WorkspaceImportCommand: ParsableCommand {
     }
 }
 
+struct WorkspaceUpdateCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "update",
+        abstract: "Update workspace metadata for the current directory or a provided path."
+    )
+
+    @Argument(help: "Workspace directory. Defaults to the current directory.")
+    var path: String?
+
+    @Option(name: .long, help: "Workspace title override.")
+    var title: String?
+
+    @Option(name: .long, help: "Workspace tooltip override.")
+    var tooltip: String?
+
+    func validate() throws {
+        if title == nil && tooltip == nil {
+            throw ValidationError("Specify at least one field to update with `--title` or `--tooltip`.")
+        }
+    }
+
+    func run() throws {
+        let context = CLIContext()
+        let orchestrator = try context.makeOrchestrator()
+        let workspace = try requireWorkspace(path: path, orchestrator: orchestrator, context: context)
+
+        try orchestrator.updateWorkspaceMetadata(
+            workspaceID: workspace.id,
+            title: title,
+            tooltip: tooltip != nil ? .some(tooltip) : nil
+        )
+
+        let updatedWorkspace = try requireWorkspace(id: workspace.id, orchestrator: orchestrator)
+        try context.output.emit(
+            text: "Updated workspace \(updatedWorkspace.title)\t\(updatedWorkspace.dir)",
+            json: MutationResultPayload(message: "Updated workspace \(updatedWorkspace.title).", resource: updatedWorkspace)
+        )
+    }
+}
+
 struct WorkspaceUpCommand: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "up",
         abstract: "Ensure a workspace is running and optionally focus a tracked window."
     )
 
-    @Option(name: .long, help: "Workspace directory. Defaults to the current directory.")
-    var dir: String?
+    @Argument(help: "Workspace directory. Defaults to the current directory.")
+    var path: String?
 
     @Flag(name: .long, help: "Force a full stop and relaunch if the workspace is already running.")
-    var forceRestart = false
+    var restart = false
 
     @Option(name: .long, help: "Focus a named workspace window after launch.")
     var focus: String?
 
-    @Option(name: .long, help: "Update the workspace tooltip before launch.")
-    var tooltip: String?
-
     func run() throws {
         let context = CLIContext()
         let orchestrator = try context.makeOrchestrator()
-        let workspace = try requireWorkspace(dir: dir, orchestrator: orchestrator, context: context)
-
-        if let tooltip {
-            try orchestrator.updateWorkspaceMetadata(workspaceID: workspace.id, tooltip: .some(tooltip))
-        }
+        let workspace = try requireWorkspace(path: path, orchestrator: orchestrator, context: context)
 
         try orchestrator.upWorkspace(
             workspaceID: workspace.id,
-            restartIfRunning: forceRestart,
+            restartIfRunning: restart,
             background: focus == nil
         )
 
@@ -156,7 +181,7 @@ struct AgentCommand: ParsableCommand {
 struct AgentEventCommand: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "event",
-        abstract: "Attach an explicit lifecycle event to the current coding-agent terminal."
+        abstract: "Record an explicit lifecycle event for the current coding-agent terminal."
     )
 
     @Option(
@@ -168,25 +193,23 @@ struct AgentEventCommand: ParsableCommand {
     )
     var type: AgentEventType
 
-    @Option(name: .long, help: "Workspace directory. Defaults to the current directory.")
-    var dir: String?
-
-    @Option(
-        name: .long,
-        help: ArgumentHelp(
-            "Terminal host for the event. Defaults to the inferred host.",
-            discussion: "Allowed values: \(AgentProvider.allValueStrings.joined(separator: ", "))."
-        )
-    )
-    var provider: AgentProvider?
+    @Argument(help: "Workspace directory. Defaults to the current directory.")
+    var path: String?
 
     func run() throws {
         let context = CLIContext()
         let orchestrator = try context.makeOrchestrator()
         let environment = context.environment()
-        let directory = dir ?? context.currentDirectoryPath()
+        let directory = path ?? context.currentDirectoryPath()
         let normalizedDirectory = context.normalizePath(directory)
-        let resolvedProvider = try resolveProvider(explicitProvider: provider, environment: environment)
+        let resolvedProvider = resolveProvider(environment: environment)
+        guard let resolvedProvider else {
+            try context.output.emit(
+                text: "Dropped agent event \(type.rawValue): unsupported terminal host",
+                json: MutationResultPayload<[String: String]>(message: "Dropped unsupported agent event.", resource: nil)
+            )
+            return
+        }
         let agentContext = AgentInvocationContext(
             provider: resolvedProvider,
             label: inferredAgentLabel(environment: environment),
@@ -194,12 +217,12 @@ struct AgentEventCommand: ParsableCommand {
             codexThreadID: environment["CODEX_THREAD_ID"],
             yabaiWindowID: context.currentYabaiWindowID()
         )
-        let workspaceID = try ensureWorkspace(directory: normalizedDirectory, orchestrator: orchestrator)
+        let workspace = try requireWorkspace(path: normalizedDirectory, orchestrator: orchestrator, context: context)
 
         switch type {
         case .`init`:
             try orchestrator.registerAgentWindow(
-                workspaceID: workspaceID,
+                workspaceID: workspace.id,
                 provider: agentContext.provider,
                 label: agentContext.label,
                 itermSessionID: agentContext.iTermSessionID,
@@ -207,9 +230,9 @@ struct AgentEventCommand: ParsableCommand {
                 yabaiWindowID: agentContext.yabaiWindowID,
                 status: .idle
             )
-        case .start, .waiting, .done, .stop:
+        case .start, .waiting, .done, .exit:
             try orchestrator.updateAgentWindowStatus(
-                workspaceID: workspaceID,
+                workspaceID: workspace.id,
                 provider: agentContext.provider,
                 itermSessionID: agentContext.iTermSessionID,
                 codexThreadID: agentContext.codexThreadID,
@@ -220,25 +243,13 @@ struct AgentEventCommand: ParsableCommand {
         }
 
         try context.output.emit(
-            text: "Agent \(type.rawValue): workspace=\(workspaceID)",
+            text: "Agent \(type.rawValue): workspace=\(workspace.id)",
             json: MutationResultPayload(
                 message: "Agent \(type.rawValue) recorded.",
-                resource: ["workspaceID": workspaceID, "status": type.status.rawValue]
+                resource: ["workspaceID": workspace.id, "status": type.status.rawValue]
             )
         )
         context.fireAgentEventNotification()
-    }
-}
-
-struct DashboardRemovedCommand: ParsableCommand {
-    static let configuration = CommandConfiguration(
-        commandName: "dashboard",
-        abstract: "Removed command.",
-        shouldDisplay: false
-    )
-
-    func run() throws {
-        throw ValidationError("`mx dashboard` was removed with the Tauri proof of concept.")
     }
 }
 
@@ -247,7 +258,7 @@ enum AgentEventType: String, CaseIterable, ExpressibleByArgument {
     case start = "start"
     case waiting = "waiting"
     case done = "done"
-    case stop = "stop"
+    case exit = "exit"
 
     static let allValueStrings = allCases.map(\.rawValue)
 
@@ -259,16 +270,10 @@ enum AgentEventType: String, CaseIterable, ExpressibleByArgument {
             .spinning
         case .waiting:
             .waiting
-        case .done, .stop:
+        case .done, .exit:
             .done
         }
     }
-}
-
-extension AgentProvider: ExpressibleByArgument, CaseIterable {
-    public static var allCases: [Self] { [.iterm2, .ghostty] }
-
-    public static var allValueStrings: [String] { allCases.map(\.rawValue) }
 }
 
 private struct AgentInvocationContext {
@@ -287,31 +292,19 @@ private func requireWorkspace(id: String, orchestrator: MuxyOrchestrator) throws
     return workspace
 }
 
-private func requireWorkspace(dir: String?, orchestrator: MuxyOrchestrator, context: CLIContext) throws -> WorkspaceRecord {
-    let directory = dir ?? context.currentDirectoryPath()
+private func requireWorkspace(path: String?, orchestrator: MuxyOrchestrator, context: CLIContext) throws -> WorkspaceRecord {
+    let directory = path ?? context.currentDirectoryPath()
     let normalizedDirectory = context.normalizePath(directory)
     guard let workspace = try orchestrator.store.workspace(dir: normalizedDirectory) else {
         throw ValidationError(
-            "Workspace not found at: \(normalizedDirectory). Use `--dir <path>` to specify a different workspace directory."
+            "Workspace not found at: \(normalizedDirectory). Run `mx workspace import [path]` first."
         )
     }
 
     return workspace
 }
 
-private func ensureWorkspace(directory: String, orchestrator: MuxyOrchestrator) throws -> String {
-    if let workspace = try orchestrator.store.workspace(dir: directory) {
-        return workspace.id
-    }
-
-    return try orchestrator.createWorkspaceFromWorktree(worktreePath: directory).id
-}
-
-private func resolveProvider(explicitProvider: AgentProvider?, environment: [String: String]) throws -> AgentProvider {
-    if let explicitProvider {
-        return explicitProvider
-    }
-
+private func resolveProvider(environment: [String: String]) -> AgentProvider? {
     let bundleIdentifier = environment["__CFBundleIdentifier"] ?? ""
     if bundleIdentifier == "com.googlecode.iterm2" {
         return .iterm2
@@ -319,16 +312,7 @@ private func resolveProvider(explicitProvider: AgentProvider?, environment: [Str
     if bundleIdentifier == "com.mitchellh.ghostty" {
         return .ghostty
     }
-    if hasKnownCodingAgentMarkers(environment: environment) {
-        let host = bundleIdentifier.isEmpty ? "unknown" : bundleIdentifier
-        throw ValidationError("Ignoring agent event: unsupported terminal host '\(host)' for detected coding agent env.")
-    }
-
-    return .iterm2
-}
-
-private func hasKnownCodingAgentMarkers(environment: [String: String]) -> Bool {
-    environment["CODEX_THREAD_ID"] != nil || environment["CLAUDE_CODE_ENTRYPOINT"] != nil
+    return nil
 }
 
 private func inferredAgentLabel(environment: [String: String]) -> String? {

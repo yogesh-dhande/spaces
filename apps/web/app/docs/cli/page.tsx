@@ -36,16 +36,17 @@ export default function CliReferencePage() {
   return (
     <DocsShell
       title="CLI Reference"
-      description="The mx CLI is intentionally minimal. It exists for workspace import, idempotent workspace launch, and explicit coding-agent lifecycle events."
+      description="The mx CLI is intentionally minimal. It exists for workspace import, workspace metadata updates, idempotent workspace launch, and explicit coding-agent lifecycle events."
       pagePath="/docs/cli"
     >
       <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
         <h2 className="text-2xl font-semibold tracking-tight">Overview</h2>
         <p className="mt-3 text-sm leading-7 text-foreground-soft">
-          Use <Cmd>mx</Cmd> when you are already in a terminal or when a coding agent needs to register a workspace, make sure it is running, or report its lifecycle state back to Muxy.
+          Use <Cmd>mx</Cmd> when you are already in a terminal or when a coding agent needs to register a workspace, update its visible metadata, make sure it is running, or report its lifecycle state back to Muxy.
         </p>
         <CodeBlock>{`mx --version
 mx workspace import
+mx workspace update --tooltip "Ready for review"
 mx workspace up
 mx agent event --type waiting`}</CodeBlock>
       </article>
@@ -67,14 +68,31 @@ mx agent event --type waiting`}</CodeBlock>
 mx workspace import
 
 # Import another directory
-mx workspace import --dir /path/to/worktree
+mx workspace import /path/to/worktree
 
-# Set or update visible metadata
+# Create or update visible metadata during import
 mx workspace import --title "OAuth rollout" --tooltip "Waiting on staging verification"`}</CodeBlock>
         <ul className="mt-3 space-y-1">
-          <Flag name="--dir <path>" description="Workspace directory to register. Defaults to the current working directory." />
+          <Flag name="[path]" description="Workspace directory to register. Defaults to the current working directory." />
           <Flag name="--title <title>" description="Optional workspace title. If the workspace already exists, the title is updated." />
           <Flag name="--tooltip <text>" description="Optional workspace tooltip. If the workspace already exists, the tooltip is updated." />
+        </ul>
+      </article>
+
+      <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
+        <h2 className="text-2xl font-semibold tracking-tight">Workspace Update</h2>
+        <p className="mt-3 text-sm leading-7 text-foreground-soft">
+          <Cmd>mx workspace update</Cmd> changes workspace metadata after the workspace already exists. Use it for title or tooltip edits without relaunching anything.
+        </p>
+        <CodeBlock>{`# Update the current workspace tooltip
+mx workspace update --tooltip "Ready for review"
+
+# Update another workspace
+mx workspace update /path/to/workspace --title "oauth-timeout" --tooltip "Waiting on staging verification"`}</CodeBlock>
+        <ul className="mt-3 space-y-1">
+          <Flag name="[path]" description="Workspace directory to update. Defaults to the current working directory." />
+          <Flag name="--title <title>" description="Optional workspace title update." />
+          <Flag name="--tooltip <text>" description="Optional workspace tooltip update." />
         </ul>
       </article>
 
@@ -87,16 +105,16 @@ mx workspace import --title "OAuth rollout" --tooltip "Waiting on staging verifi
 mx workspace up
 
 # Target another workspace directory
-mx workspace up --dir /path/to/workspace
+mx workspace up /path/to/workspace
 
 # Force a full stop and relaunch
-mx workspace up --dir /path/to/workspace --force-restart
+mx workspace up /path/to/workspace --restart
 
 # Launch and focus one named tracked window
-mx workspace up --dir /path/to/workspace --focus frontend`}</CodeBlock>
+mx workspace up /path/to/workspace --focus frontend`}</CodeBlock>
         <ul className="mt-3 space-y-1">
-          <Flag name="--dir <path>" description="Workspace directory to launch. Defaults to the current working directory." />
-          <Flag name="--force-restart" description="Always perform a full stop and fresh launch instead of the normal idempotent path." />
+          <Flag name="[path]" description="Workspace directory to launch. Defaults to the current working directory." />
+          <Flag name="--restart" description="Always perform a full stop and fresh launch instead of the normal idempotent path." />
           <Flag name="--focus <name>" description="After launch, focus one tracked browser, process, or agent window by its unique workspace-local name." />
         </ul>
       </article>
@@ -104,29 +122,33 @@ mx workspace up --dir /path/to/workspace --focus frontend`}</CodeBlock>
       <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
         <h2 className="text-2xl font-semibold tracking-tight">Agent Events</h2>
         <p className="mt-3 text-sm leading-7 text-foreground-soft">
-          Coding agents report their lifecycle explicitly. Muxy uses these events to surface waiting and done states in the app and dashboard.
+          Coding agents report their lifecycle explicitly. Muxy uses these events to surface waiting and done states in the app and dashboard. This command records state only; it does not launch or stop an agent.
         </p>
         <CodeBlock>{`mx agent event --type init
 mx agent event --type start
 mx agent event --type waiting
 mx agent event --type done
-mx agent event --type stop`}</CodeBlock>
+mx agent event --type exit`}</CodeBlock>
         <ul className="mt-3 space-y-1">
-          <Flag name="--type <event>" description="Required event type: init, start, waiting, done, or stop." />
-          <Flag name="--dir <path>" description="Workspace directory to associate with the event. Defaults to the current working directory." />
-          <Flag name="--provider iterm2|ghostty" description="Optional terminal host override when auto-detection is not enough." />
+          <Flag name="--type <event>" description="Required event type: init, start, waiting, done, or exit." />
+          <Flag name="[path]" description="Workspace directory to associate with the event. Defaults to the current working directory." />
         </ul>
+        <p className="mt-3 text-sm leading-7 text-foreground-soft">
+          Muxy infers the terminal host automatically. If the current terminal host is not iTerm2 or Ghostty, Muxy drops the event instead of recording it.
+        </p>
       </article>
 
       <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
         <h2 className="text-2xl font-semibold tracking-tight">Typical Flow</h2>
-        <CodeBlock>{`mx workspace import --title "bugfix/login-timeout" --tooltip "Investigating flaky OAuth callback"
-mx workspace up --force-restart
+        <CodeBlock>{`mx workspace import --title "bugfix/login-timeout"
+mx workspace up --restart
+mx workspace update --tooltip "Investigating flaky OAuth callback"
+mx agent event --type init
 mx agent event --type start
 # ... later ...
 mx agent event --type waiting`}</CodeBlock>
         <p className="mt-2 text-sm leading-7 text-foreground-soft">
-          The GUI remains the primary place to create projects, configure templates, and adjust workspace settings. The CLI stays focused on launch-time workflows.
+          The GUI remains the primary place to create projects and configure templates. The CLI stays focused on registration, lightweight metadata updates, launch-time workflows, and agent reporting.
         </p>
       </article>
     </DocsShell>

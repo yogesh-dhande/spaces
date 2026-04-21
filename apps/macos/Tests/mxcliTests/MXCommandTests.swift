@@ -4,39 +4,38 @@ import XCTest
 
 final class MXCommandTests: XCTestCase {
     func testWorkspaceUpParsesLeafCommandOptions() throws {
-        let command = try WorkspaceUpCommand.parse(["--dir", "/tmp/worktree", "--force-restart", "--focus", "frontend", "--tooltip", "Ready"])
+        let command = try WorkspaceUpCommand.parse(["/tmp/worktree", "--restart", "--focus", "frontend"])
 
-        XCTAssertEqual(command.dir, "/tmp/worktree")
-        XCTAssertTrue(command.forceRestart)
+        XCTAssertEqual(command.path, "/tmp/worktree")
+        XCTAssertTrue(command.restart)
         XCTAssertEqual(command.focus, "frontend")
-        XCTAssertEqual(command.tooltip, "Ready")
+    }
+
+    func testWorkspaceUpdateRequiresMutationFlag() {
+        XCTAssertThrowsError(try WorkspaceUpdateCommand.parse([])) { error in
+            XCTAssertTrue(String(describing: error).contains("at least one field"))
+        }
+    }
+
+    func testWorkspaceUpdateParsesPathAndMetadata() throws {
+        let command = try WorkspaceUpdateCommand.parse(["/tmp/worktree", "--title", "Title", "--tooltip", "Summary"])
+
+        XCTAssertEqual(command.path, "/tmp/worktree")
+        XCTAssertEqual(command.title, "Title")
+        XCTAssertEqual(command.tooltip, "Summary")
     }
 
     func testAgentEventParsesTypedEnums() throws {
-        let command = try AgentEventCommand.parse(["--type", "waiting", "--provider", "ghostty"])
+        let command = try AgentEventCommand.parse(["--type", "waiting", "/tmp/worktree"])
 
         XCTAssertEqual(command.type, .waiting)
-        XCTAssertEqual(command.provider, .ghostty)
+        XCTAssertEqual(command.path, "/tmp/worktree")
     }
 
     func testAgentEventRejectsUnknownEnumValue() {
         XCTAssertThrowsError(try AgentEventCommand.parse(["--type", "bogus"])) { error in
             let rendered = String(describing: error)
             XCTAssertTrue(rendered.contains("bogus") || rendered.contains("waiting"))
-        }
-    }
-
-    func testRootRejectsRemovedJSONFlag() {
-        XCTAssertThrowsError(try MXCommand.parseAsRoot(["--json", "workspace", "import"])) { error in
-            XCTAssertTrue(String(describing: error).contains("no longer supported"))
-        }
-    }
-
-    func testRemovedDashboardCommandReportsExplicitError() throws {
-        let command = try DashboardRemovedCommand.parse([])
-
-        XCTAssertThrowsError(try command.run()) { error in
-            XCTAssertTrue(String(describing: error).contains("removed with the Tauri proof of concept"))
         }
     }
 }
