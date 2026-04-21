@@ -33,7 +33,7 @@ flowchart LR
 ## Module Responsibilities
 - `MuxyApp`: minimal app entry point that boots AppKit.
 - `gui`: AppKit UI layer that renders state and dispatches actions into `streamctl`.
-- `mx`: CLI entry point that exposes the same orchestrator capabilities.
+- `mx`: minimal CLI entry point for workspace import, idempotent workspace launch, and coding-agent events.
 - `streamctl`: core orchestration, lifecycle, validation, persistence coordination, and environment building.
 - `appctl`: system adapters for shell commands, yabai, iTerm2, Ghostty, Chrome, and related OS integrations.
 

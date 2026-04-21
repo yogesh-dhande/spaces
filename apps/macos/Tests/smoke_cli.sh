@@ -13,7 +13,7 @@ TMP_HOME="$(mktemp -d /tmp/muxy-smoke-home.XXXXXX)"
 trap 'rm -rf "$TMP_HOME"' EXIT
 export HOME="$TMP_HOME"
 
-# Project + workspace CRUD
+# Workspace import + up
 TEST_REPO="$(mktemp -d /tmp/muxy-smoke-repo.XXXXXX)"
 (
   cd "$TEST_REPO"
@@ -24,22 +24,26 @@ TEST_REPO="$(mktemp -d /tmp/muxy-smoke-repo.XXXXXX)"
   git add README.md
   git commit -q -m init
 )
-"$BIN" project add --dir "$TEST_REPO" >/dev/null
 
-LIST_OUT="$($BIN project list)"
-echo "$LIST_OUT" | grep -q "$(basename "$TEST_REPO")"
+IMPORT_ERR="$(mktemp)"
+if "$BIN" workspace import --dir "$TEST_REPO" --title "smoke" --tooltip "smoke test" >/dev/null 2>"$IMPORT_ERR"; then
+  echo "expected import without a registered project to fail"
+  exit 1
+fi
+grep -q -- "Add the project in the app" "$IMPORT_ERR"
 
 JSON_ERR="$(mktemp)"
-if "$BIN" project list --json >/dev/null 2>"$JSON_ERR"; then
+if "$BIN" workspace import --json >/dev/null 2>"$JSON_ERR"; then
   echo "expected --json to fail"
   exit 1
 fi
 grep -q -- "--json" "$JSON_ERR"
 
-WS_LIST="$($BIN workspace list --project-dir "$TEST_REPO" --all)"
-echo "$WS_LIST" | grep -q "^default"
-
-WS_GET="$($BIN workspace get --dir "$TEST_REPO")"
-echo "$WS_GET" | grep -q "^default"
+UP_ERR="$(mktemp)"
+if "$BIN" workspace up --dir "$TEST_REPO" >/dev/null 2>"$UP_ERR"; then
+  echo "expected up without a registered workspace to fail"
+  exit 1
+fi
+grep -q -- "Workspace not found" "$UP_ERR"
 
 echo "smoke_cli.sh: PASS"

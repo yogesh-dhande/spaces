@@ -45,7 +45,7 @@ export default function ProjectsDocsPage() {
       <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
         <h2 className="text-2xl font-semibold tracking-tight">Adding a Project</h2>
         <p className="mt-2 text-sm leading-7 text-foreground-soft">
-          Add a project by pointing at a local directory or pasting a Git URL. For a Git URL, Muxy clones into <code className="rounded bg-background-soft px-1.5 py-0.5 text-xs">~/muxy/repos</code>. Either way, Muxy creates a default workspace for you automatically.
+          Add a project from the app by pointing at a local directory or pasting a Git URL. For a Git URL, Muxy clones into <code className="rounded bg-background-soft px-1.5 py-0.5 text-xs">~/muxy/repos</code>. Either way, Muxy creates a default workspace for you automatically.
         </p>
       </article>
 

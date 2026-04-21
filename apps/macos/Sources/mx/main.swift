@@ -35,9 +35,7 @@ struct CLI {
         _ = try orchestrator.syncConfig()
 
         switch command {
-        case "project": try runProjectSubcommand(orchestrator: orchestrator)
         case "workspace": try runWorkspaceSubcommand(orchestrator: orchestrator)
-        case "discover": try runDiscover(orchestrator: orchestrator)
         case "dashboard":
             throw NSError(
                 domain: "mx.cli",
@@ -54,7 +52,7 @@ struct CLI {
                 domain: "mx.cli", code: 2,
                 userInfo: [
                     NSLocalizedDescriptionKey:
-                        "Missing project action. Use: project list|add|update|remove|port|process|status-check|browser-session"
+                        "Unsupported command."
                 ])
         }
 
@@ -337,52 +335,10 @@ struct CLI {
                 domain: "mx.cli", code: 2,
                 userInfo: [
                     NSLocalizedDescriptionKey:
-                        "Missing workspace action. Use: workspace list|get|create|import|update|launch|restart|up|stop|archive|focus|runtime|settings|port|process|status-check|browser-session"
+                        "Missing workspace action. Use: workspace import|up"
                 ])
         }
         switch args[2] {
-        case "port": try runWorkspacePortSubcommand(orchestrator: orchestrator)
-        case "process": try runWorkspaceProcessSubcommand(orchestrator: orchestrator)
-        case "status-check": try runWorkspaceStatusCheckSubcommand(orchestrator: orchestrator)
-        case "browser-session": try runWorkspaceBrowserSessionSubcommand(orchestrator: orchestrator)
-        case "settings": try runWorkspaceSettingsSubcommand(orchestrator: orchestrator)
-        case "get":
-            let id = try workspaceID(orchestrator: orchestrator)
-            guard let workspace = try orchestrator.store.workspace(id: id) else {
-                throw NSError(domain: "mx.cli", code: 2, userInfo: [NSLocalizedDescriptionKey: "Workspace not found for id \(id)"])
-            }
-            try output.emit(
-                text: "\(workspace.title)\t\(workspace.dir)",
-                json: workspace)
-        case "list":
-            let projectDir = try value(for: "--project-dir")
-            let projectID = normalizePath(projectDir)
-            let workspaces = try orchestrator.listWorkspaces(projectID: projectID, includeArchived: args.contains("--all"))
-            try output.emitLines(
-                text: workspaces.map { ws in
-                    let flags = [
-                        ws.isDefault ? "default" : nil, ws.isRunning ? "running" : nil, ws.isArchived ? "archived" : nil, !ws.isActive ? "inactive" : nil,
-                    ].compactMap { $0 }.joined(separator: ",")
-                    return "\(ws.title)\t\(ws.dir)\t\(flags)"
-                },
-                json: workspaces.map(WorkspaceSummaryPayload.init))
-        case "create":
-            let projectDir = try value(for: "--project-dir")
-            let name = try value(for: "--name")
-            let branch = optionalValue(for: "--branch")
-            let targetBranch = optionalValue(for: "--target-branch")
-            let directoryName = optionalValue(for: "--directory-name")
-            let tooltip = optionalValue(for: "--tooltip")
-            let projectID = normalizePath(projectDir)
-            var workspace = try orchestrator.createWorkspace(
-                projectID: projectID, name: name, branch: branch, targetBranch: targetBranch, directoryName: directoryName)
-            if let tooltip {
-                try orchestrator.updateWorkspaceTooltip(workspaceID: workspace.id, tooltip: tooltip)
-                workspace = try orchestrator.store.workspace(id: workspace.id)!
-            }
-            try output.emit(
-                text: "Created workspace \(workspace.title)\t\(workspace.dir)",
-                json: MutationResultPayload(message: "Created workspace \(workspace.title).", resource: workspace))
         case "import":
             let dir = optionalValue(for: "--dir") ?? FileManager.default.currentDirectoryPath
             let title = optionalValue(for: "--title")
@@ -408,73 +364,6 @@ struct CLI {
                     text: "Created workspace \(workspace.title)\t\(workspace.dir)",
                     json: MutationResultPayload(message: "Created workspace \(workspace.title).", resource: workspace))
             }
-        case "update":
-            let id = try workspaceID(orchestrator: orchestrator)
-            let title = optionalValue(for: "--title")
-            let branch = optionalValue(for: "--branch")
-            if args.contains("--directory-name") {
-                throw NSError(
-                    domain: "mx.cli", code: 2,
-                    userInfo: [NSLocalizedDescriptionKey: "`workspace update` no longer supports --directory-name. Set the directory name when creating the workspace instead."])
-            }
-            let shouldClearTooltip = args.contains("--clear-tooltip")
-            let activateFlag = args.contains("--active")
-            let deactivateFlag = args.contains("--inactive")
-            if activateFlag && deactivateFlag {
-                throw NSError(domain: "mx.cli", code: 2, userInfo: [NSLocalizedDescriptionKey: "Use either --active or --inactive, but not both."])
-            }
-            let tooltipValue = optionalValueAllowingMissingValue(for: "--tooltip")
-            if args.contains("--tooltip"), tooltipValue == nil {
-                throw NSError(domain: "mx.cli", code: 2, userInfo: [NSLocalizedDescriptionKey: "Missing required value for --tooltip"])
-            }
-            if shouldClearTooltip, args.contains("--tooltip") {
-                throw NSError(
-                    domain: "mx.cli", code: 2, userInfo: [NSLocalizedDescriptionKey: "Use either --tooltip <text> or --clear-tooltip, but not both."])
-            }
-            let tooltipUpdate: String??
-            if shouldClearTooltip {
-                tooltipUpdate = .some(nil)
-            } else if let tooltipValue {
-                tooltipUpdate = .some(tooltipValue)
-            } else {
-                tooltipUpdate = nil
-            }
-            let activeUpdate = activateFlag ? true : (deactivateFlag ? false : nil)
-            guard title != nil || branch != nil || tooltipUpdate != nil || activeUpdate != nil else {
-                throw NSError(
-                    domain: "mx.cli", code: 2,
-                    userInfo: [
-                        NSLocalizedDescriptionKey:
-                            "No updates provided. Use one or more of --title, --branch, --tooltip, --clear-tooltip, --active, or --inactive."
-                    ])
-            }
-            try orchestrator.updateWorkspaceMetadata(
-                workspaceID: id, title: title, branch: branch, tooltip: tooltipUpdate)
-            if let activeUpdate { try orchestrator.updateWorkspaceActive(workspaceID: id, isActive: activeUpdate) }
-            guard let updated = try orchestrator.store.workspace(id: id) else {
-                throw NSError(domain: "mx.cli", code: 2, userInfo: [NSLocalizedDescriptionKey: "Workspace not found for id \(id)"])
-            }
-            try output.emit(
-                text: "Updated workspace \(id)\t\(updated.title)",
-                json: MutationResultPayload(message: "Updated workspace \(updated.title).", resource: updated))
-        case "launch":
-            let id = try workspaceID(orchestrator: orchestrator)
-            try orchestrator.launchWorkspace(workspaceID: id)
-            guard let workspace = try orchestrator.store.workspace(id: id) else {
-                throw NSError(domain: "mx.cli", code: 2, userInfo: [NSLocalizedDescriptionKey: "Workspace not found for id \(id)"])
-            }
-            try output.emit(
-                text: "Launched workspace \(id)",
-                json: MutationResultPayload(message: "Launched workspace \(workspace.title).", resource: workspace))
-        case "restart":
-            let id = try workspaceID(orchestrator: orchestrator)
-            try orchestrator.restartWorkspace(workspaceID: id)
-            guard let workspace = try orchestrator.store.workspace(id: id) else {
-                throw NSError(domain: "mx.cli", code: 2, userInfo: [NSLocalizedDescriptionKey: "Workspace not found for id \(id)"])
-            }
-            try output.emit(
-                text: "Restarted workspace \(id)",
-                json: MutationResultPayload(message: "Restarted workspace \(workspace.title).", resource: workspace))
         case "up":
             let id = try workspaceID(orchestrator: orchestrator)
             let shouldRestartIfRunning = args.contains("--force-restart")
@@ -495,66 +384,6 @@ struct CLI {
             try output.emit(
                 text: "Workspace is running \(id)",
                 json: MutationResultPayload(message: "Workspace is running.", resource: workspace))
-        case "stop":
-            let id = try workspaceID(orchestrator: orchestrator)
-            let outcome = try orchestrator.stopWorkspace(workspaceID: id)
-            guard let workspace = try orchestrator.store.workspace(id: id) else {
-                throw NSError(domain: "mx.cli", code: 2, userInfo: [NSLocalizedDescriptionKey: "Workspace not found for id \(id)"])
-            }
-            if outcome.skippedStopScriptBecauseWorkspaceDirectoryMissing {
-                try output.emitLines(
-                    text: [
-                        "Stopped workspace \(id)",
-                        "Note: workspace directory is missing, so the workspace stop script was skipped."
-                    ],
-                    json: MutationResultPayload(
-                        message: "Stopped workspace \(workspace.title). Workspace directory was missing, so the stop script was skipped.",
-                        resource: workspace))
-            } else {
-                try output.emit(
-                    text: "Stopped workspace \(id)",
-                    json: MutationResultPayload(message: "Stopped workspace \(workspace.title).", resource: workspace))
-            }
-        case "archive":
-            let id = try workspaceID(orchestrator: orchestrator)
-            try orchestrator.archiveWorkspace(workspaceID: id)
-            let resource = try orchestrator.store.workspace(id: id)
-            try output.emit(
-                text: "Archived workspace \(id)",
-                json: MutationResultPayload<WorkspaceRecord>(message: "Archived workspace \(id).", resource: resource))
-        case "focus":
-            let id = try workspaceID(orchestrator: orchestrator)
-            guard let windowName = optionalValueAllowingMissingValue(for: "--window") else {
-                let availableNames = try orchestrator.workspaceFocusableWindowNames(workspaceID: id)
-                let suffix = availableNames.isEmpty ? "" : " Available names: \(availableNames.joined(separator: ", "))"
-                throw NSError(
-                    domain: "mx.cli", code: 2,
-                    userInfo: [NSLocalizedDescriptionKey: "`mx workspace focus` requires --window <name> so focus targets stay explicit.\(suffix)"])
-            }
-            try orchestrator.focusWorkspaceWindow(workspaceID: id, name: windowName)
-            try output.emit(
-                text: "Focused workspace window \(windowName) for workspace \(id)",
-                json: MutationResultPayload(
-                    message: "Focused workspace window \(windowName).",
-                    resource: ["workspaceID": id, "windowName": windowName]))
-        case "runtime":
-            let id = try workspaceID(orchestrator: orchestrator)
-            let status = try orchestrator.workspaceRuntimeStatus(workspaceID: id)
-            let processes = try orchestrator.runningProcesses(workspaceID: id)
-            let windows = try orchestrator.windows(workspaceID: id)
-            let agentWindows = try orchestrator.agentWindows(workspaceID: id)
-            var resultsByProcessID: [String: [StatusResult]] = [:]
-            for process in processes {
-                resultsByProcessID[process.id] = try orchestrator.statusResults(processID: process.id)
-            }
-            try output.emit(
-                text: CLITextRenderer.workspaceRuntimeLines(
-                    status: status,
-                    processes: processes,
-                    windows: windows,
-                    statusResultsByProcessID: resultsByProcessID,
-                    agentWindows: agentWindows),
-                json: "")
         default: throw NSError(domain: "mx.cli", code: 2, userInfo: [NSLocalizedDescriptionKey: "Unknown workspace action: \(args[2])"])
         }
     }
@@ -819,7 +648,7 @@ struct CLI {
     private func runDiscover(orchestrator: MuxyOrchestrator) throws {
         let nonFlagArgs = args.dropFirst().filter { !$0.hasPrefix("--") }
         guard nonFlagArgs.count == 1 else {
-            throw NSError(domain: "mx.cli", code: 2, userInfo: [NSLocalizedDescriptionKey: "`mx discover` does not take any flags or arguments."])
+            throw NSError(domain: "mx.cli", code: 2, userInfo: [NSLocalizedDescriptionKey: "Unsupported command."])
         }
         let workspaces = try orchestrator.scanAndCreateWorkspacesFromWorktrees(projectID: nil)
         if workspaces.isEmpty {
@@ -1053,73 +882,17 @@ struct CLI {
 
             Usage:
               mx --version
-              mx discover
-
-              mx project list
-              mx project get --dir <path>
-              mx project add --dir <path>
-              mx project add --git-url <url>
-              mx project update --dir <path> [--setup-script <script>] [--stop-script <script>]
-              mx project remove --dir <path>
-              mx project port list --dir <path>
-              mx project port add --dir <path> --name <NAME>
-              mx project port remove --dir <path> --name <NAME>
-              mx project process list --dir <path>
-              mx project process add --dir <path> --command <cmd> [--name <name>] [--on-exit none|restart|notify]
-              mx project process remove --dir <path> --name <name>
-              mx project status-check list --dir <path>
-              mx project status-check add --dir <path> --process <process> --command <cmd> [--name <name>] [--interval <seconds>] [--timeout <seconds>] [--on-fail none|restart|notify]
-              mx project status-check remove --dir <path> --name <name>
-              mx project browser-session list --dir <path>
-              mx project browser-session add --dir <path> --url <url> [--name <name>]
-              mx project browser-session remove --dir <path> --url <url>
-
-              mx workspace list --project-dir <path> [--all]
-              mx workspace get [--dir <path>]
-              mx workspace create --project-dir <path> --name <name> --branch <branch> [--target-branch <branch>] [--directory-name <name>] [--tooltip <text>]
               mx workspace import [--dir <path>] [--title <title>] [--tooltip <text>]
-              mx workspace update [--dir <path>] [--title <title>] [--branch <branch>] [--tooltip <text>|--clear-tooltip] [--active|--inactive]
-              mx workspace launch [--dir <path>]
-              mx workspace restart [--dir <path>]
               mx workspace up [--dir <path>] [--force-restart] [--focus <name>]
-              mx workspace stop [--dir <path>]
-              mx workspace archive [--dir <path>]
-              mx workspace focus [--dir <path>] --window <name>
-              mx workspace runtime [--dir <path>]
-              mx workspace settings [get] [--dir <path>]
-              mx workspace settings update [--dir <path>] [--stop-script <script>|--clear-stop-script]
-              mx workspace port add|remove|list [--dir <path>] [--name <name>]
-              mx workspace process add|remove|list [--dir <path>]
-              mx workspace status-check add|remove|list [--dir <path>]
-              mx workspace browser-session add|remove|list [--dir <path>]
-
               mx agent event --type init|start|waiting|done|stop [--dir <path>] [--provider iterm2|ghostty]
 
             Notes:
               - All settings are stored in ~/.muxy/muxy.db.
-              - GUI settings (⌘,) let you pick a preferred editor (VS Code, Cursor, Windsurf).
               - Runtime state is stored in ~/.muxy/muxy.db and migrated in place with additive schema changes.
-              - Removing a git project first removes managed worktrees via `git worktree remove --force`, then deletes related workspace directories under ~/muxy/workspaces.
-              - Removing a project deletes only muxy state unless it is a muxy-cloned git repo under ~/muxy/repos; those managed repository directories are deleted.
-              - Workspaces snapshot project port definitions, processes, status checks, and browser sessions into the runtime DB on creation.
-              - Project `setup_script` runs when a workspace is created/revived; GUI create persists workspace first and runs setup in background.
               - Launch waits for pending/running setup to complete and fails with the setup error if setup failed.
-              - `mx discover` reconciles git worktrees across all registered projects by creating missing workspaces, archiving workspaces whose worktrees are no longer valid, refreshing stored branch names from disk, and running the project `setup_script` for each newly created workspace.
-              - Project/workspace `stop_script` runs whenever a workspace is stopped (including restart/archive stop phase), after automatic process termination attempts.
               - `workspace up` ensures a workspace and all its processes are running: launches when stopped; when already running, restarts any exited processes. Windows open without activating the app. Add `--force-restart` to force a full stop+launch. Add `--focus <name>` to bring one named workspace window to the foreground after launch.
-              - If a workspace directory is missing during stop, muxy still stops the workspace, skips `stop_script`, and prints a note.
-              - For git projects, `workspace create` requires `--branch`; `--target-branch` defaults to main/master if available.
-              - `workspace create --directory-name` overrides the auto-generated git worktree directory name; allowed characters are letters, numbers, '-', and '_', with no spaces.
-              - `workspace update` updates workspace metadata (`--title`, `--branch`, `--tooltip`) and visibility state (`--active`/`--inactive`); protected `main`/`master` branches cannot be renamed.
-              - Archiving a non-git workspace never deletes the project directory.
-              - Workspaces reserve named ports from the configured port range based on project/workspace port definitions.
-              - GUI window focus shortcuts use the configured direct-focus modifier plus digits 1 through 9 when the GUI is focused.
-              - GUI queued window focus uses the configured sequence modifier plus digits 1 through 9 and replays them in order on modifier release.
-              - GUI window cycle shortcuts are global and keep working when the GUI is not focused.
-              - Each browser session, process, and coding agent uses its own dedicated top-level window.
-              - Workspace focus and cycling use tracked yabai window IDs directly; missing browser windows are marked stale for later recovery.
-              - Diagnostics: DEBUG=1 logs full workspace-cycle timing plus direct browser/window focus-path timing for dedicated-window focus flows.
-              - GUI action shortcuts can be overridden in the app Settings.
+              - `workspace import` registers the current directory by default, or another directory via `--dir`.
+              - Agent events stay explicit. `workspace import` and `workspace up` do not imply agent lifecycle.
             """)
     }
 }

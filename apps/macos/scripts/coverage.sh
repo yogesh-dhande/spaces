@@ -69,8 +69,49 @@ if [ -z "${test_binary:-}" ]; then
     exit 1
 fi
 
+report_path="$coverage_dir/llvm-cov-report.txt"
+
 echo "Coverage report:"
 xcrun llvm-cov report \
     -instr-profile "$profdata_path" \
     --ignore-filename-regex="\\.build|/Tests/" \
-    "$test_binary"
+    "$test_binary" | tee "$report_path"
+
+echo "Coverage summary:"
+awk '
+BEGIN {
+    module_order[1] = "streamctl"
+    module_order[2] = "gui"
+    module_order[3] = "appctl"
+    module_order[4] = "mx"
+}
+/^TOTAL[[:space:]]/ {
+    overall_lines = $10
+}
+/^(appctl|gui|streamctl|mx)\// {
+    split($1, parts, "/")
+    module = parts[1]
+    regions_total[module] += $2
+    regions_missed[module] += $3
+    functions_total[module] += $5
+    functions_missed[module] += $6
+    lines_total[module] += $8
+    lines_missed[module] += $9
+}
+END {
+    if (overall_lines != "") {
+        printf("  overall lines: %.2f%%\n", overall_lines + 0)
+    }
+    for (i = 1; i <= 4; i++) {
+        module = module_order[i]
+        if (lines_total[module] > 0) {
+            line_cover = (lines_total[module] - lines_missed[module]) * 100 / lines_total[module]
+            region_cover = (regions_total[module] - regions_missed[module]) * 100 / regions_total[module]
+            function_cover = (functions_total[module] - functions_missed[module]) * 100 / functions_total[module]
+            printf("  %s: lines %.2f%% | regions %.2f%% | functions %.2f%%\n", module, line_cover, region_cover, function_cover)
+        }
+    }
+}
+' "$report_path"
+
+echo "Coverage report saved to: $report_path"

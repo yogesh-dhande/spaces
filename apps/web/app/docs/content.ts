@@ -32,7 +32,7 @@ export const docsPageLinks: DocsPageLink[] = [
     href: "/docs/workspace-lifecycle",
     title: "Workspace Lifecycle",
     summary:
-      "Launch, stop, restart, and archive workspaces from the GUI, the CLI, or a coding agent.",
+      "Understand how workspaces move between stopped, running, and archived states across the GUI and the minimal CLI runtime flow.",
   },
   {
     href: "/docs/window-management",
@@ -80,7 +80,7 @@ export const docsPageLinks: DocsPageLink[] = [
     href: "/docs/cli",
     title: "CLI Reference",
     summary:
-      "Drive every Muxy action from the terminal or ask a coding agent to do it for you.",
+      "Use the minimal mx CLI for workspace import, idempotent launch, and explicit coding-agent events.",
   },
 ];
 

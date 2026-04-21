@@ -3438,7 +3438,7 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertThrowsError(try orchestrator.createWorkspaceFromWorktree(worktreePath: worktree.path, name: nil)) { error in
             let nsError = error as NSError
             XCTAssertTrue(nsError.localizedDescription.contains("Project not found"))
-            XCTAssertTrue(nsError.localizedDescription.contains("mx project add"))
+            XCTAssertTrue(nsError.localizedDescription.contains("Add the project in the app"))
         }
     }
 

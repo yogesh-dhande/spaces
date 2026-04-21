@@ -507,7 +507,7 @@ public final class MuxyOrchestrator {
         let projectID = normalizePath(gitRoot)
         guard let project = try store.project(id: projectID) else {
             throw MuxyError.invalidArgument(
-                message: "Project not found for git root: \(gitRoot). Add the project first using: mx project add --dir \(gitRoot)")
+                message: "Project not found for git root: \(gitRoot). Add the project in the app before importing this workspace.")
         }
         if let existing = try store.workspace(dir: normalizedWorktreePath) {
             if existing.isArchived {

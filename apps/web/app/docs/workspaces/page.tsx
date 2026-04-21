@@ -48,7 +48,7 @@ export default function WorkspacesDocsPage() {
           <li>• Add, remove, or rename named ports per workspace.</li>
           <li>• Edit a process command while the workspace is running and Muxy restarts just that process.</li>
           <li>• Add a browser session and Muxy opens it right away if the workspace is already running.</li>
-          <li>• <code>mx workspace update</code> edits title, branch, directory name, and tooltip from the CLI. Ports, processes, and browser sessions have their own <code>mx workspace</code> subcommands.</li>
+          <li>• The GUI is the place to edit workspace settings after creation. The CLI stays focused on import, launch, and agent events.</li>
         </ul>
       </article>
 

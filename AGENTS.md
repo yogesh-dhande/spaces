@@ -27,6 +27,7 @@
 - Always run lint and build before finalizing macOS app changes.
 - Run `scripts/coverage.sh` after changes unless the change is limited to `apps/web` or docs/comments.
 - Whenever `scripts/coverage.sh` is run, report the overall coverage percentage.
+- Whenever `scripts/coverage.sh` is run, also report module-level coverage percentages for major modules such as `streamctl`, `gui`, and `appctl`.
 - Always consider adding or expanding tests before finalizing code changes.
 - When fixing a bug, reproduce it first using the real system, `~/projects/muxy/apps/macos/.build/debug/mx` cli, and/or database inspection when practical, then add a test, implement the fix, and confirm both the test and the real workflow.
 - When running `git commit` via Codex, allow at least a 10-minute timeout so pre-commit checks can finish.

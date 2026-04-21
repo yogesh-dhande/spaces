@@ -26,14 +26,14 @@ yabai -m query --windows --window
 
 ## muxy Diagnostics
 
-List projects:
+Register the current directory as a workspace:
 ```bash
-mx project list
+mx workspace import --title "debug" --tooltip "Local troubleshooting session"
 ```
 
-List workspaces (including archived):
+Force a clean runtime restart:
 ```bash
-mx workspace list --project-dir /path/to/repo --all
+mx workspace up --force-restart
 ```
 
 ## Runtime Logs

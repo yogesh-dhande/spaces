@@ -26,15 +26,15 @@ export default function TroubleshootingDocsPage() {
       <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
         <h2 className="text-2xl font-semibold tracking-tight">Launch / Stop / Restart Issues</h2>
         <ul className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
-          <li>• <strong>&ldquo;Workspace is already running&rdquo;</strong> &mdash; use restart, or <code>mx workspace up --force-restart</code>, to reset state.</li>
+          <li>• <strong>&ldquo;Workspace is already running&rdquo;</strong> &mdash; use <code>mx workspace up --force-restart</code> to reset state.</li>
           <li>• <strong>No terminal windows appear</strong> &mdash; confirm your processes are running.</li>
           <li>• <strong>No browser windows appear</strong> &mdash; confirm Chrome is installed and the workspace has browser sessions configured.</li>
           <li>• <strong>Something is left running after stop</strong> &mdash; add the teardown command to the project or workspace stop script to clean up state not managed by Muxy.</li>
         </ul>
         <pre className="mt-3 w-full max-w-full min-w-0 overflow-x-auto whitespace-pre-wrap break-words rounded-lg border border-line/70 bg-background-soft/60 p-3 text-xs leading-6 text-foreground">
-          <code>{`mx workspace up      --dir /path/to/workspace
-mx workspace restart --dir /path/to/workspace
-mx workspace stop    --dir /path/to/workspace`}</code>
+          <code>{`mx workspace up --dir /path/to/workspace
+mx workspace up --dir /path/to/workspace --force-restart
+mx workspace up --dir /path/to/workspace --focus frontend`}</code>
         </pre>
       </article>
 
