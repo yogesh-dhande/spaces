@@ -27,15 +27,4 @@ public struct WorkspaceSummary: Sendable {
         self.isDefault = isDefault
         self.tooltip = tooltip
     }
-
-    public var name: String { title }
-
-    public init(
-        id: String, name: String, branch: String?, targetBranch: String? = nil, dir: String, isRunning: Bool, isArchived: Bool, isActive: Bool = true,
-        isDefault: Bool, tooltip: String? = nil
-    ) {
-        self.init(
-            id: id, title: name, branch: branch, targetBranch: targetBranch, dir: dir, isRunning: isRunning, isArchived: isArchived,
-            isActive: isActive, isDefault: isDefault, tooltip: tooltip)
-    }
 }

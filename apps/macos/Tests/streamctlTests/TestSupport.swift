@@ -21,9 +21,9 @@ func makeProjectRecord(id: String = UUID().uuidString, dir: String) -> ProjectRe
         statusChecks: [], browserSessions: [])
 }
 
-func makeWorkspaceRecord(id: String = UUID().uuidString, projectID: String, name: String, dir: String) -> WorkspaceRecord {
+func makeWorkspaceRecord(id: String = UUID().uuidString, projectID: String, title: String, dir: String) -> WorkspaceRecord {
     WorkspaceRecord(
-        id: id, projectID: projectID, name: name, dir: dir, dirname: nil, branch: nil, isDefault: false, isArchived: false, isRunning: false,
+        id: id, projectID: projectID, title: title, dir: dir, dirname: nil, branch: nil, isDefault: false, isArchived: false, isRunning: false,
         lastLaunchedAt: nil)
 }
 

@@ -402,7 +402,7 @@ enum DashboardPayloadBuilder {
                     .init(
                         projectName: project.name,
                         workspaceID: workspace.id,
-                        workspaceName: workspace.name,
+                        workspaceName: workspace.title,
                         latestDate: latestDate,
                         items: items))
             }

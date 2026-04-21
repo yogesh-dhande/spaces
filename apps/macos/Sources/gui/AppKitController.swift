@@ -1044,7 +1044,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                     case (_, nil): return true
                     }
                 }
-                groups.append(DashboardGroup(projectName: project.name, workspaceID: workspace.id, workspaceName: workspace.name, items: items))
+                groups.append(DashboardGroup(projectName: project.name, workspaceID: workspace.id, workspaceName: workspace.title, items: items))
             }
         }
         groups.sort {
@@ -3203,7 +3203,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         projectLabel.textColor = sidebarPrimaryTextColor(isSelected: false, isArchived: false)
         projectLabel.setContentHuggingPriority(.required, for: .horizontal)
 
-        let workspaceTitleLabel = NSTextField(labelWithString: inlineWorkspaceFieldDisplayValue(workspace.name, field: .title))
+        let workspaceTitleLabel = NSTextField(labelWithString: inlineWorkspaceFieldDisplayValue(workspace.title, field: .title))
         workspaceTitleLabel.font = .systemFont(ofSize: 20, weight: .semibold)
         workspaceTitleLabel.textColor = sidebarPrimaryTextColor(isSelected: false, isArchived: false)
         workspaceTitleLabel.lineBreakMode = .byTruncatingTail
@@ -3218,7 +3218,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         runtimeWarningIcon.widthAnchor.constraint(equalToConstant: 12).isActive = true
         runtimeWarningIcon.heightAnchor.constraint(equalToConstant: 12).isActive = true
 
-        let workspaceTitleField = NSTextField(string: workspace.name)
+        let workspaceTitleField = NSTextField(string: workspace.title)
         workspaceTitleField.placeholderString = "Workspace title"
         workspaceTitleField.delegate = self
         workspaceTitleField.font = .systemFont(ofSize: 18, weight: .semibold)
@@ -3250,7 +3250,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let tag = UUID().uuidString.hashValue
         let refs = InlineWorkspaceDetailFieldRefs(
             workspaceID: workspace.id, field: .title, valueLabel: workspaceTitleLabel, textField: workspaceTitleField,
-            saveButton: titleSaveButton, cancelButton: titleCancelButton, originalValue: workspace.name, isEditing: false)
+            saveButton: titleSaveButton, cancelButton: titleCancelButton, originalValue: workspace.title, isEditing: false)
         inlineWorkspaceFieldRefsByTag[tag] = refs
         inlineWorkspaceFieldTagByObjectID[ObjectIdentifier(workspaceTitleField)] = tag
         inlineWorkspaceLabelTagByObjectID[ObjectIdentifier(workspaceTitleLabel)] = tag
@@ -4949,7 +4949,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         alert.messageText = "Delete project?"
         alert.informativeText = """
             This removes the project and its workspaces from muxy.
-            If this project was cloned into ~/muxy/projects by muxy, that project directory is deleted.
+            If this project was cloned into ~/muxy/repos by muxy, that project directory is deleted.
             For git projects, related workspace directories under ~/muxy/workspaces are also deleted.
             """
         alert.addButton(withTitle: "Delete")
@@ -5093,7 +5093,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     }
 
     private func suggestedWorkspaceNameFast(projectID: String) -> String {
-        let existingNames = Set((workspacesByProject[projectID] ?? []).map(\.name))
+        let existingNames = Set((workspacesByProject[projectID] ?? []).map(\.title))
         if let suggestion = MuxyOrchestrator.suggestWorkspaceName(existingNames: existingNames) { return suggestion }
         return ""
     }
@@ -5316,7 +5316,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             alert.alertStyle = .warning
             alert.messageText = "Deactivate workspace?"
             alert.informativeText =
-                "“\(workspace.name)” is currently running. Deactivating it will stop the workspace first, then hide it from the sidebar by default."
+                "“\(workspace.title)” is currently running. Deactivating it will stop the workspace first, then hide it from the sidebar by default."
             alert.addButton(withTitle: "Stop and Deactivate")
             alert.addButton(withTitle: "Cancel")
             let response = alert.runModal()
@@ -5363,7 +5363,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         alert.alertStyle = .warning
         alert.messageText = "Archive workspace?"
         alert.informativeText =
-            "Are you sure you want to archive \"\(workspace?.name ?? id)\"? This will remove its git worktree and stop all running processes."
+            "Are you sure you want to archive \"\(workspace?.title ?? id)\"? This will remove its git worktree and stop all running processes."
         alert.addButton(withTitle: "Archive")
         alert.addButton(withTitle: "Cancel")
         let response = alert.runModal()
@@ -6320,7 +6320,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             let workspace =
                 (index >= 0 && index < visible.count ? visible[index] : nil)
                 ?? WorkspaceSummary(
-                    id: "", name: "", branch: nil, targetBranch: nil, dir: "", isRunning: false, isArchived: false, isActive: true, isDefault: false)
+                    id: "", title: "", branch: nil, targetBranch: nil, dir: "", isRunning: false, isArchived: false, isActive: true, isDefault: false)
             return outlineItemRef(for: .workspace(project, workspace))
         }
         return outlineItemRef(for: .project(projects[0]))
@@ -6460,7 +6460,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         statusIcon.widthAnchor.constraint(equalToConstant: 10).isActive = true
         statusIcon.heightAnchor.constraint(equalToConstant: 10).isActive = true
 
-        let nameLabel = NSTextField(labelWithString: workspace.name)
+        let nameLabel = NSTextField(labelWithString: workspace.title)
         nameLabel.font = .systemFont(ofSize: 12, weight: .medium)
         nameLabel.lineBreakMode = .byTruncatingTail
         nameLabel.textColor = sidebarPrimaryTextColor(isSelected: isSelected, isArchived: workspace.isArchived)

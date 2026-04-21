@@ -164,14 +164,14 @@ public final class MuxyOrchestrator {
         let records = try store.workspaces(projectID: projectID, includeArchived: includeArchived)
         return records.map {
             WorkspaceSummary(
-                id: $0.id, name: $0.name, branch: $0.branch, targetBranch: $0.targetBranch, dir: $0.dir, isRunning: $0.isRunning,
+                id: $0.id, title: $0.title, branch: $0.branch, targetBranch: $0.targetBranch, dir: $0.dir, isRunning: $0.isRunning,
                 isArchived: $0.isArchived, isActive: $0.isActive, isDefault: $0.isDefault, tooltip: $0.tooltip)
         }
     }
 
     public func suggestedWorkspaceName(projectID: String) throws -> String {
         guard let project = try store.project(id: projectID) else { throw MuxyError.missingProject(dir: projectID) }
-        let existingNames = Set(try store.workspaces(projectID: project.id, includeArchived: true).map(\.name))
+        let existingNames = Set(try store.workspaces(projectID: project.id, includeArchived: true).map(\.title))
         if let suggestion = MuxyOrchestrator.suggestWorkspaceName(existingNames: existingNames) { return suggestion }
         throw MuxyError.invalidArgument(message: "No available workspace names remain for project \(project.name).")
     }
@@ -253,7 +253,7 @@ public final class MuxyOrchestrator {
         let (project, workspace) = try resolveWorkspace(id: workspaceID)
         let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedName.isEmpty else { throw MuxyError.invalidArgument(message: "Workspace name is required.") }
-        if trimmedName == workspace.name { return }
+        if trimmedName == workspace.title { return }
         if let existing = try store.workspace(projectID: workspace.projectID, name: trimmedName), existing.id != workspace.id {
             throw MuxyError.workspaceAlreadyExists(project: project.name, workspace: trimmedName)
         }
@@ -264,7 +264,7 @@ public final class MuxyOrchestrator {
         workspaceID: String, title: String? = nil, branch: String? = nil, directoryName: String? = nil, tooltip: String?? = nil
     ) throws {
         let (project, workspace) = try resolveWorkspace(id: workspaceID)
-        var updatedName = workspace.name
+        var updatedTitle = workspace.title
         var updatedBranch = workspace.branch
         var updatedDirname = workspace.dirname
         var updatedTooltip = workspace.tooltip
@@ -273,7 +273,7 @@ public final class MuxyOrchestrator {
         if let title {
             let trimmedTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !trimmedTitle.isEmpty else { throw MuxyError.invalidArgument(message: "Workspace title is required.") }
-            if trimmedTitle != workspace.name {
+            if trimmedTitle != workspace.title {
                 if let existing = try store.workspace(projectID: workspace.projectID, name: trimmedTitle), existing.id != workspace.id {
                     throw MuxyError.workspaceAlreadyExists(project: project.name, workspace: trimmedTitle)
                 }
@@ -281,7 +281,7 @@ public final class MuxyOrchestrator {
                     // Default workspaces allow title overrides while default semantics remain on isDefault.
                     try store.updateWorkspaceTitle(id: workspace.id, title: trimmedTitle)
                 } else {
-                    updatedName = trimmedTitle
+                    updatedTitle = trimmedTitle
                 }
                 didChange = true
             }
@@ -331,7 +331,7 @@ public final class MuxyOrchestrator {
             return
         }
         let updatedWorkspace = WorkspaceRecord(
-            id: workspace.id, projectID: workspace.projectID, name: updatedName, dir: workspace.dir, dirname: updatedDirname, branch: updatedBranch,
+            id: workspace.id, projectID: workspace.projectID, title: updatedTitle, dir: workspace.dir, dirname: updatedDirname, branch: updatedBranch,
             targetBranch: workspace.targetBranch, isDefault: workspace.isDefault, isArchived: workspace.isArchived, isActive: workspace.isActive,
             isRunning: workspace.isRunning, lastLaunchedAt: workspace.lastLaunchedAt, tooltip: updatedTooltip)
         try store.upsert(workspace: updatedWorkspace)
@@ -447,7 +447,7 @@ public final class MuxyOrchestrator {
                 revivedBranch = nil
             }
             let revived = WorkspaceRecord(
-                id: existing.id, projectID: project.id, name: trimmedName, dir: revivedDir, dirname: revivedDirname, branch: revivedBranch,
+                id: existing.id, projectID: project.id, title: trimmedName, dir: revivedDir, dirname: revivedDirname, branch: revivedBranch,
                 targetBranch: existing.targetBranch ?? resolvedTargetBranch, isDefault: false, isArchived: false, isActive: existing.isActive,
                 isRunning: false, lastLaunchedAt: nil)
             try store.upsert(workspace: revived)
@@ -475,7 +475,7 @@ public final class MuxyOrchestrator {
             workspaceBranch = nil
         }
         let workspace = WorkspaceRecord(
-            id: UUID().uuidString, projectID: project.id, name: trimmedName, dir: workspaceDir, dirname: workspaceDirname, branch: workspaceBranch,
+            id: UUID().uuidString, projectID: project.id, title: trimmedName, dir: workspaceDir, dirname: workspaceDirname, branch: workspaceBranch,
             targetBranch: resolvedTargetBranch, isDefault: false, isArchived: false, isRunning: false, lastLaunchedAt: nil)
         try store.upsert(workspace: workspace)
         try seedWorkspaceSettings(project: project, workspace: workspace)
@@ -512,9 +512,9 @@ public final class MuxyOrchestrator {
         if let existing = try store.workspace(dir: normalizedWorktreePath) {
             if existing.isArchived {
                 throw MuxyError.invalidArgument(
-                    message: "Workspace already exists but is archived: \(existing.name). Unarchive it or use a different worktree.")
+                    message: "Workspace already exists but is archived: \(existing.title). Unarchive it or use a different worktree.")
             }
-            throw MuxyError.invalidArgument(message: "Workspace already exists: \(existing.name)")
+            throw MuxyError.invalidArgument(message: "Workspace already exists: \(existing.title)")
         }
         let branchOutput = try git.runGitAndCapture(["-C", normalizedWorktreePath, "rev-parse", "--abbrev-ref", "HEAD"])
         let branch = branchOutput.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -529,7 +529,7 @@ public final class MuxyOrchestrator {
         }
         let dirname = URL(fileURLWithPath: normalizedWorktreePath).lastPathComponent
         let workspace = WorkspaceRecord(
-            id: UUID().uuidString, projectID: project.id, name: inferredName, dir: normalizedWorktreePath, dirname: dirname, branch: branch,
+            id: UUID().uuidString, projectID: project.id, title: inferredName, dir: normalizedWorktreePath, dirname: dirname, branch: branch,
             isDefault: false, isArchived: false, isRunning: false, lastLaunchedAt: nil)
         try store.upsert(workspace: workspace)
         try seedWorkspaceSettings(project: project, workspace: workspace)
@@ -560,7 +560,7 @@ public final class MuxyOrchestrator {
                 let normalizedWorkspacePath = normalizePath(workspace.dir)
                 if let worktree = discoverableWorktreeByPath[normalizedWorkspacePath], workspace.branch != worktree.branchName {
                     let updatedWorkspace = WorkspaceRecord(
-                        id: workspace.id, projectID: workspace.projectID, name: workspace.name, dir: workspace.dir, dirname: workspace.dirname,
+                        id: workspace.id, projectID: workspace.projectID, title: workspace.title, dir: workspace.dir, dirname: workspace.dirname,
                         branch: worktree.branchName, targetBranch: workspace.targetBranch, isDefault: workspace.isDefault,
                         isArchived: workspace.isArchived, isActive: workspace.isActive, isRunning: workspace.isRunning,
                         lastLaunchedAt: workspace.lastLaunchedAt, tooltip: workspace.tooltip)
@@ -580,7 +580,7 @@ public final class MuxyOrchestrator {
                 if (try store.workspace(dir: normalizedPath)) != nil { continue }
                 guard let branchName = worktree.branchName else { continue }
                 let workspace = WorkspaceRecord(
-                    id: UUID().uuidString, projectID: project.id, name: branchName, dir: normalizedPath,
+                    id: UUID().uuidString, projectID: project.id, title: branchName, dir: normalizedPath,
                     dirname: URL(fileURLWithPath: normalizedPath).lastPathComponent, branch: branchName, isDefault: false, isArchived: false,
                     isRunning: false, lastLaunchedAt: nil)
                 try store.upsert(workspace: workspace)
@@ -2690,11 +2690,6 @@ public final class MuxyOrchestrator {
         try store.setSetting(key: SettingsKey.dashboardDismissedAttentionItems, value: String(decoding: encoded, as: UTF8.self))
     }
 
-    private enum LeaderBackedShortcutResolution {
-        case suffix(HotkeySpec)
-        case fullOverride(HotkeySpec)
-    }
-
     private func guiLeaderModifiers() throws -> Set<HotkeyModifier> {
         if let raw = try store.setting(key: SettingsKey.guiLeaderHotkey), let modifiers = try? HotkeySpec.parseModifierSet(raw), !modifiers.isEmpty {
             return modifiers
@@ -2703,26 +2698,14 @@ public final class MuxyOrchestrator {
     }
 
     private func effectiveLeaderBackedShortcut(settingKey: String, defaultValue: String) throws -> String {
-        let resolution = try resolveLeaderBackedShortcut(settingKey: settingKey, defaultValue: defaultValue)
-        switch resolution {
-        case .suffix(let spec):
-            return spec.adding(modifiers: try guiLeaderModifiers()).normalized
-        case .fullOverride(let spec):
-            return spec.normalized
-        }
-    }
-
-    private func resolveLeaderBackedShortcut(settingKey: String, defaultValue: String) throws -> LeaderBackedShortcutResolution {
         let leaderModifiers = try guiLeaderModifiers()
-        let defaultLeaderModifiers = try HotkeySpec.parseModifierSet(SettingsKey.defaultGUILeaderHotkey)
         guard let raw = try store.setting(key: settingKey), let stored = try? HotkeySpec.parse(raw) else {
-            return .suffix((try? HotkeySpec.parse(defaultValue)) ?? HotkeySpec(key: defaultValue, modifiers: []))
+            let spec = (try? HotkeySpec.parse(defaultValue)) ?? HotkeySpec(key: defaultValue, modifiers: [])
+            return spec.adding(modifiers: leaderModifiers).normalized
         }
-        if stored.modifiers.isEmpty { return .suffix(stored) }
-        if stored.modifiers.isSuperset(of: leaderModifiers) { return .suffix(stored.removing(modifiers: leaderModifiers)) }
-        if stored.modifiers.isSuperset(of: defaultLeaderModifiers) { return .suffix(stored.removing(modifiers: defaultLeaderModifiers)) }
-        if stored.modifiers.contains(.cmd) { return .fullOverride(stored) }
-        return .suffix(stored)
+        if stored.modifiers.isEmpty { return stored.adding(modifiers: leaderModifiers).normalized }
+        if stored.modifiers.isSuperset(of: leaderModifiers) { return stored.removing(modifiers: leaderModifiers).adding(modifiers: leaderModifiers).normalized }
+        return stored.normalized
     }
 
     private func normalizeLeaderBackedShortcut(_ raw: String?) throws -> String? {
@@ -2789,7 +2772,7 @@ public final class MuxyOrchestrator {
         if let existing = try defaultWorkspace(projectID: project.id) {
             if existing.isArchived {
                 let revived = WorkspaceRecord(
-                    id: existing.id, projectID: project.id, name: existing.name, dir: existing.dir, dirname: existing.dirname,
+                    id: existing.id, projectID: project.id, title: existing.title, dir: existing.dir, dirname: existing.dirname,
                     branch: existing.branch, targetBranch: existing.targetBranch, isDefault: true, isArchived: false, isActive: existing.isActive,
                     isRunning: existing.isRunning, lastLaunchedAt: existing.lastLaunchedAt)
                 try store.upsert(workspace: revived)
@@ -2797,7 +2780,7 @@ public final class MuxyOrchestrator {
             return
         }
         let workspace = WorkspaceRecord(
-            id: UUID().uuidString, projectID: project.id, name: "default", dir: project.dir, dirname: nil, branch: project.defaultBranch,
+            id: UUID().uuidString, projectID: project.id, title: "default", dir: project.dir, dirname: nil, branch: project.defaultBranch,
             targetBranch: project.defaultBranch, isDefault: true, isArchived: false, isRunning: false, lastLaunchedAt: nil)
         try store.upsert(workspace: workspace)
         try seedWorkspaceSettings(project: project, workspace: workspace)
@@ -2810,7 +2793,7 @@ public final class MuxyOrchestrator {
         if let existing = try defaultWorkspace(projectID: project.id) {
             if existing.isArchived {
                 let revived = WorkspaceRecord(
-                    id: existing.id, projectID: project.id, name: existing.name, dir: existing.dir, dirname: existing.dirname,
+                    id: existing.id, projectID: project.id, title: existing.title, dir: existing.dir, dirname: existing.dirname,
                     branch: existing.branch, targetBranch: existing.targetBranch, isDefault: true, isArchived: false, isActive: existing.isActive,
                     isRunning: existing.isRunning, lastLaunchedAt: existing.lastLaunchedAt)
                 try store.upsert(workspace: revived)
@@ -2824,7 +2807,7 @@ public final class MuxyOrchestrator {
         try git.createWorktree(path: project.dir, worktreePath: workspaceDir, branch: branch, targetBranch: branch)
 
         let workspace = WorkspaceRecord(
-            id: UUID().uuidString, projectID: project.id, name: branch, dir: workspaceDir, dirname: branch, branch: branch, targetBranch: branch,
+            id: UUID().uuidString, projectID: project.id, title: branch, dir: workspaceDir, dirname: branch, branch: branch, targetBranch: branch,
             isDefault: true, isArchived: false, isRunning: false, lastLaunchedAt: nil)
         try store.upsert(workspace: workspace)
         try seedWorkspaceSettings(project: project, workspace: workspace)
@@ -3673,11 +3656,6 @@ public final class MuxyOrchestrator {
         return home.appending(path: "muxy", directoryHint: .isDirectory).appending(path: "repos", directoryHint: .isDirectory)
     }
 
-    private func legacyProjectsRootDirectory() -> URL {
-        let home = FileManager.default.homeDirectoryForCurrentUser
-        return home.appending(path: "muxy", directoryHint: .isDirectory).appending(path: "projects", directoryHint: .isDirectory)
-    }
-
     private func workspaceRootDirectory() -> URL {
         if let workspacesRootDirectoryURL { return workspacesRootDirectoryURL }
         let home = FileManager.default.homeDirectoryForCurrentUser
@@ -3715,9 +3693,7 @@ public final class MuxyOrchestrator {
     }
 
     private func isManagedRepositoryDirectory(path: String) -> Bool {
-        if isPath(path, inside: repositoriesRootDirectory().path) { return true }
-        if projectsRootDirectoryURL == nil, isPath(path, inside: legacyProjectsRootDirectory().path) { return true }
-        return false
+        isPath(path, inside: repositoriesRootDirectory().path)
     }
 
     private func defaultWorkspace(projectID: String) throws -> WorkspaceRecord? {

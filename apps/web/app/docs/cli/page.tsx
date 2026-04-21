@@ -257,7 +257,7 @@ mx workspace create \\
   --project-dir /path/to/repo \\
   --name "fix-login-crash" \\
   --branch fix/login-crash \\
-  --dirname fix_login_crash
+  --directory-name fix_login_crash
 
 # Non-git project
 mx workspace create \\
@@ -267,7 +267,7 @@ mx workspace create \\
           <Flag name="--name <name>" description="Workspace display name used in the UI and in other commands." />
           <Flag name="--branch <branch>" description="Git branch name. Created from --target-branch if it does not exist. Required for git projects." />
           <Flag name="--target-branch <branch>" description="Base branch for the new branch. Defaults to main or master." />
-          <Flag name="--dirname <name>" description="Override the git worktree directory name. Letters, numbers, - and _ only." />
+          <Flag name="--directory-name <name>" description="Override the git worktree directory name. Letters, numbers, - and _ only." />
           <Flag name="--tooltip <text>" description="Optional context about what you're working on. Shown on hover in the sidebar." />
         </ul>
         <p className="mt-3 text-sm leading-7 text-foreground-soft">
@@ -305,14 +305,14 @@ mx discover`}</CodeBlock>
         <CodeBlock>{`# Update title from current workspace directory
 mx workspace update --title "feat-auth-v2"
 
-# Update branch and directory name
-mx workspace update --dir /path/to/workspace --branch fix-login-timeout --directory-name fix_login_timeout
+# Update branch
+mx workspace update --dir /path/to/workspace --branch fix-login-timeout
 
 # Set or clear tooltip text
 mx workspace update --dir /path/to/workspace --tooltip "Working on OAuth integration"
 mx workspace update --dir /path/to/workspace --clear-tooltip`}</CodeBlock>
         <p className="mt-2 text-sm leading-7 text-foreground-soft">
-          Updates workspace metadata without launching/stopping runtime: title, branch, directory-name metadata, and tooltip text.
+          Updates workspace metadata without launching/stopping runtime: title, branch, and tooltip text.
           Default workspaces keep their fixed title.
         </p>
 

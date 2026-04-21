@@ -10,8 +10,8 @@ final class PortAllocatorTests: XCTestCase {
         let project = makeProjectRecord(dir: projectDir)
         try store.upsert(project: project)
 
-        let workspaceA = makeWorkspaceRecord(projectID: project.id, name: "alpha", dir: projectDir)
-        let workspaceB = makeWorkspaceRecord(projectID: project.id, name: "beta", dir: projectDir)
+        let workspaceA = makeWorkspaceRecord(projectID: project.id, title: "alpha", dir: projectDir)
+        let workspaceB = makeWorkspaceRecord(projectID: project.id, title: "beta", dir: projectDir)
         try store.upsert(workspace: workspaceA)
         try store.upsert(workspace: workspaceB)
         try store.setWorkspacePorts(workspaceID: workspaceA.id, ports: [20000, 20001])
@@ -38,8 +38,8 @@ final class PortAllocatorTests: XCTestCase {
         let project = makeProjectRecord(dir: projectDir)
         try store.upsert(project: project)
 
-        let workspaceA = makeWorkspaceRecord(projectID: project.id, name: "alpha", dir: projectDir)
-        let workspaceB = makeWorkspaceRecord(projectID: project.id, name: "beta", dir: projectDir)
+        let workspaceA = makeWorkspaceRecord(projectID: project.id, title: "alpha", dir: projectDir)
+        let workspaceB = makeWorkspaceRecord(projectID: project.id, title: "beta", dir: projectDir)
         try store.upsert(workspace: workspaceA)
         try store.upsert(workspace: workspaceB)
         try store.setWorkspacePorts(workspaceID: workspaceA.id, ports: [20000, 20001, 20002])
@@ -62,7 +62,7 @@ final class PortAllocatorTests: XCTestCase {
         let project = makeProjectRecord(dir: projectDir)
         try store.upsert(project: project)
 
-        let workspace = makeWorkspaceRecord(projectID: project.id, name: "alpha", dir: projectDir)
+        let workspace = makeWorkspaceRecord(projectID: project.id, title: "alpha", dir: projectDir)
         try store.upsert(workspace: workspace)
 
         let allocator = PortAllocator(store: store)
@@ -79,7 +79,7 @@ final class PortAllocatorTests: XCTestCase {
         let project = makeProjectRecord(dir: projectDir)
         try store.upsert(project: project)
 
-        let workspace = makeWorkspaceRecord(projectID: project.id, name: "alpha", dir: projectDir)
+        let workspace = makeWorkspaceRecord(projectID: project.id, title: "alpha", dir: projectDir)
         try store.upsert(workspace: workspace)
 
         // Store ports directly so reserveExistingPorts finds a non-empty list.

@@ -1152,7 +1152,7 @@ public final class SQLiteStore {
     private func decodeWorkspace(row: [String]) -> WorkspaceRecord? {
         guard row.count >= 13 else { return nil }
         return WorkspaceRecord(
-            id: row[0], projectID: row[1], name: row[2], dir: row[3], dirname: row[4].isEmpty ? nil : row[4], branch: row[5].isEmpty ? nil : row[5],
+            id: row[0], projectID: row[1], title: row[2], dir: row[3], dirname: row[4].isEmpty ? nil : row[4], branch: row[5].isEmpty ? nil : row[5],
             targetBranch: row[6].isEmpty ? nil : row[6], isDefault: row[7] == "1", isArchived: row[8] == "1", isActive: row[9] != "0",
             isRunning: row[10] == "1", lastLaunchedAt: row[11].isEmpty ? nil : row[11], tooltip: row[12].isEmpty ? nil : row[12])
     }
