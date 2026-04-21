@@ -10,10 +10,12 @@ let package = Package(
         .library(name: "appctl", targets: ["appctl"]),
         .library(name: "streamctl", targets: ["streamctl"]),
         .library(name: "gui", targets: ["gui"]),
+        .library(name: "mxcli", targets: ["mxcli"]),
         .executable(name: "mx", targets: ["mx"]),
         .executable(name: "Muxy", targets: ["Muxy"])
     ],
     dependencies: [
+        .package(url: "https://github.com/apple/swift-argument-parser.git", from: "1.5.0"),
         .package(url: "https://github.com/sparkle-project/Sparkle.git", from: "2.6.0")
     ],
     targets: [
@@ -24,7 +26,15 @@ let package = Package(
             linkerSettings: [.linkedLibrary("sqlite3")]
         ),
         .target(name: "gui", dependencies: ["streamctl", "appctl"]),
-        .executableTarget(name: "mx", dependencies: ["streamctl", "appctl"]),
+        .target(
+            name: "mxcli",
+            dependencies: [
+                "streamctl",
+                "appctl",
+                .product(name: "ArgumentParser", package: "swift-argument-parser")
+            ]
+        ),
+        .executableTarget(name: "mx", dependencies: ["mxcli"]),
         .executableTarget(
             name: "Muxy",
             dependencies: [
@@ -45,6 +55,13 @@ let package = Package(
             ]
         ),
         .testTarget(name: "streamctlTests", dependencies: ["streamctl", "appctl"]),
-        .testTarget(name: "guiTests", dependencies: ["gui"])
+        .testTarget(name: "guiTests", dependencies: ["gui"]),
+        .testTarget(
+            name: "mxcliTests",
+            dependencies: [
+                "mxcli",
+                .product(name: "ArgumentParser", package: "swift-argument-parser")
+            ]
+        )
     ]
 )

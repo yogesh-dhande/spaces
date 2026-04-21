@@ -16,7 +16,8 @@ Core invariants:
 
 ```mermaid
 flowchart LR
-  cli["mx"] --> stream["streamctl"]
+  cli["mx"] --> mxcli["mxcli"]
+  mxcli --> stream["streamctl"]
   app["MuxyApp"] --> gui["gui"]
   gui --> stream
 
@@ -33,7 +34,8 @@ flowchart LR
 ## Module Responsibilities
 - `MuxyApp`: minimal app entry point that boots AppKit.
 - `gui`: AppKit UI layer that renders state and dispatches actions into `streamctl`.
-- `mx`: minimal CLI entry point for workspace import, idempotent workspace launch, and coding-agent events.
+- `mx`: executable shim that boots the declarative CLI parser.
+- `mxcli`: declarative `swift-argument-parser` command tree for `mx`, including command help, leaf validation, removed-command handling, and translation from CLI inputs into orchestration calls.
 - `streamctl`: core orchestration, lifecycle, validation, persistence coordination, and environment building.
 - `appctl`: system adapters for shell commands, yabai, iTerm2, Ghostty, Chrome, and related OS integrations.
 
