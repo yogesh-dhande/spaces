@@ -134,7 +134,7 @@ Muxy focuses those windows; it does not decide their geometry.
 - Browser focus should match the intended browser session by URL, not by window title.
 - Terminal focus should land on the intended dedicated process or agent session.
 - Focusing a tracked terminal window should flash a short semitransparent overlay on top of the target window in both iTerm2 and Ghostty.
-- The focus-pulse overlay color should be configured as a shared window-level setting from both the GUI and `mx settings`.
+- The focus-pulse overlay color should be configured from the GUI settings panel.
 - Users should be able to choose the default terminal host globally, and both the GUI and CLI should respect that selection.
 - After the GUI focuses or opens an external window, Muxy should hide itself immediately so the target app stays unobstructed.
 - When a workspace detail view becomes visible, Muxy should refresh workspace windows and process state asynchronously so stale rows reconcile shortly after the page appears.
@@ -169,7 +169,7 @@ Muxy focuses those windows; it does not decide their geometry.
 - Shortcut handling must not break normal text-edit shortcuts while an input is focused.
 - Recovery affordances should reserve `Cmd+R`; app-data reload should default to leader+`R` so it stays distinct from recovery modals.
 - Dashboard should default to leader+`G` so it does not conflict with the macOS Dock toggle shortcut.
-- Every keyboard shortcut the product supports must be configurable from the GUI settings panel and from `mx settings`.
+- Every keyboard shortcut the product supports must be configurable from the GUI settings panel.
 
 ## Coding-Agent Integration
 - Coding agents can explicitly report lifecycle events through `mx agent event`.

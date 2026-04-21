@@ -120,7 +120,7 @@ It also lets lifecycle state stay explicit while runtime health is derived from 
 - Workspace processes also receive stable environment variables such as project and workspace directories.
 - Setup scripts, stop scripts, process commands, and status-check commands all execute against the workspace-specific environment.
 - Process launch and terminal recovery use tmux so the process lifetime can outlive a missing terminal window and be reattached later.
-- Global app settings include the selected terminal host, and both the GUI and `mx settings` read and write the same value.
+- Global app settings include the selected terminal host, and the GUI is the configuration surface for that value.
 - Global settings also store the shared window focus pulse color and enabled state behind window-scoped keys.
 - Process templates are parsed as direct executable invocations. If a workflow needs composite shell syntax such as `cd x && y`, pipes, or redirection, it must opt in explicitly by launching a shell command such as `bash -lc "cd x && y"`.
 
@@ -201,7 +201,7 @@ Implementation note:
 - The GUI should render lifecycle state directly and layer runtime-health warnings on top instead of inferring lifecycle from stale runtime leftovers.
 
 ## Shortcut Architecture
-- Shortcut defaults and user overrides are stored in SQLite global settings so the GUI and `mx settings` stay in sync.
+- Shortcut defaults and user overrides are stored in SQLite global settings and edited from the GUI settings panel.
 - Global shortcuts use Carbon hotkey registration for actions that must work while Muxy is not frontmost.
 - In-app shortcuts use an AppKit event monitor so they can respect focused text inputs and support digit-family shortcuts such as window `1` through `9`.
 - Leader-based shortcuts store a suffix key spec and derive their shared modifiers from `gui_leader_hotkey`; the orchestrator resolves them to full effective hotkeys for both the GUI and CLI. Reload now uses this same leader-backed resolution path.

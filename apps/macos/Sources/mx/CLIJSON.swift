@@ -73,62 +73,6 @@ struct CLITextOrJSONOutput {
     }
 }
 
-struct SettingsSnapshot: Encodable {
-    let editor: String?
-    let terminalHost: String
-    let portRange: String
-    let guiHotkey: String
-    let guiLeaderHotkey: String
-    let guiDashboardShortcut: String
-    let guiAddProjectShortcut: String
-    let guiAddWorkspaceShortcut: String
-    let guiReloadShortcut: String
-    let guiNextShortcut: String
-    let guiPrevShortcut: String
-    let guiOpenEditorShortcut: String
-    let guiOpenTerminalShortcut: String
-    let guiOpenFinderShortcut: String
-    let guiOpenSettingsShortcut: String
-    let guiWindowShortcut: String
-    let guiWindowSequenceShortcut: String
-    let windowFocusPulseColor: String
-    let windowFocusPulseEnabled: Bool
-}
-
-extension SettingsSnapshot {
-    static func load(from orchestrator: MuxyOrchestrator) throws -> SettingsSnapshot {
-        let config = try orchestrator.appConfig()
-        let pulseColor = try orchestrator.windowFocusPulseColor()
-        let pulseColorValue = "\(pulseColor.0),\(pulseColor.1),\(pulseColor.2)"
-        let pulseEnabled = try orchestrator.windowFocusPulseEnabled()
-        return SettingsSnapshot(
-            editor: config.editor?.rawValue,
-            terminalHost: config.terminalHost.rawValue,
-            portRange: "\(config.portRange.start)-\(config.portRange.end)",
-            guiHotkey: try orchestrator.guiHotkey(),
-            guiLeaderHotkey: try orchestrator.guiLeaderHotkey(),
-            guiDashboardShortcut: try orchestrator.guiDashboardShortcut(),
-            guiAddProjectShortcut: try orchestrator.guiAddProjectShortcut(),
-            guiAddWorkspaceShortcut: try orchestrator.guiAddWorkspaceShortcut(),
-            guiReloadShortcut: try orchestrator.guiReloadShortcut(),
-            guiNextShortcut: try orchestrator.guiNextShortcut(),
-            guiPrevShortcut: try orchestrator.guiPreviousShortcut(),
-            guiOpenEditorShortcut: try orchestrator.guiOpenEditorShortcut(),
-            guiOpenTerminalShortcut: try orchestrator.guiOpenTerminalShortcut(),
-            guiOpenFinderShortcut: try orchestrator.guiOpenFinderShortcut(),
-            guiOpenSettingsShortcut: try orchestrator.guiOpenSettingsShortcut(),
-            guiWindowShortcut: try orchestrator.guiWindowShortcut(),
-            guiWindowSequenceShortcut: try orchestrator.guiWindowSequenceShortcut(),
-            windowFocusPulseColor: pulseColorValue,
-            windowFocusPulseEnabled: pulseEnabled)
-    }
-}
-
-struct SettingValuePayload: Encodable {
-    let name: String
-    let value: String
-}
-
 struct MutationResultPayload<Resource: Encodable>: Encodable {
     let message: String
     let resource: Resource?
