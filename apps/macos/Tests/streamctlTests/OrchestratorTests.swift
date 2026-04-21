@@ -1689,6 +1689,66 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertTrue(openLog.contains("set URL of active tab of newWindow"))
     }
 
+    // Tests direct browser-session focus reselects the tracked Chrome window's first tab instead of relying on yabai-only window focus.
+    func testFocusWorkspaceBrowserSessionSelectsFirstTabInTrackedChromeWindow() throws {
+        let (orchestrator, store, _, workspace, root) = try makeOrchestratorWithWorkspace()
+        let tabIndexLog = root.appendingPathComponent("browser-first-tab.log")
+        let yabaiFocusLog = root.appendingPathComponent("browser-first-tab-yabai.log")
+
+        try store.setWorkspaceBrowserSessions(workspaceID: workspace.id, sessions: [BrowserSession(name: "Frontend", url: "http://localhost:3001")])
+        try store.upsert(
+            window: WindowRecord(
+                id: UUID().uuidString, workspaceID: workspace.id, app: "Google Chrome", title: "Frontend", targetURL: "http://localhost:3001",
+                windowID: 202, role: "browser", orderIndex: 0, lastSeenAt: "now"))
+
+        try withMockCommands(["yabai": Self.orchestratorYabaiMockScript, "osascript": Self.orchestratorOsaScriptMock]) {
+            try withEnv(name: "MOCK_CHROME_TAB_INDEX_LOG_FILE", value: tabIndexLog.path) {
+                try withEnv(name: "YABAI_FOCUS_LOG_FILE", value: yabaiFocusLog.path) {
+                    try orchestrator.focusWorkspaceBrowserSession(workspaceID: workspace.id, targetURL: "http://localhost:3001")
+                }
+            }
+        }
+
+        let focusedTabs = try String(contentsOf: tabIndexLog).split(separator: "\n").map(String.init)
+        XCTAssertEqual(focusedTabs, ["front\t1"])
+        let focusedWindows = try String(contentsOf: yabaiFocusLog).split(separator: "\n").map(String.init)
+        XCTAssertEqual(focusedWindows, ["202"])
+    }
+
+    // Tests workspace window cycling reselects the tracked browser window's first tab when landing on a browser target.
+    func testFocusNextWindowSelectsFirstTabForBrowserTarget() throws {
+        let (orchestrator, store, _, workspace, root) = try makeOrchestratorWithWorkspace()
+        let tabIndexLog = root.appendingPathComponent("browser-cycle-first-tab.log")
+        let yabaiFocusLog = root.appendingPathComponent("browser-cycle-yabai.log")
+
+        try store.setWorkspaceBrowserSessions(workspaceID: workspace.id, sessions: [BrowserSession(name: "Frontend", url: "http://localhost:3001")])
+        try store.upsert(
+            window: WindowRecord(
+                id: UUID().uuidString, workspaceID: workspace.id, app: "iTerm2", title: "api", windowID: 101, role: "terminal", orderIndex: 0,
+                lastSeenAt: "now"))
+        try store.upsert(
+            window: WindowRecord(
+                id: UUID().uuidString, workspaceID: workspace.id, app: "Google Chrome", title: "Frontend", targetURL: "http://localhost:3001",
+                windowID: 202, role: "browser", orderIndex: 1, lastSeenAt: "now"))
+
+        try withMockCommands(["yabai": Self.orchestratorYabaiMockScript, "osascript": Self.orchestratorOsaScriptMock]) {
+            try withEnv(name: "MOCK_CHROME_TAB_INDEX_LOG_FILE", value: tabIndexLog.path) {
+                try withEnv(name: "YABAI_FOCUS_LOG_FILE", value: yabaiFocusLog.path) {
+                    try withEnv(name: "YABAI_FOCUSED_ID", value: "101") {
+                        try withEnv(name: "YABAI_FOCUSED_APP", value: "iTerm2") {
+                            try orchestrator.focusNextWindow(workspaceID: workspace.id)
+                        }
+                    }
+                }
+            }
+        }
+
+        let focusedTabs = try String(contentsOf: tabIndexLog).split(separator: "\n").map(String.init)
+        XCTAssertEqual(focusedTabs, ["front\t1"])
+        let focusedWindows = try String(contentsOf: yabaiFocusLog).split(separator: "\n").map(String.init)
+        XCTAssertEqual(focusedWindows, ["202"])
+    }
+
     // Tests window cycling ignores missing browser windows and keeps moving to the next live tracked window.
     func testFocusNextWindowIgnoresMissingBrowserWindow() throws {
         let (orchestrator, store, _, workspace, root) = try makeOrchestratorWithWorkspace()
@@ -2760,27 +2820,22 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertTrue(openLog.contains("set requestedWindowID to \"88\""))
     }
 
-    // Tests launch workspace opens browser sessions in dedicated windows and persists the direct window mapping by arranging representative inputs and asserting the expected result.
-    func testLaunchWorkspaceExtractsBrowserSessionIntoDedicatedWindowAndPersistsMapping() throws {
+    // Tests launch workspace leaves configured browser sessions unopened so they behave like lazy bookmarks.
+    func testLaunchWorkspaceLeavesBrowserSessionsUnopenedUntilFocused() throws {
         let (orchestrator, store, _, workspace, root) = try makeOrchestratorWithWorkspace()
-        let extractLog = root.appendingPathComponent("chrome-extract.log")
+        let chromeOpenLog = root.appendingPathComponent("chrome-open.log")
         try store.setWorkspaceBrowserSessions(workspaceID: workspace.id, sessions: [BrowserSession(url: "http://localhost:3001")])
-        let chromeMatches = "888\tGoogle Chrome — localhost 3001\thttp://localhost:3001\n"
 
         try withMockCommands(["yabai": Self.orchestratorYabaiMockScript, "osascript": Self.orchestratorOsaScriptMock]) {
-            try withEnv(name: "MOCK_CHROME_WINDOW_MATCHES", value: chromeMatches) {
-                try withEnv(name: "MOCK_CHROME_EXTRACT_WINDOW_ID", value: "888") {
-                    try withEnv(name: "MOCK_CHROME_EXTRACT_LOG_FILE", value: extractLog.path) {
-                        try orchestrator.launchWorkspace(workspaceID: workspace.id)
-                    }
-                }
+            try withEnv(name: "MOCK_CHROME_OPEN_LOG_FILE", value: chromeOpenLog.path) {
+                try orchestrator.launchWorkspace(workspaceID: workspace.id)
             }
         }
 
+        XCTAssertTrue(try store.windows(workspaceID: workspace.id).filter { $0.role == "browser" }.isEmpty)
         let sessions = try store.workspaceBrowserSessions(workspaceID: workspace.id)
-        XCTAssertEqual(sessions.first?.extractedWindow?.windowID, 202)
-        XCTAssertEqual(sessions.first?.extractedWindow?.isValid, true)
-        XCTAssertFalse(FileManager.default.fileExists(atPath: extractLog.path))
+        XCTAssertNil(sessions.first?.extractedWindow)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: chromeOpenLog.path))
     }
 
     // Tests focus workspace window marks stale extracted mapping invalid after direct focus failure and falls back to indexed tab focus by arranging representative inputs and asserting the expected result.
@@ -2922,6 +2977,23 @@ final class OrchestratorTests: XCTestCase {
 
         XCTAssertFalse(didMutate)
         XCTAssertTrue(try store.windows(workspaceID: workspace.id).isEmpty)
+    }
+
+    // Tests refresh workspace windows leaves tracked browser rows alone until the user focuses them on demand.
+    func testRefreshWorkspaceWindowsDoesNotPruneMissingBrowserRows() throws {
+        let (orchestrator, store, _, workspace, _) = try makeOrchestratorWithWorkspace()
+        try store.upsert(
+            window: WindowRecord(
+                id: UUID().uuidString, workspaceID: workspace.id, app: "Google Chrome", title: "Frontend", targetURL: "http://localhost:3001",
+                windowID: 909, role: "browser", orderIndex: 0, lastSeenAt: "now"))
+
+        var didMutate = true
+        try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) {
+            try withEnv(name: "YABAI_WINDOWS_JSON", value: "[]") { didMutate = try orchestrator.refreshWorkspaceWindows(workspaceID: workspace.id) }
+        }
+
+        XCTAssertFalse(didMutate)
+        XCTAssertEqual(try store.windows(workspaceID: workspace.id).filter { $0.role == "browser" }.count, 1)
     }
 
     // Tests stopped workspaces with tracked runtime leftovers remain stopped but surface degraded runtime health.
@@ -4156,6 +4228,14 @@ final class OrchestratorTests: XCTestCase {
 
         if [[ "$script" == *'tell application "Google Chrome" to version'* ]]; then
           echo "122"
+          exit 0
+        fi
+
+        if [[ "$script" == *'set active tab index of front window to 1'* ]]; then
+          if [[ -n "${MOCK_CHROME_TAB_INDEX_LOG_FILE:-}" ]]; then
+            echo "front\t1" >> "$MOCK_CHROME_TAB_INDEX_LOG_FILE"
+          fi
+          echo "1"
           exit 0
         fi
 

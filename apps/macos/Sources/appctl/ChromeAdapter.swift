@@ -183,6 +183,24 @@ public final class ChromeAdapter {
         return output == "1"
     }
 
+    public func focusFirstTab(windowID: Int) throws -> Bool { try focusTab(windowID: windowID, tabIndex: 1) }
+
+    public func focusFirstTabOfFrontWindow() throws -> Bool {
+        let script = """
+            tell application "Google Chrome"
+              if (count of windows) is 0 then
+                return "0"
+              end if
+              set active tab index of front window to 1
+              set index of front window to 1
+              activate
+              return "1"
+            end tell
+            """
+        let output = try AppleScript.run(script).trimmingCharacters(in: .whitespacesAndNewlines)
+        return output == "1"
+    }
+
     public func tabURL(windowID: Int, tabIndex: Int) throws -> String? {
         let script = """
             tell application "Google Chrome"

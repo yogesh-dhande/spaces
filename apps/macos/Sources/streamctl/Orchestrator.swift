@@ -654,10 +654,6 @@ public final class MuxyOrchestrator {
 
         if let config {
             newWindows.append(contentsOf: try launchProcesses(workspace: workspace, templates: config.processes, env: env, background: background))
-            let browserSessionResult = try ensureBrowserSessions(
-                project: project, workspace: workspace, sessions: config.browserSessions, env: env, extractOnAttach: true, background: background)
-            try store.setWorkspaceBrowserSessions(workspaceID: workspace.id, sessions: browserSessionResult.sessions)
-            newWindows.append(contentsOf: browserSessionResult.windows)
         }
 
         try store.deleteWindows(workspaceID: workspace.id)
@@ -1503,15 +1499,24 @@ public final class MuxyOrchestrator {
 
     private func focusTrackedWindow(_ window: WindowRecord, workspaceID: String) -> Bool {
         let focusStartedAt = currentDate()
-        let terminalID = resolvedTerminalID(for: window, workspaceID: workspaceID)
-        let adapterFocused = focusManagedTerminal(
-            terminalApp: window.app,
-            terminalID: terminalID,
-            windowID: window.windowID,
-            tabIndex: window.itermTabIndex)
-        let focused = adapterFocused == true
-            ? true
-            : ((window.windowID.flatMap { try? yabai.focusWindow(id: $0) }) ?? false)
+        let focused: Bool
+        if window.role == "browser", let windowID = window.windowID {
+            let focusedWindow = (try? yabai.focusWindow(id: windowID)) ?? false
+            if focusedWindow, chrome.isAvailable() {
+                _ = try? chrome.focusFirstTabOfFrontWindow()
+            }
+            focused = focusedWindow
+        } else {
+            let terminalID = resolvedTerminalID(for: window, workspaceID: workspaceID)
+            let adapterFocused = focusManagedTerminal(
+                terminalApp: window.app,
+                terminalID: terminalID,
+                windowID: window.windowID,
+                tabIndex: window.itermTabIndex)
+            focused = adapterFocused == true
+                ? true
+                : ((window.windowID.flatMap { try? yabai.focusWindow(id: $0) }) ?? false)
+        }
         guard let id = window.windowID else { return focused }
         if !focused, window.role == "browser", let targetURL = window.targetURL {
             try? markBrowserWindowMissing(workspaceID: workspaceID, targetURL: targetURL, windowID: id)
@@ -2943,38 +2948,30 @@ public final class MuxyOrchestrator {
     private func reconcileBrowserSessions(project: ProjectRecord, workspace: WorkspaceRecord, sessions: [BrowserSession], env: [String: String])
         throws
     {
+        _ = project
         let tracked = try store.windows(workspaceID: workspace.id).filter { $0.role == "browser" }
-        if sessions.isEmpty {
+        let resolvedSessions = resolveBrowserSessions(sessions, env: env)
+        if resolvedSessions.isEmpty {
             for window in tracked {
                 closeTrackedBrowserTab(window)
                 try store.deleteWindow(id: window.id)
             }
             return
         }
-        guard chrome.isAvailable() else { throw MuxyError.dependencyMissing(message: "Google Chrome is required for browser sessions.") }
-        let browserSessionResult = try ensureBrowserSessions(
-            project: project, workspace: workspace, sessions: sessions, env: env, extractOnAttach: false)
-        try store.setWorkspaceBrowserSessions(workspaceID: workspace.id, sessions: browserSessionResult.sessions)
-        let desiredWindows = browserSessionResult.windows
-        let desiredIDs = Set(desiredWindows.compactMap(\.windowID))
-        let desiredKeys = Set(desiredWindows.map(windowTrackingKey))
+        let desiredOrderByTargetURL = Dictionary(uniqueKeysWithValues: resolvedSessions.map { ($0.prefix, $0.index) })
         for window in tracked {
-            guard let id = window.windowID else {
+            guard let targetURL = window.targetURL, let desiredOrder = desiredOrderByTargetURL[targetURL] else {
+                if window.windowID != nil { closeTrackedBrowserTab(window) }
                 try store.deleteWindow(id: window.id)
                 continue
             }
-            let key = windowTrackingKey(window)
-            if !desiredKeys.contains(key) {
-                if !desiredIDs.contains(id) { closeTrackedBrowserTab(window) }
-                try store.deleteWindow(id: window.id)
+            if window.orderIndex != desiredOrder {
+                try store.upsert(
+                    window: WindowRecord(
+                        id: window.id, workspaceID: window.workspaceID, app: window.app, title: window.title, targetURL: targetURL,
+                        windowID: window.windowID, itermSessionID: window.itermSessionID, itermTabIndex: window.itermTabIndex,
+                        tmuxWindowID: window.tmuxWindowID, role: window.role, orderIndex: desiredOrder, lastSeenAt: window.lastSeenAt))
             }
-        }
-        var existingKeys = Set<String>()
-        for window in desiredWindows {
-            let key = windowTrackingKey(window)
-            if existingKeys.contains(key) { continue }
-            existingKeys.insert(key)
-            try store.upsert(window: window)
         }
     }
 
@@ -2989,9 +2986,7 @@ public final class MuxyOrchestrator {
                 continue
             }
             if !existingIDs.contains(id) {
-                if window.role == "browser", let targetURL = window.targetURL {
-                    try markBrowserWindowMissing(workspaceID: workspaceID, targetURL: targetURL, windowID: id)
-                    pruned += 1
+                if window.role == "browser" {
                     continue
                 }
                 try store.deleteWindow(id: window.id)

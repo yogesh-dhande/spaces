@@ -97,8 +97,8 @@ It also lets lifecycle state stay explicit while runtime health is derived from 
 1. Validate that the workspace is launchable.
 2. Build the workspace environment, including named port variables and workspace paths.
 3. Start tracked processes inside tmux-backed dedicated terminal contexts.
-4. Open tracked browser sessions.
-5. Capture new windows through yabai and persist the mapping.
+4. Leave configured browser sessions unopened until the user focuses them.
+5. Capture new terminal windows through yabai and persist the mapping.
 
 ### Workspace Stop or Archive
 1. Stop tracked processes.
@@ -127,9 +127,12 @@ It also lets lifecycle state stay explicit while runtime health is derived from 
 ## Window and Focus Architecture
 - yabai provides stable window identity and cross-app focusing.
 - iTerm2, Ghostty, and Chrome AppleScript integrations add app-specific behavior on top of yabai, such as returning launch-time terminal IDs or selecting the intended browser target.
+- Browser sessions are stored as workspace configuration and only become tracked windows after an explicit focus action opens them.
+- Browser-session focus uses the tracked Chrome window plus tab `1` as the fast path, instead of rescanning Chrome tabs on every focus.
 - Terminal focus pulsing is terminal-agnostic: Muxy queries the target yabai window and briefly presents an AppKit overlay aligned to that window instead of mutating terminal-specific appearance settings.
 - Tracked windows are persisted so Muxy can refocus or clean up only the windows it owns.
 - Direct focus requests auto-recover stale browser-session windows by reopening and re-tracking them, while process and generic window failures still surface typed missing-window errors to the GUI.
+- Browser-session existence is not polled during background refresh; stale browser mappings are detected on demand when the user focuses that session.
 - Window cycling is tolerant of stale tracked yabai IDs and keeps advancing until it finds the next live target.
 - Reconciliation is required because window state can drift outside the app.
 

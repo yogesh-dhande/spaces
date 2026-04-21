@@ -22,10 +22,12 @@ Muxy provides a desktop app and a CLI for power users and coding agents.
 - Muxy only supports the browser and terminal integrations it explicitly implements.
 
 ## Key Design Decisions
-- Separate window per process or browser session URL.
-  This keeps each focus target stable because Muxy cannot predict which two or more terminals or browser sessions a user may want to see side by side later.
-- Focus Chrome by window only, not by tab matching as the primary path.
-  AppleScript tab matching is too slow when Muxy cannot assume tab indexes remain stable, and must resort to searching/matching by URL. So tracked window identity must be the fast path.
+- Separate window per process.
+  Dedicated process windows keep each terminal focus target stable because Muxy cannot predict which terminals a user will want side by side later.
+- Browser sessions are lazy bookmarks that open into dedicated Chrome windows only when focused.
+  Some workspaces may carry many useful URLs, but opening all of them during launch or restart is wasteful when the user may only need a subset in a given session.
+- Focus a browser session by activating its tracked Chrome window and reselecting tab `1`.
+  The first tab is unlikely to be reordered by the user, while additional tabs are much more likely to be appended during normal browsing in that window.
 - Launch workspace processes inside tmux.
   This lets Muxy recover the terminal view without losing the underlying process when a supported terminal-host window is closed or needs to be recreated.
 - Keep workspace lifecycle separate from runtime health.
@@ -72,7 +74,7 @@ Running and stopped should be easy to explain:
 ### Window Set
 A workspace owns a tracked set of dedicated windows, such as:
 - process terminals
-- browser windows for browser sessions
+- browser windows for browser sessions that have been opened on demand
 - coding-agent terminal windows
 
 Muxy focuses those windows; it does not decide their geometry.
@@ -111,7 +113,8 @@ Muxy focuses those windows; it does not decide their geometry.
 - Sidebar git activity should remain visible while background refresh is in flight and update in place when fresh status arrives.
 
 ## Launch and Runtime Behavior
-- Launch starts the workspace's configured processes and browser sessions and captures the resulting windows.
+- Launch starts the workspace's configured processes and captures the resulting windows.
+- Browser sessions stay configured while the workspace is running, but Muxy should leave them unopened until the user explicitly focuses that browser session.
 - Workspace processes should be launched inside tmux so Muxy can recover the terminal view without losing the underlying process when a supported terminal-host window closes.
 - Process commands are treated as direct executable invocations with arguments.
 - If a user needs composite shell behavior such as `cd x && y`, pipes, or redirection, they should wrap it explicitly, for example `bash -lc "cd x && y"`.
@@ -132,6 +135,7 @@ Muxy focuses those windows; it does not decide their geometry.
 - Workspaces map to captured window sets managed through yabai.
 - Muxy should focus the correct window or workspace quickly, even when switching across apps.
 - Browser focus should match the intended browser session by URL, not by window title.
+- When focusing an already-open browser session, Muxy should activate Chrome and select the first tab in that tracked window.
 - Terminal focus should land on the intended dedicated process or agent session.
 - Focusing a tracked terminal window should flash a short semitransparent overlay on top of the target window in both iTerm2 and Ghostty.
 - The focus-pulse overlay color should be configured from the GUI settings panel.
@@ -139,6 +143,7 @@ Muxy focuses those windows; it does not decide their geometry.
 - After the GUI focuses or opens an external window, Muxy should hide itself immediately so the target app stays unobstructed.
 - When a workspace detail view becomes visible, Muxy should refresh workspace windows and process state asynchronously so stale rows reconcile shortly after the page appears.
 - If tracked windows become stale during next/previous window cycling, Muxy should skip them and continue to the next live target.
+- Muxy should not poll in the background to verify whether a tracked browser-session window still exists; it should validate that on demand when the user focuses that browser session.
 - If direct window focus from the app targets a stale browser session, Muxy should reopen that session in a new Chrome window and update tracking without showing an error modal first.
 - If direct window focus from the app targets a stale process window, Muxy should first try to recover silently by opening a new dedicated window in the selected terminal host and reattaching to the existing tmux session when the process is still running. If the process is no longer running, Muxy should show a modal warning with `Recover (Cmd+R)` and `Cancel (Esc)`, and the explicit recovery action should restart it inside tmux.
   - coding-agent windows only show the error state and do not offer recovery
@@ -163,6 +168,7 @@ Muxy focuses those windows; it does not decide their geometry.
 - The app should expose a configurable shortcut leader that supplies the shared modifiers for leader-based shortcuts like workspace navigation, dashboard, editor, Finder, and queued window focus.
 - Window rows in the selected workspace should expose numbered shortcuts for direct focus.
 - Workspace Run-tab rows and their numbered focus shortcuts should keep the saved workspace-settings order for configured browser sessions and processes, and append newly added ad-hoc windows after those configured rows.
+- Browser-session rows should appear in the Run tab only while the workspace is running.
 - Workspace focus from the GUI or `mx workspace focus` should require an explicit tracked window target instead of picking an arbitrary window.
 - Window-number shortcuts should use a configurable direct-focus modifier plus digits `1` through `9`.
 - Window-number sequence shortcuts should use a separate configurable modifier plus digits `1` through `9`, then replay the queued focus actions in order when the modifiers are released.

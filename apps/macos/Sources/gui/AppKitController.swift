@@ -832,7 +832,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 let windows = try orchestrator.windows(workspaceID: selectedWorkspaceID)
                 let processes = try orchestrator.runningProcesses(workspaceID: selectedWorkspaceID)
                 let agentWindows = try orchestrator.agentWindows(workspaceID: selectedWorkspaceID)
-                let browserSessions = try orchestrator.resolvedWorkspaceBrowserSessions(workspaceID: selectedWorkspaceID)
+                let workspaceIsRunning = try orchestrator.store.workspace(id: selectedWorkspaceID)?.isRunning ?? false
+                let browserSessions = shouldShowConfiguredBrowserSessions(workspaceIsRunning: workspaceIsRunning)
+                    ? try orchestrator.resolvedWorkspaceBrowserSessions(workspaceID: selectedWorkspaceID)
+                    : []
                 let configuredProcesses = try orchestrator.workspaceSettings(workspaceID: selectedWorkspaceID)?.processes ?? []
                 let processEntries = orderedWorkspaceRunProcessEntries(
                     configuredProcesses: configuredProcesses,
@@ -878,6 +881,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             } catch { return .failure(error) }
         }.value
     }
+
+    nonisolated static func shouldShowConfiguredBrowserSessions(workspaceIsRunning: Bool) -> Bool { workspaceIsRunning }
 
     nonisolated private static func runWorkspaceSetupSnapshot(workspaceID: String) async -> Result<Void, Error> {
         await Task.detached(priority: .utility) {
@@ -3475,7 +3480,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let windows = (try? orchestrator.windows(workspaceID: workspace.id)) ?? []
         let configuredProcesses = (try? orchestrator.workspaceSettings(workspaceID: workspace.id)?.processes) ?? []
         let configuredBrowserSessions: [BrowserSession] = {
-            (try? orchestrator.resolvedWorkspaceBrowserSessions(workspaceID: workspace.id)) ?? []
+            guard Self.shouldShowConfiguredBrowserSessions(workspaceIsRunning: workspace.isRunning) else { return [] }
+            return (try? orchestrator.resolvedWorkspaceBrowserSessions(workspaceID: workspace.id)) ?? []
         }()
         var statusResultsByProcessID: [String: [StatusResult]] = [:]
         for process in processes { statusResultsByProcessID[process.id] = (try? orchestrator.statusResults(processID: process.id)) ?? [] }
