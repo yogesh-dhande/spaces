@@ -36,28 +36,13 @@ public final class YabaiAdapter {
         } catch { return nil }
     }
 
-    public func validate(displayIndex: Int, spaceIndex: Int) throws -> YabaiValidation {
-        let displays = try listDisplays()
-        let spaces = try listSpaces()
-        let displayExists = displays.contains(where: { $0.index == displayIndex })
-        let spaceExists = spaces.contains(where: { $0.index == spaceIndex })
-        return YabaiValidation(displayExists: displayExists, spaceExists: spaceExists)
-    }
-
     @discardableResult public func focusWindow(id: Int) throws -> Bool {
         do {
             return try Shell.run(["yabai", "-m", "window", "--focus", String(id)]) == 0
         } catch { return false }
     }
 
-    public func minimizeWindow(id: Int) throws { _ = try Shell.run(["yabai", "-m", "window", "--minimize", String(id)]) }
-
     public func closeWindow(id: Int) throws { _ = try Shell.run(["yabai", "-m", "window", "--close", String(id)]) }
-
-    public func windowExists(id: Int) throws -> Bool {
-        let windows = try listWindows()
-        return windows.contains(where: { $0.id == id })
-    }
 
     private func decodeList<T: Decodable>(_ json: String) throws -> [T] {
         let data = Data(json.utf8)

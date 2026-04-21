@@ -19,9 +19,6 @@ import Foundation
         }
     }
 
-    /// Progress callback: (bytesReceived, totalBytes). totalBytes may be 0 if unknown.
-    var onProgress: (@MainActor (Int64, Int64) -> Void)?
-
     /// Download and install the update from the given URL.
     func downloadAndInstall(from url: URL) async throws {
         let tempDir = FileManager.default.temporaryDirectory.appending(path: "muxy-update-\(UUID().uuidString)")

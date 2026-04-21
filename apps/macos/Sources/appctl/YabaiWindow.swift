@@ -14,10 +14,7 @@ public struct YabaiWindow: Decodable, Sendable {
     public let title: String?
     public let space: Int
     public let display: Int
-    public let isSticky: Bool
-    public let isHidden: Bool
     public let isVisible: Bool
-    public let isNativeFullscreen: Bool
     public let frame: YabaiFrame?
 
     private enum CodingKeys: String, CodingKey {
@@ -27,10 +24,7 @@ public struct YabaiWindow: Decodable, Sendable {
         case title
         case space
         case display
-        case isSticky = "is-sticky"
-        case isHidden = "is-hidden"
         case isVisible = "is-visible"
-        case isNativeFullscreen = "is-native-fullscreen"
         case frame
     }
 }

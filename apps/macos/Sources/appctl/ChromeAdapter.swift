@@ -20,144 +20,7 @@ public final class ChromeAdapter {
         return Int(output.trimmingCharacters(in: .whitespacesAndNewlines)) ?? -1
     }
 
-    public func openTab(windowID: Int, url: String, background: Bool = false) throws -> Bool {
-        let escaped = url.replacingOccurrences(of: "\"", with: "\\\"")
-        let script: String
-        if background {
-            script = """
-                tell application "Google Chrome"
-                  set requestedWindowID to "\(windowID)"
-                  repeat with w in windows
-                    if (id of w as string) is requestedWindowID then
-                      make new tab at end of tabs of w with properties {URL:"\(escaped)"}
-                      return "1"
-                    end if
-                  end repeat
-                end tell
-                return "0"
-                """
-        } else {
-            script = """
-                tell application "Google Chrome"
-                  set requestedWindowID to "\(windowID)"
-                  repeat with w in windows
-                    if (id of w as string) is requestedWindowID then
-                      make new tab at end of tabs of w with properties {URL:"\(escaped)"}
-                      set active tab index of w to (count of tabs of w)
-                      set index of w to 1
-                      activate
-                      return "1"
-                    end if
-                  end repeat
-                end tell
-                return "0"
-                """
-        }
-        let output = try AppleScript.run(script).trimmingCharacters(in: .whitespacesAndNewlines)
-        return output == "1"
-    }
-
-    public func windowMatches(forURLPrefix prefix: String) throws -> [ChromeWindowMatch] { try queryTabs(urlPrefix: prefix) }
-
     public func allTabs() throws -> [ChromeWindowMatch] { try queryTabs(urlPrefix: nil) }
-
-    public func focusTab(forURLPrefix prefix: String) throws -> Bool {
-        let escaped = prefix.replacingOccurrences(of: "\"", with: "\\\"")
-        let script = """
-            tell application "Google Chrome"
-              repeat with w in windows
-                set tabCount to count of tabs of w
-                repeat with i from 1 to tabCount
-                  set u to URL of tab i of w
-                  if u starts with "\(escaped)" then
-                    set active tab index of w to i
-                    set index of w to 1
-                    activate
-                    return "1"
-                  end if
-                end repeat
-              end repeat
-            end tell
-            return "0"
-            """
-        let output = try AppleScript.run(script).trimmingCharacters(in: .whitespacesAndNewlines)
-        return output == "1"
-    }
-
-    public func focusTab(forExactURL url: String) throws -> Bool {
-        let escaped = url.replacingOccurrences(of: "\"", with: "\\\"")
-        let script = """
-            tell application "Google Chrome"
-              repeat with w in windows
-                set tabCount to count of tabs of w
-                repeat with i from 1 to tabCount
-                  set u to URL of tab i of w
-                  if u is "\(escaped)" then
-                    set active tab index of w to i
-                    set index of w to 1
-                    activate
-                    return "1"
-                  end if
-                end repeat
-              end repeat
-            end tell
-            return "0"
-            """
-        let output = try AppleScript.run(script).trimmingCharacters(in: .whitespacesAndNewlines)
-        return output == "1"
-    }
-
-    public func focusTab(forURLPrefix prefix: String, windowID: Int) throws -> Bool {
-        let escaped = prefix.replacingOccurrences(of: "\"", with: "\\\"")
-        let script = """
-            tell application "Google Chrome"
-              set requestedWindowID to "\(windowID)"
-              repeat with w in windows
-                if (id of w as string) is requestedWindowID then
-                  set tabCount to count of tabs of w
-                  repeat with i from 1 to tabCount
-                    set u to URL of tab i of w
-                    if u starts with "\(escaped)" then
-                      set active tab index of w to i
-                      set index of w to 1
-                      activate
-                      return "1"
-                    end if
-                  end repeat
-                end if
-              end repeat
-            end tell
-            return "0"
-            """
-        let output = try AppleScript.run(script).trimmingCharacters(in: .whitespacesAndNewlines)
-        return output == "1"
-    }
-
-    public func focusTab(forExactURL url: String, windowID: Int) throws -> Bool {
-        let escaped = url.replacingOccurrences(of: "\"", with: "\\\"")
-        let script = """
-            tell application "Google Chrome"
-              set requestedWindowID to "\(windowID)"
-              repeat with w in windows
-                if (id of w as string) is requestedWindowID then
-                  set tabCount to count of tabs of w
-                  repeat with i from 1 to tabCount
-                    set u to URL of tab i of w
-                    if u is "\(escaped)" then
-                      set active tab index of w to i
-                      set index of w to 1
-                      activate
-                      return "1"
-                    end if
-                  end repeat
-                end if
-              end repeat
-            end tell
-            return "0"
-            """
-        let output = try AppleScript.run(script).trimmingCharacters(in: .whitespacesAndNewlines)
-        return output == "1"
-    }
 
     public func focusTab(windowID: Int, tabIndex: Int) throws -> Bool {
         let script = """
@@ -183,8 +46,6 @@ public final class ChromeAdapter {
         return output == "1"
     }
 
-    public func focusFirstTab(windowID: Int) throws -> Bool { try focusTab(windowID: windowID, tabIndex: 1) }
-
     public func focusFirstTabOfFrontWindow() throws -> Bool {
         let script = """
             tell application "Google Chrome"
@@ -199,31 +60,6 @@ public final class ChromeAdapter {
             """
         let output = try AppleScript.run(script).trimmingCharacters(in: .whitespacesAndNewlines)
         return output == "1"
-    }
-
-    public func tabURL(windowID: Int, tabIndex: Int) throws -> String? {
-        let script = """
-            tell application "Google Chrome"
-              set requestedWindowID to "\(windowID)"
-              set requestedTabIndex to \(tabIndex)
-              repeat with w in windows
-                if (id of w as string) is requestedWindowID then
-                  set tabCount to count of tabs of w
-                  if requestedTabIndex < 1 or requestedTabIndex > tabCount then
-                    return ""
-                  end if
-                  set u to URL of tab requestedTabIndex of w
-                  if u is missing value then
-                    return ""
-                  end if
-                  return u
-                end if
-              end repeat
-            end tell
-            return ""
-            """
-        let output = try AppleScript.run(script).trimmingCharacters(in: .whitespacesAndNewlines)
-        return output.isEmpty ? nil : output
     }
 
     public func extractTabToWindow(windowID: Int, tabIndex: Int) throws -> Int? {
@@ -271,102 +107,6 @@ public final class ChromeAdapter {
             """
         let output = try AppleScript.run(script).trimmingCharacters(in: .whitespacesAndNewlines)
         return output.isEmpty ? nil : output
-    }
-
-    public func closeTabs(forExactURL url: String) throws -> Bool {
-        let escaped = url.replacingOccurrences(of: "\"", with: "\\\"")
-        let script = """
-            tell application "Google Chrome"
-              set closedCount to 0
-              repeat with w in windows
-                set tabCount to count of tabs of w
-                repeat with i from tabCount to 1 by -1
-                  set u to URL of tab i of w
-                  if u is not missing value and u is "\(escaped)" then
-                    close tab i of w
-                    set closedCount to closedCount + 1
-                  end if
-                end repeat
-              end repeat
-              return closedCount
-            end tell
-            """
-        let output = try AppleScript.run(script).trimmingCharacters(in: .whitespacesAndNewlines)
-        return (Int(output) ?? 0) > 0
-    }
-
-    public func closeTabs(forURLPrefix prefix: String) throws -> Bool {
-        let escaped = prefix.replacingOccurrences(of: "\"", with: "\\\"")
-        let script = """
-            tell application "Google Chrome"
-              set closedCount to 0
-              repeat with w in windows
-                set tabCount to count of tabs of w
-                repeat with i from tabCount to 1 by -1
-                  set u to URL of tab i of w
-                  if u is not missing value and u starts with "\(escaped)" then
-                    close tab i of w
-                    set closedCount to closedCount + 1
-                  end if
-                end repeat
-              end repeat
-              return closedCount
-            end tell
-            """
-        let output = try AppleScript.run(script).trimmingCharacters(in: .whitespacesAndNewlines)
-        return (Int(output) ?? 0) > 0
-    }
-
-    public func closeTabs(forExactURL url: String, windowID: Int) throws -> Bool {
-        let escaped = url.replacingOccurrences(of: "\"", with: "\\\"")
-        let script = """
-            tell application "Google Chrome"
-              set requestedWindowID to "\(windowID)"
-              set closedCount to 0
-              repeat with w in windows
-                if (id of w as string) is requestedWindowID then
-                  set tabCount to count of tabs of w
-                  repeat with i from tabCount to 1 by -1
-                    set u to URL of tab i of w
-                    if u is not missing value and u is "\(escaped)" then
-                      close tab i of w
-                      set closedCount to closedCount + 1
-                    end if
-                  end repeat
-                  exit repeat
-                end if
-              end repeat
-              return closedCount
-            end tell
-            """
-        let output = try AppleScript.run(script).trimmingCharacters(in: .whitespacesAndNewlines)
-        return (Int(output) ?? 0) > 0
-    }
-
-    public func closeTabs(forURLPrefix prefix: String, windowID: Int) throws -> Bool {
-        let escaped = prefix.replacingOccurrences(of: "\"", with: "\\\"")
-        let script = """
-            tell application "Google Chrome"
-              set requestedWindowID to "\(windowID)"
-              set closedCount to 0
-              repeat with w in windows
-                if (id of w as string) is requestedWindowID then
-                  set tabCount to count of tabs of w
-                  repeat with i from tabCount to 1 by -1
-                    set u to URL of tab i of w
-                    if u is not missing value and u starts with "\(escaped)" then
-                      close tab i of w
-                      set closedCount to closedCount + 1
-                    end if
-                  end repeat
-                  exit repeat
-                end if
-              end repeat
-              return closedCount
-            end tell
-            """
-        let output = try AppleScript.run(script).trimmingCharacters(in: .whitespacesAndNewlines)
-        return (Int(output) ?? 0) > 0
     }
 
     private func queryTabs(urlPrefix: String?) throws -> [ChromeWindowMatch] {
