@@ -157,6 +157,7 @@ class MockGhosttyAdapter: GhosttyAdapter, @unchecked Sendable {
     var nextTabID = "ghostty-tab-1"
     var nextTerminalID = "ghostty-terminal-1"
     var openWindowInfos: [GhosttyWindowInfo] = []
+    var lastEnvironment: [String: String] = [:]
 
     override func isAvailable() -> Bool { available }
 
@@ -168,6 +169,11 @@ class MockGhosttyAdapter: GhosttyAdapter, @unchecked Sendable {
             return openWindowInfos.removeFirst()
         }
         return GhosttyWindowInfo(windowID: nextWindowID, tabID: nextTabID, terminalID: nextTerminalID)
+    }
+
+    override func openWindowAndRun(command: String, cwd: String, environment: [String: String], background: Bool) throws -> TerminalLaunchResult {
+        lastEnvironment = environment
+        return try super.openWindowAndRun(command: command, cwd: cwd, environment: environment, background: background)
     }
 
     override func focusTerminal(id: String) throws -> String? {

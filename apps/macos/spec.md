@@ -187,9 +187,13 @@ Muxy focuses those windows; it does not decide their geometry.
 - Coding agents can explicitly report lifecycle events through `mx agent event`.
 - Agent events are not implied by `workspace import` or `workspace up`.
 - `mx agent event` should support explicit `init`, `start`, `waiting`, `done`, and `exit` events.
-- Agent events from unsupported terminal hosts should be dropped instead of recorded.
-- Agent windows should appear as tracked workspace windows with visible status.
-- Waiting and done states should surface in dashboard attention views.
+- Agent events from unsupported terminal hosts should be dropped instead of recorded. Coding agents run from tmux are not supported by Muxy and should return an explicit error instead of being inferred onto workspace process terminals.
+- `init` should identify the originating terminal and either attach to an already tracked terminal row or create a tracked terminal row for that coding agent.
+- Terminal identity should be adapter-driven and consistent across supported hosts: prefer tmux window identity when present, otherwise prefer a stable session/token identity, and only fall back to a yabai window identity when no durable session-like identity exists.
+- Ghostty agent tracking should rely on a stable Muxy-injected terminal tracking token for Muxy-launched shells instead of inferring identity from the frontmost Ghostty window.
+- Coding-agent rows should render after browser and process rows so non-agent shortcut ordering stays stable when agents appear or disappear.
+- `start` should show a spinner, `waiting` should show a warning indicator and count toward dashboard and dock attention, and `done` or idle should render as green or gray dots without creating dashboard attention.
+- `exit` should return the row to idle when the terminal is still open; if the terminal is closed, ad-hoc agent rows should be removed while rows linked to workspace process terminals should remain idle.
 
 ## Errors and Feedback
 - Long-running actions should show visible progress.

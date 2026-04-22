@@ -67,7 +67,7 @@ import Testing
             #expect(currentProcesses.count == 1)
             let currentProcess = currentProcesses.first!
             #expect(currentProcess.status == .running)
-            #expect(currentProcess.tmuxWindowID == nil)
+            #expect(currentProcess.tmuxWindowID == "@1")
         }
     }
     @Test("Status check command success detection with docker commands")
@@ -202,7 +202,7 @@ import Testing
             let currentProcesses = try store.runningProcesses(workspaceID: workspace.id)
             #expect(currentProcesses.count == 1)
             #expect(currentProcesses.first?.status == .running)
-            #expect(currentProcesses.first?.tmuxWindowID == nil)
+            #expect(currentProcesses.first?.tmuxWindowID == "@1")
         }
     }
 

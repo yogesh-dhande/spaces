@@ -44,6 +44,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let shortcut: String
         let processStatus: RunningProcessState?
         let agentStatus: AgentWindowStatus?
+        let countsTowardBadge: Bool
         /// All status checks for this process (green and red), matching Run tab display.
         let statusChecks: [StatusResult]
         let eventDate: Date?
@@ -92,6 +93,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     private var dashboardGroups: [DashboardGroup] = []
     private var dismissedDashboardAttentionItemIDs: Set<String> = []
     private var selectedWorkspaceDetailTabIdentifierByWorkspaceID: [String: String] = [:]
+    private var visibleWorkspaceDetailTabIdentifier: String?
     private var visibleDetailWorkspaceID: String?
 
     private var selectedProjectID: String?
@@ -286,7 +288,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         agentEventIPCObserver = DistributedNotificationCenter.default().addObserver(
             forName: IPCNotification.agentEventFired, object: nil, queue: .main
         ) { [weak self] _ in
-            Task { @MainActor [weak self] in self?.requestSidebarReload() }
+            Task { @MainActor [weak self] in self?.reloadData() }
         }
     }
 
@@ -617,10 +619,17 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         return nil
     }
 
-    private func captureVisibleWorkspaceDetailTabSelectionIfNeeded() {
+    private func persistVisibleWorkspaceDetailTabSelectionIfNeeded() {
         guard let workspaceID = visibleDetailWorkspaceID else { return }
-        guard let identifier = Self.selectedWorkspaceDetailTabIdentifier(in: detailContainer) else { return }
+        let identifier = Self.restoredWorkspaceDetailTabIdentifier(savedIdentifier: visibleWorkspaceDetailTabIdentifier)
         selectedWorkspaceDetailTabIdentifierByWorkspaceID[workspaceID] = identifier
+    }
+
+    private func resolvedWorkspaceDetailTabIdentifier(for workspaceID: String) -> String {
+        if visibleDetailWorkspaceID == workspaceID {
+            return Self.restoredWorkspaceDetailTabIdentifier(savedIdentifier: visibleWorkspaceDetailTabIdentifier)
+        }
+        return Self.restoredWorkspaceDetailTabIdentifier(savedIdentifier: selectedWorkspaceDetailTabIdentifierByWorkspaceID[workspaceID])
     }
 
     nonisolated private static func dashboardFocusRequest(
@@ -843,41 +852,31 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                     processes: processes,
                     agentWindows: agentWindows)
                 let processesByID = Dictionary(uniqueKeysWithValues: processes.map { ($0.id, $0) })
-                var shortcutCounter = 1
-                for agentWin in agentWindows {
-                    if shortcutCounter == index {
-                        try orchestrator.focusAgentWindow(agentWin)
-                        return .success(.focused(kind: "agent"))
-                    }
-                    shortcutCounter += 1
+                let shortcutTargets = orderedWorkspaceRunShortcutTargets(
+                    browserSessions: browserSessions,
+                    processEntries: processEntries,
+                    processesByID: processesByID,
+                    agentWindows: agentWindows)
+                guard index > 0, index <= shortcutTargets.count else { return .success(.noMatch) }
+                let target = shortcutTargets[index - 1]
+                switch target.kind {
+                case .browser:
+                    guard let targetURL = target.targetURL else { return .success(.noMatch) }
+                    try orchestrator.focusWorkspaceBrowserSession(workspaceID: selectedWorkspaceID, targetURL: targetURL)
+                    return .success(.focused(kind: "browser"))
+                case .process:
+                    guard let processID = target.processID else { return .success(.noMatch) }
+                    try orchestrator.focusWorkspaceProcess(workspaceID: selectedWorkspaceID, processID: processID)
+                    return .success(.focused(kind: "process"))
+                case .window:
+                    guard let windowListIndex = target.windowListIndex else { return .success(.noMatch) }
+                    try orchestrator.focusWorkspaceWindow(workspaceID: selectedWorkspaceID, index: windowListIndex + 1)
+                    return .success(.focused(kind: "window"))
+                case .agent:
+                    guard let record = target.agentWindow else { return .success(.noMatch) }
+                    try orchestrator.focusAgentWindow(record)
+                    return .success(.focused(kind: "agent"))
                 }
-                for session in browserSessions {
-                    guard let targetURL = session.url, !targetURL.isEmpty else { continue }
-                    if shortcutCounter == index {
-                        try orchestrator.focusWorkspaceBrowserSession(workspaceID: selectedWorkspaceID, targetURL: targetURL)
-                        return .success(.focused(kind: "browser"))
-                    }
-                    shortcutCounter += 1
-                }
-                for entry in processEntries {
-                    switch entry.kind {
-                    case .process:
-                        guard let processID = entry.processID, processesByID[processID] != nil else { continue }
-                        if shortcutCounter == index {
-                            try orchestrator.focusWorkspaceProcess(workspaceID: selectedWorkspaceID, processID: processID)
-                            return .success(.focused(kind: "process"))
-                        }
-                        shortcutCounter += 1
-                    case .window:
-                        guard let windowListIndex = entry.windowListIndex else { continue }
-                        if shortcutCounter == index {
-                            try orchestrator.focusWorkspaceWindow(workspaceID: selectedWorkspaceID, index: windowListIndex + 1)
-                            return .success(.focused(kind: "window"))
-                        }
-                        shortcutCounter += 1
-                    }
-                }
-                return .success(.noMatch)
             } catch { return .failure(error) }
         }.value
     }
@@ -942,7 +941,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             let workspaces = workspacesByProject[project.id] ?? []
             for workspace in workspaces {
                 let agentWindowsList = (try? orchestrator.agentWindows(workspaceID: workspace.id)) ?? []
-                let attentionAgentWindows = agentWindowsList.filter { $0.status == .waiting || $0.status == .done }
+                let attentionAgentWindows = agentWindowsList.filter { $0.status == .waiting }
                 guard workspace.isRunning || !attentionAgentWindows.isEmpty else { continue }
 
                 let processes = workspace.isRunning ? ((try? orchestrator.runningProcesses(workspaceID: workspace.id)) ?? []) : []
@@ -1004,7 +1003,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                         DashboardAttentionEntry(
                             attentionID: Self.dashboardAttentionID(process: process, failedChecks: redChecks), icon: icon, iconTint: iconTint,
                             label: label, detail: detail, shortcut: "", processStatus: process.status,
-                            agentStatus: nil, statusChecks: allChecks, eventDate: eventDate,
+                            agentStatus: nil, countsTowardBadge: true, statusChecks: allChecks, eventDate: eventDate,
                             focusRequest: Self.dashboardFocusRequest(window: win, windowListIndex: idx + 1, process: process, workspaceID: workspace.id)))
                 }
 
@@ -1021,7 +1020,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                         DashboardAttentionEntry(
                             attentionID: Self.dashboardAttentionID(process: process, failedChecks: redChecks), icon: "terminal",
                             iconTint: .terminal, label: process.templateName, detail: process.command, shortcut: "", processStatus: process.status,
-                            agentStatus: nil, statusChecks: allChecks, eventDate: eventDate,
+                            agentStatus: nil, countsTowardBadge: true, statusChecks: allChecks, eventDate: eventDate,
                             focusRequest: .workspaceProcess(workspaceID: workspace.id, processID: process.id)))
                 }
 
@@ -1029,9 +1028,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                     items.append(
                         DashboardAttentionEntry(
                             attentionID: Self.dashboardAttentionID(agentWindow: agentWin), icon: "cpu.fill",
-                            iconTint: agentWin.status == .done ? .success : .warning,
+                            iconTint: .warning,
                             label: agentWin.label ?? "Coding Agent CLI", detail: nil, shortcut: "", processStatus: nil,
-                            agentStatus: agentWin.status, statusChecks: [],
+                            agentStatus: agentWin.status, countsTowardBadge: true, statusChecks: [],
                             eventDate: iso8601Formatter.date(from: agentWin.updatedAt), focusRequest: .agentWindow(agentWin)))
                 }
 
@@ -1190,6 +1189,21 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let windowListIndex: Int?
     }
 
+    struct WorkspaceRunShortcutTarget: Sendable {
+        enum Kind: String, Sendable, Equatable {
+            case browser
+            case process
+            case window
+            case agent
+        }
+
+        let kind: Kind
+        let processID: String?
+        let windowListIndex: Int?
+        let targetURL: String?
+        let agentWindow: AgentWindowRecord?
+    }
+
     nonisolated static func processTemplateKey(for template: ProcessTemplate) -> String {
         let name = template.name?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         let command = template.command.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1197,16 +1211,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     }
 
     nonisolated static func agentTerminalTrackingKey(for record: AgentWindowRecord) -> String? {
-        if record.provider == .ghostty, let windowID = record.yabaiWindowID ?? record.windowID {
-            return "window:\(windowID)"
-        }
-        guard let sessionID = record.itermSessionID, !sessionID.isEmpty else {
-            if let windowID = record.yabaiWindowID ?? record.windowID {
-                return "window:\(windowID)"
-            }
-            return nil
-        }
-        return "terminal:\(sessionID)"
+        record.terminalTrackingKey
     }
 
     nonisolated static func orderedWorkspaceRunProcessEntries(
@@ -1215,11 +1220,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         processes: [RunningProcessRecord],
         agentWindows: [AgentWindowRecord]
     ) -> [WorkspaceRunProcessEntry] {
-        let terminalOrderByTargetID: [String: Int] = Dictionary(
-            uniqueKeysWithValues: windows.compactMap { window in
-                guard window.role == "terminal", let targetID = window.terminalTrackingKey else { return nil }
-                return (targetID, window.orderIndex)
-            })
+        let terminalOrderByTargetID: [String: Int] = windows.reduce(into: [:]) { result, window in
+            guard window.role == "terminal", let targetID = window.terminalTrackingKey else { return }
+            let existingOrder = result[targetID] ?? Int.max
+            result[targetID] = min(existingOrder, window.orderIndex)
+        }
         let processesByTerminalID: [String: [RunningProcessRecord]] = {
             var map: [String: [RunningProcessRecord]] = [:]
             for process in processes {
@@ -1289,6 +1294,61 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             entries.append(WorkspaceRunProcessEntry(kind: .process, processID: process.id, windowListIndex: nil))
         }
         return entries
+    }
+
+    nonisolated static func orderedWorkspaceRunShortcutTargets(
+        browserSessions: [BrowserSession],
+        processEntries: [WorkspaceRunProcessEntry],
+        processesByID: [String: RunningProcessRecord],
+        agentWindows: [AgentWindowRecord]
+    ) -> [WorkspaceRunShortcutTarget] {
+        var targets: [WorkspaceRunShortcutTarget] = []
+
+        for session in browserSessions {
+            guard let targetURL = session.url, !targetURL.isEmpty else { continue }
+            targets.append(
+                WorkspaceRunShortcutTarget(
+                    kind: .browser,
+                    processID: nil,
+                    windowListIndex: nil,
+                    targetURL: targetURL,
+                    agentWindow: nil))
+        }
+
+        for entry in processEntries {
+            switch entry.kind {
+            case .process:
+                guard let processID = entry.processID, processesByID[processID] != nil else { continue }
+                targets.append(
+                    WorkspaceRunShortcutTarget(
+                        kind: .process,
+                        processID: processID,
+                        windowListIndex: nil,
+                        targetURL: nil,
+                        agentWindow: nil))
+            case .window:
+                guard let windowListIndex = entry.windowListIndex else { continue }
+                targets.append(
+                    WorkspaceRunShortcutTarget(
+                        kind: .window,
+                        processID: nil,
+                        windowListIndex: windowListIndex,
+                        targetURL: nil,
+                        agentWindow: nil))
+            }
+        }
+
+        for agentWindow in agentWindows {
+            targets.append(
+                WorkspaceRunShortcutTarget(
+                    kind: .agent,
+                    processID: nil,
+                    windowListIndex: nil,
+                    targetURL: nil,
+                    agentWindow: agentWindow))
+        }
+
+        return targets
     }
 
     private func buildMainMenu() {
@@ -1568,7 +1628,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         }
     }
 
-    private func dashboardAttentionCount() -> Int { buildDashboardGroups().reduce(0) { $0 + $1.items.count } }
+    private func dashboardAttentionCount() -> Int {
+        buildDashboardGroups().reduce(0) { total, group in
+            total + group.items.filter(\.countsTowardBadge).count
+        }
+    }
 
     private func loadDashboardDismissedAttentionItemIDs() {
         dismissedDashboardAttentionItemIDs = (try? orchestrator.dashboardDismissedAttentionItemIDs()) ?? []
@@ -1600,11 +1664,12 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     }
 
     private func showDashboardDetail() {
-        captureVisibleWorkspaceDetailTabSelectionIfNeeded()
+        persistVisibleWorkspaceDetailTabSelectionIfNeeded()
         clearInlineWorkspaceFieldRefs()
         activeAddWorkspaceFormTag = nil
         activeAddProjectFormTag = nil
         visibleDetailWorkspaceID = nil
+        visibleWorkspaceDetailTabIdentifier = nil
         showingSettings = false
         showingDashboard = true
         let previousProjectID = selectedProjectID
@@ -2101,6 +2166,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         activeAddWorkspaceFormTag = nil
         activeAddProjectFormTag = nil
         visibleDetailWorkspaceID = nil
+        visibleWorkspaceDetailTabIdentifier = nil
         showingSettings = false
         showingDashboard = false
         updateDashboardRowAppearance()
@@ -2372,11 +2438,12 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     }
 
     private func showSettingsDetail() {
-        captureVisibleWorkspaceDetailTabSelectionIfNeeded()
+        persistVisibleWorkspaceDetailTabSelectionIfNeeded()
         clearInlineWorkspaceFieldRefs()
         activeAddWorkspaceFormTag = nil
         activeAddProjectFormTag = nil
         visibleDetailWorkspaceID = nil
+        visibleWorkspaceDetailTabIdentifier = nil
         showingSettings = true
         showingDashboard = false
         updateDashboardRowAppearance()
@@ -2516,11 +2583,12 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     }
 
     private func showProjectDetail(project: ProjectSummary) {
-        captureVisibleWorkspaceDetailTabSelectionIfNeeded()
+        persistVisibleWorkspaceDetailTabSelectionIfNeeded()
         clearInlineWorkspaceFieldRefs()
         activeAddWorkspaceFormTag = nil
         activeAddProjectFormTag = nil
         visibleDetailWorkspaceID = nil
+        visibleWorkspaceDetailTabIdentifier = nil
         showingSettings = false
         showingDashboard = false
         updateDashboardRowAppearance()
@@ -3158,11 +3226,13 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
     private func showWorkspaceDetail(project: ProjectSummary, workspace: WorkspaceSummary) {
         requestVisibleWorkspaceDetailRefreshIfNeeded(reason: "workspace_detail_shown")
-        captureVisibleWorkspaceDetailTabSelectionIfNeeded()
+        persistVisibleWorkspaceDetailTabSelectionIfNeeded()
         clearInlineWorkspaceFieldRefs()
         activeAddWorkspaceFormTag = nil
         activeAddProjectFormTag = nil
+        let selectedTabIdentifier = resolvedWorkspaceDetailTabIdentifier(for: workspace.id)
         visibleDetailWorkspaceID = workspace.id
+        visibleWorkspaceDetailTabIdentifier = selectedTabIdentifier
         showingSettings = false
         showingDashboard = false
         updateDashboardRowAppearance()
@@ -3381,11 +3451,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         tabs.addTabViewItem(runTab)
         tabs.addTabViewItem(envTab)
         tabs.addTabViewItem(settingsTab)
-        let selectedTabIdentifier = Self.restoredWorkspaceDetailTabIdentifier(
-            savedIdentifier: selectedWorkspaceDetailTabIdentifierByWorkspaceID[workspace.id])
         if let restoredTab = tabs.tabViewItems.first(where: { ($0.identifier as? String) == selectedTabIdentifier }) {
             tabs.selectTabViewItem(restoredTab)
         }
+        selectedWorkspaceDetailTabIdentifierByWorkspaceID[workspace.id] = selectedTabIdentifier
 
         stack.addArrangedSubview(headerAndActionsRow)
         if let inlineBranchRow {
@@ -3426,6 +3495,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     public func tabView(_ tabView: NSTabView, didSelect tabViewItem: NSTabViewItem?) {
         guard let workspaceID = selectedWorkspaceID else { return }
         guard let identifier = tabViewItem?.identifier as? String else { return }
+        visibleWorkspaceDetailTabIdentifier = identifier
         selectedWorkspaceDetailTabIdentifierByWorkspaceID[workspaceID] = identifier
     }
 
@@ -3493,49 +3563,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             agentWindows: agentWindowsForRunTab)
         let processesByID = Dictionary(uniqueKeysWithValues: processes.map { ($0.id, $0) })
         // Shortcut counter is shared across all sections so numbers are assigned
-        // in the order rows appear on screen: Coding Agents → Browser Tabs → Processes.
+        // in the order rows appear on screen: Browser Tabs → Processes → Coding Agents.
         var shortcutCounter = 1
 
-        // --- Build Coding Agents rows first (displayed at the top) ---
-        var agentsStack: NSStackView? = nil
-        if !agentWindowsForRunTab.isEmpty {
-            let windowsByItermSessionID: [String: WindowRecord] = Dictionary(
-                uniqueKeysWithValues: windows.compactMap { window in
-                    guard window.app == "iTerm2",
-                        window.role == "terminal",
-                        let sessionID = window.itermSessionID,
-                        !sessionID.isEmpty
-                    else { return nil }
-                    return (sessionID, window)
-                })
-            let stack = NSStackView()
-            stack.orientation = .vertical
-            stack.spacing = 4
-            for agentWin in agentWindowsForRunTab {
-                let agentIcon = "cpu.fill"
-                let agentColor: NSColor = agentWin.status == .done ? .systemGreen : agentWin.status == .waiting ? .systemOrange : .secondaryLabelColor
-                let linkedWin = agentWin.itermSessionID.flatMap { windowsByItermSessionID[$0] }
-                let agentLabel = agentWin.label ?? "Coding Agent CLI"
-                let agentDetail = linkedWin?.detail ?? linkedWin?.app
-                let agentShortcutNum = shortcutCounter
-                shortcutCounter += 1
-                let rec = agentWin
-                let row = windowRow(
-                    icon: agentIcon, iconColor: agentColor, label: agentLabel, detail: agentDetail,
-                    shortcut: windowShortcutBadgeText(index: agentShortcutNum),
-                    agentStatus: agentWin.status,
-                    action: { [weak self] in
-                        guard let self else { return }
-                        await self.performWindowFocus(.agentWindow(rec))
-                    })
-                stack.addArrangedSubview(row)
-                constrainFormFieldToFillWidth(row, in: stack)
-            }
-            agentsStack = stack
-        }
-
         // --- Build Browser Tabs rows ---
-                let browserStack = NSStackView()
+        let browserStack = NSStackView()
         browserStack.orientation = .vertical
         browserStack.spacing = 4
         var browserRowCount = 0
@@ -3626,15 +3658,42 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             }
         }
 
-        // --- Add sections in display order: Coding Agents → Browser Tabs → Processes ---
-        if let agentsStack {
-            let agentsHeader = sectionHeader(icon: "cpu.fill", title: "Coding Agents")
-            container.addArrangedSubview(agentsHeader)
-            constrainFormFieldToFillWidth(agentsHeader, in: container)
-            container.addArrangedSubview(agentsStack)
-            constrainFormFieldToFillWidth(agentsStack, in: container)
+        // --- Build Coding Agents rows last so they do not reshuffle non-agent shortcuts ---
+        var agentsStack: NSStackView? = nil
+        if !agentWindowsForRunTab.isEmpty {
+            let windowsByTrackingKey: [String: WindowRecord] = Dictionary(
+                uniqueKeysWithValues: windows.compactMap { window in
+                    guard window.role == "terminal", let trackingKey = window.terminalTrackingKey else { return nil }
+                    return (trackingKey, window)
+                })
+            let stack = NSStackView()
+            stack.orientation = .vertical
+            stack.spacing = 4
+            for agentWin in agentWindowsForRunTab {
+                let trackingKey = Self.agentTerminalTrackingKey(for: agentWin)
+                let linkedWin = trackingKey.flatMap { windowsByTrackingKey[$0] }
+                let agentLabel = agentWin.label ?? "Coding Agent CLI"
+                let agentDetail = linkedWin?.detail ?? linkedWin?.app
+                let rec = agentWin
+                let row = windowRow(
+                    icon: "cpu.fill",
+                    iconColor: .secondaryLabelColor,
+                    label: agentLabel,
+                    detail: agentDetail,
+                    shortcut: windowShortcutBadgeText(index: shortcutCounter),
+                    agentStatus: agentWin.status,
+                    action: { [weak self] in
+                        guard let self else { return }
+                        await self.performWindowFocus(.agentWindow(rec))
+                    })
+                shortcutCounter += 1
+                stack.addArrangedSubview(row)
+                constrainFormFieldToFillWidth(row, in: stack)
+            }
+            agentsStack = stack
         }
 
+        // --- Add sections in display order: Browser Tabs → Processes → Coding Agents ---
         if browserRowCount > 0 {
             let browserHeader = sectionHeader(icon: "globe", title: "Browser Tabs")
             container.addArrangedSubview(browserHeader)
@@ -3649,6 +3708,14 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             constrainFormFieldToFillWidth(processesHeader, in: container)
             container.addArrangedSubview(processesStack)
             constrainFormFieldToFillWidth(processesStack, in: container)
+        }
+
+        if let agentsStack {
+            let agentsHeader = sectionHeader(icon: "cpu.fill", title: "Coding Agents")
+            container.addArrangedSubview(agentsHeader)
+            constrainFormFieldToFillWidth(agentsHeader, in: container)
+            container.addArrangedSubview(agentsStack)
+            constrainFormFieldToFillWidth(agentsStack, in: container)
         }
 
         // (quick actions moved above Windows section)
@@ -4114,13 +4181,13 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 let statusColor: NSColor
                 switch agentStatus {
                 case .waiting:
-                    statusIconName = "circle"
-                    statusColor = .systemRed
+                    statusIconName = "exclamationmark.triangle.fill"
+                    statusColor = .systemOrange
                 case .done:
                     statusIconName = "circle.fill"
                     statusColor = .systemGreen
                 default:
-                    statusIconName = "circle"
+                    statusIconName = "circle.fill"
                     statusColor = .tertiaryLabelColor
                 }
                 let statusDot = NSImageView()
@@ -4128,7 +4195,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 statusDot.contentTintColor = statusColor
                 statusDot.translatesAutoresizingMaskIntoConstraints = false
                 NSLayoutConstraint.activate([
-                    statusDot.widthAnchor.constraint(equalToConstant: 8), statusDot.heightAnchor.constraint(equalToConstant: 8),
+                    statusDot.widthAnchor.constraint(equalToConstant: 10), statusDot.heightAnchor.constraint(equalToConstant: 10),
                 ])
                 statusDot.setContentHuggingPriority(.required, for: .horizontal)
                 statusDot.setContentCompressionResistancePriority(.required, for: .horizontal)

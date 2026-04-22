@@ -353,18 +353,56 @@ extension Iterm2Adapter: TerminalAdapter {
     public var appName: String { "iTerm2" }
     public var bundleIdentifier: String { "com.googlecode.iterm2" }
 
-    public func openWindowAndRun(command: String, cwd _: String, background: Bool) throws -> TerminalLaunchResult {
-        let window = try openWindowAndRun(command: command, background: background)
+    private func commandApplyingEnvironment(_ command: String, environment: [String: String]) -> String {
+        guard !environment.isEmpty else { return command }
+        let exports = environment
+            .sorted { $0.key < $1.key }
+            .map { "export \($0.key)=\(shellQuoted($0.value))" }
+            .joined(separator: "; ")
+        return "\(exports); \(command)"
+    }
+
+    private func shellQuoted(_ token: String) -> String {
+        "'\(token.replacingOccurrences(of: "'", with: "'\\''"))'"
+    }
+
+    public func openWindowAndRun(command: String, cwd _: String, environment: [String: String], background: Bool) throws -> TerminalLaunchResult {
+        let window = try openWindowAndRun(command: commandApplyingEnvironment(command, environment: environment), background: background)
         return TerminalLaunchResult(
-            terminalID: window.sessionID,
+            trackingIdentity: window.sessionID.map(TerminalTrackingIdentity.session) ?? .window(window.id),
             containerID: String(window.id),
             fallbackWindowID: window.id,
             tabIndex: window.tabIndex)
     }
 
-    public func focusTrackedTerminal(_ target: TerminalFocusTarget) throws -> Bool {
-        try focusSessionOrTab(preferredSessionID: target.terminalID, tabIndex: target.tabIndex, windowID: target.windowID)
+    public func resolveCurrentTrackingIdentity(environment: [String: String], yabaiFocusedWindowID: Int?) throws -> TerminalTrackingIdentity? {
+        guard let raw = environment["ITERM_SESSION_ID"], !raw.isEmpty else {
+            return yabaiFocusedWindowID.map(TerminalTrackingIdentity.window)
+        }
+        guard let colonIndex = raw.lastIndex(of: ":") else {
+            return .session(raw)
+        }
+        return .session(String(raw[raw.index(after: colonIndex)...]))
     }
 
-    public func listLiveTerminalIDs() throws -> Set<String> { try listSessionIDs() }
+    public func focusTrackedTerminal(_ target: TerminalFocusTarget) throws -> Bool {
+        let sessionID: String?
+        let windowID: Int?
+        switch target.trackingIdentity {
+        case .session(let id):
+            sessionID = id
+            windowID = target.windowID
+        case .window(let id):
+            sessionID = nil
+            windowID = id
+        case .tmux, nil:
+            sessionID = nil
+            windowID = target.windowID
+        }
+        return try focusSessionOrTab(preferredSessionID: sessionID, tabIndex: target.tabIndex, windowID: windowID)
+    }
+
+    public func listLiveTrackingIdentities() throws -> Set<TerminalTrackingIdentity> {
+        Set(try listSessionIDs().map(TerminalTrackingIdentity.session))
+    }
 }

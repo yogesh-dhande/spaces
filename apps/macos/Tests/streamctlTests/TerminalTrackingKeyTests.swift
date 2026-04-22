@@ -3,7 +3,7 @@ import XCTest
 @testable import streamctl
 
 final class TerminalTrackingKeyTests: XCTestCase {
-    func testGhosttyProcessPrefersWindowTrackingKey() {
+    func testGhosttyProcessPrefersSessionTrackingKeyWhenPresent() {
         let process = RunningProcessRecord(
             id: UUID().uuidString,
             workspaceID: "workspace",
@@ -21,7 +21,7 @@ final class TerminalTrackingKeyTests: XCTestCase {
             startedAt: "now",
             exitedAt: nil)
 
-        XCTAssertEqual(process.terminalTrackingKey, "window:559")
+        XCTAssertEqual(process.terminalTrackingKey, "terminal:ghostty-terminal-2")
     }
 
     func testItermProcessPrefersSessionTrackingKey() {
@@ -45,7 +45,7 @@ final class TerminalTrackingKeyTests: XCTestCase {
         XCTAssertEqual(process.terminalTrackingKey, "terminal:session-2")
     }
 
-    func testGhosttyWindowPrefersWindowTrackingKey() {
+    func testGhosttyWindowPrefersSessionTrackingKeyWhenPresent() {
         let window = WindowRecord(
             id: UUID().uuidString,
             workspaceID: "workspace",
@@ -60,6 +60,6 @@ final class TerminalTrackingKeyTests: XCTestCase {
             orderIndex: 200,
             lastSeenAt: "now")
 
-        XCTAssertEqual(window.terminalTrackingKey, "window:559")
+        XCTAssertEqual(window.terminalTrackingKey, "terminal:ghostty-terminal-2")
     }
 }

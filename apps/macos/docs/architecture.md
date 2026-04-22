@@ -148,20 +148,35 @@ protocol TerminalAdapter: Sendable {
     var bundleIdentifier: String { get }
 
     func isAvailable() -> Bool
-    func openWindowAndRun(command: String, cwd: String, background: Bool) throws -> TerminalLaunchResult
+    func openWindowAndRun(
+        command: String,
+        cwd: String,
+        environment: [String: String],
+        background: Bool
+    ) throws -> TerminalLaunchResult
+    func resolveCurrentTrackingIdentity(
+        environment: [String: String],
+        yabaiFocusedWindowID: Int?
+    ) throws -> TerminalTrackingIdentity?
     func focusTrackedTerminal(_ target: TerminalFocusTarget) throws -> Bool
-    func listLiveTerminalIDs() throws -> Set<String>
+    func listLiveTrackingIdentities() throws -> Set<TerminalTrackingIdentity>
+}
+
+enum TerminalTrackingIdentity: Hashable, Sendable {
+    case session(String)
+    case window(Int)
+    case tmux(String)
 }
 
 struct TerminalLaunchResult: Sendable {
-    let terminalID: String?
+    let trackingIdentity: TerminalTrackingIdentity?
     let containerID: String?
-    let fallbackYabaiWindowID: Int?
+    let fallbackWindowID: Int?
     let tabIndex: Int?
 }
 
 struct TerminalFocusTarget: Sendable {
-    let terminalID: String?
+    let trackingIdentity: TerminalTrackingIdentity?
     let windowID: Int?
     let tabIndex: Int?
 }
@@ -169,10 +184,11 @@ struct TerminalFocusTarget: Sendable {
 
 Required behavior:
 - Availability: expose a cheap `isAvailable()` check so setup validation and host selection can reject unsupported terminals early.
-- Launch: create a new dedicated terminal context and run the provided command without requiring Muxy to synthesize terminal-specific shell glue outside the adapter.
-- Identity: return a stable terminal-specific identifier that Muxy can persist on `RunningProcessRecord`, `WindowRecord`, and `AgentWindowRecord`.
+- Launch: create a new dedicated terminal context, inject the requested environment into the child shell, and run the provided command without requiring Muxy to synthesize host-specific shell glue outside the adapter.
+- Identity: return a stable `TerminalTrackingIdentity` that Muxy can persist on `RunningProcessRecord`, `WindowRecord`, and `AgentWindowRecord`.
+- Current-context resolution: turn the current hook process environment plus the current yabai focus into a `TerminalTrackingIdentity` so CLI agent events do not need host-specific matching logic.
 - Focus: refocus the tracked terminal target, not just the containing yabai window, so tabbed terminals reopen the exact tracked session or surface when possible.
-- Reconciliation: enumerate live terminal identifiers so Muxy can detect stale runtime records after users close windows manually.
+- Reconciliation: enumerate live tracking identities so Muxy can detect stale runtime records after users close windows manually.
 
 Identity rules:
 - yabai remains the source of truth for window IDs and cross-app focus.
@@ -180,7 +196,7 @@ Identity rules:
 - If the terminal cannot provide a durable session identifier, the integration must still provide a deterministic fallback that maps back to the yabai-managed window.
 - Current examples:
   `iTerm2` tracks sessions primarily by session ID and falls back to a yabai window ID.
-  `Ghostty` tracks by terminal/window identity and currently resolves persisted focus through the yabai window path.
+  `Ghostty` tracks by a Muxy-injected session token when one exists and otherwise falls back to a yabai window identity.
 - `WindowRecord` stores a stable `name` for focus identity separately from a display `detail`, so CLI focus targets can stay deterministic while GUI rows still show live browser URLs, process commands, or terminal window titles.
 
 Operational requirements:
@@ -191,14 +207,21 @@ Operational requirements:
 
 Implementation note:
 - The shared launch and discovery contract now lives in `appctl` as `TerminalAdapter`, and `MuxyOrchestrator` resolves `TerminalHost` to a concrete adapter through one registry.
-- The shared focus contract now also requires host-specific refocus by tracked terminal identity. iTerm2 implements that with session/tab selection, while Ghostty uses terminal identity.
+- `TerminalAdapter.openWindowAndRun(...)` must inject any requested launch environment into the child shell process and return the stable tracking identity that later hooks and focus flows should use.
+- The shared focus contract now also requires host-specific refocus by typed tracking identity. iTerm2 implements that with session/tab selection, while Ghostty can resolve either an injected session token or a window identity.
 - Richer iTerm2-only helpers can still exist outside the shared interface, but a new terminal should first conform to `TerminalAdapter` so launch, focus, and discovery all follow one path.
 
 ## Agent Integration
 - Agent events are explicit CLI inputs that attach status to tracked workspace agent windows.
-- `mx agent event` infers the terminal host from the environment and drops events from unsupported hosts instead of persisting them.
-- Agent windows are stored separately from regular process windows because they carry provider and lifecycle metadata.
+- `mx agent event` only resolves direct terminal environments. If the command is run from tmux, the CLI rejects it explicitly because Muxy does not support coding agents running inside tmux.
+- Agent windows are stored separately from regular process windows because they carry provider and lifecycle metadata, but `init` also reconciles them against tracked terminal windows so ad-hoc agent terminals become focusable tracked rows.
+- Agent reconciliation prefers terminal identity first:
+  `iTerm2` uses the shell session ID from the environment.
+  `Ghostty` first uses the Muxy-injected `MUXY_TERMINAL_TRACKING_ID` from Muxy-launched shells, then falls back to the coding-agent thread-aware Ghostty lookup when that explicit token is unavailable.
+- Workspace-managed process terminals persist the tmux window ID on their running-process and tracked-window records so later agent events, reattachment, and exit cleanup can reconcile against the same process-backed terminal slot.
+- When an agent attaches to a workspace-managed process terminal, the record keeps the tmux window ID so a later `exit` can keep an idle placeholder row instead of deleting it.
 - Dashboard attention state is derived from runtime records rather than inferred from UI state.
+- Only `waiting` agent events contribute dashboard and dock attention; `done` remains visible only on the workspace row itself.
 - Dashboard dismissals are stored as a persisted set of attention-event IDs in SQLite global settings, then filtered in the GUI so workspace detail panes keep showing the underlying runtime rows.
 
 ## Lifecycle and Health

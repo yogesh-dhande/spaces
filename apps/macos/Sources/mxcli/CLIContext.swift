@@ -38,6 +38,12 @@ struct CLIContext {
         return id
     }
 
+    func currentTmuxWindowID(environment: [String: String]) -> String? {
+        guard let tmuxEnv = environment["TMUX"], !tmuxEnv.isEmpty else { return nil }
+        guard let window = try? TmuxAdapter().currentWindow() else { return tmuxEnv }
+        return window.id
+    }
+
     func fireAgentEventNotification() {
         DistributedNotificationCenter.default().postNotificationName(
             IPCNotification.agentEventFired,

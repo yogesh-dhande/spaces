@@ -74,14 +74,18 @@ final class AppctlAdapterTests: XCTestCase {
             XCTAssertEqual(window.sessionID, "session-77")
             XCTAssertEqual(window.tabIndex, 2)
             let itermTerminalAdapter: any TerminalAdapter = iterm
-            let itermLaunch = try itermTerminalAdapter.openWindowAndRun(command: "echo \"hi\"", cwd: "/tmp", background: false)
+            let itermLaunch = try itermTerminalAdapter.openWindowAndRun(
+                command: "echo \"hi\"",
+                cwd: "/tmp",
+                environment: ["MUXY_TERMINAL_TRACKING_ID": "tracking-1"],
+                background: false)
             XCTAssertEqual(itermLaunch.fallbackWindowID, 77)
-            XCTAssertEqual(itermLaunch.terminalID, "session-77")
+            XCTAssertEqual(itermLaunch.trackingIdentity, .session("session-77"))
             XCTAssertEqual(itermLaunch.containerID, "77")
             XCTAssertEqual(itermLaunch.tabIndex, 2)
             XCTAssertTrue(
                 try itermTerminalAdapter.focusTrackedTerminal(
-                    TerminalFocusTarget(terminalID: "session-77", windowID: 77, tabIndex: 2)))
+                    TerminalFocusTarget(trackingIdentity: .session("session-77"), windowID: 77, tabIndex: 2)))
             XCTAssertNoThrow(try iterm.runInWindow(id: 77, command: "pwd"))
             XCTAssertNoThrow(try iterm.closeWindow(id: 77))
             XCTAssertTrue(try iterm.closeSessionOrTab(preferredSessionID: "session-77", tabIndex: 2, windowID: 77))
@@ -94,14 +98,18 @@ final class AppctlAdapterTests: XCTestCase {
             XCTAssertEqual(ghosttyWindow.tabID, "ghostty-tab-1")
             XCTAssertEqual(ghosttyWindow.terminalID, "ghostty-terminal-1")
             let ghosttyTerminalAdapter: any TerminalAdapter = ghostty
-            let ghosttyLaunch = try ghosttyTerminalAdapter.openWindowAndRun(command: "echo hi", cwd: "/tmp", background: false)
+            let ghosttyLaunch = try ghosttyTerminalAdapter.openWindowAndRun(
+                command: "echo hi",
+                cwd: "/tmp",
+                environment: ["MUXY_TERMINAL_TRACKING_ID": "tracking-ghostty-1"],
+                background: false)
             XCTAssertNil(ghosttyLaunch.fallbackWindowID)
-            XCTAssertEqual(ghosttyLaunch.terminalID, "ghostty-terminal-1")
+            XCTAssertEqual(ghosttyLaunch.trackingIdentity, .session("tracking-ghostty-1"))
             XCTAssertEqual(ghosttyLaunch.containerID, "ghostty-window-1")
             XCTAssertTrue(
                 try ghosttyTerminalAdapter.focusTrackedTerminal(
-                    TerminalFocusTarget(terminalID: "ghostty-terminal-1", windowID: nil, tabIndex: nil)))
-            XCTAssertEqual(try ghosttyTerminalAdapter.listLiveTerminalIDs(), ["ghostty-terminal-1"])
+                    TerminalFocusTarget(trackingIdentity: .session("ghostty-terminal-1"), windowID: nil, tabIndex: nil)))
+            XCTAssertEqual(try ghosttyTerminalAdapter.listLiveTrackingIdentities(), [.session("ghostty-terminal-1")])
             XCTAssertEqual(try ghostty.focusTerminal(id: "ghostty-terminal-1"), "ghostty-window-1")
             XCTAssertNoThrow(try ghostty.closeWindow(id: "ghostty-window-1"))
             XCTAssertEqual(try ghostty.listWindowTabAndTerminalIDs().count, 1)

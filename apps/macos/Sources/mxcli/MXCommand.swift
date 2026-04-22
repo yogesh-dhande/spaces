@@ -15,7 +15,7 @@ public struct MXCommand: ParsableCommand {
           - `workspace import` registers the current directory by default and can apply `--title` or `--tooltip` when creating or re-importing a workspace.
           - `workspace update` mutates workspace metadata after creation.
           - `workspace up` waits for pending/running setup to complete and fails with the setup error if setup failed. It ensures a workspace and all its processes are running: launches when stopped; when already running, restarts any exited processes. Windows open without activating the app. Add `--restart` to force a full stop+launch. Add `--focus <name>` to bring one named workspace window to the foreground after launch.
-          - Agent events stay explicit. `workspace import` and `workspace up` do not imply agent lifecycle. Events from unsupported terminal hosts are dropped.
+          - Agent events stay explicit. `workspace import` and `workspace up` do not imply agent lifecycle. Events from unsupported terminal hosts are dropped. Agent events fired from tmux are rejected because Muxy does not support coding agents running inside tmux.
         """,
         version: AppVersion.current,
         subcommands: [
@@ -200,24 +200,19 @@ struct AgentEventCommand: ParsableCommand {
         let context = CLIContext()
         let orchestrator = try context.makeOrchestrator()
         let environment = context.environment()
-        let directory = path ?? context.currentDirectoryPath()
-        let normalizedDirectory = context.normalizePath(directory)
-        let resolvedProvider = resolveProvider(environment: environment)
-        guard let resolvedProvider else {
-            try context.output.emit(
-                text: "Dropped agent event \(type.rawValue): unsupported terminal host",
-                json: MutationResultPayload<[String: String]>(message: "Dropped unsupported agent event.", resource: nil)
-            )
+        if let dropResult = agentEventDropResult(type: type, environment: environment, context: context) {
+            try context.output.emit(text: dropResult.text, json: dropResult.payload)
             return
         }
-        let agentContext = AgentInvocationContext(
-            provider: resolvedProvider,
-            label: inferredAgentLabel(environment: environment),
-            iTermSessionID: normalizedItermSessionID(environment: environment, provider: resolvedProvider),
-            codexThreadID: environment["CODEX_THREAD_ID"],
-            yabaiWindowID: context.currentYabaiWindowID()
-        )
+        let directory = path ?? context.currentDirectoryPath()
+        let normalizedDirectory = context.normalizePath(directory)
         let workspace = try requireWorkspace(path: normalizedDirectory, orchestrator: orchestrator, context: context)
+        let agentContext = try resolveAgentInvocationContext(
+            workspaceID: workspace.id,
+            environment: environment,
+            orchestrator: orchestrator,
+            context: context)
+        guard let agentContext else { return }
 
         switch type {
         case .`init`:
@@ -230,7 +225,7 @@ struct AgentEventCommand: ParsableCommand {
                 yabaiWindowID: agentContext.yabaiWindowID,
                 status: .idle
             )
-        case .start, .waiting, .done, .exit:
+        case .start, .waiting, .done:
             try orchestrator.updateAgentWindowStatus(
                 workspaceID: workspace.id,
                 provider: agentContext.provider,
@@ -239,6 +234,15 @@ struct AgentEventCommand: ParsableCommand {
                 yabaiWindowID: agentContext.yabaiWindowID,
                 label: agentContext.label,
                 status: type.status
+            )
+        case .exit:
+            try orchestrator.handleAgentExit(
+                workspaceID: workspace.id,
+                provider: agentContext.provider,
+                itermSessionID: agentContext.iTermSessionID,
+                codexThreadID: agentContext.codexThreadID,
+                yabaiWindowID: agentContext.yabaiWindowID,
+                label: agentContext.label
             )
         }
 
@@ -270,18 +274,41 @@ enum AgentEventType: String, CaseIterable, ExpressibleByArgument {
             .spinning
         case .waiting:
             .waiting
-        case .done, .exit:
+        case .done:
             .done
+        case .exit:
+            .idle
         }
     }
 }
 
-private struct AgentInvocationContext {
+struct AgentInvocationContext {
     let provider: AgentProvider
     let label: String?
     let iTermSessionID: String?
     let codexThreadID: String?
     let yabaiWindowID: Int?
+}
+
+func resolveAgentInvocationContext(
+    workspaceID: String,
+    environment: [String: String],
+    orchestrator: MuxyOrchestrator,
+    context: CLIContext
+) throws -> AgentInvocationContext? {
+    guard let resolvedProvider = resolveProvider(environment: environment) else {
+        return nil
+    }
+    let focusedWindowID = context.currentYabaiWindowID()
+    let trackingIdentity = try terminalAdapter(for: resolvedProvider)?
+        .resolveCurrentTrackingIdentity(environment: environment, yabaiFocusedWindowID: focusedWindowID)
+    let splitIdentity = splitTrackingIdentity(trackingIdentity)
+    return AgentInvocationContext(
+        provider: resolvedProvider,
+        label: inferredAgentLabel(environment: environment),
+        iTermSessionID: splitIdentity.sessionID,
+        codexThreadID: environment["CODEX_THREAD_ID"],
+        yabaiWindowID: splitIdentity.windowID ?? focusedWindowID)
 }
 
 private func requireWorkspace(id: String, orchestrator: MuxyOrchestrator) throws -> WorkspaceRecord {
@@ -315,27 +342,68 @@ private func resolveProvider(environment: [String: String]) -> AgentProvider? {
     return nil
 }
 
+func agentEventDropResult(
+    type: AgentEventType,
+    environment: [String: String],
+    context: CLIContext
+) -> (text: String, payload: MutationResultPayload<[String: String]>)? {
+    if context.currentTmuxWindowID(environment: environment) != nil {
+        return (
+            "Dropped agent event \(type.rawValue): coding agents run from tmux are not supported by muxy",
+            MutationResultPayload<[String: String]>(
+                message: "Dropped tmux-backed agent event.",
+                resource: nil)
+        )
+    }
+    guard resolveProvider(environment: environment) != nil else {
+        return (
+            "Dropped agent event \(type.rawValue): unsupported terminal host",
+            MutationResultPayload<[String: String]>(
+                message: "Dropped unsupported agent event.",
+                resource: nil)
+        )
+    }
+    return nil
+}
+
 private func inferredAgentLabel(environment: [String: String]) -> String? {
-    let bundleIdentifier = environment["__CFBundleIdentifier"] ?? ""
-    if (bundleIdentifier == "com.googlecode.iterm2" || bundleIdentifier == "com.mitchellh.ghostty"),
-        environment["CODEX_THREAD_ID"] != nil {
+    if environment["CODEX_THREAD_ID"] != nil {
         return "Codex CLI"
     }
-    if (bundleIdentifier == "com.googlecode.iterm2" || bundleIdentifier == "com.mitchellh.ghostty"),
-        environment["CLAUDE_CODE_ENTRYPOINT"] != nil {
+    if environment["CLAUDE_CODE_ENTRYPOINT"] != nil {
         return "Claude Code CLI"
     }
 
     return nil
 }
 
-private func normalizedItermSessionID(environment: [String: String], provider: AgentProvider) -> String? {
-    guard provider == .iterm2, let raw = environment["ITERM_SESSION_ID"] else {
+private func agentProvider(for terminalApp: String?) -> AgentProvider? {
+    switch terminalApp {
+    case TerminalHost.iterm2.appName:
+        return .iterm2
+    case TerminalHost.ghostty.appName:
+        return .ghostty
+    default:
         return nil
     }
-    guard let colonIndex = raw.lastIndex(of: ":") else {
-        return raw
-    }
+}
 
-    return String(raw[raw.index(after: colonIndex)...])
+private func terminalAdapter(for provider: AgentProvider) -> (any TerminalAdapter)? {
+    switch provider {
+    case .iterm2:
+        return Iterm2Adapter()
+    case .ghostty:
+        return GhosttyAdapter()
+    }
+}
+
+private func splitTrackingIdentity(_ identity: TerminalTrackingIdentity?) -> (sessionID: String?, windowID: Int?) {
+    switch identity {
+    case .session(let id):
+        return (id, nil)
+    case .window(let id):
+        return (nil, id)
+    case .tmux, nil:
+        return (nil, nil)
+    }
 }

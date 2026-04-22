@@ -84,6 +84,33 @@ final class AgentHookTests: XCTestCase {
         XCTAssertEqual(Set(try store.agentWindows(workspaceID: workspace.id).compactMap(\.yabaiWindowID)), Set([101, 202]))
     }
 
+    func testRegisterAgentWindowAutoRenamesDuplicateAdHocAgentLabels() throws {
+        let store = try makeTemporaryStore()
+        let orchestrator = MuxyOrchestrator(store: store, iterm: MockIterm2Adapter(), ghostty: MockGhosttyAdapter(), tmux: MockTmuxAdapter())
+        let (_, workspace) = try makeProjectAndWorkspace(store: store)
+
+        let first = try orchestrator.registerAgentWindow(
+            workspaceID: workspace.id,
+            provider: .iterm2,
+            label: "Claude Code CLI",
+            itermSessionID: "workspace-session-1",
+            codexThreadID: "thread-1",
+            yabaiWindowID: 101,
+            status: .idle)
+        let second = try orchestrator.registerAgentWindow(
+            workspaceID: workspace.id,
+            provider: .iterm2,
+            label: "Claude Code CLI",
+            itermSessionID: "workspace-session-2",
+            codexThreadID: "thread-2",
+            yabaiWindowID: 202,
+            status: .idle)
+
+        XCTAssertEqual(first.label, "Claude Code CLI")
+        XCTAssertEqual(second.label, "Claude Code CLI-2")
+        XCTAssertEqual(try store.agentWindows(workspaceID: workspace.id).count, 2)
+    }
+
     func testUpdateAgentWindowStatusMatchesExistingWindowID() throws {
         let store = try makeTemporaryStore()
         let orchestrator = MuxyOrchestrator(store: store, iterm: MockIterm2Adapter(), ghostty: MockGhosttyAdapter(), tmux: MockTmuxAdapter())
@@ -109,6 +136,35 @@ final class AgentHookTests: XCTestCase {
 
         XCTAssertEqual(updated.status, .done)
         XCTAssertEqual(updated.yabaiWindowID, 101)
+        XCTAssertEqual(try store.agentWindows(workspaceID: workspace.id).count, 1)
+    }
+
+    func testUpdateAgentWindowStatusKeepsExistingLabelStable() throws {
+        let store = try makeTemporaryStore()
+        let orchestrator = MuxyOrchestrator(store: store, iterm: MockIterm2Adapter(), ghostty: MockGhosttyAdapter(), tmux: MockTmuxAdapter())
+        let (_, workspace) = try makeProjectAndWorkspace(store: store)
+
+        let existing = try orchestrator.registerAgentWindow(
+            workspaceID: workspace.id,
+            provider: .iterm2,
+            label: "Claude Code CLI",
+            itermSessionID: "workspace-session",
+            codexThreadID: "thread-1",
+            yabaiWindowID: 101,
+            status: .idle)
+
+        let updated = try orchestrator.updateAgentWindowStatus(
+            workspaceID: workspace.id,
+            provider: .iterm2,
+            itermSessionID: "workspace-session",
+            codexThreadID: "thread-1",
+            yabaiWindowID: 101,
+            label: "Claude Code CLI",
+            status: .spinning)
+
+        XCTAssertEqual(updated.id, existing.id)
+        XCTAssertEqual(updated.label, "Claude Code CLI")
+        XCTAssertEqual(updated.status, .spinning)
         XCTAssertEqual(try store.agentWindows(workspaceID: workspace.id).count, 1)
     }
 
@@ -214,6 +270,290 @@ final class AgentHookTests: XCTestCase {
 
         XCTAssertEqual(record.provider, .ghostty)
         XCTAssertEqual(try XCTUnwrap(store.agentWindows(workspaceID: workspace.id).first).provider, .ghostty)
+    }
+
+    func testUpdateGhosttyAgentStatusMatchesTrackingTokenBeforeWindowID() throws {
+        let store = try makeTemporaryStore()
+        let orchestrator = MuxyOrchestrator(store: store, iterm: MockIterm2Adapter(), ghostty: MockGhosttyAdapter(), tmux: MockTmuxAdapter())
+        let (_, workspace) = try makeProjectAndWorkspace(store: store)
+
+        _ = try orchestrator.registerAgentWindow(
+            workspaceID: workspace.id,
+            provider: .ghostty,
+            label: "Claude Code CLI",
+            itermSessionID: "ghostty-muxy-token-1",
+            codexThreadID: "thread-1",
+            yabaiWindowID: 303,
+            status: .idle)
+
+        let updated = try orchestrator.updateAgentWindowStatus(
+            workspaceID: workspace.id,
+            provider: .ghostty,
+            itermSessionID: "ghostty-muxy-token-1",
+            codexThreadID: "thread-1",
+            yabaiWindowID: 404,
+            label: "Claude Code CLI",
+            status: .spinning)
+
+        XCTAssertEqual(updated.itermSessionID, "ghostty-muxy-token-1")
+        XCTAssertEqual(updated.yabaiWindowID, 404)
+        XCTAssertEqual(try store.agentWindows(workspaceID: workspace.id).count, 1)
+
+        let windows = try store.windows(workspaceID: workspace.id)
+        XCTAssertEqual(windows.count, 1)
+        XCTAssertEqual(windows.first?.itermSessionID, "ghostty-muxy-token-1")
+        XCTAssertEqual(windows.first?.windowID, 404)
+    }
+
+    func testRegisterAgentWindowLinksMatchingWorkspaceProcessTerminal() throws {
+        let store = try makeTemporaryStore()
+        let orchestrator = MuxyOrchestrator(store: store, iterm: MockIterm2Adapter(), ghostty: MockGhosttyAdapter(), tmux: MockTmuxAdapter())
+        let (_, workspace) = try makeProjectAndWorkspace(store: store)
+        try store.upsert(
+            runningProcess: RunningProcessRecord(
+                id: "process-1",
+                workspaceID: workspace.id,
+                templateName: "api",
+                command: "run api",
+                terminalApp: "iTerm2",
+                windowID: 101,
+                itermSessionID: "workspace-session",
+                itermTabIndex: nil,
+                tmuxWindowID: "tmux-1",
+                pid: 1,
+                status: .running,
+                logPath: nil,
+                lastOutputAt: nil,
+                startedAt: nil,
+                exitedAt: nil))
+
+        let record = try orchestrator.registerAgentWindow(
+            workspaceID: workspace.id,
+            provider: .iterm2,
+            label: "Codex CLI",
+            itermSessionID: "workspace-session",
+            codexThreadID: "thread-1",
+            yabaiWindowID: 101,
+            status: .idle)
+
+        XCTAssertEqual(record.tmuxWindowID, "tmux-1")
+    }
+
+    func testUpdateAgentWindowStatusMatchesTmuxBackedWorkspaceProcessBeforeSharedItermSession() throws {
+        let store = try makeTemporaryStore()
+        let orchestrator = MuxyOrchestrator(store: store, iterm: MockIterm2Adapter(), ghostty: MockGhosttyAdapter(), tmux: MockTmuxAdapter())
+        let (_, workspace) = try makeProjectAndWorkspace(store: store)
+        try store.upsert(
+            runningProcess: RunningProcessRecord(
+                id: "process-claude",
+                workspaceID: workspace.id,
+                templateName: "claude",
+                command: "claude",
+                terminalApp: "iTerm2",
+                windowID: 101,
+                itermSessionID: "shared-session",
+                itermTabIndex: nil,
+                tmuxWindowID: "@2",
+                pid: 2,
+                status: .running,
+                logPath: nil,
+                lastOutputAt: nil,
+                startedAt: nil,
+                exitedAt: nil))
+        try store.upsert(
+            window: WindowRecord(
+                id: "window-claude",
+                workspaceID: workspace.id,
+                app: "iTerm2",
+                name: "claude",
+                detail: "claude",
+                targetURL: nil,
+                windowID: 101,
+                itermSessionID: "shared-session",
+                itermTabIndex: nil,
+                tmuxWindowID: "@2",
+                role: "terminal",
+                orderIndex: 201,
+                lastSeenAt: "now"))
+        try store.upsertAgentWindow(
+            AgentWindowRecord(
+                id: "agent-existing",
+                workspaceID: workspace.id,
+                provider: .iterm2,
+                label: "Claude Code CLI",
+                itermSessionID: "other-session",
+                tmuxWindowID: "@2",
+                codexThreadID: "thread-1",
+                windowID: 101,
+                yabaiWindowID: 101,
+                status: .idle,
+                createdAt: "now",
+                updatedAt: "now"))
+
+        let updated = try orchestrator.updateAgentWindowStatus(
+            workspaceID: workspace.id,
+            provider: .iterm2,
+            itermSessionID: "shared-session",
+            codexThreadID: "thread-2",
+            tmuxWindowID: "@2",
+            yabaiWindowID: 101,
+            label: "Claude Code CLI",
+            status: .spinning)
+
+        XCTAssertEqual(updated.id, "agent-existing")
+        XCTAssertEqual(updated.tmuxWindowID, "@2")
+        XCTAssertEqual(updated.itermSessionID, "shared-session")
+        XCTAssertEqual(updated.status, AgentWindowStatus.spinning)
+        XCTAssertEqual(try store.agentWindows(workspaceID: workspace.id).count, 1)
+    }
+
+    func testRegisterAgentWindowDoesNotClaimTmuxProcessFromDifferentTabInSameItermWindow() throws {
+        let store = try makeTemporaryStore()
+        let orchestrator = MuxyOrchestrator(store: store, iterm: MockIterm2Adapter(), ghostty: MockGhosttyAdapter(), tmux: MockTmuxAdapter())
+        let (_, workspace) = try makeProjectAndWorkspace(store: store)
+        try store.upsert(
+            runningProcess: RunningProcessRecord(
+                id: "process-web",
+                workspaceID: workspace.id,
+                templateName: "web server",
+                command: "npm run dev",
+                terminalApp: "iTerm2",
+                windowID: 101,
+                itermSessionID: "session-web",
+                itermTabIndex: 1,
+                tmuxWindowID: "@2",
+                pid: 2,
+                status: .running,
+                logPath: nil,
+                lastOutputAt: nil,
+                startedAt: nil,
+                exitedAt: nil))
+        try store.upsert(
+            window: WindowRecord(
+                id: "window-web",
+                workspaceID: workspace.id,
+                app: "iTerm2",
+                name: "web server",
+                detail: "npm run dev",
+                targetURL: nil,
+                windowID: 101,
+                itermSessionID: "session-web",
+                itermTabIndex: 1,
+                tmuxWindowID: "@2",
+                role: "terminal",
+                orderIndex: 201,
+                lastSeenAt: "now"))
+
+        let agent = try orchestrator.registerAgentWindow(
+            workspaceID: workspace.id,
+            provider: .iterm2,
+            label: "Claude Code CLI",
+            itermSessionID: "session-agent",
+            codexThreadID: "thread-1",
+            yabaiWindowID: 101,
+            status: .idle)
+
+        XCTAssertNil(agent.tmuxWindowID)
+        XCTAssertEqual(agent.itermSessionID, "session-agent")
+
+        let process = try XCTUnwrap(store.runningProcesses(workspaceID: workspace.id).first)
+        XCTAssertEqual(process.itermSessionID, "session-web")
+        XCTAssertEqual(process.tmuxWindowID, "@2")
+
+        let trackedTerminal = try XCTUnwrap(store.windows(workspaceID: workspace.id).first(where: { $0.id == "window-web" }))
+        XCTAssertEqual(trackedTerminal.itermSessionID, "session-web")
+        XCTAssertEqual(trackedTerminal.tmuxWindowID, "@2")
+    }
+
+    func testRegisterAgentWindowCreatesTrackedTerminalRowForAdHocAgent() throws {
+        let store = try makeTemporaryStore()
+        let orchestrator = MuxyOrchestrator(store: store, iterm: MockIterm2Adapter(), ghostty: MockGhosttyAdapter(), tmux: MockTmuxAdapter())
+        let (_, workspace) = try makeProjectAndWorkspace(store: store)
+
+        _ = try orchestrator.registerAgentWindow(
+            workspaceID: workspace.id,
+            provider: .iterm2,
+            label: "Codex CLI",
+            itermSessionID: "workspace-session",
+            codexThreadID: "thread-1",
+            yabaiWindowID: 101,
+            status: .idle)
+
+        let windows = try store.windows(workspaceID: workspace.id)
+        XCTAssertEqual(windows.count, 1)
+        XCTAssertEqual(windows.first?.role, "terminal")
+        XCTAssertEqual(windows.first?.windowID, 101)
+        XCTAssertEqual(windows.first?.itermSessionID, "workspace-session")
+    }
+
+    func testHandleAgentExitDeletesClosedAdHocAgentRow() throws {
+        let store = try makeTemporaryStore()
+        let orchestrator = MuxyOrchestrator(store: store, iterm: MockIterm2Adapter(), ghostty: MockGhosttyAdapter(), tmux: MockTmuxAdapter())
+        let (_, workspace) = try makeProjectAndWorkspace(store: store)
+
+        _ = try orchestrator.registerAgentWindow(
+            workspaceID: workspace.id,
+            provider: .iterm2,
+            label: "Codex CLI",
+            itermSessionID: "workspace-session",
+            codexThreadID: "thread-1",
+            yabaiWindowID: 202,
+            status: .done)
+
+        let result = try orchestrator.handleAgentExit(
+            workspaceID: workspace.id,
+            provider: .iterm2,
+            itermSessionID: "workspace-session",
+            codexThreadID: "thread-1",
+            yabaiWindowID: 202,
+            label: "Codex CLI")
+
+        XCTAssertNil(result)
+        XCTAssertTrue(try store.agentWindows(workspaceID: workspace.id).isEmpty)
+        XCTAssertTrue(try store.windows(workspaceID: workspace.id).isEmpty)
+    }
+
+    func testHandleAgentExitKeepsWorkspaceProcessAgentRowIdleWhenWindowClosed() throws {
+        let store = try makeTemporaryStore()
+        let orchestrator = MuxyOrchestrator(store: store, iterm: MockIterm2Adapter(), ghostty: MockGhosttyAdapter(), tmux: MockTmuxAdapter())
+        let (_, workspace) = try makeProjectAndWorkspace(store: store)
+        try store.upsert(
+            runningProcess: RunningProcessRecord(
+                id: "process-1",
+                workspaceID: workspace.id,
+                templateName: "api",
+                command: "run api",
+                terminalApp: "iTerm2",
+                windowID: 202,
+                itermSessionID: "workspace-session",
+                itermTabIndex: nil,
+                tmuxWindowID: "tmux-1",
+                pid: 1,
+                status: .running,
+                logPath: nil,
+                lastOutputAt: nil,
+                startedAt: nil,
+                exitedAt: nil))
+        _ = try orchestrator.registerAgentWindow(
+            workspaceID: workspace.id,
+            provider: .iterm2,
+            label: "Codex CLI",
+            itermSessionID: "workspace-session",
+            codexThreadID: "thread-1",
+            yabaiWindowID: 202,
+            status: .done)
+
+        let result = try orchestrator.handleAgentExit(
+            workspaceID: workspace.id,
+            provider: .iterm2,
+            itermSessionID: "workspace-session",
+            codexThreadID: "thread-1",
+            yabaiWindowID: 202,
+            label: "Codex CLI")
+
+        XCTAssertEqual(result?.status, .idle)
+        XCTAssertEqual(result?.tmuxWindowID, "tmux-1")
+        XCTAssertEqual(try store.agentWindows(workspaceID: workspace.id).count, 1)
     }
 
     private func makeProjectAndWorkspace(store: SQLiteStore, projectName: String = "TestProject", workspaceName: String = "default") throws -> (
