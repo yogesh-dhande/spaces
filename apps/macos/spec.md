@@ -41,6 +41,8 @@ Muxy provides a desktop app and a CLI for power users and coding agents.
   Muxy should not hide, move, resize, or otherwise manipulate unrelated windows, because the user may intentionally keep an untracked window visible next to a tracked workspace window.
 - Keep coding-agent events explicit.
   `mx workspace import` and `mx workspace up` must not infer agent lifecycle, because only the agent can accurately report when it actually initialized, started active work, is waiting, is done, or exited.
+- Use explicit names as the stable identity surface for focusable browser sessions, processes, and coding-agent terminals.
+  Names express purpose and intent, stay meaningful when URLs or process commands change, and avoid collisions where multiple coding agents may run the same command. Those names must be unique within a workspace's combined focusable set so GUI and CLI focus can target one unambiguous window by name.
 
 ## Core Concepts
 
