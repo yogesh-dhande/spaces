@@ -65,6 +65,13 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let statusColorStyle: StatusColorStyle
     }
 
+    struct MissingConfiguredProcessDashboardItem: Sendable, Equatable {
+        let attentionID: String
+        let label: String
+        let detail: String?
+        let processKey: String
+    }
+
     enum StatusColorStyle: Sendable {
         case metadata
         case warning
@@ -202,6 +209,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         case workspaceBrowserSession(workspaceID: String, targetURL: String)
         case workspaceWindow(workspaceID: String, index: Int)
         case workspaceProcess(workspaceID: String, processID: String)
+        case workspaceMissingConfiguredProcess(workspaceID: String, processKey: String)
         case agentWindow(AgentWindowRecord)
     }
 
@@ -212,6 +220,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
     private enum WindowShortcutExecutionOutcome: Sendable {
         case focused(kind: String)
+        case promptMissingConfiguredProcess(workspaceID: String, processKey: String, title: String)
         case noWorkspace
         case noMatch
     }
@@ -598,6 +607,23 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         "agent:\(agentWindow.id):\(agentWindow.status.rawValue):\(agentWindow.updatedAt)"
     }
 
+    nonisolated static func dashboardMissingConfiguredProcessItems(
+        workspaceID: String,
+        processEntries: [WorkspaceRunProcessEntry]
+    ) -> [MissingConfiguredProcessDashboardItem] {
+        processEntries.compactMap { entry in
+            guard entry.kind == .missingConfiguredProcess,
+                let processKey = entry.processKey,
+                let label = entry.processLabel
+            else { return nil }
+            return MissingConfiguredProcessDashboardItem(
+                attentionID: "process-missing:\(workspaceID):\(processKey)",
+                label: label,
+                detail: entry.processCommand,
+                processKey: processKey)
+        }
+    }
+
     nonisolated static func restoredWorkspaceDetailTabIdentifier(savedIdentifier: String?) -> String {
         switch savedIdentifier {
         case "env", "settings":
@@ -764,6 +790,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                     try orchestrator.focusWorkspaceWindow(workspaceID: workspaceID, index: index)
                 case .workspaceProcess(let workspaceID, let processID):
                     try orchestrator.focusWorkspaceProcess(workspaceID: workspaceID, processID: processID)
+                case .workspaceMissingConfiguredProcess(let workspaceID, let processKey):
+                    try orchestrator.recoverMissingConfiguredProcess(workspaceID: workspaceID, processKey: processKey)
                 case .agentWindow(let record):
                     try orchestrator.focusAgentWindow(record)
                 }
@@ -811,6 +839,18 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         }.value
     }
 
+    nonisolated private static func recoverMissingConfiguredProcessSnapshot(workspaceID: String, processKey: String) async -> Result<Void, Error> {
+        await Task.detached(priority: .userInitiated) {
+            do {
+                let db = try DatabaseLocator.defaultPath()
+                let store = try SQLiteStore(path: db)
+                let orchestrator = MuxyOrchestrator(store: store)
+                try orchestrator.recoverMissingConfiguredProcess(workspaceID: workspaceID, processKey: processKey)
+                return .success(())
+            } catch { return .failure(error) }
+        }.value
+    }
+
     nonisolated private static func focusWindowShortcutSnapshot(
         index: Int, selectedWorkspaceID: String?, dashboardFocusRequest: WindowFocusRequest?
     ) async -> Result<WindowShortcutExecutionOutcome, Error> {
@@ -831,6 +871,12 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                     case .workspaceProcess(let workspaceID, let processID):
                         try orchestrator.focusWorkspaceProcess(workspaceID: workspaceID, processID: processID)
                         return .success(.focused(kind: "dashboard_process"))
+                    case .workspaceMissingConfiguredProcess(let workspaceID, let processKey):
+                        return .success(
+                            .promptMissingConfiguredProcess(
+                                workspaceID: workspaceID,
+                                processKey: processKey,
+                                title: processKey))
                     case .agentWindow(let record):
                         try orchestrator.focusAgentWindow(record)
                         return .success(.focused(kind: "dashboard_agent"))
@@ -872,6 +918,13 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                     guard let windowListIndex = target.windowListIndex else { return .success(.noMatch) }
                     try orchestrator.focusWorkspaceWindow(workspaceID: selectedWorkspaceID, index: windowListIndex + 1)
                     return .success(.focused(kind: "window"))
+                case .missingConfiguredProcess:
+                    guard let processKey = target.processKey else { return .success(.noMatch) }
+                    return .success(
+                        .promptMissingConfiguredProcess(
+                            workspaceID: selectedWorkspaceID,
+                            processKey: processKey,
+                            title: processKey))
                 case .agent:
                     guard let record = target.agentWindow else { return .success(.noMatch) }
                     try orchestrator.focusAgentWindow(record)
@@ -881,7 +934,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         }.value
     }
 
-    nonisolated static func shouldShowConfiguredBrowserSessions(workspaceIsRunning: Bool) -> Bool { workspaceIsRunning }
+    // Browser rows stay visible even when the workspace is stopped so the Run tab
+    // remains a stable launch surface for configured browser sessions.
+    nonisolated static func shouldShowConfiguredBrowserSessions(workspaceIsRunning _: Bool) -> Bool { true }
 
     nonisolated private static func runWorkspaceSetupSnapshot(workspaceID: String) async -> Result<Void, Error> {
         await Task.detached(priority: .utility) {
@@ -946,10 +1001,16 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
                 let processes = workspace.isRunning ? ((try? orchestrator.runningProcesses(workspaceID: workspace.id)) ?? []) : []
                 let windows = workspace.isRunning ? ((try? orchestrator.windows(workspaceID: workspace.id)) ?? []) : []
+                let configuredProcesses = workspace.isRunning ? ((try? orchestrator.workspaceSettings(workspaceID: workspace.id)?.processes) ?? []) : []
                 let configuredSessions: [BrowserSession] = {
                     guard workspace.isRunning else { return [] }
                     return (try? orchestrator.resolvedWorkspaceBrowserSessions(workspaceID: workspace.id)) ?? []
                 }()
+                let processEntries = orderedWorkspaceRunProcessEntries(
+                    configuredProcesses: configuredProcesses,
+                    windows: windows,
+                    processes: processes,
+                    agentWindows: agentWindowsList)
                 var processByWindowID: [Int: RunningProcessRecord] = [:]
                 for process in processes {
                     if let wid = process.windowID { processByWindowID[wid] = process }
@@ -1022,6 +1083,23 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                             iconTint: .terminal, label: process.templateName, detail: process.command, shortcut: "", processStatus: process.status,
                             agentStatus: nil, countsTowardBadge: true, statusChecks: allChecks, eventDate: eventDate,
                             focusRequest: .workspaceProcess(workspaceID: workspace.id, processID: process.id)))
+                }
+
+                for item in dashboardMissingConfiguredProcessItems(workspaceID: workspace.id, processEntries: processEntries) {
+                    items.append(
+                        DashboardAttentionEntry(
+                            attentionID: item.attentionID,
+                            icon: "terminal",
+                            iconTint: .warning,
+                            label: item.label,
+                            detail: item.detail,
+                            shortcut: "",
+                            processStatus: .idle,
+                            agentStatus: nil,
+                            countsTowardBadge: true,
+                            statusChecks: [],
+                            eventDate: nil,
+                            focusRequest: .workspaceMissingConfiguredProcess(workspaceID: workspace.id, processKey: item.processKey)))
                 }
 
                 for agentWin in attentionAgentWindows {
@@ -1182,11 +1260,15 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         enum Kind: Sendable, Equatable {
             case process
             case window
+            case missingConfiguredProcess
         }
 
         let kind: Kind
         let processID: String?
         let windowListIndex: Int?
+        let processKey: String?
+        let processLabel: String?
+        let processCommand: String?
     }
 
     struct WorkspaceRunShortcutTarget: Sendable {
@@ -1194,6 +1276,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             case browser
             case process
             case window
+            case missingConfiguredProcess
             case agent
         }
 
@@ -1201,13 +1284,17 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let processID: String?
         let windowListIndex: Int?
         let targetURL: String?
+        let processKey: String?
         let agentWindow: AgentWindowRecord?
     }
 
     nonisolated static func processTemplateKey(for template: ProcessTemplate) -> String {
-        let name = template.name?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        let command = template.command.trimmingCharacters(in: .whitespacesAndNewlines)
-        return name.isEmpty ? command : name
+        template.name?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+    }
+
+    // Configured-process rows match live runtime rows by the raw configured name.
+    nonisolated static func processRuntimeKey(name: String) -> String {
+        name.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     nonisolated static func agentTerminalTrackingKey(for record: AgentWindowRecord) -> String? {
@@ -1245,9 +1332,12 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let eligibleProcesses = processes.filter { process in
             process.terminalTrackingKey.map { !agentTerminalIDs.contains($0) } != false
         }
+        let agentClaimedProcessKeys = Set(processes.filter { process in
+            process.terminalTrackingKey.map(agentTerminalIDs.contains) ?? false
+        }.map { processRuntimeKey(name: $0.templateName) })
         var processQueuesByKey: [String: [RunningProcessRecord]] = [:]
         for process in eligibleProcesses {
-            processQueuesByKey[process.templateName, default: []].append(process)
+            processQueuesByKey[processRuntimeKey(name: process.templateName), default: []].append(process)
         }
         for (key, list) in processQueuesByKey {
             processQueuesByKey[key] = list.sorted { lhs, rhs in
@@ -1262,11 +1352,30 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         var matchedProcessIDs = Set<String>()
         for template in configuredProcesses {
             let key = processTemplateKey(for: template)
-            guard var queue = processQueuesByKey[key], let process = queue.first else { continue }
+            guard !key.isEmpty else { continue }
+            guard var queue = processQueuesByKey[key], let process = queue.first else {
+                if agentClaimedProcessKeys.contains(key) { continue }
+                entries.append(
+                    WorkspaceRunProcessEntry(
+                        kind: .missingConfiguredProcess,
+                        processID: nil,
+                        windowListIndex: nil,
+                        processKey: key,
+                        processLabel: key,
+                        processCommand: template.command))
+                continue
+            }
             queue.removeFirst()
             processQueuesByKey[key] = queue.isEmpty ? nil : queue
             matchedProcessIDs.insert(process.id)
-            entries.append(WorkspaceRunProcessEntry(kind: .process, processID: process.id, windowListIndex: nil))
+            entries.append(
+                WorkspaceRunProcessEntry(
+                    kind: .process,
+                    processID: process.id,
+                    windowListIndex: nil,
+                    processKey: key,
+                    processLabel: process.templateName,
+                    processCommand: process.command))
         }
 
         for (windowIdx, window) in windows.enumerated() where window.role != "browser" {
@@ -1280,18 +1389,39 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             if window.role == "terminal", !nonAgentWindowProcesses.isEmpty {
                 for process in nonAgentWindowProcesses where !matchedProcessIDs.contains(process.id) {
                     matchedProcessIDs.insert(process.id)
-                    entries.append(WorkspaceRunProcessEntry(kind: .process, processID: process.id, windowListIndex: nil))
+                    entries.append(
+                        WorkspaceRunProcessEntry(
+                        kind: .process,
+                        processID: process.id,
+                        windowListIndex: nil,
+                        processKey: processRuntimeKey(name: process.templateName),
+                        processLabel: process.templateName,
+                        processCommand: process.command))
                 }
                 continue
             }
             if !isAgentClaimedWindow {
-                entries.append(WorkspaceRunProcessEntry(kind: .window, processID: nil, windowListIndex: windowIdx))
+                entries.append(
+                    WorkspaceRunProcessEntry(
+                        kind: .window,
+                        processID: nil,
+                        windowListIndex: windowIdx,
+                        processKey: nil,
+                        processLabel: nil,
+                        processCommand: nil))
             }
         }
 
         for process in eligibleProcesses where !matchedProcessIDs.contains(process.id) {
             matchedProcessIDs.insert(process.id)
-            entries.append(WorkspaceRunProcessEntry(kind: .process, processID: process.id, windowListIndex: nil))
+            entries.append(
+                    WorkspaceRunProcessEntry(
+                        kind: .process,
+                        processID: process.id,
+                        windowListIndex: nil,
+                        processKey: processRuntimeKey(name: process.templateName),
+                        processLabel: process.templateName,
+                        processCommand: process.command))
         }
         return entries
     }
@@ -1312,6 +1442,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                     processID: nil,
                     windowListIndex: nil,
                     targetURL: targetURL,
+                    processKey: nil,
                     agentWindow: nil))
         }
 
@@ -1325,6 +1456,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                         processID: processID,
                         windowListIndex: nil,
                         targetURL: nil,
+                        processKey: nil,
                         agentWindow: nil))
             case .window:
                 guard let windowListIndex = entry.windowListIndex else { continue }
@@ -1334,6 +1466,17 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                         processID: nil,
                         windowListIndex: windowListIndex,
                         targetURL: nil,
+                        processKey: nil,
+                        agentWindow: nil))
+            case .missingConfiguredProcess:
+                guard let processKey = entry.processKey else { continue }
+                targets.append(
+                    WorkspaceRunShortcutTarget(
+                        kind: .missingConfiguredProcess,
+                        processID: nil,
+                        windowListIndex: nil,
+                        targetURL: nil,
+                        processKey: processKey,
                         agentWindow: nil))
             }
         }
@@ -1345,6 +1488,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                     processID: nil,
                     windowListIndex: nil,
                     targetURL: nil,
+                    processKey: nil,
                     agentWindow: agentWindow))
         }
 
@@ -2040,6 +2184,14 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         if !shouldPreserveDetailPane {
             refreshSelection()
             logStartupProfile("apply_snapshot_selection_ready")
+        } else if Self.shouldRefreshVisibleWorkspaceDetail(
+            selectedWorkspaceID: selectedWorkspaceID,
+            showingDashboard: showingDashboard,
+            showingSettings: showingSettings,
+            workspaceExists: selectedWorkspaceID.flatMap { findWorkspace(id: $0) } != nil)
+        {
+            refreshSelection()
+            logStartupProfile("apply_snapshot_selection_preserved_ready")
         }
         updateDashboardSidebarBadge()
         logStartupProfile("apply_snapshot_dashboard_badge_ready", details: "group_count=\(dashboardGroups.count)")
@@ -3629,6 +3781,18 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                     processesStack.addArrangedSubview(checkRow)
                     constrainFormFieldToFillWidth(checkRow, in: processesStack)
                 }
+            case .missingConfiguredProcess:
+                guard let processKey = entry.processKey, let processLabel = entry.processLabel, let processCommand = entry.processCommand else { continue }
+                processRowCount += 1
+                let row = windowRow(
+                    icon: "terminal", iconColor: .systemOrange, label: processLabel,
+                    detail: resolveCommand(processCommand), shortcut: rowShortcut, processStatus: .idle,
+                    action: { [weak self] in
+                        guard let self else { return }
+                        self.showMissingConfiguredProcessRecoveryPrompt(workspaceID: workspaceID, processKey: processKey, title: processLabel)
+                    })
+                processesStack.addArrangedSubview(row)
+                constrainFormFieldToFillWidth(row, in: processesStack)
             case .window:
                 guard let windowListIndex = entry.windowListIndex, windowListIndex < windows.count else { continue }
                 let win = windows[windowListIndex]
@@ -6061,6 +6225,13 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     }
 
     private func performWindowFocus(_ request: WindowFocusRequest) async {
+        if case .workspaceMissingConfiguredProcess(let workspaceID, let processKey) = request {
+            showMissingConfiguredProcessRecoveryPrompt(
+                workspaceID: workspaceID,
+                processKey: processKey,
+                title: processKey)
+            return
+        }
         let result = await Self.performWindowFocusSnapshot(request)
         switch result {
         case .success:
@@ -6092,6 +6263,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             activeWindowShortcutProfile?.routeCompletedAt = Date()
             logWindowShortcutProfile("stage=total index=\(index) elapsed_ms=\(windowShortcutElapsedMS(since: startedAt))")
             hideAfterSuccessfulExternalWindowAction(.focus)
+        case .success(.promptMissingConfiguredProcess(let workspaceID, let processKey, let title)):
+            showMissingConfiguredProcessRecoveryPrompt(workspaceID: workspaceID, processKey: processKey, title: title)
+            logWindowShortcutProfile(
+                "stage=prompt_missing_process index=\(index) elapsed_ms=\(windowShortcutElapsedMS(since: routeStartedAt))"
+            )
         case .success(.noWorkspace):
             logWindowShortcutProfile(
                 "stage=aborted index=\(index) reason=no_workspace elapsed_ms=\(windowShortcutElapsedMS(since: startedAt))"
@@ -6260,6 +6436,29 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             showWindowIssueModal(title: "Agent window not found", detail: "\(context.title) is no longer open.")
         case .window:
             showWindowIssueModal(title: "Window not found", detail: "\(context.title) is no longer open.")
+        }
+    }
+
+    private func showMissingConfiguredProcessRecoveryPrompt(workspaceID: String, processKey: String, title: String) {
+        showWindowIssueModal(
+            title: "Process window not found",
+            detail: "\(title) is no longer open.",
+            actionTitle: "Recover (Cmd+R)",
+            action: { [weak self] in
+                Task { await self?.recoverMissingConfiguredProcess(workspaceID: workspaceID, processKey: processKey, title: title) }
+            })
+    }
+
+    private func recoverMissingConfiguredProcess(workspaceID: String, processKey: String, title: String) async {
+        showOperationProgressOverlay(message: "Recovering Process", detail: title)
+        let result = await Self.recoverMissingConfiguredProcessSnapshot(workspaceID: workspaceID, processKey: processKey)
+        hideOperationProgressOverlay()
+        switch result {
+        case .success:
+            reloadData()
+            showWindowIssueToast(title: "Process recovered", detail: "\(title) reopened in a new terminal window.")
+        case .failure(let error):
+            showError(error)
         }
     }
 

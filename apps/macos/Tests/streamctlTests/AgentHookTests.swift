@@ -513,6 +513,27 @@ final class AgentHookTests: XCTestCase {
         XCTAssertTrue(try store.windows(workspaceID: workspace.id).isEmpty)
     }
 
+    func testRefreshWorkspaceWindowsDeletesClosedGhosttyAdHocAgentRow() throws {
+        let store = try makeTemporaryStore()
+        let orchestrator = MuxyOrchestrator(store: store, iterm: MockIterm2Adapter(), ghostty: MockGhosttyAdapter(), tmux: MockTmuxAdapter())
+        let (_, workspace) = try makeProjectAndWorkspace(store: store)
+
+        _ = try orchestrator.registerAgentWindow(
+            workspaceID: workspace.id,
+            provider: .ghostty,
+            label: "Claude Code CLI",
+            itermSessionID: "ghostty-terminal-202",
+            codexThreadID: "thread-1",
+            yabaiWindowID: 202,
+            status: .idle)
+
+        let didMutate = try orchestrator.refreshWorkspaceWindows(workspaceID: workspace.id)
+
+        XCTAssertTrue(didMutate)
+        XCTAssertTrue(try store.agentWindows(workspaceID: workspace.id).isEmpty)
+        XCTAssertTrue(try store.windows(workspaceID: workspace.id).isEmpty)
+    }
+
     func testHandleAgentExitKeepsWorkspaceProcessAgentRowIdleWhenWindowClosed() throws {
         let store = try makeTemporaryStore()
         let orchestrator = MuxyOrchestrator(store: store, iterm: MockIterm2Adapter(), ghostty: MockGhosttyAdapter(), tmux: MockTmuxAdapter())

@@ -1631,7 +1631,7 @@ final class OrchestratorTests: XCTestCase {
         let (orchestrator, store, _, workspace, _) = try makeOrchestratorWithWorkspace()
         let chromeOpenLog = FileManager.default.temporaryDirectory.appendingPathComponent("\(UUID().uuidString)-chrome-open.log")
 
-        try store.setWorkspaceBrowserSessions(workspaceID: workspace.id, sessions: [BrowserSession(url: "http://localhost:3001")])
+        try store.setWorkspaceBrowserSessions(workspaceID: workspace.id, sessions: [BrowserSession(name: "Frontend", url: "http://localhost:3001")])
 
         try store.upsert(
             window: WindowRecord(
@@ -1969,6 +1969,63 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertTrue(mockTmux.killedSessionNames.isEmpty)
     }
 
+    // Tests configured-but-missing processes can be recovered directly without restarting unrelated running processes.
+    func testRecoverMissingConfiguredProcessLaunchesSpecificMissingTemplate() throws {
+        let (orchestrator, store, _, workspace, _, mockIterm, mockTmux) = try makeMockItermOrchestratorWithWorkspace()
+        try store.touchWorkspaceSettings(workspaceID: workspace.id, updatedAt: "now")
+        try store.setWorkspaceProcesses(
+            workspaceID: workspace.id,
+            processes: [ProcessTemplate(name: "api", command: "npm run api"), ProcessTemplate(name: "web", command: "npm run web")])
+        try store.updateWorkspaceRunning(id: workspace.id, isRunning: true, launchedAt: "now")
+        try store.upsert(
+            runningProcess: RunningProcessRecord(
+                id: UUID().uuidString, workspaceID: workspace.id, templateName: "web", command: "npm run web", terminalApp: "iTerm2", windowID: 222,
+                itermSessionID: "session-web", itermTabIndex: nil, tmuxWindowID: "@2", pid: 2222, status: .running, logPath: nil, lastOutputAt: nil,
+                startedAt: "now", exitedAt: nil))
+        _ = mockTmux.addWindow(sessionName: "muxy-\(workspace.id)-web", id: "@2", name: "web", isActive: true)
+        _ = mockTmux.addWindow(sessionName: "muxy-\(workspace.id)-api", id: "@1", name: "api", isActive: true)
+        mockIterm.nextWindowID = 601
+        mockIterm.nextSessionID = "session-api"
+
+        try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) {
+            try withEnv(name: "YABAI_WINDOWS_JSON", value: "[]") {
+                try orchestrator.recoverMissingConfiguredProcess(workspaceID: workspace.id, processKey: "api")
+            }
+        }
+
+        let processes = try store.runningProcesses(workspaceID: workspace.id)
+        XCTAssertEqual(Set(processes.map(\.templateName)), ["api", "web"])
+        XCTAssertEqual(processes.first(where: { $0.templateName == "api" })?.command, "npm run api")
+        XCTAssertEqual(processes.first(where: { $0.templateName == "api" })?.status, .running)
+        XCTAssertNotNil(processes.first(where: { $0.templateName == "api" })?.windowID)
+    }
+
+    // Tests no-op settings saves do not restart a recovered named process.
+    func testUpdateWorkspaceSettingsDoesNotRestartRecoveredNamedProcess() throws {
+        let (orchestrator, store, _, workspace, _, mockIterm, mockTmux) = try makeMockItermOrchestratorWithWorkspace()
+        try store.touchWorkspaceSettings(workspaceID: workspace.id, updatedAt: "now")
+        try store.setWorkspaceProcesses(workspaceID: workspace.id, processes: [ProcessTemplate(name: "web", command: "npm run web")])
+        try store.updateWorkspaceRunning(id: workspace.id, isRunning: true, launchedAt: "now")
+        try store.upsert(
+            runningProcess: RunningProcessRecord(
+                id: UUID().uuidString, workspaceID: workspace.id, templateName: "web", command: "npm run web", terminalApp: "iTerm2", windowID: 222,
+                itermSessionID: "session-web", itermTabIndex: nil, tmuxWindowID: "@2", pid: 2222, status: .running, logPath: nil, lastOutputAt: nil,
+                startedAt: "now", exitedAt: nil))
+        _ = mockTmux.addWindow(sessionName: "muxy-\(workspace.id)-web", id: "@2", name: "web", isActive: true)
+        mockIterm.nextWindowID = 601
+        mockIterm.nextSessionID = "session-web"
+
+        try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) {
+            try orchestrator.updateWorkspaceSettings(workspaceID: workspace.id) { _ in }
+        }
+
+        let processes = try store.runningProcesses(workspaceID: workspace.id)
+        XCTAssertEqual(processes.count, 1)
+        XCTAssertEqual(processes.first?.templateName, "web")
+        XCTAssertEqual(mockIterm.openWindowAndRunCallCount, 0)
+        XCTAssertTrue(mockTmux.killedSessionNames.isEmpty)
+    }
+
     // Tests workspace cycling includes orphaned running processes so recovered iTerm windows remain reachable even before a terminal row is rebuilt.
     func testFocusNextWindowIncludesOrphanedRunningProcessTargets() throws {
         let (orchestrator, store, _, workspace, root, mockIterm, _) = try makeMockItermOrchestratorWithWorkspace()
@@ -2150,7 +2207,7 @@ final class OrchestratorTests: XCTestCase {
     func testLaunchWorkspaceLeavesBrowserSessionsUnopenedUntilFocused() throws {
         let (orchestrator, store, _, workspace, root) = try makeOrchestratorWithWorkspace()
         let chromeOpenLog = root.appendingPathComponent("chrome-open.log")
-        try store.setWorkspaceBrowserSessions(workspaceID: workspace.id, sessions: [BrowserSession(url: "http://localhost:3001")])
+        try store.setWorkspaceBrowserSessions(workspaceID: workspace.id, sessions: [BrowserSession(name: "Frontend", url: "http://localhost:3001")])
 
         try withMockCommands(["yabai": Self.orchestratorYabaiMockScript, "osascript": Self.orchestratorOsaScriptMock]) {
             try withEnv(name: "MOCK_CHROME_OPEN_LOG_FILE", value: chromeOpenLog.path) {
@@ -2437,6 +2494,61 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertEqual(runtimeStatus.warningSummary, "1 exited process")
     }
 
+    // Tests configured process names that literally start with key prefixes still match their live runtime records.
+    func testWorkspaceRuntimeStatusMatchesLiteralPrefixedProcessNames() throws {
+        let (orchestrator, store, _, workspace, _) = try makeOrchestratorWithWorkspace()
+        try store.touchWorkspaceSettings(workspaceID: workspace.id, updatedAt: "now")
+        try store.setWorkspaceProcesses(workspaceID: workspace.id, processes: [ProcessTemplate(name: "name:api", command: "npm run api")])
+        try store.updateWorkspaceRunning(id: workspace.id, isRunning: true, launchedAt: "now")
+        try store.upsert(
+            runningProcess: RunningProcessRecord(
+                id: UUID().uuidString, workspaceID: workspace.id, templateName: "name:api", command: "npm run api", terminalApp: "iTerm2", windowID: 501,
+                pid: nil, status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil))
+
+        let runtimeStatus = try orchestrator.workspaceRuntimeStatus(workspaceID: workspace.id)
+        XCTAssertEqual(runtimeStatus.runtimeHealth, .healthy)
+        XCTAssertEqual(runtimeStatus.missingConfiguredProcessCount, 0)
+        XCTAssertNil(runtimeStatus.warningSummary)
+    }
+
+    // Tests recovered runtime records stored under the configured raw name clear the missing-process warning immediately.
+    func testWorkspaceRuntimeStatusMatchesRecoveredProcessNamesByRawName() throws {
+        let (orchestrator, store, _, workspace, _) = try makeOrchestratorWithWorkspace()
+        try store.touchWorkspaceSettings(workspaceID: workspace.id, updatedAt: "now")
+        try store.setWorkspaceProcesses(workspaceID: workspace.id, processes: [ProcessTemplate(name: "web server", command: "PORT=20003 npm run dev")])
+        try store.updateWorkspaceRunning(id: workspace.id, isRunning: true, launchedAt: "now")
+        try store.upsert(
+            runningProcess: RunningProcessRecord(
+                id: UUID().uuidString, workspaceID: workspace.id, templateName: "web server", command: "PORT=20003 npm run dev",
+                terminalApp: "iTerm2", windowID: 501, pid: 999, status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil))
+
+        let runtimeStatus = try orchestrator.workspaceRuntimeStatus(workspaceID: workspace.id)
+        XCTAssertEqual(runtimeStatus.lifecycleState, .running)
+        XCTAssertEqual(runtimeStatus.runtimeHealth, .healthy)
+        XCTAssertEqual(runtimeStatus.missingConfiguredProcessCount, 0)
+        XCTAssertNil(runtimeStatus.warningSummary)
+    }
+
+    // Tests running workspaces do not surface warnings just because configured browser sessions remain unopened.
+    func testWorkspaceRuntimeStatusIgnoresUnopenedBrowserSessionsForRunningWorkspace() throws {
+        let (orchestrator, store, _, workspace, _) = try makeOrchestratorWithWorkspace()
+        try store.touchWorkspaceSettings(workspaceID: workspace.id, updatedAt: "now")
+        try store.setWorkspaceBrowserSessions(
+            workspaceID: workspace.id,
+            sessions: [BrowserSession(name: "Docs", url: "https://example.com/docs")])
+        try store.updateWorkspaceRunning(id: workspace.id, isRunning: true, launchedAt: "now")
+        try store.upsert(
+            runningProcess: RunningProcessRecord(
+                id: UUID().uuidString, workspaceID: workspace.id, templateName: "api", command: "npm run api", terminalApp: "iTerm2", windowID: 501,
+                pid: 999, status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil))
+
+        let runtimeStatus = try orchestrator.workspaceRuntimeStatus(workspaceID: workspace.id)
+        XCTAssertEqual(runtimeStatus.lifecycleState, .running)
+        XCTAssertEqual(runtimeStatus.runtimeHealth, .healthy)
+        XCTAssertEqual(runtimeStatus.missingConfiguredBrowserSessionCount, 1)
+        XCTAssertNil(runtimeStatus.warningSummary)
+    }
+
     // Tests updating settings does not promote stopped workspaces to running just because tracked runtime leftovers exist.
     func testUpdateWorkspaceSettingsDoesNotPromoteStoppedWorkspaceWithTrackedRuntimeLeftovers() throws {
         let (orchestrator, store, _, workspace, _) = try makeOrchestratorWithWorkspace()
@@ -2603,7 +2715,7 @@ final class OrchestratorTests: XCTestCase {
             p.stopScript = "echo stop"
             p.processes = [ProcessTemplate(name: "api", command: "npm run api")]
             p.statusChecks = [StatusCheckDefinition(name: "health", process: "api", command: "echo ok", interval: 10, timeout: 2, onFail: .notify)]
-            p.browserSessions = [BrowserSession(url: "https://example.com")]
+            p.browserSessions = [BrowserSession(name: "Docs", url: "https://example.com")]
         }
 
         let loaded = try orchestrator.project(id: project.id)
@@ -2620,12 +2732,40 @@ final class OrchestratorTests: XCTestCase {
 
         try orchestrator.updateProjectConfig(projectID: project.id) { config in
             config.stopScript = "echo bye"
-            config.processes = [ProcessTemplate(command: "echo process")]
+            config.processes = [ProcessTemplate(name: "process", command: "echo process")]
         }
 
         let loaded = try orchestrator.project(id: project.id)
         XCTAssertEqual(loaded?.stopScript, "echo bye")
         XCTAssertEqual(loaded?.processes.first?.command, "echo process")
+    }
+
+    // Tests update project config rejects processes without configured names.
+    func testUpdateProjectConfigRejectsUnnamedProcess() throws {
+        let (orchestrator, _, project, _, _) = try makeOrchestratorWithWorkspace()
+
+        XCTAssertThrowsError(try orchestrator.updateProjectConfig(projectID: project.id) { config in
+            config.processes = [ProcessTemplate(name: "", command: "echo process")]
+        }) { error in
+            guard case MuxyError.invalidArgument(let message) = error else {
+                return XCTFail("Expected invalidArgument, got \(error)")
+            }
+            XCTAssertEqual(message, "Process name is required.")
+        }
+    }
+
+    // Tests update project config rejects browser sessions without configured names.
+    func testUpdateProjectConfigRejectsUnnamedBrowserSession() throws {
+        let (orchestrator, _, project, _, _) = try makeOrchestratorWithWorkspace()
+
+        XCTAssertThrowsError(try orchestrator.updateProjectConfig(projectID: project.id) { config in
+            config.browserSessions = [BrowserSession(name: "", url: "https://example.com")]
+        }) { error in
+            guard case MuxyError.invalidArgument(let message) = error else {
+                return XCTFail("Expected invalidArgument, got \(error)")
+            }
+            XCTAssertEqual(message, "Browser session name is required.")
+        }
     }
 
     // Tests update project config seeds default workspace when settings match previous template by arranging representative inputs and asserting the expected result.
@@ -2643,7 +2783,7 @@ final class OrchestratorTests: XCTestCase {
             config.stopScript = "echo stop"
             config.processes = [ProcessTemplate(name: "api", command: "npm run api")]
             config.statusChecks = [StatusCheckDefinition(name: "health", process: "api", command: "echo ok", interval: 30, timeout: 3)]
-            config.browserSessions = [BrowserSession(url: "https://example.com")]
+            config.browserSessions = [BrowserSession(name: "Docs", url: "https://example.com")]
         }
 
         let settings = try orchestrator.workspaceSettings(workspaceID: defaultWorkspace.id)
@@ -2668,21 +2808,21 @@ final class OrchestratorTests: XCTestCase {
             config.stopScript = "echo project-stop"
             config.processes = [ProcessTemplate(name: "api", command: "npm run api")]
             config.statusChecks = [StatusCheckDefinition(name: "health", process: "api", command: "echo ok", interval: 30, timeout: 3)]
-            config.browserSessions = [BrowserSession(url: "https://example.com")]
+            config.browserSessions = [BrowserSession(name: "Docs", url: "https://example.com")]
         }
 
         try orchestrator.updateWorkspaceSettings(workspaceID: defaultWorkspace.id) { settings in
             settings.stopScript = "echo workspace-stop"
             settings.processes = [ProcessTemplate(name: "custom", command: "echo custom")]
             settings.statusChecks = []
-            settings.browserSessions = [BrowserSession(url: "https://custom.example.com")]
+            settings.browserSessions = [BrowserSession(name: "Custom Docs", url: "https://custom.example.com")]
         }
 
         try orchestrator.updateProjectConfig(projectID: project.id) { config in
             config.stopScript = "echo project-stop-v2"
             config.processes = [ProcessTemplate(name: "api", command: "npm run api:v2")]
             config.statusChecks = [StatusCheckDefinition(name: "health-v2", process: "api", command: "echo ok v2", interval: 45, timeout: 5)]
-            config.browserSessions = [BrowserSession(url: "https://example.com/v2")]
+            config.browserSessions = [BrowserSession(name: "Docs", url: "https://example.com/v2")]
         }
 
         let settings = try orchestrator.workspaceSettings(workspaceID: defaultWorkspace.id)
@@ -4831,6 +4971,19 @@ final class OrchestratorTests: XCTestCase {
             }
             XCTAssertTrue(message.contains("unique"))
             XCTAssertTrue(message.contains("Frontend"))
+        }
+    }
+
+    func testUpdateWorkspaceSettingsRejectsUnnamedBrowserSession() throws {
+        let (orchestrator, _, _, workspace, _) = try makeOrchestratorWithWorkspace()
+
+        XCTAssertThrowsError(try orchestrator.updateWorkspaceSettings(workspaceID: workspace.id) { settings in
+            settings.browserSessions = [BrowserSession(name: "", url: "http://localhost:3001")]
+        }) { error in
+            guard case MuxyError.invalidArgument(let message) = error else {
+                return XCTFail("Expected invalidArgument, got \(error)")
+            }
+            XCTAssertEqual(message, "Browser session name is required.")
         }
     }
 

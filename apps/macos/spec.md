@@ -116,6 +116,7 @@ Muxy focuses those windows; it does not decide their geometry.
 ## Launch and Runtime Behavior
 - Launch starts the workspace's configured processes and captures the resulting windows.
 - Browser sessions stay configured while the workspace is running, but Muxy should leave them unopened until the user explicitly focuses that browser session.
+- Unopened browser sessions should not degrade runtime health or show missing-window warnings for an otherwise running workspace.
 - Workspace processes should be launched inside tmux so Muxy can recover the terminal view without losing the underlying process when a supported terminal-host window closes.
 - Process commands are treated as direct executable invocations with arguments.
 - If a user needs composite shell behavior such as `cd x && y`, pipes, or redirection, they should wrap it explicitly, for example `bash -lc "cd x && y"`.
@@ -154,9 +155,11 @@ Muxy focuses those windows; it does not decide their geometry.
 
 ## Dashboard and Health
 - The app should surface attention items across workspaces in one place.
-- Attention includes exited processes, failed status checks, and coding-agent states such as waiting or done.
+- Attention includes exited processes, failed status checks, missing configured processes in running workspaces, and coding-agent states such as waiting or done.
 - A stopped workspace can still contribute attention items when that helps the user notice something actionable.
+- Missing configured processes in running workspaces should appear in the dashboard with the same direct recovery path offered from the Run tab.
 - Dashboard attention rows should support direct window focus by click and by the numbered window shortcuts.
+- The dashboard sidebar badge and dock badge should reflect the number of visible dashboard attention rows after dismissals are applied.
 - Users should be able to dismiss individual dashboard attention items so they disappear from the dashboard list and dock badge until that specific attention event changes.
 - Dismissing a dashboard attention item must not hide the underlying process, status check, or agent row from the workspace detail pane.
 
@@ -170,11 +173,14 @@ Muxy focuses those windows; it does not decide their geometry.
 - The app should expose a configurable shortcut leader that supplies the shared modifiers for leader-based shortcuts like workspace navigation, dashboard, editor, Finder, and queued window focus.
 - Window rows in the selected workspace should expose numbered shortcuts for direct focus.
 - Workspace Run-tab rows and their numbered focus shortcuts should keep the saved workspace-settings order for configured browser sessions and processes, and append newly added ad-hoc windows after those configured rows.
-- Browser-session rows should appear in the Run tab only while the workspace is running.
+- Browser-session rows should stay visible in the Run tab even when the workspace is stopped so the user can still open them directly.
+- Process rows in the Run tab should stay visible for configured processes that are currently missing so the user still has a direct recovery path.
+- Focusing a missing configured process should show the same `Recover (Cmd+R)` or `Cancel (Esc)` modal used for stale tracked process windows, and a successful recovery should reuse that configured process row instead of creating a duplicate row.
 - Run-tab rows should show the tracked window or process name as the primary label and the target detail, such as a browser URL or process command, as secondary text.
 - Ad-hoc terminal rows should keep their generated focus name as the primary label and use the live terminal window title as secondary text.
 - CLI-driven focus through `mx workspace up --focus` should require an explicit tracked window target instead of picking an arbitrary window.
 - CLI focus should use unique names across focusable browser sessions, processes, and coding-agent terminals, and `mx workspace up --focus` should require one of those names explicitly.
+- Configured workspace processes and browser sessions must always have explicit names; Muxy should reject unnamed entries instead of falling back to commands or URLs as identities.
 - Focus target discovery may remain GUI-centric; the CLI does not need a separate read-only discovery command.
 - Window-number shortcuts should use a configurable direct-focus modifier plus digits `1` through `9`.
 - Window-number sequence shortcuts should use a separate configurable modifier plus digits `1` through `9`, then replay the queued focus actions in order when the modifiers are released.
@@ -193,7 +199,7 @@ Muxy focuses those windows; it does not decide their geometry.
 - Ghostty agent tracking should rely on a stable Muxy-injected terminal tracking token for Muxy-launched shells instead of inferring identity from the frontmost Ghostty window.
 - Coding-agent rows should render after browser and process rows so non-agent shortcut ordering stays stable when agents appear or disappear.
 - `start` should show a spinner, `waiting` should show a warning indicator and count toward dashboard and dock attention, and `done` or idle should render as green or gray dots without creating dashboard attention.
-- `exit` should return the row to idle when the terminal is still open; if the terminal is closed, ad-hoc agent rows should be removed while rows linked to workspace process terminals should remain idle.
+- `exit` should return the row to idle when the terminal is still open; if the terminal is closed, ad-hoc agent rows should be removed immediately, including when background runtime refresh detects the terminal closure after the fact, while rows linked to workspace process terminals should remain idle.
 
 ## Errors and Feedback
 - Long-running actions should show visible progress.

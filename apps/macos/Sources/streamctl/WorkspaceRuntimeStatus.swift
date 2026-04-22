@@ -54,11 +54,6 @@ public struct WorkspaceRuntimeStatus: Sendable {
                 if missingConfiguredProcessCount > 0 {
                     parts.append(summaryCount(missingConfiguredProcessCount, singular: "missing process", plural: "missing processes"))
                 }
-                if missingConfiguredBrowserSessionCount > 0 {
-                    parts.append(
-                        summaryCount(
-                            missingConfiguredBrowserSessionCount, singular: "missing browser session", plural: "missing browser sessions"))
-                }
                 if exitedProcessCount > 0 {
                     parts.append(summaryCount(exitedProcessCount, singular: "exited process", plural: "exited processes"))
                 }

@@ -93,13 +93,13 @@ import Testing
         #expect(processes.isEmpty)
     }
 
-    // Tests currentProcesses returns a nil name when the name field is empty.
-    @Test func currentProcessesUsesNilNameForEmptyNameField() {
+    // Tests currentProcesses preserves an empty name so save-time validation can reject it explicitly.
+    @Test func currentProcessesPreservesEmptyNameForValidation() {
         let editor = ProcessEditor()
         editor.setProcesses([.init(name: nil, command: "echo hello")])
         let processes = editor.currentProcesses()
         #expect(processes.count == 1)
-        #expect(processes[0].name == nil)
+        #expect(processes[0].name == "")
     }
 
     // Tests currentStatusChecks returns checks associated with a named process.

@@ -42,6 +42,88 @@ import streamctl
         #expect(entries.map(\.windowListIndex) == [nil, nil, 2])
     }
 
+    @Test func missingConfiguredProcessesKeepVisibleRecoveryRowInSettingsOrder() {
+        let configuredProcesses = [
+            ProcessTemplate(name: "api", command: "run api"),
+            ProcessTemplate(name: "web", command: "run web"),
+        ]
+        let windows = [
+            WindowRecord(
+                id: "win-web", workspaceID: "workspace", app: "iTerm2", title: "web", targetURL: nil, windowID: 102, itermSessionID: "session-web",
+                itermTabIndex: nil, tmuxWindowID: nil, role: "terminal", orderIndex: 200, lastSeenAt: "now")
+        ]
+        let processes = [
+            RunningProcessRecord(
+                id: "process-web", workspaceID: "workspace", templateName: "web", command: "run web", terminalApp: "iTerm2", windowID: 102,
+                itermSessionID: "session-web", itermTabIndex: nil, tmuxWindowID: nil, pid: 2, status: .running, logPath: nil, lastOutputAt: nil,
+                startedAt: nil, exitedAt: nil)
+        ]
+
+        let entries = AppKitController.orderedWorkspaceRunProcessEntries(
+            configuredProcesses: configuredProcesses,
+            windows: windows,
+            processes: processes,
+            agentWindows: [])
+
+        #expect(entries.map(\.kind) == [.missingConfiguredProcess, .process])
+        #expect(entries.map(\.processKey) == ["api", "web"])
+        #expect(entries.map(\.processID) == [nil, "process-web"])
+        #expect(entries.first?.processLabel == "api")
+        #expect(entries.first?.processCommand == "run api")
+    }
+
+    @Test func recoveredConfiguredProcessClaimsExistingRow() {
+        let configuredProcesses = [ProcessTemplate(name: "web server", command: "PORT=20003 npm run dev")]
+        let windows = [
+            WindowRecord(
+                id: "win-web", workspaceID: "workspace", app: "iTerm2", title: "web server", targetURL: nil, windowID: 102, itermSessionID: "session-web",
+                itermTabIndex: nil, tmuxWindowID: nil, role: "terminal", orderIndex: 200, lastSeenAt: "now")
+        ]
+        let processes = [
+            RunningProcessRecord(
+                id: "process-web", workspaceID: "workspace", templateName: "web server", command: "PORT=20003 npm run dev", terminalApp: "iTerm2",
+                windowID: 102, itermSessionID: "session-web", itermTabIndex: nil, tmuxWindowID: nil, pid: 2, status: .running, logPath: nil,
+                lastOutputAt: nil, startedAt: nil, exitedAt: nil)
+        ]
+
+        let entries = AppKitController.orderedWorkspaceRunProcessEntries(
+            configuredProcesses: configuredProcesses,
+            windows: windows,
+            processes: processes,
+            agentWindows: [])
+
+        #expect(entries.count == 1)
+        #expect(entries.first?.kind == .process)
+        #expect(entries.first?.processKey == "web server")
+        #expect(entries.first?.processLabel == "web server")
+    }
+
+    @Test func literalPrefixedProcessNamesStillMatchRunningProcessRows() {
+        let configuredProcesses = [ProcessTemplate(name: "name:api", command: "npm run api")]
+        let windows = [
+            WindowRecord(
+                id: "win-api", workspaceID: "workspace", app: "iTerm2", title: "name:api", targetURL: nil, windowID: 102, itermSessionID: "session-api",
+                itermTabIndex: nil, tmuxWindowID: nil, role: "terminal", orderIndex: 200, lastSeenAt: "now")
+        ]
+        let processes = [
+            RunningProcessRecord(
+                id: "process-api", workspaceID: "workspace", templateName: "name:api", command: "npm run api", terminalApp: "iTerm2", windowID: 102,
+                itermSessionID: "session-api", itermTabIndex: nil, tmuxWindowID: nil, pid: 2, status: .running, logPath: nil, lastOutputAt: nil,
+                startedAt: nil, exitedAt: nil)
+        ]
+
+        let entries = AppKitController.orderedWorkspaceRunProcessEntries(
+            configuredProcesses: configuredProcesses,
+            windows: windows,
+            processes: processes,
+            agentWindows: [])
+
+        #expect(entries.count == 1)
+        #expect(entries.first?.kind == .process)
+        #expect(entries.first?.processKey == "name:api")
+        #expect(entries.first?.processLabel == "name:api")
+    }
+
     @Test func agentClaimedTerminalRowsAreExcludedFromProcessOrdering() {
         let configuredProcesses = [ProcessTemplate(name: "api", command: "run api")]
         let windows = [
@@ -147,6 +229,67 @@ import streamctl
         #expect(shortcutTargets.first?.targetURL == "http://localhost:3000")
         #expect(shortcutTargets[1].processID == "process-web")
         #expect(shortcutTargets[2].agentWindow?.id == "agent")
+    }
+
+    @Test func missingConfiguredProcessShortcutTargetsRecoveryAction() {
+        let processEntries = [
+            AppKitController.WorkspaceRunProcessEntry(
+                kind: .missingConfiguredProcess,
+                processID: nil,
+                windowListIndex: nil,
+                processKey: "api",
+                processLabel: "api",
+                processCommand: "run api")
+        ]
+
+        let shortcutTargets = AppKitController.orderedWorkspaceRunShortcutTargets(
+            browserSessions: [],
+            processEntries: processEntries,
+            processesByID: [:],
+            agentWindows: [])
+
+        #expect(shortcutTargets.count == 1)
+        #expect(shortcutTargets.first?.kind == .missingConfiguredProcess)
+        #expect(shortcutTargets.first?.processKey == "api")
+    }
+
+    @Test func missingConfiguredProcessesBecomeDashboardAttentionItems() {
+        let processEntries = [
+            AppKitController.WorkspaceRunProcessEntry(
+                kind: .missingConfiguredProcess,
+                processID: nil,
+                windowListIndex: nil,
+                processKey: "api",
+                processLabel: "API",
+                processCommand: "bin/api"),
+            AppKitController.WorkspaceRunProcessEntry(
+                kind: .process,
+                processID: "process-web",
+                windowListIndex: nil,
+                processKey: "web",
+                processLabel: "Web",
+                processCommand: "bin/web"),
+            AppKitController.WorkspaceRunProcessEntry(
+                kind: .missingConfiguredProcess,
+                processID: nil,
+                windowListIndex: nil,
+                processKey: "worker",
+                processLabel: "Worker",
+                processCommand: "bin/worker")
+        ]
+
+        let items = AppKitController.dashboardMissingConfiguredProcessItems(
+            workspaceID: "workspace-1",
+            processEntries: processEntries)
+
+        #expect(items.count == 2)
+        #expect(items.map(\.attentionID) == [
+            "process-missing:workspace-1:api",
+            "process-missing:workspace-1:worker",
+        ])
+        #expect(items.map(\.label) == ["API", "Worker"])
+        #expect(items.map(\.detail) == ["bin/api", "bin/worker"])
+        #expect(items.map(\.processKey) == ["api", "worker"])
     }
 
     @Test func tmuxBackedRowsUseTmuxIdentityBeforeSharedItermSession() {

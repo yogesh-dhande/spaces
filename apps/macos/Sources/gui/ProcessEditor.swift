@@ -70,7 +70,7 @@ import streamctl
             let command = row.commandField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
             let onExit = ProcessExitAction(rawValue: row.onExitPopup.titleOfSelectedItem ?? "") ?? .none
             guard !command.isEmpty else { return nil }
-            return ProcessTemplate(name: name.isEmpty ? nil : name, command: command, onExit: onExit)
+            return ProcessTemplate(name: name, command: command, onExit: onExit)
         }
     }
 

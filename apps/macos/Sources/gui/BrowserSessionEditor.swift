@@ -58,7 +58,7 @@ import streamctl
             let name = row.nameField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
             let url = row.urlField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !url.isEmpty else { return nil }
-            return BrowserSession(name: name.isEmpty ? nil : name, url: url)
+            return BrowserSession(name: name, url: url)
         }
     }
 

@@ -69,9 +69,9 @@ import Testing
         #expect(AppKitController.restoredWorkspaceDetailTabIdentifier(savedIdentifier: "settings") == "settings")
     }
 
-    @Test func configuredBrowserSessionsOnlyShowForRunningWorkspaces() {
+    @Test func configuredBrowserSessionsAlsoShowForStoppedWorkspaces() {
         #expect(AppKitController.shouldShowConfiguredBrowserSessions(workspaceIsRunning: true))
-        #expect(!AppKitController.shouldShowConfiguredBrowserSessions(workspaceIsRunning: false))
+        #expect(AppKitController.shouldShowConfiguredBrowserSessions(workspaceIsRunning: false))
     }
 
     @MainActor @Test func selectedWorkspaceDetailTabIdentifierFindsNestedSelectedTab() {
