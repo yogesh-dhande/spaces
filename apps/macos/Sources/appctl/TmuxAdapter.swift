@@ -40,13 +40,11 @@ open class TmuxAdapter: @unchecked Sendable {
         return window
     }
 
-    open func startSession(
-        named sessionName: String, windowName: String, cwd: String, env: [String: String] = [:], command: [String]
-    ) throws -> TmuxWindowInfo {
+    open func startSession(named sessionName: String, windowName: String, cwd: String, env: [String: String] = [:], command: [String]) throws
+        -> TmuxWindowInfo
+    {
         var arguments = ["tmux", "new-session", "-d", "-P", "-F", windowFormat, "-s", sessionName, "-n", windowName, "-c", cwd]
-        for (key, value) in env.sorted(by: { $0.key < $1.key }) {
-            arguments += ["-e", "\(key)=\(value)"]
-        }
+        for (key, value) in env.sorted(by: { $0.key < $1.key }) { arguments += ["-e", "\(key)=\(value)"] }
         arguments.append(contentsOf: command)
         let output = try Shell.runAndCapture(arguments)
         guard let window = parseWindow(line: output.trimmingCharacters(in: .whitespacesAndNewlines)) else {
@@ -55,9 +53,7 @@ open class TmuxAdapter: @unchecked Sendable {
         return window
     }
 
-    open func renameWindow(windowID: String, name: String) throws {
-        _ = try Shell.run(["tmux", "rename-window", "-t", windowID, name])
-    }
+    open func renameWindow(windowID: String, name: String) throws { _ = try Shell.run(["tmux", "rename-window", "-t", windowID, name]) }
 
     open func respawnWindow(windowID: String, command: String) throws {
         _ = try Shell.run(["tmux", "respawn-window", "-k", "-t", windowID, command])

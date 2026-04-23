@@ -73,8 +73,7 @@ final class MXCommandTests: XCTestCase {
         let context = CLIContext()
 
         let result = agentEventDropResult(
-            type: .start,
-            environment: ["TERM_PROGRAM": "ghostty", MuxyOrchestrator.terminalTrackingIDEnvVar: "ghostty-hook-token-1"],
+            type: .start, environment: ["TERM_PROGRAM": "ghostty", MuxyOrchestrator.terminalTrackingIDEnvVar: "ghostty-hook-token-1"],
             context: context)
 
         XCTAssertNil(result)
@@ -139,8 +138,8 @@ final class MXCommandTests: XCTestCase {
         try withMockCommands(["yabai": Self.yabaiFocusedWindowMock, "osascript": Self.ghosttyFocusedTerminalMock]) {
             let context = CLIContext()
             let agentContext = try resolveAgentInvocationContext(
-                workspaceID: workspace.id, environment: ["TERM_PROGRAM": "ghostty", "CLAUDE_CODE_ENTRYPOINT": "1"],
-                orchestrator: orchestrator, context: context)
+                workspaceID: workspace.id, environment: ["TERM_PROGRAM": "ghostty", "CLAUDE_CODE_ENTRYPOINT": "1"], orchestrator: orchestrator,
+                context: context)
 
             XCTAssertNil(agentContext)
         }
@@ -156,12 +155,9 @@ final class MXCommandTests: XCTestCase {
             let agentContext = try resolveAgentInvocationContext(
                 workspaceID: workspace.id,
                 environment: [
-                    "__CFBundleIdentifier": "com.mitchellh.ghostty",
-                    "CLAUDE_CODE_ENTRYPOINT": "1",
+                    "__CFBundleIdentifier": "com.mitchellh.ghostty", "CLAUDE_CODE_ENTRYPOINT": "1",
                     MuxyOrchestrator.terminalTrackingIDEnvVar: "ghostty-hook-token-1",
-                ],
-                orchestrator: orchestrator,
-                context: context)
+                ], orchestrator: orchestrator, context: context)
 
             XCTAssertEqual(agentContext?.provider, .ghostty)
             XCTAssertEqual(agentContext?.terminalTrackingID, "ghostty-hook-token-1")
@@ -176,27 +172,18 @@ final class MXCommandTests: XCTestCase {
         let orchestrator = MuxyOrchestrator(store: store)
         try store.upsert(
             window: WindowRecord(
-                id: UUID().uuidString,
-                workspaceID: workspace.id,
-                app: TerminalHost.ghostty.appName,
-                name: "Claude Code CLI",
-                windowID: 106482,
-                terminalTrackingID: "ghostty-hook-token-1",
-                terminalNativeID: "ghostty-native-1",
-                role: "terminal",
-                orderIndex: 200,
-                lastSeenAt: "now"))
+                id: UUID().uuidString, workspaceID: workspace.id, app: TerminalHost.ghostty.appName, name: "Claude Code CLI", windowID: 106482,
+                terminalTrackingID: "ghostty-hook-token-1", terminalNativeID: "ghostty-native-1", role: "terminal", orderIndex: 200, lastSeenAt: "now"
+            ))
 
         try withMockCommands(["yabai": Self.yabaiFocusedWindowMock]) {
             let context = CLIContext()
             let agentContext = try resolveAgentInvocationContext(
                 workspaceID: workspace.id,
                 environment: [
-                    "__CFBundleIdentifier": "com.mitchellh.ghostty",
-                    "CLAUDE_CODE_ENTRYPOINT": "1",
+                    "__CFBundleIdentifier": "com.mitchellh.ghostty", "CLAUDE_CODE_ENTRYPOINT": "1",
                     MuxyOrchestrator.terminalTrackingIDEnvVar: "ghostty-hook-token-1",
-                ],
-                orchestrator: orchestrator, context: context)
+                ], orchestrator: orchestrator, context: context)
 
             XCTAssertEqual(agentContext?.provider, .ghostty)
             XCTAssertEqual(agentContext?.terminalTrackingID, "ghostty-hook-token-1")
@@ -209,21 +196,9 @@ final class MXCommandTests: XCTestCase {
         let store = try makeTemporaryStore()
         let workspace = try makeWorkspace(store: store)
         let projectWindow = WindowRecord(
-            id: UUID().uuidString,
-            workspaceID: workspace.id,
-            app: TerminalHost.iterm2.appName,
-            name: "frontend",
-            detail: "npm run dev",
-            targetURL: nil,
-            windowID: 77,
-            terminalTrackingID: "session-77",
-            terminalNativeID: nil,
-            itermTabIndex: 2,
-            tmuxWindowID: nil,
-            role: "terminal",
-            orderIndex: 200,
-            lastSeenAt: "now"
-        )
+            id: UUID().uuidString, workspaceID: workspace.id, app: TerminalHost.iterm2.appName, name: "frontend", detail: "npm run dev",
+            targetURL: nil, windowID: 77, terminalTrackingID: "session-77", terminalNativeID: nil, itermTabIndex: 2, tmuxWindowID: nil,
+            role: "terminal", orderIndex: 200, lastSeenAt: "now")
         try store.upsert(window: projectWindow)
 
         let iterm = VerifyingIterm2Adapter()

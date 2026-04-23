@@ -7,12 +7,9 @@ public enum TerminalTrackingIdentity: Hashable, Sendable {
 
     public var trackingKey: String {
         switch self {
-        case .session(let id):
-            return "terminal:\(id)"
-        case .window(let id):
-            return "window:\(id)"
-        case .tmux(let id):
-            return "tmux:\(id)"
+        case .session(let id): return "terminal:\(id)"
+        case .window(let id): return "window:\(id)"
+        case .tmux(let id): return "tmux:\(id)"
         }
     }
 
@@ -42,11 +39,7 @@ public struct TerminalLaunchResult: Sendable {
     public let tabIndex: Int?
 
     public init(
-        trackingIdentity: TerminalTrackingIdentity?,
-        hookSessionID: String? = nil,
-        containerID: String?,
-        fallbackWindowID: Int?,
-        tabIndex: Int? = nil
+        trackingIdentity: TerminalTrackingIdentity?, hookSessionID: String? = nil, containerID: String?, fallbackWindowID: Int?, tabIndex: Int? = nil
     ) {
         self.trackingIdentity = trackingIdentity
         self.hookSessionID = hookSessionID

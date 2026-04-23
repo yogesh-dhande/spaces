@@ -17,8 +17,7 @@ public struct ProjectRecord: Codable, Sendable {
 
     public init(
         id: String, name: String, dir: String, isGitRepo: Bool, defaultBranch: String?, isCollapsed: Bool = false, setupScript: String? = nil,
-        stopScript: String? = nil,
-        ports: [PortDefinition] = [], processes: [ProcessTemplate] = [], statusChecks: [StatusCheckDefinition] = [],
+        stopScript: String? = nil, ports: [PortDefinition] = [], processes: [ProcessTemplate] = [], statusChecks: [StatusCheckDefinition] = [],
         browserSessions: [BrowserSession] = [], agentLaunchers: [AgentLauncher] = []
     ) {
         self.id = id

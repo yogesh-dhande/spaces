@@ -280,9 +280,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     private func setupAgentEventIPCObserver() {
         agentEventIPCObserver = DistributedNotificationCenter.default().addObserver(
             forName: IPCNotification.agentEventFired, object: nil, queue: .main
-        ) { [weak self] _ in
-            Task { @MainActor [weak self] in self?.reloadData() }
-        }
+        ) { [weak self] _ in Task { @MainActor [weak self] in self?.reloadData() } }
     }
 
     private func setupAppActivationObservers() {
@@ -327,10 +325,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                     if (refreshResult.didMutateDB || windowCountsChanged) && self.canReloadAfterBackgroundWorkspaceRefresh() {
                         self.requestSidebarReload()
                     }
-                case .failure(let error):
-                    if !self.handleDeferredSetupRequirementIfNeeded(error) {
-                        self.showError(error)
-                    }
+                case .failure(let error): if !self.handleDeferredSetupRequirementIfNeeded(error) { self.showError(error) }
                 }
                 do { try await Task.sleep(for: .seconds(PollingConstants.workspaceWindowRefreshInterval)) } catch { break }
             }
@@ -528,20 +523,15 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     }
 
     /// Holds a click closure and serves as the NSGestureRecognizer target for clickable row views.
-    @MainActor
-    private final class ClickTarget: NSObject {
+    @MainActor private final class ClickTarget: NSObject {
         let action: () async -> Void
         init(_ action: @escaping () async -> Void) { self.action = action }
-        @objc func clicked(_ sender: NSGestureRecognizer) {
-            Task { await self.action() }
-        }
+        @objc func clicked(_ sender: NSGestureRecognizer) { Task { await self.action() } }
     }
 
     private static var clickTargetAssocKey: UInt8 = 0
 
-    nonisolated private static func startupProfileEnabled() -> Bool {
-        ProcessInfo.processInfo.environment["MUXY_STARTUP_PROFILE"] == "1"
-    }
+    nonisolated private static func startupProfileEnabled() -> Bool { ProcessInfo.processInfo.environment["MUXY_STARTUP_PROFILE"] == "1" }
 
     nonisolated private static func startupElapsedMS() -> Int { Int((ProcessInfo.processInfo.systemUptime - startupProfileBaselineUptime) * 1000) }
 
@@ -575,9 +565,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     }
 
     nonisolated private static func dashboardAttentionID(process: RunningProcessRecord, failedChecks: [StatusResult]) -> String {
-        if process.status == .exited {
-            return "process:\(process.id):exited:\(process.exitedAt ?? "unknown")"
-        }
+        if process.status == .exited { return "process:\(process.id):exited:\(process.exitedAt ?? "unknown")" }
         let failedCheckNames = failedChecks.map(\.checkName).sorted().joined(separator: ",")
         let latestFailure = failedChecks.compactMap(\.lastRunAt).max() ?? "unknown"
         return "process:\(process.id):failed:\(failedCheckNames):\(latestFailure)"
@@ -591,41 +579,26 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         agentWindows.filter { $0.status == .waiting || $0.status == .done }
     }
 
-    nonisolated static func dashboardMissingConfiguredProcessItems(
-        workspaceID: String,
-        processEntries: [WorkspaceRunProcessEntry]
-    ) -> [MissingConfiguredProcessDashboardItem] {
+    nonisolated static func dashboardMissingConfiguredProcessItems(workspaceID: String, processEntries: [WorkspaceRunProcessEntry])
+        -> [MissingConfiguredProcessDashboardItem]
+    {
         processEntries.compactMap { entry in
-            guard entry.kind == .missingConfiguredProcess,
-                let processKey = entry.processKey,
-                let label = entry.processLabel
-            else { return nil }
+            guard entry.kind == .missingConfiguredProcess, let processKey = entry.processKey, let label = entry.processLabel else { return nil }
             return MissingConfiguredProcessDashboardItem(
-                attentionID: "process-missing:\(workspaceID):\(processKey)",
-                label: label,
-                detail: entry.processCommand,
-                processKey: processKey)
+                attentionID: "process-missing:\(workspaceID):\(processKey)", label: label, detail: entry.processCommand, processKey: processKey)
         }
     }
 
     nonisolated static func restoredWorkspaceDetailTabIdentifier(savedIdentifier: String?) -> String {
         switch savedIdentifier {
-        case "env", "settings":
-            savedIdentifier ?? "run"
-        default:
-            "run"
+        case "env", "settings": savedIdentifier ?? "run"
+        default: "run"
         }
     }
 
     static func selectedWorkspaceDetailTabIdentifier(in view: NSView) -> String? {
-        if let tabView = view as? NSTabView, let identifier = tabView.selectedTabViewItem?.identifier as? String {
-            return identifier
-        }
-        for subview in view.subviews {
-            if let identifier = selectedWorkspaceDetailTabIdentifier(in: subview) {
-                return identifier
-            }
-        }
+        if let tabView = view as? NSTabView, let identifier = tabView.selectedTabViewItem?.identifier as? String { return identifier }
+        for subview in view.subviews { if let identifier = selectedWorkspaceDetailTabIdentifier(in: subview) { return identifier } }
         return nil
     }
 
@@ -648,9 +621,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         if window.role == "browser", let targetURL = window.targetURL, !targetURL.isEmpty {
             return .workspaceBrowserSession(workspaceID: workspaceID, targetURL: targetURL)
         }
-        if window.role == "terminal" {
-            return .workspaceProcess(workspaceID: workspaceID, processID: process.id)
-        }
+        if window.role == "terminal" { return .workspaceProcess(workspaceID: workspaceID, processID: process.id) }
         return .workspaceWindow(workspaceID: workspaceID, index: windowListIndex)
     }
 
@@ -666,15 +637,16 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         }.value
     }
 
-    nonisolated private static func refreshVisibleWorkspaceDetailSnapshot(workspaceID: String) async -> Result<VisibleWorkspaceDetailRefreshOutcome, Error> {
+    nonisolated private static func refreshVisibleWorkspaceDetailSnapshot(workspaceID: String) async -> Result<
+        VisibleWorkspaceDetailRefreshOutcome, Error
+    > {
         await Task.detached(priority: .utility) {
             do {
                 let db = try DatabaseLocator.defaultPath()
                 let store = try SQLiteStore(path: db)
                 let orchestrator = MuxyOrchestrator(store: store)
                 let didMutateWindows = try orchestrator.refreshWorkspaceWindows(workspaceID: workspaceID)
-                let didUpdateProcesses = try orchestrator.checkAndUpdateProcessStatuses()
-                    || orchestrator.runDueStatusChecksForRunningWorkspaces()
+                let didUpdateProcesses = try orchestrator.checkAndUpdateProcessStatuses() || orchestrator.runDueStatusChecksForRunningWorkspaces()
                 return .success(.init(didMutateWindows: didMutateWindows, didUpdateProcesses: didUpdateProcesses))
             } catch { return .failure(error) }
         }.value
@@ -771,14 +743,12 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 switch request {
                 case .workspaceBrowserSession(let workspaceID, let targetURL):
                     try orchestrator.focusWorkspaceBrowserSession(workspaceID: workspaceID, targetURL: targetURL)
-                case .workspaceWindow(let workspaceID, let index):
-                    try orchestrator.focusWorkspaceWindow(workspaceID: workspaceID, index: index)
+                case .workspaceWindow(let workspaceID, let index): try orchestrator.focusWorkspaceWindow(workspaceID: workspaceID, index: index)
                 case .workspaceProcess(let workspaceID, let processID):
                     try orchestrator.focusWorkspaceProcess(workspaceID: workspaceID, processID: processID)
                 case .workspaceMissingConfiguredProcess(let workspaceID, let processKey):
                     try orchestrator.recoverMissingConfiguredProcess(workspaceID: workspaceID, processKey: processKey)
-                case .agentWindow(let record):
-                    try orchestrator.focusAgentWindow(record)
+                case .agentWindow(let record): try orchestrator.focusAgentWindow(record)
                 }
                 return .success(())
             } catch { return .failure(error) }
@@ -802,15 +772,16 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                         throw MuxyError.invalidArgument(message: "Process recovery requires a process identifier.")
                     }
                     try orchestrator.restartWorkspaceProcess(workspaceID: context.workspaceID, processID: processID)
-                case .codingAgent, .window:
-                    throw MuxyError.invalidArgument(message: "This window cannot be recovered automatically.")
+                case .codingAgent, .window: throw MuxyError.invalidArgument(message: "This window cannot be recovered automatically.")
                 }
                 return .success(())
             } catch { return .failure(error) }
         }.value
     }
 
-    nonisolated private static func recoverRunningWorkspaceProcessIfPossibleSnapshot(_ context: MissingTrackedWindowContext) async -> Result<Bool, Error> {
+    nonisolated private static func recoverRunningWorkspaceProcessIfPossibleSnapshot(_ context: MissingTrackedWindowContext) async -> Result<
+        Bool, Error
+    > {
         await Task.detached(priority: .userInitiated) {
             do {
                 guard context.kind == .process, let processID = context.processID else {
@@ -836,9 +807,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         }.value
     }
 
-    nonisolated private static func focusWindowShortcutSnapshot(
-        index: Int, selectedWorkspaceID: String?, dashboardFocusRequest: WindowFocusRequest?
-    ) async -> Result<WindowShortcutExecutionOutcome, Error> {
+    nonisolated private static func focusWindowShortcutSnapshot(index: Int, selectedWorkspaceID: String?, dashboardFocusRequest: WindowFocusRequest?)
+        async -> Result<WindowShortcutExecutionOutcome, Error>
+    {
         await Task.detached(priority: .userInitiated) {
             do {
                 let db = try DatabaseLocator.defaultPath()
@@ -870,23 +841,17 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 let processes = try orchestrator.runningProcesses(workspaceID: selectedWorkspaceID)
                 let agentWindows = try orchestrator.agentWindows(workspaceID: selectedWorkspaceID)
                 let workspaceIsRunning = try orchestrator.store.workspace(id: selectedWorkspaceID)?.isRunning ?? false
-                let browserSessions = shouldShowConfiguredBrowserSessions(workspaceIsRunning: workspaceIsRunning)
-                    ? try orchestrator.resolvedWorkspaceBrowserSessions(workspaceID: selectedWorkspaceID)
-                    : []
+                let browserSessions =
+                    shouldShowConfiguredBrowserSessions(workspaceIsRunning: workspaceIsRunning)
+                    ? try orchestrator.resolvedWorkspaceBrowserSessions(workspaceID: selectedWorkspaceID) : []
                 let workspaceSettings = try orchestrator.workspaceSettings(workspaceID: selectedWorkspaceID)
                 let configuredProcesses = workspaceSettings?.processes ?? []
                 let processEntries = orderedWorkspaceRunProcessEntries(
-                    configuredProcesses: configuredProcesses,
-                    windows: windows,
-                    processes: processes,
-                    agentWindows: agentWindows)
+                    configuredProcesses: configuredProcesses, windows: windows, processes: processes, agentWindows: agentWindows)
                 let processesByID = Dictionary(uniqueKeysWithValues: processes.map { ($0.id, $0) })
                 let shortcutTargets = orderedWorkspaceRunShortcutTargets(
-                    browserSessions: browserSessions,
-                    processEntries: processEntries,
-                    processesByID: processesByID,
-                    configuredAgentLaunchers: workspaceSettings?.agentLaunchers ?? [],
-                    agentWindows: agentWindows)
+                    browserSessions: browserSessions, processEntries: processEntries, processesByID: processesByID,
+                    configuredAgentLaunchers: workspaceSettings?.agentLaunchers ?? [], agentWindows: agentWindows)
                 guard index > 0, index <= shortcutTargets.count else { return .success(.noMatch) }
                 let target = shortcutTargets[index - 1]
                 switch target.kind {
@@ -986,24 +951,18 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
                 let processes = workspace.isRunning ? ((try? orchestrator.runningProcesses(workspaceID: workspace.id)) ?? []) : []
                 let windows = workspace.isRunning ? ((try? orchestrator.windows(workspaceID: workspace.id)) ?? []) : []
-                let configuredProcesses = workspace.isRunning ? ((try? orchestrator.workspaceSettings(workspaceID: workspace.id)?.processes) ?? []) : []
+                let configuredProcesses =
+                    workspace.isRunning ? ((try? orchestrator.workspaceSettings(workspaceID: workspace.id)?.processes) ?? []) : []
                 let configuredSessions: [BrowserSession] = {
                     guard workspace.isRunning else { return [] }
                     return (try? orchestrator.resolvedWorkspaceBrowserSessions(workspaceID: workspace.id)) ?? []
                 }()
                 let processEntries = orderedWorkspaceRunProcessEntries(
-                    configuredProcesses: configuredProcesses,
-                    windows: windows,
-                    processes: processes,
-                    agentWindows: agentWindowsList)
+                    configuredProcesses: configuredProcesses, windows: windows, processes: processes, agentWindows: agentWindowsList)
                 var processByWindowID: [Int: RunningProcessRecord] = [:]
-                for process in processes {
-                    if let wid = process.windowID { processByWindowID[wid] = process }
-                }
+                for process in processes { if let wid = process.windowID { processByWindowID[wid] = process } }
                 var statusResultsByProcessID: [String: [StatusResult]] = [:]
-                for process in processes {
-                    statusResultsByProcessID[process.id] = (try? orchestrator.statusResults(processID: process.id)) ?? []
-                }
+                for process in processes { statusResultsByProcessID[process.id] = (try? orchestrator.statusResults(processID: process.id)) ?? [] }
 
                 var items: [DashboardAttentionEntry] = []
                 var matchedProcessIDs: Set<String> = []
@@ -1048,9 +1007,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                     items.append(
                         DashboardAttentionEntry(
                             attentionID: Self.dashboardAttentionID(process: process, failedChecks: redChecks), icon: icon, iconTint: iconTint,
-                            label: label, detail: detail, shortcut: "", processStatus: process.status,
-                            agentStatus: nil, countsTowardBadge: true, statusChecks: allChecks, eventDate: eventDate,
-                            focusRequest: Self.dashboardFocusRequest(window: win, windowListIndex: idx + 1, process: process, workspaceID: workspace.id)))
+                            label: label, detail: detail, shortcut: "", processStatus: process.status, agentStatus: nil, countsTowardBadge: true,
+                            statusChecks: allChecks, eventDate: eventDate,
+                            focusRequest: Self.dashboardFocusRequest(
+                                window: win, windowListIndex: idx + 1, process: process, workspaceID: workspace.id)))
                 }
 
                 for process in processes where !matchedProcessIDs.contains(process.id) {
@@ -1064,37 +1024,27 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                         : redChecks.compactMap { $0.lastRunAt.flatMap { iso8601Formatter.date(from: $0) } }.max()
                     items.append(
                         DashboardAttentionEntry(
-                            attentionID: Self.dashboardAttentionID(process: process, failedChecks: redChecks), icon: "terminal",
-                            iconTint: .terminal, label: process.templateName, detail: process.command, shortcut: "", processStatus: process.status,
-                            agentStatus: nil, countsTowardBadge: true, statusChecks: allChecks, eventDate: eventDate,
+                            attentionID: Self.dashboardAttentionID(process: process, failedChecks: redChecks), icon: "terminal", iconTint: .terminal,
+                            label: process.templateName, detail: process.command, shortcut: "", processStatus: process.status, agentStatus: nil,
+                            countsTowardBadge: true, statusChecks: allChecks, eventDate: eventDate,
                             focusRequest: .workspaceProcess(workspaceID: workspace.id, processID: process.id)))
                 }
 
                 for item in dashboardMissingConfiguredProcessItems(workspaceID: workspace.id, processEntries: processEntries) {
                     items.append(
                         DashboardAttentionEntry(
-                            attentionID: item.attentionID,
-                            icon: "terminal",
-                            iconTint: .warning,
-                            label: item.label,
-                            detail: item.detail,
-                            shortcut: "",
-                            processStatus: .idle,
-                            agentStatus: nil,
-                            countsTowardBadge: true,
-                            statusChecks: [],
-                            eventDate: nil,
+                            attentionID: item.attentionID, icon: "terminal", iconTint: .warning, label: item.label, detail: item.detail, shortcut: "",
+                            processStatus: .idle, agentStatus: nil, countsTowardBadge: true, statusChecks: [], eventDate: nil,
                             focusRequest: .workspaceMissingConfiguredProcess(workspaceID: workspace.id, processKey: item.processKey)))
                 }
 
                 for agentWin in attentionAgentWindows {
                     items.append(
                         DashboardAttentionEntry(
-                            attentionID: Self.dashboardAttentionID(agentWindow: agentWin), icon: "cpu.fill",
-                            iconTint: .warning,
-                            label: agentWin.label ?? "Coding Agent CLI", detail: nil, shortcut: "", processStatus: nil,
-                            agentStatus: agentWin.status, countsTowardBadge: true, statusChecks: [],
-                            eventDate: iso8601Formatter.date(from: agentWin.updatedAt), focusRequest: .agentWindow(agentWin)))
+                            attentionID: Self.dashboardAttentionID(agentWindow: agentWin), icon: "cpu.fill", iconTint: .warning,
+                            label: agentWin.label ?? "Coding Agent CLI", detail: nil, shortcut: "", processStatus: nil, agentStatus: agentWin.status,
+                            countsTowardBadge: true, statusChecks: [], eventDate: iso8601Formatter.date(from: agentWin.updatedAt),
+                            focusRequest: .agentWindow(agentWin)))
                 }
 
                 guard !items.isEmpty else { continue }
@@ -1153,23 +1103,21 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 logStartupSnapshotProfile(
                     "sidebar_snapshot_workspace_scan_breakdown",
                     details:
-                        "workspace_count=\(workspaceCount) list_ms=\(listWorkspacesMS) runtime_ms=\(runtimeStatusMS) git_ms=0 unaccounted_ms=\(workspaceScanMS - listWorkspacesMS - runtimeStatusMS)")
+                        "workspace_count=\(workspaceCount) list_ms=\(listWorkspacesMS) runtime_ms=\(runtimeStatusMS) git_ms=0 unaccounted_ms=\(workspaceScanMS - listWorkspacesMS - runtimeStatusMS)"
+                )
                 logStartupSnapshotProfile(
-                    "sidebar_snapshot_workspace_scan_ready",
-                    details: "workspace_count=\(workspaceCount) scan_ms=\(workspaceScanMS)")
+                    "sidebar_snapshot_workspace_scan_ready", details: "workspace_count=\(workspaceCount) scan_ms=\(workspaceScanMS)")
                 let dashboardGroups = try buildDashboardGroupsSnapshot(
                     orchestrator: orchestrator, projects: projects, workspacesByProject: workspacesByProject)
                 logStartupSnapshotProfile(
                     "sidebar_snapshot_dashboard_ready",
                     details: "group_count=\(dashboardGroups.count) item_count=\(dashboardGroups.reduce(0) { $0 + $1.items.count })")
                 logStartupSnapshotProfile(
-                    "sidebar_snapshot_complete",
-                    details: "total_ms=\(Int((ProcessInfo.processInfo.systemUptime - snapshotStartedAt) * 1000))")
+                    "sidebar_snapshot_complete", details: "total_ms=\(Int((ProcessInfo.processInfo.systemUptime - snapshotStartedAt) * 1000))")
                 return .success(
                     .init(
                         config: config, projects: projects, workspacesByProject: workspacesByProject,
-                        workspaceRuntimeStatusByID: workspaceRuntimeStatusByID,
-                        dashboardGroups: dashboardGroups))
+                        workspaceRuntimeStatusByID: workspaceRuntimeStatusByID, dashboardGroups: dashboardGroups))
             } catch { return .failure(error) }
         }.value
     }
@@ -1177,26 +1125,20 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     nonisolated static func shouldHideAfterSuccessfulExternalWindowAction(_ succeeded: Bool, action: ExternalWindowAction) -> Bool {
         guard succeeded else { return false }
         switch action {
-        case .focus, .open:
-            return true
+        case .focus, .open: return true
         }
     }
 
     nonisolated static func hideDelayAfterSuccessfulExternalWindowAction(_ succeeded: Bool, action: ExternalWindowAction) -> Duration? {
         guard shouldHideAfterSuccessfulExternalWindowAction(succeeded, action: action) else { return nil }
         switch action {
-        case .focus:
-            return .milliseconds(400)
-        case .open:
-            return nil
+        case .focus: return .milliseconds(400)
+        case .open: return nil
         }
     }
 
     nonisolated static func shouldRefreshVisibleWorkspaceDetail(
-        selectedWorkspaceID: String?,
-        showingDashboard: Bool,
-        showingSettings: Bool,
-        workspaceExists: Bool
+        selectedWorkspaceID: String?, showingDashboard: Bool, showingSettings: Bool, workspaceExists: Bool
     ) -> Bool {
         guard selectedWorkspaceID != nil else { return false }
         guard !showingDashboard, !showingSettings else { return false }
@@ -1254,24 +1196,16 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     }
 
     // Configured-process rows match live runtime rows by the raw configured name.
-    nonisolated static func processRuntimeKey(name: String) -> String {
-        name.trimmingCharacters(in: .whitespacesAndNewlines)
-    }
+    nonisolated static func processRuntimeKey(name: String) -> String { name.trimmingCharacters(in: .whitespacesAndNewlines) }
 
     nonisolated static func normalizedRunRowName(_ value: String) -> String {
-        value.trimmingCharacters(in: .whitespacesAndNewlines)
-            .folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
+        value.trimmingCharacters(in: .whitespacesAndNewlines).folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
     }
 
-    nonisolated static func resolvedCodingAgentRunEntries(
-        configuredAgentLaunchers: [AgentLauncher],
-        agentWindows: [AgentWindowRecord]
-    ) -> [ResolvedCodingAgentRunEntry] {
-        let configuredAgentNames = Set(
-            configuredAgentLaunchers
-                .map(\.name)
-                .map(normalizedRunRowName)
-                .filter { !$0.isEmpty })
+    nonisolated static func resolvedCodingAgentRunEntries(configuredAgentLaunchers: [AgentLauncher], agentWindows: [AgentWindowRecord])
+        -> [ResolvedCodingAgentRunEntry]
+    {
+        let configuredAgentNames = Set(configuredAgentLaunchers.map(\.name).map(normalizedRunRowName).filter { !$0.isEmpty })
         var entries: [ResolvedCodingAgentRunEntry] = []
 
         // Configured coding agents always own the first slots in the Coding Agents
@@ -1280,9 +1214,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         for launcher in configuredAgentLaunchers {
             let normalizedName = normalizedRunRowName(launcher.name)
             guard !normalizedName.isEmpty else { continue }
-            let matchedAgent = agentWindows.first(where: {
-                normalizedRunRowName($0.label ?? "") == normalizedName
-            })
+            let matchedAgent = agentWindows.first(where: { normalizedRunRowName($0.label ?? "") == normalizedName })
             entries.append(ResolvedCodingAgentRunEntry(launcher: launcher, agentWindow: matchedAgent))
         }
 
@@ -1309,17 +1241,12 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             // Duplicate keys can exist transiently while Ghostty rows are being reconciled.
             // Prefer the earliest ordered tracked window instead of crashing on duplicates.
             let existingOrder = result[trackingKey]?.orderIndex ?? Int.max
-            if window.orderIndex <= existingOrder {
-                result[trackingKey] = window
-            }
+            if window.orderIndex <= existingOrder { result[trackingKey] = window }
         }
     }
 
     nonisolated static func orderedWorkspaceRunProcessEntries(
-        configuredProcesses: [ProcessTemplate],
-        windows: [WindowRecord],
-        processes: [RunningProcessRecord],
-        agentWindows: [AgentWindowRecord]
+        configuredProcesses: [ProcessTemplate], windows: [WindowRecord], processes: [RunningProcessRecord], agentWindows: [AgentWindowRecord]
     ) -> [WorkspaceRunProcessEntry] {
         let terminalOrderByTargetID: [String: Int] = windows.reduce(into: [:]) { result, window in
             guard window.role == "terminal", let targetID = window.terminalTrackingKey else { return }
@@ -1343,16 +1270,13 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             return map
         }()
         let agentTerminalIDs = Set(agentWindows.flatMap { agentTerminalTrackingKeys(for: $0) })
-        let eligibleProcesses = processes.filter { process in
-            process.terminalTrackingKey.map { !agentTerminalIDs.contains($0) } != false
-        }
-        let agentClaimedProcessKeys = Set(processes.filter { process in
-            process.terminalTrackingKey.map(agentTerminalIDs.contains) ?? false
-        }.map { processRuntimeKey(name: $0.templateName) })
+        let eligibleProcesses = processes.filter { process in process.terminalTrackingKey.map { !agentTerminalIDs.contains($0) } != false }
+        let agentClaimedProcessKeys = Set(
+            processes.filter { process in process.terminalTrackingKey.map(agentTerminalIDs.contains) ?? false }.map {
+                processRuntimeKey(name: $0.templateName)
+            })
         var processQueuesByKey: [String: [RunningProcessRecord]] = [:]
-        for process in eligibleProcesses {
-            processQueuesByKey[processRuntimeKey(name: process.templateName), default: []].append(process)
-        }
+        for process in eligibleProcesses { processQueuesByKey[processRuntimeKey(name: process.templateName), default: []].append(process) }
         for (key, list) in processQueuesByKey {
             processQueuesByKey[key] = list.sorted { lhs, rhs in
                 let lhsOrder = lhs.terminalTrackingKey.flatMap { terminalOrderByTargetID[$0] } ?? Int.max
@@ -1371,11 +1295,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 if agentClaimedProcessKeys.contains(key) { continue }
                 entries.append(
                     WorkspaceRunProcessEntry(
-                        kind: .missingConfiguredProcess,
-                        processID: nil,
-                        windowListIndex: nil,
-                        processKey: key,
-                        processLabel: key,
+                        kind: .missingConfiguredProcess, processID: nil, windowListIndex: nil, processKey: key, processLabel: key,
                         processCommand: template.command))
                 continue
             }
@@ -1384,11 +1304,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             matchedProcessIDs.insert(process.id)
             entries.append(
                 WorkspaceRunProcessEntry(
-                    kind: .process,
-                    processID: process.id,
-                    windowListIndex: nil,
-                    processKey: key,
-                    processLabel: process.templateName,
+                    kind: .process, processID: process.id, windowListIndex: nil, processKey: key, processLabel: process.templateName,
                     processCommand: process.command))
         }
 
@@ -1405,47 +1321,31 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                     matchedProcessIDs.insert(process.id)
                     entries.append(
                         WorkspaceRunProcessEntry(
-                        kind: .process,
-                        processID: process.id,
-                        windowListIndex: nil,
-                        processKey: processRuntimeKey(name: process.templateName),
-                        processLabel: process.templateName,
-                        processCommand: process.command))
+                            kind: .process, processID: process.id, windowListIndex: nil, processKey: processRuntimeKey(name: process.templateName),
+                            processLabel: process.templateName, processCommand: process.command))
                 }
                 continue
             }
             if !isAgentClaimedWindow {
                 entries.append(
                     WorkspaceRunProcessEntry(
-                        kind: .window,
-                        processID: nil,
-                        windowListIndex: windowIdx,
-                        processKey: nil,
-                        processLabel: nil,
-                        processCommand: nil))
+                        kind: .window, processID: nil, windowListIndex: windowIdx, processKey: nil, processLabel: nil, processCommand: nil))
             }
         }
 
         for process in eligibleProcesses where !matchedProcessIDs.contains(process.id) {
             matchedProcessIDs.insert(process.id)
             entries.append(
-                    WorkspaceRunProcessEntry(
-                        kind: .process,
-                        processID: process.id,
-                        windowListIndex: nil,
-                        processKey: processRuntimeKey(name: process.templateName),
-                        processLabel: process.templateName,
-                        processCommand: process.command))
+                WorkspaceRunProcessEntry(
+                    kind: .process, processID: process.id, windowListIndex: nil, processKey: processRuntimeKey(name: process.templateName),
+                    processLabel: process.templateName, processCommand: process.command))
         }
         return entries
     }
 
     nonisolated static func orderedWorkspaceRunShortcutTargets(
-        browserSessions: [BrowserSession],
-        processEntries: [WorkspaceRunProcessEntry],
-        processesByID: [String: RunningProcessRecord],
-        configuredAgentLaunchers: [AgentLauncher],
-        agentWindows: [AgentWindowRecord]
+        browserSessions: [BrowserSession], processEntries: [WorkspaceRunProcessEntry], processesByID: [String: RunningProcessRecord],
+        configuredAgentLaunchers: [AgentLauncher], agentWindows: [AgentWindowRecord]
     ) -> [WorkspaceRunShortcutTarget] {
         var targets: [WorkspaceRunShortcutTarget] = []
 
@@ -1453,13 +1353,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             guard let targetURL = session.url, !targetURL.isEmpty else { continue }
             targets.append(
                 WorkspaceRunShortcutTarget(
-                    kind: .browser,
-                    processID: nil,
-                    windowListIndex: nil,
-                    targetURL: targetURL,
-                    processKey: nil,
-                    launcherName: nil,
-                    agentWindow: nil))
+                    kind: .browser, processID: nil, windowListIndex: nil, targetURL: targetURL, processKey: nil, launcherName: nil, agentWindow: nil))
         }
 
         for entry in processEntries {
@@ -1468,48 +1362,28 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 guard let processID = entry.processID, processesByID[processID] != nil else { continue }
                 targets.append(
                     WorkspaceRunShortcutTarget(
-                        kind: .process,
-                        processID: processID,
-                        windowListIndex: nil,
-                        targetURL: nil,
-                        processKey: nil,
-                        launcherName: nil,
+                        kind: .process, processID: processID, windowListIndex: nil, targetURL: nil, processKey: nil, launcherName: nil,
                         agentWindow: nil))
             case .window:
                 guard let windowListIndex = entry.windowListIndex else { continue }
                 targets.append(
                     WorkspaceRunShortcutTarget(
-                        kind: .window,
-                        processID: nil,
-                        windowListIndex: windowListIndex,
-                        targetURL: nil,
-                        processKey: nil,
-                        launcherName: nil,
+                        kind: .window, processID: nil, windowListIndex: windowListIndex, targetURL: nil, processKey: nil, launcherName: nil,
                         agentWindow: nil))
             case .missingConfiguredProcess:
                 guard let processKey = entry.processKey else { continue }
                 targets.append(
                     WorkspaceRunShortcutTarget(
-                        kind: .missingConfiguredProcess,
-                        processID: nil,
-                        windowListIndex: nil,
-                        targetURL: nil,
-                        processKey: processKey,
-                        launcherName: nil,
-                        agentWindow: nil))
+                        kind: .missingConfiguredProcess, processID: nil, windowListIndex: nil, targetURL: nil, processKey: processKey,
+                        launcherName: nil, agentWindow: nil))
             }
         }
 
         for entry in resolvedCodingAgentRunEntries(configuredAgentLaunchers: configuredAgentLaunchers, agentWindows: agentWindows) {
             targets.append(
                 WorkspaceRunShortcutTarget(
-                    kind: entry.kind,
-                    processID: nil,
-                    windowListIndex: nil,
-                    targetURL: nil,
-                    processKey: nil,
-                    launcherName: entry.agentWindow == nil ? entry.launcherName : nil,
-                    agentWindow: entry.agentWindow))
+                    kind: entry.kind, processID: nil, windowListIndex: nil, targetURL: nil, processKey: nil,
+                    launcherName: entry.agentWindow == nil ? entry.launcherName : nil, agentWindow: entry.agentWindow))
         }
 
         return targets
@@ -1644,9 +1518,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             }
             return false
         }
-        outlineView.onArrowNavigation = { [weak self] direction in
-            self?.navigateSidebarSelection(direction: direction) ?? false
-        }
+        outlineView.onArrowNavigation = { [weak self] direction in self?.navigateSidebarSelection(direction: direction) ?? false }
         outlineView.delegate = self
         outlineView.dataSource = self
 
@@ -1793,9 +1665,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     }
 
     private func dashboardAttentionCount() -> Int {
-        buildDashboardGroups().reduce(0) { total, group in
-            total + group.items.filter(\.countsTowardBadge).count
-        }
+        buildDashboardGroups().reduce(0) { total, group in total + group.items.filter(\.countsTowardBadge).count }
     }
 
     private func loadDashboardDismissedAttentionItemIDs() {
@@ -1807,11 +1677,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let prunedIDs = dismissedDashboardAttentionItemIDs.intersection(activeIDs)
         guard prunedIDs != dismissedDashboardAttentionItemIDs else { return }
         dismissedDashboardAttentionItemIDs = prunedIDs
-        do {
-            try orchestrator.setDashboardDismissedAttentionItemIDs(prunedIDs)
-        } catch {
-            showError(error)
-        }
+        do { try orchestrator.setDashboardDismissedAttentionItemIDs(prunedIDs) } catch { showError(error) }
     }
 
     private func dismissDashboardAttentionItem(_ attentionID: String) {
@@ -1845,10 +1711,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         // Reload only the previously-selected workspace row to clear its selection styling;
         // avoid full reloadData() which would reset expand/collapse state.
         refreshSidebarSelectionRows(
-            previousProjectID: previousProjectID,
-            currentProjectID: nil,
-            previousWorkspaceID: previousWorkspaceID,
-            currentWorkspaceID: nil)
+            previousProjectID: previousProjectID, currentProjectID: nil, previousWorkspaceID: previousWorkspaceID, currentWorkspaceID: nil)
         updateDashboardRowAppearance()
 
         for view in detailContainer.subviews { view.removeFromSuperview() }
@@ -1948,9 +1811,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
                 for entry in group.items {
                     let shortcut = shortcutCounter <= 9 ? windowShortcutBadgeText(index: shortcutCounter) : ""
-                    if shortcutCounter <= 9, let focusRequest = entry.focusRequest {
-                        dashboardFocusRequestMap[shortcutCounter] = focusRequest
-                    }
+                    if shortcutCounter <= 9, let focusRequest = entry.focusRequest { dashboardFocusRequestMap[shortcutCounter] = focusRequest }
                     shortcutCounter += 1
                     let cardAction: (() async -> Void)?
                     if let focusRequest = entry.focusRequest {
@@ -2004,9 +1865,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         for check in entry.statusChecks {
             let checkColor: NSColor = check.status == .passed ? .systemGreen : .systemRed
             let checkRow = statusCheckSubRow(name: check.checkName, color: checkColor, status: check.status)
-            if let action {
-                attachAsyncClickAction(to: checkRow, label: entry.label, shortcut: shortcut, action: action)
-            }
+            if let action { attachAsyncClickAction(to: checkRow, label: entry.label, shortcut: shortcut, action: action) }
             container.addArrangedSubview(checkRow)
             constrainFormFieldToFillWidth(checkRow, in: container)
         }
@@ -2106,12 +1965,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     }
 
     private func shouldRouteToDeferredSetup(for error: Error) -> Bool {
-        if case let MuxyError.yabaiUnavailable(message) = error {
-            return message.localizedStandardContains("failed to connect to socket")
-        }
+        if case MuxyError.yabaiUnavailable(let message) = error { return message.localizedStandardContains("failed to connect to socket") }
         let message = error.localizedDescription
-        return message.localizedStandardContains("yabai-msg")
-            && message.localizedStandardContains("failed to connect to socket")
+        return message.localizedStandardContains("yabai-msg") && message.localizedStandardContains("failed to connect to socket")
     }
 
     private func loadInitialSidebarData() async {
@@ -2142,10 +1998,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         outlineView.deselectAll(nil)
         suppressOutlineSelectionChanges = false
         refreshSidebarSelectionRows(
-            previousProjectID: previousProjectID,
-            currentProjectID: nil,
-            previousWorkspaceID: previousWorkspaceID,
-            currentWorkspaceID: nil)
+            previousProjectID: previousProjectID, currentProjectID: nil, previousWorkspaceID: previousWorkspaceID, currentWorkspaceID: nil)
         updateDashboardRowAppearance()
     }
 
@@ -2160,10 +2013,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             guard !Task.isCancelled else { return }
             switch result {
             case .success(let snapshot): self.applySidebarDataSnapshot(snapshot, preserveDetailPane: true)
-            case .failure(let error):
-                if !self.handleDeferredSetupRequirementIfNeeded(error) {
-                    self.showError(error)
-                }
+            case .failure(let error): if !self.handleDeferredSetupRequirementIfNeeded(error) { self.showError(error) }
             }
             self.sidebarReloadTask = nil
             if self.pendingSidebarReloadRequest {
@@ -2192,9 +2042,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             refreshSelection()
             logStartupProfile("apply_snapshot_selection_ready")
         } else if Self.shouldRefreshVisibleWorkspaceDetail(
-            selectedWorkspaceID: selectedWorkspaceID,
-            showingDashboard: showingDashboard,
-            showingSettings: showingSettings,
+            selectedWorkspaceID: selectedWorkspaceID, showingDashboard: showingDashboard, showingSettings: showingSettings,
             workspaceExists: selectedWorkspaceID.flatMap { findWorkspace(id: $0) } != nil)
         {
             refreshSelection()
@@ -2247,11 +2095,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
     private func requestVisibleWorkspaceDetailRefreshIfNeeded(reason _: String) {
         guard let workspaceID = selectedWorkspaceID else { return }
-        guard Self.shouldRefreshVisibleWorkspaceDetail(
-            selectedWorkspaceID: selectedWorkspaceID,
-            showingDashboard: showingDashboard,
-            showingSettings: showingSettings,
-            workspaceExists: findWorkspace(id: workspaceID) != nil)
+        guard
+            Self.shouldRefreshVisibleWorkspaceDetail(
+                selectedWorkspaceID: selectedWorkspaceID, showingDashboard: showingDashboard, showingSettings: showingSettings,
+                workspaceExists: findWorkspace(id: workspaceID) != nil)
         else { return }
         if visibleWorkspaceDetailRefreshWorkspaceID == workspaceID, let task = visibleWorkspaceDetailRefreshTask, !task.isCancelled { return }
 
@@ -2274,10 +2121,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 guard outcome.didChangeVisibleState else { return }
                 guard self.canReloadAfterBackgroundWorkspaceRefresh() else { return }
                 self.reloadData()
-            case .failure(let error):
-                if !self.handleDeferredSetupRequirementIfNeeded(error) {
-                    self.showError(error)
-                }
+            case .failure(let error): if !self.handleDeferredSetupRequirementIfNeeded(error) { self.showError(error) }
             }
         }
     }
@@ -2553,9 +2397,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             return
         }
 
-        alert.beginSheetModal(for: window) { response in
-            if actionTitle != nil, response == .alertFirstButtonReturn { action?() }
-        }
+        alert.beginSheetModal(for: window) { response in if actionTitle != nil, response == .alertFirstButtonReturn { action?() } }
     }
 
     private func showSettingsDetail() {
@@ -2848,8 +2690,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             browserSessionEditor: browserSessionEditor, agentLauncherEditor: agentLauncherEditor)
         registerDirtyTracking(
             setupView: setupView, stopView: stopView, portEditor: portEditor, processEditor: processEditor,
-            browserSessionEditor: browserSessionEditor, agentLauncherEditor: agentLauncherEditor
-        )
+            browserSessionEditor: browserSessionEditor, agentLauncherEditor: agentLauncherEditor)
     }
 
     private func formSectionCard(icon: String, title: String, subtitle: String, trailingView: NSView? = nil, contentViews: [NSView]) -> NSView {
@@ -2918,10 +2759,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             innerStack.trailingAnchor.constraint(equalTo: section.trailingAnchor),
             innerStack.topAnchor.constraint(equalTo: section.topAnchor, constant: 4),
 
-            divider.leadingAnchor.constraint(equalTo: section.leadingAnchor),
-            divider.trailingAnchor.constraint(equalTo: section.trailingAnchor),
-            divider.topAnchor.constraint(equalTo: innerStack.bottomAnchor, constant: 18),
-            divider.heightAnchor.constraint(equalToConstant: 1),
+            divider.leadingAnchor.constraint(equalTo: section.leadingAnchor), divider.trailingAnchor.constraint(equalTo: section.trailingAnchor),
+            divider.topAnchor.constraint(equalTo: innerStack.bottomAnchor, constant: 18), divider.heightAnchor.constraint(equalToConstant: 1),
             divider.bottomAnchor.constraint(equalTo: section.bottomAnchor),
         ])
         headerRow.translatesAutoresizingMaskIntoConstraints = false
@@ -3290,7 +3129,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
         // --- Buttons ---
         let createButton = actionButton(
-            title: "Create Workspace (Cmd+Return)", symbol: nil, tooltip: "Create workspace (Cmd+Return)", action: #selector(createWorkspace(_:)), primary: true)
+            title: "Create Workspace (Cmd+Return)", symbol: nil, tooltip: "Create workspace (Cmd+Return)", action: #selector(createWorkspace(_:)),
+            primary: true)
         createButton.keyEquivalent = "\r"
         createButton.keyEquivalentModifierMask = [.command]
         let cancelButton = actionButton(
@@ -3313,8 +3153,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             projectID: project.id, isGitRepo: project.isGitRepo, branchModePopup: project.isGitRepo ? branchModePopup : nil,
             existingBranchField: project.isGitRepo ? existingBranchField : nil, newBranchField: project.isGitRepo ? newBranchField : nil,
             targetBranchField: project.isGitRepo ? targetBranchField : nil, nameField: nameField,
-            directoryNameField: project.isGitRepo ? directoryNameField : nil,
-            tooltipField: tooltipField, autoNameState: autoNameState, progressiveInputViews: progressiveInputViews, createButton: createButton)
+            directoryNameField: project.isGitRepo ? directoryNameField : nil, tooltipField: tooltipField, autoNameState: autoNameState,
+            progressiveInputViews: progressiveInputViews, createButton: createButton)
         activeAddWorkspaceFormTag = createButton.tag
         if let refs = AddWorkspaceFieldCache.shared.cache[createButton.tag] {
             updateAddWorkspaceBranchInputUI(refs: refs)
@@ -3323,11 +3163,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         Task { @MainActor [weak self, weak newBranchField] in
             await Task.yield()
             guard let self else { return }
-            if project.isGitRepo {
-                self.window.makeFirstResponder(newBranchField)
-            } else {
-                self.window.makeFirstResponder(nameField)
-            }
+            if project.isGitRepo { self.window.makeFirstResponder(newBranchField) } else { self.window.makeFirstResponder(nameField) }
         }
         guard project.isGitRepo else { return }
         let formTag = createButton.tag
@@ -3387,18 +3223,12 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
         // --- Header with status dot ---
         let accentColor = sidebarThemeColor(light: (13, 95, 93), dark: (61, 198, 184))
-        let runtimeStatus = workspaceRuntimeStatusByID[workspace.id]
+        let runtimeStatus =
+            workspaceRuntimeStatusByID[workspace.id]
             ?? WorkspaceRuntimeStatus(
-                workspaceID: workspace.id,
-                lifecycleState: WorkspaceLifecycleState(isRunning: workspace.isRunning),
-                runtimeHealth: .healthy,
-                hasTrackedRuntimeIndicators: false,
-                runningProcessCount: 0,
-                exitedProcessCount: 0,
-                failedCheckCount: 0,
-                waitingAgentWindowCount: 0,
-                missingConfiguredProcessCount: 0,
-                missingConfiguredBrowserSessionCount: 0)
+                workspaceID: workspace.id, lifecycleState: WorkspaceLifecycleState(isRunning: workspace.isRunning), runtimeHealth: .healthy,
+                hasTrackedRuntimeIndicators: false, runningProcessCount: 0, exitedProcessCount: 0, failedCheckCount: 0, waitingAgentWindowCount: 0,
+                missingConfiguredProcessCount: 0, missingConfiguredBrowserSessionCount: 0)
         let isLifecycleRunning = runtimeStatus.lifecycleState == .running
         let statusDot = NSImageView()
         statusDot.image = NSImage(
@@ -3457,8 +3287,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
         let tag = UUID().uuidString.hashValue
         let refs = InlineWorkspaceDetailFieldRefs(
-            workspaceID: workspace.id, field: .title, valueLabel: workspaceTitleLabel, textField: workspaceTitleField,
-            saveButton: titleSaveButton, cancelButton: titleCancelButton, originalValue: workspace.title, isEditing: false)
+            workspaceID: workspace.id, field: .title, valueLabel: workspaceTitleLabel, textField: workspaceTitleField, saveButton: titleSaveButton,
+            cancelButton: titleCancelButton, originalValue: workspace.title, isEditing: false)
         inlineWorkspaceFieldRefsByTag[tag] = refs
         inlineWorkspaceFieldTagByObjectID[ObjectIdentifier(workspaceTitleField)] = tag
         inlineWorkspaceLabelTagByObjectID[ObjectIdentifier(workspaceTitleLabel)] = tag
@@ -3687,14 +3517,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         for process in processes { statusResultsByProcessID[process.id] = (try? orchestrator.statusResults(processID: process.id)) ?? [] }
         let agentWindowsForRunTab = (try? orchestrator.agentWindows(workspaceID: workspace.id)) ?? []
         let processEntries = Self.orderedWorkspaceRunProcessEntries(
-            configuredProcesses: configuredProcesses,
-            windows: windows,
-            processes: processes,
-            agentWindows: agentWindowsForRunTab)
+            configuredProcesses: configuredProcesses, windows: windows, processes: processes, agentWindows: agentWindowsForRunTab)
         let processesByID = Dictionary(uniqueKeysWithValues: processes.map { ($0.id, $0) })
         let codingAgentEntries = Self.resolvedCodingAgentRunEntries(
-            configuredAgentLaunchers: configuredAgentLaunchers,
-            agentWindows: agentWindowsForRunTab)
+            configuredAgentLaunchers: configuredAgentLaunchers, agentWindows: agentWindowsForRunTab)
         // Shortcut counter is shared across all sections so numbers are assigned
         // in the order rows appear on screen: Browser Tabs → Processes →
         // Coding Agents.
@@ -3733,8 +3559,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             shortcutCounter += 1
             browserRowCount += 1
             let row = windowRow(
-                icon: "globe", iconColor: .systemBlue, label: sessionLabel, detail: sessionDetail,
-                shortcut: rowShortcut, processStatus: nil,
+                icon: "globe", iconColor: .systemBlue, label: sessionLabel, detail: sessionDetail, shortcut: rowShortcut, processStatus: nil,
                 action: { [weak self] in
                     guard let self else { return }
                     await self.performWindowFocus(.workspaceBrowserSession(workspaceID: workspaceID, targetURL: targetURL))
@@ -3752,8 +3577,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 guard let processID = entry.processID, let process = processesByID[processID] else { continue }
                 processRowCount += 1
                 let row = windowRow(
-                    icon: "terminal", iconColor: .systemGreen, label: process.templateName,
-                    detail: resolveCommand(process.command), shortcut: rowShortcut, processStatus: process.status,
+                    icon: "terminal", iconColor: .systemGreen, label: process.templateName, detail: resolveCommand(process.command),
+                    shortcut: rowShortcut, processStatus: process.status,
                     action: { [weak self] in
                         guard let self else { return }
                         await self.performWindowFocus(.workspaceProcess(workspaceID: workspaceID, processID: process.id))
@@ -3769,11 +3594,13 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                     constrainFormFieldToFillWidth(checkRow, in: processesStack)
                 }
             case .missingConfiguredProcess:
-                guard let processKey = entry.processKey, let processLabel = entry.processLabel, let processCommand = entry.processCommand else { continue }
+                guard let processKey = entry.processKey, let processLabel = entry.processLabel, let processCommand = entry.processCommand else {
+                    continue
+                }
                 processRowCount += 1
                 let row = windowRow(
-                    icon: "terminal", iconColor: .systemOrange, label: processLabel,
-                    detail: resolveCommand(processCommand), shortcut: rowShortcut, processStatus: .idle,
+                    icon: "terminal", iconColor: .systemOrange, label: processLabel, detail: resolveCommand(processCommand), shortcut: rowShortcut,
+                    processStatus: .idle,
                     action: { [weak self] in
                         guard let self else { return }
                         await self.performWindowFocus(.workspaceMissingConfiguredProcess(workspaceID: workspaceID, processKey: processKey))
@@ -3787,8 +3614,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 if win.role == "terminal" {
                     let rowText = Self.terminalFallbackRowText(name: win.name, detail: win.detail, app: win.app)
                     let row = windowRow(
-                        icon: "terminal", iconColor: .systemGreen, label: rowText.label, detail: rowText.detail,
-                        shortcut: rowShortcut, processStatus: nil,
+                        icon: "terminal", iconColor: .systemGreen, label: rowText.label, detail: rowText.detail, shortcut: rowShortcut,
+                        processStatus: nil,
                         action: { [weak self] in
                             guard let self else { return }
                             await self.performWindowFocus(.workspaceWindow(workspaceID: workspaceID, index: windowListIndex + 1))
@@ -3797,8 +3624,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                     constrainFormFieldToFillWidth(row, in: processesStack)
                 } else {
                     let row = windowRow(
-                        icon: "chevron.left.forwardslash.chevron.right", iconColor: .systemPurple,
-                        label: win.name ?? win.app, detail: win.detail, shortcut: rowShortcut, processStatus: nil,
+                        icon: "chevron.left.forwardslash.chevron.right", iconColor: .systemPurple, label: win.name ?? win.app, detail: win.detail,
+                        shortcut: rowShortcut, processStatus: nil,
                         action: { [weak self] in
                             guard let self else { return }
                             await self.performWindowFocus(.workspaceWindow(workspaceID: workspaceID, index: windowListIndex + 1))
@@ -3819,11 +3646,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                     Self.agentTerminalTrackingKeys(for: agent).compactMap { windowsByTrackingKey[$0] }.first
                 }
                 let row = windowRow(
-                    icon: "cpu.fill",
-                    iconColor: entry.agentWindow == nil ? .systemOrange : .secondaryLabelColor,
+                    icon: "cpu.fill", iconColor: entry.agentWindow == nil ? .systemOrange : .secondaryLabelColor,
                     label: entry.agentWindow?.label ?? entry.launcherName ?? "Coding Agent CLI",
-                    detail: linkedWin?.detail ?? entry.launcher.map { resolveCommand($0.command) } ?? linkedWin?.app,
-                    shortcut: rowShortcut,
+                    detail: linkedWin?.detail ?? entry.launcher.map { resolveCommand($0.command) } ?? linkedWin?.app, shortcut: rowShortcut,
                     agentStatus: entry.agentWindow?.status,
                     action: { [weak self] in
                         guard let self else { return }
@@ -4258,7 +4083,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             let startedAt = Date()
             self?.logWindowRowClickProfile("stage=received label=\(label) shortcut=\(shortcut)")
             await action()
-            self?.logWindowRowClickProfile("stage=completed label=\(label) shortcut=\(shortcut) elapsed_ms=\(self?.windowShortcutElapsedMS(since: startedAt) ?? 0)")
+            self?.logWindowRowClickProfile(
+                "stage=completed label=\(label) shortcut=\(shortcut) elapsed_ms=\(self?.windowShortcutElapsedMS(since: startedAt) ?? 0)")
         }
         let target = ClickTarget(profiledAction)
         let recognizer = NSClickGestureRecognizer(target: target, action: #selector(ClickTarget.clicked(_:)))
@@ -4267,12 +4093,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     }
 
     nonisolated static func terminalFallbackRowText(name: String?, detail: String?, app _: String) -> (label: String, detail: String?) {
-        let cleanedName = name?
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-            .replacingOccurrences(of: #"^[*-]\s*"#, with: "", options: .regularExpression)
-        let cleanedDetail = detail?
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-            .replacingOccurrences(of: #"^[*-]\s*"#, with: "", options: .regularExpression)
+        let cleanedName = name?.trimmingCharacters(in: .whitespacesAndNewlines).replacingOccurrences(
+            of: #"^[*-]\s*"#, with: "", options: .regularExpression)
+        let cleanedDetail = detail?.trimmingCharacters(in: .whitespacesAndNewlines).replacingOccurrences(
+            of: #"^[*-]\s*"#, with: "", options: .regularExpression)
         return (cleanedName?.isEmpty == false ? cleanedName! : "Terminal", cleanedDetail?.isEmpty == false ? cleanedDetail : nil)
     }
 
@@ -4392,9 +4216,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         contentRow.spacing = 8
         contentRow.translatesAutoresizingMaskIntoConstraints = false
 
-        if let action {
-            attachAsyncClickAction(to: contentRow, label: label, shortcut: shortcut, action: action)
-        }
+        if let action { attachAsyncClickAction(to: contentRow, label: label, shortcut: shortcut, action: action) }
 
         contentRow.addArrangedSubview(badge)
         contentRow.addArrangedSubview(iconView)
@@ -4642,9 +4464,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
     private func workspaceDetailShortcutFooterSegments() -> [String] {
         [
-            "Dashboard \(footerShortcutHint(for: .guiDashboardShortcut))",
-            "Next window \(footerShortcutHint(for: .guiNextShortcut))", "Prev window \(footerShortcutHint(for: .guiPreviousShortcut))",
-            "Settings \(footerShortcutHint(for: .guiOpenSettingsShortcut))",
+            "Dashboard \(footerShortcutHint(for: .guiDashboardShortcut))", "Next window \(footerShortcutHint(for: .guiNextShortcut))",
+            "Prev window \(footerShortcutHint(for: .guiPreviousShortcut))", "Settings \(footerShortcutHint(for: .guiOpenSettingsShortcut))",
         ]
     }
 
@@ -4748,7 +4569,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             updateShortcutCaptureButtonText(button, text: shortcutCaptureButtonTitle(setting: setting), active: isActive)
             styleShortcutCaptureButton(button, active: isActive)
             if activeShortcutCaptureSetting == setting {
-                button.toolTip = setting.capturesModifierOnly ? "Hold a modifier combination (Esc to cancel)" : "Press a key combination (Esc to cancel)"
+                button.toolTip =
+                    setting.capturesModifierOnly ? "Hold a modifier combination (Esc to cancel)" : "Press a key combination (Esc to cancel)"
             } else {
                 button.toolTip = "Click to capture shortcut"
             }
@@ -4987,8 +4809,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     }
 
     private func storeWorkspaceFields(
-        workspaceID: String, stopView: NSTextView, portEditor: PortEditor, processEditor: ProcessEditor,
-        browserSessionEditor: BrowserSessionEditor, agentLauncherEditor: AgentLauncherEditor
+        workspaceID: String, stopView: NSTextView, portEditor: PortEditor, processEditor: ProcessEditor, browserSessionEditor: BrowserSessionEditor,
+        agentLauncherEditor: AgentLauncherEditor
     ) -> Int {
         let id = workspaceID.hashValue
         WorkspaceFieldCache.shared.cache[id] = WorkspaceFieldRefs(
@@ -5000,16 +4822,15 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     private func storeAddProjectFields(
         sourcePopup: NSPopUpButton, localSourceSection: NSStackView, cloneSourceSection: NSStackView, dirField: NSTextField,
         repoURLField: NSTextField, setupView: NSTextView, stopView: NSTextView, portEditor: PortEditor, processEditor: ProcessEditor,
-        browserSessionEditor: BrowserSessionEditor, agentLauncherEditor: AgentLauncherEditor, browseButton: NSButton,
-        progressiveInputViews: [NSView], createButton: NSButton
+        browserSessionEditor: BrowserSessionEditor, agentLauncherEditor: AgentLauncherEditor, browseButton: NSButton, progressiveInputViews: [NSView],
+        createButton: NSButton
     ) -> Int {
         let id = UUID().uuidString.hashValue
         AddProjectFieldCache.shared.cache[id] = AddProjectFieldRefs(
             sourcePopup: sourcePopup, localSourceSection: localSourceSection, cloneSourceSection: cloneSourceSection, dirField: dirField,
             repoURLField: repoURLField, browseButton: browseButton, progressiveInputViews: progressiveInputViews, createButton: createButton,
             setupView: setupView, stopView: stopView, portEditor: portEditor, processEditor: processEditor,
-            browserSessionEditor: browserSessionEditor, agentLauncherEditor: agentLauncherEditor
-        )
+            browserSessionEditor: browserSessionEditor, agentLauncherEditor: agentLauncherEditor)
         sourcePopup.tag = id
         browseButton.tag = id
         return id
@@ -5343,10 +5164,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
     private func currentAddWorkspaceBranchValue(_ refs: AddWorkspaceFieldRefs) -> String {
         switch addWorkspaceBranchMode(refs: refs) {
-        case .existing:
-            refs.existingBranchField?.stringValue ?? ""
-        case .create:
-            refs.newBranchField?.stringValue ?? ""
+        case .existing: refs.existingBranchField?.stringValue ?? ""
+        case .create: refs.newBranchField?.stringValue ?? ""
         }
     }
 
@@ -5407,9 +5226,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             let tooltip = refs.tooltipField?.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
             let resolvedTooltip: String?
             if let tooltip, tooltip.isEmpty { resolvedTooltip = nil } else { resolvedTooltip = tooltip }
-            if refs.isGitRepo, branch.isEmpty {
-                throw MuxyError.invalidArgument(message: "Branch name is required for git projects.")
-            }
+            if refs.isGitRepo, branch.isEmpty { throw MuxyError.invalidArgument(message: "Branch name is required for git projects.") }
             if refs.isGitRepo, targetBranch == nil || targetBranch?.isEmpty == true {
                 throw MuxyError.invalidArgument(message: "Target branch is required for git projects.")
             }
@@ -5688,9 +5505,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     private func openWorkspaceFinder(workspaceID: String) {
         guard let (_, workspace) = findWorkspace(id: workspaceID) else { return }
         let url = URL(fileURLWithPath: workspace.dir, isDirectory: true)
-        if NSWorkspace.shared.open(url) {
-            hideAfterSuccessfulExternalWindowAction(.open)
-        }
+        if NSWorkspace.shared.open(url) { hideAfterSuccessfulExternalWindowAction(.open) }
     }
 
     private func findWorkspace(id: String) -> (ProjectSummary, WorkspaceSummary)? {
@@ -5770,9 +5585,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     private func setupShortcutMonitor() {
         shortcutMonitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .flagsChanged]) { [weak self] event in
             guard let self else { return event }
-            if event.type == .flagsChanged {
-                return self.handleShortcutFlagsChanged(event: event) ? nil : event
-            }
+            if event.type == .flagsChanged { return self.handleShortcutFlagsChanged(event: event) ? nil : event }
             self.recordStartupInteraction(kind: "key_down")
             if self.handleShortcutCaptureEvent(event: event) { return nil }
             if self.handleAddProjectShortcut(event: event) { return nil }
@@ -5962,17 +5775,13 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
     private func currentPressedShortcutModifiers(fallback flags: NSEvent.ModifierFlags) -> Set<HotkeyModifier> {
         let pressedModifierKeys: [(HotkeyModifier, [CGKeyCode])] = [
-            (.cmd, [CGKeyCode(kVK_Command), CGKeyCode(kVK_RightCommand)]),
-            (.shift, [CGKeyCode(kVK_Shift), CGKeyCode(kVK_RightShift)]),
-            (.alt, [CGKeyCode(kVK_Option), CGKeyCode(kVK_RightOption)]),
-            (.ctrl, [CGKeyCode(kVK_Control), CGKeyCode(kVK_RightControl)]),
+            (.cmd, [CGKeyCode(kVK_Command), CGKeyCode(kVK_RightCommand)]), (.shift, [CGKeyCode(kVK_Shift), CGKeyCode(kVK_RightShift)]),
+            (.alt, [CGKeyCode(kVK_Option), CGKeyCode(kVK_RightOption)]), (.ctrl, [CGKeyCode(kVK_Control), CGKeyCode(kVK_RightControl)]),
         ]
 
         var modifiers = Set<HotkeyModifier>()
         for (modifier, keyCodes) in pressedModifierKeys {
-            if keyCodes.contains(where: { CGEventSource.keyState(.combinedSessionState, key: $0) }) {
-                modifiers.insert(modifier)
-            }
+            if keyCodes.contains(where: { CGEventSource.keyState(.combinedSessionState, key: $0) }) { modifiers.insert(modifier) }
         }
         return modifiers.isEmpty ? shortcutModifiers(from: flags) : modifiers
     }
@@ -6021,21 +5830,16 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     }
 
     private func navigateSidebarSelection(direction: Int) -> Bool {
-        guard let target = Self.sidebarArrowSelectionTarget(
-            visibleWorkspaceIDsByProject: projects.map { project in
-                let visibleWorkspaceIDs = project.isCollapsed ? [] : visibleWorkspaces(projectID: project.id).map(\.id)
-                return (project.id, visibleWorkspaceIDs)
-            },
-            selectedProjectID: selectedProjectID,
-            selectedWorkspaceID: selectedWorkspaceID,
-            showingDashboard: showingDashboard,
-            direction: direction)
-        else {
-            return false
-        }
+        guard
+            let target = Self.sidebarArrowSelectionTarget(
+                visibleWorkspaceIDsByProject: projects.map { project in
+                    let visibleWorkspaceIDs = project.isCollapsed ? [] : visibleWorkspaces(projectID: project.id).map(\.id)
+                    return (project.id, visibleWorkspaceIDs)
+                }, selectedProjectID: selectedProjectID, selectedWorkspaceID: selectedWorkspaceID, showingDashboard: showingDashboard,
+                direction: direction)
+        else { return false }
         switch target {
-        case .dashboard:
-            showDashboardDetail()
+        case .dashboard: showDashboardDetail()
         case .workspace(let workspaceID):
             guard let (_, workspace) = findWorkspace(id: workspaceID) else { return false }
             selectWorkspace(workspace)
@@ -6048,22 +5852,16 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         guard flags.isEmpty else { return false }
         let direction: Int
         switch event.keyCode {
-        case UInt16(kVK_UpArrow):
-            direction = -1
-        case UInt16(kVK_DownArrow):
-            direction = 1
-        default:
-            return false
+        case UInt16(kVK_UpArrow): direction = -1
+        case UInt16(kVK_DownArrow): direction = 1
+        default: return false
         }
         return navigateSidebarSelection(direction: direction)
     }
 
     nonisolated static func sidebarArrowSelectionTarget(
-        visibleWorkspaceIDsByProject: [(projectID: String, workspaceIDs: [String])],
-        selectedProjectID: String?,
-        selectedWorkspaceID: String?,
-        showingDashboard: Bool,
-        direction: Int
+        visibleWorkspaceIDsByProject: [(projectID: String, workspaceIDs: [String])], selectedProjectID: String?, selectedWorkspaceID: String?,
+        showingDashboard: Bool, direction: Int
     ) -> SidebarArrowSelectionTarget? {
         guard direction == -1 || direction == 1 else { return nil }
         let visibleWorkspaceIDs = visibleWorkspaceIDsByProject.flatMap(\.workspaceIDs)
@@ -6077,16 +5875,12 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             guard targetIndex < visibleWorkspaceIDs.count else { return nil }
             return .workspace(visibleWorkspaceIDs[targetIndex])
         }
-        guard let selectedProjectID,
-              let projectIndex = visibleWorkspaceIDsByProject.firstIndex(where: { $0.projectID == selectedProjectID })
-        else {
+        guard let selectedProjectID, let projectIndex = visibleWorkspaceIDsByProject.firstIndex(where: { $0.projectID == selectedProjectID }) else {
             return nil
         }
         if direction < 0 {
             let priorProjects = visibleWorkspaceIDsByProject[..<projectIndex].reversed()
-            for project in priorProjects {
-                if let workspaceID = project.workspaceIDs.last { return .workspace(workspaceID) }
-            }
+            for project in priorProjects { if let workspaceID = project.workspaceIDs.last { return .workspace(workspaceID) } }
             return .dashboard
         }
         for project in visibleWorkspaceIDsByProject[(projectIndex + 1)...] {
@@ -6098,7 +5892,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     private func handleBufferedWindowShortcut(event: NSEvent) -> Bool {
         guard let windowIndex = bufferedWindowShortcutIndex(for: event) else { return false }
         bufferedWindowShortcutIndices.append(windowIndex)
-        logWindowShortcutProfile("stage=buffered index=\(windowIndex) sequence=\(bufferedWindowShortcutIndices.map(String.init).joined(separator: ","))")
+        logWindowShortcutProfile(
+            "stage=buffered index=\(windowIndex) sequence=\(bufferedWindowShortcutIndices.map(String.init).joined(separator: ","))")
         return true
     }
 
@@ -6231,10 +6026,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     private func performWindowFocus(_ request: WindowFocusRequest) async {
         let result = await Self.performWindowFocusSnapshot(request)
         switch result {
-        case .success:
-            hideAfterSuccessfulExternalWindowAction(.focus)
-        case .failure(let error):
-            await handleWindowFocusFailure(error)
+        case .success: hideAfterSuccessfulExternalWindowAction(.focus)
+        case .failure(let error): await handleWindowFocusFailure(error)
         }
     }
 
@@ -6244,16 +6037,13 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         case .success:
             reloadData()
             hideAfterSuccessfulExternalWindowAction(.open)
-        case .failure(let error):
-            showError(error)
+        case .failure(let error): showError(error)
         }
     }
 
     private func focusWindowShortcut(index: Int) {
         let startedAt = Date()
-        Task { @MainActor [weak self] in
-            await self?.runWindowShortcut(index: index, startedAt: startedAt)
-        }
+        Task { @MainActor [weak self] in await self?.runWindowShortcut(index: index, startedAt: startedAt) }
     }
 
     private func runWindowShortcut(index: Int, startedAt: Date) async {
@@ -6265,33 +6055,23 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             index: index, selectedWorkspaceID: selectedWorkspaceID, dashboardFocusRequest: dashboardFocusRequest)
         switch result {
         case .success(.focused(let kind)):
-            logWindowShortcutProfile(
-                "stage=route_done index=\(index) kind=\(kind) elapsed_ms=\(windowShortcutElapsedMS(since: routeStartedAt))"
-            )
+            logWindowShortcutProfile("stage=route_done index=\(index) kind=\(kind) elapsed_ms=\(windowShortcutElapsedMS(since: routeStartedAt))")
             activeWindowShortcutProfile?.routeCompletedAt = Date()
             logWindowShortcutProfile("stage=total index=\(index) elapsed_ms=\(windowShortcutElapsedMS(since: startedAt))")
             hideAfterSuccessfulExternalWindowAction(.focus)
         case .success(.opened(let kind)):
-            logWindowShortcutProfile(
-                "stage=route_done index=\(index) kind=\(kind) elapsed_ms=\(windowShortcutElapsedMS(since: routeStartedAt))"
-            )
+            logWindowShortcutProfile("stage=route_done index=\(index) kind=\(kind) elapsed_ms=\(windowShortcutElapsedMS(since: routeStartedAt))")
             activeWindowShortcutProfile?.routeCompletedAt = Date()
             logWindowShortcutProfile("stage=total index=\(index) elapsed_ms=\(windowShortcutElapsedMS(since: startedAt))")
             reloadData()
             hideAfterSuccessfulExternalWindowAction(.open)
         case .success(.noWorkspace):
-            logWindowShortcutProfile(
-                "stage=aborted index=\(index) reason=no_workspace elapsed_ms=\(windowShortcutElapsedMS(since: startedAt))"
-            )
+            logWindowShortcutProfile("stage=aborted index=\(index) reason=no_workspace elapsed_ms=\(windowShortcutElapsedMS(since: startedAt))")
         case .success(.noMatch):
-            logWindowShortcutProfile(
-                "stage=aborted index=\(index) reason=no_match elapsed_ms=\(windowShortcutElapsedMS(since: startedAt))"
-            )
+            logWindowShortcutProfile("stage=aborted index=\(index) reason=no_match elapsed_ms=\(windowShortcutElapsedMS(since: startedAt))")
         case .failure(let error):
             await handleWindowFocusFailure(error)
-            logWindowShortcutProfile(
-                "stage=aborted index=\(index) reason=error elapsed_ms=\(windowShortcutElapsedMS(since: startedAt))"
-            )
+            logWindowShortcutProfile("stage=aborted index=\(index) reason=error elapsed_ms=\(windowShortcutElapsedMS(since: startedAt))")
         }
     }
 
@@ -6300,9 +6080,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         fputs("muxy: window_shortcut \(message)\n", stderr)
     }
 
-    private func windowShortcutElapsedMS(since start: Date) -> Int {
-        max(Int(Date().timeIntervalSince(start) * 1000), 0)
-    }
+    private func windowShortcutElapsedMS(since start: Date) -> Int { max(Int(Date().timeIntervalSince(start) * 1000), 0) }
 
     private func windowShortcutIndex(for event: NSEvent) -> Int? {
         guard let windowShortcutSpec else { return nil }
@@ -6384,9 +6162,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 try orchestrator.focusPreviousWindow(workspaceID: workspaceID)
             }
             hideAfterSuccessfulExternalWindowAction(.focus)
-        } catch {
-            showError(error)
-        }
+        } catch { showError(error) }
     }
 
     private func hideAfterSuccessfulExternalWindowAction(_ action: ExternalWindowAction) {
@@ -6416,12 +6192,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         }
 
         switch await Self.recoverRunningWorkspaceProcessIfPossibleSnapshot(context) {
-        case .success(true):
-            reloadData()
-        case .success(false):
-            handleWindowFocusError(error)
-        case .failure(let recoveryError):
-            showError(recoveryError)
+        case .success(true): reloadData()
+        case .success(false): handleWindowFocusError(error)
+        case .failure(let recoveryError): showError(recoveryError)
         }
     }
 
@@ -6433,20 +6206,14 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         switch context.kind {
         case .browserSession:
             showWindowIssueModal(
-                title: "Browser window not found",
-                detail: "\(context.title) is no longer open.",
-                actionTitle: "Recover (Cmd+R)",
+                title: "Browser window not found", detail: "\(context.title) is no longer open.", actionTitle: "Recover (Cmd+R)",
                 action: { [weak self] in Task { await self?.recoverMissingTrackedWindow(context) } })
         case .process:
             showWindowIssueModal(
-                title: "Process window not found",
-                detail: "\(context.title) is no longer open.",
-                actionTitle: "Recover (Cmd+R)",
+                title: "Process window not found", detail: "\(context.title) is no longer open.", actionTitle: "Recover (Cmd+R)",
                 action: { [weak self] in Task { await self?.recoverMissingTrackedWindow(context) } })
-        case .codingAgent:
-            showWindowIssueModal(title: "Agent window not found", detail: "\(context.title) is no longer open.")
-        case .window:
-            showWindowIssueModal(title: "Window not found", detail: "\(context.title) is no longer open.")
+        case .codingAgent: showWindowIssueModal(title: "Agent window not found", detail: "\(context.title) is no longer open.")
+        case .window: showWindowIssueModal(title: "Window not found", detail: "\(context.title) is no longer open.")
         }
     }
 
@@ -6460,8 +6227,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         case .process:
             progressTitle = "Recovering Process"
             progressDetail = context.title
-        case .codingAgent, .window:
-            return
+        case .codingAgent, .window: return
         }
 
         showOperationProgressOverlay(message: progressTitle, detail: progressDetail)
@@ -6473,13 +6239,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             switch context.kind {
             case .browserSession:
                 showWindowIssueToast(title: "Browser session recovered", detail: "\(context.title) reopened in a new Chrome window.")
-            case .process:
-                showWindowIssueToast(title: "Process recovered", detail: "\(context.title) reopened in a new iTerm2 window.")
-            case .codingAgent, .window:
-                break
+            case .process: showWindowIssueToast(title: "Process recovered", detail: "\(context.title) reopened in a new iTerm2 window.")
+            case .codingAgent, .window: break
             }
-        case .failure(let error):
-            showError(error)
+        case .failure(let error): showError(error)
         }
     }
 
@@ -6538,9 +6301,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     }
 
     private func refreshWorkspaceSelectionForActivation(focusedWorkspaceID: String?) {
-        let targetWorkspaceID = Self.activationWorkspaceID(
-            focusedWorkspaceID: focusedWorkspaceID,
-            selectedWorkspaceID: selectedWorkspaceID)
+        let targetWorkspaceID = Self.activationWorkspaceID(focusedWorkspaceID: focusedWorkspaceID, selectedWorkspaceID: selectedWorkspaceID)
         guard let targetWorkspaceID else { return }
         guard let (_, workspace) = findWorkspace(id: targetWorkspaceID) else { return }
         if selectedWorkspaceID == targetWorkspaceID, !showingDashboard, !showingSettings {
@@ -6563,9 +6324,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
     public func outlineView(_ outlineView: NSOutlineView, shouldShowOutlineCellForItem item: Any) -> Bool { true }
 
-    public func outlineView(_ outlineView: NSOutlineView, shouldSelectItem item: Any) -> Bool {
-        return true
-    }
+    public func outlineView(_ outlineView: NSOutlineView, shouldSelectItem item: Any) -> Bool { return true }
 
     public func outlineView(_ outlineView: NSOutlineView, child index: Int, ofItem item: Any?) -> Any {
         if item == nil { return outlineItemRef(for: .project(projects[index])) }
@@ -6594,10 +6353,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     public func outlineView(_ outlineView: NSOutlineView, viewFor tableColumn: NSTableColumn?, item: Any) -> NSView? {
         guard let ref = item as? OutlineItemRef else { return nil }
         switch ref.item {
-        case .project(let project):
-            return projectRowCell(
-                project: project,
-                isSelected: selectedProjectID == project.id && selectedWorkspaceID == nil)
+        case .project(let project): return projectRowCell(project: project, isSelected: selectedProjectID == project.id && selectedWorkspaceID == nil)
         case .workspace(let project, let workspace):
             return workspaceRowCell(project: project, workspace: workspace, isSelected: selectedWorkspaceID == workspace.id)
         }
@@ -6612,9 +6368,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         rowBackground.layer?.cornerRadius = UIRadius.regular
         rowBackground.layer?.borderWidth = isSelected ? 1 : 0
         rowBackground.layer?.borderColor = sidebarCardBorderColor(isSelected: true).cgColor
-        rowBackground.layer?.backgroundColor = isSelected
-            ? sidebarSelectedCardBackgroundColor().cgColor
-            : NSColor.clear.cgColor
+        rowBackground.layer?.backgroundColor = isSelected ? sidebarSelectedCardBackgroundColor().cgColor : NSColor.clear.cgColor
 
         let titleLabel = NSTextField(labelWithString: project.name)
         titleLabel.font = .systemFont(ofSize: 13, weight: .semibold)
@@ -6636,7 +6390,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         accessoryStack.spacing = 4
         accessoryStack.translatesAutoresizingMaskIntoConstraints = false
         accessoryStack.setContentHuggingPriority(.required, for: .horizontal)
-        let settingsButton = sidebarRowIconButton(symbol: "gearshape", tooltip: "Project settings for \(project.name)", action: #selector(showProjectSettings(_:)))
+        let settingsButton = sidebarRowIconButton(
+            symbol: "gearshape", tooltip: "Project settings for \(project.name)", action: #selector(showProjectSettings(_:)))
         settingsButton.identifier = NSUserInterfaceItemIdentifier(project.id)
         accessoryStack.addArrangedSubview(settingsButton)
 
@@ -6695,18 +6450,12 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
         let statusIcon = NSImageView()
         statusIcon.translatesAutoresizingMaskIntoConstraints = false
-        let runtimeStatus = workspaceRuntimeStatusByID[workspace.id]
+        let runtimeStatus =
+            workspaceRuntimeStatusByID[workspace.id]
             ?? WorkspaceRuntimeStatus(
-                workspaceID: workspace.id,
-                lifecycleState: WorkspaceLifecycleState(isRunning: workspace.isRunning),
-                runtimeHealth: .healthy,
-                hasTrackedRuntimeIndicators: false,
-                runningProcessCount: 0,
-                exitedProcessCount: 0,
-                failedCheckCount: 0,
-                waitingAgentWindowCount: 0,
-                missingConfiguredProcessCount: 0,
-                missingConfiguredBrowserSessionCount: 0)
+                workspaceID: workspace.id, lifecycleState: WorkspaceLifecycleState(isRunning: workspace.isRunning), runtimeHealth: .healthy,
+                hasTrackedRuntimeIndicators: false, runningProcessCount: 0, exitedProcessCount: 0, failedCheckCount: 0, waitingAgentWindowCount: 0,
+                missingConfiguredProcessCount: 0, missingConfiguredBrowserSessionCount: 0)
         let isLifecycleRunning = runtimeStatus.lifecycleState == .running
         statusIcon.image = NSImage(systemSymbolName: isLifecycleRunning ? "circle.fill" : "circle", accessibilityDescription: "Status")
         statusIcon.contentTintColor = isLifecycleRunning ? sidebarRunningIndicatorColor() : sidebarIdleIndicatorColor()
@@ -6737,8 +6486,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         cell.addSubview(cardView)
 
         NSLayoutConstraint.activate([
-            cardView.leadingAnchor.constraint(equalTo: cell.leadingAnchor),
-            cardView.trailingAnchor.constraint(equalTo: cell.trailingAnchor),
+            cardView.leadingAnchor.constraint(equalTo: cell.leadingAnchor), cardView.trailingAnchor.constraint(equalTo: cell.trailingAnchor),
             cardView.topAnchor.constraint(equalTo: cell.topAnchor, constant: 2),
             cardView.bottomAnchor.constraint(equalTo: cell.bottomAnchor, constant: -2),
 
@@ -6791,10 +6539,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     public func outlineView(_ outlineView: NSOutlineView, heightOfRowByItem item: Any) -> CGFloat {
         guard let ref = item as? OutlineItemRef else { return 24 }
         switch ref.item {
-        case .project(let project):
-            return selectedProjectID == project.id && selectedWorkspaceID == nil ? 38 : 34
-        case .workspace:
-            return 52
+        case .project(let project): return selectedProjectID == project.id && selectedWorkspaceID == nil ? 38 : 34
+        case .workspace: return 52
         }
     }
 
@@ -6850,9 +6596,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             showingSettings = false
             if !showingDashboard { showPlaceholder() }
             refreshSidebarSelectionRows(
-                previousProjectID: previousProjectID,
-                currentProjectID: selectedProjectID,
-                previousWorkspaceID: previousWorkspaceID,
+                previousProjectID: previousProjectID, currentProjectID: selectedProjectID, previousWorkspaceID: previousWorkspaceID,
                 currentWorkspaceID: selectedWorkspaceID)
             return
         }
@@ -6895,17 +6639,12 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             showWorkspaceDetail(project: project, workspace: workspace)
         }
         refreshSidebarSelectionRows(
-            previousProjectID: previousProjectID,
-            currentProjectID: selectedProjectID,
-            previousWorkspaceID: previousWorkspaceID,
+            previousProjectID: previousProjectID, currentProjectID: selectedProjectID, previousWorkspaceID: previousWorkspaceID,
             currentWorkspaceID: selectedWorkspaceID)
     }
 
     private func refreshSidebarSelectionRows(
-        previousProjectID: String?,
-        currentProjectID: String?,
-        previousWorkspaceID: String?,
-        currentWorkspaceID: String?
+        previousProjectID: String?, currentProjectID: String?, previousWorkspaceID: String?, currentWorkspaceID: String?
     ) {
         var rowsToReload = IndexSet()
         if let previousProjectID, let previousRow = rowIndex(forProjectID: previousProjectID) { rowsToReload.insert(previousRow) }
@@ -6944,29 +6683,17 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             showError(error)
             return
         }
-        if isCollapsed {
-            outlineView.collapseItem(item)
-        } else {
-            outlineView.expandItem(item)
-        }
-        if isCollapsed,
-           let selectedWorkspaceID,
-           let (project, _) = findWorkspace(id: selectedWorkspaceID),
-           project.id == projectID
-        {
+        if isCollapsed { outlineView.collapseItem(item) } else { outlineView.expandItem(item) }
+        if isCollapsed, let selectedWorkspaceID, let (project, _) = findWorkspace(id: selectedWorkspaceID), project.id == projectID {
             self.selectedWorkspaceID = nil
             self.selectedProjectID = projectID
             lastSelectedRow = row
             suppressOutlineSelectionChanges = true
             outlineView.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
             suppressOutlineSelectionChanges = false
-            if let refreshedProject = projects.first(where: { $0.id == projectID }) {
-                showProjectDetail(project: refreshedProject)
-            }
+            if let refreshedProject = projects.first(where: { $0.id == projectID }) { showProjectDetail(project: refreshedProject) }
             refreshSidebarSelectionRows(
-                previousProjectID: previousProjectID,
-                currentProjectID: selectedProjectID,
-                previousWorkspaceID: previousWorkspaceID,
+                previousProjectID: previousProjectID, currentProjectID: selectedProjectID, previousWorkspaceID: previousWorkspaceID,
                 currentWorkspaceID: selectedWorkspaceID)
         }
         outlineView.reloadData(forRowIndexes: IndexSet(integer: row), columnIndexes: IndexSet(integer: 0))
@@ -6975,11 +6702,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     private func applySidebarProjectExpansionState() {
         for project in projects {
             guard let row = rowIndex(forProjectID: project.id), let item = outlineView.item(atRow: row) else { continue }
-            if project.isCollapsed {
-                outlineView.collapseItem(item)
-            } else {
-                outlineView.expandItem(item)
-            }
+            if project.isCollapsed { outlineView.collapseItem(item) } else { outlineView.expandItem(item) }
         }
     }
 
@@ -6990,7 +6713,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             id: project.id, name: project.name, dir: project.dir, isGitRepo: project.isGitRepo, defaultBranch: project.defaultBranch,
             isCollapsed: isCollapsed)
     }
-
 
     @objc private func showProjectSettings(_ sender: NSButton) {
         guard let projectID = sender.identifier?.rawValue, let project = projects.first(where: { $0.id == projectID }) else { return }
@@ -7017,9 +6739,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         showingSettings = false
         showProjectDetail(project: project)
         refreshSidebarSelectionRows(
-            previousProjectID: previousProjectID,
-            currentProjectID: selectedProjectID,
-            previousWorkspaceID: previousWorkspaceID,
+            previousProjectID: previousProjectID, currentProjectID: selectedProjectID, previousWorkspaceID: previousWorkspaceID,
             currentWorkspaceID: selectedWorkspaceID)
     }
 
@@ -7050,8 +6770,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     }
 
     private func registerDirtyTracking(
-        setupView: NSTextView, stopView: NSTextView, portEditor: PortEditor, processEditor: ProcessEditor,
-        browserSessionEditor: BrowserSessionEditor, agentLauncherEditor: AgentLauncherEditor
+        setupView: NSTextView, stopView: NSTextView, portEditor: PortEditor, processEditor: ProcessEditor, browserSessionEditor: BrowserSessionEditor,
+        agentLauncherEditor: AgentLauncherEditor
     ) {
         projectHasUnsavedChanges = false
         NotificationCenter.default.addObserver(forName: NSText.didChangeNotification, object: setupView, queue: .main) { [weak self] _ in

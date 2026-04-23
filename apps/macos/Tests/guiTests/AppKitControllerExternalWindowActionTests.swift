@@ -3,17 +3,13 @@ import Testing
 @testable import gui
 
 @Suite struct AppKitControllerExternalWindowActionTests {
-    @Test func successfulFocusActionsHideMuxy() {
-        #expect(AppKitController.shouldHideAfterSuccessfulExternalWindowAction(true, action: .focus))
-    }
+    @Test func successfulFocusActionsHideMuxy() { #expect(AppKitController.shouldHideAfterSuccessfulExternalWindowAction(true, action: .focus)) }
 
     @Test func successfulFocusActionsDelayHideForPulseVisibility() {
         #expect(AppKitController.hideDelayAfterSuccessfulExternalWindowAction(true, action: .focus) == .milliseconds(400))
     }
 
-    @Test func successfulOpenActionsHideMuxy() {
-        #expect(AppKitController.shouldHideAfterSuccessfulExternalWindowAction(true, action: .open))
-    }
+    @Test func successfulOpenActionsHideMuxy() { #expect(AppKitController.shouldHideAfterSuccessfulExternalWindowAction(true, action: .open)) }
 
     @Test func successfulOpenActionsDoNotDelayHide() {
         #expect(AppKitController.hideDelayAfterSuccessfulExternalWindowAction(true, action: .open) == nil)

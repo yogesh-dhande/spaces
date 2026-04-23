@@ -8,9 +8,7 @@ final class PortReserverTests: XCTestCase {
 
     override func tearDown() {
         // Release any workspaces this test class may have reserved.
-        for id in PortReserver.shared.reservedWorkspaceIDs() where id.hasPrefix(prefix) {
-            PortReserver.shared.releasePorts(workspaceID: id)
-        }
+        for id in PortReserver.shared.reservedWorkspaceIDs() where id.hasPrefix(prefix) { PortReserver.shared.releasePorts(workspaceID: id) }
         super.tearDown()
     }
 

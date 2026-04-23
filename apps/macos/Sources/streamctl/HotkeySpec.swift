@@ -32,13 +32,9 @@ public struct HotkeySpec: Sendable, Equatable {
         return result
     }
 
-    public func removing(modifiers: Set<HotkeyModifier>) -> HotkeySpec {
-        HotkeySpec(key: key, modifiers: self.modifiers.subtracting(modifiers))
-    }
+    public func removing(modifiers: Set<HotkeyModifier>) -> HotkeySpec { HotkeySpec(key: key, modifiers: self.modifiers.subtracting(modifiers)) }
 
-    public func adding(modifiers: Set<HotkeyModifier>) -> HotkeySpec {
-        HotkeySpec(key: key, modifiers: self.modifiers.union(modifiers))
-    }
+    public func adding(modifiers: Set<HotkeyModifier>) -> HotkeySpec { HotkeySpec(key: key, modifiers: self.modifiers.union(modifiers)) }
 
     public static func parse(_ raw: String) throws -> HotkeySpec {
         let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)

@@ -3,6 +3,21 @@ import XCTest
 
 @testable import streamctl
 
+private final class SQLiteCommitThread: Thread {
+    private let database: OpaquePointer
+    private let delay: TimeInterval
+
+    init(database: OpaquePointer, delay: TimeInterval) {
+        self.database = database
+        self.delay = delay
+    }
+
+    override func main() {
+        Thread.sleep(forTimeInterval: delay)
+        _ = sqlite3_exec(database, "COMMIT;", nil, nil, nil)
+    }
+}
+
 final class StoreTests: XCTestCase {
     // Tests a fresh store bootstraps the current schema and version by arranging an empty DB path and asserting the resulting shape.
     func testFreshStoreBootstrapsCurrentSchema() throws {
@@ -220,8 +235,7 @@ final class StoreTests: XCTestCase {
         XCTAssertEqual(sessions[0].extractedWindow?.targetURL, "https://example.com")
 
         try store.setWorkspaceAgentLaunchers(
-            workspaceID: workspace.id,
-            launchers: [AgentLauncher(name: "Codex", command: "codex"), AgentLauncher(name: "Claude", command: "claude")])
+            workspaceID: workspace.id, launchers: [AgentLauncher(name: "Codex", command: "codex"), AgentLauncher(name: "Claude", command: "claude")])
         let launchers = try store.workspaceAgentLaunchers(workspaceID: workspace.id)
         XCTAssertEqual(launchers, [AgentLauncher(name: "Codex", command: "codex"), AgentLauncher(name: "Claude", command: "claude")])
         XCTAssertEqual(sessions[0].extractedWindow?.windowID, 303)
@@ -290,10 +304,7 @@ final class StoreTests: XCTestCase {
         defer { sqlite3_close(lockDB) }
 
         XCTAssertEqual(sqlite3_exec(lockDB, "BEGIN IMMEDIATE TRANSACTION;", nil, nil, nil), SQLITE_OK)
-        let unlockThread = Thread {
-            Thread.sleep(forTimeInterval: 0.2)
-            _ = sqlite3_exec(lockDB, "COMMIT;", nil, nil, nil)
-        }
+        let unlockThread = SQLiteCommitThread(database: lockDB, delay: 0.2)
         unlockThread.start()
 
         XCTAssertNoThrow(try store.setSetting(key: "lock-test", value: "ok"))
@@ -717,12 +728,14 @@ final class StoreTests: XCTestCase {
 
         try store.upsertAgentWindow(
             AgentWindowRecord(
-                id: UUID().uuidString, workspaceID: workspace.id, provider: .iterm2, label: "claude", terminalTrackingID: "session-a", codexThreadID: nil,
-                windowID: nil, yabaiWindowID: nil, status: .idle, createdAt: "2026-01-01T00:00:01Z", updatedAt: "2026-01-01T00:00:01Z"))
+                id: UUID().uuidString, workspaceID: workspace.id, provider: .iterm2, label: "claude", terminalTrackingID: "session-a",
+                codexThreadID: nil, windowID: nil, yabaiWindowID: nil, status: .idle, createdAt: "2026-01-01T00:00:01Z",
+                updatedAt: "2026-01-01T00:00:01Z"))
         try store.upsertAgentWindow(
             AgentWindowRecord(
-                id: UUID().uuidString, workspaceID: workspaceB.id, provider: .iterm2, label: "codex", terminalTrackingID: "session-b", codexThreadID: nil,
-                windowID: nil, yabaiWindowID: nil, status: .spinning, createdAt: "2026-01-01T00:00:02Z", updatedAt: "2026-01-01T00:00:02Z"))
+                id: UUID().uuidString, workspaceID: workspaceB.id, provider: .iterm2, label: "codex", terminalTrackingID: "session-b",
+                codexThreadID: nil, windowID: nil, yabaiWindowID: nil, status: .spinning, createdAt: "2026-01-01T00:00:02Z",
+                updatedAt: "2026-01-01T00:00:02Z"))
 
         let itermWindows = try store.agentWindowsByProvider(workspaceID: workspace.id, provider: .iterm2)
         XCTAssertEqual(itermWindows.count, 1)

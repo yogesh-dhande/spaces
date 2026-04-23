@@ -14,8 +14,8 @@ public struct WorkspaceRuntimeStatus: Sendable {
 
     public init(
         workspaceID: String, lifecycleState: WorkspaceLifecycleState, runtimeHealth: WorkspaceRuntimeHealth, hasTrackedRuntimeIndicators: Bool,
-        runningProcessCount: Int, exitedProcessCount: Int, failedCheckCount: Int, waitingAgentWindowCount: Int,
-        missingConfiguredProcessCount: Int, missingConfiguredBrowserSessionCount: Int
+        runningProcessCount: Int, exitedProcessCount: Int, failedCheckCount: Int, waitingAgentWindowCount: Int, missingConfiguredProcessCount: Int,
+        missingConfiguredBrowserSessionCount: Int
     ) {
         self.workspaceID = workspaceID
         self.lifecycleState = lifecycleState
@@ -40,26 +40,17 @@ public struct WorkspaceRuntimeStatus: Sendable {
         var parts: [String] = []
 
         switch lifecycleState {
-        case .stopped:
-            if hasTrackedRuntimeIndicators {
-                parts.append("tracked runtime leftovers")
-            }
+        case .stopped: if hasTrackedRuntimeIndicators { parts.append("tracked runtime leftovers") }
         case .running:
             switch runtimeHealth {
-            case .healthy:
-                break
-            case .missing:
-                parts.append("no tracked runtime remains")
+            case .healthy: break
+            case .missing: parts.append("no tracked runtime remains")
             case .partial:
                 if missingConfiguredProcessCount > 0 {
                     parts.append(summaryCount(missingConfiguredProcessCount, singular: "missing process", plural: "missing processes"))
                 }
-                if exitedProcessCount > 0 {
-                    parts.append(summaryCount(exitedProcessCount, singular: "exited process", plural: "exited processes"))
-                }
-                if failedCheckCount > 0 {
-                    parts.append(summaryCount(failedCheckCount, singular: "failed check", plural: "failed checks"))
-                }
+                if exitedProcessCount > 0 { parts.append(summaryCount(exitedProcessCount, singular: "exited process", plural: "exited processes")) }
+                if failedCheckCount > 0 { parts.append(summaryCount(failedCheckCount, singular: "failed check", plural: "failed checks")) }
                 if waitingAgentWindowCount > 0 {
                     parts.append(summaryCount(waitingAgentWindowCount, singular: "waiting agent", plural: "waiting agents"))
                 }
@@ -70,7 +61,5 @@ public struct WorkspaceRuntimeStatus: Sendable {
         return parts.prefix(3).joined(separator: ", ")
     }
 
-    private func summaryCount(_ count: Int, singular: String, plural: String) -> String {
-        "\(count) \(count == 1 ? singular : plural)"
-    }
+    private func summaryCount(_ count: Int, singular: String, plural: String) -> String { "\(count) \(count == 1 ? singular : plural)" }
 }

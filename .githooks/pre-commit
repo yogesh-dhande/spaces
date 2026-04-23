@@ -1,6 +1,9 @@
 #!/bin/sh
 set -e
 
+echo "Formatting staged Swift files..."
+scripts/format-staged-swift.sh
+
 echo "Running lint..."
 scripts/lint.sh
 

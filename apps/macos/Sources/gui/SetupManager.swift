@@ -27,49 +27,31 @@ private enum SetupStepAction {
     case commandAndURL(command: String, url: URL, urlLabel: String)
 }
 
-@MainActor
-final class SetupManager: NSObject {
+@MainActor final class SetupManager: NSObject {
     private let checker: any SetupChecking
 
     // Steps 3 & 4 are combined: yabai's --spaces query also requires Accessibility, so
     // "service running" and "accessibility granted" cannot be detected independently.
     private let steps: [SetupStep] = [
         SetupStep(
-            ids: [.terminalInstalled],
-            icon: "terminal",
-            title: "Install a terminal",
-            body: "Muxy opens terminal processes in iTerm2 or Ghostty. If neither is installed, install Ghostty with Homebrew or from the Ghostty website.",
+            ids: [.terminalInstalled], icon: "terminal", title: "Install a terminal",
+            body:
+                "Muxy opens terminal processes in iTerm2 or Ghostty. If neither is installed, install Ghostty with Homebrew or from the Ghostty website.",
             action: .commandAndURL(
-                command: "brew install --cask ghostty",
-                url: URL(string: "https://ghostty.org/")!,
-                urlLabel: "Open Ghostty Website"
-            )
-        ),
+                command: "brew install --cask ghostty", url: URL(string: "https://ghostty.org/")!, urlLabel: "Open Ghostty Website")),
         SetupStep(
-            ids: [.tmuxInstalled],
-            icon: "rectangle.split.1x2",
-            title: "Install tmux",
-            body: "Muxy uses tmux to keep process sessions recoverable when terminal windows close.",
-            action: .copyCommand("brew install tmux")
-        ),
+            ids: [.tmuxInstalled], icon: "rectangle.split.1x2", title: "Install tmux",
+            body: "Muxy uses tmux to keep process sessions recoverable when terminal windows close.", action: .copyCommand("brew install tmux")),
         SetupStep(
-            ids: [.yabaiInstalled],
-            icon: "hammer",
-            title: "Install yabai",
-            body: "yabai is a window manager Muxy uses to capture and focus windows.",
-            action: .copyCommand("brew install yabai")
-        ),
+            ids: [.yabaiInstalled], icon: "hammer", title: "Install yabai", body: "yabai is a window manager Muxy uses to capture and focus windows.",
+            action: .copyCommand("brew install yabai")),
         SetupStep(
-            ids: [.yabaiServiceRunning, .yabaiAccessibility],
-            icon: "hand.raised",
-            title: "Set up yabai",
-            body: "Start the yabai service and grant it Accessibility permission to manage windows.\n\nApple Menu → System Settings → Privacy & Security → Accessibility → enable yabai.",
+            ids: [.yabaiServiceRunning, .yabaiAccessibility], icon: "hand.raised", title: "Set up yabai",
+            body:
+                "Start the yabai service and grant it Accessibility permission to manage windows.\n\nApple Menu → System Settings → Privacy & Security → Accessibility → enable yabai.",
             action: .commandAndURL(
-                command: "yabai --start-service",
-                url: URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")!,
-                urlLabel: "Open System Settings"
-            )
-        ),
+                command: "yabai --start-service", url: URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")!,
+                urlLabel: "Open System Settings")),
     ]
 
     private var stepStatuses: [SetupCheckID: Bool] = [:]
@@ -128,28 +110,20 @@ final class SetupManager: NSObject {
         container.addSubview(card)
 
         NSLayoutConstraint.activate([
-            outer.topAnchor.constraint(equalTo: card.topAnchor),
-            outer.bottomAnchor.constraint(equalTo: card.bottomAnchor),
-            outer.leadingAnchor.constraint(equalTo: card.leadingAnchor),
-            outer.trailingAnchor.constraint(equalTo: card.trailingAnchor),
+            outer.topAnchor.constraint(equalTo: card.topAnchor), outer.bottomAnchor.constraint(equalTo: card.bottomAnchor),
+            outer.leadingAnchor.constraint(equalTo: card.leadingAnchor), outer.trailingAnchor.constraint(equalTo: card.trailingAnchor),
 
-            card.centerXAnchor.constraint(equalTo: container.centerXAnchor),
-            card.centerYAnchor.constraint(equalTo: container.centerYAnchor),
+            card.centerXAnchor.constraint(equalTo: container.centerXAnchor), card.centerYAnchor.constraint(equalTo: container.centerYAnchor),
             card.widthAnchor.constraint(equalToConstant: 400),
 
-            separator.widthAnchor.constraint(equalTo: outer.widthAnchor),
-            detail.widthAnchor.constraint(equalTo: outer.widthAnchor),
+            separator.widthAnchor.constraint(equalTo: outer.widthAnchor), detail.widthAnchor.constraint(equalTo: outer.widthAnchor),
         ])
 
         return container
     }
 
     func start(preferredInitialCheckID: SetupCheckID? = nil) {
-        let results = if preferredInitialCheckID == nil {
-            checker.runStartupBlockingChecks()
-        } else {
-            checker.runAll()
-        }
+        let results = if preferredInitialCheckID == nil { checker.runStartupBlockingChecks() } else { checker.runAll() }
         for result in results { stepStatuses[result.id] = result.passed }
 
         guard let firstFailIndex = initialFailIndex(preferredInitialCheckID: preferredInitialCheckID) else {
@@ -163,9 +137,9 @@ final class SetupManager: NSObject {
         updateChecklistDisplay()
         updateDetailDisplay()
 
-        becameActiveObserver = NotificationCenter.default.addObserver(
-            forName: NSApplication.didBecomeActiveNotification, object: nil, queue: .main
-        ) { [weak self] _ in Task { @MainActor [weak self] in self?.recheckCurrentStep() } }
+        becameActiveObserver = NotificationCenter.default.addObserver(forName: NSApplication.didBecomeActiveNotification, object: nil, queue: .main) {
+            [weak self] _ in Task { @MainActor [weak self] in self?.recheckCurrentStep() }
+        }
 
         startPolling()
     }
@@ -284,9 +258,7 @@ final class SetupManager: NSObject {
     // MARK: - Display updates
 
     private func updateChecklistDisplay() {
-        for (i, step) in steps.enumerated() {
-            updateChecklistRow(i, passed: allIDsPassed(for: step), isCurrent: i == currentIndex)
-        }
+        for (i, step) in steps.enumerated() { updateChecklistRow(i, passed: allIDsPassed(for: step), isCurrent: i == currentIndex) }
     }
 
     private func updateChecklistRow(_ index: Int, passed: Bool, isCurrent: Bool) {
@@ -297,20 +269,17 @@ final class SetupManager: NSObject {
         let cfg = NSImage.SymbolConfiguration(pointSize: 13, weight: isCurrent ? .semibold : .regular)
 
         if passed {
-            iconView.image = NSImage(systemSymbolName: "checkmark.circle.fill", accessibilityDescription: nil)?
-                .withSymbolConfiguration(cfg)
+            iconView.image = NSImage(systemSymbolName: "checkmark.circle.fill", accessibilityDescription: nil)?.withSymbolConfiguration(cfg)
             iconView.contentTintColor = .systemGreen
             label.font = .systemFont(ofSize: 13)
             label.textColor = .tertiaryLabelColor
         } else if isCurrent {
-            iconView.image = NSImage(systemSymbolName: "circle.fill", accessibilityDescription: nil)?
-                .withSymbolConfiguration(cfg)
+            iconView.image = NSImage(systemSymbolName: "circle.fill", accessibilityDescription: nil)?.withSymbolConfiguration(cfg)
             iconView.contentTintColor = .controlAccentColor
             label.font = .systemFont(ofSize: 13, weight: .semibold)
             label.textColor = .labelColor
         } else {
-            iconView.image = NSImage(systemSymbolName: "circle", accessibilityDescription: nil)?
-                .withSymbolConfiguration(cfg)
+            iconView.image = NSImage(systemSymbolName: "circle", accessibilityDescription: nil)?.withSymbolConfiguration(cfg)
             iconView.contentTintColor = .tertiaryLabelColor
             label.font = .systemFont(ofSize: 13)
             label.textColor = .tertiaryLabelColor
@@ -322,8 +291,7 @@ final class SetupManager: NSObject {
         let step = steps[currentIndex]
 
         let cfg = NSImage.SymbolConfiguration(pointSize: 28, weight: .regular)
-        detailIconView?.image = NSImage(systemSymbolName: step.icon, accessibilityDescription: nil)?
-            .withSymbolConfiguration(cfg)
+        detailIconView?.image = NSImage(systemSymbolName: step.icon, accessibilityDescription: nil)?.withSymbolConfiguration(cfg)
         detailIconView?.contentTintColor = .secondaryLabelColor
 
         detailTitleLabel?.stringValue = step.title
@@ -349,8 +317,8 @@ final class SetupManager: NSObject {
             label.translatesAutoresizingMaskIntoConstraints = false
 
             let copyBtn = NSButton(
-                image: NSImage(systemSymbolName: "doc.on.doc", accessibilityDescription: "Copy")!,
-                target: self, action: #selector(copyCommandPressed))
+                image: NSImage(systemSymbolName: "doc.on.doc", accessibilityDescription: "Copy")!, target: self, action: #selector(copyCommandPressed)
+            )
             copyBtn.bezelStyle = .inline
             copyBtn.isBordered = false
             copyBtn.contentTintColor = .secondaryLabelColor
@@ -365,8 +333,7 @@ final class SetupManager: NSObject {
 
             box.addSubview(row)
             NSLayoutConstraint.activate([
-                row.topAnchor.constraint(equalTo: box.topAnchor, constant: 9),
-                row.bottomAnchor.constraint(equalTo: box.bottomAnchor, constant: -9),
+                row.topAnchor.constraint(equalTo: box.topAnchor, constant: 9), row.bottomAnchor.constraint(equalTo: box.bottomAnchor, constant: -9),
                 row.leadingAnchor.constraint(equalTo: box.leadingAnchor, constant: 12),
                 row.trailingAnchor.constraint(equalTo: box.trailingAnchor, constant: -10),
             ])
@@ -388,8 +355,7 @@ final class SetupManager: NSObject {
 
             box.addSubview(openBtn)
             NSLayoutConstraint.activate([
-                openBtn.topAnchor.constraint(equalTo: box.topAnchor),
-                openBtn.bottomAnchor.constraint(equalTo: box.bottomAnchor),
+                openBtn.topAnchor.constraint(equalTo: box.topAnchor), openBtn.bottomAnchor.constraint(equalTo: box.bottomAnchor),
                 openBtn.leadingAnchor.constraint(equalTo: box.leadingAnchor),
             ])
 
@@ -411,8 +377,8 @@ final class SetupManager: NSObject {
             cmdLabel.translatesAutoresizingMaskIntoConstraints = false
 
             let copyBtn = NSButton(
-                image: NSImage(systemSymbolName: "doc.on.doc", accessibilityDescription: "Copy")!,
-                target: self, action: #selector(copyCommandPressed))
+                image: NSImage(systemSymbolName: "doc.on.doc", accessibilityDescription: "Copy")!, target: self, action: #selector(copyCommandPressed)
+            )
             copyBtn.bezelStyle = .inline
             copyBtn.isBordered = false
             copyBtn.contentTintColor = .secondaryLabelColor
@@ -448,10 +414,8 @@ final class SetupManager: NSObject {
 
             box.addSubview(inner)
             NSLayoutConstraint.activate([
-                inner.topAnchor.constraint(equalTo: box.topAnchor),
-                inner.bottomAnchor.constraint(equalTo: box.bottomAnchor),
-                inner.leadingAnchor.constraint(equalTo: box.leadingAnchor),
-                inner.trailingAnchor.constraint(equalTo: box.trailingAnchor),
+                inner.topAnchor.constraint(equalTo: box.topAnchor), inner.bottomAnchor.constraint(equalTo: box.bottomAnchor),
+                inner.leadingAnchor.constraint(equalTo: box.leadingAnchor), inner.trailingAnchor.constraint(equalTo: box.trailingAnchor),
                 cmdContainer.widthAnchor.constraint(equalTo: inner.widthAnchor),
             ])
         }
@@ -510,9 +474,7 @@ final class SetupManager: NSObject {
         stopPolling()
         isAutoAdvancing = false
 
-        let nextFail = steps.indices.dropFirst(currentIndex + 1).first(where: {
-            !allIDsPassed(for: steps[$0])
-        })
+        let nextFail = steps.indices.dropFirst(currentIndex + 1).first(where: { !allIDsPassed(for: steps[$0]) })
 
         if let next = nextFail {
             currentIndex = next
@@ -528,9 +490,7 @@ final class SetupManager: NSObject {
 
     // MARK: - Helpers
 
-    private func allIDsPassed(for step: SetupStep) -> Bool {
-        step.ids.allSatisfy { stepStatuses[$0] ?? false }
-    }
+    private func allIDsPassed(for step: SetupStep) -> Bool { step.ids.allSatisfy { stepStatuses[$0] ?? false } }
 
     private func hasStartupBlockingFailure(for step: SetupStep) -> Bool {
         let blockingIDs = step.ids.filter { SetupChecker.startupBlockingCheckIDs.contains($0) }
@@ -539,9 +499,7 @@ final class SetupManager: NSObject {
     }
 
     private func initialFailIndex(preferredInitialCheckID: SetupCheckID?) -> Int? {
-        if let preferredInitialCheckID,
-            let preferredStepIndex = steps.firstIndex(where: { $0.ids.contains(preferredInitialCheckID) })
-        {
+        if let preferredInitialCheckID, let preferredStepIndex = steps.firstIndex(where: { $0.ids.contains(preferredInitialCheckID) }) {
             if let preferredFailure = steps.indices.dropFirst(preferredStepIndex).first(where: { !allIDsPassed(for: steps[$0]) }) {
                 return preferredFailure
             }

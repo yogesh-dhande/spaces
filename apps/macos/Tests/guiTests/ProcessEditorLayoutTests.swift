@@ -106,8 +106,7 @@ import Testing
     @Test func currentStatusChecksReturnsChecksForNamedProcess() {
         let editor = ProcessEditor()
         editor.setProcessesWithChecks(
-            [.init(name: "api", command: "run api")],
-            statusChecks: [.init(process: "api", command: "curl localhost", interval: 30, timeout: 5)])
+            [.init(name: "api", command: "run api")], statusChecks: [.init(process: "api", command: "curl localhost", interval: 30, timeout: 5)])
         let checks = editor.currentStatusChecks()
         #expect(checks.count == 1)
         #expect(checks[0].process == "api")
@@ -125,11 +124,7 @@ import Testing
     // Tests processNames returns a sorted, deduplicated list of non-empty process names.
     @Test func processNamesReturnsSortedUniqueNames() {
         let editor = ProcessEditor()
-        editor.setProcesses([
-            .init(name: "zebra", command: "run z"),
-            .init(name: "apple", command: "run a"),
-            .init(name: "zebra", command: "run z2"),
-        ])
+        editor.setProcesses([.init(name: "zebra", command: "run z"), .init(name: "apple", command: "run a"), .init(name: "zebra", command: "run z2")])
         let names = editor.processNames()
         #expect(names == ["apple", "zebra"])
     }
@@ -156,13 +151,10 @@ import Testing
     @Test func setProcessesWithChecksReplacesExistingRowsOnSecondCall() {
         let editor = ProcessEditor()
         editor.setProcessesWithChecks(
-            [.init(name: "api", command: "run api")],
-            statusChecks: [.init(process: "api", command: "curl localhost", interval: 30, timeout: 5)])
+            [.init(name: "api", command: "run api")], statusChecks: [.init(process: "api", command: "curl localhost", interval: 30, timeout: 5)])
 
         // Second call replaces the rows.
-        editor.setProcessesWithChecks(
-            [.init(name: "server", command: "npm start")],
-            statusChecks: [])
+        editor.setProcessesWithChecks([.init(name: "server", command: "npm start")], statusChecks: [])
 
         let processes = editor.currentProcesses()
         #expect(processes.count == 1)

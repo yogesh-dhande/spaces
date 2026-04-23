@@ -136,12 +136,8 @@ final class HotkeySpecTests: XCTestCase {
         XCTAssertEqual(try HotkeySpec.parse("cmd f1").key, "f1")
         XCTAssertEqual(try HotkeySpec.parse("cmd f12").key, "f12")
         XCTAssertEqual(try HotkeySpec.parse("cmd f20").key, "f20")
-        XCTAssertThrowsError(try HotkeySpec.parse("cmd f21")) { error in
-            XCTAssertEqual(error.localizedDescription, "Unsupported key: f21")
-        }
-        XCTAssertThrowsError(try HotkeySpec.parse("cmd f0")) { error in
-            XCTAssertEqual(error.localizedDescription, "Unsupported key: f0")
-        }
+        XCTAssertThrowsError(try HotkeySpec.parse("cmd f21")) { error in XCTAssertEqual(error.localizedDescription, "Unsupported key: f21") }
+        XCTAssertThrowsError(try HotkeySpec.parse("cmd f0")) { error in XCTAssertEqual(error.localizedDescription, "Unsupported key: f0") }
     }
 
     // Tests modifiersCarbon includes alt and ctrl flags by arranging representative inputs and asserting the expected result.
@@ -192,20 +188,14 @@ final class HotkeySpecTests: XCTestCase {
     // Tests parse with "+" (all separators, no keys) hits guard !tokens.isEmpty else throw at line 40.
     func testParseAllSeparatorsThrowsEmptyHotkey() {
         // "+" is normalized to " " (all separators replaced), split yields empty tokens array.
-        XCTAssertThrowsError(try HotkeySpec.parse("+")) { error in
-            XCTAssertEqual(error.localizedDescription, "Hotkey cannot be empty")
-        }
+        XCTAssertThrowsError(try HotkeySpec.parse("+")) { error in XCTAssertEqual(error.localizedDescription, "Hotkey cannot be empty") }
         // "-" has the same behavior.
-        XCTAssertThrowsError(try HotkeySpec.parse("-")) { error in
-            XCTAssertEqual(error.localizedDescription, "Hotkey cannot be empty")
-        }
+        XCTAssertThrowsError(try HotkeySpec.parse("-")) { error in XCTAssertEqual(error.localizedDescription, "Hotkey cannot be empty") }
     }
 
     // Tests parse with a 1-char unsupported punctuation throws (covers canonicalKeyName 1-char path that falls through to switch default).
     func testParseSingleUnsupportedPunctuationThrows() {
         // "!" is 1 char, not a letter/digit/allowed-punctuation and not a named key.
-        XCTAssertThrowsError(try HotkeySpec.parse("cmd+!")) { error in
-            XCTAssertEqual(error.localizedDescription, "Unsupported key: !")
-        }
+        XCTAssertThrowsError(try HotkeySpec.parse("cmd+!")) { error in XCTAssertEqual(error.localizedDescription, "Unsupported key: !") }
     }
 }

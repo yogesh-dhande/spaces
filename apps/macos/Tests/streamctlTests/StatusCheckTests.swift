@@ -35,27 +35,25 @@ import Testing
                 workspaceID: workspace.id,
                 checks: [
                     StatusCheckDefinition(
-                        name: "docker-container-health", process: "web-server", command: mockScript.path, interval: 10, timeout: 5,
-                        onFail: .restart)
+                        name: "docker-container-health", process: "web-server", command: mockScript.path, interval: 10, timeout: 5, onFail: .restart)
                 ])
             try store.upsert(
                 window: WindowRecord(
                     id: UUID().uuidString, workspaceID: workspace.id, app: "iTerm2", title: "web-server", windowID: 123,
                     terminalTrackingID: "workspace-session", tmuxWindowID: "@1", role: "terminal", orderIndex: 200, lastSeenAt: "now"))
             let runningProcess = RunningProcessRecord(
-                id: UUID().uuidString, workspaceID: workspace.id, templateName: "web-server", command: "docker compose up -d",
-                terminalApp: "iTerm2", windowID: 123, terminalTrackingID: "workspace-session", itermTabIndex: nil, tmuxWindowID: "@1", pid: 9000,
-                status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil)
+                id: UUID().uuidString, workspaceID: workspace.id, templateName: "web-server", command: "docker compose up -d", terminalApp: "iTerm2",
+                windowID: 123, terminalTrackingID: "workspace-session", itermTabIndex: nil, tmuxWindowID: "@1", pid: 9000, status: .running,
+                logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil)
             try store.upsert(runningProcess: runningProcess)
 
             var results: [StatusResult] = []
             try withMockCommands(["yabai": Self.yabaiMockScript]) {
                 try withEnv(
                     name: "YABAI_WINDOWS_JSON",
-                    value: #"[{"id":123,"pid":11,"app":"iTerm2","title":"web-server","space":1,"display":1,"is-sticky":false,"is-hidden":false,"is-visible":true,"is-native-fullscreen":false}]"#
-                ) {
-                    results = try orchestrator.runStatusChecks(workspaceID: workspace.id)
-                }
+                    value:
+                        #"[{"id":123,"pid":11,"app":"iTerm2","title":"web-server","space":1,"display":1,"is-sticky":false,"is-hidden":false,"is-visible":true,"is-native-fullscreen":false}]"#
+                ) { results = try orchestrator.runStatusChecks(workspaceID: workspace.id) }
             }
             #expect(results.count == 1)
             #expect(results.first?.status == .failed)
@@ -168,8 +166,8 @@ import Testing
                 workspaceID: workspace.id,
                 checks: [
                     StatusCheckDefinition(
-                        name: "docker-container-health", process: "web-server", command: failingCheck.path, interval: 10, timeout: 5,
-                        onFail: .restart)
+                        name: "docker-container-health", process: "web-server", command: failingCheck.path, interval: 10, timeout: 5, onFail: .restart
+                    )
                 ])
             let workspaceRuntime = runtimeDir.appendingPathComponent(workspace.id, isDirectory: true)
             try FileManager.default.createDirectory(at: workspaceRuntime, withIntermediateDirectories: true)
@@ -190,10 +188,9 @@ import Testing
             try withMockCommands(["yabai": Self.yabaiMockScript]) {
                 try withEnv(
                     name: "YABAI_WINDOWS_JSON",
-                    value: #"[{"id":123,"pid":11,"app":"iTerm2","title":"web-server","space":1,"display":1,"is-sticky":false,"is-hidden":false,"is-visible":true,"is-native-fullscreen":false}]"#
-                ) {
-                    results = try orchestrator.runStatusChecks(workspaceID: workspace.id)
-                }
+                    value:
+                        #"[{"id":123,"pid":11,"app":"iTerm2","title":"web-server","space":1,"display":1,"is-sticky":false,"is-hidden":false,"is-visible":true,"is-native-fullscreen":false}]"#
+                ) { results = try orchestrator.runStatusChecks(workspaceID: workspace.id) }
             }
             #expect(results.count == 1)
             #expect(results.first?.status == .failed)
@@ -229,13 +226,7 @@ import Testing
         defer { sharedEnvironmentMutationLock.unlock() }
         let original = ProcessInfo.processInfo.environment[name]
         setenv(name, value, 1)
-        defer {
-            if let original {
-                setenv(name, original, 1)
-            } else {
-                unsetenv(name)
-            }
-        }
+        defer { if let original { setenv(name, original, 1) } else { unsetenv(name) } }
         try run()
     }
 

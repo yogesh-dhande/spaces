@@ -17,9 +17,7 @@ public enum Shell {
     }
 
     private static func resolvedExecutablePath(for executable: String, environment: [String: String]) -> String? {
-        if executable.contains("/") {
-            return FileManager.default.isExecutableFile(atPath: executable) ? executable : nil
-        }
+        if executable.contains("/") { return FileManager.default.isExecutableFile(atPath: executable) ? executable : nil }
 
         let pathValue = environment["PATH"] ?? ""
         for directory in pathValue.split(separator: ":").map(String.init) where !directory.isEmpty {
@@ -44,26 +42,24 @@ public enum Shell {
         if cwd == nil, let executablePath = resolvedExecutablePath(for: executable, environment: environment) {
             var argv: [UnsafeMutablePointer<CChar>?] = ([executablePath] + Array(command.dropFirst())).map { strdup($0) }
             argv.append(nil)
-            defer {
-                for case let pointer? in argv { free(pointer) }
-            }
+            defer { for case let pointer? in argv { free(pointer) } }
 
             var envp: [UnsafeMutablePointer<CChar>?] = environment.map { strdup("\($0.key)=\($0.value)") }
             envp.append(nil)
-            defer {
-                for case let pointer? in envp { free(pointer) }
-            }
+            defer { for case let pointer? in envp { free(pointer) } }
 
             var pid: pid_t = 0
             let spawnResult = posix_spawn(&pid, executablePath, nil, nil, &argv, &envp)
             if spawnResult != 0 {
-                throw NSError(domain: NSPOSIXErrorDomain, code: Int(spawnResult), userInfo: [NSLocalizedDescriptionKey: String(cString: strerror(spawnResult))])
+                throw NSError(
+                    domain: NSPOSIXErrorDomain, code: Int(spawnResult), userInfo: [NSLocalizedDescriptionKey: String(cString: strerror(spawnResult))])
             }
 
             var status: Int32 = 0
             if waitpid(pid, &status, 0) == -1 {
                 let errnoValue = errno
-                throw NSError(domain: NSPOSIXErrorDomain, code: Int(errnoValue), userInfo: [NSLocalizedDescriptionKey: String(cString: strerror(errnoValue))])
+                throw NSError(
+                    domain: NSPOSIXErrorDomain, code: Int(errnoValue), userInfo: [NSLocalizedDescriptionKey: String(cString: strerror(errnoValue))])
             }
             return waitStatus(status)
         }
@@ -88,13 +84,15 @@ public enum Shell {
             var stderrPipe: [Int32] = [0, 0]
             guard pipe(&stdoutPipe) == 0 else {
                 let errnoValue = errno
-                throw NSError(domain: NSPOSIXErrorDomain, code: Int(errnoValue), userInfo: [NSLocalizedDescriptionKey: String(cString: strerror(errnoValue))])
+                throw NSError(
+                    domain: NSPOSIXErrorDomain, code: Int(errnoValue), userInfo: [NSLocalizedDescriptionKey: String(cString: strerror(errnoValue))])
             }
             guard pipe(&stderrPipe) == 0 else {
                 let errnoValue = errno
                 close(stdoutPipe[0])
                 close(stdoutPipe[1])
-                throw NSError(domain: NSPOSIXErrorDomain, code: Int(errnoValue), userInfo: [NSLocalizedDescriptionKey: String(cString: strerror(errnoValue))])
+                throw NSError(
+                    domain: NSPOSIXErrorDomain, code: Int(errnoValue), userInfo: [NSLocalizedDescriptionKey: String(cString: strerror(errnoValue))])
             }
 
             var argv: [UnsafeMutablePointer<CChar>?] = ([executablePath] + Array(command.dropFirst())).map { strdup($0) }
@@ -122,7 +120,8 @@ public enum Shell {
             if spawnResult != 0 {
                 close(stdoutPipe[0])
                 close(stderrPipe[0])
-                throw NSError(domain: NSPOSIXErrorDomain, code: Int(spawnResult), userInfo: [NSLocalizedDescriptionKey: String(cString: strerror(spawnResult))])
+                throw NSError(
+                    domain: NSPOSIXErrorDomain, code: Int(spawnResult), userInfo: [NSLocalizedDescriptionKey: String(cString: strerror(spawnResult))])
             }
 
             let stdoutHandle = FileHandle(fileDescriptor: stdoutPipe[0], closeOnDealloc: true)
@@ -133,7 +132,8 @@ public enum Shell {
             var status: Int32 = 0
             if waitpid(pid, &status, 0) == -1 {
                 let errnoValue = errno
-                throw NSError(domain: NSPOSIXErrorDomain, code: Int(errnoValue), userInfo: [NSLocalizedDescriptionKey: String(cString: strerror(errnoValue))])
+                throw NSError(
+                    domain: NSPOSIXErrorDomain, code: Int(errnoValue), userInfo: [NSLocalizedDescriptionKey: String(cString: strerror(errnoValue))])
             }
 
             let terminationStatus = waitStatus(status)

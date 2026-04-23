@@ -22,9 +22,35 @@ Run from the repository root:
 ```bash
 scripts/swiftpm.sh build
 scripts/swiftpm.sh test --parallel
+scripts/format-staged-swift.sh
 scripts/lint.sh
 scripts/coverage.sh
 ```
+
+Git commits can use the repo hook in `.githooks/pre-commit`, which auto-formats staged Swift files under `apps/macos/Sources` and `apps/macos/Tests` before running lint and coverage.
+
+Enable the repo-managed hooks once per clone:
+
+```bash
+git config core.hooksPath .githooks
+```
+
+Verify the setting:
+
+```bash
+git config --get core.hooksPath
+```
+
+Expected output:
+
+```text
+.githooks
+```
+
+The pre-commit hook currently does three things:
+- formats staged macOS Swift source and test files with `swift format`
+- runs `scripts/lint.sh`
+- runs `scripts/coverage.sh`
 
 Useful local entry points:
 

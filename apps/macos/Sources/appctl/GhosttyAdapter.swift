@@ -94,9 +94,7 @@ open class GhosttyAdapter: @unchecked Sendable {
         let window: GhosttyWindowInfo = try self.openWindowAndRun(
             command: commandApplyingEnvironment(command, environment: environment), cwd: cwd, background: background)
         return TerminalLaunchResult(
-            trackingIdentity: .session(window.terminalID),
-            hookSessionID: environment["MUXY_TERMINAL_TRACKING_ID"],
-            containerID: window.windowID,
+            trackingIdentity: .session(window.terminalID), hookSessionID: environment["MUXY_TERMINAL_TRACKING_ID"], containerID: window.windowID,
             fallbackWindowID: nil)
     }
 }

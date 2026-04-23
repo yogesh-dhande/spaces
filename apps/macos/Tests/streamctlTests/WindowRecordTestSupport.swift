@@ -9,8 +9,8 @@ extension WindowRecord {
     ) {
         self.init(
             id: id, workspaceID: workspaceID, app: app, name: title, detail: nil, targetURL: targetURL, windowID: windowID,
-            terminalTrackingID: terminalTrackingID, itermTabIndex: itermTabIndex, tmuxWindowID: tmuxWindowID, role: role,
-            orderIndex: orderIndex, lastSeenAt: lastSeenAt)
+            terminalTrackingID: terminalTrackingID, itermTabIndex: itermTabIndex, tmuxWindowID: tmuxWindowID, role: role, orderIndex: orderIndex,
+            lastSeenAt: lastSeenAt)
     }
 
     var title: String? { name }

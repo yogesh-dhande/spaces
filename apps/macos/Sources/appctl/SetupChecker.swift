@@ -25,9 +25,7 @@ public struct SetupCheckResult {
 /// Runs prerequisite checks for Muxy dependencies (iTerm2, tmux, and yabai).
 /// Injecting custom adapter subclasses enables unit testing without real apps.
 public final class SetupChecker {
-    public static var startupBlockingCheckIDs: [SetupCheckID] {
-        [.terminalInstalled, .tmuxInstalled, .yabaiInstalled]
-    }
+    public static var startupBlockingCheckIDs: [SetupCheckID] { [.terminalInstalled, .tmuxInstalled, .yabaiInstalled] }
 
     private let terminalAdapters: [any TerminalAdapter]
     private let tmux: TmuxAdapter
@@ -40,18 +38,14 @@ public final class SetupChecker {
     /// Runs a single check and returns whether it passed.
     public func run(_ id: SetupCheckID) -> Bool {
         let startedAt = ProcessInfo.processInfo.systemUptime
-        let passed = switch id {
-        case .terminalInstalled:
-            isTerminalInstalled()
-        case .tmuxInstalled:
-            isTmuxInstalled()
-        case .yabaiInstalled:
-            isYabaiInstalled()
-        case .yabaiServiceRunning:
-            isYabaiServiceRunning()
-        case .yabaiAccessibility:
-            hasYabaiAccessibility()
-        }
+        let passed =
+            switch id {
+            case .terminalInstalled: isTerminalInstalled()
+            case .tmuxInstalled: isTmuxInstalled()
+            case .yabaiInstalled: isYabaiInstalled()
+            case .yabaiServiceRunning: isYabaiServiceRunning()
+            case .yabaiAccessibility: hasYabaiAccessibility()
+            }
         logSetupCheckProfile(id: id, passed: passed, startedAt: startedAt)
         return passed
     }
@@ -78,23 +72,15 @@ public final class SetupChecker {
         return results
     }
 
-    private func run(_ ids: [SetupCheckID]) -> [SetupCheckResult] {
-        ids.map { id in SetupCheckResult(id: id, passed: run(id)) }
-    }
+    private func run(_ ids: [SetupCheckID]) -> [SetupCheckResult] { ids.map { id in SetupCheckResult(id: id, passed: run(id)) } }
 
     // MARK: - Individual checks
 
-    private func isTerminalInstalled() -> Bool {
-        terminalAdapters.contains { $0.isAvailable() }
-    }
+    private func isTerminalInstalled() -> Bool { terminalAdapters.contains { $0.isAvailable() } }
 
-    private func isTmuxInstalled() -> Bool {
-        tmux.isAvailable()
-    }
+    private func isTmuxInstalled() -> Bool { tmux.isAvailable() }
 
-    private func isYabaiInstalled() -> Bool {
-        (try? Shell.runAndCapture(["yabai", "--version"])) != nil
-    }
+    private func isYabaiInstalled() -> Bool { (try? Shell.runAndCapture(["yabai", "--version"])) != nil }
 
     private func isYabaiServiceRunning() -> Bool {
         guard (try? Shell.runAndCapture(["yabai", "-m", "signal", "--list"])) != nil else { return false }

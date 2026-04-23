@@ -5,55 +5,37 @@ import streamctl
 
 public struct MXCommand: ParsableCommand {
     public static let configuration = CommandConfiguration(
-        commandName: "mx",
-        abstract: "Workspace registration, runtime, and coding-agent lifecycle commands for Muxy.",
+        commandName: "mx", abstract: "Workspace registration, runtime, and coding-agent lifecycle commands for Muxy.",
         discussion: """
-        Notes:
-          - All settings are stored in ~/.muxy/muxy.db.
-          - Runtime state is stored in ~/.muxy/muxy.db and migrated in place with additive schema changes.
-          - Paths default to the current directory when omitted.
-          - `workspace import` registers the current directory by default and can apply `--title` or `--tooltip` when creating or re-importing a workspace.
-          - `workspace update` mutates workspace metadata after creation.
-          - `workspace up` waits for pending/running setup to complete and fails with the setup error if setup failed. It ensures a workspace and all its processes are running: launches when stopped; when already running, restarts any exited processes. Windows open without activating the app. Add `--restart` to force a full stop+launch. Add `--focus <name>` to bring one named workspace window to the foreground after launch.
-          - `agent launch --name <name>` launches one configured coding agent in a dedicated terminal window without tmux.
-          - Agent events stay explicit. `workspace import` and `workspace up` do not imply agent lifecycle. Events from unsupported terminal hosts are dropped. Agent events fired from tmux are rejected because Muxy does not support coding agents running inside tmux.
-        """,
-        version: AppVersion.current,
-        subcommands: [
-            WorkspaceCommand.self,
-            AgentCommand.self
-        ]
-    )
+            Notes:
+              - All settings are stored in ~/.muxy/muxy.db.
+              - Runtime state is stored in ~/.muxy/muxy.db and migrated in place with additive schema changes.
+              - Paths default to the current directory when omitted.
+              - `workspace import` registers the current directory by default and can apply `--title` or `--tooltip` when creating or re-importing a workspace.
+              - `workspace update` mutates workspace metadata after creation.
+              - `workspace up` waits for pending/running setup to complete and fails with the setup error if setup failed. It ensures a workspace and all its processes are running: launches when stopped; when already running, restarts any exited processes. Windows open without activating the app. Add `--restart` to force a full stop+launch. Add `--focus <name>` to bring one named workspace window to the foreground after launch.
+              - `agent launch --name <name>` launches one configured coding agent in a dedicated terminal window without tmux.
+              - Agent events stay explicit. `workspace import` and `workspace up` do not imply agent lifecycle. Events from unsupported terminal hosts are dropped. Agent events fired from tmux are rejected because Muxy does not support coding agents running inside tmux.
+            """, version: AppVersion.current, subcommands: [WorkspaceCommand.self, AgentCommand.self])
 
     public init() {}
 }
 
 struct WorkspaceCommand: ParsableCommand {
     static let configuration = CommandConfiguration(
-        commandName: "workspace",
-        abstract: "Import, update, and launch workspaces.",
-        subcommands: [
-            WorkspaceImportCommand.self,
-            WorkspaceUpdateCommand.self,
-            WorkspaceUpCommand.self
-        ]
-    )
+        commandName: "workspace", abstract: "Import, update, and launch workspaces.",
+        subcommands: [WorkspaceImportCommand.self, WorkspaceUpdateCommand.self, WorkspaceUpCommand.self])
 }
 
 struct WorkspaceImportCommand: ParsableCommand {
     static let configuration = CommandConfiguration(
-        commandName: "import",
-        abstract: "Register a workspace for the current directory or a provided path."
-    )
+        commandName: "import", abstract: "Register a workspace for the current directory or a provided path.")
 
-    @Argument(help: "Workspace directory. Defaults to the current directory.")
-    var path: String?
+    @Argument(help: "Workspace directory. Defaults to the current directory.") var path: String?
 
-    @Option(name: .long, help: "Workspace title override.")
-    var title: String?
+    @Option(name: .long, help: "Workspace title override.") var title: String?
 
-    @Option(name: .long, help: "Workspace tooltip override.")
-    var tooltip: String?
+    @Option(name: .long, help: "Workspace tooltip override.") var tooltip: String?
 
     func run() throws {
         let context = CLIContext()
@@ -64,18 +46,13 @@ struct WorkspaceImportCommand: ParsableCommand {
 
         if let existing = try orchestrator.store.workspace(dir: normalizedImportDirectory), !existing.isArchived {
             if title != nil || tooltip != nil {
-                try orchestrator.updateWorkspaceMetadata(
-                    workspaceID: existing.id,
-                    title: title,
-                    tooltip: tooltip != nil ? .some(tooltip) : nil
-                )
+                try orchestrator.updateWorkspaceMetadata(workspaceID: existing.id, title: title, tooltip: tooltip != nil ? .some(tooltip) : nil)
             }
 
             workspace = try orchestrator.store.workspace(id: existing.id) ?? existing
             try context.output.emit(
                 text: "Workspace already exists: \(workspace.title)\t\(workspace.dir)",
-                json: MutationResultPayload(message: "Workspace already exists.", resource: workspace)
-            )
+                json: MutationResultPayload(message: "Workspace already exists.", resource: workspace))
             return
         }
 
@@ -88,30 +65,22 @@ struct WorkspaceImportCommand: ParsableCommand {
         workspace = created
         try context.output.emit(
             text: "Created workspace \(workspace.title)\t\(workspace.dir)",
-            json: MutationResultPayload(message: "Created workspace \(workspace.title).", resource: workspace)
-        )
+            json: MutationResultPayload(message: "Created workspace \(workspace.title).", resource: workspace))
     }
 }
 
 struct WorkspaceUpdateCommand: ParsableCommand {
     static let configuration = CommandConfiguration(
-        commandName: "update",
-        abstract: "Update workspace metadata for the current directory or a provided path."
-    )
+        commandName: "update", abstract: "Update workspace metadata for the current directory or a provided path.")
 
-    @Argument(help: "Workspace directory. Defaults to the current directory.")
-    var path: String?
+    @Argument(help: "Workspace directory. Defaults to the current directory.") var path: String?
 
-    @Option(name: .long, help: "Workspace title override.")
-    var title: String?
+    @Option(name: .long, help: "Workspace title override.") var title: String?
 
-    @Option(name: .long, help: "Workspace tooltip override.")
-    var tooltip: String?
+    @Option(name: .long, help: "Workspace tooltip override.") var tooltip: String?
 
     func validate() throws {
-        if title == nil && tooltip == nil {
-            throw ValidationError("Specify at least one field to update with `--title` or `--tooltip`.")
-        }
+        if title == nil && tooltip == nil { throw ValidationError("Specify at least one field to update with `--title` or `--tooltip`.") }
     }
 
     func run() throws {
@@ -119,77 +88,51 @@ struct WorkspaceUpdateCommand: ParsableCommand {
         let orchestrator = try context.makeOrchestrator()
         let workspace = try requireWorkspace(path: path, orchestrator: orchestrator, context: context)
 
-        try orchestrator.updateWorkspaceMetadata(
-            workspaceID: workspace.id,
-            title: title,
-            tooltip: tooltip != nil ? .some(tooltip) : nil
-        )
+        try orchestrator.updateWorkspaceMetadata(workspaceID: workspace.id, title: title, tooltip: tooltip != nil ? .some(tooltip) : nil)
 
         let updatedWorkspace = try requireWorkspace(id: workspace.id, orchestrator: orchestrator)
         try context.output.emit(
             text: "Updated workspace \(updatedWorkspace.title)\t\(updatedWorkspace.dir)",
-            json: MutationResultPayload(message: "Updated workspace \(updatedWorkspace.title).", resource: updatedWorkspace)
-        )
+            json: MutationResultPayload(message: "Updated workspace \(updatedWorkspace.title).", resource: updatedWorkspace))
     }
 }
 
 struct WorkspaceUpCommand: ParsableCommand {
     static let configuration = CommandConfiguration(
-        commandName: "up",
-        abstract: "Ensure a workspace is running and optionally focus a tracked window."
-    )
+        commandName: "up", abstract: "Ensure a workspace is running and optionally focus a tracked window.")
 
-    @Argument(help: "Workspace directory. Defaults to the current directory.")
-    var path: String?
+    @Argument(help: "Workspace directory. Defaults to the current directory.") var path: String?
 
-    @Flag(name: .long, help: "Force a full stop and relaunch if the workspace is already running.")
-    var restart = false
+    @Flag(name: .long, help: "Force a full stop and relaunch if the workspace is already running.") var restart = false
 
-    @Option(name: .long, help: "Focus a named workspace window after launch.")
-    var focus: String?
+    @Option(name: .long, help: "Focus a named workspace window after launch.") var focus: String?
 
     func run() throws {
         let context = CLIContext()
         let orchestrator = try context.makeOrchestrator()
         let workspace = try requireWorkspace(path: path, orchestrator: orchestrator, context: context)
 
-        try orchestrator.upWorkspace(
-            workspaceID: workspace.id,
-            restartIfRunning: restart,
-            background: focus == nil
-        )
+        try orchestrator.upWorkspace(workspaceID: workspace.id, restartIfRunning: restart, background: focus == nil)
 
-        if let focus {
-            try orchestrator.focusWorkspaceWindow(workspaceID: workspace.id, name: focus)
-        }
+        if let focus { try orchestrator.focusWorkspaceWindow(workspaceID: workspace.id, name: focus) }
 
         let updatedWorkspace = try requireWorkspace(id: workspace.id, orchestrator: orchestrator)
         try context.output.emit(
-            text: "Workspace is running \(workspace.id)",
-            json: MutationResultPayload(message: "Workspace is running.", resource: updatedWorkspace)
-        )
+            text: "Workspace is running \(workspace.id)", json: MutationResultPayload(message: "Workspace is running.", resource: updatedWorkspace))
     }
 }
 
 struct AgentCommand: ParsableCommand {
     static let configuration = CommandConfiguration(
-        commandName: "agent",
-        abstract: "Record coding-agent lifecycle events.",
-        subcommands: [AgentLaunchCommand.self, AgentEventCommand.self]
-    )
+        commandName: "agent", abstract: "Record coding-agent lifecycle events.", subcommands: [AgentLaunchCommand.self, AgentEventCommand.self])
 }
 
 struct AgentLaunchCommand: ParsableCommand {
-    static let configuration = CommandConfiguration(
-        commandName: "launch",
-        abstract: "Launch one configured coding agent for the current workspace."
-    )
+    static let configuration = CommandConfiguration(commandName: "launch", abstract: "Launch one configured coding agent for the current workspace.")
 
-    @Option(name: .long, help: "Configured coding agent name.")
-    var name: String
+    @Option(name: .long, help: "Configured coding agent name.") var name: String
 
-    @Argument(help: "Workspace directory. Defaults to the current directory.")
-    var path: String?
+    @Argument(help: "Workspace directory. Defaults to the current directory.") var path: String?
 
     func run() throws {
         let context = CLIContext()
@@ -198,31 +141,20 @@ struct AgentLaunchCommand: ParsableCommand {
         let record = try orchestrator.launchAgentLauncher(workspaceID: workspace.id, name: name)
         try context.output.emit(
             text: "Launched coding agent \(record.label ?? name)\tworkspace=\(workspace.id)",
-            json: MutationResultPayload(
-                message: "Launched coding agent.",
-                resource: ["workspaceID": workspace.id, "label": record.label ?? name]
-            )
-        )
+            json: MutationResultPayload(message: "Launched coding agent.", resource: ["workspaceID": workspace.id, "label": record.label ?? name]))
     }
 }
 
 struct AgentEventCommand: ParsableCommand {
     static let configuration = CommandConfiguration(
-        commandName: "event",
-        abstract: "Record an explicit lifecycle event for the current coding-agent terminal."
-    )
+        commandName: "event", abstract: "Record an explicit lifecycle event for the current coding-agent terminal.")
 
     @Option(
         name: .long,
-        help: ArgumentHelp(
-            "Lifecycle event to record.",
-            discussion: "Allowed values: \(AgentEventType.allValueStrings.joined(separator: ", "))."
-        )
-    )
+        help: ArgumentHelp("Lifecycle event to record.", discussion: "Allowed values: \(AgentEventType.allValueStrings.joined(separator: ", "))."))
     var type: AgentEventType
 
-    @Argument(help: "Workspace directory. Defaults to the current directory.")
-    var path: String?
+    @Argument(help: "Workspace directory. Defaults to the current directory.") var path: String?
 
     func run() throws {
         let context = CLIContext()
@@ -236,54 +168,31 @@ struct AgentEventCommand: ParsableCommand {
         let normalizedDirectory = context.normalizePath(directory)
         let workspace = try requireWorkspace(path: normalizedDirectory, orchestrator: orchestrator, context: context)
         let agentContext = try resolveAgentInvocationContext(
-            workspaceID: workspace.id,
-            environment: environment,
-            orchestrator: orchestrator,
-            context: context)
+            workspaceID: workspace.id, environment: environment, orchestrator: orchestrator, context: context)
         guard let agentContext else { return }
 
         switch type {
         case .`init`:
             try orchestrator.registerAgentWindow(
-                workspaceID: workspace.id,
-                provider: agentContext.provider,
-                label: agentContext.label,
-                terminalTrackingID: agentContext.terminalTrackingID,
-                terminalNativeID: agentContext.terminalNativeID,
-                codexThreadID: agentContext.codexThreadID,
-                yabaiWindowID: agentContext.yabaiWindowID,
-                status: .idle
-            )
+                workspaceID: workspace.id, provider: agentContext.provider, label: agentContext.label,
+                terminalTrackingID: agentContext.terminalTrackingID, terminalNativeID: agentContext.terminalNativeID,
+                codexThreadID: agentContext.codexThreadID, yabaiWindowID: agentContext.yabaiWindowID, status: .idle)
         case .start, .waiting, .done:
             try orchestrator.updateAgentWindowStatus(
-                workspaceID: workspace.id,
-                provider: agentContext.provider,
-                terminalTrackingID: agentContext.terminalTrackingID,
-                codexThreadID: agentContext.codexThreadID,
-                terminalNativeID: agentContext.terminalNativeID,
-                yabaiWindowID: agentContext.yabaiWindowID,
-                label: agentContext.label,
-                status: type.status
-            )
+                workspaceID: workspace.id, provider: agentContext.provider, terminalTrackingID: agentContext.terminalTrackingID,
+                codexThreadID: agentContext.codexThreadID, terminalNativeID: agentContext.terminalNativeID, yabaiWindowID: agentContext.yabaiWindowID,
+                label: agentContext.label, status: type.status)
         case .exit:
             try orchestrator.handleAgentExit(
-                workspaceID: workspace.id,
-                provider: agentContext.provider,
-                terminalTrackingID: agentContext.terminalTrackingID,
-                codexThreadID: agentContext.codexThreadID,
-                terminalNativeID: agentContext.terminalNativeID,
-                yabaiWindowID: agentContext.yabaiWindowID,
-                label: agentContext.label
-            )
+                workspaceID: workspace.id, provider: agentContext.provider, terminalTrackingID: agentContext.terminalTrackingID,
+                codexThreadID: agentContext.codexThreadID, terminalNativeID: agentContext.terminalNativeID, yabaiWindowID: agentContext.yabaiWindowID,
+                label: agentContext.label)
         }
 
         try context.output.emit(
             text: "Agent \(type.rawValue): workspace=\(workspace.id)",
             json: MutationResultPayload(
-                message: "Agent \(type.rawValue) recorded.",
-                resource: ["workspaceID": workspace.id, "status": type.status.rawValue]
-            )
-        )
+                message: "Agent \(type.rawValue) recorded.", resource: ["workspaceID": workspace.id, "status": type.status.rawValue]))
         context.fireAgentEventNotification()
     }
 }
@@ -299,16 +208,11 @@ enum AgentEventType: String, CaseIterable, ExpressibleByArgument {
 
     var status: AgentWindowStatus {
         switch self {
-        case .`init`:
-            .idle
-        case .start:
-            .spinning
-        case .waiting:
-            .waiting
-        case .done:
-            .done
-        case .exit:
-            .idle
+        case .`init`: .idle
+        case .start: .spinning
+        case .waiting: .waiting
+        case .done: .done
+        case .exit: .idle
         }
     }
 }
@@ -322,43 +226,27 @@ struct AgentInvocationContext {
     let yabaiWindowID: Int?
 }
 
-func resolveAgentInvocationContext(
-    workspaceID: String,
-    environment: [String: String],
-    orchestrator: MuxyOrchestrator,
-    context: CLIContext
-) throws -> AgentInvocationContext? {
-    guard let resolvedProvider = resolveProvider(environment: environment) else {
-        return nil
-    }
+func resolveAgentInvocationContext(workspaceID: String, environment: [String: String], orchestrator: MuxyOrchestrator, context: CLIContext) throws
+    -> AgentInvocationContext?
+{
+    guard let resolvedProvider = resolveProvider(environment: environment) else { return nil }
     let focusedWindowID = context.currentYabaiWindowID()
     let adapter = terminalAdapter(for: resolvedProvider)
-    let trackingIdentity = try adapter?
-        .resolveCurrentTrackingIdentity(environment: environment, yabaiFocusedWindowID: focusedWindowID)
+    let trackingIdentity = try adapter?.resolveCurrentTrackingIdentity(environment: environment, yabaiFocusedWindowID: focusedWindowID)
     let splitIdentity = splitTrackingIdentity(trackingIdentity)
-    if resolvedProvider == .ghostty, splitIdentity.sessionID?.isEmpty != false {
-        return nil
-    }
+    if resolvedProvider == .ghostty, splitIdentity.sessionID?.isEmpty != false { return nil }
     let terminalNativeID =
         resolvedProvider == .ghostty
-        ? try resolveTrackedGhosttyNativeTerminalID(
-            workspaceID: workspaceID,
-            terminalTrackingID: splitIdentity.sessionID,
-            orchestrator: orchestrator)
+        ? try resolveTrackedGhosttyNativeTerminalID(workspaceID: workspaceID, terminalTrackingID: splitIdentity.sessionID, orchestrator: orchestrator)
         : nil
     return AgentInvocationContext(
-        provider: resolvedProvider,
-        label: inferredAgentLabel(environment: environment),
-        terminalTrackingID: splitIdentity.sessionID,
-        terminalNativeID: terminalNativeID,
-        codexThreadID: environment["CODEX_THREAD_ID"],
+        provider: resolvedProvider, label: inferredAgentLabel(environment: environment), terminalTrackingID: splitIdentity.sessionID,
+        terminalNativeID: terminalNativeID, codexThreadID: environment["CODEX_THREAD_ID"],
         yabaiWindowID: resolvedProvider == .ghostty ? splitIdentity.windowID : (splitIdentity.windowID ?? focusedWindowID))
 }
 
 private func requireWorkspace(id: String, orchestrator: MuxyOrchestrator) throws -> WorkspaceRecord {
-    guard let workspace = try orchestrator.store.workspace(id: id) else {
-        throw ValidationError("Workspace not found for id \(id)")
-    }
+    guard let workspace = try orchestrator.store.workspace(id: id) else { throw ValidationError("Workspace not found for id \(id)") }
 
     return workspace
 }
@@ -367,9 +255,7 @@ private func requireWorkspace(path: String?, orchestrator: MuxyOrchestrator, con
     let directory = path ?? context.currentDirectoryPath()
     let normalizedDirectory = context.normalizePath(directory)
     guard let workspace = try orchestrator.store.workspace(dir: normalizedDirectory) else {
-        throw ValidationError(
-            "Workspace not found at: \(normalizedDirectory). Run `mx workspace import [path]` first."
-        )
+        throw ValidationError("Workspace not found at: \(normalizedDirectory). Run `mx workspace import [path]` first.")
     }
 
     return workspace
@@ -377,111 +263,76 @@ private func requireWorkspace(path: String?, orchestrator: MuxyOrchestrator, con
 
 private func resolveProvider(environment: [String: String]) -> AgentProvider? {
     let bundleIdentifier = environment["__CFBundleIdentifier"]?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-    if bundleIdentifier == TerminalHost.iterm2.bundleIdentifier {
-        return .iterm2
-    }
-    if bundleIdentifier == TerminalHost.ghostty.bundleIdentifier {
-        return .ghostty
-    }
+    if bundleIdentifier == TerminalHost.iterm2.bundleIdentifier { return .iterm2 }
+    if bundleIdentifier == TerminalHost.ghostty.bundleIdentifier { return .ghostty }
 
     let termProgram = environment["TERM_PROGRAM"]?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ?? ""
-    if termProgram == "iterm.app" {
-        return .iterm2
-    }
-    if termProgram == "ghostty" {
-        return .ghostty
-    }
+    if termProgram == "iterm.app" { return .iterm2 }
+    if termProgram == "ghostty" { return .ghostty }
 
     let term = environment["TERM"]?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ?? ""
-    if term.contains("ghostty") {
-        return .ghostty
-    }
+    if term.contains("ghostty") { return .ghostty }
 
     return nil
 }
 
-func agentEventDropResult(
-    type: AgentEventType,
-    environment: [String: String],
-    context: CLIContext
-) -> (text: String, payload: MutationResultPayload<[String: String]>)? {
+func agentEventDropResult(type: AgentEventType, environment: [String: String], context: CLIContext) -> (
+    text: String, payload: MutationResultPayload<[String: String]>
+)? {
     if context.currentTmuxWindowID(environment: environment) != nil {
         return (
             "Dropped agent event \(type.rawValue): coding agents run from tmux are not supported by muxy",
-            MutationResultPayload<[String: String]>(
-                message: "Dropped tmux-backed agent event.",
-                resource: nil)
+            MutationResultPayload<[String: String]>(message: "Dropped tmux-backed agent event.", resource: nil)
         )
     }
     guard let provider = resolveProvider(environment: environment) else {
         return (
             "Dropped agent event \(type.rawValue): unsupported terminal host",
-            MutationResultPayload<[String: String]>(
-                message: "Dropped unsupported agent event.",
-                resource: nil)
+            MutationResultPayload<[String: String]>(message: "Dropped unsupported agent event.", resource: nil)
         )
     }
-    if provider == .ghostty, (environment[MuxyOrchestrator.terminalTrackingIDEnvVar]?.isEmpty != false) {
+    if provider == .ghostty, environment[MuxyOrchestrator.terminalTrackingIDEnvVar]?.isEmpty != false {
         return (
             "Dropped agent event \(type.rawValue): untracked Ghostty terminal",
-            MutationResultPayload<[String: String]>(
-                message: "Dropped untracked Ghostty agent event.",
-                resource: nil)
+            MutationResultPayload<[String: String]>(message: "Dropped untracked Ghostty agent event.", resource: nil)
         )
     }
     return nil
 }
 
 private func inferredAgentLabel(environment: [String: String]) -> String? {
-    if let label = environment[MuxyOrchestrator.agentLabelEnvVar]?.trimmingCharacters(in: .whitespacesAndNewlines), !label.isEmpty {
-        return label
-    }
-    if environment["CODEX_THREAD_ID"] != nil {
-        return "Codex CLI"
-    }
-    if environment["CLAUDE_CODE_ENTRYPOINT"] != nil {
-        return "Claude Code CLI"
-    }
+    if let label = environment[MuxyOrchestrator.agentLabelEnvVar]?.trimmingCharacters(in: .whitespacesAndNewlines), !label.isEmpty { return label }
+    if environment["CODEX_THREAD_ID"] != nil { return "Codex CLI" }
+    if environment["CLAUDE_CODE_ENTRYPOINT"] != nil { return "Claude Code CLI" }
 
     return nil
 }
 
 private func agentProvider(for terminalApp: String?) -> AgentProvider? {
     switch terminalApp {
-    case TerminalHost.iterm2.appName:
-        return .iterm2
-    case TerminalHost.ghostty.appName:
-        return .ghostty
-    default:
-        return nil
+    case TerminalHost.iterm2.appName: return .iterm2
+    case TerminalHost.ghostty.appName: return .ghostty
+    default: return nil
     }
 }
 
 private func terminalAdapter(for provider: AgentProvider) -> (any TerminalAdapter)? {
     switch provider {
-    case .iterm2:
-        return Iterm2Adapter()
-    case .ghostty:
-        return GhosttyAdapter()
+    case .iterm2: return Iterm2Adapter()
+    case .ghostty: return GhosttyAdapter()
     }
 }
 
 private func splitTrackingIdentity(_ identity: TerminalTrackingIdentity?) -> (sessionID: String?, windowID: Int?) {
     switch identity {
-    case .session(let id):
-        return (id, nil)
-    case .window(let id):
-        return (nil, id)
-    case .tmux, nil:
-        return (nil, nil)
+    case .session(let id): return (id, nil)
+    case .window(let id): return (nil, id)
+    case .tmux, nil: return (nil, nil)
     }
 }
 
-private func resolveTrackedGhosttyNativeTerminalID(
-    workspaceID: String,
-    terminalTrackingID: String?,
-    orchestrator: MuxyOrchestrator
-) throws -> String? {
+private func resolveTrackedGhosttyNativeTerminalID(workspaceID: String, terminalTrackingID: String?, orchestrator: MuxyOrchestrator) throws -> String?
+{
     guard let terminalTrackingID, !terminalTrackingID.isEmpty else { return nil }
 
     // Ghostty hooks only know the Muxy-issued tracking token. Recover the host-native terminal ID

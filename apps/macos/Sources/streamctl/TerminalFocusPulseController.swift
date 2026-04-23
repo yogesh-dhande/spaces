@@ -2,23 +2,17 @@ import AppKit
 import Foundation
 import appctl
 
-public protocol TerminalFocusPulseControlling: Sendable {
-    func pulse(windowID: Int, color: (r: Int, g: Int, b: Int), yabai: YabaiAdapter)
-}
+public protocol TerminalFocusPulseControlling: Sendable { func pulse(windowID: Int, color: (r: Int, g: Int, b: Int), yabai: YabaiAdapter) }
 
 public final class TerminalFocusPulseController: @unchecked Sendable, TerminalFocusPulseControlling {
-    private final class OverlayStore {
-        var overlaysByWindowID: [Int: NSWindow] = [:]
-    }
+    private final class OverlayStore { var overlaysByWindowID: [Int: NSWindow] = [:] }
 
     private let lock = NSLock()
     private var tokenByWindowID: [Int: UUID] = [:]
     private let pulseDuration: Duration
     private let overlayStore = OverlayStore()
 
-    public init(pulseDuration: Duration = .milliseconds(300)) {
-        self.pulseDuration = pulseDuration
-    }
+    public init(pulseDuration: Duration = .milliseconds(300)) { self.pulseDuration = pulseDuration }
 
     public func pulse(windowID: Int, color: (r: Int, g: Int, b: Int), yabai: YabaiAdapter) {
         let token = UUID()
@@ -36,22 +30,16 @@ public final class TerminalFocusPulseController: @unchecked Sendable, TerminalFo
 
         Task { [weak self] in
             guard let self else { return }
-            let overlayFrame = await MainActor.run {
-                self.overlayFrame(windowFrame: frame, displayFrame: displayFrame, displayID: display.id)
-            }
+            let overlayFrame = await MainActor.run { self.overlayFrame(windowFrame: frame, displayFrame: displayFrame, displayID: display.id) }
             guard let overlayFrame else {
                 self.clearToken(windowID: windowID, token: token)
                 return
             }
 
-            await MainActor.run {
-                self.presentOverlay(windowID: windowID, frame: overlayFrame, color: color)
-            }
+            await MainActor.run { self.presentOverlay(windowID: windowID, frame: overlayFrame, color: color) }
 
             try? await Task.sleep(for: self.pulseDuration)
-            await MainActor.run {
-                self.finishPulse(windowID: windowID, token: token)
-            }
+            await MainActor.run { self.finishPulse(windowID: windowID, token: token) }
         }
     }
 
@@ -74,8 +62,7 @@ public final class TerminalFocusPulseController: @unchecked Sendable, TerminalFo
         return tokenByWindowID[windowID]
     }
 
-    @MainActor
-    private func overlayFrame(windowFrame: YabaiFrame, displayFrame: YabaiFrame, displayID: Int?) -> NSRect? {
+    @MainActor private func overlayFrame(windowFrame: YabaiFrame, displayFrame: YabaiFrame, displayID: Int?) -> NSRect? {
         guard let screen = screen(for: displayID) else { return nil }
         let xOffset = CGFloat(windowFrame.x - displayFrame.x)
         let yOffsetFromTop = CGFloat(windowFrame.y - displayFrame.y)
@@ -86,8 +73,7 @@ public final class TerminalFocusPulseController: @unchecked Sendable, TerminalFo
         return NSRect(x: x, y: y, width: width, height: height)
     }
 
-    @MainActor
-    private func screen(for displayID: Int?) -> NSScreen? {
+    @MainActor private func screen(for displayID: Int?) -> NSScreen? {
         if let displayID {
             let matched = NSScreen.screens.first {
                 (($0.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.intValue) == displayID
@@ -97,8 +83,7 @@ public final class TerminalFocusPulseController: @unchecked Sendable, TerminalFo
         return NSScreen.screens.first
     }
 
-    @MainActor
-    private func presentOverlay(windowID: Int, frame: NSRect, color: (r: Int, g: Int, b: Int)) {
+    @MainActor private func presentOverlay(windowID: Int, frame: NSRect, color: (r: Int, g: Int, b: Int)) {
         let overlay: NSWindow
         if let existing = overlayStore.overlaysByWindowID[windowID] {
             overlay = existing
@@ -118,17 +103,12 @@ public final class TerminalFocusPulseController: @unchecked Sendable, TerminalFo
         }
 
         overlay.contentView?.frame = NSRect(origin: .zero, size: frame.size)
-        overlay.contentView?.layer?.backgroundColor = NSColor(
-            red: CGFloat(color.r) / 255,
-            green: CGFloat(color.g) / 255,
-            blue: CGFloat(color.b) / 255,
-            alpha: 0.35
-        ).cgColor
+        overlay.contentView?.layer?.backgroundColor =
+            NSColor(red: CGFloat(color.r) / 255, green: CGFloat(color.g) / 255, blue: CGFloat(color.b) / 255, alpha: 0.35).cgColor
         overlay.orderFrontRegardless()
     }
 
-    @MainActor
-    private func finishPulse(windowID: Int, token: UUID) {
+    @MainActor private func finishPulse(windowID: Int, token: UUID) {
         guard currentToken(windowID: windowID) == token else { return }
         clearToken(windowID: windowID, token: token)
         guard let overlay = overlayStore.overlaysByWindowID.removeValue(forKey: windowID) else { return }

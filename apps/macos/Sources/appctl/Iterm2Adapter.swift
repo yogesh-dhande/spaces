@@ -3,11 +3,7 @@ import Foundation
 open class Iterm2Adapter: @unchecked Sendable {
     private let scheduleVerificationWork: @Sendable (@escaping @Sendable () -> Void) -> Void
 
-    public init() {
-        self.scheduleVerificationWork = { work in
-            Task.detached(priority: .utility) { work() }
-        }
-    }
+    public init() { self.scheduleVerificationWork = { work in Task.detached(priority: .utility) { work() } } }
 
     public init(scheduleVerificationWork: @escaping @Sendable (@escaping @Sendable () -> Void) -> Void) {
         self.scheduleVerificationWork = scheduleVerificationWork
@@ -16,10 +12,7 @@ open class Iterm2Adapter: @unchecked Sendable {
     open func isAvailable() -> Bool { (try? AppleScript.run("tell application \"iTerm2\" to version")) != nil }
 
     private func appleScriptEscaped(_ value: String) -> String {
-        value
-            .replacingOccurrences(of: "\\", with: "\\\\")
-            .replacingOccurrences(of: "\"", with: "\\\"")
-            .replacingOccurrences(of: "\r", with: "\\r")
+        value.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"").replacingOccurrences(of: "\r", with: "\\r")
             .replacingOccurrences(of: "\n", with: "\\n")
     }
 
@@ -216,18 +209,11 @@ open class Iterm2Adapter: @unchecked Sendable {
         let output = try AppleScript.run(script).trimmingCharacters(in: .whitespacesAndNewlines)
         guard !output.isEmpty else { return nil }
         let parts = output.split(separator: ",", omittingEmptySubsequences: false)
-        guard parts.count == 3,
-            let red16 = Int(parts[0]),
-            let green16 = Int(parts[1]),
-            let blue16 = Int(parts[2])
-        else {
-            return nil
-        }
+        guard parts.count == 3, let red16 = Int(parts[0]), let green16 = Int(parts[1]), let blue16 = Int(parts[2]) else { return nil }
         return (r: red16 / 257, g: green16 / 257, b: blue16 / 257)
     }
 
-    @discardableResult
-    open func setBackgroundColor(windowID: Int, color: (r: Int, g: Int, b: Int)) throws -> Bool {
+    @discardableResult open func setBackgroundColor(windowID: Int, color: (r: Int, g: Int, b: Int)) throws -> Bool {
         let r = color.r * 257
         let g = color.g * 257
         let b = color.b * 257
@@ -362,15 +348,10 @@ open class Iterm2Adapter: @unchecked Sendable {
             guard let self else { return }
             do {
                 let verified = try self.verifyFocusedSession(preferredSessionID: preferredSessionID, windowID: windowID)
-                if !verified {
-                    self.logFocusVerification(
-                        "session_verification_failed session_id=\(preferredSessionID) window_id=\(windowID ?? -1)"
-                    )
-                }
+                if !verified { self.logFocusVerification("session_verification_failed session_id=\(preferredSessionID) window_id=\(windowID ?? -1)") }
             } catch {
                 self.logFocusVerification(
-                    "session_verification_error session_id=\(preferredSessionID) window_id=\(windowID ?? -1) error=\(error.localizedDescription)"
-                )
+                    "session_verification_error session_id=\(preferredSessionID) window_id=\(windowID ?? -1) error=\(error.localizedDescription)")
             }
         }
     }
@@ -414,16 +395,11 @@ extension Iterm2Adapter: TerminalAdapter {
 
     private func commandApplyingEnvironment(_ command: String, environment: [String: String]) -> String {
         guard !environment.isEmpty else { return command }
-        let exports = environment
-            .sorted { $0.key < $1.key }
-            .map { "export \($0.key)=\(shellQuoted($0.value))" }
-            .joined(separator: "; ")
+        let exports = environment.sorted { $0.key < $1.key }.map { "export \($0.key)=\(shellQuoted($0.value))" }.joined(separator: "; ")
         return "\(exports); \(command)"
     }
 
-    private func shellQuoted(_ token: String) -> String {
-        "'\(token.replacingOccurrences(of: "'", with: "'\\''"))'"
-    }
+    private func shellQuoted(_ token: String) -> String { "'\(token.replacingOccurrences(of: "'", with: "'\\''"))'" }
 
     private func commandApplyingWorkingDirectory(_ command: String, cwd: String) -> String {
         let trimmedDirectory = cwd.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -432,25 +408,16 @@ extension Iterm2Adapter: TerminalAdapter {
     }
 
     public func openWindowAndRun(command: String, cwd: String, environment: [String: String], background: Bool) throws -> TerminalLaunchResult {
-        let launchedCommand = commandApplyingWorkingDirectory(
-            commandApplyingEnvironment(command, environment: environment),
-            cwd: cwd)
+        let launchedCommand = commandApplyingWorkingDirectory(commandApplyingEnvironment(command, environment: environment), cwd: cwd)
         let window = try openWindowAndRun(command: launchedCommand, background: background)
         return TerminalLaunchResult(
-            trackingIdentity: window.sessionID.map(TerminalTrackingIdentity.session) ?? .window(window.id),
-            hookSessionID: window.sessionID,
-            containerID: String(window.id),
-            fallbackWindowID: window.id,
-            tabIndex: window.tabIndex)
+            trackingIdentity: window.sessionID.map(TerminalTrackingIdentity.session) ?? .window(window.id), hookSessionID: window.sessionID,
+            containerID: String(window.id), fallbackWindowID: window.id, tabIndex: window.tabIndex)
     }
 
     public func resolveCurrentTrackingIdentity(environment: [String: String], yabaiFocusedWindowID: Int?) throws -> TerminalTrackingIdentity? {
-        guard let raw = environment["ITERM_SESSION_ID"], !raw.isEmpty else {
-            return yabaiFocusedWindowID.map(TerminalTrackingIdentity.window)
-        }
-        guard let colonIndex = raw.lastIndex(of: ":") else {
-            return .session(raw)
-        }
+        guard let raw = environment["ITERM_SESSION_ID"], !raw.isEmpty else { return yabaiFocusedWindowID.map(TerminalTrackingIdentity.window) }
+        guard let colonIndex = raw.lastIndex(of: ":") else { return .session(raw) }
         return .session(String(raw[raw.index(after: colonIndex)...]))
     }
 

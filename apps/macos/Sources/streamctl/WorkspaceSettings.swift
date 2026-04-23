@@ -9,8 +9,8 @@ public struct WorkspaceSettings: Sendable {
     public var agentLaunchers: [AgentLauncher]
 
     public init(
-        stopScript: String? = nil, ports: [PortDefinition] = [], processes: [ProcessTemplate] = [],
-        statusChecks: [StatusCheckDefinition] = [], browserSessions: [BrowserSession] = [], agentLaunchers: [AgentLauncher] = []
+        stopScript: String? = nil, ports: [PortDefinition] = [], processes: [ProcessTemplate] = [], statusChecks: [StatusCheckDefinition] = [],
+        browserSessions: [BrowserSession] = [], agentLaunchers: [AgentLauncher] = []
     ) {
         self.stopScript = stopScript
         self.ports = ports

@@ -18,12 +18,9 @@ final class SidebarOutlineView: NSOutlineView {
         let flags = event.modifierFlags.intersection([.command, .shift, .option, .control])
         if flags.isEmpty {
             switch event.keyCode {
-            case UInt16(kVK_UpArrow):
-                if onArrowNavigation?(-1) == true { return }
-            case UInt16(kVK_DownArrow):
-                if onArrowNavigation?(1) == true { return }
-            default:
-                break
+            case UInt16(kVK_UpArrow): if onArrowNavigation?(-1) == true { return }
+            case UInt16(kVK_DownArrow): if onArrowNavigation?(1) == true { return }
+            default: break
             }
         }
         super.keyDown(with: event)

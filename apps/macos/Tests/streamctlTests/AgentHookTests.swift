@@ -65,11 +65,11 @@ final class AgentHookTests: XCTestCase {
         let (_, workspace) = try makeProjectAndWorkspace(store: store)
 
         let first = try orchestrator.registerAgentWindow(
-            workspaceID: workspace.id, provider: .iterm2, label: "Claude Code CLI", terminalTrackingID: "workspace-session-1", codexThreadID: "thread-1",
-            yabaiWindowID: 101, status: .idle)
+            workspaceID: workspace.id, provider: .iterm2, label: "Claude Code CLI", terminalTrackingID: "workspace-session-1",
+            codexThreadID: "thread-1", yabaiWindowID: 101, status: .idle)
         let second = try orchestrator.registerAgentWindow(
-            workspaceID: workspace.id, provider: .iterm2, label: "Claude Code CLI", terminalTrackingID: "workspace-session-2", codexThreadID: "thread-2",
-            yabaiWindowID: 202, status: .idle)
+            workspaceID: workspace.id, provider: .iterm2, label: "Claude Code CLI", terminalTrackingID: "workspace-session-2",
+            codexThreadID: "thread-2", yabaiWindowID: 202, status: .idle)
 
         XCTAssertEqual(first.label, "Claude Code CLI")
         XCTAssertEqual(second.label, "Claude Code CLI-2")
@@ -120,8 +120,8 @@ final class AgentHookTests: XCTestCase {
         let (_, workspace) = try makeProjectAndWorkspace(store: store)
 
         let existing = try orchestrator.registerAgentWindow(
-            workspaceID: workspace.id, provider: .iterm2, label: "Claude Code CLI", terminalTrackingID: "workspace-session", codexThreadID: "thread-1",
-            yabaiWindowID: 101, status: .idle)
+            workspaceID: workspace.id, provider: .iterm2, label: "Claude Code CLI", terminalTrackingID: "workspace-session",
+            codexThreadID: "thread-1", yabaiWindowID: 101, status: .idle)
 
         let updated = try orchestrator.updateAgentWindowStatus(
             workspaceID: workspace.id, provider: .iterm2, terminalTrackingID: "workspace-session", codexThreadID: "thread-1", yabaiWindowID: 101,
@@ -139,8 +139,8 @@ final class AgentHookTests: XCTestCase {
         let (_, workspace) = try makeProjectAndWorkspace(store: store)
 
         let existing = try orchestrator.registerAgentWindow(
-            workspaceID: workspace.id, provider: .iterm2, label: "Claude Code CLI", terminalTrackingID: "workspace-session", codexThreadID: "thread-1",
-            yabaiWindowID: 101, status: .idle)
+            workspaceID: workspace.id, provider: .iterm2, label: "Claude Code CLI", terminalTrackingID: "workspace-session",
+            codexThreadID: "thread-1", yabaiWindowID: 101, status: .idle)
 
         let updated = try orchestrator.updateAgentWindowStatus(
             workspaceID: workspace.id, provider: .iterm2, terminalTrackingID: "workspace-session", codexThreadID: "thread-1", yabaiWindowID: 202,
@@ -271,8 +271,8 @@ final class AgentHookTests: XCTestCase {
         try store.upsert(
             runningProcess: RunningProcessRecord(
                 id: "process-claude", workspaceID: workspace.id, templateName: "claude", command: "claude", terminalApp: "iTerm2", windowID: 101,
-                terminalTrackingID: "shared-session", itermTabIndex: nil, tmuxWindowID: "@2", pid: 2, status: .running, logPath: nil, lastOutputAt: nil,
-                startedAt: nil, exitedAt: nil))
+                terminalTrackingID: "shared-session", itermTabIndex: nil, tmuxWindowID: "@2", pid: 2, status: .running, logPath: nil,
+                lastOutputAt: nil, startedAt: nil, exitedAt: nil))
         try store.upsert(
             window: WindowRecord(
                 id: "window-claude", workspaceID: workspace.id, app: "iTerm2", name: "claude", detail: "claude", targetURL: nil, windowID: 101,
@@ -389,8 +389,8 @@ final class AgentHookTests: XCTestCase {
                 id: originalWindow.id, workspaceID: originalWindow.workspaceID, app: "Ghostty", name: originalWindow.name,
                 detail: originalWindow.detail, targetURL: originalWindow.targetURL, windowID: originalWindow.windowID,
                 terminalTrackingID: originalWindow.terminalTrackingID, terminalNativeID: originalWindow.terminalNativeID,
-                itermTabIndex: originalWindow.itermTabIndex, tmuxWindowID: originalWindow.tmuxWindowID,
-                role: originalWindow.role, orderIndex: originalWindow.orderIndex, lastSeenAt: originalWindow.lastSeenAt))
+                itermTabIndex: originalWindow.itermTabIndex, tmuxWindowID: originalWindow.tmuxWindowID, role: originalWindow.role,
+                orderIndex: originalWindow.orderIndex, lastSeenAt: originalWindow.lastSeenAt))
 
         let windowsJSON =
             #"[{"id":303,"pid":11,"app":"Ghostty","title":"Claude Code","space":1,"display":1,"is-sticky":false,"is-hidden":false,"is-visible":true,"is-native-fullscreen":false}]"#

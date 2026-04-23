@@ -8,12 +8,9 @@ extension AppKitController {
 
         static func == (lhs: OutlineItem, rhs: OutlineItem) -> Bool {
             switch (lhs, rhs) {
-            case (.project(let a), .project(let b)):
-                return a.id == b.id
-            case (.workspace(_, let a), .workspace(_, let b)):
-                return a.id == b.id
-            default:
-                return false
+            case (.project(let a), .project(let b)): return a.id == b.id
+            case (.workspace(_, let a), .workspace(_, let b)): return a.id == b.id
+            default: return false
             }
         }
 

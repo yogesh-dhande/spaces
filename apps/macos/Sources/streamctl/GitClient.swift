@@ -6,9 +6,7 @@ public final class GitClient {
     private let environmentOverrides: [String: String]
     private let metadataCommandTimeout: TimeInterval
 
-    public init(
-        gitExecutable: String = "git", environmentOverrides: [String: String] = [:], metadataCommandTimeout: TimeInterval = 2
-    ) {
+    public init(gitExecutable: String = "git", environmentOverrides: [String: String] = [:], metadataCommandTimeout: TimeInterval = 2) {
         self.gitExecutable = gitExecutable
         self.environmentOverrides = environmentOverrides
         self.metadataCommandTimeout = metadataCommandTimeout
@@ -19,9 +17,7 @@ public final class GitClient {
     }
 
     public func defaultBranch(path: String) -> String? {
-        if let output = try? runGitAndCapture(
-            ["-C", path, "symbolic-ref", "--short", "refs/remotes/origin/HEAD"], timeout: metadataCommandTimeout)
-        {
+        if let output = try? runGitAndCapture(["-C", path, "symbolic-ref", "--short", "refs/remotes/origin/HEAD"], timeout: metadataCommandTimeout) {
             let trimmed = output.trimmingCharacters(in: .whitespacesAndNewlines)
             if let slash = trimmed.split(separator: "/").last { return String(slash) }
         }
@@ -31,14 +27,12 @@ public final class GitClient {
     }
 
     public func branchExists(path: String, branch: String) -> Bool {
-        let status =
-            (try? runGit(["-C", path, "show-ref", "--verify", "--quiet", "refs/heads/\(branch)"], timeout: metadataCommandTimeout)) ?? 1
+        let status = (try? runGit(["-C", path, "show-ref", "--verify", "--quiet", "refs/heads/\(branch)"], timeout: metadataCommandTimeout)) ?? 1
         return status == 0
     }
 
     public func remoteBranchExists(path: String, branch: String) -> Bool {
-        let status =
-            (try? runGit(["-C", path, "ls-remote", "--exit-code", "--heads", "origin", branch], timeout: metadataCommandTimeout)) ?? 1
+        let status = (try? runGit(["-C", path, "ls-remote", "--exit-code", "--heads", "origin", branch], timeout: metadataCommandTimeout)) ?? 1
         return status == 0
     }
 

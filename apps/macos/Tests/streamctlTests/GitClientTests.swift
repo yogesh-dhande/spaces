@@ -271,9 +271,7 @@ final class GitClientTests: XCTestCase {
             try client.createWorktree(
                 path: repo.path, worktreePath: worktree.path, branch: "new-feature", targetBranch: "nonexistent-branch",
                 allowRemoteBranchLookup: false)
-        ) { error in
-            guard case MuxyError.invalidArgument = error else { return XCTFail("Expected invalidArgument, got \(error)") }
-        }
+        ) { error in guard case MuxyError.invalidArgument = error else { return XCTFail("Expected invalidArgument, got \(error)") } }
     }
 
     private func initializeGitRepository(at directory: URL, initialBranch: String) throws {
@@ -362,9 +360,7 @@ final class GitClientTests: XCTestCase {
         let client = GitClient()
 
         // Attempt to remove a worktree path that was never created; git will fail with a non-zero exit code.
-        XCTAssertThrowsError(
-            try client.removeWorktree(path: repo.path, worktreePath: "/nonexistent/path/\(UUID().uuidString)")
-        ) { error in
+        XCTAssertThrowsError(try client.removeWorktree(path: repo.path, worktreePath: "/nonexistent/path/\(UUID().uuidString)")) { error in
             guard case MuxyError.gitCommandFailed = error else { return XCTFail("Expected gitCommandFailed, got \(error)") }
         }
     }
@@ -388,14 +384,10 @@ final class GitClientTests: XCTestCase {
         let client = GitClient()
 
         XCTAssertThrowsError(try client.renameCurrentBranch(path: repo.path, to: "")) { error in
-            guard case MuxyError.invalidArgument = error else {
-                return XCTFail("Expected invalidArgument, got \(error)")
-            }
+            guard case MuxyError.invalidArgument = error else { return XCTFail("Expected invalidArgument, got \(error)") }
         }
         XCTAssertThrowsError(try client.renameCurrentBranch(path: repo.path, to: "   ")) { error in
-            guard case MuxyError.invalidArgument = error else {
-                return XCTFail("Expected invalidArgument, got \(error)")
-            }
+            guard case MuxyError.invalidArgument = error else { return XCTFail("Expected invalidArgument, got \(error)") }
         }
     }
 

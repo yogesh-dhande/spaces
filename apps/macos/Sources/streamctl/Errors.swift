@@ -54,14 +54,10 @@ public enum MuxyError: LocalizedError {
         case .configError(let message): return "Configuration error: \(message)"
         case .missingTrackedWindow(let context):
             switch context.kind {
-            case .browserSession:
-                return "Window missing: Browser session '\(context.title)' is no longer available."
-            case .process:
-                return "Window missing: Process '\(context.title)' is no longer available."
-            case .codingAgent:
-                return "Window missing: Coding agent '\(context.title)' is no longer available."
-            case .window:
-                return "Window missing: '\(context.title)' is no longer available."
+            case .browserSession: return "Window missing: Browser session '\(context.title)' is no longer available."
+            case .process: return "Window missing: Process '\(context.title)' is no longer available."
+            case .codingAgent: return "Window missing: Coding agent '\(context.title)' is no longer available."
+            case .window: return "Window missing: '\(context.title)' is no longer available."
             }
         }
     }

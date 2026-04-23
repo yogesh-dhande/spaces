@@ -18,8 +18,8 @@ public struct AgentWindowRecord: Codable, Sendable {
 
     public init(
         id: String, workspaceID: String, provider: AgentProvider, label: String?, terminalTrackingID: String?, terminalNativeID: String? = nil,
-        tmuxWindowID: String? = nil, codexThreadID: String?, windowID: Int?,
-        yabaiWindowID: Int? = nil, status: AgentWindowStatus, createdAt: String, updatedAt: String
+        tmuxWindowID: String? = nil, codexThreadID: String?, windowID: Int?, yabaiWindowID: Int? = nil, status: AgentWindowStatus, createdAt: String,
+        updatedAt: String
     ) {
         self.id = id
         self.workspaceID = workspaceID

@@ -82,8 +82,6 @@ final class ShellTests: XCTestCase {
         setenv("PATH", updatedPath, 1)
         defer { setenv("PATH", originalPath, 1) }
 
-        try withTestAppleScriptOptIn(enabled: commands.keys.contains("osascript")) {
-            try run()
-        }
+        try withTestAppleScriptOptIn(enabled: commands.keys.contains("osascript")) { try run() }
     }
 }

@@ -5,19 +5,15 @@ import appctl
 
 @MainActor @Suite struct SetupManagerTests {
     @Test func startupSkipsDeferredYabaiFailure() {
-        let manager = SetupManager(checker: MockSetupChecker(
-            startupBlockingResults: [
-                .init(id: .terminalInstalled, passed: true),
-                .init(id: .tmuxInstalled, passed: true),
-                .init(id: .yabaiInstalled, passed: true),
-            ],
-            allResults: [
-                .init(id: .terminalInstalled, passed: true),
-                .init(id: .tmuxInstalled, passed: true),
-                .init(id: .yabaiInstalled, passed: true),
-                .init(id: .yabaiServiceRunning, passed: false),
-                .init(id: .yabaiAccessibility, passed: false),
-            ]))
+        let manager = SetupManager(
+            checker: MockSetupChecker(
+                startupBlockingResults: [
+                    .init(id: .terminalInstalled, passed: true), .init(id: .tmuxInstalled, passed: true), .init(id: .yabaiInstalled, passed: true),
+                ],
+                allResults: [
+                    .init(id: .terminalInstalled, passed: true), .init(id: .tmuxInstalled, passed: true), .init(id: .yabaiInstalled, passed: true),
+                    .init(id: .yabaiServiceRunning, passed: false), .init(id: .yabaiAccessibility, passed: false),
+                ]))
         var completed = false
 
         _ = manager.makeContentView()
@@ -30,19 +26,15 @@ import appctl
     }
 
     @Test func deferredStartShowsYabaiStep() {
-        let manager = SetupManager(checker: MockSetupChecker(
-            startupBlockingResults: [
-                .init(id: .terminalInstalled, passed: true),
-                .init(id: .tmuxInstalled, passed: true),
-                .init(id: .yabaiInstalled, passed: true),
-            ],
-            allResults: [
-                .init(id: .terminalInstalled, passed: true),
-                .init(id: .tmuxInstalled, passed: true),
-                .init(id: .yabaiInstalled, passed: true),
-                .init(id: .yabaiServiceRunning, passed: false),
-                .init(id: .yabaiAccessibility, passed: false),
-            ]))
+        let manager = SetupManager(
+            checker: MockSetupChecker(
+                startupBlockingResults: [
+                    .init(id: .terminalInstalled, passed: true), .init(id: .tmuxInstalled, passed: true), .init(id: .yabaiInstalled, passed: true),
+                ],
+                allResults: [
+                    .init(id: .terminalInstalled, passed: true), .init(id: .tmuxInstalled, passed: true), .init(id: .yabaiInstalled, passed: true),
+                    .init(id: .yabaiServiceRunning, passed: false), .init(id: .yabaiAccessibility, passed: false),
+                ]))
         var completed = false
 
         _ = manager.makeContentView()
@@ -59,15 +51,9 @@ private struct MockSetupChecker: SetupChecking {
     let startupBlockingResults: [SetupCheckResult]
     let allResults: [SetupCheckResult]
 
-    func run(_ id: SetupCheckID) -> Bool {
-        allResults.first(where: { $0.id == id })?.passed ?? false
-    }
+    func run(_ id: SetupCheckID) -> Bool { allResults.first(where: { $0.id == id })?.passed ?? false }
 
-    func runAll() -> [SetupCheckResult] {
-        allResults
-    }
+    func runAll() -> [SetupCheckResult] { allResults }
 
-    func runStartupBlockingChecks() -> [SetupCheckResult] {
-        startupBlockingResults
-    }
+    func runStartupBlockingChecks() -> [SetupCheckResult] { startupBlockingResults }
 }

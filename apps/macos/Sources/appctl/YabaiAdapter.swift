@@ -37,9 +37,7 @@ public final class YabaiAdapter {
     }
 
     @discardableResult public func focusWindow(id: Int) throws -> Bool {
-        do {
-            return try Shell.run(["yabai", "-m", "window", "--focus", String(id)]) == 0
-        } catch { return false }
+        do { return try Shell.run(["yabai", "-m", "window", "--focus", String(id)]) == 0 } catch { return false }
     }
 
     public func closeWindow(id: Int) throws { _ = try Shell.run(["yabai", "-m", "window", "--close", String(id)]) }

@@ -2,17 +2,11 @@ import Foundation
 import streamctl
 
 struct CLITextOrJSONOutput {
-    func emit<Payload>(text: @autoclosure () -> String, json: @autoclosure () -> Payload) throws {
-        print(text())
-    }
+    func emit<Payload>(text: @autoclosure () -> String, json: @autoclosure () -> Payload) throws { print(text()) }
 
-    func emitLines<Payload>(text: @autoclosure () -> [String], json: @autoclosure () -> Payload) throws {
-        for line in text() { print(line) }
-    }
+    func emitLines<Payload>(text: @autoclosure () -> [String], json: @autoclosure () -> Payload) throws { for line in text() { print(line) } }
 
-    static func emitError(_ error: Error, wantsJSON: Bool) {
-        fputs("Error: \(error.localizedDescription)\n", stderr)
-    }
+    static func emitError(_ error: Error, wantsJSON: Bool) { fputs("Error: \(error.localizedDescription)\n", stderr) }
 }
 
 enum CLITextRenderer {
@@ -21,8 +15,7 @@ enum CLITextRenderer {
         lines.append(contentsOf: settings.ports.isEmpty ? ["port\t-"] : settings.ports.map { "port\t\($0.name)" })
         lines.append(
             contentsOf: settings.processes.isEmpty
-                ? ["process\t-"]
-                : settings.processes.map { "process\t\($0.name ?? "-")\t\($0.command)\ton-exit=\($0.onExit.rawValue)" })
+                ? ["process\t-"] : settings.processes.map { "process\t\($0.name ?? "-")\t\($0.command)\ton-exit=\($0.onExit.rawValue)" })
         lines.append(
             contentsOf: settings.statusChecks.isEmpty
                 ? ["status-check\t-"]
@@ -31,21 +24,16 @@ enum CLITextRenderer {
                 })
         lines.append(
             contentsOf: settings.browserSessions.isEmpty
-                ? ["browser-session\t-"]
-                : settings.browserSessions.map { "browser-session\t\($0.name ?? "-")\t\($0.url ?? "-")" })
+                ? ["browser-session\t-"] : settings.browserSessions.map { "browser-session\t\($0.name ?? "-")\t\($0.url ?? "-")" })
         lines.append(
             contentsOf: settings.agentLaunchers.isEmpty
-                ? ["agent-launcher\t-"]
-                : settings.agentLaunchers.map { "agent-launcher\t\($0.name)\t\($0.command)" })
+                ? ["agent-launcher\t-"] : settings.agentLaunchers.map { "agent-launcher\t\($0.name)\t\($0.command)" })
         return lines.joined(separator: "\n")
     }
 
     static func workspaceRuntimeLines(
-        status: WorkspaceRuntimeStatus,
-        processes: [RunningProcessRecord],
-        windows: [WindowRecord],
-        statusResultsByProcessID: [String: [StatusResult]],
-        agentWindows: [AgentWindowRecord]
+        status: WorkspaceRuntimeStatus, processes: [RunningProcessRecord], windows: [WindowRecord],
+        statusResultsByProcessID: [String: [StatusResult]], agentWindows: [AgentWindowRecord]
     ) -> String {
         var lines = [
             "status\tlifecycle=\(status.lifecycleState.rawValue)\truntime-health=\(status.runtimeHealth.rawValue)\trunning-processes=\(status.runningProcessCount)\texited-processes=\(status.exitedProcessCount)\tfailed-checks=\(status.failedCheckCount)\twaiting-agents=\(status.waitingAgentWindowCount)\tmissing-processes=\(status.missingConfiguredProcessCount)\tmissing-browser-sessions=\(status.missingConfiguredBrowserSessionCount)\twarning=\(status.warningSummary ?? "-")"
@@ -289,9 +277,7 @@ enum DashboardPayloadBuilder {
     static func build(orchestrator: MuxyOrchestrator) throws -> DashboardPayload {
         let projects = try orchestrator.listProjects()
         var workspacesByProject: [String: [WorkspaceSummary]] = [:]
-        for project in projects {
-            workspacesByProject[project.id] = try orchestrator.listWorkspaces(projectID: project.id, includeArchived: false)
-        }
+        for project in projects { workspacesByProject[project.id] = try orchestrator.listWorkspaces(projectID: project.id, includeArchived: false) }
 
         let iso8601Formatter = ISO8601DateFormatter()
         let dismissedIDs = Array(try orchestrator.dashboardDismissedAttentionItemIDs()).sorted()
@@ -305,17 +291,14 @@ enum DashboardPayloadBuilder {
 
                 let processes = workspace.isRunning ? ((try? orchestrator.runningProcesses(workspaceID: workspace.id)) ?? []) : []
                 let windows = workspace.isRunning ? ((try? orchestrator.windows(workspaceID: workspace.id)) ?? []) : []
-                let configuredSessions = workspace.isRunning ? ((try? orchestrator.resolvedWorkspaceBrowserSessions(workspaceID: workspace.id)) ?? []) : []
+                let configuredSessions =
+                    workspace.isRunning ? ((try? orchestrator.resolvedWorkspaceBrowserSessions(workspaceID: workspace.id)) ?? []) : []
 
                 var processByWindowID: [Int: RunningProcessRecord] = [:]
-                for process in processes {
-                    if let windowID = process.windowID { processByWindowID[windowID] = process }
-                }
+                for process in processes { if let windowID = process.windowID { processByWindowID[windowID] = process } }
 
                 var statusResultsByProcessID: [String: [StatusResult]] = [:]
-                for process in processes {
-                    statusResultsByProcessID[process.id] = (try? orchestrator.statusResults(processID: process.id)) ?? []
-                }
+                for process in processes { statusResultsByProcessID[process.id] = (try? orchestrator.statusResults(processID: process.id)) ?? [] }
 
                 var items: [DashboardPayload.Item] = []
                 var matchedProcessIDs: Set<String> = []
@@ -328,76 +311,48 @@ enum DashboardPayloadBuilder {
                     guard process.status == .exited || !failedChecks.isEmpty else { continue }
 
                     let presentation = itemPresentation(window: window, process: process, configuredSessions: configuredSessions)
-                    let eventDate = process.status == .exited
-                        ? process.exitedAt
-                        : failedChecks.compactMap(\.lastRunAt).max()
+                    let eventDate = process.status == .exited ? process.exitedAt : failedChecks.compactMap(\.lastRunAt).max()
 
                     items.append(
                         DashboardPayload.Item(
                             attentionID: dashboardAttentionID(process: process, failedChecks: failedChecks),
-                            kind: window.role == "browser" ? "browser" : (window.role == "terminal" ? "process" : "window"),
-                            icon: presentation.icon,
-                            label: presentation.label,
-                            detail: presentation.detail,
-                            processStatus: process.status.rawValue,
-                            agentStatus: nil,
-                            statusChecks: allChecks.map(StatusResultPayload.init),
-                            eventDate: eventDate,
-                            focusRequest: dashboardFocusRequest(window: window, windowListIndex: index + 1, process: process, workspaceID: workspace.id)))
+                            kind: window.role == "browser" ? "browser" : (window.role == "terminal" ? "process" : "window"), icon: presentation.icon,
+                            label: presentation.label, detail: presentation.detail, processStatus: process.status.rawValue, agentStatus: nil,
+                            statusChecks: allChecks.map(StatusResultPayload.init), eventDate: eventDate,
+                            focusRequest: dashboardFocusRequest(
+                                window: window, windowListIndex: index + 1, process: process, workspaceID: workspace.id)))
                 }
 
                 for process in processes where !matchedProcessIDs.contains(process.id) {
                     let allChecks = statusResultsByProcessID[process.id] ?? []
                     let failedChecks = allChecks.filter { $0.status == .failed }
                     guard process.status == .exited || !failedChecks.isEmpty else { continue }
-                    let eventDate = process.status == .exited
-                        ? process.exitedAt
-                        : failedChecks.compactMap(\.lastRunAt).max()
+                    let eventDate = process.status == .exited ? process.exitedAt : failedChecks.compactMap(\.lastRunAt).max()
                     items.append(
                         DashboardPayload.Item(
-                            attentionID: dashboardAttentionID(process: process, failedChecks: failedChecks),
-                            kind: "process",
-                            icon: "terminal",
-                            label: process.templateName,
-                            detail: process.command,
-                            processStatus: process.status.rawValue,
-                            agentStatus: nil,
-                            statusChecks: allChecks.map(StatusResultPayload.init),
-                            eventDate: eventDate,
+                            attentionID: dashboardAttentionID(process: process, failedChecks: failedChecks), kind: "process", icon: "terminal",
+                            label: process.templateName, detail: process.command, processStatus: process.status.rawValue, agentStatus: nil,
+                            statusChecks: allChecks.map(StatusResultPayload.init), eventDate: eventDate,
                             focusRequest: .init(
-                                kind: "workspace_process",
-                                workspaceID: workspace.id,
-                                windowIndex: nil,
-                                processID: process.id,
-                                agentWindowID: nil,
+                                kind: "workspace_process", workspaceID: workspace.id, windowIndex: nil, processID: process.id, agentWindowID: nil,
                                 targetURL: nil)))
                 }
 
                 for agentWindow in attentionAgentWindows {
                     items.append(
                         DashboardPayload.Item(
-                            attentionID: dashboardAttentionID(agentWindow: agentWindow),
-                            kind: "agent",
-                            icon: "cpu.fill",
-                            label: agentWindow.label ?? "Coding Agent CLI",
-                            detail: nil,
-                            processStatus: nil,
-                            agentStatus: agentWindow.status.rawValue,
-                            statusChecks: [],
-                            eventDate: agentWindow.updatedAt,
+                            attentionID: dashboardAttentionID(agentWindow: agentWindow), kind: "agent", icon: "cpu.fill",
+                            label: agentWindow.label ?? "Coding Agent CLI", detail: nil, processStatus: nil, agentStatus: agentWindow.status.rawValue,
+                            statusChecks: [], eventDate: agentWindow.updatedAt,
                             focusRequest: .init(
-                                kind: "agent_window",
-                                workspaceID: agentWindow.workspaceID,
-                                windowIndex: nil,
-                                processID: nil,
-                                agentWindowID: agentWindow.id,
-                                targetURL: nil)))
+                                kind: "agent_window", workspaceID: agentWindow.workspaceID, windowIndex: nil, processID: nil,
+                                agentWindowID: agentWindow.id, targetURL: nil)))
                 }
 
                 guard !items.isEmpty else { continue }
                 items.sort { lhs, rhs in
                     switch (lhs.eventDate, rhs.eventDate) {
-                    case let (a?, b?): return a > b
+                    case (let a?, let b?): return a > b
                     case (nil, _): return false
                     case (_, nil): return true
                     }
@@ -408,18 +363,13 @@ enum DashboardPayloadBuilder {
                 }.max()
 
                 groups.append(
-                    .init(
-                        projectName: project.name,
-                        workspaceID: workspace.id,
-                        workspaceName: workspace.title,
-                        latestDate: latestDate,
-                        items: items))
+                    .init(projectName: project.name, workspaceID: workspace.id, workspaceName: workspace.title, latestDate: latestDate, items: items))
             }
         }
 
         groups.sort { lhs, rhs in
             switch (lhs.latestDate, rhs.latestDate) {
-            case let (a?, b?): return a > b
+            case (let a?, let b?): return a > b
             case (nil, _): return false
             case (_, nil): return true
             }
@@ -429,9 +379,7 @@ enum DashboardPayloadBuilder {
     }
 
     private static func dashboardAttentionID(process: RunningProcessRecord, failedChecks: [StatusResult]) -> String {
-        if process.status == .exited {
-            return "process:\(process.id):exited:\(process.exitedAt ?? "unknown")"
-        }
+        if process.status == .exited { return "process:\(process.id):exited:\(process.exitedAt ?? "unknown")" }
         let failedCheckNames = failedChecks.map(\.checkName).sorted().joined(separator: ",")
         let latestFailure = failedChecks.compactMap(\.lastRunAt).max() ?? "unknown"
         return "process:\(process.id):failed:\(failedCheckNames):\(latestFailure)"
@@ -441,54 +389,33 @@ enum DashboardPayloadBuilder {
         "agent:\(agentWindow.id):\(agentWindow.status.rawValue):\(agentWindow.updatedAt)"
     }
 
-    private static func dashboardFocusRequest(
-        window: WindowRecord,
-        windowListIndex: Int,
-        process: RunningProcessRecord,
-        workspaceID: String
-    ) -> DashboardPayload.Item.FocusRequest {
+    private static func dashboardFocusRequest(window: WindowRecord, windowListIndex: Int, process: RunningProcessRecord, workspaceID: String)
+        -> DashboardPayload.Item.FocusRequest
+    {
         if window.role == "browser", let targetURL = window.targetURL, !targetURL.isEmpty {
             return .init(
-                kind: "workspace_browser_session",
-                workspaceID: workspaceID,
-                windowIndex: nil,
-                processID: nil,
-                agentWindowID: nil,
+                kind: "workspace_browser_session", workspaceID: workspaceID, windowIndex: nil, processID: nil, agentWindowID: nil,
                 targetURL: targetURL)
         }
         if window.role == "terminal" {
             return .init(
-                kind: "workspace_process",
-                workspaceID: workspaceID,
-                windowIndex: nil,
-                processID: process.id,
-                agentWindowID: nil,
-                targetURL: nil)
+                kind: "workspace_process", workspaceID: workspaceID, windowIndex: nil, processID: process.id, agentWindowID: nil, targetURL: nil)
         }
         return .init(
-            kind: "workspace_window",
-            workspaceID: workspaceID,
-            windowIndex: windowListIndex,
-            processID: nil,
-            agentWindowID: nil,
-            targetURL: nil)
+            kind: "workspace_window", workspaceID: workspaceID, windowIndex: windowListIndex, processID: nil, agentWindowID: nil, targetURL: nil)
     }
 
-    private static func itemPresentation(
-        window: WindowRecord,
-        process: RunningProcessRecord,
-        configuredSessions: [BrowserSession]
-    ) -> (icon: String, label: String, detail: String?) {
+    private static func itemPresentation(window: WindowRecord, process: RunningProcessRecord, configuredSessions: [BrowserSession]) -> (
+        icon: String, label: String, detail: String?
+    ) {
         switch window.role {
         case "browser":
             if let name = browserSessionDisplayName(for: window.targetURL, sessions: configuredSessions), let url = window.targetURL {
                 return ("globe", name, url)
             }
             return ("globe", window.name ?? window.targetURL ?? window.app, window.detail)
-        case "terminal":
-            return ("terminal", process.templateName, process.command)
-        default:
-            return ("chevron.left.forwardslash.chevron.right", window.name ?? window.app, window.detail)
+        case "terminal": return ("terminal", process.templateName, process.command)
+        default: return ("chevron.left.forwardslash.chevron.right", window.name ?? window.app, window.detail)
         }
     }
 
@@ -497,10 +424,7 @@ enum DashboardPayloadBuilder {
         var bestMatch: (length: Int, name: String)?
         for session in sessions {
             guard let prefix = session.url?.trimmingCharacters(in: .whitespacesAndNewlines),
-                let name = session.name?.trimmingCharacters(in: .whitespacesAndNewlines),
-                !prefix.isEmpty,
-                !name.isEmpty,
-                targetURL.hasPrefix(prefix)
+                let name = session.name?.trimmingCharacters(in: .whitespacesAndNewlines), !prefix.isEmpty, !name.isEmpty, targetURL.hasPrefix(prefix)
             else { continue }
             if let bestMatch, bestMatch.length >= prefix.count { continue }
             bestMatch = (prefix.count, name)
