@@ -76,6 +76,26 @@ final class AgentHookTests: XCTestCase {
         XCTAssertEqual(try store.agentWindows(workspaceID: workspace.id).count, 2)
     }
 
+    func testRegisterAgentWindowReservesConfiguredLauncherNamesForLauncherOwnedAgent() throws {
+        let store = try makeTemporaryStore()
+        let orchestrator = MuxyOrchestrator(store: store, iterm: MockIterm2Adapter(), ghostty: MockGhosttyAdapter(), tmux: MockTmuxAdapter())
+        let (project, workspace) = try makeProjectAndWorkspace(store: store)
+        try orchestrator.updateProjectConfig(projectID: project.id) { config in
+            config.agentLaunchers = [AgentLauncher(name: "Codex", command: "codex")]
+        }
+
+        let adHoc = try orchestrator.registerAgentWindow(
+            workspaceID: workspace.id, provider: .iterm2, label: "Codex", terminalTrackingID: "workspace-session-1", codexThreadID: "thread-1",
+            yabaiWindowID: 101, status: .idle)
+        let configured = try orchestrator.registerAgentWindow(
+            workspaceID: workspace.id, provider: .iterm2, label: "Codex", terminalTrackingID: "workspace-session-2", codexThreadID: "thread-2",
+            yabaiWindowID: 202, status: .idle, claimedLauncherName: "Codex")
+
+        XCTAssertEqual(adHoc.label, "Codex-2")
+        XCTAssertEqual(configured.label, "Codex")
+        XCTAssertEqual(try store.agentWindows(workspaceID: workspace.id).count, 2)
+    }
+
     func testUpdateAgentWindowStatusMatchesExistingWindowID() throws {
         let store = try makeTemporaryStore()
         let orchestrator = MuxyOrchestrator(store: store, iterm: MockIterm2Adapter(), ghostty: MockGhosttyAdapter(), tmux: MockTmuxAdapter())

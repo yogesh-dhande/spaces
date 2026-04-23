@@ -218,6 +218,12 @@ final class StoreTests: XCTestCase {
         XCTAssertEqual(sessions[0].name, "checkout")
         XCTAssertEqual(sessions[0].url, "https://example.com")
         XCTAssertEqual(sessions[0].extractedWindow?.targetURL, "https://example.com")
+
+        try store.setWorkspaceAgentLaunchers(
+            workspaceID: workspace.id,
+            launchers: [AgentLauncher(name: "Codex", command: "codex"), AgentLauncher(name: "Claude", command: "claude")])
+        let launchers = try store.workspaceAgentLaunchers(workspaceID: workspace.id)
+        XCTAssertEqual(launchers, [AgentLauncher(name: "Codex", command: "codex"), AgentLauncher(name: "Claude", command: "claude")])
         XCTAssertEqual(sessions[0].extractedWindow?.windowID, 303)
         XCTAssertEqual(sessions[0].extractedWindow?.isValid, true)
         XCTAssertNil(sessions[1].name)

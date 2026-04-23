@@ -11,6 +11,15 @@ final class AppctlAdapterTests: XCTestCase {
         }
     }
 
+    private final class CommandCapturingIterm2Adapter: Iterm2Adapter, @unchecked Sendable {
+        var launchedCommands: [String] = []
+
+        override func openWindowAndRun(command: String, background: Bool = false) throws -> ItermWindowInfo {
+            launchedCommands.append(command)
+            return try super.openWindowAndRun(command: command, background: background)
+        }
+    }
+
     // Tests yabai adapter queries validation and window operations by arranging representative inputs and asserting the expected result.
     func testYabaiAdapterQueriesValidationAndWindowOperations() throws {
         // Mocked dependency: `yabai` CLI.
@@ -75,7 +84,7 @@ final class AppctlAdapterTests: XCTestCase {
             XCTAssertFalse(try chrome.focusTab(windowID: 11, tabIndex: 99))
             XCTAssertEqual(try chrome.frontmostActiveTabURL(), "https://docs.example.com")
 
-            let iterm = Iterm2Adapter()
+            let iterm = CommandCapturingIterm2Adapter()
             XCTAssertTrue(iterm.isAvailable())
             let window = try iterm.openWindowAndRun(command: "echo \"hi\"")
             XCTAssertEqual(window.id, 77)
@@ -88,6 +97,8 @@ final class AppctlAdapterTests: XCTestCase {
             XCTAssertEqual(itermLaunch.trackingIdentity, .session("session-77"))
             XCTAssertEqual(itermLaunch.containerID, "77")
             XCTAssertEqual(itermLaunch.tabIndex, 2)
+            XCTAssertTrue(iterm.launchedCommands.last?.contains("cd '/tmp' &&") == true)
+            XCTAssertTrue(iterm.launchedCommands.last?.contains("export MUXY_TERMINAL_TRACKING_ID='tracking-1'; echo \"hi\"") == true)
             XCTAssertTrue(
                 try itermTerminalAdapter.focusTrackedTerminal(
                     TerminalFocusTarget(trackingIdentity: .session("session-77"), windowID: 77, tabIndex: 2)))

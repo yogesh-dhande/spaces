@@ -220,6 +220,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
     private enum WindowShortcutExecutionOutcome: Sendable {
         case focused(kind: String)
+        case opened(kind: String)
         case promptMissingConfiguredProcess(workspaceID: String, processKey: String, title: String)
         case noWorkspace
         case noMatch
@@ -532,6 +533,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let processes: [ProcessTemplate]
         let browserSessions: [BrowserSession]
         let statusChecks: [StatusCheckDefinition]
+        let agentLaunchers: [AgentLauncher]
     }
 
     private struct SidebarDataSnapshot: Sendable {
@@ -763,6 +765,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                     project.processes = input.processes
                     project.browserSessions = input.browserSessions
                     project.statusChecks = input.statusChecks
+                    project.agentLaunchers = input.agentLaunchers
                 }
                 return .success(record)
             } catch { return .failure(error) }
@@ -855,6 +858,18 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         }.value
     }
 
+    nonisolated private static func launchConfiguredAgentSnapshot(workspaceID: String, name: String) async -> Result<Void, Error> {
+        await Task.detached(priority: .userInitiated) {
+            do {
+                let db = try DatabaseLocator.defaultPath()
+                let store = try SQLiteStore(path: db)
+                let orchestrator = MuxyOrchestrator(store: store)
+                _ = try orchestrator.launchAgentLauncher(workspaceID: workspaceID, name: name)
+                return .success(())
+            } catch { return .failure(error) }
+        }.value
+    }
+
     nonisolated private static func focusWindowShortcutSnapshot(
         index: Int, selectedWorkspaceID: String?, dashboardFocusRequest: WindowFocusRequest?
     ) async -> Result<WindowShortcutExecutionOutcome, Error> {
@@ -895,7 +910,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 let browserSessions = shouldShowConfiguredBrowserSessions(workspaceIsRunning: workspaceIsRunning)
                     ? try orchestrator.resolvedWorkspaceBrowserSessions(workspaceID: selectedWorkspaceID)
                     : []
-                let configuredProcesses = try orchestrator.workspaceSettings(workspaceID: selectedWorkspaceID)?.processes ?? []
+                let workspaceSettings = try orchestrator.workspaceSettings(workspaceID: selectedWorkspaceID)
+                let configuredProcesses = workspaceSettings?.processes ?? []
                 let processEntries = orderedWorkspaceRunProcessEntries(
                     configuredProcesses: configuredProcesses,
                     windows: windows,
@@ -906,6 +922,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                     browserSessions: browserSessions,
                     processEntries: processEntries,
                     processesByID: processesByID,
+                    configuredAgentLaunchers: workspaceSettings?.agentLaunchers ?? [],
                     agentWindows: agentWindows)
                 guard index > 0, index <= shortcutTargets.count else { return .success(.noMatch) }
                 let target = shortcutTargets[index - 1]
@@ -929,6 +946,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                             workspaceID: selectedWorkspaceID,
                             processKey: processKey,
                             title: processKey))
+                case .agentLauncher:
+                    guard let launcherName = target.launcherName else { return .success(.noMatch) }
+                    _ = try orchestrator.launchAgentLauncher(workspaceID: selectedWorkspaceID, name: launcherName)
+                    return .success(.opened(kind: "agent_launcher"))
                 case .agent:
                     guard let record = target.agentWindow else { return .success(.noMatch) }
                     try orchestrator.focusAgentWindow(record)
@@ -1281,6 +1302,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             case process
             case window
             case missingConfiguredProcess
+            case agentLauncher
             case agent
         }
 
@@ -1289,7 +1311,20 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let windowListIndex: Int?
         let targetURL: String?
         let processKey: String?
+        let launcherName: String?
         let agentWindow: AgentWindowRecord?
+    }
+
+    struct ResolvedCodingAgentRunEntry: Sendable {
+        let launcher: AgentLauncher?
+        let agentWindow: AgentWindowRecord?
+
+        var launcherName: String? { launcher?.name }
+
+        var kind: WorkspaceRunShortcutTarget.Kind {
+            if agentWindow != nil { return .agent }
+            return .agentLauncher
+        }
     }
 
     nonisolated static func processTemplateKey(for template: ProcessTemplate) -> String {
@@ -1299,6 +1334,42 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     // Configured-process rows match live runtime rows by the raw configured name.
     nonisolated static func processRuntimeKey(name: String) -> String {
         name.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    nonisolated static func normalizedRunRowName(_ value: String) -> String {
+        value.trimmingCharacters(in: .whitespacesAndNewlines)
+            .folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
+    }
+
+    nonisolated static func resolvedCodingAgentRunEntries(
+        configuredAgentLaunchers: [AgentLauncher],
+        agentWindows: [AgentWindowRecord]
+    ) -> [ResolvedCodingAgentRunEntry] {
+        let configuredAgentNames = Set(
+            configuredAgentLaunchers
+                .map(\.name)
+                .map(normalizedRunRowName)
+                .filter { !$0.isEmpty })
+        var entries: [ResolvedCodingAgentRunEntry] = []
+
+        // Configured coding agents always own the first slots in the Coding Agents
+        // section. If a live agent matches one of those names, the slot resolves to
+        // that agent; otherwise the slot stays launchable from the config row.
+        for launcher in configuredAgentLaunchers {
+            let normalizedName = normalizedRunRowName(launcher.name)
+            guard !normalizedName.isEmpty else { continue }
+            let matchedAgent = agentWindows.first(where: {
+                normalizedRunRowName($0.label ?? "") == normalizedName
+            })
+            entries.append(ResolvedCodingAgentRunEntry(launcher: launcher, agentWindow: matchedAgent))
+        }
+
+        for agentWindow in agentWindows {
+            guard !configuredAgentNames.contains(normalizedRunRowName(agentWindow.label ?? "")) else { continue }
+            entries.append(ResolvedCodingAgentRunEntry(launcher: nil, agentWindow: agentWindow))
+        }
+
+        return entries
     }
 
     nonisolated static func agentTerminalTrackingKeys(for record: AgentWindowRecord) -> Set<String> {
@@ -1451,6 +1522,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         browserSessions: [BrowserSession],
         processEntries: [WorkspaceRunProcessEntry],
         processesByID: [String: RunningProcessRecord],
+        configuredAgentLaunchers: [AgentLauncher],
         agentWindows: [AgentWindowRecord]
     ) -> [WorkspaceRunShortcutTarget] {
         var targets: [WorkspaceRunShortcutTarget] = []
@@ -1464,6 +1536,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                     windowListIndex: nil,
                     targetURL: targetURL,
                     processKey: nil,
+                    launcherName: nil,
                     agentWindow: nil))
         }
 
@@ -1478,6 +1551,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                         windowListIndex: nil,
                         targetURL: nil,
                         processKey: nil,
+                        launcherName: nil,
                         agentWindow: nil))
             case .window:
                 guard let windowListIndex = entry.windowListIndex else { continue }
@@ -1488,6 +1562,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                         windowListIndex: windowListIndex,
                         targetURL: nil,
                         processKey: nil,
+                        launcherName: nil,
                         agentWindow: nil))
             case .missingConfiguredProcess:
                 guard let processKey = entry.processKey else { continue }
@@ -1498,19 +1573,21 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                         windowListIndex: nil,
                         targetURL: nil,
                         processKey: processKey,
+                        launcherName: nil,
                         agentWindow: nil))
             }
         }
 
-        for agentWindow in agentWindows {
+        for entry in resolvedCodingAgentRunEntries(configuredAgentLaunchers: configuredAgentLaunchers, agentWindows: agentWindows) {
             targets.append(
                 WorkspaceRunShortcutTarget(
-                    kind: .agent,
+                    kind: entry.kind,
                     processID: nil,
                     windowListIndex: nil,
                     targetURL: nil,
                     processKey: nil,
-                    agentWindow: agentWindow))
+                    launcherName: entry.agentWindow == nil ? entry.launcherName : nil,
+                    agentWindow: entry.agentWindow))
         }
 
         return targets
@@ -2822,11 +2899,13 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let portEditor = PortEditor()
         let processEditor = ProcessEditor()
         let browserSessionEditor = BrowserSessionEditor()
+        let agentLauncherEditor = AgentLauncherEditor()
         setupView.string = fullProject?.setupScript ?? ""
         stopView.string = fullProject?.stopScript ?? ""
         portEditor.setDefinitions(fullProject?.ports ?? [])
         processEditor.setProcessesWithChecks(fullProject?.processes ?? [], statusChecks: fullProject?.statusChecks ?? [])
         browserSessionEditor.setSessions(fullProject?.browserSessions ?? [])
+        agentLauncherEditor.setLaunchers(fullProject?.agentLaunchers ?? [])
 
         // --- Setup script card ---
         let setupScroll = scrollableTextView(setupView, height: 90)
@@ -2856,6 +2935,12 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             contentViews: [browserSessionEditor.container])
         stack.addArrangedSubview(browserCard)
         constrainFormFieldToFillWidth(browserCard, in: stack)
+
+        let agentLauncherCard = formSectionCard(
+            icon: "cpu.fill", title: "Coding agents", subtitle: "Named interactive coding agents that open outside tmux.",
+            contentViews: [agentLauncherEditor.container])
+        stack.addArrangedSubview(agentLauncherCard)
+        constrainFormFieldToFillWidth(agentLauncherCard, in: stack)
 
         // --- Stop script card ---
         let stopScroll = scrollableTextView(stopView, height: 90)
@@ -2889,9 +2974,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
         saveButton.tag = storeProjectFields(
             projectID: project.id, setupView: setupView, stopView: stopView, portEditor: portEditor, processEditor: processEditor,
-            browserSessionEditor: browserSessionEditor)
+            browserSessionEditor: browserSessionEditor, agentLauncherEditor: agentLauncherEditor)
         registerDirtyTracking(
-            setupView: setupView, stopView: stopView, portEditor: portEditor, processEditor: processEditor, browserSessionEditor: browserSessionEditor
+            setupView: setupView, stopView: stopView, portEditor: portEditor, processEditor: processEditor,
+            browserSessionEditor: browserSessionEditor, agentLauncherEditor: agentLauncherEditor
         )
     }
 
@@ -3051,6 +3137,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let portEditor = PortEditor()
         let processEditor = ProcessEditor()
         let browserSessionEditor = BrowserSessionEditor()
+        let agentLauncherEditor = AgentLauncherEditor()
         // --- Source row: popup + dir/URL input on same line ---
         let localSourceSection = NSStackView()
         localSourceSection.orientation = .horizontal
@@ -3135,6 +3222,12 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         browserCard.isHidden = true
         stack.addArrangedSubview(browserCard)
 
+        let agentLauncherCard = formSectionCard(
+            icon: "cpu.fill", title: "Coding agents", subtitle: "Named interactive coding agents that open outside tmux.",
+            contentViews: [agentLauncherEditor.container])
+        agentLauncherCard.isHidden = true
+        stack.addArrangedSubview(agentLauncherCard)
+
         // --- Stop script card ---
         let stopScroll = scrollableTextView(stopView, height: 90)
         let stopCard = formSectionCard(
@@ -3166,6 +3259,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         constrainFormFieldToFillWidth(addPortCard, in: stack)
         constrainFormFieldToFillWidth(processCard, in: stack)
         constrainFormFieldToFillWidth(browserCard, in: stack)
+        constrainFormFieldToFillWidth(agentLauncherCard, in: stack)
         constrainFormFieldToFillWidth(stopCard, in: stack)
         constrainFormFieldToFillWidth(buttonRow, in: stack)
 
@@ -3174,8 +3268,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         createButton.tag = storeAddProjectFields(
             sourcePopup: sourcePopup, localSourceSection: localSourceSection, cloneSourceSection: cloneSourceSection, dirField: dirField,
             repoURLField: repoURLField, setupView: setupView, stopView: stopView, portEditor: portEditor, processEditor: processEditor,
-            browserSessionEditor: browserSessionEditor, browseButton: browseButton,
-            progressiveInputViews: [setupCard, addPortCard, processCard, browserCard, stopCard], createButton: createButton)
+            browserSessionEditor: browserSessionEditor, agentLauncherEditor: agentLauncherEditor, browseButton: browseButton,
+            progressiveInputViews: [setupCard, addPortCard, processCard, browserCard, agentLauncherCard, stopCard], createButton: createButton)
         activeAddProjectFormTag = createButton.tag
         if let refs = AddProjectFieldCache.shared.cache[createButton.tag] { updateAddProjectSourceUI(refs) }
     }
@@ -3718,10 +3812,12 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         container.addArrangedSubview(centeredOpenRow)
         constrainFormFieldToFillWidth(centeredOpenRow, in: container)
 
-        // --- Windows grouped into Browser Tabs / Coding Agents / Processes ---
+        // --- Windows grouped into Browser Tabs / Processes / Coding Agents ---
         let processes = (try? orchestrator.runningProcesses(workspaceID: workspace.id)) ?? []
         let windows = (try? orchestrator.windows(workspaceID: workspace.id)) ?? []
-        let configuredProcesses = (try? orchestrator.workspaceSettings(workspaceID: workspace.id)?.processes) ?? []
+        let workspaceSettings = try? orchestrator.workspaceSettings(workspaceID: workspace.id)
+        let configuredProcesses = workspaceSettings?.processes ?? []
+        let configuredAgentLaunchers = workspaceSettings?.agentLaunchers ?? []
         let configuredBrowserSessions: [BrowserSession] = {
             guard Self.shouldShowConfiguredBrowserSessions(workspaceIsRunning: workspace.isRunning) else { return [] }
             return (try? orchestrator.resolvedWorkspaceBrowserSessions(workspaceID: workspace.id)) ?? []
@@ -3735,8 +3831,12 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             processes: processes,
             agentWindows: agentWindowsForRunTab)
         let processesByID = Dictionary(uniqueKeysWithValues: processes.map { ($0.id, $0) })
+        let codingAgentEntries = Self.resolvedCodingAgentRunEntries(
+            configuredAgentLaunchers: configuredAgentLaunchers,
+            agentWindows: agentWindowsForRunTab)
         // Shortcut counter is shared across all sections so numbers are assigned
-        // in the order rows appear on screen: Browser Tabs → Processes → Coding Agents.
+        // in the order rows appear on screen: Browser Tabs → Processes →
+        // Coding Agents.
         var shortcutCounter = 1
 
         // --- Build Browser Tabs rows ---
@@ -3750,6 +3850,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         processesStack.orientation = .vertical
         processesStack.spacing = 4
         var processRowCount = 0
+
+        let codingAgentsStack = NSStackView()
+        codingAgentsStack.orientation = .vertical
+        codingAgentsStack.spacing = 4
+        var codingAgentRowCount = 0
 
         for session in configuredBrowserSessions {
             guard let targetURL = session.url, !targetURL.isEmpty else { continue }
@@ -3844,33 +3949,33 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         }
 
         // --- Build Coding Agents rows last so they do not reshuffle non-agent shortcuts ---
-        var agentsStack: NSStackView? = nil
-        if !agentWindowsForRunTab.isEmpty {
+        if !codingAgentEntries.isEmpty {
             let windowsByTrackingKey = Self.preferredTerminalWindowsByTrackingKey(windows)
-            let stack = NSStackView()
-            stack.orientation = .vertical
-            stack.spacing = 4
-            for agentWin in agentWindowsForRunTab {
-                let linkedWin = Self.agentTerminalTrackingKeys(for: agentWin).compactMap { windowsByTrackingKey[$0] }.first
-                let agentLabel = agentWin.label ?? "Coding Agent CLI"
-                let agentDetail = linkedWin?.detail ?? linkedWin?.app
-                let rec = agentWin
+            for entry in codingAgentEntries {
+                let rowShortcut = windowShortcutBadgeText(index: shortcutCounter)
+                shortcutCounter += 1
+                let linkedWin = entry.agentWindow.flatMap { agent in
+                    Self.agentTerminalTrackingKeys(for: agent).compactMap { windowsByTrackingKey[$0] }.first
+                }
                 let row = windowRow(
                     icon: "cpu.fill",
-                    iconColor: .secondaryLabelColor,
-                    label: agentLabel,
-                    detail: agentDetail,
-                    shortcut: windowShortcutBadgeText(index: shortcutCounter),
-                    agentStatus: agentWin.status,
+                    iconColor: entry.agentWindow == nil ? .systemOrange : .secondaryLabelColor,
+                    label: entry.agentWindow?.label ?? entry.launcherName ?? "Coding Agent CLI",
+                    detail: linkedWin?.detail ?? entry.launcher.map { resolveCommand($0.command) } ?? linkedWin?.app,
+                    shortcut: rowShortcut,
+                    agentStatus: entry.agentWindow?.status,
                     action: { [weak self] in
                         guard let self else { return }
-                        await self.performWindowFocus(.agentWindow(rec))
+                        if let matchedAgent = entry.agentWindow {
+                            await self.performWindowFocus(.agentWindow(matchedAgent))
+                        } else if let launcherName = entry.launcherName {
+                            await self.launchConfiguredAgent(workspaceID: workspace.id, name: launcherName)
+                        }
                     })
-                shortcutCounter += 1
-                stack.addArrangedSubview(row)
-                constrainFormFieldToFillWidth(row, in: stack)
+                codingAgentsStack.addArrangedSubview(row)
+                constrainFormFieldToFillWidth(row, in: codingAgentsStack)
+                codingAgentRowCount += 1
             }
-            agentsStack = stack
         }
 
         // --- Add sections in display order: Browser Tabs → Processes → Coding Agents ---
@@ -3890,12 +3995,12 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             constrainFormFieldToFillWidth(processesStack, in: container)
         }
 
-        if let agentsStack {
+        if codingAgentRowCount > 0 {
             let agentsHeader = sectionHeader(icon: "cpu.fill", title: "Coding Agents")
             container.addArrangedSubview(agentsHeader)
             constrainFormFieldToFillWidth(agentsHeader, in: container)
-            container.addArrangedSubview(agentsStack)
-            constrainFormFieldToFillWidth(agentsStack, in: container)
+            container.addArrangedSubview(codingAgentsStack)
+            constrainFormFieldToFillWidth(codingAgentsStack, in: container)
         }
 
         // (quick actions moved above Windows section)
@@ -3950,18 +4055,21 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let stopView = makeEditableTextView()
         let stopScroll = scrollableTextView(stopView, height: 90)
         let browserSessionEditor = BrowserSessionEditor()
+        let agentLauncherEditor = AgentLauncherEditor()
 
         if let config = try? orchestrator.workspaceSettings(workspaceID: workspace.id) {
             stopView.string = config.stopScript ?? ""
             portEditor.setDefinitions(config.ports)
             processEditor.setProcessesWithChecks(config.processes, statusChecks: config.statusChecks)
             browserSessionEditor.setSessions(config.browserSessions)
+            agentLauncherEditor.setLaunchers(config.agentLaunchers)
         } else {
             let fullProject = try? orchestrator.project(id: project.id)
             stopView.string = fullProject?.stopScript ?? ""
             portEditor.setDefinitions(fullProject?.ports ?? [])
             processEditor.setProcessesWithChecks(fullProject?.processes ?? [], statusChecks: fullProject?.statusChecks ?? [])
             browserSessionEditor.setSessions(fullProject?.browserSessions ?? [])
+            agentLauncherEditor.setLaunchers(fullProject?.agentLaunchers ?? [])
         }
         let saveButton = actionButton(
             title: "Save Workspace", symbol: "square.and.arrow.down", tooltip: "Save workspace settings", action: #selector(saveWorkspace(_:)),
@@ -3993,6 +4101,12 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             contentViews: [browserSessionEditor.container])
         contentStack.addArrangedSubview(browserCard)
         constrainFormFieldToFillWidth(browserCard, in: contentStack)
+
+        let agentLauncherCard = formSectionCard(
+            icon: "cpu.fill", title: "Coding agents", subtitle: "Workspace override for named interactive coding agents.",
+            contentViews: [agentLauncherEditor.container])
+        contentStack.addArrangedSubview(agentLauncherCard)
+        constrainFormFieldToFillWidth(agentLauncherCard, in: contentStack)
 
         let scroll = NSScrollView()
         scroll.hasVerticalScroller = true
@@ -4034,9 +4148,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
         saveButton.tag = storeWorkspaceFields(
             workspaceID: workspace.id, stopView: stopView, portEditor: portEditor, processEditor: processEditor,
-            browserSessionEditor: browserSessionEditor)
+            browserSessionEditor: browserSessionEditor, agentLauncherEditor: agentLauncherEditor)
         registerWorkspaceDirtyTracking(
-            stopView: stopView, portEditor: portEditor, processEditor: processEditor, browserSessionEditor: browserSessionEditor)
+            stopView: stopView, portEditor: portEditor, processEditor: processEditor, browserSessionEditor: browserSessionEditor,
+            agentLauncherEditor: agentLauncherEditor)
 
         return insetContainerView(container)
     }
@@ -4999,30 +5114,30 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
     private func storeProjectFields(
         projectID: String, setupView: NSTextView, stopView: NSTextView, portEditor: PortEditor, processEditor: ProcessEditor,
-        browserSessionEditor: BrowserSessionEditor
+        browserSessionEditor: BrowserSessionEditor, agentLauncherEditor: AgentLauncherEditor
     ) -> Int {
         let id = projectID.hashValue
         ProjectFieldCache.shared.cache[id] = ProjectFieldRefs(
             projectID: projectID, setupView: setupView, stopView: stopView, portEditor: portEditor, processEditor: processEditor,
-            browserSessionEditor: browserSessionEditor)
+            browserSessionEditor: browserSessionEditor, agentLauncherEditor: agentLauncherEditor)
         return id
     }
 
     private func storeWorkspaceFields(
         workspaceID: String, stopView: NSTextView, portEditor: PortEditor, processEditor: ProcessEditor,
-        browserSessionEditor: BrowserSessionEditor
+        browserSessionEditor: BrowserSessionEditor, agentLauncherEditor: AgentLauncherEditor
     ) -> Int {
         let id = workspaceID.hashValue
         WorkspaceFieldCache.shared.cache[id] = WorkspaceFieldRefs(
             workspaceID: workspaceID, stopView: stopView, portEditor: portEditor, processEditor: processEditor,
-            browserSessionEditor: browserSessionEditor)
+            browserSessionEditor: browserSessionEditor, agentLauncherEditor: agentLauncherEditor)
         return id
     }
 
     private func storeAddProjectFields(
         sourcePopup: NSPopUpButton, localSourceSection: NSStackView, cloneSourceSection: NSStackView, dirField: NSTextField,
         repoURLField: NSTextField, setupView: NSTextView, stopView: NSTextView, portEditor: PortEditor, processEditor: ProcessEditor,
-        browserSessionEditor: BrowserSessionEditor, browseButton: NSButton,
+        browserSessionEditor: BrowserSessionEditor, agentLauncherEditor: AgentLauncherEditor, browseButton: NSButton,
         progressiveInputViews: [NSView], createButton: NSButton
     ) -> Int {
         let id = UUID().uuidString.hashValue
@@ -5030,7 +5145,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             sourcePopup: sourcePopup, localSourceSection: localSourceSection, cloneSourceSection: cloneSourceSection, dirField: dirField,
             repoURLField: repoURLField, browseButton: browseButton, progressiveInputViews: progressiveInputViews, createButton: createButton,
             setupView: setupView, stopView: stopView, portEditor: portEditor, processEditor: processEditor,
-            browserSessionEditor: browserSessionEditor
+            browserSessionEditor: browserSessionEditor, agentLauncherEditor: agentLauncherEditor
         )
         sourcePopup.tag = id
         browseButton.tag = id
@@ -5191,6 +5306,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 config.processes = refs.processEditor.currentProcesses()
                 config.browserSessions = refs.browserSessionEditor.currentSessions()
                 config.statusChecks = refs.processEditor.currentStatusChecks()
+                config.agentLaunchers = refs.agentLauncherEditor.currentLaunchers()
             }
             projectHasUnsavedChanges = false
             reloadData()
@@ -5242,6 +5358,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 config.processes = refs.processEditor.currentProcesses()
                 config.browserSessions = refs.browserSessionEditor.currentSessions()
                 config.statusChecks = refs.processEditor.currentStatusChecks()
+                config.agentLaunchers = refs.agentLauncherEditor.currentLaunchers()
             }
             workspaceHasUnsavedChanges = false
             reloadData()
@@ -5260,7 +5377,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                     gitURL: repoURL, directoryPath: nil, setupScript: refs.setupView.string.isEmpty ? nil : refs.setupView.string,
                     stopScript: refs.stopView.string.isEmpty ? nil : refs.stopView.string, ports: refs.portEditor.currentDefinitions(),
                     processes: refs.processEditor.currentProcesses(), browserSessions: refs.browserSessionEditor.currentSessions(),
-                    statusChecks: refs.processEditor.currentStatusChecks())
+                    statusChecks: refs.processEditor.currentStatusChecks(), agentLaunchers: refs.agentLauncherEditor.currentLaunchers())
                 progressDetail = "Cloning repository and applying project settings."
             } else {
                 let dir = refs.dirField.toolTip?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
@@ -5269,7 +5386,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                     gitURL: nil, directoryPath: dir, setupScript: refs.setupView.string.isEmpty ? nil : refs.setupView.string,
                     stopScript: refs.stopView.string.isEmpty ? nil : refs.stopView.string, ports: refs.portEditor.currentDefinitions(),
                     processes: refs.processEditor.currentProcesses(), browserSessions: refs.browserSessionEditor.currentSessions(),
-                    statusChecks: refs.processEditor.currentStatusChecks())
+                    statusChecks: refs.processEditor.currentStatusChecks(), agentLaunchers: refs.agentLauncherEditor.currentLaunchers())
                 progressDetail = "Registering project and applying project settings."
             }
             let originalTitle = sender.title
@@ -6266,6 +6383,17 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         }
     }
 
+    private func launchConfiguredAgent(workspaceID: String, name: String) async {
+        let result = await Self.launchConfiguredAgentSnapshot(workspaceID: workspaceID, name: name)
+        switch result {
+        case .success:
+            reloadData()
+            hideAfterSuccessfulExternalWindowAction(.open)
+        case .failure(let error):
+            showError(error)
+        }
+    }
+
     private func focusWindowShortcut(index: Int) {
         let startedAt = Date()
         Task { @MainActor [weak self] in
@@ -6288,6 +6416,14 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             activeWindowShortcutProfile?.routeCompletedAt = Date()
             logWindowShortcutProfile("stage=total index=\(index) elapsed_ms=\(windowShortcutElapsedMS(since: startedAt))")
             hideAfterSuccessfulExternalWindowAction(.focus)
+        case .success(.opened(let kind)):
+            logWindowShortcutProfile(
+                "stage=route_done index=\(index) kind=\(kind) elapsed_ms=\(windowShortcutElapsedMS(since: routeStartedAt))"
+            )
+            activeWindowShortcutProfile?.routeCompletedAt = Date()
+            logWindowShortcutProfile("stage=total index=\(index) elapsed_ms=\(windowShortcutElapsedMS(since: startedAt))")
+            reloadData()
+            hideAfterSuccessfulExternalWindowAction(.open)
         case .success(.promptMissingConfiguredProcess(let workspaceID, let processKey, let title)):
             showMissingConfiguredProcessRecoveryPrompt(workspaceID: workspaceID, processKey: processKey, title: title)
             logWindowShortcutProfile(
@@ -7204,7 +7340,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
     private func registerDirtyTracking(
         setupView: NSTextView, stopView: NSTextView, portEditor: PortEditor, processEditor: ProcessEditor,
-        browserSessionEditor: BrowserSessionEditor
+        browserSessionEditor: BrowserSessionEditor, agentLauncherEditor: AgentLauncherEditor
     ) {
         projectHasUnsavedChanges = false
         NotificationCenter.default.addObserver(forName: NSText.didChangeNotification, object: setupView, queue: .main) { [weak self] _ in
@@ -7216,10 +7352,12 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         portEditor.onDirty = { [weak self] in Task { @MainActor in self?.projectHasUnsavedChanges = true } }
         processEditor.onDirty = { [weak self] in Task { @MainActor in self?.projectHasUnsavedChanges = true } }
         browserSessionEditor.onDirty = { [weak self] in Task { @MainActor in self?.projectHasUnsavedChanges = true } }
+        agentLauncherEditor.onDirty = { [weak self] in Task { @MainActor in self?.projectHasUnsavedChanges = true } }
     }
 
     private func registerWorkspaceDirtyTracking(
-        stopView: NSTextView, portEditor: PortEditor, processEditor: ProcessEditor, browserSessionEditor: BrowserSessionEditor
+        stopView: NSTextView, portEditor: PortEditor, processEditor: ProcessEditor, browserSessionEditor: BrowserSessionEditor,
+        agentLauncherEditor: AgentLauncherEditor
     ) {
         workspaceHasUnsavedChanges = false
         NotificationCenter.default.addObserver(forName: NSText.didChangeNotification, object: stopView, queue: .main) { [weak self] _ in
@@ -7228,6 +7366,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         portEditor.onDirty = { [weak self] in Task { @MainActor in self?.workspaceHasUnsavedChanges = true } }
         processEditor.onDirty = { [weak self] in Task { @MainActor in self?.workspaceHasUnsavedChanges = true } }
         browserSessionEditor.onDirty = { [weak self] in Task { @MainActor in self?.workspaceHasUnsavedChanges = true } }
+        agentLauncherEditor.onDirty = { [weak self] in Task { @MainActor in self?.workspaceHasUnsavedChanges = true } }
     }
 
     private func saveCurrentDetail() -> Bool {
@@ -7264,6 +7403,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 config.processes = refs.processEditor.currentProcesses()
                 config.browserSessions = refs.browserSessionEditor.currentSessions()
                 config.statusChecks = refs.processEditor.currentStatusChecks()
+                config.agentLaunchers = refs.agentLauncherEditor.currentLaunchers()
             }
             workspaceHasUnsavedChanges = false
             reloadData()
@@ -7287,6 +7427,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 config.processes = refs.processEditor.currentProcesses()
                 config.browserSessions = refs.browserSessionEditor.currentSessions()
                 config.statusChecks = refs.processEditor.currentStatusChecks()
+                config.agentLaunchers = refs.agentLauncherEditor.currentLaunchers()
             }
             projectHasUnsavedChanges = false
             reloadData()

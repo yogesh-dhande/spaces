@@ -217,6 +217,10 @@ Implementation note:
 - Agent events are explicit CLI inputs that attach status to tracked workspace agent windows.
 - `mx agent event` only resolves direct terminal environments. If the command is run from tmux, the CLI rejects it explicitly because Muxy does not support coding agents running inside tmux.
 - Agent windows are stored separately from regular process windows because they carry provider and lifecycle metadata, but `init` also reconciles them against tracked terminal windows so ad-hoc agent terminals become focusable tracked rows.
+- Configured agent-launcher names are treated as reserved focus labels. The launcher-owned agent instance may keep that exact label, while unrelated ad-hoc agents that report the same label are suffixed during registration so GUI rows and CLI focus targets stay unambiguous.
+- Workspace launch now opens configured coding agents through the same direct-terminal path as manual agent launch. That creates the tracked agent rows eagerly, while later `mx agent event` calls still supply the actual lifecycle status.
+- The Run tab keeps configured and ad-hoc agent rows in one `Coding Agents` section. Configured rows occupy their stable slots first, then unmatched ad-hoc agent rows append after them so shortcut ordering remains deterministic.
+- Configured-agent relaunch is conservative: if a reserved row still points at a live tracked terminal, Muxy keeps that row and treats launch as a no-op. Only clearly stale rows are evicted and replaced.
 - Agent reconciliation prefers terminal identity first:
   `iTerm2` uses the shell session ID from the environment.
   `Ghostty` keeps a Muxy-issued `terminalTrackingID` for CLI hook attribution and a separate `terminalNativeID` for the real Ghostty terminal. Hook events only trust the tracking token; they do not infer the emitting shell from the frontmost Ghostty terminal or yabai window.

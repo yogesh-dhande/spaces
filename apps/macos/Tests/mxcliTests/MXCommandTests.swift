@@ -46,6 +46,13 @@ final class MXCommandTests: XCTestCase {
         XCTAssertEqual(command.path, "/tmp/worktree")
     }
 
+    func testAgentLaunchParsesNameAndWorkspacePath() throws {
+        let command = try AgentLaunchCommand.parse(["--name", "Codex", "/tmp/worktree"])
+
+        XCTAssertEqual(command.name, "Codex")
+        XCTAssertEqual(command.path, "/tmp/worktree")
+    }
+
     func testAgentEventRejectsUnknownEnumValue() {
         XCTAssertThrowsError(try AgentEventCommand.parse(["--type", "bogus"])) { error in
             let rendered = String(describing: error)

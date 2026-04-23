@@ -425,8 +425,17 @@ extension Iterm2Adapter: TerminalAdapter {
         "'\(token.replacingOccurrences(of: "'", with: "'\\''"))'"
     }
 
-    public func openWindowAndRun(command: String, cwd _: String, environment: [String: String], background: Bool) throws -> TerminalLaunchResult {
-        let window = try openWindowAndRun(command: commandApplyingEnvironment(command, environment: environment), background: background)
+    private func commandApplyingWorkingDirectory(_ command: String, cwd: String) -> String {
+        let trimmedDirectory = cwd.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedDirectory.isEmpty else { return command }
+        return "cd \(shellQuoted(trimmedDirectory)) && \(command)"
+    }
+
+    public func openWindowAndRun(command: String, cwd: String, environment: [String: String], background: Bool) throws -> TerminalLaunchResult {
+        let launchedCommand = commandApplyingWorkingDirectory(
+            commandApplyingEnvironment(command, environment: environment),
+            cwd: cwd)
+        let window = try openWindowAndRun(command: launchedCommand, background: background)
         return TerminalLaunchResult(
             trackingIdentity: window.sessionID.map(TerminalTrackingIdentity.session) ?? .window(window.id),
             hookSessionID: window.sessionID,

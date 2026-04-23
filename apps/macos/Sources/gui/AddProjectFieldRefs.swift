@@ -14,4 +14,5 @@ struct AddProjectFieldRefs {
     let portEditor: PortEditor
     let processEditor: ProcessEditor
     let browserSessionEditor: BrowserSessionEditor
+    let agentLauncherEditor: AgentLauncherEditor
 }

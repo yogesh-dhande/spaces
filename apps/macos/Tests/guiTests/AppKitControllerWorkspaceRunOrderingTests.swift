@@ -250,6 +250,7 @@ import streamctl
     @Test func shortcutTargetsFollowVisibleRunSectionOrder() {
         let configuredProcesses = [ProcessTemplate(name: "web", command: "npm run dev")]
         let browserSessions = [BrowserSession(name: "frontend", url: "http://localhost:3000")]
+        let configuredAgentLaunchers = [AgentLauncher(name: "claude", command: "claude")]
         let windows = [
             WindowRecord(
                 id: "win-web", workspaceID: "workspace", app: "iTerm2", title: "web", targetURL: nil, windowID: 101, terminalTrackingID: "session-web",
@@ -276,12 +277,56 @@ import streamctl
             browserSessions: browserSessions,
             processEntries: processEntries,
             processesByID: Dictionary(uniqueKeysWithValues: processes.map { ($0.id, $0) }),
+            configuredAgentLaunchers: configuredAgentLaunchers,
             agentWindows: agentWindows)
 
-        #expect(shortcutTargets.map(\.kind) == [.browser, .process, .agent])
+        #expect(shortcutTargets.map(\.kind) == [.browser, .process, .agentLauncher, .agent])
         #expect(shortcutTargets.first?.targetURL == "http://localhost:3000")
         #expect(shortcutTargets[1].processID == "process-web")
-        #expect(shortcutTargets[2].agentWindow?.id == "agent")
+        #expect(shortcutTargets[2].launcherName == "claude")
+        #expect(shortcutTargets[3].agentWindow?.id == "agent")
+    }
+
+    @Test func configuredAndAdHocAgentsShareOneVisibleShortcutRunOrder() {
+        let configuredAgentLaunchers = [AgentLauncher(name: "claude", command: "claude")]
+        let agentWindows = [
+            AgentWindowRecord(
+                id: "configured", workspaceID: "workspace", provider: .iterm2, label: "claude", terminalTrackingID: "session-claude",
+                tmuxWindowID: nil, codexThreadID: nil, windowID: 202, yabaiWindowID: 202, status: .idle, createdAt: "now", updatedAt: "now"),
+            AgentWindowRecord(
+                id: "adhoc", workspaceID: "workspace", provider: .iterm2, label: "reviewer", terminalTrackingID: "session-reviewer",
+                tmuxWindowID: nil, codexThreadID: nil, windowID: 203, yabaiWindowID: 203, status: .spinning, createdAt: "now", updatedAt: "now"),
+        ]
+
+        let shortcutTargets = AppKitController.orderedWorkspaceRunShortcutTargets(
+            browserSessions: [],
+            processEntries: [],
+            processesByID: [:],
+            configuredAgentLaunchers: configuredAgentLaunchers,
+            agentWindows: agentWindows)
+
+        #expect(shortcutTargets.map(\.kind) == [.agent, .agent])
+        #expect(shortcutTargets.map { $0.agentWindow?.id } == ["configured", "adhoc"])
+    }
+
+    @Test func resolvedCodingAgentEntriesKeepConfiguredSlotsBeforeAdHocAgents() {
+        let configuredAgentLaunchers = [AgentLauncher(name: "claude", command: "claude"), AgentLauncher(name: "codex", command: "codex")]
+        let agentWindows = [
+            AgentWindowRecord(
+                id: "matched", workspaceID: "workspace", provider: .iterm2, label: "Claude", terminalTrackingID: "session-claude",
+                tmuxWindowID: nil, codexThreadID: nil, windowID: 202, yabaiWindowID: 202, status: .idle, createdAt: "now", updatedAt: "now"),
+            AgentWindowRecord(
+                id: "adhoc", workspaceID: "workspace", provider: .iterm2, label: "reviewer", terminalTrackingID: "session-reviewer",
+                tmuxWindowID: nil, codexThreadID: nil, windowID: 203, yabaiWindowID: 203, status: .spinning, createdAt: "now", updatedAt: "now"),
+        ]
+
+        let entries = AppKitController.resolvedCodingAgentRunEntries(
+            configuredAgentLaunchers: configuredAgentLaunchers,
+            agentWindows: agentWindows)
+
+        #expect(entries.map(\.kind) == [.agent, .agentLauncher, .agent])
+        #expect(entries.map(\.launcherName) == ["claude", "codex", nil])
+        #expect(entries.map { $0.agentWindow?.id } == ["matched", nil, "adhoc"])
     }
 
     @Test func missingConfiguredProcessShortcutTargetsRecoveryAction() {
@@ -299,6 +344,7 @@ import streamctl
             browserSessions: [],
             processEntries: processEntries,
             processesByID: [:],
+            configuredAgentLaunchers: [],
             agentWindows: [])
 
         #expect(shortcutTargets.count == 1)

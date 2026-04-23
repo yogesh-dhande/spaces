@@ -5,6 +5,7 @@ import appctl
 
 public final class MuxyOrchestrator {
     public static let terminalTrackingIDEnvVar = "MUXY_TERMINAL_TRACKING_ID"
+    public static let agentLabelEnvVar = "MUXY_AGENT_LABEL"
 
     public struct WorkspaceStopOutcome: Sendable {
         public let skippedStopScriptBecauseWorkspaceDirectoryMissing: Bool
@@ -225,12 +226,14 @@ public final class MuxyOrchestrator {
         update(&existing)
         try validateWorkspaceFocusNames(
             workspaceID: workspace.id, processes: existing.processes, browserSessions: existing.browserSessions,
+            agentLaunchers: existing.agentLaunchers,
             agentWindows: try store.agentWindows(workspaceID: workspace.id))
         try store.setWorkspaceStopScript(workspaceID: workspace.id, stopScript: existing.stopScript)
         try store.setWorkspacePortDefinitions(workspaceID: workspace.id, definitions: existing.ports)
         try store.setWorkspaceProcesses(workspaceID: workspace.id, processes: existing.processes)
         try store.setWorkspaceStatusChecks(workspaceID: workspace.id, checks: existing.statusChecks)
         try store.setWorkspaceBrowserSessions(workspaceID: workspace.id, sessions: existing.browserSessions)
+        try store.setWorkspaceAgentLaunchers(workspaceID: workspace.id, launchers: existing.agentLaunchers)
         try store.touchWorkspaceSettings(workspaceID: workspace.id, updatedAt: nowISO8601())
         if workspace.isRunning { try applyWorkspaceSettingsUpdate(project: project, workspace: workspace, previous: previous, updated: existing) }
     }
@@ -378,8 +381,11 @@ public final class MuxyOrchestrator {
         record = ProjectRecord(
             id: normalizedID, name: record.name, dir: record.dir, isGitRepo: record.isGitRepo, defaultBranch: record.defaultBranch,
             setupScript: record.setupScript, stopScript: record.stopScript, ports: record.ports, processes: record.processes,
-            statusChecks: record.statusChecks, browserSessions: record.browserSessions)
-        try validateUniqueConfiguredFocusNames(processes: record.processes, browserSessions: record.browserSessions)
+            statusChecks: record.statusChecks, browserSessions: record.browserSessions, agentLaunchers: record.agentLaunchers)
+        try validateUniqueConfiguredFocusNames(
+            processes: record.processes,
+            browserSessions: record.browserSessions,
+            agentLaunchers: record.agentLaunchers)
         try store.upsert(project: record)
         try ensureDefaultWorkspace(for: record)
         try syncDefaultWorkspaceSettingsIfTemplateBased(project: record, previousRecord: previousRecord, updatedRecord: record)
@@ -664,6 +670,15 @@ public final class MuxyOrchestrator {
 
         if let config {
             newWindows.append(contentsOf: try launchProcesses(workspace: workspace, templates: config.processes, env: env, background: background))
+        }
+
+        if let config {
+            for launcher in config.agentLaunchers {
+                let trimmedName = launcher.name.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !trimmedName.isEmpty else { continue }
+                _ = try launchAgentLauncher(workspaceID: workspace.id, name: trimmedName, background: background)
+            }
+            newWindows.append(contentsOf: try trackedTerminalWindowsForAgents(workspaceID: workspace.id, agentWindows: try store.agentWindows(workspaceID: workspace.id)))
         }
 
         try store.deleteWindows(workspaceID: workspace.id)
@@ -1572,8 +1587,16 @@ public final class MuxyOrchestrator {
         return "shell-\(suffix)"
     }
 
-    private func uniqueAgentFocusLabel(workspaceID: String, preferredLabel: String?, excludingAgentWindowID: String? = nil) throws -> String? {
+    private func uniqueAgentFocusLabel(
+        workspaceID: String,
+        preferredLabel: String?,
+        excludingAgentWindowID: String? = nil,
+        claimedLauncherName: String? = nil
+    ) throws -> String? {
         guard let baseLabel = sanitizedFocusName(preferredLabel) else { return nil }
+        // Configured coding-agent slots reserve their exact names even before a live agent
+        // reports in. Ad-hoc agents that choose the same label get suffixed so the Run tab
+        // and `mx workspace focus --name ...` keep a stable one-name-to-one-row mapping.
         let usedNames = Set(
             try focusableWorkspaceTargets(workspaceID: workspaceID).filter { entry in
                 guard case .agent(let record) = entry.target, let excludingAgentWindowID else { return true }
@@ -1581,8 +1604,17 @@ public final class MuxyOrchestrator {
             }.map(\.name).map(normalizedFocusName))
         let existingAgentNames = try store.agentWindows(workspaceID: workspaceID).filter { $0.id != excludingAgentWindowID }.compactMap(\.label)
             .compactMap(sanitizedFocusName).map(normalizedFocusName)
+        let reservedLauncherNames = Set(
+            try store.workspaceAgentLaunchers(workspaceID: workspaceID)
+                .map { try requiredConfiguredFocusName($0.name, kind: "Coding agent") }
+                .filter { launcherName in
+                    guard let claimedLauncherName else { return true }
+                    return normalizedFocusName(launcherName) != normalizedFocusName(claimedLauncherName)
+                }
+                .map(normalizedFocusName))
         var blockedNames = usedNames
         blockedNames.formUnion(existingAgentNames)
+        blockedNames.formUnion(reservedLauncherNames)
         if !blockedNames.contains(normalizedFocusName(baseLabel)) { return baseLabel }
         var suffix = 2
         while blockedNames.contains(normalizedFocusName("\(baseLabel)-\(suffix)")) { suffix += 1 }
@@ -1624,21 +1656,35 @@ public final class MuxyOrchestrator {
         return sanitized
     }
 
-    private func validateUniqueConfiguredFocusNames(processes: [ProcessTemplate], browserSessions: [BrowserSession]) throws {
+    private func validateUniqueConfiguredFocusNames(
+        processes: [ProcessTemplate],
+        browserSessions: [BrowserSession],
+        agentLaunchers: [AgentLauncher]
+    ) throws {
         let processEntries = try processes.map { process in (name: try requiredConfiguredFocusName(process.name, kind: "Process"), kind: "process") }
         let browserEntries = try browserSessions.map { session in
             (name: try requiredConfiguredFocusName(session.name, kind: "Browser session"), kind: "browser session")
         }
-        let entries = processEntries + browserEntries
+        let launcherEntries = try agentLaunchers.map { launcher in
+            (name: try requiredConfiguredFocusName(launcher.name, kind: "Coding agent"), kind: "coding agent")
+        }
+        let entries = processEntries + browserEntries + launcherEntries
         try validateUniqueFocusNameEntries(entries)
     }
 
     private func validateWorkspaceFocusNames(
-        workspaceID: String, processes: [ProcessTemplate]? = nil, browserSessions: [BrowserSession]? = nil, agentWindows: [AgentWindowRecord]? = nil
+        workspaceID: String,
+        processes: [ProcessTemplate]? = nil,
+        browserSessions: [BrowserSession]? = nil,
+        agentLaunchers: [AgentLauncher]? = nil,
+        agentWindows: [AgentWindowRecord]? = nil
     ) throws {
         let workspaceProcesses = try processes ?? store.workspaceProcesses(workspaceID: workspaceID)
         let workspaceBrowserSessions = try browserSessions ?? store.workspaceBrowserSessions(workspaceID: workspaceID)
+        let workspaceAgentLaunchers = try agentLaunchers ?? store.workspaceAgentLaunchers(workspaceID: workspaceID)
         let workspaceAgentWindows = try agentWindows ?? store.agentWindows(workspaceID: workspaceID)
+        let configuredAgentNames = Set(
+            try workspaceAgentLaunchers.map { try requiredConfiguredFocusName($0.name, kind: "Coding agent") }.map(normalizedFocusName))
         let processEntries = try workspaceProcesses.map { process in
             (name: try requiredConfiguredFocusName(process.name, kind: "Process"), kind: "process")
         }
@@ -1647,8 +1693,12 @@ public final class MuxyOrchestrator {
             + (try resolvedBrowserSessionsForFocusNames(workspaceID: workspaceID, browserSessions: workspaceBrowserSessions).map {
                 ($0.name, "browser session")
             })
+            + (try workspaceAgentLaunchers.map { launcher in
+                (name: try requiredConfiguredFocusName(launcher.name, kind: "Coding agent"), kind: "coding agent")
+            })
             + workspaceAgentWindows.compactMap { record -> (name: String, kind: String)? in
                 guard let name = sanitizedFocusName(record.label) else { return nil }
+                guard !configuredAgentNames.contains(normalizedFocusName(name)) else { return nil }
                 return (name, "terminal")
             }
         try validateUniqueFocusNameEntries(entries)
@@ -1668,7 +1718,7 @@ public final class MuxyOrchestrator {
         }.sorted { $0.localizedStandardCompare($1) == .orderedAscending }
         guard !duplicates.isEmpty else { return }
         throw MuxyError.invalidArgument(
-            message: "Names must be unique across browser sessions, processes, and terminals. Duplicates: \(duplicates.joined(separator: ", "))")
+            message: "Names must be unique across browser sessions, processes, and coding agents. Duplicates: \(duplicates.joined(separator: ", "))")
     }
 
     private func missingFocusNameMessage(name: String, availableNames: [String]) -> String {
@@ -1797,6 +1847,13 @@ public final class MuxyOrchestrator {
     private func terminalHost(for appName: String?) -> TerminalHost? {
         guard let appName else { return nil }
         return TerminalHost.allCases.first(where: { $0.appName == appName })
+    }
+
+    private func agentProvider(for terminalHost: TerminalHost) -> AgentProvider {
+        switch terminalHost {
+        case .iterm2: return .iterm2
+        case .ghostty: return .ghostty
+        }
     }
 
     private func terminalAppName(for terminalHost: TerminalHost) -> String { terminalHost.appName }
@@ -2247,6 +2304,22 @@ public final class MuxyOrchestrator {
 
     private func indexedWorkspaceWindows(workspaceID: String) throws -> [WindowRecord] {
         try store.windows(workspaceID: workspaceID).sorted { $0.orderIndex < $1.orderIndex }
+    }
+
+    private func trackedTerminalWindowsForAgents(workspaceID: String, agentWindows: [AgentWindowRecord]) throws -> [WindowRecord] {
+        guard !agentWindows.isEmpty else { return [] }
+        let trackedAgentTerminalKeys = Set(agentWindows.compactMap(\.terminalTrackingKey))
+        let trackedAgentWindowIDs = Set(agentWindows.compactMap { $0.yabaiWindowID ?? $0.windowID })
+        guard !trackedAgentTerminalKeys.isEmpty || !trackedAgentWindowIDs.isEmpty else { return [] }
+        // Auto-launched coding agents register their own tracked terminal rows before the
+        // workspace launch finishes. Preserve those rows when replacing the workspace
+        // window snapshot so stop/restart can still close the actual agent terminals.
+        return try store.windows(workspaceID: workspaceID).filter { window in
+            guard window.role == "terminal" else { return false }
+            if let trackingKey = window.terminalTrackingKey, trackedAgentTerminalKeys.contains(trackingKey) { return true }
+            if let windowID = window.windowID, trackedAgentWindowIDs.contains(windowID) { return true }
+            return false
+        }
     }
 
     private func resolvedBrowserSessionPrefixes(project: ProjectRecord, workspace: WorkspaceRecord) throws -> [String] {
@@ -2816,11 +2889,13 @@ public final class MuxyOrchestrator {
             ports: try store.workspacePortDefinitions(workspaceID: defaultWorkspace.id),
             processes: try store.workspaceProcesses(workspaceID: defaultWorkspace.id),
             statusChecks: try store.workspaceStatusChecks(workspaceID: defaultWorkspace.id),
-            browserSessions: try store.workspaceBrowserSessions(workspaceID: defaultWorkspace.id))
+            browserSessions: try store.workspaceBrowserSessions(workspaceID: defaultWorkspace.id),
+            agentLaunchers: try store.workspaceAgentLaunchers(workspaceID: defaultWorkspace.id))
 
         let previousTemplate = WorkspaceSettings(
             stopScript: previousRecord.stopScript, ports: previousRecord.ports, processes: previousRecord.processes,
-            statusChecks: previousRecord.statusChecks, browserSessions: previousRecord.browserSessions)
+            statusChecks: previousRecord.statusChecks, browserSessions: previousRecord.browserSessions,
+            agentLaunchers: previousRecord.agentLaunchers)
 
         guard workspaceSettingsMatch(currentSettings, previousTemplate) else { return }
 
@@ -2833,6 +2908,7 @@ public final class MuxyOrchestrator {
         guard processTemplatesMatch(lhs.processes, rhs.processes) else { return false }
         guard statusChecksMatch(lhs.statusChecks, rhs.statusChecks) else { return false }
         guard browserSessionsMatch(lhs.browserSessions, rhs.browserSessions) else { return false }
+        guard lhs.agentLaunchers == rhs.agentLaunchers else { return false }
         return true
     }
 
@@ -2863,12 +2939,14 @@ public final class MuxyOrchestrator {
     private func seedWorkspaceSettings(project: ProjectRecord, workspace: WorkspaceRecord) throws {
         try validateWorkspaceFocusNames(
             workspaceID: workspace.id, processes: project.processes, browserSessions: project.browserSessions,
+            agentLaunchers: project.agentLaunchers,
             agentWindows: try store.agentWindows(workspaceID: workspace.id))
         try store.setWorkspaceStopScript(workspaceID: workspace.id, stopScript: project.stopScript)
         try store.setWorkspacePortDefinitions(workspaceID: workspace.id, definitions: project.ports)
         try store.setWorkspaceProcesses(workspaceID: workspace.id, processes: project.processes)
         try store.setWorkspaceStatusChecks(workspaceID: workspace.id, checks: project.statusChecks)
         try store.setWorkspaceBrowserSessions(workspaceID: workspace.id, sessions: project.browserSessions)
+        try store.setWorkspaceAgentLaunchers(workspaceID: workspace.id, launchers: project.agentLaunchers)
         try store.touchWorkspaceSettings(workspaceID: workspace.id, updatedAt: nowISO8601())
     }
 
@@ -2893,8 +2971,10 @@ public final class MuxyOrchestrator {
         let processes = try store.workspaceProcesses(workspaceID: workspace.id)
         let statusChecks = try store.workspaceStatusChecks(workspaceID: workspace.id)
         let browserSessions = try store.workspaceBrowserSessions(workspaceID: workspace.id)
+        let agentLaunchers = try store.workspaceAgentLaunchers(workspaceID: workspace.id)
         return WorkspaceSettings(
-            stopScript: stopScript, ports: ports, processes: processes, statusChecks: statusChecks, browserSessions: browserSessions)
+            stopScript: stopScript, ports: ports, processes: processes, statusChecks: statusChecks, browserSessions: browserSessions,
+            agentLaunchers: agentLaunchers)
     }
 
     private func runScript(_ script: String, cwd: String) throws { _ = try Shell.run(["/bin/bash", "-lc", script], cwd: cwd) }
@@ -3833,6 +3913,16 @@ public final class MuxyOrchestrator {
         return liveWindow.id == windowID
     }
 
+    private func removeStaleAgentWindow(_ record: AgentWindowRecord) throws {
+        try store.deleteAgentWindow(id: record.id)
+        try removeAdHocTrackedWindowForAgent(
+            workspaceID: record.workspaceID,
+            provider: record.provider,
+            terminalTrackingID: record.terminalTrackingID,
+            yabaiWindowID: record.yabaiWindowID ?? record.windowID,
+            tmuxWindowID: record.tmuxWindowID)
+    }
+
     private func removeAdHocTrackedWindowForAgent(
         workspaceID: String, provider: AgentProvider, terminalTrackingID: String?, yabaiWindowID: Int?, tmuxWindowID: String?
     ) throws {
@@ -3850,7 +3940,8 @@ public final class MuxyOrchestrator {
 
     @discardableResult public func registerAgentWindow(
         workspaceID: String, provider: AgentProvider, label: String? = nil, terminalTrackingID: String? = nil, tmuxWindowID: String? = nil,
-        terminalNativeID: String? = nil, codexThreadID: String? = nil, yabaiWindowID: Int? = nil, status: AgentWindowStatus = .idle
+        terminalNativeID: String? = nil, codexThreadID: String? = nil, yabaiWindowID: Int? = nil, status: AgentWindowStatus = .idle,
+        claimedLauncherName: String? = nil
     ) throws -> AgentWindowRecord {
         let now = nowISO8601()
         let existingAgentWindows = try store.agentWindows(workspaceID: workspaceID)
@@ -3868,7 +3959,10 @@ public final class MuxyOrchestrator {
             yabaiWindowID: resolvedWindowID)
         {
             let resolvedLabel = try uniqueAgentFocusLabel(
-                workspaceID: workspaceID, preferredLabel: label ?? existing.label, excludingAgentWindowID: existing.id)
+                workspaceID: workspaceID,
+                preferredLabel: label ?? existing.label,
+                excludingAgentWindowID: existing.id,
+                claimedLauncherName: claimedLauncherName ?? existing.label)
             let updated = AgentWindowRecord(
                 id: existing.id, workspaceID: existing.workspaceID, provider: existing.provider, label: resolvedLabel,
                 terminalTrackingID: terminalTrackingID ?? existing.terminalTrackingID, terminalNativeID: finalTerminalNativeID ?? existing.terminalNativeID,
@@ -3882,7 +3976,10 @@ public final class MuxyOrchestrator {
             try store.upsertAgentWindow(updated)
             return updated
         }
-        let resolvedLabel = try uniqueAgentFocusLabel(workspaceID: workspaceID, preferredLabel: label)
+        let resolvedLabel = try uniqueAgentFocusLabel(
+            workspaceID: workspaceID,
+            preferredLabel: label,
+            claimedLauncherName: claimedLauncherName)
         let record = AgentWindowRecord(
             id: UUID().uuidString, workspaceID: workspaceID, provider: provider, label: resolvedLabel, terminalTrackingID: terminalTrackingID,
             terminalNativeID: finalTerminalNativeID, tmuxWindowID: resolvedTmuxWindowID, codexThreadID: codexThreadID, windowID: resolvedWindowID,
@@ -3896,7 +3993,8 @@ public final class MuxyOrchestrator {
 
     @discardableResult public func updateAgentWindowStatus(
         workspaceID: String, provider: AgentProvider, terminalTrackingID: String? = nil, codexThreadID: String? = nil, tmuxWindowID: String? = nil,
-        terminalNativeID: String? = nil, yabaiWindowID: Int? = nil, label: String? = nil, status: AgentWindowStatus
+        terminalNativeID: String? = nil, yabaiWindowID: Int? = nil, label: String? = nil, status: AgentWindowStatus,
+        claimedLauncherName: String? = nil
     ) throws -> AgentWindowRecord {
         let now = nowISO8601()
         let allAgentWindows = try store.agentWindows(workspaceID: workspaceID)
@@ -3914,7 +4012,10 @@ public final class MuxyOrchestrator {
             yabaiWindowID: resolvedWindowID)
         if let existing {
             let resolvedLabel = try uniqueAgentFocusLabel(
-                workspaceID: workspaceID, preferredLabel: label ?? existing.label, excludingAgentWindowID: existing.id)
+                workspaceID: workspaceID,
+                preferredLabel: label ?? existing.label,
+                excludingAgentWindowID: existing.id,
+                claimedLauncherName: claimedLauncherName ?? existing.label)
             let updated = AgentWindowRecord(
                 id: existing.id, workspaceID: existing.workspaceID, provider: existing.provider, label: resolvedLabel,
                 terminalTrackingID: terminalTrackingID ?? existing.terminalTrackingID, terminalNativeID: finalTerminalNativeID ?? existing.terminalNativeID,
@@ -3930,7 +4031,8 @@ public final class MuxyOrchestrator {
         }
         return try registerAgentWindow(
             workspaceID: workspaceID, provider: provider, label: label, terminalTrackingID: terminalTrackingID, tmuxWindowID: resolvedTmuxWindowID,
-            terminalNativeID: resolvedTerminalNativeID, codexThreadID: codexThreadID, yabaiWindowID: yabaiWindowID, status: status)
+            terminalNativeID: resolvedTerminalNativeID, codexThreadID: codexThreadID, yabaiWindowID: yabaiWindowID, status: status,
+            claimedLauncherName: claimedLauncherName)
     }
 
     @discardableResult public func handleAgentExit(
@@ -3997,9 +4099,65 @@ public final class MuxyOrchestrator {
         _ = try launchConfiguredProcess(template: template, workspace: workspace, env: env, terminalHost: terminalHost)
     }
 
+    @discardableResult public func launchAgentLauncher(workspaceID: String, name: String, background: Bool = false) throws -> AgentWindowRecord {
+        let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedName.isEmpty else { throw MuxyError.invalidArgument(message: "Coding agent name is required.") }
+        let (project, workspace) = try resolveWorkspace(id: workspaceID)
+        let settings = try loadWorkspaceSettings(project: project, workspace: workspace)
+        guard let launcher = settings?.agentLaunchers.first(where: { normalizedFocusName($0.name) == normalizedFocusName(trimmedName) }) else {
+            throw MuxyError.invalidArgument(message: "Configured coding agent not found.")
+        }
+
+        if let existing = try store.agentWindows(workspaceID: workspaceID).first(where: {
+            normalizedFocusName($0.label ?? "") == normalizedFocusName(launcher.name)
+        }) {
+            if try focusAgentWindowRecord(existing) { return existing }
+            let existingWindowID = try trackedAgentWindowID(existing) ?? existing.yabaiWindowID ?? existing.windowID
+            // A failed focus attempt is not enough evidence to destroy the reserved row.
+            // Only evict the existing record when its terminal is actually gone; otherwise
+            // keep the current slot and treat launch as an idempotent no-op.
+            if agentWindowIsOpen(existingWindowID) || existing.tmuxWindowID != nil { return existing }
+            try removeStaleAgentWindow(existing)
+        }
+
+        let terminalHost = try configuredTerminalHost()
+        guard terminalAdapterAvailable(terminalHost) else {
+            throw MuxyError.dependencyMissing(message: missingTerminalDependencyMessage(for: terminalHost, operation: "launch coding agents"))
+        }
+
+        let namedPorts = try store.workspacePortsNamed(workspaceID: workspace.id)
+        let env = buildWorkspaceEnv(project: project, workspace: workspace, namedPorts: namedPorts)
+        let launchEnv = terminalLaunchEnvironment(
+            base: env.merging([Self.agentLabelEnvVar: launcher.name]) { _, new in new },
+            terminalHost: terminalHost)
+        let snapshot = try yabai.listWindows()
+        let terminalHandle = try openManagedTerminalWindow(
+            terminalHost: terminalHost,
+            command: wrappedAgentLauncherCommand(name: launcher.name, command: applyEnvVars(launcher.command, env: env)),
+            cwd: workspace.dir,
+            environment: launchEnv,
+            background: background)
+        let capturedWindowID =
+            try captureNewAppWindowID(snapshot: snapshot, appName: terminalAppName(for: terminalHost)) ?? terminalHandle.fallbackWindowID
+        return try registerAgentWindow(
+            workspaceID: workspace.id,
+            provider: agentProvider(for: terminalHost),
+            label: launcher.name,
+            terminalTrackingID: storedTerminalHookSessionID(terminalHost: terminalHost, handle: terminalHandle),
+            terminalNativeID: storedTerminalNativeID(terminalHost: terminalHost, handle: terminalHandle),
+            yabaiWindowID: capturedWindowID,
+            status: .idle,
+            claimedLauncherName: launcher.name)
+    }
+
     private func configuredProcessMatchesKey(_ template: ProcessTemplate, key: String) -> Bool {
         let trimmedName = template.name?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         return !trimmedName.isEmpty && trimmedName == key
+    }
+
+    private func wrappedAgentLauncherCommand(name: String, command: String) -> String {
+        let escapedName = name.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "'", with: "'\\''")
+        return "printf '\\033]0;\(escapedName)\\007'; \(command)"
     }
 
     public func recoverRunningWorkspaceProcessIfPossible(workspaceID: String, processID: String) throws -> Bool {
@@ -4167,6 +4325,8 @@ public final class MuxyOrchestrator {
             // their tracked terminal window. If native-ID lookup misses, fall back to that same
             // persisted tracking token rather than inferring from frontmost Ghostty state.
         }
+        // iTerm rows, and older Ghostty rows that have not been backfilled with a native
+        // terminal ID yet, still reconcile through the persisted shell/session identity.
         guard let sessionID = record.terminalTrackingID, !sessionID.isEmpty else { return record.yabaiWindowID ?? record.windowID }
         return try store.windows(workspaceID: record.workspaceID).first(where: {
             $0.app == terminalApp && $0.role == "terminal" && $0.terminalTrackingID == sessionID

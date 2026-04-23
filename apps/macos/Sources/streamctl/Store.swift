@@ -77,6 +77,12 @@ public final class SQLiteStore {
                 sql: "INSERT INTO project_browser_sessions(id, project_id, name, url, order_index) VALUES (?, ?, ?, ?, ?)",
                 bindings: [UUID().uuidString, project.id, session.name ?? "", session.url ?? "", String(index)])
         }
+        try execute(sql: "DELETE FROM project_agent_launchers WHERE project_id = ?", bindings: [project.id])
+        for (index, launcher) in project.agentLaunchers.enumerated() {
+            try execute(
+                sql: "INSERT INTO project_agent_launchers(id, project_id, name, command, order_index) VALUES (?, ?, ?, ?, ?)",
+                bindings: [UUID().uuidString, project.id, launcher.name, launcher.command, String(index)])
+        }
     }
 
     public func project(id: String) throws -> ProjectRecord? {
@@ -111,6 +117,8 @@ public final class SQLiteStore {
         try execute(
             sql: "DELETE FROM workspace_browser_sessions WHERE workspace_id IN (SELECT id FROM workspaces WHERE project_id = ?)", bindings: [id])
         try execute(
+            sql: "DELETE FROM workspace_agent_launchers WHERE workspace_id IN (SELECT id FROM workspaces WHERE project_id = ?)", bindings: [id])
+        try execute(
             sql:
                 "DELETE FROM status_results WHERE process_id IN (SELECT id FROM running_processes WHERE workspace_id IN (SELECT id FROM workspaces WHERE project_id = ?))",
             bindings: [id])
@@ -123,6 +131,7 @@ public final class SQLiteStore {
         try execute(sql: "DELETE FROM project_processes WHERE project_id = ?", bindings: [id])
         try execute(sql: "DELETE FROM project_status_checks WHERE project_id = ?", bindings: [id])
         try execute(sql: "DELETE FROM project_browser_sessions WHERE project_id = ?", bindings: [id])
+        try execute(sql: "DELETE FROM project_agent_launchers WHERE project_id = ?", bindings: [id])
         try execute(sql: "DELETE FROM ignored_worktrees WHERE project_id = ?", bindings: [id])
         try execute(sql: "DELETE FROM projects WHERE id = ?", bindings: [id])
     }
@@ -206,6 +215,7 @@ public final class SQLiteStore {
         try execute(sql: "DELETE FROM workspace_processes WHERE workspace_id = ?", bindings: [id])
         try execute(sql: "DELETE FROM workspace_status_checks WHERE workspace_id = ?", bindings: [id])
         try execute(sql: "DELETE FROM workspace_browser_sessions WHERE workspace_id = ?", bindings: [id])
+        try execute(sql: "DELETE FROM workspace_agent_launchers WHERE workspace_id = ?", bindings: [id])
         try execute(sql: "DELETE FROM status_results WHERE process_id IN (SELECT id FROM running_processes WHERE workspace_id = ?)", bindings: [id])
         try execute(sql: "DELETE FROM running_processes WHERE workspace_id = ?", bindings: [id])
         try execute(sql: "DELETE FROM workspace_ports WHERE workspace_id = ?", bindings: [id])
@@ -382,6 +392,17 @@ public final class SQLiteStore {
         }
     }
 
+    public func setWorkspaceAgentLaunchers(workspaceID: String, launchers: [AgentLauncher]) throws {
+        try execute(sql: "DELETE FROM workspace_agent_launchers WHERE workspace_id = ?", bindings: [workspaceID])
+        for (index, launcher) in launchers.enumerated() {
+            try execute(
+                sql: """
+                    INSERT INTO workspace_agent_launchers(id, workspace_id, name, command, order_index)
+                    VALUES (?, ?, ?, ?, ?)
+                    """, bindings: [UUID().uuidString, workspaceID, launcher.name, launcher.command, String(index)])
+        }
+    }
+
     public func workspaceSettingsExists(workspaceID: String) throws -> Bool {
         let rows = try queryRows(sql: "SELECT workspace_id FROM workspace_settings WHERE workspace_id = ?", bindings: [workspaceID])
         return !rows.isEmpty
@@ -462,6 +483,17 @@ public final class SQLiteStore {
             }
             return BrowserSession(name: name, url: url, extractedWindow: extractedWindow)
         }
+    }
+
+    public func workspaceAgentLaunchers(workspaceID: String) throws -> [AgentLauncher] {
+        let rows = try queryRows(
+            sql: """
+                SELECT name, command
+                FROM workspace_agent_launchers
+                WHERE workspace_id = ?
+                ORDER BY order_index
+                """, bindings: [workspaceID])
+        return rows.map { AgentLauncher(name: $0[0], command: $0[1]) }
     }
 
     public func releaseWorkspacePorts(workspaceID: String) throws {
@@ -815,6 +847,14 @@ public final class SQLiteStore {
               order_index INTEGER NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS project_agent_launchers (
+              id TEXT PRIMARY KEY,
+              project_id TEXT NOT NULL,
+              name TEXT NOT NULL,
+              command TEXT NOT NULL,
+              order_index INTEGER NOT NULL
+            );
+
             CREATE TABLE IF NOT EXISTS workspaces (
               id TEXT PRIMARY KEY,
               project_id TEXT NOT NULL,
@@ -885,6 +925,14 @@ public final class SQLiteStore {
               extracted_target_url TEXT,
               extracted_window_id INTEGER,
               extracted_window_valid INTEGER NOT NULL DEFAULT 0,
+              order_index INTEGER NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS workspace_agent_launchers (
+              id TEXT PRIMARY KEY,
+              workspace_id TEXT NOT NULL,
+              name TEXT NOT NULL,
+              command TEXT NOT NULL,
               order_index INTEGER NOT NULL
             );
 
@@ -1186,10 +1234,13 @@ public final class SQLiteStore {
         let browserSessions = try queryRows(
             sql: "SELECT name, url FROM project_browser_sessions WHERE project_id = ? ORDER BY order_index", bindings: [id]
         ).map { row in BrowserSession(name: row[0].isEmpty ? nil : row[0], url: row[1].isEmpty ? nil : row[1]) }
+        let agentLaunchers = try queryRows(
+            sql: "SELECT name, command FROM project_agent_launchers WHERE project_id = ? ORDER BY order_index", bindings: [id]
+        ).map { row in AgentLauncher(name: row[0], command: row[1]) }
         return ProjectRecord(
             id: id, name: row[1], dir: row[2], isGitRepo: row[3] == "1", defaultBranch: row[4].isEmpty ? nil : row[4], isCollapsed: row[5] == "1",
             setupScript: row[6].isEmpty ? nil : row[6], stopScript: row[7].isEmpty ? nil : row[7], ports: ports, processes: processes,
-            statusChecks: statusChecks, browserSessions: browserSessions)
+            statusChecks: statusChecks, browserSessions: browserSessions, agentLaunchers: agentLaunchers)
     }
 
     private func decodeWorkspace(row: [String]) -> WorkspaceRecord? {

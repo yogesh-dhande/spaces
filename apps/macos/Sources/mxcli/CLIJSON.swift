@@ -33,6 +33,10 @@ enum CLITextRenderer {
             contentsOf: settings.browserSessions.isEmpty
                 ? ["browser-session\t-"]
                 : settings.browserSessions.map { "browser-session\t\($0.name ?? "-")\t\($0.url ?? "-")" })
+        lines.append(
+            contentsOf: settings.agentLaunchers.isEmpty
+                ? ["agent-launcher\t-"]
+                : settings.agentLaunchers.map { "agent-launcher\t\($0.name)\t\($0.command)" })
         return lines.joined(separator: "\n")
     }
 
@@ -135,6 +139,7 @@ struct WorkspaceSettingsPayload: Encodable {
     let processes: [ProcessTemplate]
     let statusChecks: [StatusCheckDefinition]
     let browserSessions: [BrowserSession]
+    let agentLaunchers: [AgentLauncher]
 }
 
 extension WorkspaceSettingsPayload {
@@ -144,6 +149,7 @@ extension WorkspaceSettingsPayload {
         processes = value.processes
         statusChecks = value.statusChecks
         browserSessions = value.browserSessions
+        agentLaunchers = value.agentLaunchers
     }
 }
 

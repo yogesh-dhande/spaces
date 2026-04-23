@@ -15,6 +15,7 @@ public struct MXCommand: ParsableCommand {
           - `workspace import` registers the current directory by default and can apply `--title` or `--tooltip` when creating or re-importing a workspace.
           - `workspace update` mutates workspace metadata after creation.
           - `workspace up` waits for pending/running setup to complete and fails with the setup error if setup failed. It ensures a workspace and all its processes are running: launches when stopped; when already running, restarts any exited processes. Windows open without activating the app. Add `--restart` to force a full stop+launch. Add `--focus <name>` to bring one named workspace window to the foreground after launch.
+          - `agent launch --name <name>` launches one configured coding agent in a dedicated terminal window without tmux.
           - Agent events stay explicit. `workspace import` and `workspace up` do not imply agent lifecycle. Events from unsupported terminal hosts are dropped. Agent events fired from tmux are rejected because Muxy does not support coding agents running inside tmux.
         """,
         version: AppVersion.current,
@@ -174,8 +175,35 @@ struct AgentCommand: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "agent",
         abstract: "Record coding-agent lifecycle events.",
-        subcommands: [AgentEventCommand.self]
+        subcommands: [AgentLaunchCommand.self, AgentEventCommand.self]
     )
+}
+
+struct AgentLaunchCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "launch",
+        abstract: "Launch one configured coding agent for the current workspace."
+    )
+
+    @Option(name: .long, help: "Configured coding agent name.")
+    var name: String
+
+    @Argument(help: "Workspace directory. Defaults to the current directory.")
+    var path: String?
+
+    func run() throws {
+        let context = CLIContext()
+        let orchestrator = try context.makeOrchestrator()
+        let workspace = try requireWorkspace(path: path, orchestrator: orchestrator, context: context)
+        let record = try orchestrator.launchAgentLauncher(workspaceID: workspace.id, name: name)
+        try context.output.emit(
+            text: "Launched coding agent \(record.label ?? name)\tworkspace=\(workspace.id)",
+            json: MutationResultPayload(
+                message: "Launched coding agent.",
+                resource: ["workspaceID": workspace.id, "label": record.label ?? name]
+            )
+        )
+    }
 }
 
 struct AgentEventCommand: ParsableCommand {
@@ -405,6 +433,9 @@ func agentEventDropResult(
 }
 
 private func inferredAgentLabel(environment: [String: String]) -> String? {
+    if let label = environment[MuxyOrchestrator.agentLabelEnvVar]?.trimmingCharacters(in: .whitespacesAndNewlines), !label.isEmpty {
+        return label
+    }
     if environment["CODEX_THREAD_ID"] != nil {
         return "Codex CLI"
     }

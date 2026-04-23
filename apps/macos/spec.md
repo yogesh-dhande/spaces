@@ -194,7 +194,7 @@ Muxy focuses those windows; it does not decide their geometry.
 
 ## Coding-Agent Integration
 - Coding agents can explicitly report lifecycle events through `mx agent event`.
-- Agent events are not implied by `workspace import` or `workspace up`.
+- Agent status events are not implied by `workspace import` or `workspace up`, but workspace launch should open any configured coding-agent rows so they appear alongside runtime-managed agents under one `Coding Agents` section.
 - `mx agent event` should support explicit `init`, `start`, `waiting`, `done`, and `exit` events.
 - Agent events from unsupported terminal hosts should be dropped instead of recorded. Coding agents run from tmux are not supported by Muxy and should return an explicit error instead of being inferred onto workspace process terminals.
 - `init` should identify the originating terminal and either attach to an already tracked terminal row or create a tracked terminal row for that coding agent.
@@ -204,6 +204,10 @@ Muxy focuses those windows; it does not decide their geometry.
 - Ghostty agent events without a Muxy-issued tracking token should be dropped instead of being rebound to whichever Ghostty tab or window happens to be frontmost.
 - Ghostty focus may fall back from `terminalNativeID` to the stored hook token only when resolving an already tracked terminal row in the same workspace; it must not guess from the frontmost Ghostty tab/window.
 - Coding-agent rows should render after browser and process rows so non-agent shortcut ordering stays stable when agents appear or disappear.
+- Configured and ad-hoc coding agents should share the same `Coding Agents` section rather than rendering as separate launcher and runtime sections.
+- Every tracked window row should have a unique visible name within its workspace. Two coding-agent rows must not share the same name.
+- Configured coding-agent launcher names are reserved within the workspace. An ad-hoc coding agent that reports the same label should be auto-renamed with a numeric suffix instead of colliding with the configured launcher slot.
+- Launching a configured coding agent is idempotent for its reserved slot: if that coding agent still has a live tracked terminal, Muxy should keep the existing row instead of deleting and recreating it.
 - `start` should show a spinner, `waiting` should show a warning indicator and count toward dashboard and dock attention, and `done` should remain in dashboard and dock attention until dismissed while still rendering as a green dot on the workspace row. `idle` should render as a gray dot without creating dashboard attention.
 - `exit` should return the row to idle when the terminal is still open; if the terminal is closed, ad-hoc agent rows should be removed immediately, including when background runtime refresh detects the terminal closure after the fact, while rows linked to workspace process terminals should remain idle.
 

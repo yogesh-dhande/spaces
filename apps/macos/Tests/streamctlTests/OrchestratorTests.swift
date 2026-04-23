@@ -22,6 +22,97 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertNil(try store.appConfig().editor)
     }
 
+    func testLaunchAgentLauncherOpensDirectTerminalAndRegistersAgentWindow() throws {
+        let root = try makeTempDirectory()
+        let store = try makeTemporaryStore()
+        let mockIterm = MockIterm2Adapter()
+        mockIterm.nextSessionID = "agent-session-1"
+        mockIterm.nextWindowID = 4242
+        let orchestrator = MuxyOrchestrator(store: store, iterm: mockIterm, ghostty: MockGhosttyAdapter(), tmux: MockTmuxAdapter())
+        let project = try orchestrator.addProject(dir: root.path)
+        guard let workspace = try store.workspaces(projectID: project.id).first else {
+            return XCTFail("Expected default workspace")
+        }
+        try orchestrator.updateProjectConfig(projectID: project.id) { project in
+            project.agentLaunchers = [AgentLauncher(name: "Codex", command: "codex --dangerously-skip-permissions")]
+        }
+
+        try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) {
+            let record = try orchestrator.launchAgentLauncher(workspaceID: workspace.id, name: "Codex")
+
+            XCTAssertEqual(record.label, "Codex")
+            XCTAssertEqual(record.provider, .iterm2)
+            XCTAssertEqual(record.terminalTrackingID, "agent-session-1")
+            XCTAssertTrue(mockIterm.lastCommand?.contains("Codex") == true)
+            XCTAssertTrue(mockIterm.lastCommand?.contains("codex --dangerously-skip-permissions") == true)
+            XCTAssertEqual(try store.agentWindows(workspaceID: workspace.id).count, 1)
+        }
+    }
+
+    func testLaunchWorkspaceAutoLaunchesConfiguredCodingAgents() throws {
+        let root = try makeTempDirectory()
+        let store = try makeTemporaryStore()
+        let mockIterm = MockIterm2Adapter()
+        mockIterm.nextSessionID = "agent-session-1"
+        mockIterm.nextWindowID = 5151
+        let orchestrator = MuxyOrchestrator(store: store, iterm: mockIterm, ghostty: MockGhosttyAdapter(), tmux: MockTmuxAdapter())
+        let project = try orchestrator.addProject(dir: root.path)
+        let workspace = try XCTUnwrap(try store.workspaces(projectID: project.id).first)
+        try orchestrator.updateProjectConfig(projectID: project.id) { project in
+            project.agentLaunchers = [AgentLauncher(name: "Codex", command: "codex --dangerously-skip-permissions")]
+        }
+
+        try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) {
+            try orchestrator.launchWorkspace(workspaceID: workspace.id)
+        }
+
+        XCTAssertEqual(mockIterm.openWindowAndRunCallCount, 1)
+        XCTAssertEqual(try store.workspace(id: workspace.id)?.isRunning, true)
+        let agentWindows = try store.agentWindows(workspaceID: workspace.id)
+        XCTAssertEqual(agentWindows.count, 1)
+        XCTAssertEqual(agentWindows.first?.label, "Codex")
+        let trackedTerminalWindows = try store.windows(workspaceID: workspace.id).filter { $0.role == "terminal" }
+        XCTAssertEqual(trackedTerminalWindows.count, 1)
+        XCTAssertEqual(trackedTerminalWindows.first?.terminalTrackingID, "agent-session-1")
+
+        try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) {
+            _ = try orchestrator.stopWorkspace(workspaceID: workspace.id)
+        }
+        XCTAssertTrue(try store.windows(workspaceID: workspace.id).isEmpty)
+        XCTAssertTrue(try store.agentWindows(workspaceID: workspace.id).isEmpty)
+    }
+
+    func testLaunchAgentLauncherReplacesStaleConfiguredAgentRowAndTrackedWindow() throws {
+        let (orchestrator, store, _, workspace, _, mockIterm, _) = try makeMockItermOrchestratorWithWorkspace()
+        try store.setWorkspaceAgentLaunchers(
+            workspaceID: workspace.id,
+            launchers: [AgentLauncher(name: "Codex", command: "codex --dangerously-skip-permissions")])
+        _ = try orchestrator.registerAgentWindow(
+            workspaceID: workspace.id,
+            provider: .iterm2,
+            label: "Codex",
+            terminalTrackingID: "stale-session",
+            status: .idle,
+            claimedLauncherName: "Codex")
+
+        mockIterm.focusSessionOrTabResult = false
+        mockIterm.nextSessionID = "fresh-session"
+        mockIterm.nextWindowID = 4242
+
+        try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) {
+            let record = try orchestrator.launchAgentLauncher(workspaceID: workspace.id, name: "Codex")
+            XCTAssertEqual(record.label, "Codex")
+            XCTAssertEqual(record.terminalTrackingID, "fresh-session")
+        }
+
+        let agentWindows = try store.agentWindows(workspaceID: workspace.id)
+        XCTAssertEqual(agentWindows.count, 1)
+        XCTAssertEqual(agentWindows.first?.terminalTrackingID, "fresh-session")
+        let terminalWindows = try store.windows(workspaceID: workspace.id).filter { $0.role == "terminal" }
+        XCTAssertEqual(terminalWindows.count, 1)
+        XCTAssertEqual(terminalWindows.first?.terminalTrackingID, "fresh-session")
+    }
+
     // Tests next window order index uses role offset and max by arranging representative inputs and asserting the expected result.
     func testNextWindowOrderIndexUsesRoleOffsetAndMax() {
         let windows = [
@@ -2709,6 +2800,23 @@ final class OrchestratorTests: XCTestCase {
         }
     }
 
+    func testUpdateProjectConfigRejectsDuplicateConfiguredCodingAgentNames() throws {
+        let (orchestrator, _, project, _, _) = try makeOrchestratorWithWorkspace()
+
+        XCTAssertThrowsError(
+            try orchestrator.updateProjectConfig(projectID: project.id) { config in
+                config.agentLaunchers = [
+                    AgentLauncher(name: "Codex", command: "codex"),
+                    AgentLauncher(name: "codex", command: "codex --review"),
+                ]
+            }
+        ) { error in
+            guard case MuxyError.invalidArgument(let message) = error else { return XCTFail("Expected invalidArgument, got \(error)") }
+            XCTAssertTrue(message.contains("coding agents"))
+            XCTAssertTrue(message.contains("Codex"))
+        }
+    }
+
     // Tests update project config seeds default workspace when settings match previous template by arranging representative inputs and asserting the expected result.
     func testUpdateProjectConfigSeedsDefaultWorkspaceWhenSettingsMatchPreviousTemplate() throws {
         let root = try makeTempDirectory()
@@ -4873,6 +4981,21 @@ final class OrchestratorTests: XCTestCase {
             guard case MuxyError.invalidArgument(let message) = error else { return XCTFail("Expected invalidArgument, got \(error)") }
             XCTAssertTrue(message.contains("unique"))
             XCTAssertTrue(message.contains("Frontend"))
+        }
+    }
+
+    func testUpdateWorkspaceSettingsRejectsDuplicateFocusNamesAcrossProcessAndCodingAgent() throws {
+        let (orchestrator, _, _, workspace, _) = try makeOrchestratorWithWorkspace()
+
+        XCTAssertThrowsError(
+            try orchestrator.updateWorkspaceSettings(workspaceID: workspace.id) { settings in
+                settings.processes = [ProcessTemplate(name: "Reviewer", command: "npm run review")]
+                settings.agentLaunchers = [AgentLauncher(name: "reviewer", command: "codex --review")]
+            }
+        ) { error in
+            guard case MuxyError.invalidArgument(let message) = error else { return XCTFail("Expected invalidArgument, got \(error)") }
+            XCTAssertTrue(message.contains("coding agents"))
+            XCTAssertTrue(message.contains("Reviewer"))
         }
     }
 
