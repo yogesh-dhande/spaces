@@ -1,8 +1,6 @@
 import Foundation
 import appctl
 
-private let gitActivityProfileEnabled = ProcessInfo.processInfo.environment["MUXY_STARTUP_PROFILE"] == "1"
-
 public final class GitClient {
     private let gitExecutable: String
     private let environmentOverrides: [String: String]
@@ -74,62 +72,6 @@ public final class GitClient {
         }
         if let defaultBranch = defaultBranch(path: path), !defaultBranch.isEmpty { branches.insert(defaultBranch) }
         return branches.sorted { lhs, rhs in lhs.localizedStandardCompare(rhs) == .orderedAscending }
-    }
-
-    public func trackedFileActivity(path: String, baseBranch: String? = nil) -> GitTrackedFileActivity {
-        let startedAt = ProcessInfo.processInfo.systemUptime
-        let repoCheckStartedAt = startedAt
-        guard isRepo(path: path) else {
-            logTrackedFileActivityProfile(
-                path: path,
-                repoCheckMS: Int((ProcessInfo.processInfo.systemUptime - repoCheckStartedAt) * 1000),
-                trackedPathsMS: 0,
-                latestModificationMS: 0,
-                modifiedCountMS: 0,
-                baseRefMS: 0,
-                aheadBehindMS: 0,
-                mergeConflictsMS: 0,
-                totalMS: Int((ProcessInfo.processInfo.systemUptime - startedAt) * 1000))
-            return GitTrackedFileActivity(
-                latestTrackedFileModificationDate: nil, modifiedTrackedFileCount: 0, aheadCount: 0, behindCount: 0,
-                comparedBaseBranch: baseBranch?.trimmingCharacters(in: .whitespacesAndNewlines), hasMergeConflicts: false)
-        }
-
-        let trackedPathsStartedAt = ProcessInfo.processInfo.systemUptime
-        let trackedPaths = trackedFilePaths(path: path)
-        let trackedPathsMS = Int((ProcessInfo.processInfo.systemUptime - trackedPathsStartedAt) * 1000)
-        let latestModificationStartedAt = ProcessInfo.processInfo.systemUptime
-        let latestModificationDate = latestTrackedFileModificationDate(path: path, trackedPaths: trackedPaths)
-        let latestModificationMS = Int((ProcessInfo.processInfo.systemUptime - latestModificationStartedAt) * 1000)
-        let modifiedCountStartedAt = ProcessInfo.processInfo.systemUptime
-        let modifiedTrackedFileCount = modifiedTrackedFileCount(path: path)
-        let modifiedCountMS = Int((ProcessInfo.processInfo.systemUptime - modifiedCountStartedAt) * 1000)
-        let baseRefStartedAt = ProcessInfo.processInfo.systemUptime
-        let comparisonBaseRef = resolveComparisonBaseRef(path: path, baseBranch: baseBranch)
-        let baseRefMS = Int((ProcessInfo.processInfo.systemUptime - baseRefStartedAt) * 1000)
-        let aheadBehindStartedAt = ProcessInfo.processInfo.systemUptime
-        let (aheadCount, behindCount) = aheadBehindCounts(path: path, baseRef: comparisonBaseRef)
-        let aheadBehindMS = Int((ProcessInfo.processInfo.systemUptime - aheadBehindStartedAt) * 1000)
-        let mergeConflictsStartedAt = ProcessInfo.processInfo.systemUptime
-        let hasMergeConflicts = hasMergeConflicts(path: path)
-        let mergeConflictsMS = Int((ProcessInfo.processInfo.systemUptime - mergeConflictsStartedAt) * 1000)
-        let comparedBaseBranch = displayBranchName(forRef: comparisonBaseRef)
-        let totalMS = Int((ProcessInfo.processInfo.systemUptime - startedAt) * 1000)
-
-        logTrackedFileActivityProfile(
-            path: path,
-            repoCheckMS: Int((ProcessInfo.processInfo.systemUptime - repoCheckStartedAt) * 1000),
-            trackedPathsMS: trackedPathsMS,
-            latestModificationMS: latestModificationMS,
-            modifiedCountMS: modifiedCountMS,
-            baseRefMS: baseRefMS,
-            aheadBehindMS: aheadBehindMS,
-            mergeConflictsMS: mergeConflictsMS,
-            totalMS: totalMS)
-
-        return GitTrackedFileActivity(
-            latestTrackedFileModificationDate: latestModificationDate, modifiedTrackedFileCount: modifiedTrackedFileCount, aheadCount: aheadCount,
-            behindCount: behindCount, comparedBaseBranch: comparedBaseBranch, hasMergeConflicts: hasMergeConflicts)
     }
 
     public func createWorktree(
@@ -265,82 +207,9 @@ public final class GitClient {
         try runGitOrThrow(["-C", path, "fetch", "origin", "refs/heads/\(branch):refs/remotes/origin/\(branch)"])
     }
 
-    private func trackedFilePaths(path: String) -> [String] {
-        guard let output = try? runGitAndCapture(["-C", path, "ls-files", "-z"], timeout: metadataCommandTimeout) else { return [] }
-        return parseNullSeparatedOutput(output)
-    }
-
-    private func latestTrackedFileModificationDate(path: String, trackedPaths: [String]) -> Date? {
-        let fileManager = FileManager.default
-        let rootURL = URL(fileURLWithPath: path, isDirectory: true)
-        var latestDate: Date?
-
-        for trackedPath in trackedPaths {
-            guard !trackedPath.isEmpty else { continue }
-            let fileURL = rootURL.appending(path: trackedPath)
-            guard let attributes = try? fileManager.attributesOfItem(atPath: fileURL.path),
-                let modificationDate = attributes[.modificationDate] as? Date
-            else { continue }
-            if let existingLatestDate = latestDate {
-                if modificationDate > existingLatestDate { latestDate = modificationDate }
-            } else {
-                latestDate = modificationDate
-            }
-        }
-
-        return latestDate
-    }
-
-    private func modifiedTrackedFileCount(path: String) -> Int {
-        let staged = trackedDiffPaths(path: path, includeStaged: true)
-        let unstaged = trackedDiffPaths(path: path, includeStaged: false)
-        return staged.union(unstaged).count
-    }
-
-    private func resolveComparisonBaseRef(path: String, baseBranch: String?) -> String? {
-        guard let rawBaseBranch = baseBranch?.trimmingCharacters(in: .whitespacesAndNewlines), !rawBaseBranch.isEmpty else { return nil }
-        if branchExists(path: path, branch: rawBaseBranch) { return rawBaseBranch }
-        if remoteTrackingBranchExists(path: path, branch: rawBaseBranch) { return "origin/\(rawBaseBranch)" }
-        return nil
-    }
-
     private func remoteTrackingBranchExists(path: String, branch: String) -> Bool {
         let status = (try? runGit(["-C", path, "show-ref", "--verify", "--quiet", "refs/remotes/origin/\(branch)"])) ?? 1
         return status == 0
-    }
-
-    private func aheadBehindCounts(path: String, baseRef: String?) -> (aheadCount: Int, behindCount: Int) {
-        guard let baseRef else { return (0, 0) }
-        guard
-            let output = try? runGitAndCapture(
-                ["-C", path, "rev-list", "--left-right", "--count", "\(baseRef)...HEAD"], timeout: metadataCommandTimeout)
-        else { return (0, 0) }
-        let values = output.split(whereSeparator: \.isWhitespace)
-        guard values.count >= 2, let behindCount = Int(values[0]), let aheadCount = Int(values[1]) else { return (0, 0) }
-        return (aheadCount, behindCount)
-    }
-
-    private func hasMergeConflicts(path: String) -> Bool {
-        guard let output = try? runGitAndCapture(["-C", path, "diff", "--name-only", "--diff-filter=U"], timeout: metadataCommandTimeout) else {
-            return false
-        }
-        return !output.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-    }
-
-    private func displayBranchName(forRef ref: String?) -> String? {
-        guard let ref else { return nil }
-        return ref.replacingPrefix("origin/") ?? ref
-    }
-
-    private func trackedDiffPaths(path: String, includeStaged: Bool) -> Set<String> {
-        var arguments = ["-C", path, "diff", "--name-only", "-z"]
-        if includeStaged { arguments.insert("--cached", at: 3) }
-        guard let output = try? runGitAndCapture(arguments, timeout: metadataCommandTimeout) else { return [] }
-        return Set(parseNullSeparatedOutput(output))
-    }
-
-    private func parseNullSeparatedOutput(_ output: String) -> [String] {
-        output.split(separator: "\u{0}", omittingEmptySubsequences: true).map { String($0) }
     }
 
     private func makeGitProcess(_ arguments: [String]) -> Process {
@@ -378,23 +247,6 @@ public final class GitClient {
         }
     }
 
-    private func logTrackedFileActivityProfile(
-        path: String,
-        repoCheckMS: Int,
-        trackedPathsMS: Int,
-        latestModificationMS: Int,
-        modifiedCountMS: Int,
-        baseRefMS: Int,
-        aheadBehindMS: Int,
-        mergeConflictsMS: Int,
-        totalMS: Int
-    ) {
-        guard gitActivityProfileEnabled else { return }
-        let workspaceName = URL(fileURLWithPath: path).lastPathComponent
-        fputs(
-            "muxy: git_activity workspace=\(workspaceName) repo_check_ms=\(repoCheckMS) tracked_paths_ms=\(trackedPathsMS) latest_mod_ms=\(latestModificationMS) modified_count_ms=\(modifiedCountMS) base_ref_ms=\(baseRefMS) ahead_behind_ms=\(aheadBehindMS) merge_conflicts_ms=\(mergeConflictsMS) total_ms=\(totalMS)\n",
-            stderr)
-    }
 }
 
 extension String {

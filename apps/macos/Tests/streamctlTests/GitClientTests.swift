@@ -233,125 +233,9 @@ final class GitClientTests: XCTestCase {
         try runGit(["add", "TRACKED.md"], cwd: repo.path)
         try runGit(["-c", "user.name=muxy-test", "-c", "user.email=test@example.com", "commit", "-m", "add tracked"], cwd: repo.path)
 
-        let readmeFile = repo.appending(path: "README.md")
-        let oldDate = Date(timeIntervalSinceNow: -600)
-        let newerTrackedDate = Date(timeIntervalSinceNow: -300)
-        try setModificationDate(oldDate, for: readmeFile)
-        try setModificationDate(newerTrackedDate, for: trackedFile)
-
         let untrackedFile = repo.appending(path: "UNTRACKED.md")
         try "scratch".write(to: untrackedFile, atomically: true, encoding: .utf8)
-        try setModificationDate(Date(), for: untrackedFile)
 
-        let client = GitClient()
-        let initialActivity = client.trackedFileActivity(path: repo.path)
-        XCTAssertEqual(initialActivity.modifiedTrackedFileCount, 0)
-        assertEqualDate(initialActivity.latestTrackedFileModificationDate, newerTrackedDate)
-
-        try "updated readme".write(to: readmeFile, atomically: true, encoding: .utf8)
-        let expectedLatestDate = try modificationDate(for: readmeFile)
-        let updatedActivity = client.trackedFileActivity(path: repo.path)
-
-        XCTAssertEqual(updatedActivity.modifiedTrackedFileCount, 1)
-        assertEqualDate(updatedActivity.latestTrackedFileModificationDate, expectedLatestDate)
-    }
-
-    // Tests tracked file activity includes ahead/behind counts relative to base branch by arranging representative inputs and asserting the expected result.
-    func testTrackedFileActivityIncludesAheadBehindCountsRelativeToBaseBranch() throws {
-        let root = try makeTempDirectory()
-        let repo = root.appending(path: "repo", directoryHint: .isDirectory)
-        try FileManager.default.createDirectory(at: repo, withIntermediateDirectories: true)
-        try initializeGitRepository(at: repo, initialBranch: "main")
-
-        try runGit(["checkout", "-b", "feature"], cwd: repo.path)
-        try "feature".write(to: repo.appending(path: "FEATURE.md"), atomically: true, encoding: .utf8)
-        try runGit(["add", "FEATURE.md"], cwd: repo.path)
-        try runGit(["-c", "user.name=muxy-test", "-c", "user.email=test@example.com", "commit", "-m", "feature commit"], cwd: repo.path)
-
-        var activity = GitClient().trackedFileActivity(path: repo.path, baseBranch: "main")
-        XCTAssertEqual(activity.aheadCount, 1)
-        XCTAssertEqual(activity.behindCount, 0)
-        XCTAssertEqual(activity.comparedBaseBranch, "main")
-
-        try runGit(["checkout", "main"], cwd: repo.path)
-        try "main".write(to: repo.appending(path: "MAIN.md"), atomically: true, encoding: .utf8)
-        try runGit(["add", "MAIN.md"], cwd: repo.path)
-        try runGit(["-c", "user.name=muxy-test", "-c", "user.email=test@example.com", "commit", "-m", "main commit"], cwd: repo.path)
-        try runGit(["checkout", "feature"], cwd: repo.path)
-
-        activity = GitClient().trackedFileActivity(path: repo.path, baseBranch: "main")
-        XCTAssertEqual(activity.aheadCount, 1)
-        XCTAssertEqual(activity.behindCount, 1)
-    }
-
-    // Tests tracked file activity reports merge conflicts by arranging representative inputs and asserting the expected result.
-    func testTrackedFileActivityReportsMergeConflicts() throws {
-        let root = try makeTempDirectory()
-        let repo = root.appending(path: "repo", directoryHint: .isDirectory)
-        try FileManager.default.createDirectory(at: repo, withIntermediateDirectories: true)
-        try initializeGitRepository(at: repo, initialBranch: "main")
-
-        let readme = repo.appending(path: "README.md")
-        try runGit(["checkout", "-b", "feature"], cwd: repo.path)
-        try "feature change\n".write(to: readme, atomically: true, encoding: .utf8)
-        try runGit(["add", "README.md"], cwd: repo.path)
-        try runGit(["-c", "user.name=muxy-test", "-c", "user.email=test@example.com", "commit", "-m", "feature change"], cwd: repo.path)
-
-        try runGit(["checkout", "main"], cwd: repo.path)
-        try "main change\n".write(to: readme, atomically: true, encoding: .utf8)
-        try runGit(["add", "README.md"], cwd: repo.path)
-        try runGit(["-c", "user.name=muxy-test", "-c", "user.email=test@example.com", "commit", "-m", "main change"], cwd: repo.path)
-        try runGit(["checkout", "feature"], cwd: repo.path)
-
-        XCTAssertThrowsError(try runGit(["merge", "main"], cwd: repo.path))
-
-        let activity = GitClient().trackedFileActivity(path: repo.path, baseBranch: "main")
-        XCTAssertTrue(activity.hasMergeConflicts)
-    }
-
-    // Tests tracked file activity returns empty snapshot for non repository by arranging representative inputs and asserting the expected result.
-    func testTrackedFileActivityReturnsEmptySnapshotForNonRepository() throws {
-        let directory = try makeTempDirectory()
-        let activity = GitClient().trackedFileActivity(path: directory.path)
-        XCTAssertNil(activity.latestTrackedFileModificationDate)
-        XCTAssertEqual(activity.modifiedTrackedFileCount, 0)
-        XCTAssertEqual(activity.aheadCount, 0)
-        XCTAssertEqual(activity.behindCount, 0)
-        XCTAssertFalse(activity.hasMergeConflicts)
-    }
-
-    // Tests trackedFileActivity times out hanging git metadata probes and returns an empty snapshot instead of blocking indefinitely.
-    func testTrackedFileActivityTimesOutSlowGitMetadata() throws {
-        let root = try makeTempDirectory()
-        let repo = root.appendingPathComponent("repo", isDirectory: true)
-        try FileManager.default.createDirectory(at: repo, withIntermediateDirectories: true)
-        try initializeGitRepository(at: repo, initialBranch: "main")
-
-        let binDir = root.appendingPathComponent("bin", isDirectory: true)
-        try FileManager.default.createDirectory(at: binDir, withIntermediateDirectories: true)
-        let fakeGit = binDir.appendingPathComponent("git-sleep")
-        let script = """
-            #!/bin/sh
-            sleep 1
-            exit 0
-            """
-        try script.write(to: fakeGit, atomically: true, encoding: .utf8)
-        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: fakeGit.path)
-
-        var environment = ProcessInfo.processInfo.environment
-        environment["PATH"] = "\(binDir.path):\(environment["PATH"] ?? "/usr/bin:/bin")"
-        let client = GitClient(gitExecutable: "git-sleep", environmentOverrides: environment, metadataCommandTimeout: 0.05)
-
-        let start = Date()
-        let activity = client.trackedFileActivity(path: repo.path)
-        let elapsed = Date().timeIntervalSince(start)
-
-        XCTAssertLessThan(elapsed, 0.5)
-        XCTAssertNil(activity.latestTrackedFileModificationDate)
-        XCTAssertEqual(activity.modifiedTrackedFileCount, 0)
-        XCTAssertEqual(activity.aheadCount, 0)
-        XCTAssertEqual(activity.behindCount, 0)
-        XCTAssertFalse(activity.hasMergeConflicts)
     }
 
     // Tests clone and delete branch by arranging representative inputs and asserting the expected result.
@@ -497,28 +381,6 @@ final class GitClientTests: XCTestCase {
         XCTAssertEqual(info.branchName, "")
     }
 
-    // Tests trackedFileActivity with a non-existent base branch returns zero ahead/behind counts and nil comparedBaseBranch.
-    func testTrackedFileActivityWithNonExistentBranchReturnsZeroAheadBehind() throws {
-        let root = try makeTempDirectory()
-        let repo = root.appendingPathComponent("repo", isDirectory: true)
-        try FileManager.default.createDirectory(at: repo, withIntermediateDirectories: true)
-        try initializeGitRepository(at: repo, initialBranch: "main")
-        // "no-such-branch-xyz" does not exist locally or remotely → resolveComparisonBaseRef returns nil.
-        let activity = GitClient().trackedFileActivity(path: repo.path, baseBranch: "no-such-branch-xyz")
-        XCTAssertNil(activity.comparedBaseBranch)
-        XCTAssertEqual(activity.aheadCount, 0)
-        XCTAssertEqual(activity.behindCount, 0)
-    }
-
-    // Tests trackedFileActivity uses a remote tracking branch when the branch exists only on the remote.
-    func testTrackedFileActivityUsesRemoteTrackingBranchWhenLocalBranchMissing() throws {
-        let fixture = try makeRemoteFixture()
-        // fixture.clone has origin/remote-feature as a remote tracking branch but no local "remote-feature" branch.
-        let activity = GitClient().trackedFileActivity(path: fixture.clone.path, baseBranch: "remote-feature")
-        // resolveComparisonBaseRef should find origin/remote-feature and return it.
-        XCTAssertEqual(activity.comparedBaseBranch, "remote-feature")
-    }
-
     // Tests renameCurrentBranch throws invalidArgument when an empty branch name is provided.
     func testRenameCurrentBranchThrowsForEmptyName() throws {
         let repo = try makeTempDirectory()
@@ -551,33 +413,4 @@ final class GitClientTests: XCTestCase {
         XCTAssertEqual(output.trimmingCharacters(in: .whitespacesAndNewlines), "main")
     }
 
-    // Tests latestTrackedFileModificationDate does not update when a later-encountered file is older than the current latest.
-    // This covers the false branch of `if modificationDate > existingLatestDate` in latestTrackedFileModificationDate.
-    func testTrackedFileActivityLatestDateIsNotUpdatedByOlderSecondFile() throws {
-        let root = try makeTempDirectory()
-        let repo = root.appending(path: "repo", directoryHint: .isDirectory)
-        try FileManager.default.createDirectory(at: repo, withIntermediateDirectories: true)
-        try initializeGitRepository(at: repo, initialBranch: "main")
-
-        // Add a second tracked file committed after the first.
-        let secondFile = repo.appendingPathComponent("zzz.md")
-        try "second".write(to: secondFile, atomically: true, encoding: .utf8)
-        try runGit(["add", "zzz.md"], cwd: repo.path)
-        try runGit(["-c", "user.name=muxy-test", "-c", "user.email=test@example.com", "commit", "-m", "add zzz"], cwd: repo.path)
-
-        // Set modification dates: README.md (alphabetically first) gets a NEWER date,
-        // zzz.md (alphabetically second) gets an OLDER date.
-        // ls-files returns alphabetical order: README.md first, zzz.md second.
-        let readmeFile = repo.appendingPathComponent("README.md")
-        let newerDate = Date(timeIntervalSinceNow: -100)
-        let olderDate = Date(timeIntervalSinceNow: -500)
-        try setModificationDate(newerDate, for: readmeFile)
-        try setModificationDate(olderDate, for: secondFile)
-
-        let activity = GitClient().trackedFileActivity(path: repo.path)
-
-        // latestTrackedFileModificationDate should be the newer date from README.md.
-        // When zzz.md is processed: olderDate > newerDate → false → latestDate stays as newerDate.
-        assertEqualDate(activity.latestTrackedFileModificationDate, newerDate)
-    }
 }

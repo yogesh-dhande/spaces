@@ -186,12 +186,6 @@ public final class MuxyOrchestrator {
         return git.branchOptions(path: project.dir, includeLiveRemoteHeads: includeLiveRemoteHeads)
     }
 
-    public func workspaceGitTrackedFileActivity(workspaceID: String) throws -> GitTrackedFileActivity? {
-        let (project, workspace) = try resolveWorkspace(id: workspaceID)
-        guard project.isGitRepo else { return nil }
-        return git.trackedFileActivity(path: workspace.dir, baseBranch: workspace.targetBranch ?? project.defaultBranch)
-    }
-
     private func isProtectedBranchName(_ branch: String) -> Bool {
         let normalized = branch.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         return normalized == "main" || normalized == "master"

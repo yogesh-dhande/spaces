@@ -4769,21 +4769,6 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertTrue(try store.runningProcesses(workspaceID: workspace.id).isEmpty)
     }
 
-    // Tests workspaceGitTrackedFileActivity returns nil for non-git project by arranging representative inputs and asserting the expected result.
-    func testWorkspaceGitTrackedFileActivityReturnsNilForNonGitProject() throws {
-        let root = try makeTempDirectory()
-        let projectDir = root.appendingPathComponent("project", isDirectory: true)
-        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
-        let store = try makeTemporaryStore()
-        let orchestrator = MuxyOrchestrator(store: store)
-
-        let project = try orchestrator.addProject(dir: projectDir.path)
-        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
-
-        let activity = try orchestrator.workspaceGitTrackedFileActivity(workspaceID: workspace.id)
-        XCTAssertNil(activity)
-    }
-
     // Tests gitBranchOptions returns empty for non-git project by arranging representative inputs and asserting the expected result.
     func testGitBranchOptionsReturnsEmptyForNonGitProject() throws {
         let root = try makeTempDirectory()
@@ -5166,21 +5151,6 @@ final class OrchestratorTests: XCTestCase {
         let options = try orchestrator.gitBranchOptions(projectID: project.id)
         XCTAssertFalse(options.isEmpty)
         XCTAssertTrue(options.contains("main"))
-    }
-
-    // Tests workspaceGitTrackedFileActivity returns non-nil for a git workspace by arranging representative inputs and asserting the expected result.
-    func testWorkspaceGitTrackedFileActivityForGitWorkspace() throws {
-        let fixture = try makeTempGitRepo(name: "git-activity-test")
-        let root = try makeTempDirectory()
-        let reposRoot = root.appendingPathComponent("repos", isDirectory: true)
-        let workspacesRoot = root.appendingPathComponent("workspaces", isDirectory: true)
-        let store = try makeTemporaryStore()
-        let orchestrator = MuxyOrchestrator(store: store, projectsRootDirectory: reposRoot, workspacesRootDirectory: workspacesRoot)
-
-        let project = try orchestrator.addProject(gitURL: fixture.path)
-        let defaultWorkspace = try XCTUnwrap(orchestrator.listWorkspaces(projectID: project.id).first(where: \.isDefault))
-        let activity = try orchestrator.workspaceGitTrackedFileActivity(workspaceID: defaultWorkspace.id)
-        XCTAssertNotNil(activity)
     }
 
     // Tests createWorkspace revives an archived git workspace by recreating the worktree by arranging representative inputs and asserting the expected result.
