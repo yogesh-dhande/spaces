@@ -40,4 +40,25 @@ final class DatabaseLocatorTests: XCTestCase {
         let path = try DatabaseLocator.defaultPath()
         XCTAssertTrue(path.hasSuffix("muxy.db"), "Expected path to end with muxy.db, got \(path)")
     }
+
+    // Tests the public defaultPath() overload honors the explicit DB-path override used by manual E2E runs.
+    func testPublicDefaultPathHonorsEnvironmentOverride() throws {
+        let overrideURL = tempHomeURL.appendingPathComponent("isolated/state/muxy-test.db")
+        let previous = getenv(DatabaseLocator.databasePathEnvironmentVariable).map { String(cString: $0) }
+        setenv(DatabaseLocator.databasePathEnvironmentVariable, overrideURL.path, 1)
+        defer {
+            if let previous {
+                setenv(DatabaseLocator.databasePathEnvironmentVariable, previous, 1)
+            } else {
+                unsetenv(DatabaseLocator.databasePathEnvironmentVariable)
+            }
+        }
+
+        let path = try DatabaseLocator.defaultPath()
+
+        XCTAssertEqual(path, overrideURL.path)
+        var isDirectory: ObjCBool = false
+        XCTAssertTrue(FileManager.default.fileExists(atPath: overrideURL.deletingLastPathComponent().path, isDirectory: &isDirectory))
+        XCTAssertTrue(isDirectory.boolValue)
+    }
 }

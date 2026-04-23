@@ -105,6 +105,14 @@ final class MXCommandTests: XCTestCase {
         XCTAssertNil(result)
     }
 
+    func testAgentEventDropResultAcceptsItermSessionIdentifierWithoutTermProgram() {
+        let context = CLIContext()
+
+        let result = agentEventDropResult(type: .start, environment: ["ITERM_SESSION_ID": "w0t0p0:ABC123"], context: context)
+
+        XCTAssertNil(result)
+    }
+
     func testAgentEventDropResultRejectsTmuxBeforeWorkspaceLookup() {
         let context = CLIContext()
 
@@ -188,6 +196,23 @@ final class MXCommandTests: XCTestCase {
             XCTAssertEqual(agentContext?.provider, .ghostty)
             XCTAssertEqual(agentContext?.terminalTrackingID, "ghostty-hook-token-1")
             XCTAssertEqual(agentContext?.terminalNativeID, "ghostty-native-1")
+            XCTAssertNil(agentContext?.yabaiWindowID)
+        }
+    }
+
+    func testResolveAgentInvocationContextDoesNotBorrowFocusedWindowForItermSessionIdentity() throws {
+        let store = try makeTemporaryStore()
+        let workspace = try makeWorkspace(store: store)
+        let orchestrator = MuxyOrchestrator(store: store)
+
+        try withMockCommands(["yabai": Self.yabaiFocusedWindowMock]) {
+            let context = CLIContext()
+            let agentContext = try resolveAgentInvocationContext(
+                workspaceID: workspace.id, environment: ["ITERM_SESSION_ID": "w0t0p0:ABC123", "CLAUDE_CODE_ENTRYPOINT": "1"],
+                orchestrator: orchestrator, context: context)
+
+            XCTAssertEqual(agentContext?.provider, .iterm2)
+            XCTAssertEqual(agentContext?.terminalTrackingID, "ABC123")
             XCTAssertNil(agentContext?.yabaiWindowID)
         }
     }

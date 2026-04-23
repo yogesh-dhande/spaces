@@ -6,11 +6,14 @@ import streamctl
     private let rowsStack = NSStackView()
     private let addButton: NSButton
     private var rows: [ProcessRowRefs] = []
+    private let accessibilityPrefix: String?
     var onDirty: (() -> Void)?
 
-    init() {
+    init(accessibilityPrefix: String? = nil) {
+        self.accessibilityPrefix = accessibilityPrefix
         container.orientation = .vertical
         container.spacing = 8
+        if let accessibilityPrefix { container.setAccessibilityIdentifier("\(accessibilityPrefix)-container") }
         rowsStack.orientation = .vertical
         rowsStack.spacing = 6
         rowsStack.translatesAutoresizingMaskIntoConstraints = false
@@ -18,6 +21,7 @@ import streamctl
         addButton.bezelStyle = .texturedRounded
         addButton.image = NSImage(systemSymbolName: "plus", accessibilityDescription: "Add Process")
         addButton.toolTip = "Add process"
+        if let accessibilityPrefix { addButton.setAccessibilityIdentifier("\(accessibilityPrefix)-add") }
         addButton.target = self
         addButton.action = #selector(addRowFromButton)
 
@@ -111,11 +115,24 @@ import streamctl
             if let idx = self.rows.firstIndex(where: { $0 === row }) { self.rows.remove(at: idx) }
             row.remove()
             self.onDirty?()
+            self.refreshAccessibilityIdentifiers()
         }
         onDirty?()
+        refreshAccessibilityIdentifiers()
     }
 
     @objc private func addRowFromButton() { addRow(with: nil, checks: []) }
+
+    private func refreshAccessibilityIdentifiers() {
+        guard let accessibilityPrefix else { return }
+        for (index, row) in rows.enumerated() {
+            row.processRow.setAccessibilityIdentifier("\(accessibilityPrefix)-row-\(index)")
+            row.nameField.setAccessibilityIdentifier("\(accessibilityPrefix)-name-\(index)")
+            row.commandField.setAccessibilityIdentifier("\(accessibilityPrefix)-command-\(index)")
+            row.onExitPopup.setAccessibilityIdentifier("\(accessibilityPrefix)-on-exit-\(index)")
+            row.removeButton.setAccessibilityIdentifier("\(accessibilityPrefix)-remove-\(index)")
+        }
+    }
 
     @MainActor private final class ProcessRowRefs {
         let processRow = NSStackView()
@@ -123,6 +140,7 @@ import streamctl
         let nameField = NSTextField(string: "")
         let commandField = NSTextField(string: "")
         let onExitPopup = NSPopUpButton()
+        let removeButton: NSButton
         private let checksStack = NSStackView()
         private let checksFieldHeader = NSStackView()
         private var checkRows: [StatusCheckRowRefs] = []
@@ -144,10 +162,12 @@ import streamctl
             onExitPopup.font = .systemFont(ofSize: 11)
             onExitPopup.toolTip = "Action on process exit"
 
-            let removeButton = NSButton(title: "", target: self, action: #selector(removeRow))
+            removeButton = NSButton(title: "", target: nil, action: nil)
             removeButton.bezelStyle = .texturedRounded
             removeButton.image = NSImage(systemSymbolName: "minus", accessibilityDescription: "Remove Process")
             removeButton.toolTip = "Remove process"
+            removeButton.target = self
+            removeButton.action = #selector(removeRow)
 
             processRow.addArrangedSubview(nameField)
             processRow.addArrangedSubview(commandField)

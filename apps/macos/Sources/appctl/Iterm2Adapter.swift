@@ -348,7 +348,14 @@ open class Iterm2Adapter: @unchecked Sendable {
             guard let self else { return }
             do {
                 let verified = try self.verifyFocusedSession(preferredSessionID: preferredSessionID, windowID: windowID)
-                if !verified { self.logFocusVerification("session_verification_failed session_id=\(preferredSessionID) window_id=\(windowID ?? -1)") }
+                // This debug line is consumed opportunistically by the manual
+                // E2E harness when it wants extra confirmation that iTerm2
+                // reselected the intended tracked session after focus returns.
+                if verified {
+                    self.logFocusVerification("session_verification_succeeded session_id=\(preferredSessionID) window_id=\(windowID ?? -1)")
+                } else {
+                    self.logFocusVerification("session_verification_failed session_id=\(preferredSessionID) window_id=\(windowID ?? -1)")
+                }
             } catch {
                 self.logFocusVerification(
                     "session_verification_error session_id=\(preferredSessionID) window_id=\(windowID ?? -1) error=\(error.localizedDescription)")

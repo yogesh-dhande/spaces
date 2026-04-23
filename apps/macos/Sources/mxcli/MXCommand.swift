@@ -239,10 +239,20 @@ func resolveAgentInvocationContext(workspaceID: String, environment: [String: St
         resolvedProvider == .ghostty
         ? try resolveTrackedGhosttyNativeTerminalID(workspaceID: workspaceID, terminalTrackingID: splitIdentity.sessionID, orchestrator: orchestrator)
         : nil
+    let resolvedYabaiWindowID: Int?
+    if resolvedProvider == .ghostty {
+        resolvedYabaiWindowID = splitIdentity.windowID
+    } else if splitIdentity.sessionID?.isEmpty == false {
+        // iTerm session IDs are already stable terminal identities. Falling back
+        // to whichever yabai window happens to be focused at event time can
+        // misattribute agent events to the Muxy app window.
+        resolvedYabaiWindowID = nil
+    } else {
+        resolvedYabaiWindowID = splitIdentity.windowID ?? focusedWindowID
+    }
     return AgentInvocationContext(
         provider: resolvedProvider, label: inferredAgentLabel(environment: environment), terminalTrackingID: splitIdentity.sessionID,
-        terminalNativeID: terminalNativeID, codexThreadID: environment["CODEX_THREAD_ID"],
-        yabaiWindowID: resolvedProvider == .ghostty ? splitIdentity.windowID : (splitIdentity.windowID ?? focusedWindowID))
+        terminalNativeID: terminalNativeID, codexThreadID: environment["CODEX_THREAD_ID"], yabaiWindowID: resolvedYabaiWindowID)
 }
 
 private func requireWorkspace(id: String, orchestrator: MuxyOrchestrator) throws -> WorkspaceRecord {
@@ -265,6 +275,9 @@ private func resolveProvider(environment: [String: String]) -> AgentProvider? {
     let bundleIdentifier = environment["__CFBundleIdentifier"]?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
     if bundleIdentifier == TerminalHost.iterm2.bundleIdentifier { return .iterm2 }
     if bundleIdentifier == TerminalHost.ghostty.bundleIdentifier { return .ghostty }
+
+    let itermSessionID = environment["ITERM_SESSION_ID"]?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+    if !itermSessionID.isEmpty { return .iterm2 }
 
     let termProgram = environment["TERM_PROGRAM"]?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ?? ""
     if termProgram == "iterm.app" { return .iterm2 }

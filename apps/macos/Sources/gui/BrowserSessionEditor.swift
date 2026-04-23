@@ -6,11 +6,14 @@ import streamctl
     private let rowsStack = NSStackView()
     private let addButton: NSButton
     private var rows: [BrowserSessionRowRefs] = []
+    private let accessibilityPrefix: String?
     var onDirty: (() -> Void)?
 
-    init() {
+    init(accessibilityPrefix: String? = nil) {
+        self.accessibilityPrefix = accessibilityPrefix
         container.orientation = .vertical
         container.spacing = 8
+        if let accessibilityPrefix { container.setAccessibilityIdentifier("\(accessibilityPrefix)-container") }
         rowsStack.orientation = .vertical
         rowsStack.spacing = 6
         rowsStack.translatesAutoresizingMaskIntoConstraints = false
@@ -18,6 +21,7 @@ import streamctl
         addButton.bezelStyle = .texturedRounded
         addButton.image = NSImage(systemSymbolName: "plus", accessibilityDescription: "Add Browser Session")
         addButton.toolTip = "Add browser session"
+        if let accessibilityPrefix { addButton.setAccessibilityIdentifier("\(accessibilityPrefix)-add") }
         addButton.target = self
         addButton.action = #selector(addRowFromButton)
 
@@ -78,16 +82,29 @@ import streamctl
             if let idx = self.rows.firstIndex(where: { $0 === row }) { self.rows.remove(at: idx) }
             row.remove()
             self.onDirty?()
+            self.refreshAccessibilityIdentifiers()
         }
         onDirty?()
+        refreshAccessibilityIdentifiers()
     }
 
     @objc private func addRowFromButton() { addRow(with: nil) }
+
+    private func refreshAccessibilityIdentifiers() {
+        guard let accessibilityPrefix else { return }
+        for (index, row) in rows.enumerated() {
+            row.container.setAccessibilityIdentifier("\(accessibilityPrefix)-row-\(index)")
+            row.nameField.setAccessibilityIdentifier("\(accessibilityPrefix)-name-\(index)")
+            row.urlField.setAccessibilityIdentifier("\(accessibilityPrefix)-url-\(index)")
+            row.removeButton.setAccessibilityIdentifier("\(accessibilityPrefix)-remove-\(index)")
+        }
+    }
 
     @MainActor private final class BrowserSessionRowRefs {
         let container = NSStackView()
         let nameField = NSTextField(string: "")
         let urlField = NSTextField(string: "")
+        let removeButton: NSButton
         var onRemove: (() -> Void)?
         var onChange: (() -> Void)?
 
@@ -99,10 +116,12 @@ import streamctl
             nameField.placeholderString = "name"
             urlField.placeholderString = "https://example.com"
 
-            let removeButton = NSButton(title: "", target: self, action: #selector(removeRow))
+            removeButton = NSButton(title: "", target: nil, action: nil)
             removeButton.bezelStyle = .texturedRounded
             removeButton.image = NSImage(systemSymbolName: "minus", accessibilityDescription: "Remove Browser Session")
             removeButton.toolTip = "Remove browser session"
+            removeButton.target = self
+            removeButton.action = #selector(removeRow)
 
             container.addArrangedSubview(nameField)
             container.addArrangedSubview(urlField)

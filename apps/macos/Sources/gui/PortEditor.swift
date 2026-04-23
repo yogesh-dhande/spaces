@@ -6,17 +6,21 @@ import streamctl
     private let rowsStack = NSStackView()
     private let addButton: NSButton
     private var rows: [PortRowRefs] = []
+    private let accessibilityPrefix: String?
     var onDirty: (() -> Void)?
 
-    init() {
+    init(accessibilityPrefix: String? = nil) {
+        self.accessibilityPrefix = accessibilityPrefix
         container.orientation = .vertical
         container.spacing = 8
+        if let accessibilityPrefix { container.setAccessibilityIdentifier("\(accessibilityPrefix)-container") }
         rowsStack.orientation = .vertical
         rowsStack.spacing = 6
         addButton = NSButton(title: "", target: nil, action: nil)
         addButton.bezelStyle = .texturedRounded
         addButton.image = NSImage(systemSymbolName: "plus", accessibilityDescription: "Add Port")
         addButton.toolTip = "Add port definition"
+        if let accessibilityPrefix { addButton.setAccessibilityIdentifier("\(accessibilityPrefix)-add") }
         addButton.target = self
         addButton.action = #selector(addRowFromButton)
         let header = NSStackView()
@@ -58,15 +62,27 @@ import streamctl
             if let idx = self.rows.firstIndex(where: { $0 === row }) { self.rows.remove(at: idx) }
             row.remove()
             self.onDirty?()
+            self.refreshAccessibilityIdentifiers()
         }
         onDirty?()
+        refreshAccessibilityIdentifiers()
     }
 
     @objc private func addRowFromButton() { addRow(with: nil) }
 
+    private func refreshAccessibilityIdentifiers() {
+        guard let accessibilityPrefix else { return }
+        for (index, row) in rows.enumerated() {
+            row.container.setAccessibilityIdentifier("\(accessibilityPrefix)-row-\(index)")
+            row.nameField.setAccessibilityIdentifier("\(accessibilityPrefix)-name-\(index)")
+            row.removeButton.setAccessibilityIdentifier("\(accessibilityPrefix)-remove-\(index)")
+        }
+    }
+
     @MainActor private final class PortRowRefs {
         let container = NSStackView()
         let nameField = NSTextField(string: "")
+        let removeButton: NSButton
         var onRemove: (() -> Void)?
         var onChange: (() -> Void)?
 
@@ -77,10 +93,12 @@ import streamctl
 
             nameField.placeholderString = "e.g. FRONTEND_PORT"
 
-            let removeButton = NSButton(title: "", target: self, action: #selector(removeRow))
+            removeButton = NSButton(title: "", target: nil, action: nil)
             removeButton.bezelStyle = .texturedRounded
             removeButton.image = NSImage(systemSymbolName: "minus", accessibilityDescription: "Remove Port")
             removeButton.toolTip = "Remove port definition"
+            removeButton.target = self
+            removeButton.action = #selector(removeRow)
 
             container.addArrangedSubview(nameField)
             container.addArrangedSubview(removeButton)

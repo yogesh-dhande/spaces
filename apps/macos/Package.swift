@@ -11,6 +11,7 @@ let package = Package(
         .library(name: "streamctl", targets: ["streamctl"]),
         .library(name: "gui", targets: ["gui"]),
         .library(name: "mxcli", targets: ["mxcli"]),
+        .executable(name: "mxe2e", targets: ["mxe2e"]),
         .executable(name: "mx", targets: ["mx"]),
         .executable(name: "Muxy", targets: ["Muxy"])
     ],
@@ -28,6 +29,14 @@ let package = Package(
         .target(name: "gui", dependencies: ["streamctl", "appctl"]),
         .target(
             name: "mxcli",
+            dependencies: [
+                "streamctl",
+                "appctl",
+                .product(name: "ArgumentParser", package: "swift-argument-parser")
+            ]
+        ),
+        .executableTarget(
+            name: "mxe2e",
             dependencies: [
                 "streamctl",
                 "appctl",

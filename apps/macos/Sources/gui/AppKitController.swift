@@ -141,6 +141,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     private var checkForUpdatesMenuItem: NSMenuItem?
     private var availableUpdate: UpdateInfo?
     private var agentEventIPCObserver: NSObjectProtocol?
+    private var selectWorkspaceDetailIPCObserver: NSObjectProtocol?
     private var appDidBecomeActiveObserver: NSObjectProtocol?
     private var appDidResignActiveObserver: NSObjectProtocol?
     private var didStartBackgroundServices = false
@@ -245,6 +246,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         setupShortcutMonitor()
         logStartupProfile("shortcut_monitor_ready")
         setupAgentEventIPCObserver()
+        setupSelectWorkspaceDetailIPCObserver()
         setupAppActivationObservers()
         logStartupProfile("ipc_observers_ready")
 
@@ -267,6 +269,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             DistributedNotificationCenter.default().removeObserver(agentEventIPCObserver)
             self.agentEventIPCObserver = nil
         }
+        if let selectWorkspaceDetailIPCObserver {
+            DistributedNotificationCenter.default().removeObserver(selectWorkspaceDetailIPCObserver)
+            self.selectWorkspaceDetailIPCObserver = nil
+        }
         if let appDidBecomeActiveObserver {
             NotificationCenter.default.removeObserver(appDidBecomeActiveObserver)
             self.appDidBecomeActiveObserver = nil
@@ -280,7 +286,48 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     private func setupAgentEventIPCObserver() {
         agentEventIPCObserver = DistributedNotificationCenter.default().addObserver(
             forName: IPCNotification.agentEventFired, object: nil, queue: .main
-        ) { [weak self] _ in Task { @MainActor [weak self] in self?.reloadData() } }
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                self.reloadData()
+            }
+        }
+    }
+
+    private func setupSelectWorkspaceDetailIPCObserver() {
+        selectWorkspaceDetailIPCObserver = DistributedNotificationCenter.default().addObserver(
+            forName: IPCNotification.selectWorkspaceDetail, object: nil, queue: .main
+        ) { [weak self] notification in
+            guard let workspaceID = notification.userInfo?[IPCNotification.workspaceIDUserInfoKey] as? String else { return }
+            Task { @MainActor [weak self, workspaceID] in
+                guard let self else { return }
+                guard let (_, workspace) = self.findWorkspace(id: workspaceID) else {
+                    self.logWorkspaceDetailIPC("workspace_not_found id=\(workspaceID)")
+                    return
+                }
+                self.logWorkspaceDetailIPC("selecting id=\(workspaceID) title=\(workspace.title)")
+                self.showingDashboard = false
+                self.showingSettings = false
+                self.selectWorkspace(workspace)
+                self.refreshSelection()
+                NSApp.activate(ignoringOtherApps: true)
+                NSApp.unhide(nil)
+                if let window = NSApp.keyWindow ?? NSApp.mainWindow ?? NSApp.windows.first {
+                    if window.isMiniaturized { window.deminiaturize(nil) }
+                    self.prepareWindowForActiveSpaceSummon(window)
+                    window.orderFrontRegardless()
+                    window.makeKey()
+                }
+                self.logWorkspaceDetailIPC("selected id=\(workspaceID) title=\(workspace.title)")
+            }
+        }
+    }
+
+    private func logWorkspaceDetailIPC(_ message: String) {
+        guard ProcessInfo.processInfo.environment["DEBUG"] == "1" else { return }
+        // Manual real-system E2E uses these lines to confirm the helper-driven
+        // workspace-detail selection request was accepted by the running app.
+        fputs("muxy: workspace_detail_ipc \(message)\n", stderr)
     }
 
     private func setupAppActivationObservers() {
@@ -1202,6 +1249,12 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         value.trimmingCharacters(in: .whitespacesAndNewlines).folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
     }
 
+    nonisolated static func automationIdentifierSlug(_ value: String) -> String {
+        let lowercased = value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let slug = lowercased.replacingOccurrences(of: #"[^a-z0-9]+"#, with: "-", options: .regularExpression)
+        return slug.trimmingCharacters(in: CharacterSet(charactersIn: "-"))
+    }
+
     nonisolated static func resolvedCodingAgentRunEntries(configuredAgentLaunchers: [AgentLauncher], agentWindows: [AgentWindowRecord])
         -> [ResolvedCodingAgentRunEntry]
     {
@@ -1591,6 +1644,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
     private func makeDashboardSidebarRow() -> NSView {
         let row = NSView()
+        row.setAccessibilityIdentifier("sidebar-dashboard")
 
         let titleLabel = NSTextField(labelWithString: "Dashboard")
         titleLabel.font = .systemFont(ofSize: 12, weight: .medium)
@@ -1852,7 +1906,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
         let mainRow = windowRow(
             icon: entry.icon, iconColor: Self.dashboardIconColor(entry.iconTint), label: entry.label, detail: entry.detail, shortcut: shortcut,
-            processStatus: entry.processStatus, agentStatus: entry.agentStatus, trailingAccessory: dismissButton, action: action)
+            processStatus: entry.processStatus, agentStatus: entry.agentStatus,
+            automationID: entry.agentStatus == nil ? nil : "dashboard-agent-\(Self.automationIdentifierSlug(entry.label))",
+            trailingAccessory: dismissButton, action: action)
 
         let container = NSStackView()
         container.orientation = .vertical
@@ -2474,6 +2530,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         {
             terminalPopUp.select(item)
         }
+        terminalPopUp.setAccessibilityIdentifier("settings-terminal-host")
         terminalPopUp.target = self
         terminalPopUp.action = #selector(terminalHostChanged(_:))
         stack.addArrangedSubview(terminalPopUp)
@@ -3036,15 +3093,18 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let suggestedName = suggestedWorkspaceNameFast(projectID: project.id)
         let nameField = NSTextField(string: project.isGitRepo ? "" : suggestedName)
         nameField.placeholderString = "workspace title"
+        nameField.setAccessibilityIdentifier("add-workspace-title")
         let branchModePopup = NSPopUpButton()
         branchModePopup.addItems(withTitles: ["Existing branch", "Create branch"])
         branchModePopup.selectItem(at: 1)
+        branchModePopup.setAccessibilityIdentifier("add-workspace-branch-mode")
         branchModePopup.target = self
         branchModePopup.action = #selector(addWorkspaceBranchModeChanged(_:))
         let targetBranchField = NSComboBox()
         targetBranchField.usesDataSource = false
         targetBranchField.completes = true
         targetBranchField.numberOfVisibleItems = 10
+        targetBranchField.setAccessibilityIdentifier("add-workspace-target-branch")
         let targetBranches = project.isGitRepo ? [defaultWorkspaceTargetBranchFast(project: project)].compactMap { $0 } : []
         targetBranchField.addItems(withObjectValues: targetBranches)
         if let defaultTargetBranch = defaultWorkspaceTargetBranch(project: project, branches: targetBranches) {
@@ -3055,17 +3115,21 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         existingBranchField.completes = true
         existingBranchField.numberOfVisibleItems = 10
         existingBranchField.placeholderString = "search branches"
+        existingBranchField.setAccessibilityIdentifier("add-workspace-existing-branch")
         existingBranchField.addItems(withObjectValues: targetBranches)
         if let defaultBranch = defaultWorkspaceTargetBranch(project: project, branches: targetBranches) {
             existingBranchField.stringValue = defaultBranch
         }
         let newBranchField = NSTextField(string: "")
         newBranchField.placeholderString = "new branch name"
+        newBranchField.setAccessibilityIdentifier("add-workspace-new-branch")
         newBranchField.delegate = self
         let directoryNameField = NSTextField(string: "")
         directoryNameField.placeholderString = "optional: letters, numbers, -, _"
+        directoryNameField.setAccessibilityIdentifier("add-workspace-directory-name")
         let tooltipField = NSTextField(string: "")
         tooltipField.placeholderString = "optional: context about what you're working on"
+        tooltipField.setAccessibilityIdentifier("add-workspace-tooltip")
         let autoNameState = project.isGitRepo ? AddWorkspaceAutoNameState() : nil
 
         // --- Single card with all inputs ---
@@ -3131,10 +3195,12 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let createButton = actionButton(
             title: "Create Workspace (Cmd+Return)", symbol: nil, tooltip: "Create workspace (Cmd+Return)", action: #selector(createWorkspace(_:)),
             primary: true)
+        createButton.setAccessibilityIdentifier("add-workspace-create")
         createButton.keyEquivalent = "\r"
         createButton.keyEquivalentModifierMask = [.command]
         let cancelButton = actionButton(
             title: "Cancel (Esc)", symbol: nil, tooltip: "Cancel (Esc)", action: #selector(cancelProjectForm), primary: false)
+        cancelButton.setAccessibilityIdentifier("add-workspace-cancel")
         cancelButton.keyEquivalent = "\u{1b}"
         cancelButton.keyEquivalentModifierMask = []
 
@@ -3246,6 +3312,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         workspaceTitleLabel.textColor = sidebarPrimaryTextColor(isSelected: false, isArchived: false)
         workspaceTitleLabel.lineBreakMode = .byTruncatingTail
         workspaceTitleLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        workspaceTitleLabel.setAccessibilityIdentifier("workspace-detail-title-label")
 
         let runtimeWarningIcon = NSImageView()
         runtimeWarningIcon.image = NSImage(systemSymbolName: "exclamationmark.triangle.fill", accessibilityDescription: "Status warning")
@@ -3262,16 +3329,19 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         workspaceTitleField.font = .systemFont(ofSize: 18, weight: .semibold)
         workspaceTitleField.isHidden = true
         workspaceTitleField.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        workspaceTitleField.setAccessibilityIdentifier("workspace-detail-title-input")
 
         let titleSaveButton = NSButton(title: "Save", target: self, action: #selector(saveInlineWorkspaceMetadata(_:)))
         titleSaveButton.controlSize = .small
         titleSaveButton.bezelStyle = .rounded
         titleSaveButton.isHidden = true
+        titleSaveButton.setAccessibilityIdentifier("workspace-detail-title-save")
 
         let titleCancelButton = NSButton(title: "Cancel", target: self, action: #selector(cancelInlineWorkspaceMetadata(_:)))
         titleCancelButton.controlSize = .small
         titleCancelButton.bezelStyle = .rounded
         titleCancelButton.isHidden = true
+        titleCancelButton.setAccessibilityIdentifier("workspace-detail-title-cancel")
         let headerRow = NSStackView()
         headerRow.orientation = .horizontal
         headerRow.alignment = .centerY
@@ -3349,8 +3419,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 title: "Launch", symbol: "play.circle", tooltip: "Launch", action: #selector(launchWorkspace(_:)), primary: false)
         }
         launchOrRestartButton.identifier = NSUserInterfaceItemIdentifier(workspace.id)
+        launchOrRestartButton.setAccessibilityIdentifier("workspace-detail-launch-restart")
         let stopButton = actionButton(title: "Stop", symbol: "stop.circle", tooltip: "Stop", action: #selector(stopWorkspace(_:)), primary: false)
         stopButton.identifier = NSUserInterfaceItemIdentifier(workspace.id)
+        stopButton.setAccessibilityIdentifier("workspace-detail-stop")
         let activeToggleButton = actionButton(
             title: workspace.isActive ? "Deactivate" : "Activate", symbol: workspace.isActive ? "eye.slash" : "eye",
             tooltip: workspace.isActive ? "Hide this workspace from the sidebar by default" : "Show this workspace in the sidebar by default",
@@ -3359,6 +3431,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let archiveButton = actionButton(
             title: "Archive", symbol: "archivebox", tooltip: "Archive", action: #selector(archiveWorkspace(_:)), primary: false)
         archiveButton.identifier = NSUserInterfaceItemIdentifier(workspace.id)
+        archiveButton.setAccessibilityIdentifier("workspace-detail-archive")
         let muted = NSColor.systemRed.withAlphaComponent(0.6)
         let redTitle = NSMutableAttributedString(
             string: "Archive", attributes: [.foregroundColor: muted, .font: archiveButton.font ?? NSFont.systemFont(ofSize: 13)])
@@ -3521,6 +3594,14 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let processesByID = Dictionary(uniqueKeysWithValues: processes.map { ($0.id, $0) })
         let codingAgentEntries = Self.resolvedCodingAgentRunEntries(
             configuredAgentLaunchers: configuredAgentLaunchers, agentWindows: agentWindowsForRunTab)
+        if ProcessInfo.processInfo.environment["DEBUG"] == "1" {
+            // The manual real-system harness uses this one-line snapshot instead
+            // of brittle AX traversal to confirm the selected Run tab rebuilt
+            // with coding-agent rows after agent-event IPC notifications land.
+            fputs(
+                "muxy: workspace_run_view workspace=\(workspace.id) selected=\(selectedWorkspaceID == workspace.id) agents=\(agentWindowsForRunTab.count) coding_entries=\(codingAgentEntries.count)\n",
+                stderr)
+        }
         // Shortcut counter is shared across all sections so numbers are assigned
         // in the order rows appear on screen: Browser Tabs → Processes →
         // Coding Agents.
@@ -3650,6 +3731,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                     label: entry.agentWindow?.label ?? entry.launcherName ?? "Coding Agent CLI",
                     detail: linkedWin?.detail ?? entry.launcher.map { resolveCommand($0.command) } ?? linkedWin?.app, shortcut: rowShortcut,
                     agentStatus: entry.agentWindow?.status,
+                    automationID:
+                        "workspace-agent-\(workspace.id)-\(Self.automationIdentifierSlug(entry.agentWindow?.label ?? entry.launcherName ?? "coding-agent-cli"))",
                     action: { [weak self] in
                         guard let self else { return }
                         if let matchedAgent = entry.agentWindow, linkedWin != nil {
@@ -3738,11 +3821,12 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         contentStack.spacing = 14
         contentStack.translatesAutoresizingMaskIntoConstraints = false
 
-        let portEditor = PortEditor()
-        let processEditor = ProcessEditor()
+        let portEditor = PortEditor(accessibilityPrefix: "workspace-settings-ports")
+        let processEditor = ProcessEditor(accessibilityPrefix: "workspace-settings-processes")
         let stopView = makeEditableTextView()
+        stopView.setAccessibilityIdentifier("workspace-settings-stop-script")
         let stopScroll = scrollableTextView(stopView, height: 90)
-        let browserSessionEditor = BrowserSessionEditor()
+        let browserSessionEditor = BrowserSessionEditor(accessibilityPrefix: "workspace-settings-browser-sessions")
         let agentLauncherEditor = AgentLauncherEditor()
 
         if let config = try? orchestrator.workspaceSettings(workspaceID: workspace.id) {
@@ -3762,6 +3846,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let saveButton = actionButton(
             title: "Save Workspace", symbol: "square.and.arrow.down", tooltip: "Save workspace settings", action: #selector(saveWorkspace(_:)),
             primary: true)
+        saveButton.setAccessibilityIdentifier("workspace-settings-save")
 
         // --- Port definitions card ---
         let wsPortCard = formSectionCard(
@@ -3909,11 +3994,18 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     private func makeInlineWorkspaceMetadataEditRow(
         workspaceID: String, field: InlineWorkspaceDetailField, icon: String, labelText: String, value: String, placeholder: String, isEditable: Bool
     ) -> NSView {
+        let automationID: String =
+            switch field {
+            case .title: "workspace-detail-title"
+            case .branch: "workspace-detail-branch"
+            case .tooltip: "workspace-detail-tooltip"
+            }
         let row = NSStackView()
         row.orientation = .horizontal
         row.alignment = .centerY
         row.spacing = 8
         row.translatesAutoresizingMaskIntoConstraints = false
+        row.setAccessibilityIdentifier("\(automationID)-row")
         if field == .tooltip, !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             row.wantsLayer = true
             row.layer?.cornerRadius = UIRadius.compact
@@ -3933,6 +4025,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         valueLabel.textColor = .secondaryLabelColor
         valueLabel.lineBreakMode = .byTruncatingTail
         valueLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        valueLabel.setAccessibilityIdentifier("\(automationID)-label")
         valueLabel.toolTip =
             isEditable
             ? "Double-click to edit \(labelText.lowercased())."
@@ -3945,16 +4038,19 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         textField.isHidden = true
         textField.font = .systemFont(ofSize: 12)
         textField.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        textField.setAccessibilityIdentifier("\(automationID)-input")
 
         let saveButton = NSButton(title: "Save", target: self, action: #selector(saveInlineWorkspaceMetadata(_:)))
         saveButton.controlSize = .small
         saveButton.bezelStyle = .rounded
         saveButton.isHidden = true
+        saveButton.setAccessibilityIdentifier("\(automationID)-save")
 
         let cancelButton = NSButton(title: "Cancel", target: self, action: #selector(cancelInlineWorkspaceMetadata(_:)))
         cancelButton.controlSize = .small
         cancelButton.bezelStyle = .rounded
         cancelButton.isHidden = true
+        cancelButton.setAccessibilityIdentifier("\(automationID)-cancel")
 
         row.addArrangedSubview(iconView)
         row.addArrangedSubview(valueLabel)
@@ -4102,9 +4198,14 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
     private func windowRow(
         icon: String, iconColor: NSColor, label: String, detail: String? = nil, shortcut: String, processStatus: RunningProcessState? = nil,
-        agentStatus: AgentWindowStatus? = nil, trailingAccessory: NSView? = nil, action: (() async -> Void)? = nil
+        agentStatus: AgentWindowStatus? = nil, automationID: String? = nil, trailingAccessory: NSView? = nil, action: (() async -> Void)? = nil
     ) -> NSView {
         let container = ClickableRowView(isInteractive: action != nil)
+        container.setAccessibilityElement(true)
+        container.setAccessibilityRole(.group)
+        container.setAccessibilityLabel(label)
+        if let detail, !detail.isEmpty { container.setAccessibilityValue(detail) }
+        if let automationID { container.setAccessibilityIdentifier("\(automationID)-row") }
 
         let row = NSStackView()
         row.orientation = .horizontal
@@ -4120,6 +4221,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         iconView.setContentCompressionResistancePriority(.required, for: .horizontal)
 
         let labelField = NSTextField(labelWithString: label)
+        if let automationID { labelField.setAccessibilityIdentifier("\(automationID)-label") }
         labelField.font = detail == nil ? .systemFont(ofSize: 12) : .systemFont(ofSize: 12, weight: .semibold)
         labelField.textColor = .labelColor
         labelField.lineBreakMode = .byTruncatingTail
@@ -4127,6 +4229,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         labelField.setContentCompressionResistancePriority(.required, for: .horizontal)
 
         let detailField = NSTextField(labelWithString: detail ?? "")
+        if let automationID { detailField.setAccessibilityIdentifier("\(automationID)-detail") }
         detailField.font = .systemFont(ofSize: 11)
         detailField.textColor = .secondaryLabelColor
         detailField.lineBreakMode = .byTruncatingTail
@@ -4144,6 +4247,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         if let agentStatus {
             if agentStatus == .spinning {
                 let spinner = NSProgressIndicator()
+                if let automationID { spinner.setAccessibilityIdentifier("\(automationID)-status-spinning") }
                 spinner.style = .spinning
                 spinner.controlSize = .mini
                 spinner.translatesAutoresizingMaskIntoConstraints = false
@@ -4169,6 +4273,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                     statusColor = .tertiaryLabelColor
                 }
                 let statusDot = NSImageView()
+                if let automationID { statusDot.setAccessibilityIdentifier("\(automationID)-status-\(agentStatus.rawValue)") }
                 statusDot.image = NSImage(systemSymbolName: statusIconName, accessibilityDescription: agentStatus.rawValue)
                 statusDot.contentTintColor = statusColor
                 statusDot.translatesAutoresizingMaskIntoConstraints = false
@@ -5806,7 +5911,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     ]
 
     private func isTextInputFocused() -> Bool {
-        guard let window else { return false }
+        guard let window = NSApp.keyWindow ?? NSApp.mainWindow else { return false }
         if let textView = window.firstResponder as? NSTextView { return textView.isEditable || textView.isFieldEditor }
         return false
     }
@@ -6058,26 +6163,36 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             logWindowShortcutProfile("stage=route_done index=\(index) kind=\(kind) elapsed_ms=\(windowShortcutElapsedMS(since: routeStartedAt))")
             activeWindowShortcutProfile?.routeCompletedAt = Date()
             logWindowShortcutProfile("stage=total index=\(index) elapsed_ms=\(windowShortcutElapsedMS(since: startedAt))")
+            logPerfMetric("window_shortcut", target: "index=\(index)", elapsedMS: windowShortcutElapsedMS(since: startedAt), success: true)
             hideAfterSuccessfulExternalWindowAction(.focus)
         case .success(.opened(let kind)):
             logWindowShortcutProfile("stage=route_done index=\(index) kind=\(kind) elapsed_ms=\(windowShortcutElapsedMS(since: routeStartedAt))")
             activeWindowShortcutProfile?.routeCompletedAt = Date()
             logWindowShortcutProfile("stage=total index=\(index) elapsed_ms=\(windowShortcutElapsedMS(since: startedAt))")
+            logPerfMetric("window_shortcut", target: "index=\(index)", elapsedMS: windowShortcutElapsedMS(since: startedAt), success: true)
             reloadData()
             hideAfterSuccessfulExternalWindowAction(.open)
         case .success(.noWorkspace):
             logWindowShortcutProfile("stage=aborted index=\(index) reason=no_workspace elapsed_ms=\(windowShortcutElapsedMS(since: startedAt))")
+            logPerfMetric("window_shortcut", target: "index=\(index)", elapsedMS: windowShortcutElapsedMS(since: startedAt), success: false)
         case .success(.noMatch):
             logWindowShortcutProfile("stage=aborted index=\(index) reason=no_match elapsed_ms=\(windowShortcutElapsedMS(since: startedAt))")
+            logPerfMetric("window_shortcut", target: "index=\(index)", elapsedMS: windowShortcutElapsedMS(since: startedAt), success: false)
         case .failure(let error):
             await handleWindowFocusFailure(error)
             logWindowShortcutProfile("stage=aborted index=\(index) reason=error elapsed_ms=\(windowShortcutElapsedMS(since: startedAt))")
+            logPerfMetric("window_shortcut", target: "index=\(index)", elapsedMS: windowShortcutElapsedMS(since: startedAt), success: false)
         }
     }
 
     private func logWindowShortcutProfile(_ message: String) {
         guard ProcessInfo.processInfo.environment["DEBUG"] == "1" else { return }
         fputs("muxy: window_shortcut \(message)\n", stderr)
+    }
+
+    private func logPerfMetric(_ metric: String, target: String, elapsedMS: Int, success: Bool) {
+        guard ProcessInfo.processInfo.environment["DEBUG"] == "1" else { return }
+        fputs("muxy: perf metric=\(metric) target=\(target) success=\(success ? 1 : 0) elapsed_ms=\(elapsedMS)\n", stderr)
     }
 
     private func windowShortcutElapsedMS(since start: Date) -> Int { max(Int(Date().timeIntervalSince(start) * 1000), 0) }
@@ -6393,6 +6508,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let settingsButton = sidebarRowIconButton(
             symbol: "gearshape", tooltip: "Project settings for \(project.name)", action: #selector(showProjectSettings(_:)))
         settingsButton.identifier = NSUserInterfaceItemIdentifier(project.id)
+        settingsButton.setAccessibilityIdentifier("sidebar-project-settings-\(project.id)")
         accessoryStack.addArrangedSubview(settingsButton)
 
         let contentRow = NSStackView()
@@ -6420,6 +6536,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         if project.isGitRepo {
             let addButton = sidebarRowIconButton(symbol: "plus", tooltip: "New workspace in \(project.name)", action: #selector(addWorkspace(_:)))
             addButton.identifier = NSUserInterfaceItemIdentifier(project.id)
+            addButton.setAccessibilityIdentifier("sidebar-project-add-workspace-\(project.id)")
             accessoryStack.addArrangedSubview(addButton)
         }
         return cell
@@ -6427,9 +6544,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
     private func workspaceRowCell(project: ProjectSummary, workspace: WorkspaceSummary, isSelected: Bool) -> NSTableCellView {
         let cell = NSTableCellView()
+        cell.setAccessibilityIdentifier("sidebar-workspace-\(workspace.id)")
 
         let cardView = NSView()
         cardView.translatesAutoresizingMaskIntoConstraints = false
+        cardView.setAccessibilityIdentifier("sidebar-workspace-card-\(workspace.id)")
         cardView.wantsLayer = true
         cardView.layer?.cornerRadius = UIRadius.regular
         cardView.layer?.borderWidth = isSelected ? 1 : 0
@@ -6467,6 +6586,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         nameLabel.font = .systemFont(ofSize: 12, weight: .medium)
         nameLabel.lineBreakMode = .byTruncatingTail
         nameLabel.textColor = sidebarPrimaryTextColor(isSelected: isSelected, isArchived: workspace.isArchived)
+        nameLabel.setAccessibilityIdentifier("sidebar-workspace-title-\(workspace.id)")
 
         titleRow.addArrangedSubview(statusIcon)
         titleRow.addArrangedSubview(nameLabel)

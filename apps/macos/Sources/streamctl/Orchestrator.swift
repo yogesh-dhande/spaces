@@ -629,6 +629,7 @@ public final class MuxyOrchestrator {
                     _ = try stopWorkspaceUnlocked(workspaceID: workspaceID)
                     try launchWorkspaceUnlocked(workspaceID: workspaceID, background: background)
                 } else {
+                    try refreshProcessStatuses(workspaceID: workspaceID, ignoreStartupGracePeriod: true)
                     try restartExitedProcesses(workspaceID: workspaceID, background: background)
                 }
                 return
@@ -857,37 +858,51 @@ public final class MuxyOrchestrator {
     public func checkAndUpdateProcessStatuses() throws -> Bool {
         var didUpdate = false
         let allProjects = try store.projects()
-        let now = currentDate()
         for project in allProjects {
             let workspaces = try store.workspaces(projectID: project.id, includeArchived: false)
             for workspace in workspaces {
-                let processes = try store.runningProcesses(workspaceID: workspace.id)
-                for process in processes where process.status == .running {
-                    if let startedAtStr = process.startedAt, let startedAt = ISO8601DateFormatter().date(from: startedAtStr) {
-                        let secondsSinceStart = now.timeIntervalSince(startedAt)
-                        if secondsSinceStart < 10.0 { continue }
-                    }
-                    guard let pid = resolvedRuntimePID(for: process) else { continue }
-                    if !isProcessAlive(pid: pid) {
-                        let updatedProcess = RunningProcessRecord(
-                            id: process.id, workspaceID: process.workspaceID, templateName: process.templateName, command: process.command,
-                            terminalApp: process.terminalApp, windowID: process.windowID, terminalTrackingID: process.terminalTrackingID,
-                            terminalNativeID: process.terminalNativeID, itermTabIndex: process.itermTabIndex, tmuxWindowID: process.tmuxWindowID,
-                            pid: process.pid, status: .exited, logPath: process.logPath, lastOutputAt: process.lastOutputAt,
-                            startedAt: process.startedAt, exitedAt: nowISO8601())
-                        try store.upsert(runningProcess: updatedProcess)
-                        // Mark status check results as failed so they reflect the process exit.
-                        try store.markStatusResultsAsFailed(processID: process.id)
-                        didUpdate = true
-
-                        // Handle on-exit behavior for the process
-                        try handleProcessExit(workspaceID: workspace.id, process: updatedProcess, project: project, workspace: workspace)
-                    }
-                }
+                if try refreshProcessStatuses(workspaceID: workspace.id, project: project) { didUpdate = true }
                 if try syncTrackedTmuxRuntime(workspaceID: workspace.id) { didUpdate = true }
                 // iTerm exposes live session identity directly, so it can prune stale ad-hoc
                 // agent rows before the generic window-reconciliation pass notices a closed window.
                 if try pruneStaleItermAgentWindows(workspaceID: workspace.id) > 0 { didUpdate = true }
+            }
+        }
+        return didUpdate
+    }
+
+    @discardableResult private func refreshProcessStatuses(workspaceID: String, ignoreStartupGracePeriod: Bool = false) throws -> Bool {
+        let (project, workspace) = try resolveWorkspace(id: workspaceID)
+        return try refreshProcessStatuses(
+            workspaceID: workspaceID, project: project, workspace: workspace, ignoreStartupGracePeriod: ignoreStartupGracePeriod)
+    }
+
+    @discardableResult private func refreshProcessStatuses(
+        workspaceID: String, project: ProjectRecord, workspace: WorkspaceRecord? = nil, ignoreStartupGracePeriod: Bool = false
+    ) throws -> Bool {
+        let workspace = try workspace ?? resolveWorkspace(id: workspaceID).1
+        let processes = try store.runningProcesses(workspaceID: workspace.id)
+        let now = currentDate()
+        let formatter = ISO8601DateFormatter()
+        var didUpdate = false
+        for process in processes where process.status == .running {
+            if !ignoreStartupGracePeriod, let startedAtStr = process.startedAt, let startedAt = formatter.date(from: startedAtStr),
+                now.timeIntervalSince(startedAt) < 10.0
+            {
+                continue
+            }
+            guard let pid = resolvedRuntimePID(for: process) else { continue }
+            if !isProcessAlive(pid: pid) {
+                let updatedProcess = RunningProcessRecord(
+                    id: process.id, workspaceID: process.workspaceID, templateName: process.templateName, command: process.command,
+                    terminalApp: process.terminalApp, windowID: process.windowID, terminalTrackingID: process.terminalTrackingID,
+                    terminalNativeID: process.terminalNativeID, itermTabIndex: process.itermTabIndex, tmuxWindowID: process.tmuxWindowID,
+                    pid: process.pid, status: .exited, logPath: process.logPath, lastOutputAt: process.lastOutputAt, startedAt: process.startedAt,
+                    exitedAt: nowISO8601())
+                try store.upsert(runningProcess: updatedProcess)
+                try store.markStatusResultsAsFailed(processID: process.id)
+                didUpdate = true
+                try handleProcessExit(workspaceID: workspace.id, process: updatedProcess, project: project, workspace: workspace)
             }
         }
         return didUpdate
@@ -1026,12 +1041,12 @@ public final class MuxyOrchestrator {
         guard let command = parseDirectProcessCommand(process.command, env: env) else {
             throw MuxyError.invalidArgument(message: invalidDirectProcessCommandMessage(process.command, env: env))
         }
-        let snapshot = try yabai.listWindows()
+        let snapshot = bestEffortYabaiWindowSnapshot()
         let terminalHandle = try launchProcessInTmux(
             workspace: workspace, processName: process.templateName, command: command, env: env, terminalHost: terminalHost, background: background,
             replaceExistingSession: true)
         let capturedWindowID =
-            try captureNewAppWindowID(snapshot: snapshot, appName: terminalAppName(for: terminalHost)) ?? terminalHandle.fallbackWindowID
+            bestEffortCaptureNewAppWindowID(snapshot: snapshot, appName: terminalAppName(for: terminalHost)) ?? terminalHandle.fallbackWindowID
             ?? process.windowID
         let tmuxWindow = try currentTmuxWindowInfo(workspaceID: workspace.id, processName: process.templateName)
         let newPID = tmuxWindow?.panePID
@@ -1150,11 +1165,11 @@ public final class MuxyOrchestrator {
         let namedPorts = try store.workspacePortsNamed(workspaceID: workspaceID)
         let env = terminalLaunchEnvironment(
             base: buildWorkspaceEnv(project: project, workspace: workspace, namedPorts: namedPorts), terminalHost: terminalHost)
-        let snapshot = try yabai.listWindows()
+        let snapshot = bestEffortYabaiWindowSnapshot()
         let terminalHandle = try openManagedTerminalWindow(
             terminalHost: terminalHost, command: interactiveShellCommand(cwd: workspace.dir), cwd: workspace.dir, environment: env, background: false)
         let capturedWindowID =
-            try captureNewAppWindowID(snapshot: snapshot, appName: terminalAppName(for: terminalHost)) ?? terminalHandle.fallbackWindowID
+            bestEffortCaptureNewAppWindowID(snapshot: snapshot, appName: terminalAppName(for: terminalHost)) ?? terminalHandle.fallbackWindowID
         let existing = try store.windows(workspaceID: workspace.id)
         let nextOrder = Self.nextWindowOrderIndex(existing: existing, role: "terminal", orderOffset: 200)
         let generatedTitle = try generatedAdHocTerminalWindowName(workspaceID: workspace.id)
@@ -1213,6 +1228,9 @@ public final class MuxyOrchestrator {
         logCycleProfile(
             "workspace=\(workspaceID) stage=direct_focus_total index=\(index) target=\(navigationTargetDebugName(navigationTarget(for: windows[targetIndex]))) success=\(ok ? 1 : 0) elapsed_ms=\(elapsedMS(since: focusStartedAt))"
         )
+        logPerfMetric(
+            "direct_window_focus", workspaceID: workspaceID, target: navigationTargetDebugName(navigationTarget(for: windows[targetIndex])),
+            detail: "index=\(index)", elapsedMS: elapsedMS(since: focusStartedAt), success: ok)
     }
 
     public func focusWorkspaceWindow(workspaceID: String, name: String) throws {
@@ -1245,9 +1263,11 @@ public final class MuxyOrchestrator {
         try setActiveWorkspace(id: workspaceID)
         logCycleProfile(
             "workspace=\(workspaceID) stage=direct_focus_total name=\(trimmedName) success=1 elapsed_ms=\(elapsedMS(since: focusStartedAt))")
+        logPerfMetric("named_window_focus", workspaceID: workspaceID, target: trimmedName, elapsedMS: elapsedMS(since: focusStartedAt), success: true)
     }
 
     public func focusWorkspaceBrowserSession(workspaceID: String, targetURL: String) throws {
+        let focusStartedAt = currentDate()
         let windows = try indexedWorkspaceWindows(workspaceID: workspaceID)
         if let window = windows.first(where: { $0.role == "browser" && $0.targetURL == targetURL }) {
             let focused = try focusTrackedWindowOrRecoverBrowserWindow(window, workspaceID: workspaceID)
@@ -1255,6 +1275,9 @@ public final class MuxyOrchestrator {
             rememberNavigationTarget(navigationTarget(for: window), workspaceID: workspaceID)
             try markWorkspaceRunningIfNeeded(workspaceID: workspaceID)
             try setActiveWorkspace(id: workspaceID)
+            logPerfMetric(
+                "browser_focus", workspaceID: workspaceID, target: targetURL, detail: "recovered=0", elapsedMS: elapsedMS(since: focusStartedAt),
+                success: true)
             return
         }
 
@@ -1265,15 +1288,21 @@ public final class MuxyOrchestrator {
             rememberNavigationTarget(navigationTarget(for: recoveredWindow), workspaceID: workspaceID)
         }
         try setActiveWorkspace(id: workspaceID)
+        logPerfMetric(
+            "browser_focus", workspaceID: workspaceID, target: targetURL, detail: "recovered=1", elapsedMS: elapsedMS(since: focusStartedAt),
+            success: true)
     }
 
     public func focusWorkspaceProcess(workspaceID: String, processID: String) throws {
+        let focusStartedAt = currentDate()
         guard let process = try store.runningProcesses(workspaceID: workspaceID).first(where: { $0.id == processID }) else { return }
         let focused = try focusWorkspaceProcessRecord(process, workspaceID: workspaceID)
         guard focused else { throw missingTrackedProcessError(process, workspaceID: workspaceID) }
         rememberNavigationTarget(.process(process), workspaceID: workspaceID)
         try markWorkspaceRunningIfNeeded(workspaceID: workspaceID)
         try setActiveWorkspace(id: workspaceID)
+        logPerfMetric(
+            "process_focus", workspaceID: workspaceID, target: process.templateName, elapsedMS: elapsedMS(since: focusStartedAt), success: true)
     }
 
     public func focusNextWindow(workspaceID: String) throws { try focusWindowRelative(workspaceID: workspaceID, delta: 1) }
@@ -1356,6 +1385,9 @@ public final class MuxyOrchestrator {
         logCycleProfile(
             "workspace=\(workspaceID) direction=\(direction) total_ms=\(elapsedMS(since: cycleStartedAt)) target=\(navigationTargetDebugName(targets[resolvedTargetIndex])) success=\(ok ? "1" : "0")"
         )
+        logPerfMetric(
+            "window_cycle", workspaceID: workspaceID, target: navigationTargetDebugName(targets[resolvedTargetIndex]),
+            detail: "direction=\(direction)", elapsedMS: elapsedMS(since: cycleStartedAt), success: ok)
     }
 
     private func currentFocusedNavigationTargetIndex(targets: [WorkspaceNavigationTarget], workspaceID: String) throws -> Int? {
@@ -1998,8 +2030,13 @@ public final class MuxyOrchestrator {
     }
 
     private func terminalLaunchEnvironment(base: [String: String], terminalHost: TerminalHost) -> [String: String] {
-        guard terminalHost == .ghostty else { return base }
         var env = base
+        for key in [DatabaseLocator.databasePathEnvironmentVariable, "MUXY_RUNTIME_DIR", "MUXY_E2E_EVENTS_LOG", "DEBUG"] {
+            if let value = ProcessInfo.processInfo.environment[key]?.trimmingCharacters(in: .whitespacesAndNewlines), !value.isEmpty {
+                env[key] = value
+            }
+        }
+        guard terminalHost == .ghostty else { return env }
         env[Self.terminalTrackingIDEnvVar] = UUID().uuidString
         return env
     }
@@ -2243,7 +2280,17 @@ public final class MuxyOrchestrator {
         for process in try store.runningProcesses(workspaceID: workspaceID) where isManagedTerminalApp(process.terminalApp) {
             guard let tmuxWindowID = process.tmuxWindowID else { continue }
             guard liveTmuxWindowIDs.contains(tmuxWindowID) else {
-                try store.deleteRunningProcess(id: process.id)
+                guard process.status != .exited else { continue }
+                // Preserve configured process rows when their tmux window vanishes so an
+                // explicit `mx workspace up` can still restart just the dead process.
+                try store.upsert(
+                    runningProcess: RunningProcessRecord(
+                        id: process.id, workspaceID: process.workspaceID, templateName: process.templateName, command: process.command,
+                        terminalApp: process.terminalApp, windowID: process.windowID, terminalTrackingID: process.terminalTrackingID,
+                        terminalNativeID: process.terminalNativeID, itermTabIndex: process.itermTabIndex, tmuxWindowID: process.tmuxWindowID,
+                        pid: process.pid, status: .exited, logPath: process.logPath, lastOutputAt: process.lastOutputAt, startedAt: process.startedAt,
+                        exitedAt: process.exitedAt ?? now))
+                try store.markStatusResultsAsFailed(processID: process.id)
                 didMutate = true
                 continue
             }
@@ -2531,6 +2578,17 @@ public final class MuxyOrchestrator {
     private func logBrowserFocus(_ message: String) {
         guard debugLoggingEnabled() else { return }
         fputs("muxy: browser focus \(message)\n", stderr)
+    }
+
+    private func logPerfMetric(_ metric: String, workspaceID: String, target: String, detail: String = "", elapsedMS: Int, success: Bool) {
+        guard debugLoggingEnabled() else { return }
+        // Manual real-system E2E parses these `muxy: perf metric=...` lines for
+        // focus/cycle timing summaries. Treat the prefix and key/value shape as a
+        // compatibility surface for the shell harness when changing debug logs.
+        let suffix = detail.isEmpty ? "" : " \(detail)"
+        fputs(
+            "muxy: perf metric=\(metric) workspace=\(workspaceID) target=\(target) success=\(success ? 1 : 0) elapsed_ms=\(elapsedMS)\(suffix)\n",
+            stderr)
     }
 
     private func debugLoggingEnabled() -> Bool { ProcessInfo.processInfo.environment["DEBUG"] == "1" }
@@ -3344,12 +3402,12 @@ public final class MuxyOrchestrator {
             guard let command = parseDirectProcessCommand(template.command, env: env) else {
                 throw MuxyError.invalidArgument(message: invalidDirectProcessCommandMessage(template.command, env: env))
             }
-            let snapshot = try yabai.listWindows()
+            let snapshot = bestEffortYabaiWindowSnapshot()
             let terminalHandle = try launchProcessInTmux(
                 workspace: workspace, processName: name, command: command, env: env, terminalHost: terminalHost, background: background,
                 replaceExistingSession: true)
             let windowID =
-                try captureNewAppWindowID(snapshot: snapshot, appName: terminalAppName(for: terminalHost)) ?? terminalHandle.fallbackWindowID
+                bestEffortCaptureNewAppWindowID(snapshot: snapshot, appName: terminalAppName(for: terminalHost)) ?? terminalHandle.fallbackWindowID
             let tmuxWindow = try currentTmuxWindowInfo(workspaceID: workspace.id, processName: name)
             let pid = tmuxWindow?.panePID
             let hookSessionID = storedTerminalHookSessionID(terminalHost: terminalHost, handle: terminalHandle)
@@ -3422,6 +3480,12 @@ public final class MuxyOrchestrator {
 
     private func captureNewAppWindowID(snapshot: [YabaiWindow], appName: String) throws -> Int? {
         try captureNewAppWindow(snapshot: snapshot, appName: appName)?.id
+    }
+
+    private func bestEffortYabaiWindowSnapshot() -> [YabaiWindow] { (try? yabai.listWindows()) ?? [] }
+
+    private func bestEffortCaptureNewAppWindowID(snapshot: [YabaiWindow], appName: String) -> Int? {
+        try? captureNewAppWindowID(snapshot: snapshot, appName: appName)
     }
 
     private func openDedicatedItermWindow(command: String, background: Bool = false) throws -> ItermWindowInfo {
@@ -4109,12 +4173,12 @@ public final class MuxyOrchestrator {
         let env = buildWorkspaceEnv(project: project, workspace: workspace, namedPorts: namedPorts)
         let launchEnv = terminalLaunchEnvironment(
             base: env.merging([Self.agentLabelEnvVar: launcher.name]) { _, new in new }, terminalHost: terminalHost)
-        let snapshot = try yabai.listWindows()
+        let snapshot = bestEffortYabaiWindowSnapshot()
         let terminalHandle = try openManagedTerminalWindow(
             terminalHost: terminalHost, command: wrappedAgentLauncherCommand(name: launcher.name, command: applyEnvVars(launcher.command, env: env)),
             cwd: workspace.dir, environment: launchEnv, background: background)
         let capturedWindowID =
-            try captureNewAppWindowID(snapshot: snapshot, appName: terminalAppName(for: terminalHost)) ?? terminalHandle.fallbackWindowID
+            bestEffortCaptureNewAppWindowID(snapshot: snapshot, appName: terminalAppName(for: terminalHost)) ?? terminalHandle.fallbackWindowID
         let record = try registerAgentWindow(
             workspaceID: workspace.id, provider: agentProvider(for: terminalHost), label: launcher.name,
             terminalTrackingID: storedTerminalHookSessionID(terminalHost: terminalHost, handle: terminalHandle),
@@ -4152,7 +4216,7 @@ public final class MuxyOrchestrator {
             throw MuxyError.invalidArgument(message: "Browser session not found for recovery.")
         }
 
-        let snapshot = try yabai.listWindows()
+        let snapshot = bestEffortYabaiWindowSnapshot()
         _ = try chrome.openWindow(url: matchedSession.prefix, background: false)
         guard let newWindow = try captureNewAppWindow(snapshot: snapshot, appName: "Google Chrome") else {
             throw MuxyError.invalidArgument(message: "Failed to recover browser session window.")
@@ -4196,11 +4260,11 @@ public final class MuxyOrchestrator {
         let sessionName = processTmuxSessionName(workspaceID: workspace.id, processName: process.templateName)
         guard tmux.hasSession(named: sessionName) else { return false }
 
-        let snapshot = try yabai.listWindows()
+        let snapshot = bestEffortYabaiWindowSnapshot()
         let terminalHandle = try attachProcessTmuxSession(
             workspace: workspace, processName: process.templateName, terminalHost: terminalHost, background: false)
         let capturedWindowID =
-            try captureNewAppWindowID(snapshot: snapshot, appName: terminalAppName(for: terminalHost)) ?? terminalHandle.fallbackWindowID
+            bestEffortCaptureNewAppWindowID(snapshot: snapshot, appName: terminalAppName(for: terminalHost)) ?? terminalHandle.fallbackWindowID
         let now = nowISO8601()
         let hookSessionID = storedTerminalHookSessionID(terminalHost: terminalHost, handle: terminalHandle)
         let terminalNativeID = storedTerminalNativeID(terminalHost: terminalHost, handle: terminalHandle)
@@ -4238,7 +4302,7 @@ public final class MuxyOrchestrator {
             workspace: workspace, processName: name, command: command, env: env, terminalHost: terminalHost, background: background,
             replaceExistingSession: true)
         let capturedWindowID =
-            try captureNewAppWindowID(snapshot: snapshot, appName: terminalAppName(for: terminalHost)) ?? terminalHandle.fallbackWindowID
+            bestEffortCaptureNewAppWindowID(snapshot: snapshot, appName: terminalAppName(for: terminalHost)) ?? terminalHandle.fallbackWindowID
         let tmuxWindow = try currentTmuxWindowInfo(workspaceID: workspace.id, processName: name)
         let hookSessionID = storedTerminalHookSessionID(terminalHost: terminalHost, handle: terminalHandle)
         let terminalNativeID = storedTerminalNativeID(terminalHost: terminalHost, handle: terminalHandle)

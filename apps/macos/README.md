@@ -33,10 +33,39 @@ Useful commands:
 ```bash
 apps/macos/.build/debug/Muxy
 apps/macos/.build/debug/mx --help
+apps/macos/.build/debug/mxe2e --help
 apps/macos/.build/debug/mx workspace import --title "debug" --tooltip "Local debug session"
 apps/macos/.build/debug/mx workspace update --tooltip "Ready for review"
 apps/macos/.build/debug/mx workspace up --restart
+apps/macos/Tests/e2e_real_system.sh
 ```
+
+## Manual E2E
+Run the real-system GUI/CLI suite from the repository root with:
+
+```bash
+apps/macos/Tests/e2e_real_system.sh
+```
+
+This suite is manual by design. It drives the real app, `mx`, `yabai`, Chrome, and the configured terminal host in an interactive macOS session instead of XCTest.
+
+Primary coverage includes:
+- adding and archiving a workspace
+- overriding workspace settings after creation
+- launch, stop, restart, and dead-process recovery
+- iTerm2 and Ghostty default terminal coverage
+- extra user-added Chrome and terminal tabs
+- workspace-detail numbered focus shortcuts
+- forward/back workspace window cycling
+- multi-workspace focus and cycling isolation
+
+The suite also emits performance metrics in milliseconds for the main window-focus and cycle paths, using the app's debug timing logs for the same shortcut and cycling flows previously profiled by `scripts/profile-window-focus.sh`. The final summary prints both the pass/fail case list and the collected timing samples, so this suite is the primary replacement for that standalone focus-profiling script during development.
+
+The manual suite depends on a small set of debug-log lines from the app and CLI helpers. Treat these as test contracts when changing debug logging:
+- `muxy: perf metric=...`
+- `muxy: workspace_detail_ipc selecting ...` / `selected ...`
+- `muxy: workspace_run_view workspace=... selected=... agents=... coding_entries=...`
+- `muxy: iterm session_verification_succeeded ...` is used as an optional extra confirmation path for iTerm2 focus checks
 
 ## Scope of This README
 This file intentionally does not duplicate:

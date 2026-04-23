@@ -1,7 +1,19 @@
 import Foundation
 
 public enum DatabaseLocator {
-    public static func defaultPath() throws -> String { return try defaultPath(homeDirectoryURL: FileManager.default.homeDirectoryForCurrentUser) }
+    public static let databasePathEnvironmentVariable = "MUXY_DB_PATH"
+
+    public static func defaultPath() throws -> String {
+        if let overridePath = ProcessInfo.processInfo.environment[databasePathEnvironmentVariable]?.trimmingCharacters(in: .whitespacesAndNewlines),
+            !overridePath.isEmpty
+        {
+            let url = URL(fileURLWithPath: overridePath)
+            let directoryURL = url.deletingLastPathComponent()
+            try FileManager.default.createDirectory(at: directoryURL, withIntermediateDirectories: true)
+            return url.standardizedFileURL.path
+        }
+        return try defaultPath(homeDirectoryURL: FileManager.default.homeDirectoryForCurrentUser)
+    }
 
     static func defaultPath(homeDirectoryURL: URL) throws -> String {
         let dir = homeDirectoryURL.appendingPathComponent(".muxy", isDirectory: true)
