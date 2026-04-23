@@ -198,7 +198,10 @@ Muxy focuses those windows; it does not decide their geometry.
 - Agent events from unsupported terminal hosts should be dropped instead of recorded. Coding agents run from tmux are not supported by Muxy and should return an explicit error instead of being inferred onto workspace process terminals.
 - `init` should identify the originating terminal and either attach to an already tracked terminal row or create a tracked terminal row for that coding agent.
 - Terminal identity should be adapter-driven and consistent across supported hosts: prefer tmux window identity when present, otherwise prefer a stable session/token identity, and only fall back to a yabai window identity when no durable session-like identity exists.
-- Ghostty agent tracking should rely on a stable Muxy-injected terminal tracking token for Muxy-launched shells instead of inferring identity from the frontmost Ghostty window.
+- iTerm2 should use `ITERM_SESSION_ID` as both its hook identity and its durable native terminal identity when available.
+- Ghostty agent tracking should keep two separate identities: a Muxy-issued terminal tracking token for CLI hook attribution and the real Ghostty terminal ID for focus, liveness, and retab rebinding.
+- Ghostty agent events without a Muxy-issued tracking token should be dropped instead of being rebound to whichever Ghostty tab or window happens to be frontmost.
+- Ghostty focus may fall back from `terminalNativeID` to the stored hook token only when resolving an already tracked terminal row in the same workspace; it must not guess from the frontmost Ghostty tab/window.
 - Coding-agent rows should render after browser and process rows so non-agent shortcut ordering stays stable when agents appear or disappear.
 - `start` should show a spinner, `waiting` should show a warning indicator and count toward dashboard and dock attention, and `done` or idle should render as green or gray dots without creating dashboard attention.
 - `exit` should return the row to idle when the terminal is still open; if the terminal is closed, ad-hoc agent rows should be removed immediately, including when background runtime refresh detects the terminal closure after the fact, while rows linked to workspace process terminals should remain idle.

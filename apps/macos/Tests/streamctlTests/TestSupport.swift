@@ -56,9 +56,7 @@ class MockIterm2Adapter: Iterm2Adapter, @unchecked Sendable {
         openedCommands.append(command)
         if let pairedTmux, command.contains("tmux new-session -A -s") {
             let pattern = #"muxy-[A-Za-z0-9_-]+(?:-[A-Za-z0-9_-]+)?"#
-            if let range = command.range(of: pattern, options: .regularExpression) {
-                pairedTmux.createSession(named: String(command[range]))
-            }
+            if let range = command.range(of: pattern, options: .regularExpression) { pairedTmux.createSession(named: String(command[range])) }
         }
         onOpenWindowAndRun?(command)
         let windowID = nextWindowID
@@ -90,9 +88,7 @@ class MockIterm2Adapter: Iterm2Adapter, @unchecked Sendable {
         focusedSessionIDs.append(preferredSessionID)
         lastFocusedTabIndex = tabIndex
         lastWindowID = windowID
-        if focusSessionOrTabResult, let preferredSessionID, !preferredSessionID.isEmpty {
-            focusedSessionIDResult = preferredSessionID
-        }
+        if focusSessionOrTabResult, let preferredSessionID, !preferredSessionID.isEmpty { focusedSessionIDResult = preferredSessionID }
         return focusSessionOrTabResult
     }
 
@@ -104,9 +100,7 @@ class MockIterm2Adapter: Iterm2Adapter, @unchecked Sendable {
         return true
     }
 
-    override func closeWindow(id: Int) throws {
-        closedWindowIDs.append(id)
-    }
+    override func closeWindow(id: Int) throws { closedWindowIDs.append(id) }
 
     var pulseCallCount = 0
     var lastPulsedWindowID: Int?
@@ -158,6 +152,7 @@ class MockGhosttyAdapter: GhosttyAdapter, @unchecked Sendable {
     var nextTerminalID = "ghostty-terminal-1"
     var openWindowInfos: [GhosttyWindowInfo] = []
     var lastEnvironment: [String: String] = [:]
+    var listWindowTabAndTerminalIDsResult: [(windowID: String, tabID: String, terminalID: String)]?
 
     override func isAvailable() -> Bool { available }
 
@@ -165,9 +160,7 @@ class MockGhosttyAdapter: GhosttyAdapter, @unchecked Sendable {
         openWindowAndRunCallCount += 1
         lastCommand = command
         lastCwd = cwd
-        if !openWindowInfos.isEmpty {
-            return openWindowInfos.removeFirst()
-        }
+        if !openWindowInfos.isEmpty { return openWindowInfos.removeFirst() }
         return GhosttyWindowInfo(windowID: nextWindowID, tabID: nextTabID, terminalID: nextTerminalID)
     }
 
@@ -188,7 +181,7 @@ class MockGhosttyAdapter: GhosttyAdapter, @unchecked Sendable {
     }
 
     override func listWindowTabAndTerminalIDs() throws -> [(windowID: String, tabID: String, terminalID: String)] {
-        [(windowID: nextWindowID, tabID: nextTabID, terminalID: nextTerminalID)]
+        listWindowTabAndTerminalIDsResult ?? [(windowID: nextWindowID, tabID: nextTabID, terminalID: nextTerminalID)]
     }
 }
 
@@ -231,12 +224,11 @@ class MockTmuxAdapter: TmuxAdapter, @unchecked Sendable {
     private var nextWindowSerial = 1
     var nextPanePID = 40_000
 
-    func createSession(named sessionName: String) {
-        if windowsBySession[sessionName] == nil { windowsBySession[sessionName] = [] }
-    }
+    func createSession(named sessionName: String) { if windowsBySession[sessionName] == nil { windowsBySession[sessionName] = [] } }
 
-    @discardableResult
-    func addWindow(sessionName: String, id: String? = nil, name: String, index: Int? = nil, isActive: Bool = false) -> TmuxWindowInfo {
+    @discardableResult func addWindow(sessionName: String, id: String? = nil, name: String, index: Int? = nil, isActive: Bool = false)
+        -> TmuxWindowInfo
+    {
         createSession(named: sessionName)
         let resolvedID = id ?? "@\(nextWindowSerial)"
         if id == nil { nextWindowSerial += 1 }
@@ -256,27 +248,21 @@ class MockTmuxAdapter: TmuxAdapter, @unchecked Sendable {
 
     override func listWindows(sessionName: String) throws -> [TmuxWindowInfo] {
         let currentWindowID = currentWindowIDBySession[sessionName]
-        return (windowsBySession[sessionName] ?? [])
-            .sorted { $0.index < $1.index }
-            .map { window in
-                TmuxWindowInfo(
-                    id: window.id, index: window.index, name: window.name, sessionName: window.sessionName,
-                    isActive: currentWindowID == window.id, panePID: window.panePID)
-            }
+        return (windowsBySession[sessionName] ?? []).sorted { $0.index < $1.index }.map { window in
+            TmuxWindowInfo(
+                id: window.id, index: window.index, name: window.name, sessionName: window.sessionName, isActive: currentWindowID == window.id,
+                panePID: window.panePID)
+        }
     }
 
     override func currentWindow(sessionName: String) throws -> TmuxWindowInfo? {
         let windows = try listWindows(sessionName: sessionName)
-        if let currentWindowID = currentWindowIDBySession[sessionName] {
-            return windows.first(where: { $0.id == currentWindowID })
-        }
+        if let currentWindowID = currentWindowIDBySession[sessionName] { return windows.first(where: { $0.id == currentWindowID }) }
         return windows.first(where: \.isActive) ?? windows.first
     }
 
     override func currentWindow() throws -> TmuxWindowInfo? {
-        for sessionName in windowsBySession.keys.sorted() {
-            if let window = try currentWindow(sessionName: sessionName) { return window }
-        }
+        for sessionName in windowsBySession.keys.sorted() { if let window = try currentWindow(sessionName: sessionName) { return window } }
         return nil
     }
 
@@ -288,9 +274,9 @@ class MockTmuxAdapter: TmuxAdapter, @unchecked Sendable {
         return window
     }
 
-    override func startSession(
-        named sessionName: String, windowName: String, cwd: String, env: [String: String] = [:], command: [String]
-    ) throws -> TmuxWindowInfo {
+    override func startSession(named sessionName: String, windowName: String, cwd: String, env: [String: String] = [:], command: [String]) throws
+        -> TmuxWindowInfo
+    {
         startSessionCallCount += 1
         lastStartedSessionName = sessionName
         lastStartedWindowName = windowName
@@ -309,8 +295,7 @@ class MockTmuxAdapter: TmuxAdapter, @unchecked Sendable {
         renamedWindowIDs.append(windowID)
         guard var window = window(for: windowID) else { return }
         window = TmuxWindowInfo(
-            id: window.id, index: window.index, name: name, sessionName: window.sessionName, isActive: window.isActive,
-            panePID: window.panePID)
+            id: window.id, index: window.index, name: name, sessionName: window.sessionName, isActive: window.isActive, panePID: window.panePID)
         updateWindow(window)
     }
 
@@ -320,9 +305,7 @@ class MockTmuxAdapter: TmuxAdapter, @unchecked Sendable {
         respawnedCommandsByWindowID[windowID] = command
     }
 
-    override func setRemainOnExit(windowID: String, enabled: Bool) throws {
-        remainOnExitByWindowID[windowID] = enabled
-    }
+    override func setRemainOnExit(windowID: String, enabled: Bool) throws { remainOnExitByWindowID[windowID] = enabled }
 
     override func selectWindow(windowID: String) throws -> Bool {
         selectWindowCallCount += 1
@@ -349,9 +332,7 @@ class MockTmuxAdapter: TmuxAdapter, @unchecked Sendable {
     }
 
     private func window(for windowID: String) -> TmuxWindowInfo? {
-        for windows in windowsBySession.values {
-            if let match = windows.first(where: { $0.id == windowID }) { return match }
-        }
+        for windows in windowsBySession.values { if let match = windows.first(where: { $0.id == windowID }) { return match } }
         return nil
     }
 

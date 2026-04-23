@@ -75,10 +75,7 @@ final class AppctlAdapterTests: XCTestCase {
             XCTAssertEqual(window.tabIndex, 2)
             let itermTerminalAdapter: any TerminalAdapter = iterm
             let itermLaunch = try itermTerminalAdapter.openWindowAndRun(
-                command: "echo \"hi\"",
-                cwd: "/tmp",
-                environment: ["MUXY_TERMINAL_TRACKING_ID": "tracking-1"],
-                background: false)
+                command: "echo \"hi\"", cwd: "/tmp", environment: ["MUXY_TERMINAL_TRACKING_ID": "tracking-1"], background: false)
             XCTAssertEqual(itermLaunch.fallbackWindowID, 77)
             XCTAssertEqual(itermLaunch.trackingIdentity, .session("session-77"))
             XCTAssertEqual(itermLaunch.containerID, "77")
@@ -99,20 +96,18 @@ final class AppctlAdapterTests: XCTestCase {
             XCTAssertEqual(ghosttyWindow.terminalID, "ghostty-terminal-1")
             let ghosttyTerminalAdapter: any TerminalAdapter = ghostty
             let ghosttyLaunch = try ghosttyTerminalAdapter.openWindowAndRun(
-                command: "echo hi",
-                cwd: "/tmp",
-                environment: ["MUXY_TERMINAL_TRACKING_ID": "tracking-ghostty-1"],
-                background: false)
+                command: "echo hi", cwd: "/tmp", environment: ["MUXY_TERMINAL_TRACKING_ID": "tracking-ghostty-1"], background: false)
             XCTAssertNil(ghosttyLaunch.fallbackWindowID)
-            XCTAssertEqual(ghosttyLaunch.trackingIdentity, .session("tracking-ghostty-1"))
+            XCTAssertEqual(ghosttyLaunch.trackingIdentity, .session("ghostty-terminal-1"))
+            XCTAssertEqual(ghosttyLaunch.hookSessionID, "tracking-ghostty-1")
             XCTAssertEqual(ghosttyLaunch.containerID, "ghostty-window-1")
             XCTAssertTrue(
                 try ghosttyTerminalAdapter.focusTrackedTerminal(
                     TerminalFocusTarget(trackingIdentity: .session("ghostty-terminal-1"), windowID: nil, tabIndex: nil)))
-            XCTAssertEqual(try ghosttyTerminalAdapter.listLiveTrackingIdentities(), [.session("ghostty-terminal-1")])
+            XCTAssertEqual(try ghosttyTerminalAdapter.listLiveTrackingIdentities(), [.session("ghostty-terminal-1"), .session("ghostty-terminal-2")])
             XCTAssertEqual(try ghostty.focusTerminal(id: "ghostty-terminal-1"), "ghostty-window-1")
             XCTAssertNoThrow(try ghostty.closeWindow(id: "ghostty-window-1"))
-            XCTAssertEqual(try ghostty.listWindowTabAndTerminalIDs().count, 1)
+            XCTAssertEqual(try ghostty.listWindowTabAndTerminalIDs().count, 2)
         }
     }
 
@@ -153,9 +148,7 @@ final class AppctlAdapterTests: XCTestCase {
         setenv("PATH", updatedPath, 1)
         defer { setenv("PATH", originalPath, 1) }
 
-        try withTestAppleScriptOptIn(enabled: commands.keys.contains("osascript")) {
-            try run()
-        }
+        try withTestAppleScriptOptIn(enabled: commands.keys.contains("osascript")) { try run() }
     }
 
     private func withEnv(name: String, value: String, run: () throws -> Void) throws {
@@ -343,13 +336,24 @@ final class AppctlAdapterTests: XCTestCase {
           exit 0
         fi
 
+        if [[ "$script" == *'tell terminal id "ghostty-terminal-1"'* && "$script" == *'return id of window'* ]]; then
+          echo '101'
+          exit 0
+        fi
+
+        if [[ "$script" == *'focused terminal of selected tab of front window'* ]]; then
+          echo 'ghostty-terminal-1'
+          exit 0
+        fi
+
         if [[ "$script" == *'tell window id "ghostty-window-1" to close window'* ]]; then
           echo 'ok'
           exit 0
         fi
 
-        if [[ "$script" == *'repeat with w in windows'* && "$script" == *'com.mitchellh.ghostty'* ]]; then
+        if [[ "$script" == *'repeat with w in windows'* && "$script" == *'repeat with t in tabs of w'* && "$script" == *'com.mitchellh.ghostty'* ]]; then
           printf 'ghostty-window-1|ghostty-tab-1|ghostty-terminal-1\n'
+          printf 'ghostty-window-1|ghostty-tab-2|ghostty-terminal-2\n'
           exit 0
         fi
 

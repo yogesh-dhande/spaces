@@ -35,12 +35,21 @@ public enum TerminalTrackingIdentity: Hashable, Sendable {
 public struct TerminalLaunchResult: Sendable {
     /// Stable identity for later focus/reconciliation.
     public let trackingIdentity: TerminalTrackingIdentity?
+    /// Shell-emitted hook identity when the launched terminal cannot rediscover its stable native identity itself.
+    public let hookSessionID: String?
     public let containerID: String?
     public let fallbackWindowID: Int?
     public let tabIndex: Int?
 
-    public init(trackingIdentity: TerminalTrackingIdentity?, containerID: String?, fallbackWindowID: Int?, tabIndex: Int? = nil) {
+    public init(
+        trackingIdentity: TerminalTrackingIdentity?,
+        hookSessionID: String? = nil,
+        containerID: String?,
+        fallbackWindowID: Int?,
+        tabIndex: Int? = nil
+    ) {
         self.trackingIdentity = trackingIdentity
+        self.hookSessionID = hookSessionID
         self.containerID = containerID
         self.fallbackWindowID = fallbackWindowID
         self.tabIndex = tabIndex

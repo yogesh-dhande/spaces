@@ -220,7 +220,8 @@ struct AgentEventCommand: ParsableCommand {
                 workspaceID: workspace.id,
                 provider: agentContext.provider,
                 label: agentContext.label,
-                itermSessionID: agentContext.iTermSessionID,
+                terminalTrackingID: agentContext.terminalTrackingID,
+                terminalNativeID: agentContext.terminalNativeID,
                 codexThreadID: agentContext.codexThreadID,
                 yabaiWindowID: agentContext.yabaiWindowID,
                 status: .idle
@@ -229,8 +230,9 @@ struct AgentEventCommand: ParsableCommand {
             try orchestrator.updateAgentWindowStatus(
                 workspaceID: workspace.id,
                 provider: agentContext.provider,
-                itermSessionID: agentContext.iTermSessionID,
+                terminalTrackingID: agentContext.terminalTrackingID,
                 codexThreadID: agentContext.codexThreadID,
+                terminalNativeID: agentContext.terminalNativeID,
                 yabaiWindowID: agentContext.yabaiWindowID,
                 label: agentContext.label,
                 status: type.status
@@ -239,8 +241,9 @@ struct AgentEventCommand: ParsableCommand {
             try orchestrator.handleAgentExit(
                 workspaceID: workspace.id,
                 provider: agentContext.provider,
-                itermSessionID: agentContext.iTermSessionID,
+                terminalTrackingID: agentContext.terminalTrackingID,
                 codexThreadID: agentContext.codexThreadID,
+                terminalNativeID: agentContext.terminalNativeID,
                 yabaiWindowID: agentContext.yabaiWindowID,
                 label: agentContext.label
             )
@@ -285,7 +288,8 @@ enum AgentEventType: String, CaseIterable, ExpressibleByArgument {
 struct AgentInvocationContext {
     let provider: AgentProvider
     let label: String?
-    let iTermSessionID: String?
+    let terminalTrackingID: String?
+    let terminalNativeID: String?
     let codexThreadID: String?
     let yabaiWindowID: Int?
 }
@@ -300,15 +304,27 @@ func resolveAgentInvocationContext(
         return nil
     }
     let focusedWindowID = context.currentYabaiWindowID()
-    let trackingIdentity = try terminalAdapter(for: resolvedProvider)?
+    let adapter = terminalAdapter(for: resolvedProvider)
+    let trackingIdentity = try adapter?
         .resolveCurrentTrackingIdentity(environment: environment, yabaiFocusedWindowID: focusedWindowID)
     let splitIdentity = splitTrackingIdentity(trackingIdentity)
+    if resolvedProvider == .ghostty, splitIdentity.sessionID?.isEmpty != false {
+        return nil
+    }
+    let terminalNativeID =
+        resolvedProvider == .ghostty
+        ? try resolveTrackedGhosttyNativeTerminalID(
+            workspaceID: workspaceID,
+            terminalTrackingID: splitIdentity.sessionID,
+            orchestrator: orchestrator)
+        : nil
     return AgentInvocationContext(
         provider: resolvedProvider,
         label: inferredAgentLabel(environment: environment),
-        iTermSessionID: splitIdentity.sessionID,
+        terminalTrackingID: splitIdentity.sessionID,
+        terminalNativeID: terminalNativeID,
         codexThreadID: environment["CODEX_THREAD_ID"],
-        yabaiWindowID: splitIdentity.windowID ?? focusedWindowID)
+        yabaiWindowID: resolvedProvider == .ghostty ? splitIdentity.windowID : (splitIdentity.windowID ?? focusedWindowID))
 }
 
 private func requireWorkspace(id: String, orchestrator: MuxyOrchestrator) throws -> WorkspaceRecord {
@@ -332,13 +348,27 @@ private func requireWorkspace(path: String?, orchestrator: MuxyOrchestrator, con
 }
 
 private func resolveProvider(environment: [String: String]) -> AgentProvider? {
-    let bundleIdentifier = environment["__CFBundleIdentifier"] ?? ""
-    if bundleIdentifier == "com.googlecode.iterm2" {
+    let bundleIdentifier = environment["__CFBundleIdentifier"]?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+    if bundleIdentifier == TerminalHost.iterm2.bundleIdentifier {
         return .iterm2
     }
-    if bundleIdentifier == "com.mitchellh.ghostty" {
+    if bundleIdentifier == TerminalHost.ghostty.bundleIdentifier {
         return .ghostty
     }
+
+    let termProgram = environment["TERM_PROGRAM"]?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ?? ""
+    if termProgram == "iterm.app" {
+        return .iterm2
+    }
+    if termProgram == "ghostty" {
+        return .ghostty
+    }
+
+    let term = environment["TERM"]?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ?? ""
+    if term.contains("ghostty") {
+        return .ghostty
+    }
+
     return nil
 }
 
@@ -355,11 +385,19 @@ func agentEventDropResult(
                 resource: nil)
         )
     }
-    guard resolveProvider(environment: environment) != nil else {
+    guard let provider = resolveProvider(environment: environment) else {
         return (
             "Dropped agent event \(type.rawValue): unsupported terminal host",
             MutationResultPayload<[String: String]>(
                 message: "Dropped unsupported agent event.",
+                resource: nil)
+        )
+    }
+    if provider == .ghostty, (environment[MuxyOrchestrator.terminalTrackingIDEnvVar]?.isEmpty != false) {
+        return (
+            "Dropped agent event \(type.rawValue): untracked Ghostty terminal",
+            MutationResultPayload<[String: String]>(
+                message: "Dropped untracked Ghostty agent event.",
                 resource: nil)
         )
     }
@@ -406,4 +444,38 @@ private func splitTrackingIdentity(_ identity: TerminalTrackingIdentity?) -> (se
     case .tmux, nil:
         return (nil, nil)
     }
+}
+
+private func resolveTrackedGhosttyNativeTerminalID(
+    workspaceID: String,
+    terminalTrackingID: String?,
+    orchestrator: MuxyOrchestrator
+) throws -> String? {
+    guard let terminalTrackingID, !terminalTrackingID.isEmpty else { return nil }
+
+    // Ghostty hooks only know the Muxy-issued tracking token. Recover the host-native terminal ID
+    // only when tracked rows already agree on a single value; otherwise return nil and let the
+    // event stay unbound rather than guessing from frontmost Ghostty state.
+    let windowNativeIDs = try orchestrator.store.windows(workspaceID: workspaceID).compactMap { window -> String? in
+        guard window.role == "terminal", window.app == TerminalHost.ghostty.appName else { return nil }
+        guard window.terminalTrackingID == terminalTrackingID else { return nil }
+        guard let nativeID = window.terminalNativeID, !nativeID.isEmpty else { return nil }
+        return nativeID
+    }
+    let processNativeIDs = try orchestrator.store.runningProcesses(workspaceID: workspaceID).compactMap { process -> String? in
+        guard process.terminalApp == TerminalHost.ghostty.appName else { return nil }
+        guard process.terminalTrackingID == terminalTrackingID else { return nil }
+        guard let nativeID = process.terminalNativeID, !nativeID.isEmpty else { return nil }
+        return nativeID
+    }
+    let agentNativeIDs = try orchestrator.store.agentWindows(workspaceID: workspaceID).compactMap { record -> String? in
+        guard record.provider == .ghostty else { return nil }
+        guard record.terminalTrackingID == terminalTrackingID else { return nil }
+        guard let nativeID = record.terminalNativeID, !nativeID.isEmpty else { return nil }
+        return nativeID
+    }
+
+    let nativeIDs = Set(windowNativeIDs + processNativeIDs + agentNativeIDs)
+    guard nativeIDs.count == 1 else { return nil }
+    return nativeIDs.first
 }

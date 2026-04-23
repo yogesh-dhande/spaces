@@ -370,6 +370,7 @@ extension Iterm2Adapter: TerminalAdapter {
         let window = try openWindowAndRun(command: commandApplyingEnvironment(command, environment: environment), background: background)
         return TerminalLaunchResult(
             trackingIdentity: window.sessionID.map(TerminalTrackingIdentity.session) ?? .window(window.id),
+            hookSessionID: window.sessionID,
             containerID: String(window.id),
             fallbackWindowID: window.id,
             tabIndex: window.tabIndex)

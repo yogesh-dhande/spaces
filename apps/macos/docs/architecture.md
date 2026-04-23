@@ -170,6 +170,7 @@ enum TerminalTrackingIdentity: Hashable, Sendable {
 
 struct TerminalLaunchResult: Sendable {
     let trackingIdentity: TerminalTrackingIdentity?
+    let hookSessionID: String?
     let containerID: String?
     let fallbackWindowID: Int?
     let tabIndex: Int?
@@ -196,7 +197,7 @@ Identity rules:
 - If the terminal cannot provide a durable session identifier, the integration must still provide a deterministic fallback that maps back to the yabai-managed window.
 - Current examples:
   `iTerm2` tracks sessions primarily by session ID and falls back to a yabai window ID.
-  `Ghostty` tracks by a Muxy-injected session token when one exists and otherwise falls back to a yabai window identity.
+  `Ghostty` tracks by the real Ghostty terminal ID for focus/liveness plus a separate Muxy-issued hook token for event attribution.
 - `WindowRecord` stores a stable `name` for focus identity separately from a display `detail`, so CLI focus targets can stay deterministic while GUI rows still show live browser URLs, process commands, or terminal window titles.
 
 Operational requirements:
@@ -208,7 +209,7 @@ Operational requirements:
 Implementation note:
 - The shared launch and discovery contract now lives in `appctl` as `TerminalAdapter`, and `MuxyOrchestrator` resolves `TerminalHost` to a concrete adapter through one registry.
 - `TerminalAdapter.openWindowAndRun(...)` must inject any requested launch environment into the child shell process and return the stable tracking identity that later hooks and focus flows should use.
-- The shared focus contract now also requires host-specific refocus by typed tracking identity. iTerm2 implements that with session/tab selection, while Ghostty can resolve either an injected session token or a window identity.
+- The shared focus contract now also requires host-specific refocus by typed tracking identity. iTerm2 implements that with session/tab selection, while Ghostty refocuses the tracked terminal by Ghostty terminal ID and only falls back to the yabai window when direct terminal focus fails.
 - Richer iTerm2-only helpers can still exist outside the shared interface, but a new terminal should first conform to `TerminalAdapter` so launch, focus, and discovery all follow one path.
 
 ## Agent Integration
@@ -217,12 +218,26 @@ Implementation note:
 - Agent windows are stored separately from regular process windows because they carry provider and lifecycle metadata, but `init` also reconciles them against tracked terminal windows so ad-hoc agent terminals become focusable tracked rows.
 - Agent reconciliation prefers terminal identity first:
   `iTerm2` uses the shell session ID from the environment.
-  `Ghostty` first uses the Muxy-injected `MUXY_TERMINAL_TRACKING_ID` from Muxy-launched shells, then falls back to the coding-agent thread-aware Ghostty lookup when that explicit token is unavailable.
+  `Ghostty` keeps a Muxy-issued `terminalTrackingID` for CLI hook attribution and a separate `terminalNativeID` for the real Ghostty terminal. Hook events only trust the tracking token; they do not infer the emitting shell from the frontmost Ghostty terminal or yabai window.
 - Workspace-managed process terminals persist the tmux window ID on their running-process and tracked-window records so later agent events, reattachment, and exit cleanup can reconcile against the same process-backed terminal slot.
 - When an agent attaches to a workspace-managed process terminal, the record keeps the tmux window ID so a later `exit` can keep an idle placeholder row instead of deleting it.
 - Dashboard attention state is derived from runtime records rather than inferred from UI state.
 - Only `waiting` agent events contribute dashboard and dock attention; `done` remains visible only on the workspace row itself.
+
+Ghostty-specific reconciliation:
+- Ghostty AppleScript exposes stable terminal IDs through the window -> tab -> terminal graph, but does not reliably expose live terminal environment variables on current Ghostty builds.
+- Because yabai window IDs can change when users retab or add tabs in Ghostty, Muxy treats the Ghostty terminal ID as the durable identity and yabai window IDs as refreshable focus bindings.
+- Ghostty rows without a stored native terminal ID are not treated as live just because their tracking token still exists; only the real Ghostty terminal ID participates in liveness and retab rebinding.
+- Background refresh keeps a tracked Ghostty row alive when its stored terminal ID still appears in Ghostty's live terminal graph, even if the previously stored yabai window ID has disappeared.
+- Later agent events can refresh metadata only when they present the stored tracking token and Muxy can unambiguously recover the existing native terminal ID from tracked rows.
+- Focus is slightly more permissive than liveness for Ghostty: refocus still prefers `terminalNativeID`, but if the matching tracked terminal row has not been backfilled with that native ID yet, Muxy may fall back to the persisted `terminalTrackingID` for the same workspace row. This fallback is intentionally scoped to already-tracked rows and does not use the frontmost Ghostty terminal or a guessed yabai window.
 - Dashboard dismissals are stored as a persisted set of attention-event IDs in SQLite global settings, then filtered in the GUI so workspace detail panes keep showing the underlying runtime rows.
+
+Terminal host notes:
+- iTerm2 exposes a usable shell session ID directly (`ITERM_SESSION_ID`), so Muxy can rely on that same host-native identifier for launch tracking, hook attribution, liveness checks, and refocus.
+- Ghostty does not expose an equivalent shell-local native terminal ID to the running shell on this machine. That is why Ghostty needs the split between `terminalTrackingID` and `terminalNativeID`.
+- Ghostty AppleScript can enumerate the real terminal graph and focus a terminal by Ghostty terminal ID, but it cannot safely tell Muxy which background shell emitted an `mx agent event`. That attribution must come from the Muxy-issued hook token.
+- Ghostty direct-property or environment-variable AppleScript access has proven unreliable enough that Muxy should avoid new designs that depend on reading live terminal env vars back out of Ghostty.
 
 ## Lifecycle and Health
 - Workspace lifecycle state is explicit and persisted on the workspace record.

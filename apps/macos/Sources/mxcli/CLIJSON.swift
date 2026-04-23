@@ -178,7 +178,7 @@ struct WindowRecordPayload: Encodable {
     let detail: String?
     let targetURL: String?
     let windowID: Int?
-    let itermSessionID: String?
+    let terminalTrackingID: String?
     let itermTabIndex: Int?
     let tmuxWindowID: String?
     let role: String
@@ -195,7 +195,7 @@ extension WindowRecordPayload {
         detail = value.detail
         targetURL = value.targetURL
         windowID = value.windowID
-        itermSessionID = value.itermSessionID
+        terminalTrackingID = value.terminalTrackingID
         itermTabIndex = value.itermTabIndex
         tmuxWindowID = value.tmuxWindowID
         role = value.role

@@ -5,7 +5,8 @@ public struct AgentWindowRecord: Codable, Sendable {
     public let workspaceID: String
     public let provider: AgentProvider
     public let label: String?
-    public let itermSessionID: String?
+    public let terminalTrackingID: String?
+    public let terminalNativeID: String?
     public let tmuxWindowID: String?
     public let codexThreadID: String?
     public let windowID: Int?
@@ -16,15 +17,16 @@ public struct AgentWindowRecord: Codable, Sendable {
     public let updatedAt: String
 
     public init(
-        id: String, workspaceID: String, provider: AgentProvider, label: String?, itermSessionID: String?, tmuxWindowID: String? = nil,
-        codexThreadID: String?, windowID: Int?,
+        id: String, workspaceID: String, provider: AgentProvider, label: String?, terminalTrackingID: String?, terminalNativeID: String? = nil,
+        tmuxWindowID: String? = nil, codexThreadID: String?, windowID: Int?,
         yabaiWindowID: Int? = nil, status: AgentWindowStatus, createdAt: String, updatedAt: String
     ) {
         self.id = id
         self.workspaceID = workspaceID
         self.provider = provider
         self.label = label
-        self.itermSessionID = itermSessionID
+        self.terminalTrackingID = terminalTrackingID
+        self.terminalNativeID = terminalNativeID
         self.tmuxWindowID = tmuxWindowID
         self.codexThreadID = codexThreadID
         self.windowID = windowID

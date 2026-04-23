@@ -2,11 +2,17 @@ import Foundation
 import appctl
 
 public extension RunningProcessRecord {
+    /// Identity used to correlate runtime rows that refer to the same terminal slot.
+    /// Ghostty prefers its host-native terminal ID here; iTerm can reuse the same
+    /// session-style identity for both correlation and focus.
     var terminalTrackingIdentity: TerminalTrackingIdentity? {
         if let tmuxWindowID, !tmuxWindowID.isEmpty {
             return .tmux(tmuxWindowID)
         }
-        if let sessionID = itermSessionID, !sessionID.isEmpty {
+        if terminalApp == TerminalHost.ghostty.appName, let terminalNativeID, !terminalNativeID.isEmpty {
+            return .session(terminalNativeID)
+        }
+        if let sessionID = terminalTrackingID, !sessionID.isEmpty {
             return .session(sessionID)
         }
         if let windowID {
@@ -15,8 +21,12 @@ public extension RunningProcessRecord {
         return nil
     }
 
+    /// Identity used when Muxy actively refocuses this terminal.
     var terminalFocusIdentity: TerminalTrackingIdentity? {
-        if let sessionID = itermSessionID, !sessionID.isEmpty {
+        if terminalApp == TerminalHost.ghostty.appName, let terminalNativeID, !terminalNativeID.isEmpty {
+            return .session(terminalNativeID)
+        }
+        if let sessionID = terminalTrackingID, !sessionID.isEmpty {
             return .session(sessionID)
         }
         if let windowID {
@@ -32,11 +42,15 @@ public extension RunningProcessRecord {
 }
 
 public extension WindowRecord {
+    /// Stable identity for reconciling this tracked window with process and agent rows.
     var terminalTrackingIdentity: TerminalTrackingIdentity? {
         if let tmuxWindowID, !tmuxWindowID.isEmpty {
             return .tmux(tmuxWindowID)
         }
-        if let sessionID = itermSessionID, !sessionID.isEmpty {
+        if app == TerminalHost.ghostty.appName, let terminalNativeID, !terminalNativeID.isEmpty {
+            return .session(terminalNativeID)
+        }
+        if let sessionID = terminalTrackingID, !sessionID.isEmpty {
             return .session(sessionID)
         }
         if let windowID {
@@ -45,8 +59,12 @@ public extension WindowRecord {
         return nil
     }
 
+    /// Best-effort terminal refocus identity for this tracked window.
     var terminalFocusIdentity: TerminalTrackingIdentity? {
-        if let sessionID = itermSessionID, !sessionID.isEmpty {
+        if app == TerminalHost.ghostty.appName, let terminalNativeID, !terminalNativeID.isEmpty {
+            return .session(terminalNativeID)
+        }
+        if let sessionID = terminalTrackingID, !sessionID.isEmpty {
             return .session(sessionID)
         }
         if let windowID {
@@ -62,11 +80,15 @@ public extension WindowRecord {
 }
 
 public extension AgentWindowRecord {
+    /// Identity used to associate coding-agent state with an existing tracked terminal row.
     var terminalTrackingIdentity: TerminalTrackingIdentity? {
         if let tmuxWindowID, !tmuxWindowID.isEmpty {
             return .tmux(tmuxWindowID)
         }
-        if let sessionID = itermSessionID, !sessionID.isEmpty {
+        if provider == .ghostty, let terminalNativeID, !terminalNativeID.isEmpty {
+            return .session(terminalNativeID)
+        }
+        if let sessionID = terminalTrackingID, !sessionID.isEmpty {
             return .session(sessionID)
         }
         if let windowID = yabaiWindowID ?? windowID {
@@ -75,8 +97,12 @@ public extension AgentWindowRecord {
         return nil
     }
 
+    /// Identity used when focusing a coding-agent row back to its terminal.
     var terminalFocusIdentity: TerminalTrackingIdentity? {
-        if let sessionID = itermSessionID, !sessionID.isEmpty {
+        if provider == .ghostty, let terminalNativeID, !terminalNativeID.isEmpty {
+            return .session(terminalNativeID)
+        }
+        if let sessionID = terminalTrackingID, !sessionID.isEmpty {
             return .session(sessionID)
         }
         if let windowID = yabaiWindowID ?? windowID {

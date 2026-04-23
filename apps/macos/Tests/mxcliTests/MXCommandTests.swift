@@ -1,8 +1,11 @@
 import ArgumentParser
 import Foundation
-import streamctl
 import XCTest
+import streamctl
+
 @testable import mxcli
+
+private let testAppleScriptOptInEnvVar = "MUXY_ALLOW_TEST_APPLESCRIPT"
 
 final class MXCommandTests: XCTestCase {
     func testWorkspaceUpParsesLeafCommandOptions() throws {
@@ -14,8 +17,7 @@ final class MXCommandTests: XCTestCase {
     }
 
     func testWorkspaceUpdateRequiresMutationFlag() {
-        XCTAssertThrowsError(try WorkspaceUpdateCommand.parse([])) { error in
-            XCTAssertTrue(String(describing: error).contains("at least one field"))
+        XCTAssertThrowsError(try WorkspaceUpdateCommand.parse([])) { error in XCTAssertTrue(String(describing: error).contains("at least one field"))
         }
     }
 
@@ -44,34 +46,129 @@ final class MXCommandTests: XCTestCase {
     func testAgentEventDropResultRejectsUnsupportedHostBeforeWorkspaceLookup() {
         let context = CLIContext()
 
-        let result = agentEventDropResult(
-            type: .start,
-            environment: ["__CFBundleIdentifier": "com.apple.Terminal"],
-            context: context)
+        let result = agentEventDropResult(type: .start, environment: ["__CFBundleIdentifier": "com.apple.Terminal"], context: context)
 
         XCTAssertEqual(result?.text, "Dropped agent event start: unsupported terminal host")
         XCTAssertEqual(result?.payload.message, "Dropped unsupported agent event.")
+    }
+
+    func testAgentEventDropResultAcceptsGhosttyTermProgramWithoutBundleIdentifier() {
+        let context = CLIContext()
+
+        let result = agentEventDropResult(
+            type: .start,
+            environment: ["TERM_PROGRAM": "ghostty", MuxyOrchestrator.terminalTrackingIDEnvVar: "ghostty-hook-token-1"],
+            context: context)
+
+        XCTAssertNil(result)
+    }
+
+    func testAgentEventDropResultRejectsUntrackedGhosttyBeforeWorkspaceLookup() {
+        let context = CLIContext()
+
+        let result = agentEventDropResult(type: .start, environment: ["__CFBundleIdentifier": "com.mitchellh.ghostty"], context: context)
+
+        XCTAssertEqual(result?.text, "Dropped agent event start: untracked Ghostty terminal")
+        XCTAssertEqual(result?.payload.message, "Dropped untracked Ghostty agent event.")
+    }
+
+    func testAgentEventDropResultRejectsUntrackedGhosttyTermProgramBeforeWorkspaceLookup() {
+        let context = CLIContext()
+
+        let result = agentEventDropResult(type: .start, environment: ["TERM_PROGRAM": "ghostty"], context: context)
+
+        XCTAssertEqual(result?.text, "Dropped agent event start: untracked Ghostty terminal")
+        XCTAssertEqual(result?.payload.message, "Dropped untracked Ghostty agent event.")
+    }
+
+    func testAgentEventDropResultAcceptsItermTermProgramWithoutBundleIdentifier() {
+        let context = CLIContext()
+
+        let result = agentEventDropResult(type: .start, environment: ["TERM_PROGRAM": "iTerm.app"], context: context)
+
+        XCTAssertNil(result)
     }
 
     func testAgentEventDropResultRejectsTmuxBeforeWorkspaceLookup() {
         let context = CLIContext()
 
         let result = agentEventDropResult(
-            type: .waiting,
-            environment: [
-                "__CFBundleIdentifier": "com.googlecode.iterm2",
-                "TMUX": "/tmp/tmux-501/default,123,0",
-            ],
-            context: context)
+            type: .waiting, environment: ["__CFBundleIdentifier": "com.googlecode.iterm2", "TMUX": "/tmp/tmux-501/default,123,0"], context: context)
 
         XCTAssertEqual(result?.text, "Dropped agent event waiting: coding agents run from tmux are not supported by muxy")
         XCTAssertEqual(result?.payload.message, "Dropped tmux-backed agent event.")
     }
 
-    func testResolveAgentInvocationContextUsesYabaiWindowForGhosttyWithoutThreadID() throws {
+    func testResolveAgentInvocationContextDropsUntrackedGhosttyEventWithoutHookToken() throws {
         let store = try makeTemporaryStore()
         let workspace = try makeWorkspace(store: store)
         let orchestrator = MuxyOrchestrator(store: store)
+
+        try withMockCommands(["yabai": Self.yabaiFocusedWindowMock, "osascript": Self.ghosttyFocusedTerminalMock]) {
+            let context = CLIContext()
+            let agentContext = try resolveAgentInvocationContext(
+                workspaceID: workspace.id, environment: ["__CFBundleIdentifier": "com.mitchellh.ghostty", "CLAUDE_CODE_ENTRYPOINT": "1"],
+                orchestrator: orchestrator, context: context)
+
+            XCTAssertNil(agentContext)
+        }
+    }
+
+    func testResolveAgentInvocationContextDropsGhosttyTermProgramEventWithoutHookToken() throws {
+        let store = try makeTemporaryStore()
+        let workspace = try makeWorkspace(store: store)
+        let orchestrator = MuxyOrchestrator(store: store)
+
+        try withMockCommands(["yabai": Self.yabaiFocusedWindowMock, "osascript": Self.ghosttyFocusedTerminalMock]) {
+            let context = CLIContext()
+            let agentContext = try resolveAgentInvocationContext(
+                workspaceID: workspace.id, environment: ["TERM_PROGRAM": "ghostty", "CLAUDE_CODE_ENTRYPOINT": "1"],
+                orchestrator: orchestrator, context: context)
+
+            XCTAssertNil(agentContext)
+        }
+    }
+
+    func testResolveAgentInvocationContextUsesGhosttyHookTokenWithoutFrontmostWindowBinding() throws {
+        let store = try makeTemporaryStore()
+        let workspace = try makeWorkspace(store: store)
+        let orchestrator = MuxyOrchestrator(store: store)
+
+        try withMockCommands(["yabai": Self.yabaiFocusedWindowMock, "osascript": Self.ghosttyFocusedTerminalMock]) {
+            let context = CLIContext()
+            let agentContext = try resolveAgentInvocationContext(
+                workspaceID: workspace.id,
+                environment: [
+                    "__CFBundleIdentifier": "com.mitchellh.ghostty",
+                    "CLAUDE_CODE_ENTRYPOINT": "1",
+                    MuxyOrchestrator.terminalTrackingIDEnvVar: "ghostty-hook-token-1",
+                ],
+                orchestrator: orchestrator,
+                context: context)
+
+            XCTAssertEqual(agentContext?.provider, .ghostty)
+            XCTAssertEqual(agentContext?.terminalTrackingID, "ghostty-hook-token-1")
+            XCTAssertNil(agentContext?.terminalNativeID)
+            XCTAssertNil(agentContext?.yabaiWindowID)
+        }
+    }
+
+    func testResolveAgentInvocationContextLoadsTrackedGhosttyNativeTerminalIDFromExistingRows() throws {
+        let store = try makeTemporaryStore()
+        let workspace = try makeWorkspace(store: store)
+        let orchestrator = MuxyOrchestrator(store: store)
+        try store.upsert(
+            window: WindowRecord(
+                id: UUID().uuidString,
+                workspaceID: workspace.id,
+                app: TerminalHost.ghostty.appName,
+                name: "Claude Code CLI",
+                windowID: 106482,
+                terminalTrackingID: "ghostty-hook-token-1",
+                terminalNativeID: "ghostty-native-1",
+                role: "terminal",
+                orderIndex: 200,
+                lastSeenAt: "now"))
 
         try withMockCommands(["yabai": Self.yabaiFocusedWindowMock]) {
             let context = CLIContext()
@@ -80,35 +177,15 @@ final class MXCommandTests: XCTestCase {
                 environment: [
                     "__CFBundleIdentifier": "com.mitchellh.ghostty",
                     "CLAUDE_CODE_ENTRYPOINT": "1",
+                    MuxyOrchestrator.terminalTrackingIDEnvVar: "ghostty-hook-token-1",
                 ],
-                orchestrator: orchestrator,
-                context: context)
+                orchestrator: orchestrator, context: context)
 
             XCTAssertEqual(agentContext?.provider, .ghostty)
-            XCTAssertEqual(agentContext?.label, "Claude Code CLI")
-            XCTAssertNil(agentContext?.iTermSessionID)
-            XCTAssertEqual(agentContext?.yabaiWindowID, 106482)
+            XCTAssertEqual(agentContext?.terminalTrackingID, "ghostty-hook-token-1")
+            XCTAssertEqual(agentContext?.terminalNativeID, "ghostty-native-1")
+            XCTAssertNil(agentContext?.yabaiWindowID)
         }
-    }
-
-    func testResolveAgentInvocationContextPrefersMuxyTrackingIDForGhostty() throws {
-        let store = try makeTemporaryStore()
-        let workspace = try makeWorkspace(store: store)
-        let orchestrator = MuxyOrchestrator(store: store)
-        let context = CLIContext()
-
-        let agentContext = try resolveAgentInvocationContext(
-            workspaceID: workspace.id,
-            environment: [
-                "__CFBundleIdentifier": "com.mitchellh.ghostty",
-                "CLAUDE_CODE_ENTRYPOINT": "1",
-                MuxyOrchestrator.terminalTrackingIDEnvVar: "ghostty-muxy-token-1",
-            ],
-            orchestrator: orchestrator,
-            context: context)
-
-        XCTAssertEqual(agentContext?.provider, .ghostty)
-        XCTAssertEqual(agentContext?.iTermSessionID, "ghostty-muxy-token-1")
     }
 
     private func makeTemporaryStore() throws -> SQLiteStore {
@@ -121,29 +198,12 @@ final class MXCommandTests: XCTestCase {
         let projectDir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
         let project = ProjectRecord(
-            id: UUID().uuidString,
-            name: "TestProject",
-            dir: projectDir.path,
-            isGitRepo: false,
-            defaultBranch: nil,
-            setupScript: nil,
-            stopScript: nil,
-            ports: [],
-            processes: [],
-            statusChecks: [],
-            browserSessions: [])
+            id: UUID().uuidString, name: "TestProject", dir: projectDir.path, isGitRepo: false, defaultBranch: nil, setupScript: nil, stopScript: nil,
+            ports: [], processes: [], statusChecks: [], browserSessions: [])
         try store.upsert(project: project)
         let workspace = WorkspaceRecord(
-            id: UUID().uuidString,
-            projectID: project.id,
-            title: "default",
-            dir: projectDir.appendingPathComponent("default", isDirectory: true).path,
-            dirname: nil,
-            branch: nil,
-            isDefault: true,
-            isArchived: false,
-            isRunning: false,
-            lastLaunchedAt: nil)
+            id: UUID().uuidString, projectID: project.id, title: "default", dir: projectDir.appendingPathComponent("default", isDirectory: true).path,
+            dirname: nil, branch: nil, isDefault: true, isArchived: false, isRunning: false, lastLaunchedAt: nil)
         try store.upsert(workspace: workspace)
         return workspace
     }
@@ -161,11 +221,16 @@ final class MXCommandTests: XCTestCase {
 
         let originalPath = ProcessInfo.processInfo.environment["PATH"]
         setenv("PATH", "\(tempDir.path):\(originalPath ?? "")", 1)
+        defer { if let originalPath { setenv("PATH", originalPath, 1) } else { unsetenv("PATH") } }
+        let originalAppleScriptOptIn = ProcessInfo.processInfo.environment[testAppleScriptOptInEnvVar]
+        if commands.keys.contains("osascript") { setenv(testAppleScriptOptInEnvVar, "1", 1) }
         defer {
-            if let originalPath {
-                setenv("PATH", originalPath, 1)
-            } else {
-                unsetenv("PATH")
+            if commands.keys.contains("osascript") {
+                if let originalAppleScriptOptIn {
+                    setenv(testAppleScriptOptInEnvVar, originalAppleScriptOptIn, 1)
+                } else {
+                    unsetenv(testAppleScriptOptInEnvVar)
+                }
             }
         }
         try run()
@@ -177,6 +242,31 @@ final class MXCommandTests: XCTestCase {
           echo '{"id":106482,"pid":123,"app":"Ghostty","title":"✳ Claude Code","space":1,"display":1,"is-sticky":false,"is-hidden":false,"is-visible":true,"is-native-fullscreen":false}'
           exit 0
         fi
+        exit 1
+        """
+
+    private static let ghosttyFocusedTerminalMock = """
+        #!/bin/bash
+        script="${*: -1}"
+        if [[ "$script" == *'tell application id "com.mitchellh.ghostty" to version'* ]]; then
+          echo "1.3.1"
+          exit 0
+        fi
+        if [[ "$script" == *'focused terminal of selected tab of front window'* ]]; then
+          echo "ghostty-terminal-live-1"
+          exit 0
+        fi
+        exit 1
+        """
+
+    private static let ghosttyFocusedTerminalFailureMock = """
+        #!/bin/bash
+        script="${*: -1}"
+        if [[ "$script" == *'tell application id "com.mitchellh.ghostty" to version'* ]]; then
+          echo "1.3.1"
+          exit 0
+        fi
+        echo "lookup failed" >&2
         exit 1
         """
 }

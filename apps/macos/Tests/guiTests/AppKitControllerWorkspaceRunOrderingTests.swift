@@ -11,23 +11,23 @@ import streamctl
         ]
         let windows = [
             WindowRecord(
-                id: "win-web", workspaceID: "workspace", app: "iTerm2", title: "web", targetURL: nil, windowID: 102, itermSessionID: "session-web",
+                id: "win-web", workspaceID: "workspace", app: "iTerm2", title: "web", targetURL: nil, windowID: 102, terminalTrackingID: "session-web",
                 itermTabIndex: nil, tmuxWindowID: nil, role: "terminal", orderIndex: 200, lastSeenAt: "now"),
             WindowRecord(
-                id: "win-api", workspaceID: "workspace", app: "iTerm2", title: "api", targetURL: nil, windowID: 101, itermSessionID: "session-api",
+                id: "win-api", workspaceID: "workspace", app: "iTerm2", title: "api", targetURL: nil, windowID: 101, terminalTrackingID: "session-api",
                 itermTabIndex: nil, tmuxWindowID: nil, role: "terminal", orderIndex: 201, lastSeenAt: "now"),
             WindowRecord(
-                id: "win-shell", workspaceID: "workspace", app: "iTerm2", title: "* zsh", targetURL: nil, windowID: 103, itermSessionID: "session-shell",
+                id: "win-shell", workspaceID: "workspace", app: "iTerm2", title: "* zsh", targetURL: nil, windowID: 103, terminalTrackingID: "session-shell",
                 itermTabIndex: nil, tmuxWindowID: nil, role: "terminal", orderIndex: 202, lastSeenAt: "now"),
         ]
         let processes = [
             RunningProcessRecord(
                 id: "process-web", workspaceID: "workspace", templateName: "web", command: "run web", terminalApp: "iTerm2", windowID: 102,
-                itermSessionID: "session-web", itermTabIndex: nil, tmuxWindowID: nil, pid: 2, status: .running, logPath: nil, lastOutputAt: nil,
+                terminalTrackingID: "session-web", itermTabIndex: nil, tmuxWindowID: nil, pid: 2, status: .running, logPath: nil, lastOutputAt: nil,
                 startedAt: nil, exitedAt: nil),
             RunningProcessRecord(
                 id: "process-api", workspaceID: "workspace", templateName: "api", command: "run api", terminalApp: "iTerm2", windowID: 101,
-                itermSessionID: "session-api", itermTabIndex: nil, tmuxWindowID: nil, pid: 1, status: .running, logPath: nil, lastOutputAt: nil,
+                terminalTrackingID: "session-api", itermTabIndex: nil, tmuxWindowID: nil, pid: 1, status: .running, logPath: nil, lastOutputAt: nil,
                 startedAt: nil, exitedAt: nil),
         ]
 
@@ -49,13 +49,13 @@ import streamctl
         ]
         let windows = [
             WindowRecord(
-                id: "win-web", workspaceID: "workspace", app: "iTerm2", title: "web", targetURL: nil, windowID: 102, itermSessionID: "session-web",
+                id: "win-web", workspaceID: "workspace", app: "iTerm2", title: "web", targetURL: nil, windowID: 102, terminalTrackingID: "session-web",
                 itermTabIndex: nil, tmuxWindowID: nil, role: "terminal", orderIndex: 200, lastSeenAt: "now")
         ]
         let processes = [
             RunningProcessRecord(
                 id: "process-web", workspaceID: "workspace", templateName: "web", command: "run web", terminalApp: "iTerm2", windowID: 102,
-                itermSessionID: "session-web", itermTabIndex: nil, tmuxWindowID: nil, pid: 2, status: .running, logPath: nil, lastOutputAt: nil,
+                terminalTrackingID: "session-web", itermTabIndex: nil, tmuxWindowID: nil, pid: 2, status: .running, logPath: nil, lastOutputAt: nil,
                 startedAt: nil, exitedAt: nil)
         ]
 
@@ -76,13 +76,13 @@ import streamctl
         let configuredProcesses = [ProcessTemplate(name: "web server", command: "PORT=20003 npm run dev")]
         let windows = [
             WindowRecord(
-                id: "win-web", workspaceID: "workspace", app: "iTerm2", title: "web server", targetURL: nil, windowID: 102, itermSessionID: "session-web",
+                id: "win-web", workspaceID: "workspace", app: "iTerm2", title: "web server", targetURL: nil, windowID: 102, terminalTrackingID: "session-web",
                 itermTabIndex: nil, tmuxWindowID: nil, role: "terminal", orderIndex: 200, lastSeenAt: "now")
         ]
         let processes = [
             RunningProcessRecord(
                 id: "process-web", workspaceID: "workspace", templateName: "web server", command: "PORT=20003 npm run dev", terminalApp: "iTerm2",
-                windowID: 102, itermSessionID: "session-web", itermTabIndex: nil, tmuxWindowID: nil, pid: 2, status: .running, logPath: nil,
+                windowID: 102, terminalTrackingID: "session-web", itermTabIndex: nil, tmuxWindowID: nil, pid: 2, status: .running, logPath: nil,
                 lastOutputAt: nil, startedAt: nil, exitedAt: nil)
         ]
 
@@ -102,13 +102,13 @@ import streamctl
         let configuredProcesses = [ProcessTemplate(name: "name:api", command: "npm run api")]
         let windows = [
             WindowRecord(
-                id: "win-api", workspaceID: "workspace", app: "iTerm2", title: "name:api", targetURL: nil, windowID: 102, itermSessionID: "session-api",
+                id: "win-api", workspaceID: "workspace", app: "iTerm2", title: "name:api", targetURL: nil, windowID: 102, terminalTrackingID: "session-api",
                 itermTabIndex: nil, tmuxWindowID: nil, role: "terminal", orderIndex: 200, lastSeenAt: "now")
         ]
         let processes = [
             RunningProcessRecord(
                 id: "process-api", workspaceID: "workspace", templateName: "name:api", command: "npm run api", terminalApp: "iTerm2", windowID: 102,
-                itermSessionID: "session-api", itermTabIndex: nil, tmuxWindowID: nil, pid: 2, status: .running, logPath: nil, lastOutputAt: nil,
+                terminalTrackingID: "session-api", itermTabIndex: nil, tmuxWindowID: nil, pid: 2, status: .running, logPath: nil, lastOutputAt: nil,
                 startedAt: nil, exitedAt: nil)
         ]
 
@@ -128,25 +128,25 @@ import streamctl
         let configuredProcesses = [ProcessTemplate(name: "api", command: "run api")]
         let windows = [
             WindowRecord(
-                id: "win-agent", workspaceID: "workspace", app: "iTerm2", title: "agent", targetURL: nil, windowID: 104, itermSessionID: "session-agent",
+                id: "win-agent", workspaceID: "workspace", app: "iTerm2", title: "agent", targetURL: nil, windowID: 104, terminalTrackingID: "session-agent",
                 itermTabIndex: nil, tmuxWindowID: nil, role: "terminal", orderIndex: 200, lastSeenAt: "now"),
             WindowRecord(
-                id: "win-api", workspaceID: "workspace", app: "iTerm2", title: "api", targetURL: nil, windowID: 101, itermSessionID: "session-api",
+                id: "win-api", workspaceID: "workspace", app: "iTerm2", title: "api", targetURL: nil, windowID: 101, terminalTrackingID: "session-api",
                 itermTabIndex: nil, tmuxWindowID: nil, role: "terminal", orderIndex: 201, lastSeenAt: "now"),
         ]
         let processes = [
             RunningProcessRecord(
                 id: "process-api", workspaceID: "workspace", templateName: "api", command: "run api", terminalApp: "iTerm2", windowID: 101,
-                itermSessionID: "session-api", itermTabIndex: nil, tmuxWindowID: nil, pid: 1, status: .running, logPath: nil, lastOutputAt: nil,
+                terminalTrackingID: "session-api", itermTabIndex: nil, tmuxWindowID: nil, pid: 1, status: .running, logPath: nil, lastOutputAt: nil,
                 startedAt: nil, exitedAt: nil),
             RunningProcessRecord(
                 id: "process-agent", workspaceID: "workspace", templateName: "agent", command: "run agent", terminalApp: "iTerm2", windowID: 104,
-                itermSessionID: "session-agent", itermTabIndex: nil, tmuxWindowID: nil, pid: 2, status: .running, logPath: nil, lastOutputAt: nil,
+                terminalTrackingID: "session-agent", itermTabIndex: nil, tmuxWindowID: nil, pid: 2, status: .running, logPath: nil, lastOutputAt: nil,
                 startedAt: nil, exitedAt: nil),
         ]
         let agentWindows = [
             AgentWindowRecord(
-                id: "agent", workspaceID: "workspace", provider: .iterm2, label: "Agent", itermSessionID: "session-agent", tmuxWindowID: nil,
+                id: "agent", workspaceID: "workspace", provider: .iterm2, label: "Agent", terminalTrackingID: "session-agent", tmuxWindowID: nil,
                 codexThreadID: nil, windowID: 104, yabaiWindowID: 104, status: .spinning, createdAt: "now", updatedAt: "now")
         ]
 
@@ -165,21 +165,21 @@ import streamctl
         let configuredProcesses = [ProcessTemplate(name: "web", command: "run web")]
         let windows = [
             WindowRecord(
-                id: "win-web", workspaceID: "workspace", app: "Ghostty", title: "web", targetURL: nil, windowID: 101, itermSessionID: "ghostty-web",
+                id: "win-web", workspaceID: "workspace", app: "Ghostty", title: "web", targetURL: nil, windowID: 101, terminalTrackingID: "ghostty-web",
                 itermTabIndex: nil, tmuxWindowID: nil, role: "terminal", orderIndex: 200, lastSeenAt: "now"),
             WindowRecord(
                 id: "win-shell", workspaceID: "workspace", app: "Ghostty", title: "shell-1", targetURL: nil, windowID: 202,
-                itermSessionID: "muxy-ghostty-token", itermTabIndex: nil, tmuxWindowID: nil, role: "terminal", orderIndex: 201, lastSeenAt: "now")
+                terminalTrackingID: "muxy-ghostty-token", itermTabIndex: nil, tmuxWindowID: nil, role: "terminal", orderIndex: 201, lastSeenAt: "now")
         ]
         let processes = [
             RunningProcessRecord(
                 id: "process-web", workspaceID: "workspace", templateName: "web", command: "run web", terminalApp: "Ghostty", windowID: 101,
-                itermSessionID: "ghostty-web", itermTabIndex: nil, tmuxWindowID: nil, pid: 1, status: .running, logPath: nil, lastOutputAt: nil,
+                terminalTrackingID: "ghostty-web", itermTabIndex: nil, tmuxWindowID: nil, pid: 1, status: .running, logPath: nil, lastOutputAt: nil,
                 startedAt: nil, exitedAt: nil)
         ]
         let agentWindows = [
             AgentWindowRecord(
-                id: "agent", workspaceID: "workspace", provider: .ghostty, label: "Claude Code CLI", itermSessionID: "muxy-ghostty-token",
+                id: "agent", workspaceID: "workspace", provider: .ghostty, label: "Claude Code CLI", terminalTrackingID: "muxy-ghostty-token",
                 tmuxWindowID: nil, codexThreadID: nil, windowID: 202, yabaiWindowID: 202, status: .idle, createdAt: "now", updatedAt: "now")
         ]
 
@@ -194,23 +194,76 @@ import streamctl
         #expect(entries.first?.processID == "process-web")
     }
 
+    @Test func ghosttyAgentClaimedTerminalRowIsExcludedWhenWindowOnlyHasHookToken() {
+        let configuredProcesses = [ProcessTemplate(name: "web", command: "run web")]
+        let windows = [
+            WindowRecord(
+                id: "win-web", workspaceID: "workspace", app: "Ghostty", name: "web", detail: nil, targetURL: nil, windowID: 101,
+                terminalTrackingID: "ghostty-web", terminalNativeID: "ghostty-web-native", itermTabIndex: nil, tmuxWindowID: nil, role: "terminal",
+                orderIndex: 200, lastSeenAt: "now"),
+            WindowRecord(
+                id: "win-shell", workspaceID: "workspace", app: "Ghostty", name: "shell-1", detail: nil, targetURL: nil, windowID: 202,
+                terminalTrackingID: "muxy-ghostty-hook", terminalNativeID: nil, itermTabIndex: nil, tmuxWindowID: nil, role: "terminal",
+                orderIndex: 201, lastSeenAt: "now")
+        ]
+        let processes = [
+            RunningProcessRecord(
+                id: "process-web", workspaceID: "workspace", templateName: "web", command: "run web", terminalApp: "Ghostty", windowID: 101,
+                terminalTrackingID: "ghostty-web", terminalNativeID: "ghostty-web-native", itermTabIndex: nil, tmuxWindowID: nil, pid: 1,
+                status: .running, logPath: nil, lastOutputAt: nil, startedAt: nil, exitedAt: nil)
+        ]
+        let agentWindows = [
+            AgentWindowRecord(
+                id: "agent", workspaceID: "workspace", provider: .ghostty, label: "Claude Code CLI", terminalTrackingID: "muxy-ghostty-hook",
+                terminalNativeID: "ghostty-native-id", tmuxWindowID: nil, codexThreadID: nil, windowID: 202, yabaiWindowID: 202, status: .idle,
+                createdAt: "now", updatedAt: "now")
+        ]
+
+        let entries = AppKitController.orderedWorkspaceRunProcessEntries(
+            configuredProcesses: configuredProcesses,
+            windows: windows,
+            processes: processes,
+            agentWindows: agentWindows)
+
+        #expect(entries.count == 1)
+        #expect(entries.first?.kind == .process)
+        #expect(entries.first?.processID == "process-web")
+    }
+
+    @Test func preferredTerminalWindowsByTrackingKeyKeepsLowestOrderWhenKeysCollide() {
+        let windows = [
+            WindowRecord(
+                id: "win-newer", workspaceID: "workspace", app: "Ghostty", name: "shell-2", detail: "newer", targetURL: nil, windowID: 202,
+                terminalTrackingID: "ghostty-hook", terminalNativeID: nil, itermTabIndex: nil, tmuxWindowID: nil, role: "terminal",
+                orderIndex: 205, lastSeenAt: "now"),
+            WindowRecord(
+                id: "win-older", workspaceID: "workspace", app: "Ghostty", name: "shell-1", detail: "older", targetURL: nil, windowID: 201,
+                terminalTrackingID: "ghostty-hook", terminalNativeID: nil, itermTabIndex: nil, tmuxWindowID: nil, role: "terminal",
+                orderIndex: 201, lastSeenAt: "now")
+        ]
+
+        let linkedWindows = AppKitController.preferredTerminalWindowsByTrackingKey(windows)
+
+        #expect(linkedWindows["terminal:ghostty-hook"]?.id == "win-older")
+    }
+
     @Test func shortcutTargetsFollowVisibleRunSectionOrder() {
         let configuredProcesses = [ProcessTemplate(name: "web", command: "npm run dev")]
         let browserSessions = [BrowserSession(name: "frontend", url: "http://localhost:3000")]
         let windows = [
             WindowRecord(
-                id: "win-web", workspaceID: "workspace", app: "iTerm2", title: "web", targetURL: nil, windowID: 101, itermSessionID: "session-web",
+                id: "win-web", workspaceID: "workspace", app: "iTerm2", title: "web", targetURL: nil, windowID: 101, terminalTrackingID: "session-web",
                 itermTabIndex: nil, tmuxWindowID: nil, role: "terminal", orderIndex: 200, lastSeenAt: "now")
         ]
         let processes = [
             RunningProcessRecord(
                 id: "process-web", workspaceID: "workspace", templateName: "web", command: "npm run dev", terminalApp: "iTerm2", windowID: 101,
-                itermSessionID: "session-web", itermTabIndex: nil, tmuxWindowID: nil, pid: 1, status: .running, logPath: nil, lastOutputAt: nil,
+                terminalTrackingID: "session-web", itermTabIndex: nil, tmuxWindowID: nil, pid: 1, status: .running, logPath: nil, lastOutputAt: nil,
                 startedAt: nil, exitedAt: nil)
         ]
         let agentWindows = [
             AgentWindowRecord(
-                id: "agent", workspaceID: "workspace", provider: .iterm2, label: "Claude Code CLI", itermSessionID: "session-agent",
+                id: "agent", workspaceID: "workspace", provider: .iterm2, label: "Claude Code CLI", terminalTrackingID: "session-agent",
                 tmuxWindowID: nil, codexThreadID: nil, windowID: 202, yabaiWindowID: 202, status: .spinning, createdAt: "now", updatedAt: "now")
         ]
 
@@ -300,24 +353,24 @@ import streamctl
         let windows = [
             WindowRecord(
                 id: "win-web", workspaceID: "workspace", app: "iTerm2", title: "web server", targetURL: nil, windowID: 101,
-                itermSessionID: "shared-session", itermTabIndex: nil, tmuxWindowID: "@1", role: "terminal", orderIndex: 200, lastSeenAt: "now"),
+                terminalTrackingID: "shared-session", itermTabIndex: nil, tmuxWindowID: "@1", role: "terminal", orderIndex: 200, lastSeenAt: "now"),
             WindowRecord(
                 id: "win-claude", workspaceID: "workspace", app: "iTerm2", title: "claude", targetURL: nil, windowID: 101,
-                itermSessionID: "shared-session", itermTabIndex: nil, tmuxWindowID: "@2", role: "terminal", orderIndex: 201, lastSeenAt: "now")
+                terminalTrackingID: "shared-session", itermTabIndex: nil, tmuxWindowID: "@2", role: "terminal", orderIndex: 201, lastSeenAt: "now")
         ]
         let processes = [
             RunningProcessRecord(
                 id: "process-web", workspaceID: "workspace", templateName: "web server", command: "npm run dev", terminalApp: "iTerm2", windowID: 101,
-                itermSessionID: "shared-session", itermTabIndex: nil, tmuxWindowID: "@1", pid: 1, status: .running, logPath: nil, lastOutputAt: nil,
+                terminalTrackingID: "shared-session", itermTabIndex: nil, tmuxWindowID: "@1", pid: 1, status: .running, logPath: nil, lastOutputAt: nil,
                 startedAt: nil, exitedAt: nil),
             RunningProcessRecord(
                 id: "process-claude", workspaceID: "workspace", templateName: "claude", command: "claude", terminalApp: "iTerm2", windowID: 101,
-                itermSessionID: "shared-session", itermTabIndex: nil, tmuxWindowID: "@2", pid: 2, status: .running, logPath: nil, lastOutputAt: nil,
+                terminalTrackingID: "shared-session", itermTabIndex: nil, tmuxWindowID: "@2", pid: 2, status: .running, logPath: nil, lastOutputAt: nil,
                 startedAt: nil, exitedAt: nil)
         ]
         let agentWindows = [
             AgentWindowRecord(
-                id: "agent", workspaceID: "workspace", provider: .iterm2, label: "Claude Code CLI", itermSessionID: "shared-session",
+                id: "agent", workspaceID: "workspace", provider: .iterm2, label: "Claude Code CLI", terminalTrackingID: "shared-session",
                 tmuxWindowID: "@2", codexThreadID: nil, windowID: 101, yabaiWindowID: 101, status: .idle, createdAt: "now", updatedAt: "now")
         ]
 

@@ -4,6 +4,8 @@ import Foundation
 import appctl
 
 public final class MuxyOrchestrator {
+    public static let terminalTrackingIDEnvVar = "MUXY_TERMINAL_TRACKING_ID"
+
     public struct WorkspaceStopOutcome: Sendable {
         public let skippedStopScriptBecauseWorkspaceDirectoryMissing: Bool
 
@@ -48,9 +50,8 @@ public final class MuxyOrchestrator {
     private struct ManagedTerminalHandle {
         let fallbackWindowID: Int?
         let trackingIdentity: TerminalTrackingIdentity?
+        let hookSessionID: String?
     }
-
-    public static let terminalTrackingIDEnvVar = "MUXY_TERMINAL_TRACKING_ID"
 
     private enum WorkspaceNavigationCursor: Equatable {
         case terminal(String)
@@ -101,10 +102,8 @@ public final class MuxyOrchestrator {
     public init(
         store: SQLiteStore, projectsRootDirectory: URL? = nil, workspacesRootDirectory: URL? = nil, git: GitClient = .init(),
         yabai: YabaiAdapter = .init(), iterm: Iterm2Adapter = .init(), ghostty: GhosttyAdapter = .init(), tmux: TmuxAdapter = .init(),
-        chrome: ChromeAdapter = .init(),
-        browserWindowScanDebounceInterval: TimeInterval = PollingConstants.browserWindowScanDebounceInterval,
-        terminalFocusPulseController: TerminalFocusPulseControlling = TerminalFocusPulseController(),
-        currentDate: @escaping () -> Date = Date.init
+        chrome: ChromeAdapter = .init(), browserWindowScanDebounceInterval: TimeInterval = PollingConstants.browserWindowScanDebounceInterval,
+        terminalFocusPulseController: TerminalFocusPulseControlling = TerminalFocusPulseController(), currentDate: @escaping () -> Date = Date.init
     ) {
         self.store = store
         projectsRootDirectoryURL = projectsRootDirectory
@@ -119,9 +118,7 @@ public final class MuxyOrchestrator {
         self.browserWindowScanDebounceInterval = browserWindowScanDebounceInterval
         self.terminalFocusPulseController = terminalFocusPulseController
         self.currentDate = currentDate
-        if ProcessInfo.processInfo.environment["DEBUG"] == "1" {
-            fputs("muxy: DEBUG=1 enabled (browser/cycle profiling active)\n", stderr)
-        }
+        if ProcessInfo.processInfo.environment["DEBUG"] == "1" { fputs("muxy: DEBUG=1 enabled (browser/cycle profiling active)\n", stderr) }
     }
 
     @discardableResult public func syncConfig() throws -> AppConfig { return try store.appConfig() }
@@ -235,9 +232,7 @@ public final class MuxyOrchestrator {
         try store.setWorkspaceStatusChecks(workspaceID: workspace.id, checks: existing.statusChecks)
         try store.setWorkspaceBrowserSessions(workspaceID: workspace.id, sessions: existing.browserSessions)
         try store.touchWorkspaceSettings(workspaceID: workspace.id, updatedAt: nowISO8601())
-        if workspace.isRunning {
-            try applyWorkspaceSettingsUpdate(project: project, workspace: workspace, previous: previous, updated: existing)
-        }
+        if workspace.isRunning { try applyWorkspaceSettingsUpdate(project: project, workspace: workspace, previous: previous, updated: existing) }
     }
 
     public func updateWorkspaceTooltip(workspaceID: String, tooltip: String?) throws {
@@ -688,9 +683,10 @@ public final class MuxyOrchestrator {
         }
         for window in uniqueWindows {
             let stored = WindowRecord(
-                id: window.id, workspaceID: window.workspaceID, app: window.app, name: window.name, detail: window.detail, targetURL: window.targetURL,
-                windowID: window.windowID, itermSessionID: window.itermSessionID, itermTabIndex: window.itermTabIndex,
-                tmuxWindowID: window.tmuxWindowID, role: window.role, orderIndex: index, lastSeenAt: window.lastSeenAt)
+                id: window.id, workspaceID: window.workspaceID, app: window.app, name: window.name, detail: window.detail,
+                targetURL: window.targetURL, windowID: window.windowID, terminalTrackingID: window.terminalTrackingID,
+                terminalNativeID: window.terminalNativeID, itermTabIndex: window.itermTabIndex, tmuxWindowID: window.tmuxWindowID,
+                role: window.role, orderIndex: index, lastSeenAt: window.lastSeenAt)
             index += 1
             try store.upsert(window: stored)
         }
@@ -736,9 +732,7 @@ public final class MuxyOrchestrator {
             }
             if let id = window.windowID { _ = try? yabai.closeWindow(id: id) }
         }
-        for tmuxWindow in try tmuxWindows(workspaceID: workspace.id) {
-            _ = try? tmux.killWindow(windowID: tmuxWindow.id)
-        }
+        for tmuxWindow in try tmuxWindows(workspaceID: workspace.id) { _ = try? tmux.killWindow(windowID: tmuxWindow.id) }
         try store.deleteRunningProcesses(workspaceID: workspace.id)
         try store.deleteWindows(workspaceID: workspace.id)
         try store.deleteAgentWindows(workspaceID: workspace.id)
@@ -798,54 +792,38 @@ public final class MuxyOrchestrator {
         let missingConfiguredBrowserSessionCount = expectedBrowserTargets.subtracting(trackedBrowserTargets).count
 
         let expectsManagedRuntime = !expectedProcessKeys.isEmpty
-        let runtimeHealth: WorkspaceRuntimeHealth = switch lifecycleState {
-        case .stopped:
-            hasTrackedRuntimeIndicators ? .partial : .healthy
-        case .running:
-            if !hasTrackedRuntimeIndicators {
-                expectsManagedRuntime ? .missing : .healthy
-            } else if exitedProcessCount > 0 || failedCheckCount > 0 || waitingAgentWindowCount > 0 || missingConfiguredProcessCount > 0 {
-                .partial
-            } else {
-                .healthy
+        let runtimeHealth: WorkspaceRuntimeHealth =
+            switch lifecycleState {
+            case .stopped: hasTrackedRuntimeIndicators ? .partial : .healthy
+            case .running:
+                if !hasTrackedRuntimeIndicators {
+                    expectsManagedRuntime ? .missing : .healthy
+                } else if exitedProcessCount > 0 || failedCheckCount > 0 || waitingAgentWindowCount > 0 || missingConfiguredProcessCount > 0 {
+                    .partial
+                } else {
+                    .healthy
+                }
             }
-        }
 
         return WorkspaceRuntimeStatus(
-            workspaceID: workspaceID,
-            lifecycleState: lifecycleState,
-            runtimeHealth: runtimeHealth,
-            hasTrackedRuntimeIndicators: hasTrackedRuntimeIndicators,
-            runningProcessCount: runningProcessCount,
-            exitedProcessCount: exitedProcessCount,
-            failedCheckCount: failedCheckCount,
-            waitingAgentWindowCount: waitingAgentWindowCount,
-            missingConfiguredProcessCount: missingConfiguredProcessCount,
-            missingConfiguredBrowserSessionCount: missingConfiguredBrowserSessionCount)
+            workspaceID: workspaceID, lifecycleState: lifecycleState, runtimeHealth: runtimeHealth,
+            hasTrackedRuntimeIndicators: hasTrackedRuntimeIndicators, runningProcessCount: runningProcessCount,
+            exitedProcessCount: exitedProcessCount, failedCheckCount: failedCheckCount, waitingAgentWindowCount: waitingAgentWindowCount,
+            missingConfiguredProcessCount: missingConfiguredProcessCount, missingConfiguredBrowserSessionCount: missingConfiguredBrowserSessionCount)
     }
 
     // Configured-process matching uses the raw configured name directly.
-    private func configuredProcessMatchKey(name: String?) -> String {
-        name?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-    }
+    private func configuredProcessMatchKey(name: String?) -> String { name?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "" }
 
-    private func runningProcessMatchKey(name: String) -> String {
-        name.trimmingCharacters(in: .whitespacesAndNewlines)
-    }
+    private func runningProcessMatchKey(name: String) -> String { name.trimmingCharacters(in: .whitespacesAndNewlines) }
 
     private func missingRuntimeRecordCount(expectedKeys: [String], actualKeys: [String]) -> Int {
         var actualCounts: [String: Int] = [:]
-        for key in actualKeys {
-            actualCounts[key, default: 0] += 1
-        }
+        for key in actualKeys { actualCounts[key, default: 0] += 1 }
 
         var missingCount = 0
         for key in expectedKeys {
-            if let currentCount = actualCounts[key], currentCount > 0 {
-                actualCounts[key] = currentCount - 1
-            } else {
-                missingCount += 1
-            }
+            if let currentCount = actualCounts[key], currentCount > 0 { actualCounts[key] = currentCount - 1 } else { missingCount += 1 }
         }
         return missingCount
     }
@@ -885,10 +863,10 @@ public final class MuxyOrchestrator {
                     if !isProcessAlive(pid: pid) {
                         let updatedProcess = RunningProcessRecord(
                             id: process.id, workspaceID: process.workspaceID, templateName: process.templateName, command: process.command,
-                            terminalApp: process.terminalApp, windowID: process.windowID, itermSessionID: process.itermSessionID,
+                            terminalApp: process.terminalApp, windowID: process.windowID, terminalTrackingID: process.terminalTrackingID,
+                            terminalNativeID: process.terminalNativeID,
                             itermTabIndex: process.itermTabIndex, tmuxWindowID: process.tmuxWindowID, pid: process.pid, status: .exited,
-                            logPath: process.logPath,
-                            lastOutputAt: process.lastOutputAt, startedAt: process.startedAt, exitedAt: nowISO8601())
+                            logPath: process.logPath, lastOutputAt: process.lastOutputAt, startedAt: process.startedAt, exitedAt: nowISO8601())
                         try store.upsert(runningProcess: updatedProcess)
                         // Mark status check results as failed so they reflect the process exit.
                         try store.markStatusResultsAsFailed(processID: process.id)
@@ -996,9 +974,10 @@ public final class MuxyOrchestrator {
         // Mark the process as exited in the database
         let updatedProcess = RunningProcessRecord(
             id: process.id, workspaceID: process.workspaceID, templateName: process.templateName, command: process.command,
-            terminalApp: process.terminalApp, windowID: process.windowID, itermSessionID: process.itermSessionID,
-            itermTabIndex: process.itermTabIndex, tmuxWindowID: process.tmuxWindowID, pid: process.pid, status: .exited,
-            logPath: process.logPath, lastOutputAt: process.lastOutputAt, startedAt: process.startedAt, exitedAt: nowISO8601())
+            terminalApp: process.terminalApp, windowID: process.windowID, terminalTrackingID: process.terminalTrackingID,
+            terminalNativeID: process.terminalNativeID,
+            itermTabIndex: process.itermTabIndex, tmuxWindowID: process.tmuxWindowID, pid: process.pid, status: .exited, logPath: process.logPath,
+            lastOutputAt: process.lastOutputAt, startedAt: process.startedAt, exitedAt: nowISO8601())
         try store.upsert(runningProcess: updatedProcess)
         // Restart the process in a new terminal
         try restartProcessInTerminal(workspaceID: workspaceID, process: process)
@@ -1044,32 +1023,27 @@ public final class MuxyOrchestrator {
         let terminalHandle = try launchProcessInTmux(
             workspace: workspace, processName: process.templateName, command: command, env: env, terminalHost: terminalHost, background: background,
             replaceExistingSession: true)
-        let capturedWindowID = try captureNewAppWindowID(snapshot: snapshot, appName: terminalAppName(for: terminalHost))
-            ?? terminalHandle.fallbackWindowID
+        let capturedWindowID =
+            try captureNewAppWindowID(snapshot: snapshot, appName: terminalAppName(for: terminalHost)) ?? terminalHandle.fallbackWindowID
             ?? process.windowID
         let tmuxWindow = try currentTmuxWindowInfo(workspaceID: workspace.id, processName: process.templateName)
         let newPID = tmuxWindow?.panePID
+        let hookSessionID = storedTerminalHookSessionID(terminalHost: terminalHost, handle: terminalHandle)
+        let terminalNativeID = storedTerminalNativeID(terminalHost: terminalHost, handle: terminalHandle)
         let restartedProcess = RunningProcessRecord(
             id: process.id, workspaceID: process.workspaceID, templateName: process.templateName, command: process.command,
-            terminalApp: terminalAppName(for: terminalHost), windowID: capturedWindowID, itermSessionID: terminalHandle.trackingIdentity?.sessionID,
-            itermTabIndex: nil, tmuxWindowID: tmuxWindow?.id, pid: newPID,
-            status: .running, logPath: nil, lastOutputAt: nil, startedAt: nowISO8601(), exitedAt: nil)
+            terminalApp: terminalAppName(for: terminalHost), windowID: capturedWindowID, terminalTrackingID: hookSessionID,
+            terminalNativeID: terminalNativeID, itermTabIndex: nil, tmuxWindowID: tmuxWindow?.id, pid: newPID, status: .running, logPath: nil,
+            lastOutputAt: nil, startedAt: nowISO8601(), exitedAt: nil)
         try store.upsert(runningProcess: restartedProcess)
         let existingWindows = try store.windows(workspaceID: workspace.id)
-        let existingWindow = existingWindows.first(where: { $0.role == "terminal" && $0.windowID == process.windowID })
+        let existingWindow =
+            existingWindows.first(where: { $0.role == "terminal" && $0.windowID == process.windowID })
             ?? existingWindows.first(where: { $0.role == "terminal" && $0.id == process.id })
         let restoredWindow = WindowRecord(
-            id: existingWindow?.id ?? process.id,
-            workspaceID: workspace.id,
-            app: terminalAppName(for: terminalHost),
-            name: process.templateName,
-            detail: process.command,
-            targetURL: nil,
-            windowID: capturedWindowID,
-            itermSessionID: terminalHandle.trackingIdentity?.sessionID,
-            itermTabIndex: nil,
-            tmuxWindowID: tmuxWindow?.id,
-            role: "terminal",
+            id: existingWindow?.id ?? process.id, workspaceID: workspace.id, app: terminalAppName(for: terminalHost), name: process.templateName,
+            detail: process.command, targetURL: nil, windowID: capturedWindowID, terminalTrackingID: hookSessionID,
+            terminalNativeID: terminalNativeID, itermTabIndex: nil, tmuxWindowID: tmuxWindow?.id, role: "terminal",
             orderIndex: existingWindow?.orderIndex ?? Self.nextWindowOrderIndex(existing: existingWindows, role: "terminal", orderOffset: 200),
             lastSeenAt: nowISO8601())
         try store.upsert(window: restoredWindow)
@@ -1118,11 +1092,14 @@ public final class MuxyOrchestrator {
             let refreshedName = window.name
             let refreshedDetail = liveWindow.title
             let refreshedApp = liveWindow.app
-            guard window.name != refreshedName || window.detail != refreshedDetail || window.app != refreshedApp else { continue }
+            guard
+                window.name != refreshedName || window.detail != refreshedDetail || window.app != refreshedApp
+            else { continue }
             let refreshedWindow = WindowRecord(
                 id: window.id, workspaceID: window.workspaceID, app: refreshedApp, name: refreshedName, detail: refreshedDetail,
-                targetURL: window.targetURL, windowID: windowID, itermSessionID: window.itermSessionID, itermTabIndex: window.itermTabIndex,
-                tmuxWindowID: window.tmuxWindowID, role: window.role, orderIndex: window.orderIndex, lastSeenAt: window.lastSeenAt)
+                targetURL: window.targetURL, windowID: windowID, terminalTrackingID: window.terminalTrackingID,
+                terminalNativeID: window.terminalNativeID, itermTabIndex: window.itermTabIndex, tmuxWindowID: window.tmuxWindowID,
+                role: window.role, orderIndex: window.orderIndex, lastSeenAt: window.lastSeenAt)
             try store.upsert(window: refreshedWindow)
             refreshedCount += 1
         }
@@ -1167,26 +1144,22 @@ public final class MuxyOrchestrator {
         }
         let namedPorts = try store.workspacePortsNamed(workspaceID: workspaceID)
         let env = terminalLaunchEnvironment(
-            base: buildWorkspaceEnv(project: project, workspace: workspace, namedPorts: namedPorts),
-            terminalHost: terminalHost)
+            base: buildWorkspaceEnv(project: project, workspace: workspace, namedPorts: namedPorts), terminalHost: terminalHost)
         let snapshot = try yabai.listWindows()
         let terminalHandle = try openManagedTerminalWindow(
-            terminalHost: terminalHost,
-            command: interactiveShellCommand(cwd: workspace.dir),
-            cwd: workspace.dir,
-            environment: env,
-            background: false)
-        let capturedWindowID = try captureNewAppWindowID(snapshot: snapshot, appName: terminalAppName(for: terminalHost))
-            ?? terminalHandle.fallbackWindowID
+            terminalHost: terminalHost, command: interactiveShellCommand(cwd: workspace.dir), cwd: workspace.dir, environment: env, background: false)
+        let capturedWindowID =
+            try captureNewAppWindowID(snapshot: snapshot, appName: terminalAppName(for: terminalHost)) ?? terminalHandle.fallbackWindowID
         let existing = try store.windows(workspaceID: workspace.id)
         let nextOrder = Self.nextWindowOrderIndex(existing: existing, role: "terminal", orderOffset: 200)
         let generatedTitle = try generatedAdHocTerminalWindowName(workspaceID: workspace.id)
+        let hookSessionID = storedTerminalHookSessionID(terminalHost: terminalHost, handle: terminalHandle)
+        let terminalNativeID = storedTerminalNativeID(terminalHost: terminalHost, handle: terminalHandle)
         try store.upsert(
             window: WindowRecord(
                 id: UUID().uuidString, workspaceID: workspace.id, app: terminalAppName(for: terminalHost), name: generatedTitle, detail: nil,
-                targetURL: nil, windowID: capturedWindowID, itermSessionID: terminalHandle.trackingIdentity?.sessionID, itermTabIndex: nil, tmuxWindowID: nil,
-                role: "terminal",
-                orderIndex: nextOrder, lastSeenAt: nowISO8601()))
+                targetURL: nil, windowID: capturedWindowID, terminalTrackingID: hookSessionID, terminalNativeID: terminalNativeID, itermTabIndex: nil,
+                tmuxWindowID: nil, role: "terminal", orderIndex: nextOrder, lastSeenAt: nowISO8601()))
         if !workspace.isRunning {
             let launchedAt = workspace.lastLaunchedAt ?? nowISO8601()
             try store.updateWorkspaceRunning(id: workspace.id, isRunning: true, launchedAt: launchedAt)
@@ -1217,7 +1190,9 @@ public final class MuxyOrchestrator {
         let focusStartedAt = currentDate()
         let loadWindowsStartedAt = currentDate()
         let windows = try indexedWorkspaceWindows(workspaceID: workspaceID)
-        logCycleProfile("workspace=\(workspaceID) stage=direct_load_windows index=\(index) count=\(windows.count) elapsed_ms=\(elapsedMS(since: loadWindowsStartedAt))")
+        logCycleProfile(
+            "workspace=\(workspaceID) stage=direct_load_windows index=\(index) count=\(windows.count) elapsed_ms=\(elapsedMS(since: loadWindowsStartedAt))"
+        )
         guard index <= windows.count else { return }
         let targetIndex = index - 1
         let focusTargetStartedAt = currentDate()
@@ -1249,8 +1224,7 @@ public final class MuxyOrchestrator {
             let focused = try focusAgentWindowRecord(record)
             guard focused else { throw missingTrackedAgentError(record) }
             rememberNavigationTarget(.agent(record), workspaceID: workspaceID)
-        case .browserSession(let targetURL):
-            try focusWorkspaceBrowserSession(workspaceID: workspaceID, targetURL: targetURL)
+        case .browserSession(let targetURL): try focusWorkspaceBrowserSession(workspaceID: workspaceID, targetURL: targetURL)
         case .configuredProcess(let processName):
             throw MuxyError.invalidArgument(message: "Process window '\(processName)' is not currently running.")
         case .process(let process):
@@ -1265,8 +1239,7 @@ public final class MuxyOrchestrator {
 
         try setActiveWorkspace(id: workspaceID)
         logCycleProfile(
-            "workspace=\(workspaceID) stage=direct_focus_total name=\(trimmedName) success=1 elapsed_ms=\(elapsedMS(since: focusStartedAt))"
-        )
+            "workspace=\(workspaceID) stage=direct_focus_total name=\(trimmedName) success=1 elapsed_ms=\(elapsedMS(since: focusStartedAt))")
     }
 
     public func focusWorkspaceBrowserSession(workspaceID: String, targetURL: String) throws {
@@ -1280,7 +1253,9 @@ public final class MuxyOrchestrator {
         }
 
         try recoverMissingBrowserSession(workspaceID: workspaceID, targetURL: targetURL)
-        if let recoveredWindow = try indexedWorkspaceWindows(workspaceID: workspaceID).first(where: { $0.role == "browser" && $0.targetURL == targetURL }) {
+        if let recoveredWindow = try indexedWorkspaceWindows(workspaceID: workspaceID).first(where: {
+            $0.role == "browser" && $0.targetURL == targetURL
+        }) {
             rememberNavigationTarget(navigationTarget(for: recoveredWindow), workspaceID: workspaceID)
         }
         try setActiveWorkspace(id: workspaceID)
@@ -1333,8 +1308,7 @@ public final class MuxyOrchestrator {
         let targetsStartedAt = currentDate()
         let targets = try workspaceNavigationTargets(workspaceID: workspaceID, forCycling: true)
         logCycleProfile(
-            "workspace=\(workspaceID) stage=targets direction=\(direction) count=\(targets.count) elapsed_ms=\(elapsedMS(since: targetsStartedAt))"
-        )
+            "workspace=\(workspaceID) stage=targets direction=\(direction) count=\(targets.count) elapsed_ms=\(elapsedMS(since: targetsStartedAt))")
         guard !targets.isEmpty else { return }
         let currentIndexStartedAt = currentDate()
         let currentIndex =
@@ -1370,8 +1344,7 @@ public final class MuxyOrchestrator {
             setWindowNavigationCursor(navigationCursor(for: targets[resolvedTargetIndex]), workspaceID: workspaceID)
             try setActiveWorkspace(id: workspaceID)
             logCycleProfile(
-                "workspace=\(workspaceID) stage=set_active direction=\(direction) elapsed_ms=\(elapsedMS(since: activeWorkspaceStartedAt))"
-            )
+                "workspace=\(workspaceID) stage=set_active direction=\(direction) elapsed_ms=\(elapsedMS(since: activeWorkspaceStartedAt))")
         }
         logCycleProfile(
             "workspace=\(workspaceID) direction=\(direction) total_ms=\(elapsedMS(since: cycleStartedAt)) target=\(navigationTargetDebugName(targets[resolvedTargetIndex])) success=\(ok ? "1" : "0")"
@@ -1420,10 +1393,11 @@ public final class MuxyOrchestrator {
                 guard let windowID = process.windowID else { continue }
                 map[String(windowID), default: []].append(process)
             }
-            return Dictionary(uniqueKeysWithValues: map.compactMap { key, value in
-                guard let windowID = Int(key) else { return nil }
-                return (windowID, value.sorted { $0.templateName.localizedStandardCompare($1.templateName) == .orderedAscending })
-            })
+            return Dictionary(
+                uniqueKeysWithValues: map.compactMap { key, value in
+                    guard let windowID = Int(key) else { return nil }
+                    return (windowID, value.sorted { $0.templateName.localizedStandardCompare($1.templateName) == .orderedAscending })
+                })
         }()
         var matchedProcessIDs = Set<String>()
 
@@ -1453,15 +1427,10 @@ public final class MuxyOrchestrator {
             targets.append(.window(window))
         }
 
-        let orphanedProcesses = processes
-            .filter { process in
-                !matchedProcessIDs.contains(process.id)
-                    && terminalTargetID(process: process).map { !agentTerminalIDs.contains($0) } != false
-            }
-            .sorted { $0.templateName.localizedStandardCompare($1.templateName) == .orderedAscending }
-        for process in orphanedProcesses {
-            targets.append(.process(process))
-        }
+        let orphanedProcesses = processes.filter { process in
+            !matchedProcessIDs.contains(process.id) && terminalTargetID(process: process).map { !agentTerminalIDs.contains($0) } != false
+        }.sorted { $0.templateName.localizedStandardCompare($1.templateName) == .orderedAscending }
+        for process in orphanedProcesses { targets.append(.process(process)) }
         for record in agentWindows.sorted(by: { ($0.label ?? "").localizedStandardCompare($1.label ?? "") == .orderedAscending }) {
             targets.append(.agent(record))
         }
@@ -1498,12 +1467,9 @@ public final class MuxyOrchestrator {
 
     private func focusNavigationTarget(_ target: WorkspaceNavigationTarget, workspaceID: String) throws -> Bool {
         switch target {
-        case .agent(let record):
-            return try focusAgentWindowRecord(record)
-        case .browser(let window), .window(let window):
-            return focusTrackedWindow(window, workspaceID: workspaceID)
-        case .process(let process):
-            return try focusWorkspaceProcessRecord(process, workspaceID: workspaceID)
+        case .agent(let record): return try focusAgentWindowRecord(record)
+        case .browser(let window), .window(let window): return focusTrackedWindow(window, workspaceID: workspaceID)
+        case .process(let process): return try focusWorkspaceProcessRecord(process, workspaceID: workspaceID)
         }
     }
 
@@ -1536,11 +1502,12 @@ public final class MuxyOrchestrator {
         try validateWorkspaceFocusNames(workspaceID: workspaceID)
         let runtimeTargets = try workspaceNavigationTargets(workspaceID: workspaceID)
         let runtimeProcessNames = Set(try store.runningProcesses(workspaceID: workspaceID).map { normalizedFocusName($0.templateName) })
-        let runtimeBrowserURLs = Set(runtimeTargets.compactMap { target -> String? in
-            guard case .browser(let window) = target else { return nil }
-            guard let targetURL = sanitizedFocusName(window.targetURL) else { return nil }
-            return normalizedFocusName(targetURL)
-        })
+        let runtimeBrowserURLs = Set(
+            runtimeTargets.compactMap { target -> String? in
+                guard case .browser(let window) = target else { return nil }
+                guard let targetURL = sanitizedFocusName(window.targetURL) else { return nil }
+                return normalizedFocusName(targetURL)
+            })
         let configuredBrowsers = try resolvedBrowserSessionsForFocusNames(workspaceID: workspaceID)
         let configuredProcesses = try store.workspaceProcesses(workspaceID: workspaceID)
 
@@ -1555,9 +1522,7 @@ public final class MuxyOrchestrator {
             results.append((name, target))
         }
 
-        for target in runtimeTargets {
-            append(try focusName(for: target, workspaceID: workspaceID), target: focusableTarget(from: target))
-        }
+        for target in runtimeTargets { append(try focusName(for: target, workspaceID: workspaceID), target: focusableTarget(from: target)) }
 
         for session in configuredBrowsers where !runtimeBrowserURLs.contains(normalizedFocusName(session.targetURL)) {
             append(session.name, target: .browserSession(targetURL: session.targetURL))
@@ -1584,14 +1549,10 @@ public final class MuxyOrchestrator {
 
     private func focusName(for target: WorkspaceNavigationTarget, workspaceID: String) throws -> String? {
         switch target {
-        case .agent(let record):
-            return sanitizedFocusName(record.label)
-        case .browser(let window):
-            return sanitizedFocusName(window.name)
-        case .process(let process):
-            return sanitizedFocusName(process.templateName)
-        case .window(let window):
-            return sanitizedFocusName(window.name)
+        case .agent(let record): return sanitizedFocusName(record.label)
+        case .browser(let window): return sanitizedFocusName(window.name)
+        case .process(let process): return sanitizedFocusName(process.templateName)
+        case .window(let window): return sanitizedFocusName(window.name)
         }
     }
 
@@ -1607,40 +1568,24 @@ public final class MuxyOrchestrator {
     private func generatedAdHocTerminalWindowName(workspaceID: String) throws -> String {
         let usedNames = Set(try workspaceFocusableWindowNames(workspaceID: workspaceID).map(normalizedFocusName))
         var suffix = 1
-        while usedNames.contains(normalizedFocusName("shell-\(suffix)")) {
-            suffix += 1
-        }
+        while usedNames.contains(normalizedFocusName("shell-\(suffix)")) { suffix += 1 }
         return "shell-\(suffix)"
     }
 
-    private func uniqueAgentFocusLabel(
-        workspaceID: String,
-        preferredLabel: String?,
-        excludingAgentWindowID: String? = nil
-    ) throws -> String? {
+    private func uniqueAgentFocusLabel(workspaceID: String, preferredLabel: String?, excludingAgentWindowID: String? = nil) throws -> String? {
         guard let baseLabel = sanitizedFocusName(preferredLabel) else { return nil }
         let usedNames = Set(
-            try focusableWorkspaceTargets(workspaceID: workspaceID)
-                .filter { entry in
-                    guard case .agent(let record) = entry.target, let excludingAgentWindowID else { return true }
-                    return record.id != excludingAgentWindowID
-                }
-                .map(\.name)
-                .map(normalizedFocusName))
-        let existingAgentNames = try store.agentWindows(workspaceID: workspaceID)
-            .filter { $0.id != excludingAgentWindowID }
-            .compactMap(\.label)
-            .compactMap(sanitizedFocusName)
-            .map(normalizedFocusName)
+            try focusableWorkspaceTargets(workspaceID: workspaceID).filter { entry in
+                guard case .agent(let record) = entry.target, let excludingAgentWindowID else { return true }
+                return record.id != excludingAgentWindowID
+            }.map(\.name).map(normalizedFocusName))
+        let existingAgentNames = try store.agentWindows(workspaceID: workspaceID).filter { $0.id != excludingAgentWindowID }.compactMap(\.label)
+            .compactMap(sanitizedFocusName).map(normalizedFocusName)
         var blockedNames = usedNames
         blockedNames.formUnion(existingAgentNames)
-        if !blockedNames.contains(normalizedFocusName(baseLabel)) {
-            return baseLabel
-        }
+        if !blockedNames.contains(normalizedFocusName(baseLabel)) { return baseLabel }
         var suffix = 2
-        while blockedNames.contains(normalizedFocusName("\(baseLabel)-\(suffix)")) {
-            suffix += 1
-        }
+        while blockedNames.contains(normalizedFocusName("\(baseLabel)-\(suffix)")) { suffix += 1 }
         return "\(baseLabel)-\(suffix)"
     }
 
@@ -1657,9 +1602,9 @@ public final class MuxyOrchestrator {
         return targetURL
     }
 
-    private func resolvedBrowserSessionsForFocusNames(workspaceID: String, browserSessions: [BrowserSession]? = nil) throws
-        -> [(name: String, targetURL: String)]
-    {
+    private func resolvedBrowserSessionsForFocusNames(workspaceID: String, browserSessions: [BrowserSession]? = nil) throws -> [(
+        name: String, targetURL: String
+    )] {
         let (project, workspace) = try resolveWorkspace(id: workspaceID)
         let sessions = try browserSessions ?? store.workspaceBrowserSessions(workspaceID: workspace.id)
         let namedPorts = try store.workspacePortsNamed(workspaceID: workspace.id)
@@ -1680,9 +1625,7 @@ public final class MuxyOrchestrator {
     }
 
     private func validateUniqueConfiguredFocusNames(processes: [ProcessTemplate], browserSessions: [BrowserSession]) throws {
-        let processEntries = try processes.map { process in
-            (name: try requiredConfiguredFocusName(process.name, kind: "Process"), kind: "process")
-        }
+        let processEntries = try processes.map { process in (name: try requiredConfiguredFocusName(process.name, kind: "Process"), kind: "process") }
         let browserEntries = try browserSessions.map { session in
             (name: try requiredConfiguredFocusName(session.name, kind: "Browser session"), kind: "browser session")
         }
@@ -1699,7 +1642,8 @@ public final class MuxyOrchestrator {
         let processEntries = try workspaceProcesses.map { process in
             (name: try requiredConfiguredFocusName(process.name, kind: "Process"), kind: "process")
         }
-        let entries = processEntries
+        let entries =
+            processEntries
             + (try resolvedBrowserSessionsForFocusNames(workspaceID: workspaceID, browserSessions: workspaceBrowserSessions).map {
                 ($0.name, "browser session")
             })
@@ -1728,9 +1672,7 @@ public final class MuxyOrchestrator {
     }
 
     private func missingFocusNameMessage(name: String, availableNames: [String]) -> String {
-        guard !availableNames.isEmpty else {
-            return "Window '\(name)' was not found. No focusable window names are available for this workspace."
-        }
+        guard !availableNames.isEmpty else { return "Window '\(name)' was not found. No focusable window names are available for this workspace." }
         return "Window '\(name)' was not found. Available names: \(availableNames.joined(separator: ", "))"
     }
 
@@ -1771,20 +1713,13 @@ public final class MuxyOrchestrator {
         let focused: Bool
         if window.role == "browser", let windowID = window.windowID {
             let focusedWindow = (try? yabai.focusWindow(id: windowID)) ?? false
-            if focusedWindow, chrome.isAvailable() {
-                _ = try? chrome.focusFirstTabOfFrontWindow()
-            }
+            if focusedWindow, chrome.isAvailable() { _ = try? chrome.focusFirstTabOfFrontWindow() }
             focused = focusedWindow
         } else {
             let trackingIdentity = resolvedFocusIdentity(for: window, workspaceID: workspaceID)
             let adapterFocused = focusManagedTerminal(
-                terminalApp: window.app,
-                trackingIdentity: trackingIdentity,
-                windowID: window.windowID,
-                tabIndex: window.itermTabIndex)
-            focused = adapterFocused == true
-                ? true
-                : ((window.windowID.flatMap { try? yabai.focusWindow(id: $0) }) ?? false)
+                terminalApp: window.app, trackingIdentity: trackingIdentity, windowID: window.windowID, tabIndex: window.itermTabIndex)
+            focused = adapterFocused == true ? true : ((window.windowID.flatMap { try? yabai.focusWindow(id: $0) }) ?? false)
         }
         guard let id = window.windowID else { return focused }
         if !focused, window.role == "browser", let targetURL = window.targetURL {
@@ -1838,11 +1773,14 @@ public final class MuxyOrchestrator {
     private func persistItermTerminalWindowMetadata(workspaceID: String, windowID: Int, sessionID: String?, tabIndex: Int?) throws {
         guard let sessionID, !sessionID.isEmpty else { return }
         let windows = try store.windows(workspaceID: workspaceID)
-        guard let existing = windows.first(where: { $0.role == "terminal" && isManagedTerminalApp($0.app) && $0.windowID == windowID }) else { return }
+        guard let existing = windows.first(where: { $0.role == "terminal" && isManagedTerminalApp($0.app) && $0.windowID == windowID }) else {
+            return
+        }
         let updated = WindowRecord(
             id: existing.id, workspaceID: existing.workspaceID, app: existing.app, name: existing.name, detail: existing.detail,
-            targetURL: existing.targetURL, windowID: existing.windowID, itermSessionID: sessionID, itermTabIndex: tabIndex,
-            tmuxWindowID: existing.tmuxWindowID, role: existing.role, orderIndex: existing.orderIndex, lastSeenAt: nowISO8601())
+            targetURL: existing.targetURL, windowID: existing.windowID, terminalTrackingID: sessionID, terminalNativeID: existing.terminalNativeID,
+            itermTabIndex: tabIndex, tmuxWindowID: existing.tmuxWindowID, role: existing.role, orderIndex: existing.orderIndex,
+            lastSeenAt: nowISO8601())
         try store.upsert(window: updated)
     }
 
@@ -1867,41 +1805,45 @@ public final class MuxyOrchestrator {
 
     private func terminalAdapter(for terminalHost: TerminalHost) -> (any TerminalAdapter)? { terminalAdaptersByHost[terminalHost] }
 
-    private func resolvedFocusIdentity(for window: WindowRecord, workspaceID: String) -> TerminalTrackingIdentity? {
-        if let sessionID = window.itermSessionID, !sessionID.isEmpty {
-            return .session(sessionID)
+    private func storedTerminalHookSessionID(terminalHost: TerminalHost, handle: ManagedTerminalHandle) -> String? {
+        switch terminalHost {
+        case .ghostty:
+            return handle.hookSessionID ?? handle.trackingIdentity?.sessionID
+        case .iterm2:
+            return handle.trackingIdentity?.sessionID
         }
+    }
+
+    private func storedTerminalNativeID(terminalHost: TerminalHost, handle: ManagedTerminalHandle) -> String? {
+        guard terminalHost == .ghostty else { return nil }
+        return handle.trackingIdentity?.sessionID
+    }
+
+    private func resolvedFocusIdentity(for window: WindowRecord, workspaceID: String) -> TerminalTrackingIdentity? {
+        if let terminalHost = terminalHost(for: window.app), terminalHost == .ghostty, let focusIdentity = window.terminalFocusIdentity {
+            return focusIdentity
+        }
+        if let sessionID = window.terminalTrackingID, !sessionID.isEmpty { return .session(sessionID) }
         guard window.role == "terminal" else { return nil }
         if let windowID = window.windowID {
-            if let processIdentity = try? store.runningProcesses(workspaceID: workspaceID)
-                .first(where: { $0.windowID == windowID && $0.terminalApp == window.app && $0.terminalFocusIdentity != nil })?
-                .terminalFocusIdentity
-            {
+            if let processIdentity = try? store.runningProcesses(workspaceID: workspaceID).first(where: {
+                $0.windowID == windowID && $0.terminalApp == window.app && $0.terminalFocusIdentity != nil
+            })?.terminalFocusIdentity {
                 return processIdentity
             }
-            if let agentIdentity = try? store.agentWindows(workspaceID: workspaceID)
-                .first(where: {
-                    TerminalHost(rawValue: $0.provider.rawValue)?.appName == window.app
-                        && (($0.yabaiWindowID ?? $0.windowID) == windowID)
-                        && $0.terminalFocusIdentity != nil
-                })?.terminalFocusIdentity
-            {
+            if let agentIdentity = try? store.agentWindows(workspaceID: workspaceID).first(where: {
+                TerminalHost(rawValue: $0.provider.rawValue)?.appName == window.app && (($0.yabaiWindowID ?? $0.windowID) == windowID)
+                    && $0.terminalFocusIdentity != nil
+            })?.terminalFocusIdentity {
                 return agentIdentity
             }
             return .window(windowID)
         }
-        if let tmuxWindowID = window.tmuxWindowID, !tmuxWindowID.isEmpty {
-            return .tmux(tmuxWindowID)
-        }
+        if let tmuxWindowID = window.tmuxWindowID, !tmuxWindowID.isEmpty { return .tmux(tmuxWindowID) }
         return nil
     }
 
-    private func focusManagedTerminal(
-        terminalApp: String?,
-        trackingIdentity: TerminalTrackingIdentity?,
-        windowID: Int?,
-        tabIndex: Int?
-    ) -> Bool? {
+    private func focusManagedTerminal(terminalApp: String?, trackingIdentity: TerminalTrackingIdentity?, windowID: Int?, tabIndex: Int?) -> Bool? {
         guard let terminalHost = terminalHost(for: terminalApp), let terminalAdapter = terminalAdapter(for: terminalHost) else { return nil }
         let hasPreciseTarget = trackingIdentity != nil || tabIndex != nil
         guard hasPreciseTarget else { return nil }
@@ -1915,9 +1857,7 @@ public final class MuxyOrchestrator {
         terminalFocusPulseController.pulse(windowID: windowID, color: color, yabai: yabai)
     }
 
-    private func terminalAdapterAvailable(_ terminalHost: TerminalHost) -> Bool {
-        terminalAdapter(for: terminalHost)?.isAvailable() == true
-    }
+    private func terminalAdapterAvailable(_ terminalHost: TerminalHost) -> Bool { terminalAdapter(for: terminalHost)?.isAvailable() == true }
 
     private func missingTerminalDependencyMessage(for terminalHost: TerminalHost, operation: String) -> String {
         "\(terminalHost.displayName) is required to \(operation)."
@@ -1930,14 +1870,16 @@ public final class MuxyOrchestrator {
             throw MuxyError.invalidArgument(message: "Unsupported terminal host: \(terminalHost.rawValue)")
         }
         let result = try terminalAdapter.openWindowAndRun(command: command, cwd: cwd, environment: environment, background: background)
-        return ManagedTerminalHandle(fallbackWindowID: result.fallbackWindowID, trackingIdentity: result.trackingIdentity)
+        return ManagedTerminalHandle(
+            fallbackWindowID: result.fallbackWindowID,
+            trackingIdentity: result.trackingIdentity,
+            hookSessionID: result.hookSessionID)
     }
 
     private func workspaceTerminalWindowID(workspaceID: String) throws -> Int? {
         let liveWindowIDs = Set(try yabai.listWindows().filter { isManagedTerminalApp($0.app) }.map(\.id))
-        let windowIDs = try store.windows(workspaceID: workspaceID)
-            .filter { $0.role == "terminal" && isManagedTerminalApp($0.app) }
-            .compactMap(\.windowID)
+        let windowIDs = try store.windows(workspaceID: workspaceID).filter { $0.role == "terminal" && isManagedTerminalApp($0.app) }.compactMap(
+            \.windowID)
         let processWindowIDs = try store.runningProcesses(workspaceID: workspaceID).compactMap(\.windowID)
         let agentWindowIDs = try store.agentWindows(workspaceID: workspaceID).compactMap { $0.windowID ?? $0.yabaiWindowID }
         let candidateWindowIDs = windowIDs + processWindowIDs + agentWindowIDs
@@ -1946,14 +1888,15 @@ public final class MuxyOrchestrator {
 
     private func workspaceTerminalSessionID(workspaceID: String) throws -> String? {
         if let sessionID = try store.windows(workspaceID: workspaceID).first(where: {
-            $0.role == "terminal" && isManagedTerminalApp($0.app) && ($0.itermSessionID?.isEmpty == false)
-        })?.itermSessionID {
+            $0.role == "terminal" && isManagedTerminalApp($0.app) && ($0.terminalTrackingID?.isEmpty == false)
+        })?.terminalTrackingID {
             return sessionID
         }
-        if let sessionID = try store.runningProcesses(workspaceID: workspaceID).first(where: { $0.itermSessionID?.isEmpty == false })?.itermSessionID {
+        if let sessionID = try store.runningProcesses(workspaceID: workspaceID).first(where: { $0.terminalTrackingID?.isEmpty == false })?.terminalTrackingID
+        {
             return sessionID
         }
-        return try store.agentWindows(workspaceID: workspaceID).first(where: { $0.itermSessionID?.isEmpty == false })?.itermSessionID
+        return try store.agentWindows(workspaceID: workspaceID).first(where: { $0.terminalTrackingID?.isEmpty == false })?.terminalTrackingID
     }
 
     private func waitForTmuxSession(named sessionName: String, timeout: TimeInterval = 5.0) -> Bool {
@@ -1973,16 +1916,13 @@ public final class MuxyOrchestrator {
         "muxy-\(workspaceID)-\(safeFilename(processName).lowercased())"
     }
 
-    private func shellSingleQuoted(_ raw: String) -> String {
-        "'\(raw.replacingOccurrences(of: "'", with: "'\\''"))'"
-    }
+    private func shellSingleQuoted(_ raw: String) -> String { "'\(raw.replacingOccurrences(of: "'", with: "'\\''"))'" }
 
     private func tmuxAttachCommand(sessionName: String, cwd: String) -> String {
         "cd \(shellSingleQuoted(cwd)) && exec tmux attach-session -t \(shellSingleQuoted(sessionName))"
     }
 
-    @discardableResult
-    private func attachProcessTmuxSession(
+    @discardableResult private func attachProcessTmuxSession(
         workspace: WorkspaceRecord, processName: String, terminalHost: TerminalHost, background: Bool = false
     ) throws -> ManagedTerminalHandle {
         let sessionName = processTmuxSessionName(workspaceID: workspace.id, processName: processName)
@@ -2000,14 +1940,9 @@ public final class MuxyOrchestrator {
         background: Bool = false, replaceExistingSession: Bool
     ) throws -> ManagedTerminalHandle {
         let sessionName = processTmuxSessionName(workspaceID: workspace.id, processName: processName)
-        if replaceExistingSession, tmux.hasSession(named: sessionName) {
-            try? tmux.killSession(named: sessionName)
-        }
+        if replaceExistingSession, tmux.hasSession(named: sessionName) { try? tmux.killSession(named: sessionName) }
         _ = try tmux.startSession(
-            named: sessionName,
-            windowName: processName,
-            cwd: workspace.dir,
-            env: env.merging(command.environment) { _, new in new },
+            named: sessionName, windowName: processName, cwd: workspace.dir, env: env.merging(command.environment) { _, new in new },
             command: [command.executable] + command.arguments)
         let windowInfo = try attachProcessTmuxSession(
             workspace: workspace, processName: processName, terminalHost: terminalHost, background: background)
@@ -2047,9 +1982,7 @@ public final class MuxyOrchestrator {
     private func shellQuoted(_ token: String) -> String {
         guard !token.isEmpty else { return "''" }
         let safe = CharacterSet(charactersIn: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-._/:")
-        if token.unicodeScalars.allSatisfy({ safe.contains($0) }) {
-            return token
-        }
+        if token.unicodeScalars.allSatisfy({ safe.contains($0) }) { return token }
         return "'" + token.replacingOccurrences(of: "'", with: "'\\''") + "'"
     }
 
@@ -2069,11 +2002,7 @@ public final class MuxyOrchestrator {
                     continue
                 }
                 if char == "\\" && currentQuote == "\"" {
-                    if let escaped = iterator.next() {
-                        current.append(escaped)
-                    } else {
-                        current.append(char)
-                    }
+                    if let escaped = iterator.next() { current.append(escaped) } else { current.append(char) }
                     continue
                 }
                 current.append(char)
@@ -2081,23 +2010,15 @@ public final class MuxyOrchestrator {
             }
 
             switch char {
-            case "'", "\"":
-                quote = char
+            case "'", "\"": quote = char
             case " ", "\t", "\n":
                 if !current.isEmpty {
                     tokens.append(current)
                     current = ""
                 }
-            case "\\":
-                if let escaped = iterator.next() {
-                    current.append(escaped)
-                } else {
-                    current.append(char)
-                }
-            case "|", "&", ";", "<", ">", "(", ")", "$", "`":
-                return nil
-            default:
-                current.append(char)
+            case "\\": if let escaped = iterator.next() { current.append(escaped) } else { current.append(char) }
+            case "|", "&", ";", "<", ">", "(", ")", "$", "`": return nil
+            default: current.append(char)
             }
         }
 
@@ -2116,9 +2037,8 @@ public final class MuxyOrchestrator {
         for (index, token) in tokens.enumerated() {
             let parts = token.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false)
             let key = parts.first.map(String.init) ?? ""
-            let isAssignment = parts.count == 2
-                && !key.isEmpty
-                && (key.first?.isLetter == true || key.first == "_")
+            let isAssignment =
+                parts.count == 2 && !key.isEmpty && (key.first?.isLetter == true || key.first == "_")
                 && key.dropFirst().allSatisfy { $0.isLetter || $0.isNumber || $0 == "_" }
             if executableIndex == nil, isAssignment {
                 commandEnvironment[key] = String(parts[1])
@@ -2130,9 +2050,7 @@ public final class MuxyOrchestrator {
 
         guard let executableIndex else { return nil }
         return DirectProcessCommand(
-            executable: tokens[executableIndex],
-            arguments: Array(tokens.dropFirst(executableIndex + 1)),
-            environment: commandEnvironment)
+            executable: tokens[executableIndex], arguments: Array(tokens.dropFirst(executableIndex + 1)), environment: commandEnvironment)
     }
 
     private func invalidDirectProcessCommandMessage(_ raw: String, env: [String: String]) -> String {
@@ -2160,9 +2078,7 @@ public final class MuxyOrchestrator {
         var sessionNames: [String] = [tmuxSessionName(workspaceID: workspaceID)]
         for processName in configuredProcessNames + runningProcessNames {
             let sessionName = processTmuxSessionName(workspaceID: workspaceID, processName: processName)
-            if !sessionNames.contains(sessionName) {
-                sessionNames.append(sessionName)
-            }
+            if !sessionNames.contains(sessionName) { sessionNames.append(sessionName) }
         }
 
         var windows: [TmuxWindowInfo] = []
@@ -2186,24 +2102,25 @@ public final class MuxyOrchestrator {
             try store.upsert(
                 window: WindowRecord(
                     id: window.id, workspaceID: window.workspaceID, app: window.app, name: window.name, detail: window.detail,
-                    targetURL: window.targetURL,
-                    windowID: windowID, itermSessionID: sessionID ?? window.itermSessionID, itermTabIndex: nil, tmuxWindowID: window.tmuxWindowID,
-                    role: window.role, orderIndex: window.orderIndex, lastSeenAt: now))
+                    targetURL: window.targetURL, windowID: windowID, terminalTrackingID: sessionID ?? window.terminalTrackingID,
+                    terminalNativeID: window.terminalNativeID, itermTabIndex: nil, tmuxWindowID: window.tmuxWindowID, role: window.role,
+                    orderIndex: window.orderIndex, lastSeenAt: now))
         }
         for process in try store.runningProcesses(workspaceID: workspaceID) where isManagedTerminalApp(process.terminalApp) {
             try store.upsert(
                 runningProcess: RunningProcessRecord(
                     id: process.id, workspaceID: process.workspaceID, templateName: process.templateName, command: process.command,
-                    terminalApp: process.terminalApp, windowID: windowID, itermSessionID: sessionID ?? process.itermSessionID, itermTabIndex: nil,
-                    tmuxWindowID: process.tmuxWindowID, pid: process.pid, status: process.status, logPath: process.logPath,
+                    terminalApp: process.terminalApp, windowID: windowID, terminalTrackingID: sessionID ?? process.terminalTrackingID,
+                    terminalNativeID: process.terminalNativeID, itermTabIndex: nil, tmuxWindowID: process.tmuxWindowID, pid: process.pid, status: process.status, logPath: process.logPath,
                     lastOutputAt: process.lastOutputAt, startedAt: process.startedAt, exitedAt: process.exitedAt))
         }
         for agent in try store.agentWindows(workspaceID: workspaceID) where TerminalHost(rawValue: agent.provider.rawValue) != nil {
             try store.upsertAgentWindow(
                 AgentWindowRecord(
                     id: agent.id, workspaceID: agent.workspaceID, provider: agent.provider, label: agent.label,
-                    itermSessionID: sessionID ?? agent.itermSessionID, tmuxWindowID: agent.tmuxWindowID, codexThreadID: agent.codexThreadID,
-                    windowID: windowID, yabaiWindowID: windowID, status: agent.status, createdAt: agent.createdAt, updatedAt: now))
+                    terminalTrackingID: sessionID ?? agent.terminalTrackingID, terminalNativeID: agent.terminalNativeID, tmuxWindowID: agent.tmuxWindowID,
+                    codexThreadID: agent.codexThreadID, windowID: windowID, yabaiWindowID: windowID, status: agent.status, createdAt: agent.createdAt,
+                    updatedAt: now))
         }
         setItermTerminalSessionMetadata(workspaceID: workspaceID, windowID: windowID, sessionID: sessionID, tabIndex: nil)
     }
@@ -2228,33 +2145,35 @@ public final class MuxyOrchestrator {
     }
 
     private func upsertTmuxTerminalWindow(
-        workspaceID: String, windowID: Int?, itermSessionID: String?, tmuxWindow: TmuxWindowInfo, lastSeenAt: String = ""
+        workspaceID: String, windowID: Int?, terminalTrackingID: String?, tmuxWindow: TmuxWindowInfo, lastSeenAt: String = ""
     ) throws -> WindowRecord {
         let existingID = try store.windows(workspaceID: workspaceID).first(where: { $0.tmuxWindowID == tmuxWindow.id })?.id ?? UUID().uuidString
-        let terminalApp = try store.runningProcesses(workspaceID: workspaceID)
-            .first(where: { $0.tmuxWindowID == tmuxWindow.id && isManagedTerminalApp($0.terminalApp) })?.terminalApp
-            ?? TerminalHost.iterm2.appName
+        let terminalApp =
+            try store.runningProcesses(workspaceID: workspaceID).first(where: {
+                $0.tmuxWindowID == tmuxWindow.id && isManagedTerminalApp($0.terminalApp)
+            })?.terminalApp ?? TerminalHost.iterm2.appName
         let record = WindowRecord(
             id: existingID, workspaceID: workspaceID, app: terminalApp, name: tmuxWindow.name,
             detail: matchingProcessCommand(workspaceID: workspaceID, tmuxWindowID: tmuxWindow.id), targetURL: nil, windowID: windowID,
-            itermSessionID: itermSessionID, itermTabIndex: nil, tmuxWindowID: tmuxWindow.id, role: "terminal",
-            orderIndex: 200 + tmuxWindow.index, lastSeenAt: lastSeenAt.isEmpty ? nowISO8601() : lastSeenAt)
+            terminalTrackingID: terminalTrackingID, itermTabIndex: nil, tmuxWindowID: tmuxWindow.id, role: "terminal", orderIndex: 200 + tmuxWindow.index,
+            lastSeenAt: lastSeenAt.isEmpty ? nowISO8601() : lastSeenAt)
         try store.upsert(window: record)
         return record
     }
 
     private func tmuxTerminalWindowRecord(
-        workspaceID: String, windowID: Int?, itermSessionID: String?, tmuxWindow: TmuxWindowInfo, lastSeenAt: String = ""
+        workspaceID: String, windowID: Int?, terminalTrackingID: String?, tmuxWindow: TmuxWindowInfo, lastSeenAt: String = ""
     ) -> WindowRecord {
         let now = lastSeenAt.isEmpty ? nowISO8601() : lastSeenAt
-        let terminalApp = (try? store.runningProcesses(workspaceID: workspaceID)
-            .first(where: { $0.tmuxWindowID == tmuxWindow.id && isManagedTerminalApp($0.terminalApp) })?.terminalApp)
-            ?? TerminalHost.iterm2.appName
+        let terminalApp =
+            (try? store.runningProcesses(workspaceID: workspaceID).first(where: {
+                $0.tmuxWindowID == tmuxWindow.id && isManagedTerminalApp($0.terminalApp)
+            })?.terminalApp) ?? TerminalHost.iterm2.appName
         return WindowRecord(
             id: UUID().uuidString, workspaceID: workspaceID, app: terminalApp, name: tmuxWindow.name,
             detail: matchingProcessCommand(workspaceID: workspaceID, tmuxWindowID: tmuxWindow.id), targetURL: nil, windowID: windowID,
-            itermSessionID: itermSessionID, itermTabIndex: nil, tmuxWindowID: tmuxWindow.id, role: "terminal",
-            orderIndex: 200 + tmuxWindow.index, lastSeenAt: now)
+            terminalTrackingID: terminalTrackingID, itermTabIndex: nil, tmuxWindowID: tmuxWindow.id, role: "terminal", orderIndex: 200 + tmuxWindow.index,
+            lastSeenAt: now)
     }
 
     @discardableResult private func syncTrackedTmuxRuntime(workspaceID: String) throws -> Bool {
@@ -2266,9 +2185,7 @@ public final class MuxyOrchestrator {
         var didMutate = false
 
         for window in try store.windows(workspaceID: workspaceID) where window.role == "terminal" && isManagedTerminalApp(window.app) {
-            guard let tmuxWindowID = window.tmuxWindowID else {
-                continue
-            }
+            guard let tmuxWindowID = window.tmuxWindowID else { continue }
             guard let liveTmuxWindow = liveWindowsByID[tmuxWindowID] else {
                 try store.deleteWindow(id: window.id)
                 didMutate = true
@@ -2279,17 +2196,15 @@ public final class MuxyOrchestrator {
                 try store.upsert(
                     window: WindowRecord(
                         id: window.id, workspaceID: window.workspaceID, app: window.app, name: liveTmuxWindow.name, detail: refreshedDetail,
-                        targetURL: window.targetURL,
-                        windowID: window.windowID, itermSessionID: window.itermSessionID, itermTabIndex: nil,
-                        tmuxWindowID: tmuxWindowID, role: window.role, orderIndex: 200 + liveTmuxWindow.index, lastSeenAt: now))
+                        targetURL: window.targetURL, windowID: window.windowID, terminalTrackingID: window.terminalTrackingID,
+                        terminalNativeID: window.terminalNativeID, itermTabIndex: nil, tmuxWindowID: tmuxWindowID, role: window.role,
+                        orderIndex: 200 + liveTmuxWindow.index, lastSeenAt: now))
                 didMutate = true
             }
         }
 
         for process in try store.runningProcesses(workspaceID: workspaceID) where isManagedTerminalApp(process.terminalApp) {
-            guard let tmuxWindowID = process.tmuxWindowID else {
-                continue
-            }
+            guard let tmuxWindowID = process.tmuxWindowID else { continue }
             guard liveTmuxWindowIDs.contains(tmuxWindowID) else {
                 try store.deleteRunningProcess(id: process.id)
                 didMutate = true
@@ -2298,9 +2213,7 @@ public final class MuxyOrchestrator {
         }
 
         for agent in try store.agentWindows(workspaceID: workspaceID) where TerminalHost(rawValue: agent.provider.rawValue) != nil {
-            guard let tmuxWindowID = agent.tmuxWindowID else {
-                continue
-            }
+            guard let tmuxWindowID = agent.tmuxWindowID else { continue }
             guard liveTmuxWindowIDs.contains(tmuxWindowID) else {
                 try store.deleteAgentWindow(id: agent.id)
                 didMutate = true
@@ -2315,7 +2228,7 @@ public final class MuxyOrchestrator {
         let liveSessionIDs = liveItermSessionIDs()
         var pruned = 0
         for agent in try store.agentWindows(workspaceID: workspaceID) where agent.provider == .iterm2 {
-            guard let sessionID = agent.itermSessionID, !sessionID.isEmpty else {
+            guard let sessionID = agent.terminalTrackingID, !sessionID.isEmpty else {
                 if agent.tmuxWindowID == nil {
                     try store.deleteAgentWindow(id: agent.id)
                     pruned += 1
@@ -2379,8 +2292,7 @@ public final class MuxyOrchestrator {
         let resolveWorkspaceStartedAt = currentDate()
         let (project, workspace) = try resolveWorkspace(id: workspaceID)
         logBrowserFocus(
-            "workspace=\(workspaceID) path=extracted_substep step=resolve_workspace elapsed_ms=\(elapsedMS(since: resolveWorkspaceStartedAt))"
-        )
+            "workspace=\(workspaceID) path=extracted_substep step=resolve_workspace elapsed_ms=\(elapsedMS(since: resolveWorkspaceStartedAt))")
 
         let loadSessionsStartedAt = currentDate()
         let sessions = try store.workspaceBrowserSessions(workspaceID: workspace.id)
@@ -2572,14 +2484,10 @@ public final class MuxyOrchestrator {
 
     private func navigationTargetDebugName(_ target: WorkspaceNavigationTarget) -> String {
         switch target {
-        case .agent(let record):
-            return "agent:\(record.label ?? record.provider.rawValue)"
-        case .browser(let window):
-            return "browser:\(window.targetURL ?? window.name ?? "")"
-        case .process(let process):
-            return "process:\(process.templateName)"
-        case .window(let window):
-            return "\(window.role):\(window.name ?? window.app)"
+        case .agent(let record): return "agent:\(record.label ?? record.provider.rawValue)"
+        case .browser(let window): return "browser:\(window.targetURL ?? window.name ?? "")"
+        case .process(let process): return "process:\(process.templateName)"
+        case .window(let window): return "\(window.role):\(window.name ?? window.app)"
         }
     }
 
@@ -2613,9 +2521,8 @@ public final class MuxyOrchestrator {
             browserWindows.append(
                 WindowRecord(
                     id: UUID().uuidString, workspaceID: workspaceID, app: "Google Chrome",
-                    name: try browserFocusName(workspaceID: workspaceID, targetURL: match.tab.url) ?? match.tab.url,
-                    detail: match.tab.url, targetURL: match.tab.url,
-                    windowID: match.tab.windowID, role: "browser", orderIndex: index, lastSeenAt: nowISO8601()))
+                    name: try browserFocusName(workspaceID: workspaceID, targetURL: match.tab.url) ?? match.tab.url, detail: match.tab.url,
+                    targetURL: match.tab.url, windowID: match.tab.windowID, role: "browser", orderIndex: index, lastSeenAt: nowISO8601()))
         }
         if debugLoggingEnabled() {
             let elapsedMS = Int(Date().timeIntervalSince(scanStartedAt) * 1000)
@@ -2724,9 +2631,7 @@ public final class MuxyOrchestrator {
         try store.setSetting(key: SettingsKey.guiPreviousShortcut, value: try normalizeLeaderBackedShortcut(raw))
     }
 
-    public func guiWindowShortcut() throws -> String {
-        try store.setting(key: SettingsKey.guiWindowShortcut) ?? SettingsKey.defaultGUIWindowShortcut
-    }
+    public func guiWindowShortcut() throws -> String { try store.setting(key: SettingsKey.guiWindowShortcut) ?? SettingsKey.defaultGUIWindowShortcut }
 
     public func setGUIWindowShortcut(_ raw: String?) throws { try store.setSetting(key: SettingsKey.guiWindowShortcut, value: raw) }
 
@@ -2769,7 +2674,9 @@ public final class MuxyOrchestrator {
             return spec.adding(modifiers: leaderModifiers).normalized
         }
         if stored.modifiers.isEmpty { return stored.adding(modifiers: leaderModifiers).normalized }
-        if stored.modifiers.isSuperset(of: leaderModifiers) { return stored.removing(modifiers: leaderModifiers).adding(modifiers: leaderModifiers).normalized }
+        if stored.modifiers.isSuperset(of: leaderModifiers) {
+            return stored.removing(modifiers: leaderModifiers).adding(modifiers: leaderModifiers).normalized
+        }
         return stored.normalized
     }
 
@@ -2777,9 +2684,7 @@ public final class MuxyOrchestrator {
         guard let raw else { return nil }
         let spec = try HotkeySpec.parse(raw)
         let leaderModifiers = try guiLeaderModifiers()
-        if spec.modifiers.isSuperset(of: leaderModifiers) {
-            return spec.removing(modifiers: leaderModifiers).normalized
-        }
+        if spec.modifiers.isSuperset(of: leaderModifiers) { return spec.removing(modifiers: leaderModifiers).normalized }
         return spec.normalized
     }
 
@@ -3041,8 +2946,7 @@ public final class MuxyOrchestrator {
                 if currentDate().timeIntervalSince(waitStartedAt) > 900 {
                     throw MuxyError.invalidArgument(
                         message:
-                            "Timed out waiting for workspace setup to finish. Retry launch after setup completes or run mx workspace up --restart."
-                    )
+                            "Timed out waiting for workspace setup to finish. Retry launch after setup completes or run mx workspace up --restart.")
                 }
                 Thread.sleep(forTimeInterval: 0.2)
             }
@@ -3161,30 +3065,33 @@ public final class MuxyOrchestrator {
         for (desired, process) in toRelabel {
             let updated = RunningProcessRecord(
                 id: process.id, workspaceID: workspace.id, templateName: desired.desiredKey, command: process.command,
-                terminalApp: process.terminalApp, windowID: process.windowID, itermSessionID: process.itermSessionID,
+                terminalApp: process.terminalApp, windowID: process.windowID, terminalTrackingID: process.terminalTrackingID, terminalNativeID: process.terminalNativeID,
                 itermTabIndex: process.itermTabIndex, tmuxWindowID: process.tmuxWindowID, pid: process.pid, status: process.status,
                 logPath: process.logPath, lastOutputAt: process.lastOutputAt, startedAt: process.startedAt, exitedAt: process.exitedAt)
             try store.upsert(runningProcess: updated)
             if let terminalWindow = try store.windows(workspaceID: workspace.id).first(where: {
-                $0.role == "terminal" && (($0.windowID != nil && $0.windowID == process.windowID) || ($0.tmuxWindowID != nil && $0.tmuxWindowID == process.tmuxWindowID))
+                $0.role == "terminal"
+                    && (($0.windowID != nil && $0.windowID == process.windowID)
+                        || ($0.tmuxWindowID != nil && $0.tmuxWindowID == process.tmuxWindowID))
             }) {
                 try store.upsert(
                     window: WindowRecord(
                         id: terminalWindow.id, workspaceID: terminalWindow.workspaceID, app: terminalWindow.app, name: desired.desiredKey,
-                        detail: updated.command,
-                        targetURL: terminalWindow.targetURL, windowID: terminalWindow.windowID, itermSessionID: terminalWindow.itermSessionID,
-                        itermTabIndex: terminalWindow.itermTabIndex, tmuxWindowID: terminalWindow.tmuxWindowID, role: terminalWindow.role,
-                        orderIndex: terminalWindow.orderIndex, lastSeenAt: nowISO8601()))
+                        detail: updated.command, targetURL: terminalWindow.targetURL, windowID: terminalWindow.windowID,
+                        terminalTrackingID: terminalWindow.terminalTrackingID, terminalNativeID: terminalWindow.terminalNativeID,
+                        itermTabIndex: terminalWindow.itermTabIndex,
+                        tmuxWindowID: terminalWindow.tmuxWindowID, role: terminalWindow.role, orderIndex: terminalWindow.orderIndex,
+                        lastSeenAt: nowISO8601()))
             }
         }
 
         for (desired, process) in toRestart {
             let name = desired.desiredKey
             let updatedProcess = RunningProcessRecord(
-                id: process.id, workspaceID: process.workspaceID, templateName: name, command: desired.template.command, terminalApp: process.terminalApp,
-                windowID: process.windowID, itermSessionID: process.itermSessionID, itermTabIndex: process.itermTabIndex, tmuxWindowID: process.tmuxWindowID,
-                pid: process.pid, status: process.status, logPath: process.logPath, lastOutputAt: process.lastOutputAt, startedAt: process.startedAt,
-                exitedAt: process.exitedAt)
+                id: process.id, workspaceID: process.workspaceID, templateName: name, command: desired.template.command,
+                terminalApp: process.terminalApp, windowID: process.windowID, terminalTrackingID: process.terminalTrackingID, terminalNativeID: process.terminalNativeID,
+                itermTabIndex: process.itermTabIndex, tmuxWindowID: process.tmuxWindowID, pid: process.pid, status: process.status,
+                logPath: process.logPath, lastOutputAt: process.lastOutputAt, startedAt: process.startedAt, exitedAt: process.exitedAt)
             try restartProcessInTerminal(workspaceID: workspace.id, process: updatedProcess)
         }
 
@@ -3216,9 +3123,10 @@ public final class MuxyOrchestrator {
             if window.orderIndex != desiredOrder {
                 try store.upsert(
                     window: WindowRecord(
-                        id: window.id, workspaceID: window.workspaceID, app: window.app, name: window.name, detail: window.detail, targetURL: targetURL,
-                        windowID: window.windowID, itermSessionID: window.itermSessionID, itermTabIndex: window.itermTabIndex,
-                        tmuxWindowID: window.tmuxWindowID, role: window.role, orderIndex: desiredOrder, lastSeenAt: window.lastSeenAt))
+                        id: window.id, workspaceID: window.workspaceID, app: window.app, name: window.name, detail: window.detail,
+                        targetURL: targetURL, windowID: window.windowID, terminalTrackingID: window.terminalTrackingID,
+                        terminalNativeID: window.terminalNativeID, itermTabIndex: window.itermTabIndex, tmuxWindowID: window.tmuxWindowID,
+                        role: window.role, orderIndex: desiredOrder, lastSeenAt: window.lastSeenAt))
             }
         }
     }
@@ -3227,70 +3135,61 @@ public final class MuxyOrchestrator {
         let existingIDs = Set(try yabai.listWindows().map(\.id))
         let windows = try store.windows(workspaceID: workspaceID)
         let liveTmuxWindowIDs = Set(try tmuxWindows(workspaceID: workspaceID).map(\.id))
+        let liveGhosttyTrackingIdentities = (try? ghostty.listLiveTrackingIdentities()) ?? []
         var prunedTerminalTrackingKeys = Set<String>()
         var prunedTerminalWindowIDs = Set<Int>()
         var pruned = 0
         for window in windows {
             guard let id = window.windowID else {
-                if let tmuxWindowID = window.tmuxWindowID, liveTmuxWindowIDs.contains(tmuxWindowID) {
-                    continue
-                }
-                if window.role == "terminal", let trackingKey = window.terminalTrackingKey {
-                    prunedTerminalTrackingKeys.insert(trackingKey)
-                }
+                if ghosttyTrackedWindowIsStillLive(window: window, liveGhosttyTrackingIdentities: liveGhosttyTrackingIdentities) { continue }
+                if let tmuxWindowID = window.tmuxWindowID, liveTmuxWindowIDs.contains(tmuxWindowID) { continue }
+                if window.role == "terminal", let trackingKey = window.terminalTrackingKey { prunedTerminalTrackingKeys.insert(trackingKey) }
                 try store.deleteWindow(id: window.id)
                 pruned += 1
                 continue
             }
             if !existingIDs.contains(id) {
-                if window.role == "browser" {
-                    continue
-                }
-                if let tmuxWindowID = window.tmuxWindowID, liveTmuxWindowIDs.contains(tmuxWindowID) {
-                    continue
-                }
+                if ghosttyTrackedWindowIsStillLive(window: window, liveGhosttyTrackingIdentities: liveGhosttyTrackingIdentities) { continue }
+                if window.role == "browser" { continue }
+                if let tmuxWindowID = window.tmuxWindowID, liveTmuxWindowIDs.contains(tmuxWindowID) { continue }
                 if window.role == "terminal" {
                     prunedTerminalWindowIDs.insert(id)
-                    if let trackingKey = window.terminalTrackingKey {
-                        prunedTerminalTrackingKeys.insert(trackingKey)
-                    }
+                    if let trackingKey = window.terminalTrackingKey { prunedTerminalTrackingKeys.insert(trackingKey) }
                 }
                 try store.deleteWindow(id: window.id)
                 pruned += 1
             }
         }
         pruned += try pruneOrphanedAgentWindows(
-            workspaceID: workspaceID,
-            prunedTerminalTrackingKeys: prunedTerminalTrackingKeys,
-            prunedTerminalWindowIDs: prunedTerminalWindowIDs)
+            workspaceID: workspaceID, prunedTerminalTrackingKeys: prunedTerminalTrackingKeys, prunedTerminalWindowIDs: prunedTerminalWindowIDs)
         return pruned
     }
 
+    private func ghosttyTrackedWindowIsStillLive(window: WindowRecord, liveGhosttyTrackingIdentities: Set<TerminalTrackingIdentity>) -> Bool {
+        guard window.role == "terminal", terminalHost(for: window.app) == .ghostty, let terminalID = window.terminalNativeID, !terminalID.isEmpty
+        else {
+            return false
+        }
+        return liveGhosttyTrackingIdentities.contains(.session(terminalID))
+    }
+
     @discardableResult private func pruneOrphanedAgentWindows(
-        workspaceID: String,
-        prunedTerminalTrackingKeys: Set<String>,
-        prunedTerminalWindowIDs: Set<Int>
+        workspaceID: String, prunedTerminalTrackingKeys: Set<String>, prunedTerminalWindowIDs: Set<Int>
     ) throws -> Int {
         guard !prunedTerminalTrackingKeys.isEmpty || !prunedTerminalWindowIDs.isEmpty else { return 0 }
-        let runningProcessTrackingKeys = Set(
-            try store.runningProcesses(workspaceID: workspaceID)
-                .compactMap(\.terminalTrackingKey))
+        let runningProcessTrackingKeys = Set(try store.runningProcesses(workspaceID: workspaceID).compactMap(\.terminalTrackingKey))
         var pruned = 0
         for agent in try store.agentWindows(workspaceID: workspaceID) where TerminalHost(rawValue: agent.provider.rawValue) != nil {
-            if let tmuxWindowID = agent.tmuxWindowID, !tmuxWindowID.isEmpty {
-                continue
-            }
+            if let tmuxWindowID = agent.tmuxWindowID, !tmuxWindowID.isEmpty { continue }
             let trackingKey = agent.terminalTrackingKey
             let windowID = agent.yabaiWindowID ?? agent.windowID
             // Agent rows for ad-hoc terminals depend on the tracked terminal row for liveness.
             // Once that terminal disappears, the agent row should disappear too unless a managed
             // workspace process still owns the same terminal identity.
-            let matchesPrunedTerminal = (trackingKey.map(prunedTerminalTrackingKeys.contains) ?? false)
-                || (windowID.map(prunedTerminalWindowIDs.contains) ?? false)
+            let matchesPrunedTerminal =
+                (trackingKey.map(prunedTerminalTrackingKeys.contains) ?? false) || (windowID.map(prunedTerminalWindowIDs.contains) ?? false)
             guard matchesPrunedTerminal else { continue }
-            if let trackingKey, runningProcessTrackingKeys.contains(trackingKey) {
-                continue
-            }
+            if let trackingKey, runningProcessTrackingKeys.contains(trackingKey) { continue }
             try store.deleteAgentWindow(id: agent.id)
             pruned += 1
         }
@@ -3327,10 +3226,10 @@ public final class MuxyOrchestrator {
             seenWindowIDs.insert(windowID)
             synthesized.append(
                 WindowRecord(
-                    id: UUID().uuidString, workspaceID: workspace.id, app: process.terminalApp ?? TerminalHost.iterm2.appName, name: process.templateName,
-                    detail: process.command, windowID: windowID,
-                    itermSessionID: process.itermSessionID, itermTabIndex: nil, tmuxWindowID: process.tmuxWindowID, role: "terminal",
-                    orderIndex: 200 + synthesized.count, lastSeenAt: nowISO8601()))
+                    id: UUID().uuidString, workspaceID: workspace.id, app: process.terminalApp ?? TerminalHost.iterm2.appName,
+                    name: process.templateName, detail: process.command, windowID: windowID, terminalTrackingID: process.terminalTrackingID,
+                    itermTabIndex: nil, tmuxWindowID: process.tmuxWindowID, role: "terminal", orderIndex: 200 + synthesized.count,
+                    lastSeenAt: nowISO8601()))
         }
         return synthesized
     }
@@ -3350,8 +3249,7 @@ public final class MuxyOrchestrator {
             captured = [
                 WindowRecord(
                     id: UUID().uuidString, workspaceID: workspaceID, app: focused.app, name: focused.title, detail: focused.title,
-                    windowID: focused.id, role: role,
-                    orderIndex: orderOffset, lastSeenAt: nowISO8601())
+                    windowID: focused.id, role: role, orderIndex: orderOffset, lastSeenAt: nowISO8601())
             ]
         }
         guard !captured.isEmpty else { return }
@@ -3393,23 +3291,23 @@ public final class MuxyOrchestrator {
             let terminalHandle = try launchProcessInTmux(
                 workspace: workspace, processName: name, command: command, env: env, terminalHost: terminalHost, background: background,
                 replaceExistingSession: true)
-            let windowID = try captureNewAppWindowID(snapshot: snapshot, appName: terminalAppName(for: terminalHost))
-                ?? terminalHandle.fallbackWindowID
+            let windowID =
+                try captureNewAppWindowID(snapshot: snapshot, appName: terminalAppName(for: terminalHost)) ?? terminalHandle.fallbackWindowID
             let tmuxWindow = try currentTmuxWindowInfo(workspaceID: workspace.id, processName: name)
             let pid = tmuxWindow?.panePID
+            let hookSessionID = storedTerminalHookSessionID(terminalHost: terminalHost, handle: terminalHandle)
+            let terminalNativeID = storedTerminalNativeID(terminalHost: terminalHost, handle: terminalHandle)
             let running = RunningProcessRecord(
                 id: UUID().uuidString, workspaceID: workspace.id, templateName: name, command: template.command,
-                terminalApp: terminalAppName(for: terminalHost), windowID: windowID, itermSessionID: terminalHandle.trackingIdentity?.sessionID,
-                itermTabIndex: nil, tmuxWindowID: tmuxWindow?.id, pid: pid,
-                status: .running, logPath: nil, lastOutputAt: nil, startedAt: nowISO8601(), exitedAt: nil)
+                terminalApp: terminalAppName(for: terminalHost), windowID: windowID, terminalTrackingID: hookSessionID,
+                terminalNativeID: terminalNativeID, itermTabIndex: nil, tmuxWindowID: tmuxWindow?.id, pid: pid, status: .running, logPath: nil,
+                lastOutputAt: nil, startedAt: nowISO8601(), exitedAt: nil)
             try store.upsert(runningProcess: running)
             terminalWindows.append(
                 WindowRecord(
-                    id: UUID().uuidString, workspaceID: workspace.id, app: terminalAppName(for: terminalHost), name: name,
-                    detail: template.command, targetURL: nil,
-                    windowID: windowID, itermSessionID: terminalHandle.trackingIdentity?.sessionID, itermTabIndex: nil, tmuxWindowID: tmuxWindow?.id, role: "terminal",
-                    orderIndex: 200 + index,
-                    lastSeenAt: nowISO8601()))
+                    id: UUID().uuidString, workspaceID: workspace.id, app: terminalAppName(for: terminalHost), name: name, detail: template.command,
+                    targetURL: nil, windowID: windowID, terminalTrackingID: hookSessionID, terminalNativeID: terminalNativeID, itermTabIndex: nil,
+                    tmuxWindowID: tmuxWindow?.id, role: "terminal", orderIndex: 200 + index, lastSeenAt: nowISO8601()))
         }
         return terminalWindows
     }
@@ -3433,9 +3331,8 @@ public final class MuxyOrchestrator {
                     WindowRecord(
                         id: UUID().uuidString, workspaceID: workspace.id, app: liveWindow.app,
                         name: try browserFocusName(workspaceID: workspace.id, targetURL: resolvedSession.prefix) ?? resolvedSession.prefix,
-                        detail: resolvedSession.prefix,
-                        targetURL: resolvedSession.prefix, windowID: liveWindow.id, role: "browser", orderIndex: attached.count,
-                        lastSeenAt: nowISO8601()))
+                        detail: resolvedSession.prefix, targetURL: resolvedSession.prefix, windowID: liveWindow.id, role: "browser",
+                        orderIndex: attached.count, lastSeenAt: nowISO8601()))
                 continue
             }
 
@@ -3448,9 +3345,8 @@ public final class MuxyOrchestrator {
                 WindowRecord(
                     id: UUID().uuidString, workspaceID: workspace.id, app: newWindow.app,
                     name: try browserFocusName(workspaceID: workspace.id, targetURL: resolvedSession.prefix) ?? resolvedSession.prefix,
-                    detail: resolvedSession.prefix,
-                    targetURL: resolvedSession.prefix, windowID: newWindow.id, role: "browser", orderIndex: attached.count,
-                    lastSeenAt: nowISO8601()))
+                    detail: resolvedSession.prefix, targetURL: resolvedSession.prefix, windowID: newWindow.id, role: "browser",
+                    orderIndex: attached.count, lastSeenAt: nowISO8601()))
         }
         return (attached, refreshedSessions)
     }
@@ -3578,9 +3474,7 @@ public final class MuxyOrchestrator {
     }
 
     private func resolvedRuntimePID(for process: RunningProcessRecord) -> Int? {
-        if let tmuxRuntimePID = resolvedTmuxRuntimePID(for: process) {
-            return tmuxRuntimePID
-        }
+        if let tmuxRuntimePID = resolvedTmuxRuntimePID(for: process) { return tmuxRuntimePID }
         if let pid = process.pid, pid > 0 {
             if isProcessAlive(pid: pid) { return pid }
             guard isManagedTerminalApp(process.terminalApp) else { return pid }
@@ -3785,9 +3679,7 @@ public final class MuxyOrchestrator {
         try FileManager.default.removeItem(atPath: project.dir)
     }
 
-    private func isManagedRepositoryDirectory(path: String) -> Bool {
-        isPath(path, inside: repositoriesRootDirectory().path)
-    }
+    private func isManagedRepositoryDirectory(path: String) -> Bool { isPath(path, inside: repositoriesRootDirectory().path) }
 
     private func defaultWorkspace(projectID: String) throws -> WorkspaceRecord? {
         try store.workspaces(projectID: projectID, includeArchived: true).first(where: \.isDefault)
@@ -3831,76 +3723,43 @@ public final class MuxyOrchestrator {
 
     public func agentWindows(workspaceID: String) throws -> [AgentWindowRecord] { try store.agentWindows(workspaceID: workspaceID) }
 
-    private func matchingAgentWindow(
-        workspaceID: String,
-        tmuxWindowID: String?,
-        itermSessionID: String?,
-        codexThreadID: String?,
-        yabaiWindowID: Int?
-    ) throws -> AgentWindowRecord? {
+    private func matchingAgentWindow(workspaceID: String, tmuxWindowID: String?, terminalTrackingID: String?, codexThreadID: String?, yabaiWindowID: Int?)
+        throws -> AgentWindowRecord?
+    {
         let allAgentWindows = try store.agentWindows(workspaceID: workspaceID)
-        return tmuxWindowID.flatMap { tmuxWindowID in
-            allAgentWindows.first(where: { $0.tmuxWindowID == tmuxWindowID })
-        } ?? itermSessionID.flatMap { sessionID in
-            allAgentWindows.first(where: { $0.itermSessionID == sessionID })
-        } ?? yabaiWindowID.flatMap { windowID in
-            allAgentWindows.first(where: { ($0.yabaiWindowID ?? $0.windowID) == windowID })
-        } ?? allAgentWindows.first(where: { $0.codexThreadID == codexThreadID && codexThreadID != nil })
+        return tmuxWindowID.flatMap { tmuxWindowID in allAgentWindows.first(where: { $0.tmuxWindowID == tmuxWindowID }) } ?? terminalTrackingID.flatMap {
+            sessionID in allAgentWindows.first(where: { $0.terminalTrackingID == sessionID })
+        } ?? yabaiWindowID.flatMap { windowID in allAgentWindows.first(where: { ($0.yabaiWindowID ?? $0.windowID) == windowID }) }
+            ?? allAgentWindows.first(where: { $0.codexThreadID == codexThreadID && codexThreadID != nil })
     }
 
-    private func agentTerminalTargetID(provider: AgentProvider, itermSessionID: String?, yabaiWindowID: Int?, tmuxWindowID: String?) -> String? {
-        if let tmuxWindowID, !tmuxWindowID.isEmpty {
-            return "tmux:\(tmuxWindowID)"
-        }
-        if let sessionID = itermSessionID, !sessionID.isEmpty {
-            return "terminal:\(sessionID)"
-        }
-        if let windowID = yabaiWindowID {
-            return "window:\(windowID)"
-        }
+    private func agentTerminalTargetID(terminalTrackingID: String?, yabaiWindowID: Int?, tmuxWindowID: String?) -> String? {
+        if let tmuxWindowID, !tmuxWindowID.isEmpty { return "tmux:\(tmuxWindowID)" }
+        if let sessionID = terminalTrackingID, !sessionID.isEmpty { return "terminal:\(sessionID)" }
+        if let windowID = yabaiWindowID { return "window:\(windowID)" }
         return nil
     }
 
     private func matchedWorkspaceProcessForAgent(
-        workspaceID: String,
-        provider: AgentProvider,
-        itermSessionID: String?,
-        yabaiWindowID: Int?,
-        tmuxWindowID: String?
+        workspaceID: String, provider: AgentProvider, terminalTrackingID: String?, yabaiWindowID: Int?, tmuxWindowID: String?
     ) throws -> RunningProcessRecord? {
         let processes = try store.runningProcesses(workspaceID: workspaceID)
-        let targetID = agentTerminalTargetID(
-            provider: provider,
-            itermSessionID: itermSessionID,
-            yabaiWindowID: yabaiWindowID,
-            tmuxWindowID: tmuxWindowID)
-        if let targetID, let matched = processes.first(where: { $0.terminalTrackingKey == targetID }) {
-            return matched
-        }
+        let targetID = agentTerminalTargetID(terminalTrackingID: terminalTrackingID, yabaiWindowID: yabaiWindowID, tmuxWindowID: tmuxWindowID)
+        if let targetID, let matched = processes.first(where: { $0.terminalTrackingKey == targetID }) { return matched }
         return processes.first(where: { process in
             guard terminalHost(for: process.terminalApp)?.rawValue == provider.rawValue else { return false }
-            if let tmuxWindowID, !tmuxWindowID.isEmpty {
-                return process.tmuxWindowID == tmuxWindowID
+            if let tmuxWindowID, !tmuxWindowID.isEmpty { return process.tmuxWindowID == tmuxWindowID }
+            if let terminalTrackingID, !terminalTrackingID.isEmpty, process.terminalTrackingID == terminalTrackingID { return true }
+            if let terminalTrackingID, !terminalTrackingID.isEmpty {
+                guard process.terminalTrackingID == nil || process.terminalTrackingID?.isEmpty == true else { return false }
             }
-            if let itermSessionID, !itermSessionID.isEmpty, process.itermSessionID == itermSessionID {
-                return true
-            }
-            if let itermSessionID, !itermSessionID.isEmpty {
-                guard process.itermSessionID == nil || process.itermSessionID?.isEmpty == true else { return false }
-            }
-            if let yabaiWindowID, process.windowID == yabaiWindowID {
-                return true
-            }
+            if let yabaiWindowID, process.windowID == yabaiWindowID { return true }
             return false
         })
     }
 
     private func matchedTrackedWindowForAgent(
-        workspaceID: String,
-        provider: AgentProvider,
-        itermSessionID: String?,
-        yabaiWindowID: Int?,
-        tmuxWindowID: String?
+        workspaceID: String, provider: AgentProvider, terminalTrackingID: String?, yabaiWindowID: Int?, tmuxWindowID: String?
     ) throws -> WindowRecord? {
         let windows = try store.windows(workspaceID: workspaceID)
         if let tmuxWindowID, !tmuxWindowID.isEmpty,
@@ -3908,20 +3767,20 @@ public final class MuxyOrchestrator {
         {
             return trackedWindow
         }
-        if let targetID = agentTerminalTargetID(
-            provider: provider,
-            itermSessionID: itermSessionID,
-            yabaiWindowID: yabaiWindowID,
-            tmuxWindowID: tmuxWindowID),
+        if provider == .ghostty, let terminalTrackingID, !terminalTrackingID.isEmpty,
+            let trackedWindow = windows.first(where: { $0.role == "terminal" && $0.app == TerminalHost.ghostty.appName && $0.terminalTrackingID == terminalTrackingID })
+        {
+            return trackedWindow
+        }
+        if let targetID = agentTerminalTargetID(terminalTrackingID: terminalTrackingID, yabaiWindowID: yabaiWindowID, tmuxWindowID: tmuxWindowID),
             let trackedWindow = windows.first(where: { $0.role == "terminal" && $0.terminalTrackingKey == targetID })
         {
             return trackedWindow
         }
         if let yabaiWindowID,
             let trackedWindow = windows.first(where: {
-                $0.role == "terminal"
-                    && $0.windowID == yabaiWindowID
-                    && (itermSessionID == nil || itermSessionID?.isEmpty == true || $0.itermSessionID == nil || $0.itermSessionID?.isEmpty == true)
+                $0.role == "terminal" && $0.windowID == yabaiWindowID
+                    && (terminalTrackingID == nil || terminalTrackingID?.isEmpty == true || $0.terminalTrackingID == nil || $0.terminalTrackingID?.isEmpty == true)
                     && terminalHost(for: $0.app)?.rawValue == provider.rawValue
             })
         {
@@ -3931,41 +3790,25 @@ public final class MuxyOrchestrator {
     }
 
     private func ensureTrackedWindowExistsForAgent(
-        workspaceID: String,
-        provider: AgentProvider,
-        label: String?,
-        itermSessionID: String?,
-        yabaiWindowID: Int?,
+        workspaceID: String, provider: AgentProvider, label: String?, terminalTrackingID: String?, terminalNativeID: String?, yabaiWindowID: Int?,
         tmuxWindowID: String?
     ) throws -> WindowRecord? {
         if let trackedWindow = try matchedTrackedWindowForAgent(
-            workspaceID: workspaceID,
-            provider: provider,
-            itermSessionID: itermSessionID,
-            yabaiWindowID: yabaiWindowID,
-            tmuxWindowID: tmuxWindowID)
+            workspaceID: workspaceID, provider: provider, terminalTrackingID: terminalTrackingID, yabaiWindowID: yabaiWindowID, tmuxWindowID: tmuxWindowID)
         {
             let liveWindow = yabaiWindowID.flatMap { (try? yabai.window(id: $0)) ?? nil }
             let resolvedWindowID = yabaiWindowID ?? trackedWindow.windowID
-            let resolvedSessionID = itermSessionID ?? trackedWindow.itermSessionID
+            let resolvedSessionID = terminalTrackingID ?? trackedWindow.terminalTrackingID
+            let resolvedNativeID = terminalNativeID ?? trackedWindow.terminalNativeID
             let resolvedTmuxWindowID = tmuxWindowID ?? trackedWindow.tmuxWindowID
-            if resolvedWindowID != trackedWindow.windowID || resolvedSessionID != trackedWindow.itermSessionID
-                || resolvedTmuxWindowID != trackedWindow.tmuxWindowID
+            if resolvedWindowID != trackedWindow.windowID || resolvedSessionID != trackedWindow.terminalTrackingID
+                || resolvedNativeID != trackedWindow.terminalNativeID || resolvedTmuxWindowID != trackedWindow.tmuxWindowID
             {
                 let updated = WindowRecord(
-                    id: trackedWindow.id,
-                    workspaceID: trackedWindow.workspaceID,
-                    app: liveWindow?.app ?? trackedWindow.app,
-                    name: trackedWindow.name,
-                    detail: trackedWindow.detail,
-                    targetURL: trackedWindow.targetURL,
-                    windowID: resolvedWindowID,
-                    itermSessionID: resolvedSessionID,
-                    itermTabIndex: trackedWindow.itermTabIndex,
-                    tmuxWindowID: resolvedTmuxWindowID,
-                    role: trackedWindow.role,
-                    orderIndex: trackedWindow.orderIndex,
-                    lastSeenAt: nowISO8601())
+                    id: trackedWindow.id, workspaceID: trackedWindow.workspaceID, app: liveWindow?.app ?? trackedWindow.app, name: trackedWindow.name,
+                    detail: trackedWindow.detail, targetURL: trackedWindow.targetURL, windowID: resolvedWindowID, terminalTrackingID: resolvedSessionID,
+                    terminalNativeID: resolvedNativeID, itermTabIndex: trackedWindow.itermTabIndex, tmuxWindowID: resolvedTmuxWindowID,
+                    role: trackedWindow.role, orderIndex: trackedWindow.orderIndex, lastSeenAt: nowISO8601())
                 try store.upsert(window: updated)
                 return updated
             }
@@ -3975,18 +3818,12 @@ public final class MuxyOrchestrator {
         let liveWindow = (try? yabai.window(id: yabaiWindowID)) ?? nil
         let existing = try store.windows(workspaceID: workspaceID)
         let record = WindowRecord(
-            id: UUID().uuidString,
-            workspaceID: workspaceID,
+            id: UUID().uuidString, workspaceID: workspaceID,
             app: liveWindow?.app ?? (TerminalHost(rawValue: provider.rawValue)?.appName ?? provider.rawValue),
-            name: liveWindow?.title ?? label ?? "Coding Agent CLI",
-            detail: nil,
-            windowID: yabaiWindowID,
-            itermSessionID: itermSessionID,
-            itermTabIndex: nil,
-            tmuxWindowID: tmuxWindowID,
+            name: liveWindow?.title ?? label ?? "Coding Agent CLI", detail: nil, windowID: yabaiWindowID, terminalTrackingID: terminalTrackingID,
+            terminalNativeID: terminalNativeID, itermTabIndex: nil, tmuxWindowID: tmuxWindowID,
             role: "terminal",
-            orderIndex: Self.nextWindowOrderIndex(existing: existing, role: "terminal", orderOffset: 200),
-            lastSeenAt: nowISO8601())
+            orderIndex: Self.nextWindowOrderIndex(existing: existing, role: "terminal", orderOffset: 200), lastSeenAt: nowISO8601())
         try store.upsert(window: record)
         return record
     }
@@ -3997,71 +3834,49 @@ public final class MuxyOrchestrator {
     }
 
     private func removeAdHocTrackedWindowForAgent(
-        workspaceID: String,
-        provider: AgentProvider,
-        itermSessionID: String?,
-        yabaiWindowID: Int?,
-        tmuxWindowID: String?
+        workspaceID: String, provider: AgentProvider, terminalTrackingID: String?, yabaiWindowID: Int?, tmuxWindowID: String?
     ) throws {
         guard tmuxWindowID == nil else { return }
-        guard let trackedWindow = try matchedTrackedWindowForAgent(
-            workspaceID: workspaceID,
-            provider: provider,
-            itermSessionID: itermSessionID,
-            yabaiWindowID: yabaiWindowID,
-            tmuxWindowID: tmuxWindowID)
-        else {
-            return
-        }
+        guard
+            let trackedWindow = try matchedTrackedWindowForAgent(
+                workspaceID: workspaceID, provider: provider, terminalTrackingID: terminalTrackingID, yabaiWindowID: yabaiWindowID, tmuxWindowID: tmuxWindowID
+            )
+        else { return }
         let processUsesWindow = try store.runningProcesses(workspaceID: workspaceID).contains { process in
             process.terminalTrackingKey == trackedWindow.terminalTrackingKey
         }
-        if !processUsesWindow {
-            try store.deleteWindow(id: trackedWindow.id)
-        }
+        if !processUsesWindow { try store.deleteWindow(id: trackedWindow.id) }
     }
 
     @discardableResult public func registerAgentWindow(
-        workspaceID: String, provider: AgentProvider, label: String? = nil, itermSessionID: String? = nil,
-        tmuxWindowID: String? = nil, codexThreadID: String? = nil, yabaiWindowID: Int? = nil, status: AgentWindowStatus = .idle
+        workspaceID: String, provider: AgentProvider, label: String? = nil, terminalTrackingID: String? = nil, tmuxWindowID: String? = nil,
+        terminalNativeID: String? = nil, codexThreadID: String? = nil, yabaiWindowID: Int? = nil, status: AgentWindowStatus = .idle
     ) throws -> AgentWindowRecord {
         let now = nowISO8601()
         let existingAgentWindows = try store.agentWindows(workspaceID: workspaceID)
         let matchedProcess = try matchedWorkspaceProcessForAgent(
-            workspaceID: workspaceID,
-            provider: provider,
-            itermSessionID: itermSessionID,
-            yabaiWindowID: yabaiWindowID,
-            tmuxWindowID: tmuxWindowID)
+            workspaceID: workspaceID, provider: provider, terminalTrackingID: terminalTrackingID, yabaiWindowID: yabaiWindowID, tmuxWindowID: tmuxWindowID)
         let resolvedTmuxWindowID = tmuxWindowID ?? matchedProcess?.tmuxWindowID
+        let resolvedTerminalNativeID = matchedProcess?.terminalNativeID ?? terminalNativeID
         let trackedWindow = try ensureTrackedWindowExistsForAgent(
-            workspaceID: workspaceID,
-            provider: provider,
-            label: label,
-            itermSessionID: itermSessionID,
-            yabaiWindowID: yabaiWindowID,
-            tmuxWindowID: resolvedTmuxWindowID)
+            workspaceID: workspaceID, provider: provider, label: label, terminalTrackingID: terminalTrackingID, terminalNativeID: resolvedTerminalNativeID,
+            yabaiWindowID: yabaiWindowID, tmuxWindowID: resolvedTmuxWindowID)
         let resolvedWindowID = trackedWindow?.windowID ?? yabaiWindowID
+        let finalTerminalNativeID = trackedWindow?.terminalNativeID ?? resolvedTerminalNativeID
         if let existing = try matchingAgentWindow(
-            workspaceID: workspaceID,
-            tmuxWindowID: resolvedTmuxWindowID,
-            itermSessionID: itermSessionID,
-            codexThreadID: codexThreadID,
+            workspaceID: workspaceID, tmuxWindowID: resolvedTmuxWindowID, terminalTrackingID: terminalTrackingID, codexThreadID: codexThreadID,
             yabaiWindowID: resolvedWindowID)
         {
             let resolvedLabel = try uniqueAgentFocusLabel(
-                workspaceID: workspaceID,
-                preferredLabel: label ?? existing.label,
-                excludingAgentWindowID: existing.id)
+                workspaceID: workspaceID, preferredLabel: label ?? existing.label, excludingAgentWindowID: existing.id)
             let updated = AgentWindowRecord(
                 id: existing.id, workspaceID: existing.workspaceID, provider: existing.provider, label: resolvedLabel,
-                itermSessionID: itermSessionID ?? existing.itermSessionID, tmuxWindowID: resolvedTmuxWindowID ?? existing.tmuxWindowID,
-                codexThreadID: codexThreadID ?? existing.codexThreadID, windowID: resolvedWindowID ?? existing.windowID,
-                yabaiWindowID: resolvedWindowID ?? existing.yabaiWindowID, status: status, createdAt: existing.createdAt,
-                updatedAt: now)
+                terminalTrackingID: terminalTrackingID ?? existing.terminalTrackingID, terminalNativeID: finalTerminalNativeID ?? existing.terminalNativeID,
+                tmuxWindowID: resolvedTmuxWindowID ?? existing.tmuxWindowID, codexThreadID: codexThreadID ?? existing.codexThreadID,
+                windowID: resolvedWindowID ?? existing.windowID, yabaiWindowID: resolvedWindowID ?? existing.yabaiWindowID, status: status,
+                createdAt: existing.createdAt, updatedAt: now)
             try validateWorkspaceFocusNames(
-                workspaceID: workspaceID,
-                processes: try store.workspaceProcesses(workspaceID: workspaceID),
+                workspaceID: workspaceID, processes: try store.workspaceProcesses(workspaceID: workspaceID),
                 browserSessions: try store.workspaceBrowserSessions(workspaceID: workspaceID),
                 agentWindows: existingAgentWindows.map { $0.id == existing.id ? updated : $0 })
             try store.upsertAgentWindow(updated)
@@ -4069,112 +3884,79 @@ public final class MuxyOrchestrator {
         }
         let resolvedLabel = try uniqueAgentFocusLabel(workspaceID: workspaceID, preferredLabel: label)
         let record = AgentWindowRecord(
-            id: UUID().uuidString, workspaceID: workspaceID, provider: provider, label: resolvedLabel,
-            itermSessionID: itermSessionID, tmuxWindowID: resolvedTmuxWindowID, codexThreadID: codexThreadID,
-            windowID: resolvedWindowID, yabaiWindowID: resolvedWindowID, status: status, createdAt: now, updatedAt: now)
+            id: UUID().uuidString, workspaceID: workspaceID, provider: provider, label: resolvedLabel, terminalTrackingID: terminalTrackingID,
+            terminalNativeID: finalTerminalNativeID, tmuxWindowID: resolvedTmuxWindowID, codexThreadID: codexThreadID, windowID: resolvedWindowID,
+            yabaiWindowID: resolvedWindowID, status: status, createdAt: now, updatedAt: now)
         try validateWorkspaceFocusNames(
-            workspaceID: workspaceID,
-            processes: try store.workspaceProcesses(workspaceID: workspaceID),
-            browserSessions: try store.workspaceBrowserSessions(workspaceID: workspaceID),
-            agentWindows: existingAgentWindows + [record])
+            workspaceID: workspaceID, processes: try store.workspaceProcesses(workspaceID: workspaceID),
+            browserSessions: try store.workspaceBrowserSessions(workspaceID: workspaceID), agentWindows: existingAgentWindows + [record])
         try store.upsertAgentWindow(record)
         return record
     }
 
     @discardableResult public func updateAgentWindowStatus(
-        workspaceID: String, provider: AgentProvider, itermSessionID: String? = nil, codexThreadID: String? = nil,
-        tmuxWindowID: String? = nil, yabaiWindowID: Int? = nil, label: String? = nil, status: AgentWindowStatus
+        workspaceID: String, provider: AgentProvider, terminalTrackingID: String? = nil, codexThreadID: String? = nil, tmuxWindowID: String? = nil,
+        terminalNativeID: String? = nil, yabaiWindowID: Int? = nil, label: String? = nil, status: AgentWindowStatus
     ) throws -> AgentWindowRecord {
         let now = nowISO8601()
         let allAgentWindows = try store.agentWindows(workspaceID: workspaceID)
         let matchedProcess = try matchedWorkspaceProcessForAgent(
-            workspaceID: workspaceID,
-            provider: provider,
-            itermSessionID: itermSessionID,
-            yabaiWindowID: yabaiWindowID,
-            tmuxWindowID: tmuxWindowID)
+            workspaceID: workspaceID, provider: provider, terminalTrackingID: terminalTrackingID, yabaiWindowID: yabaiWindowID, tmuxWindowID: tmuxWindowID)
         let resolvedTmuxWindowID = tmuxWindowID ?? matchedProcess?.tmuxWindowID
+        let resolvedTerminalNativeID = matchedProcess?.terminalNativeID ?? terminalNativeID
         let trackedWindow = try ensureTrackedWindowExistsForAgent(
-            workspaceID: workspaceID,
-            provider: provider,
-            label: label,
-            itermSessionID: itermSessionID,
-            yabaiWindowID: yabaiWindowID,
-            tmuxWindowID: resolvedTmuxWindowID)
+            workspaceID: workspaceID, provider: provider, label: label, terminalTrackingID: terminalTrackingID, terminalNativeID: resolvedTerminalNativeID,
+            yabaiWindowID: yabaiWindowID, tmuxWindowID: resolvedTmuxWindowID)
         let resolvedWindowID = trackedWindow?.windowID ?? yabaiWindowID
+        let finalTerminalNativeID = trackedWindow?.terminalNativeID ?? resolvedTerminalNativeID
         let existing = try matchingAgentWindow(
-            workspaceID: workspaceID,
-            tmuxWindowID: resolvedTmuxWindowID,
-            itermSessionID: itermSessionID,
-            codexThreadID: codexThreadID,
+            workspaceID: workspaceID, tmuxWindowID: resolvedTmuxWindowID, terminalTrackingID: terminalTrackingID, codexThreadID: codexThreadID,
             yabaiWindowID: resolvedWindowID)
         if let existing {
             let resolvedLabel = try uniqueAgentFocusLabel(
-                workspaceID: workspaceID,
-                preferredLabel: label ?? existing.label,
-                excludingAgentWindowID: existing.id)
+                workspaceID: workspaceID, preferredLabel: label ?? existing.label, excludingAgentWindowID: existing.id)
             let updated = AgentWindowRecord(
                 id: existing.id, workspaceID: existing.workspaceID, provider: existing.provider, label: resolvedLabel,
-                itermSessionID: itermSessionID ?? existing.itermSessionID, tmuxWindowID: resolvedTmuxWindowID ?? existing.tmuxWindowID,
-                codexThreadID: codexThreadID ?? existing.codexThreadID, windowID: resolvedWindowID ?? existing.windowID,
-                yabaiWindowID: resolvedWindowID ?? existing.yabaiWindowID,
-                status: status, createdAt: existing.createdAt, updatedAt: now)
+                terminalTrackingID: terminalTrackingID ?? existing.terminalTrackingID, terminalNativeID: finalTerminalNativeID ?? existing.terminalNativeID,
+                tmuxWindowID: resolvedTmuxWindowID ?? existing.tmuxWindowID, codexThreadID: codexThreadID ?? existing.codexThreadID,
+                windowID: resolvedWindowID ?? existing.windowID, yabaiWindowID: resolvedWindowID ?? existing.yabaiWindowID, status: status,
+                createdAt: existing.createdAt, updatedAt: now)
             try validateWorkspaceFocusNames(
-                workspaceID: workspaceID,
-                processes: try store.workspaceProcesses(workspaceID: workspaceID),
+                workspaceID: workspaceID, processes: try store.workspaceProcesses(workspaceID: workspaceID),
                 browserSessions: try store.workspaceBrowserSessions(workspaceID: workspaceID),
                 agentWindows: allAgentWindows.map { $0.id == existing.id ? updated : $0 })
             try store.upsertAgentWindow(updated)
             return updated
         }
         return try registerAgentWindow(
-            workspaceID: workspaceID, provider: provider, label: label, itermSessionID: itermSessionID, tmuxWindowID: resolvedTmuxWindowID,
-            codexThreadID: codexThreadID,
-            yabaiWindowID: yabaiWindowID, status: status)
+            workspaceID: workspaceID, provider: provider, label: label, terminalTrackingID: terminalTrackingID, tmuxWindowID: resolvedTmuxWindowID,
+            terminalNativeID: resolvedTerminalNativeID, codexThreadID: codexThreadID, yabaiWindowID: yabaiWindowID, status: status)
     }
 
     @discardableResult public func handleAgentExit(
-        workspaceID: String,
-        provider: AgentProvider,
-        itermSessionID: String? = nil,
-        tmuxWindowID: String? = nil,
-        codexThreadID: String? = nil,
-        yabaiWindowID: Int? = nil,
-        label: String? = nil
+        workspaceID: String, provider: AgentProvider, terminalTrackingID: String? = nil, tmuxWindowID: String? = nil, codexThreadID: String? = nil,
+        terminalNativeID: String? = nil, yabaiWindowID: Int? = nil, label: String? = nil
     ) throws -> AgentWindowRecord? {
-        guard let existing = try matchingAgentWindow(
-            workspaceID: workspaceID,
-            tmuxWindowID: tmuxWindowID,
-            itermSessionID: itermSessionID,
-            codexThreadID: codexThreadID,
-            yabaiWindowID: yabaiWindowID)
-        else {
-            return nil
-        }
-        let resolvedWindowID = try matchedTrackedWindowForAgent(
-            workspaceID: workspaceID,
-            provider: provider,
-            itermSessionID: itermSessionID ?? existing.itermSessionID,
-            yabaiWindowID: yabaiWindowID ?? existing.yabaiWindowID ?? existing.windowID,
-            tmuxWindowID: existing.tmuxWindowID)?
-            .windowID ?? yabaiWindowID ?? existing.yabaiWindowID ?? existing.windowID
+        guard
+            let existing = try matchingAgentWindow(
+                workspaceID: workspaceID, tmuxWindowID: tmuxWindowID, terminalTrackingID: terminalTrackingID, codexThreadID: codexThreadID,
+                yabaiWindowID: yabaiWindowID)
+        else { return nil }
+        let resolvedWindowID =
+            try matchedTrackedWindowForAgent(
+                workspaceID: workspaceID, provider: provider, terminalTrackingID: terminalTrackingID ?? existing.terminalTrackingID,
+                yabaiWindowID: yabaiWindowID ?? existing.yabaiWindowID ?? existing.windowID, tmuxWindowID: existing.tmuxWindowID)?.windowID
+            ?? yabaiWindowID ?? existing.yabaiWindowID ?? existing.windowID
         if agentWindowIsOpen(resolvedWindowID) || existing.tmuxWindowID != nil {
             return try updateAgentWindowStatus(
-                workspaceID: workspaceID,
-                provider: provider,
-                itermSessionID: itermSessionID ?? existing.itermSessionID,
-                codexThreadID: codexThreadID ?? existing.codexThreadID,
-                tmuxWindowID: tmuxWindowID ?? existing.tmuxWindowID,
-                yabaiWindowID: resolvedWindowID,
-                label: label ?? existing.label,
-                status: .idle)
+                workspaceID: workspaceID, provider: provider, terminalTrackingID: terminalTrackingID ?? existing.terminalTrackingID,
+                codexThreadID: codexThreadID ?? existing.codexThreadID, tmuxWindowID: tmuxWindowID ?? existing.tmuxWindowID,
+                terminalNativeID: terminalNativeID ?? existing.terminalNativeID,
+                yabaiWindowID: resolvedWindowID, label: label ?? existing.label, status: .idle)
         }
         try store.deleteAgentWindow(id: existing.id)
         try removeAdHocTrackedWindowForAgent(
-            workspaceID: workspaceID,
-            provider: provider,
-            itermSessionID: itermSessionID ?? existing.itermSessionID,
-            yabaiWindowID: resolvedWindowID,
+            workspaceID: workspaceID, provider: provider, terminalTrackingID: terminalTrackingID ?? existing.terminalTrackingID, yabaiWindowID: resolvedWindowID,
             tmuxWindowID: existing.tmuxWindowID)
         return nil
     }
@@ -4228,9 +4010,7 @@ public final class MuxyOrchestrator {
     public func recoverMissingBrowserSession(workspaceID: String, targetURL: String) throws {
         let (project, workspace) = try resolveWorkspace(id: workspaceID)
         let sessions = try store.workspaceBrowserSessions(workspaceID: workspace.id)
-        guard !sessions.isEmpty else {
-            throw MuxyError.invalidArgument(message: "No browser sessions are configured for this workspace.")
-        }
+        guard !sessions.isEmpty else { throw MuxyError.invalidArgument(message: "No browser sessions are configured for this workspace.") }
         guard chrome.isAvailable() else { throw MuxyError.dependencyMissing(message: "Google Chrome is required for browser sessions.") }
 
         let namedPorts = try store.workspacePortsNamed(workspaceID: workspace.id)
@@ -4257,16 +4037,10 @@ public final class MuxyOrchestrator {
             return trackedTargetURL == matchedSession.prefix || matchedSession.prefix.hasPrefix(trackedTargetURL)
         })
         let storedWindow = WindowRecord(
-            id: existingWindow?.id ?? UUID().uuidString,
-            workspaceID: workspace.id,
-            app: newWindow.app,
+            id: existingWindow?.id ?? UUID().uuidString, workspaceID: workspace.id, app: newWindow.app,
             name: try browserFocusName(workspaceID: workspace.id, targetURL: matchedSession.prefix) ?? matchedSession.prefix,
-            detail: matchedSession.prefix,
-            targetURL: matchedSession.prefix,
-            windowID: newWindow.id,
-            role: "browser",
-            orderIndex: existingWindow?.orderIndex ?? matchedSession.index,
-            lastSeenAt: nowISO8601())
+            detail: matchedSession.prefix, targetURL: matchedSession.prefix, windowID: newWindow.id, role: "browser",
+            orderIndex: existingWindow?.orderIndex ?? matchedSession.index, lastSeenAt: nowISO8601())
         try store.upsert(window: storedWindow)
     }
 
@@ -4281,38 +4055,35 @@ public final class MuxyOrchestrator {
         let snapshot = try yabai.listWindows()
         let terminalHandle = try attachProcessTmuxSession(
             workspace: workspace, processName: process.templateName, terminalHost: terminalHost, background: false)
-        let capturedWindowID = try captureNewAppWindowID(snapshot: snapshot, appName: terminalAppName(for: terminalHost))
-            ?? terminalHandle.fallbackWindowID
+        let capturedWindowID =
+            try captureNewAppWindowID(snapshot: snapshot, appName: terminalAppName(for: terminalHost)) ?? terminalHandle.fallbackWindowID
         let now = nowISO8601()
+        let hookSessionID = storedTerminalHookSessionID(terminalHost: terminalHost, handle: terminalHandle)
+        let terminalNativeID = storedTerminalNativeID(terminalHost: terminalHost, handle: terminalHandle)
         try store.upsert(
             runningProcess: RunningProcessRecord(
                 id: process.id, workspaceID: process.workspaceID, templateName: process.templateName, command: process.command,
-                terminalApp: process.terminalApp, windowID: capturedWindowID, itermSessionID: terminalHandle.trackingIdentity?.sessionID, itermTabIndex: nil,
-                tmuxWindowID: process.tmuxWindowID, pid: pid, status: .running, logPath: process.logPath,
+                terminalApp: process.terminalApp, windowID: capturedWindowID, terminalTrackingID: hookSessionID, terminalNativeID: terminalNativeID,
+                itermTabIndex: nil, tmuxWindowID: process.tmuxWindowID, pid: pid, status: .running, logPath: process.logPath,
                 lastOutputAt: process.lastOutputAt, startedAt: process.startedAt, exitedAt: nil))
 
         let existingWindow = try store.windows(workspaceID: workspace.id).first(where: { window in
-            window.role == "terminal" && (window.id == process.id || window.windowID == process.windowID || window.tmuxWindowID == process.tmuxWindowID)
+            window.role == "terminal"
+                && (window.id == process.id || window.windowID == process.windowID || window.tmuxWindowID == process.tmuxWindowID)
         })
         try store.upsert(
             window: WindowRecord(
                 id: existingWindow?.id ?? process.id, workspaceID: workspace.id, app: terminalAppName(for: terminalHost), name: process.templateName,
-                detail: process.command,
-                targetURL: nil, windowID: capturedWindowID, itermSessionID: terminalHandle.trackingIdentity?.sessionID, itermTabIndex: nil,
-                tmuxWindowID: process.tmuxWindowID, role: "terminal",
+                detail: process.command, targetURL: nil, windowID: capturedWindowID, terminalTrackingID: hookSessionID,
+                terminalNativeID: terminalNativeID, itermTabIndex: nil, tmuxWindowID: process.tmuxWindowID, role: "terminal",
                 orderIndex: existingWindow?.orderIndex
                     ?? Self.nextWindowOrderIndex(existing: try store.windows(workspaceID: workspace.id), role: "terminal", orderOffset: 200),
                 lastSeenAt: now))
         return true
     }
 
-    @discardableResult
-    private func launchConfiguredProcess(
-        template: ProcessTemplate,
-        workspace: WorkspaceRecord,
-        env: [String: String],
-        terminalHost: TerminalHost,
-        background: Bool = false
+    @discardableResult private func launchConfiguredProcess(
+        template: ProcessTemplate, workspace: WorkspaceRecord, env: [String: String], terminalHost: TerminalHost, background: Bool = false
     ) throws -> RunningProcessRecord {
         let name = processKey(for: template)
         guard let command = parseDirectProcessCommand(template.command, env: env) else {
@@ -4322,22 +4093,23 @@ public final class MuxyOrchestrator {
         let terminalHandle = try launchProcessInTmux(
             workspace: workspace, processName: name, command: command, env: env, terminalHost: terminalHost, background: background,
             replaceExistingSession: true)
-        let capturedWindowID = try captureNewAppWindowID(snapshot: snapshot, appName: terminalAppName(for: terminalHost))
-            ?? terminalHandle.fallbackWindowID
+        let capturedWindowID =
+            try captureNewAppWindowID(snapshot: snapshot, appName: terminalAppName(for: terminalHost)) ?? terminalHandle.fallbackWindowID
         let tmuxWindow = try currentTmuxWindowInfo(workspaceID: workspace.id, processName: name)
+        let hookSessionID = storedTerminalHookSessionID(terminalHost: terminalHost, handle: terminalHandle)
+        let terminalNativeID = storedTerminalNativeID(terminalHost: terminalHost, handle: terminalHandle)
         let record = RunningProcessRecord(
             id: UUID().uuidString, workspaceID: workspace.id, templateName: name, command: template.command,
-            terminalApp: terminalAppName(for: terminalHost), windowID: capturedWindowID, itermSessionID: terminalHandle.trackingIdentity?.sessionID,
-            itermTabIndex: nil, tmuxWindowID: tmuxWindow?.id, pid: tmuxWindow?.panePID, status: .running, logPath: nil, lastOutputAt: nil,
-            startedAt: nowISO8601(), exitedAt: nil)
+            terminalApp: terminalAppName(for: terminalHost), windowID: capturedWindowID, terminalTrackingID: hookSessionID,
+            terminalNativeID: terminalNativeID, itermTabIndex: nil, tmuxWindowID: tmuxWindow?.id, pid: tmuxWindow?.panePID, status: .running,
+            logPath: nil, lastOutputAt: nil, startedAt: nowISO8601(), exitedAt: nil)
         try store.upsert(runningProcess: record)
         let nextOrder = Self.nextWindowOrderIndex(existing: try store.windows(workspaceID: workspace.id), role: "terminal", orderOffset: 200)
         try store.upsert(
             window: WindowRecord(
-                id: UUID().uuidString, workspaceID: workspace.id, app: terminalAppName(for: terminalHost), name: name,
-                detail: template.command, targetURL: nil,
-                windowID: capturedWindowID, itermSessionID: terminalHandle.trackingIdentity?.sessionID, itermTabIndex: nil, tmuxWindowID: tmuxWindow?.id,
-                role: "terminal", orderIndex: nextOrder, lastSeenAt: nowISO8601()))
+                id: UUID().uuidString, workspaceID: workspace.id, app: terminalAppName(for: terminalHost), name: name, detail: template.command,
+                targetURL: nil, windowID: capturedWindowID, terminalTrackingID: hookSessionID, terminalNativeID: terminalNativeID, itermTabIndex: nil,
+                tmuxWindowID: tmuxWindow?.id, role: "terminal", orderIndex: nextOrder, lastSeenAt: nowISO8601()))
         return record
     }
 
@@ -4346,16 +4118,9 @@ public final class MuxyOrchestrator {
         let target = try resolvedProcessTerminalFocusTarget(process, workspaceID: workspaceID)
         guard let trackedWindowID = target.windowID else { return false }
         let adapterFocused = focusManagedTerminal(
-            terminalApp: process.terminalApp,
-            trackingIdentity: target.trackingIdentity,
-            windowID: trackedWindowID,
-            tabIndex: target.tabIndex)
-        let focused = adapterFocused == true
-            ? true
-            : ((try? yabai.focusWindow(id: trackedWindowID)) ?? false)
-        if focused, let tmuxWindowID = process.tmuxWindowID, !tmuxWindowID.isEmpty {
-            _ = try? tmux.selectWindow(windowID: tmuxWindowID)
-        }
+            terminalApp: process.terminalApp, trackingIdentity: target.trackingIdentity, windowID: trackedWindowID, tabIndex: target.tabIndex)
+        let focused = adapterFocused == true ? true : ((try? yabai.focusWindow(id: trackedWindowID)) ?? false)
+        if focused, let tmuxWindowID = process.tmuxWindowID, !tmuxWindowID.isEmpty { _ = try? tmux.selectWindow(windowID: tmuxWindowID) }
         if focused { pulseTerminalWindowIfNeeded(windowID: trackedWindowID) }
         return focused
     }
@@ -4366,53 +4131,53 @@ public final class MuxyOrchestrator {
             guard window.role == "terminal", window.app == process.terminalApp else { return false }
             if window.id == process.id { return true }
             if let tmuxWindowID = process.tmuxWindowID, window.tmuxWindowID == tmuxWindowID { return true }
-            if let terminalID = process.itermSessionID, !terminalID.isEmpty, window.itermSessionID == terminalID { return true }
+            if let terminalID = process.terminalNativeID, !terminalID.isEmpty, window.terminalNativeID == terminalID { return true }
+            if let terminalID = process.terminalTrackingID, !terminalID.isEmpty, window.terminalTrackingID == terminalID { return true }
             if let windowID = process.windowID, window.windowID == windowID { return true }
             return false
         })
-        let trackedSessionIdentity = trackedWindow?.itermSessionID.flatMap { sessionID in
-            sessionID.isEmpty ? nil : TerminalTrackingIdentity.session(sessionID)
-        }
-        let processSessionIdentity = process.itermSessionID.flatMap { sessionID in
-            sessionID.isEmpty ? nil : TerminalTrackingIdentity.session(sessionID)
-        }
-        let trackingIdentity = trackedSessionIdentity
-            ?? processSessionIdentity
-            ?? trackedWindow?.windowID.map(TerminalTrackingIdentity.window)
-            ?? process.windowID.map(TerminalTrackingIdentity.window)
-            ?? trackedWindow?.tmuxWindowID.map(TerminalTrackingIdentity.tmux)
+        let trackedSessionIdentity = trackedWindow?.terminalFocusIdentity
+        let processSessionIdentity = process.terminalFocusIdentity
+        let trackingIdentity =
+            trackedSessionIdentity ?? processSessionIdentity ?? trackedWindow?.windowID.map(TerminalTrackingIdentity.window) ?? process.windowID.map(
+                TerminalTrackingIdentity.window) ?? trackedWindow?.tmuxWindowID.map(TerminalTrackingIdentity.tmux)
             ?? process.tmuxWindowID.map(TerminalTrackingIdentity.tmux)
         return TerminalFocusTarget(
-            trackingIdentity: trackingIdentity,
-            windowID: trackedWindow?.windowID ?? process.windowID,
+            trackingIdentity: trackingIdentity, windowID: trackedWindow?.windowID ?? process.windowID,
             tabIndex: trackedWindow?.itermTabIndex ?? process.itermTabIndex)
     }
 
     private func trackedAgentWindowID(_ record: AgentWindowRecord) throws -> Int? {
         if let tmuxWindowID = record.tmuxWindowID, !tmuxWindowID.isEmpty {
             let terminalApp = TerminalHost(rawValue: record.provider.rawValue)?.appName ?? TerminalHost.iterm2.appName
-            if let windowID = try store.windows(workspaceID: record.workspaceID)
-                .first(where: { $0.app == terminalApp && $0.role == "terminal" && $0.tmuxWindowID == tmuxWindowID })?
-                .windowID
-            {
+            if let windowID = try store.windows(workspaceID: record.workspaceID).first(where: {
+                $0.app == terminalApp && $0.role == "terminal" && $0.tmuxWindowID == tmuxWindowID
+            })?.windowID {
                 return windowID
             }
         }
-        guard let sessionID = record.itermSessionID, !sessionID.isEmpty else { return record.yabaiWindowID ?? record.windowID }
         let terminalApp = TerminalHost(rawValue: record.provider.rawValue)?.appName ?? TerminalHost.iterm2.appName
-        return try store.windows(workspaceID: record.workspaceID)
-            .first(where: { $0.app == terminalApp && $0.role == "terminal" && $0.itermSessionID == sessionID })?
-            .windowID
+        if record.provider == .ghostty, let terminalID = record.terminalNativeID, !terminalID.isEmpty {
+            if let windowID = try store.windows(workspaceID: record.workspaceID).first(where: {
+                $0.app == terminalApp && $0.role == "terminal" && $0.terminalNativeID == terminalID
+            })?.windowID {
+                return windowID
+            }
+            // Older or partially reconciled Ghostty rows may still only carry the hook token on
+            // their tracked terminal window. If native-ID lookup misses, fall back to that same
+            // persisted tracking token rather than inferring from frontmost Ghostty state.
+        }
+        guard let sessionID = record.terminalTrackingID, !sessionID.isEmpty else { return record.yabaiWindowID ?? record.windowID }
+        return try store.windows(workspaceID: record.workspaceID).first(where: {
+            $0.app == terminalApp && $0.role == "terminal" && $0.terminalTrackingID == sessionID
+        })?.windowID
     }
 
     private func focusAgentWindowRecord(_ record: AgentWindowRecord) throws -> Bool {
         let windowID = try trackedAgentWindowID(record) ?? record.yabaiWindowID ?? record.windowID
         let terminalApp = TerminalHost(rawValue: record.provider.rawValue)?.appName
         let adapterFocused = focusManagedTerminal(
-            terminalApp: terminalApp,
-            trackingIdentity: record.terminalFocusIdentity,
-            windowID: windowID,
-            tabIndex: nil)
+            terminalApp: terminalApp, trackingIdentity: record.terminalFocusIdentity, windowID: windowID, tabIndex: nil)
         let focused: Bool
         if adapterFocused == true {
             focused = true
@@ -4421,9 +4186,7 @@ public final class MuxyOrchestrator {
         } else {
             focused = false
         }
-        if focused, let tmuxWindowID = record.tmuxWindowID, !tmuxWindowID.isEmpty {
-            _ = try? tmux.selectWindow(windowID: tmuxWindowID)
-        }
+        if focused, let tmuxWindowID = record.tmuxWindowID, !tmuxWindowID.isEmpty { _ = try? tmux.selectWindow(windowID: tmuxWindowID) }
         if focused, let windowID { pulseTerminalWindowIfNeeded(windowID: windowID) }
         return focused
     }
@@ -4432,36 +4195,23 @@ public final class MuxyOrchestrator {
         if window.role == "browser" {
             return .missingTrackedWindow(
                 MissingTrackedWindowContext(
-                    kind: .browserSession,
-                    workspaceID: workspaceID,
-                    windowID: window.windowID,
-                    targetURL: window.targetURL,
+                    kind: .browserSession, workspaceID: workspaceID, windowID: window.windowID, targetURL: window.targetURL,
                     title: window.name ?? window.targetURL ?? "Browser Session"))
         }
         return .missingTrackedWindow(
-            MissingTrackedWindowContext(
-                kind: .window,
-                workspaceID: workspaceID,
-                windowID: window.windowID,
-                title: window.name ?? window.app))
+            MissingTrackedWindowContext(kind: .window, workspaceID: workspaceID, windowID: window.windowID, title: window.name ?? window.app))
     }
 
     private func missingTrackedProcessError(_ process: RunningProcessRecord, workspaceID: String) -> MuxyError {
         .missingTrackedWindow(
             MissingTrackedWindowContext(
-                kind: .process,
-                workspaceID: workspaceID,
-                windowID: process.windowID,
-                processID: process.id,
-                title: process.templateName))
+                kind: .process, workspaceID: workspaceID, windowID: process.windowID, processID: process.id, title: process.templateName))
     }
 
     private func missingTrackedAgentError(_ record: AgentWindowRecord) -> MuxyError {
         .missingTrackedWindow(
             MissingTrackedWindowContext(
-                kind: .codingAgent,
-                workspaceID: record.workspaceID,
-                windowID: record.windowID ?? record.yabaiWindowID,
+                kind: .codingAgent, workspaceID: record.workspaceID, windowID: record.windowID ?? record.yabaiWindowID,
                 title: record.label ?? "Coding Agent CLI"))
     }
 

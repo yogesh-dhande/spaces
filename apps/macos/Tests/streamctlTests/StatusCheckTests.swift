@@ -41,10 +41,10 @@ import Testing
             try store.upsert(
                 window: WindowRecord(
                     id: UUID().uuidString, workspaceID: workspace.id, app: "iTerm2", title: "web-server", windowID: 123,
-                    itermSessionID: "workspace-session", tmuxWindowID: "@1", role: "terminal", orderIndex: 200, lastSeenAt: "now"))
+                    terminalTrackingID: "workspace-session", tmuxWindowID: "@1", role: "terminal", orderIndex: 200, lastSeenAt: "now"))
             let runningProcess = RunningProcessRecord(
                 id: UUID().uuidString, workspaceID: workspace.id, templateName: "web-server", command: "docker compose up -d",
-                terminalApp: "iTerm2", windowID: 123, itermSessionID: "workspace-session", itermTabIndex: nil, tmuxWindowID: "@1", pid: 9000,
+                terminalApp: "iTerm2", windowID: 123, terminalTrackingID: "workspace-session", itermTabIndex: nil, tmuxWindowID: "@1", pid: 9000,
                 status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil)
             try store.upsert(runningProcess: runningProcess)
 
@@ -178,13 +178,13 @@ import Testing
 
             let runningProcess = RunningProcessRecord(
                 id: UUID().uuidString, workspaceID: workspace.id, templateName: "web-server", command: "docker compose up --build",
-                terminalApp: "iTerm2", windowID: 123, itermSessionID: "workspace-session", itermTabIndex: nil, tmuxWindowID: "@1", pid: nil,
+                terminalApp: "iTerm2", windowID: 123, terminalTrackingID: "workspace-session", itermTabIndex: nil, tmuxWindowID: "@1", pid: nil,
                 status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil)
             try store.upsert(runningProcess: runningProcess)
             try store.upsert(
                 window: WindowRecord(
                     id: UUID().uuidString, workspaceID: workspace.id, app: "iTerm2", title: "web-server", windowID: 123,
-                    itermSessionID: "workspace-session", tmuxWindowID: "@1", role: "terminal", orderIndex: 200, lastSeenAt: "now"))
+                    terminalTrackingID: "workspace-session", tmuxWindowID: "@1", role: "terminal", orderIndex: 200, lastSeenAt: "now"))
 
             var results: [StatusResult] = []
             try withMockCommands(["yabai": Self.yabaiMockScript]) {

@@ -1297,8 +1297,25 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         name.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
-    nonisolated static func agentTerminalTrackingKey(for record: AgentWindowRecord) -> String? {
-        record.terminalTrackingKey
+    nonisolated static func agentTerminalTrackingKeys(for record: AgentWindowRecord) -> Set<String> {
+        var keys = Set<String>()
+        if let trackingKey = record.terminalTrackingKey, !trackingKey.isEmpty { keys.insert(trackingKey) }
+        if record.provider == .ghostty, let sessionID = record.terminalTrackingID, !sessionID.isEmpty {
+            keys.insert(TerminalTrackingIdentity.session(sessionID).trackingKey)
+        }
+        return keys
+    }
+
+    nonisolated static func preferredTerminalWindowsByTrackingKey(_ windows: [WindowRecord]) -> [String: WindowRecord] {
+        windows.reduce(into: [:]) { result, window in
+            guard window.role == "terminal", let trackingKey = window.terminalTrackingKey else { return }
+            // Duplicate keys can exist transiently while Ghostty rows are being reconciled.
+            // Prefer the earliest ordered tracked window instead of crashing on duplicates.
+            let existingOrder = result[trackingKey]?.orderIndex ?? Int.max
+            if window.orderIndex <= existingOrder {
+                result[trackingKey] = window
+            }
+        }
     }
 
     nonisolated static func orderedWorkspaceRunProcessEntries(
@@ -1328,7 +1345,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             }
             return map
         }()
-        let agentTerminalIDs = Set(agentWindows.compactMap { agentTerminalTrackingKey(for: $0) })
+        let agentTerminalIDs = Set(agentWindows.flatMap { agentTerminalTrackingKeys(for: $0) })
         let eligibleProcesses = processes.filter { process in
             process.terminalTrackingKey.map { !agentTerminalIDs.contains($0) } != false
         }
@@ -3825,17 +3842,12 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         // --- Build Coding Agents rows last so they do not reshuffle non-agent shortcuts ---
         var agentsStack: NSStackView? = nil
         if !agentWindowsForRunTab.isEmpty {
-            let windowsByTrackingKey: [String: WindowRecord] = Dictionary(
-                uniqueKeysWithValues: windows.compactMap { window in
-                    guard window.role == "terminal", let trackingKey = window.terminalTrackingKey else { return nil }
-                    return (trackingKey, window)
-                })
+            let windowsByTrackingKey = Self.preferredTerminalWindowsByTrackingKey(windows)
             let stack = NSStackView()
             stack.orientation = .vertical
             stack.spacing = 4
             for agentWin in agentWindowsForRunTab {
-                let trackingKey = Self.agentTerminalTrackingKey(for: agentWin)
-                let linkedWin = trackingKey.flatMap { windowsByTrackingKey[$0] }
+                let linkedWin = Self.agentTerminalTrackingKeys(for: agentWin).compactMap { windowsByTrackingKey[$0] }.first
                 let agentLabel = agentWin.label ?? "Coding Agent CLI"
                 let agentDetail = linkedWin?.detail ?? linkedWin?.app
                 let rec = agentWin

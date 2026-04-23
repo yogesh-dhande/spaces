@@ -306,13 +306,15 @@ final class StoreTests: XCTestCase {
         try store.upsert(
             runningProcess: RunningProcessRecord(
                 id: processID, workspaceID: workspace.id, templateName: "api", command: "npm run api", terminalApp: "iTerm2", windowID: 9001,
-                pid: 1234, status: .running, logPath: "/tmp/api.log", lastOutputAt: "2026-01-01T00:00:00Z", startedAt: "2026-01-01T00:00:00Z",
-                exitedAt: nil))
+                terminalTrackingID: "session-abc", itermTabIndex: 2, pid: 1234, status: .running, logPath: "/tmp/api.log",
+                lastOutputAt: "2026-01-01T00:00:00Z", startedAt: "2026-01-01T00:00:00Z", exitedAt: nil))
 
         var processes = try store.runningProcesses(workspaceID: workspace.id)
         XCTAssertEqual(processes.count, 1)
         XCTAssertEqual(processes[0].status, .running)
         XCTAssertEqual(processes[0].windowID, 9001)
+        XCTAssertEqual(processes[0].terminalTrackingID, "session-abc")
+        XCTAssertEqual(processes[0].itermTabIndex, 2)
 
         try store.upsert(
             runningProcess: RunningProcessRecord(
@@ -363,7 +365,7 @@ final class StoreTests: XCTestCase {
 
         try store.upsertAgentWindow(
             AgentWindowRecord(
-                id: UUID().uuidString, workspaceID: workspace.id, provider: .iterm2, label: "Codex CLI", itermSessionID: "session-123",
+                id: UUID().uuidString, workspaceID: workspace.id, provider: .iterm2, label: "Codex CLI", terminalTrackingID: "session-123",
                 codexThreadID: "thread-123", windowID: nil, yabaiWindowID: 4242, status: .spinning, createdAt: "2026-02-25T00:00:00Z",
                 updatedAt: "2026-02-25T00:00:01Z"))
 
@@ -688,13 +690,13 @@ final class StoreTests: XCTestCase {
         let id = UUID().uuidString
         try store.upsertAgentWindow(
             AgentWindowRecord(
-                id: id, workspaceID: workspace.id, provider: .iterm2, label: nil, itermSessionID: sessionID, codexThreadID: nil, windowID: nil,
+                id: id, workspaceID: workspace.id, provider: .iterm2, label: nil, terminalTrackingID: sessionID, codexThreadID: nil, windowID: nil,
                 yabaiWindowID: nil, status: .spinning, createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:00:00Z"))
 
-        let found = try store.agentWindow(workspaceID: workspace.id, itermSessionID: sessionID)
+        let found = try store.agentWindow(workspaceID: workspace.id, terminalTrackingID: sessionID)
         XCTAssertEqual(found?.id, id)
-        XCTAssertEqual(found?.itermSessionID, sessionID)
-        XCTAssertNil(try store.agentWindow(workspaceID: workspace.id, itermSessionID: "nonexistent"))
+        XCTAssertEqual(found?.terminalTrackingID, sessionID)
+        XCTAssertNil(try store.agentWindow(workspaceID: workspace.id, terminalTrackingID: "nonexistent"))
     }
 
     // Tests agentWindowsByProvider returns only records from the requested workspace/provider by arranging representative inputs and asserting the expected result.
@@ -709,17 +711,17 @@ final class StoreTests: XCTestCase {
 
         try store.upsertAgentWindow(
             AgentWindowRecord(
-                id: UUID().uuidString, workspaceID: workspace.id, provider: .iterm2, label: "claude", itermSessionID: "session-a", codexThreadID: nil,
+                id: UUID().uuidString, workspaceID: workspace.id, provider: .iterm2, label: "claude", terminalTrackingID: "session-a", codexThreadID: nil,
                 windowID: nil, yabaiWindowID: nil, status: .idle, createdAt: "2026-01-01T00:00:01Z", updatedAt: "2026-01-01T00:00:01Z"))
         try store.upsertAgentWindow(
             AgentWindowRecord(
-                id: UUID().uuidString, workspaceID: workspaceB.id, provider: .iterm2, label: "codex", itermSessionID: "session-b", codexThreadID: nil,
+                id: UUID().uuidString, workspaceID: workspaceB.id, provider: .iterm2, label: "codex", terminalTrackingID: "session-b", codexThreadID: nil,
                 windowID: nil, yabaiWindowID: nil, status: .spinning, createdAt: "2026-01-01T00:00:02Z", updatedAt: "2026-01-01T00:00:02Z"))
 
         let itermWindows = try store.agentWindowsByProvider(workspaceID: workspace.id, provider: .iterm2)
         XCTAssertEqual(itermWindows.count, 1)
         XCTAssertEqual(itermWindows[0].provider, .iterm2)
-        XCTAssertEqual(itermWindows[0].itermSessionID, "session-a")
+        XCTAssertEqual(itermWindows[0].terminalTrackingID, "session-a")
     }
 
     // Tests deleteAgentWindow removes a single record by arranging representative inputs and asserting the expected result.
@@ -734,11 +736,11 @@ final class StoreTests: XCTestCase {
         let idB = UUID().uuidString
         try store.upsertAgentWindow(
             AgentWindowRecord(
-                id: idA, workspaceID: workspace.id, provider: .iterm2, label: nil, itermSessionID: "session-a", codexThreadID: nil, windowID: nil,
+                id: idA, workspaceID: workspace.id, provider: .iterm2, label: nil, terminalTrackingID: "session-a", codexThreadID: nil, windowID: nil,
                 yabaiWindowID: nil, status: .idle, createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:00:00Z"))
         try store.upsertAgentWindow(
             AgentWindowRecord(
-                id: idB, workspaceID: workspace.id, provider: .iterm2, label: nil, itermSessionID: "session-b", codexThreadID: nil, windowID: nil,
+                id: idB, workspaceID: workspace.id, provider: .iterm2, label: nil, terminalTrackingID: "session-b", codexThreadID: nil, windowID: nil,
                 yabaiWindowID: nil, status: .idle, createdAt: "2026-01-01T00:00:01Z", updatedAt: "2026-01-01T00:00:01Z"))
 
         try store.deleteAgentWindow(id: idA)
@@ -757,11 +759,11 @@ final class StoreTests: XCTestCase {
 
         try store.upsertAgentWindow(
             AgentWindowRecord(
-                id: UUID().uuidString, workspaceID: workspace.id, provider: .iterm2, label: nil, itermSessionID: "s1", codexThreadID: nil,
+                id: UUID().uuidString, workspaceID: workspace.id, provider: .iterm2, label: nil, terminalTrackingID: "s1", codexThreadID: nil,
                 windowID: nil, yabaiWindowID: nil, status: .idle, createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:00:00Z"))
         try store.upsertAgentWindow(
             AgentWindowRecord(
-                id: UUID().uuidString, workspaceID: workspace.id, provider: .iterm2, label: nil, itermSessionID: "s2", codexThreadID: nil,
+                id: UUID().uuidString, workspaceID: workspace.id, provider: .iterm2, label: nil, terminalTrackingID: "s2", codexThreadID: nil,
                 windowID: nil, yabaiWindowID: nil, status: .spinning, createdAt: "2026-01-01T00:00:01Z", updatedAt: "2026-01-01T00:00:01Z"))
 
         try store.deleteAgentWindowsByProvider(workspaceID: workspace.id, provider: .iterm2)
@@ -780,7 +782,7 @@ final class StoreTests: XCTestCase {
         let id = UUID().uuidString
         try store.upsertAgentWindow(
             AgentWindowRecord(
-                id: id, workspaceID: workspace.id, provider: .iterm2, label: nil, itermSessionID: "s1", codexThreadID: nil, windowID: nil,
+                id: id, workspaceID: workspace.id, provider: .iterm2, label: nil, terminalTrackingID: "s1", codexThreadID: nil, windowID: nil,
                 yabaiWindowID: nil, status: .idle, createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:00:00Z"))
 
         try store.updateAgentWindowStatus(id: id, status: .done, updatedAt: "2026-01-01T00:01:00Z")

@@ -6,24 +6,27 @@ open class GhosttyAdapter: @unchecked Sendable {
     open func isAvailable() -> Bool { (try? AppleScript.run(#"tell application id "com.mitchellh.ghostty" to version"#)) != nil }
 
     private func appleScriptEscaped(_ value: String) -> String {
-        value
-            .replacingOccurrences(of: "\\", with: "\\\\")
-            .replacingOccurrences(of: "\"", with: "\\\"")
-            .replacingOccurrences(of: "\r", with: "\\r")
+        value.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"").replacingOccurrences(of: "\r", with: "\\r")
             .replacingOccurrences(of: "\n", with: "\\n")
     }
 
-    private func shellSingleQuoted(_ value: String) -> String {
-        "'\(value.replacingOccurrences(of: "'", with: "'\\''"))'"
-    }
+    private func shellSingleQuoted(_ value: String) -> String { "'\(value.replacingOccurrences(of: "'", with: "'\\''"))'" }
 
     private func commandApplyingEnvironment(_ command: String, environment: [String: String]) -> String {
         guard !environment.isEmpty else { return command }
-        let exports = environment
-            .sorted { $0.key < $1.key }
-            .map { "export \($0.key)=\(shellSingleQuoted($0.value))" }
-            .joined(separator: "; ")
+        let exports = environment.sorted { $0.key < $1.key }.map { "export \($0.key)=\(shellSingleQuoted($0.value))" }.joined(separator: "; ")
         return "\(exports); \(command)"
+    }
+
+    /// Ghostty's AppleScript dictionary does not reliably support property access like
+    /// `environment variables of every terminal`. Keep terminal scans on the explicit
+    /// window -> tab -> terminal traversal path so lookups behave consistently.
+    private func terminalTraversalScript(lines: [String]) -> String {
+        ([
+            #"tell application id "com.mitchellh.ghostty""#, "  set out to \"\"", "  repeat with w in windows", "    repeat with t in tabs of w",
+            "      repeat with term in terminals of t",
+        ] + lines.map { "        \($0)" } + ["      end repeat", "    end repeat", "  end repeat", "  return out", "end tell"]).joined(
+            separator: "\n")
     }
 
     open func openWindowAndRun(command: String, cwd: String, background: Bool = false) throws -> GhosttyWindowInfo {
@@ -77,49 +80,22 @@ open class GhosttyAdapter: @unchecked Sendable {
     }
 
     open func listWindowTabAndTerminalIDs() throws -> [(windowID: String, tabID: String, terminalID: String)] {
-        let script = """
-            tell application id "com.mitchellh.ghostty"
-              set out to ""
-              repeat with w in windows
-                set out to out & (id of w as string) & "|" & (id of selected tab of w as string) & "|" & (id of focused terminal of selected tab of w as string) & linefeed
-              end repeat
-              return out
-            end tell
-            """
-        return try AppleScript.run(script)
-            .split(separator: "\n", omittingEmptySubsequences: true)
-            .compactMap { line in
-                let parts = line.split(separator: "|", omittingEmptySubsequences: false).map(String.init)
-                guard parts.count == 3, parts.allSatisfy({ !$0.isEmpty }) else { return nil }
-                return (windowID: parts[0], tabID: parts[1], terminalID: parts[2])
-            }
-    }
-
-    private func resolveGhosttyWindowID(environmentVariableNamed name: String, equals value: String) throws -> Int? {
-        let escapedName = appleScriptEscaped(name)
-        let escapedValue = appleScriptEscaped(value)
-        let script = """
-            tell application id "com.mitchellh.ghostty"
-              repeat with t in terminals
-                if (environment variables of t) contains "\(escapedName)=\(escapedValue)" then
-                  return id of window of t
-                end if
-              end repeat
-            end tell
-            """
-        let output = try AppleScript.run(script).trimmingCharacters(in: .whitespacesAndNewlines)
-        guard let windowID = Int(output) else { return nil }
-        return windowID
+        let script = terminalTraversalScript(lines: [
+            "set out to out & (id of w as string) & \"|\" & (id of t as string) & \"|\" & (id of term as string) & linefeed"
+        ])
+        return try AppleScript.run(script).split(separator: "\n", omittingEmptySubsequences: true).compactMap { line in
+            let parts = line.split(separator: "|", omittingEmptySubsequences: false).map(String.init)
+            guard parts.count == 3, parts.allSatisfy({ !$0.isEmpty }) else { return nil }
+            return (windowID: parts[0], tabID: parts[1], terminalID: parts[2])
+        }
     }
 
     open func openWindowAndRun(command: String, cwd: String, environment: [String: String], background: Bool) throws -> TerminalLaunchResult {
         let window: GhosttyWindowInfo = try self.openWindowAndRun(
-            command: commandApplyingEnvironment(command, environment: environment),
-            cwd: cwd,
-            background: background)
+            command: commandApplyingEnvironment(command, environment: environment), cwd: cwd, background: background)
         return TerminalLaunchResult(
-            trackingIdentity: environment["MUXY_TERMINAL_TRACKING_ID"].map(TerminalTrackingIdentity.session)
-                ?? .session(window.terminalID),
+            trackingIdentity: .session(window.terminalID),
+            hookSessionID: environment["MUXY_TERMINAL_TRACKING_ID"],
             containerID: window.windowID,
             fallbackWindowID: nil)
     }
@@ -130,26 +106,24 @@ extension GhosttyAdapter: TerminalAdapter {
     public var bundleIdentifier: String { "com.mitchellh.ghostty" }
 
     public func resolveCurrentTrackingIdentity(environment: [String: String], yabaiFocusedWindowID: Int?) throws -> TerminalTrackingIdentity? {
-        if let trackingID = environment["MUXY_TERMINAL_TRACKING_ID"], !trackingID.isEmpty {
-            return .session(trackingID)
-        }
-        if let codexThreadID = environment["CODEX_THREAD_ID"], !codexThreadID.isEmpty,
-            let windowID = try? resolveGhosttyWindowID(environmentVariableNamed: "CODEX_THREAD_ID", equals: codexThreadID)
-        {
-            return .window(windowID)
-        }
-        return yabaiFocusedWindowID.map(TerminalTrackingIdentity.window)
+        // Ghostty hook attribution must come from the injected shell token. Falling back to a
+        // frontmost terminal or window here misattributes background hooks to whichever Ghostty
+        // tab the user happens to be viewing when `mx agent event` runs.
+        if let trackingID = environment["MUXY_TERMINAL_TRACKING_ID"], !trackingID.isEmpty { return .session(trackingID) }
+        return nil
     }
 
     public func focusTrackedTerminal(_ target: TerminalFocusTarget) throws -> Bool {
         switch target.trackingIdentity {
         case .session(let id):
-            if let windowID = try? resolveGhosttyWindowID(environmentVariableNamed: "MUXY_TERMINAL_TRACKING_ID", equals: id) {
-                return (try? YabaiAdapter().focusWindow(id: windowID)) ?? false
-            }
-            return try focusTerminal(id: id) != nil
-        case .window(let id):
-            return try YabaiAdapter().focusWindow(id: id)
+            // Focus is intentionally more permissive than event attribution: once Muxy already
+            // knows which Ghostty terminal it wants, a direct terminal focus is preferred, but
+            // falling back to the tracked yabai window is still useful if Ghostty refuses the
+            // terminal-level focus request.
+            if try focusTerminal(id: id) != nil { return true }
+            guard let windowID = target.windowID else { return false }
+            return try YabaiAdapter().focusWindow(id: windowID)
+        case .window(let id): return try YabaiAdapter().focusWindow(id: id)
         case .tmux, nil:
             guard let windowID = target.windowID else { return false }
             return try YabaiAdapter().focusWindow(id: windowID)
