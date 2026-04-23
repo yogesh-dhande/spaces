@@ -345,6 +345,27 @@ import streamctl
         #expect(items.map(\.processKey) == ["api", "worker"])
     }
 
+    @Test func doneAndWaitingAgentsRemainDashboardAttentionItems() {
+        let agents = [
+            AgentWindowRecord(
+                id: "agent-waiting", workspaceID: "workspace", provider: .iterm2, label: "Waiting", terminalTrackingID: "session-1", tmuxWindowID: nil,
+                codexThreadID: nil, windowID: 101, yabaiWindowID: 101, status: .waiting, createdAt: "2026-01-01T00:00:00Z",
+                updatedAt: "2026-01-01T00:01:00Z"),
+            AgentWindowRecord(
+                id: "agent-done", workspaceID: "workspace", provider: .iterm2, label: "Done", terminalTrackingID: "session-2", tmuxWindowID: nil,
+                codexThreadID: nil, windowID: 102, yabaiWindowID: 102, status: .done, createdAt: "2026-01-01T00:00:00Z",
+                updatedAt: "2026-01-01T00:02:00Z"),
+            AgentWindowRecord(
+                id: "agent-idle", workspaceID: "workspace", provider: .iterm2, label: "Idle", terminalTrackingID: "session-3", tmuxWindowID: nil,
+                codexThreadID: nil, windowID: 103, yabaiWindowID: 103, status: .idle, createdAt: "2026-01-01T00:00:00Z",
+                updatedAt: "2026-01-01T00:03:00Z")
+        ]
+
+        let attentionAgents = AppKitController.dashboardAttentionAgentWindows(agents)
+
+        #expect(attentionAgents.map(\.id) == ["agent-waiting", "agent-done"])
+    }
+
     @Test func tmuxBackedRowsUseTmuxIdentityBeforeSharedItermSession() {
         let configuredProcesses = [
             ProcessTemplate(name: "web server", command: "npm run dev"),

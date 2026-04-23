@@ -203,7 +203,7 @@ Muxy focuses those windows; it does not decide their geometry.
 - Ghostty agent events without a Muxy-issued tracking token should be dropped instead of being rebound to whichever Ghostty tab or window happens to be frontmost.
 - Ghostty focus may fall back from `terminalNativeID` to the stored hook token only when resolving an already tracked terminal row in the same workspace; it must not guess from the frontmost Ghostty tab/window.
 - Coding-agent rows should render after browser and process rows so non-agent shortcut ordering stays stable when agents appear or disappear.
-- `start` should show a spinner, `waiting` should show a warning indicator and count toward dashboard and dock attention, and `done` or idle should render as green or gray dots without creating dashboard attention.
+- `start` should show a spinner, `waiting` should show a warning indicator and count toward dashboard and dock attention, and `done` should remain in dashboard and dock attention until dismissed while still rendering as a green dot on the workspace row. `idle` should render as a gray dot without creating dashboard attention.
 - `exit` should return the row to idle when the terminal is still open; if the terminal is closed, ad-hoc agent rows should be removed immediately, including when background runtime refresh detects the terminal closure after the fact, while rows linked to workspace process terminals should remain idle.
 
 ## Errors and Feedback

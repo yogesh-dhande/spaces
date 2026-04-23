@@ -607,6 +607,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         "agent:\(agentWindow.id):\(agentWindow.status.rawValue):\(agentWindow.updatedAt)"
     }
 
+    nonisolated static func dashboardAttentionAgentWindows(_ agentWindows: [AgentWindowRecord]) -> [AgentWindowRecord] {
+        agentWindows.filter { $0.status == .waiting || $0.status == .done }
+    }
+
     nonisolated static func dashboardMissingConfiguredProcessItems(
         workspaceID: String,
         processEntries: [WorkspaceRunProcessEntry]
@@ -996,7 +1000,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             let workspaces = workspacesByProject[project.id] ?? []
             for workspace in workspaces {
                 let agentWindowsList = (try? orchestrator.agentWindows(workspaceID: workspace.id)) ?? []
-                let attentionAgentWindows = agentWindowsList.filter { $0.status == .waiting }
+                let attentionAgentWindows = dashboardAttentionAgentWindows(agentWindowsList)
                 guard workspace.isRunning || !attentionAgentWindows.isEmpty else { continue }
 
                 let processes = workspace.isRunning ? ((try? orchestrator.runningProcesses(workspaceID: workspace.id)) ?? []) : []
@@ -4300,10 +4304,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     ) -> NSView {
         let container = ClickableRowView(isInteractive: action != nil)
 
-        if let action {
-            attachAsyncClickAction(to: container, label: label, shortcut: shortcut, action: action)
-        }
-
         let row = NSStackView()
         row.orientation = .horizontal
         row.alignment = .centerY
@@ -4408,11 +4408,24 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             row.addArrangedSubview(spacer)
         }
 
-        row.addArrangedSubview(badge)
-        row.addArrangedSubview(iconView)
-        row.addArrangedSubview(labelField)
-        row.addArrangedSubview(detailField)
-        row.addArrangedSubview(NSView())
+        let contentRow = NSStackView()
+        contentRow.orientation = .horizontal
+        contentRow.alignment = .centerY
+        contentRow.spacing = 8
+        contentRow.translatesAutoresizingMaskIntoConstraints = false
+
+        if let action {
+            attachAsyncClickAction(to: contentRow, label: label, shortcut: shortcut, action: action)
+        }
+
+        contentRow.addArrangedSubview(badge)
+        contentRow.addArrangedSubview(iconView)
+        contentRow.addArrangedSubview(labelField)
+        contentRow.addArrangedSubview(detailField)
+        contentRow.addArrangedSubview(NSView())
+        row.addArrangedSubview(contentRow)
+        contentRow.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        contentRow.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         if let trailingAccessory {
             trailingAccessory.setContentHuggingPriority(.required, for: .horizontal)
             trailingAccessory.setContentCompressionResistancePriority(.required, for: .horizontal)

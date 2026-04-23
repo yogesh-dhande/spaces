@@ -222,7 +222,7 @@ Implementation note:
 - Workspace-managed process terminals persist the tmux window ID on their running-process and tracked-window records so later agent events, reattachment, and exit cleanup can reconcile against the same process-backed terminal slot.
 - When an agent attaches to a workspace-managed process terminal, the record keeps the tmux window ID so a later `exit` can keep an idle placeholder row instead of deleting it.
 - Dashboard attention state is derived from runtime records rather than inferred from UI state.
-- Only `waiting` agent events contribute dashboard and dock attention; `done` remains visible only on the workspace row itself.
+- `waiting` and `done` agent events both contribute dashboard and dock attention until the user dismisses that specific attention event; the workspace row still renders the underlying agent status independently.
 
 Ghostty-specific reconciliation:
 - Ghostty AppleScript exposes stable terminal IDs through the window -> tab -> terminal graph, but does not reliably expose live terminal environment variables on current Ghostty builds.
