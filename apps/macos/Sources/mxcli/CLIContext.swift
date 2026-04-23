@@ -4,11 +4,30 @@ import streamctl
 
 struct CLIContext {
     let output = CLITextOrJSONOutput()
+    private let storeFactory: () throws -> SQLiteStore
+    private let itermFactory: () -> Iterm2Adapter
+
+    init(
+        storeFactory: @escaping () throws -> SQLiteStore = {
+            let db = try DatabaseLocator.defaultPath()
+            return try SQLiteStore(path: db)
+        },
+        itermFactory: @escaping () -> Iterm2Adapter = {
+            Iterm2Adapter(scheduleVerificationWork: { work in
+                // Short-lived CLI commands can exit immediately after focus returns, so keep
+                // iTerm's exact-session verification on the current process lifetime.
+                work()
+            })
+        }
+    ) {
+        self.storeFactory = storeFactory
+        self.itermFactory = itermFactory
+    }
 
     func makeOrchestrator() throws -> MuxyOrchestrator {
-        let db = try DatabaseLocator.defaultPath()
-        let store = try SQLiteStore(path: db)
-        let orchestrator = MuxyOrchestrator(store: store)
+        let store = try storeFactory()
+        let iterm = itermFactory()
+        let orchestrator = MuxyOrchestrator(store: store, iterm: iterm)
         _ = try orchestrator.syncConfig()
         return orchestrator
     }

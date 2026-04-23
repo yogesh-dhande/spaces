@@ -1,6 +1,7 @@
 import ArgumentParser
 import Foundation
 import XCTest
+import appctl
 import streamctl
 
 @testable import mxcli
@@ -8,6 +9,15 @@ import streamctl
 private let testAppleScriptOptInEnvVar = "MUXY_ALLOW_TEST_APPLESCRIPT"
 
 final class MXCommandTests: XCTestCase {
+    private final class VerifyingIterm2Adapter: Iterm2Adapter, @unchecked Sendable {
+        var verifyFocusedSessionCallCount = 0
+
+        override func verifyFocusedSession(preferredSessionID: String, windowID: Int?) throws -> Bool {
+            verifyFocusedSessionCallCount += 1
+            return true
+        }
+    }
+
     func testWorkspaceUpParsesLeafCommandOptions() throws {
         let command = try WorkspaceUpCommand.parse(["/tmp/worktree", "--restart", "--focus", "frontend"])
 
@@ -188,6 +198,38 @@ final class MXCommandTests: XCTestCase {
         }
     }
 
+    func testCLIContextRunsItermVerificationBeforeReturningFocusControl() throws {
+        let store = try makeTemporaryStore()
+        let workspace = try makeWorkspace(store: store)
+        let projectWindow = WindowRecord(
+            id: UUID().uuidString,
+            workspaceID: workspace.id,
+            app: TerminalHost.iterm2.appName,
+            name: "frontend",
+            detail: "npm run dev",
+            targetURL: nil,
+            windowID: 77,
+            terminalTrackingID: "session-77",
+            terminalNativeID: nil,
+            itermTabIndex: 2,
+            tmuxWindowID: nil,
+            role: "terminal",
+            orderIndex: 200,
+            lastSeenAt: "now"
+        )
+        try store.upsert(window: projectWindow)
+
+        let iterm = VerifyingIterm2Adapter()
+        let context = CLIContext(storeFactory: { store }, itermFactory: { iterm })
+        let orchestrator = try context.makeOrchestrator()
+
+        try withMockCommands(["osascript": Self.itermSessionFocusSuccessMock]) {
+            try orchestrator.focusWorkspaceWindow(workspaceID: workspace.id, name: "frontend")
+        }
+
+        XCTAssertEqual(iterm.verifyFocusedSessionCallCount, 1)
+    }
+
     private func makeTemporaryStore() throws -> SQLiteStore {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -267,6 +309,25 @@ final class MXCommandTests: XCTestCase {
           exit 0
         fi
         echo "lookup failed" >&2
+        exit 1
+        """
+
+    private static let itermSessionFocusSuccessMock = """
+        #!/bin/bash
+        script="${*: -1}"
+        if [[ "$script" == *'tell application "iTerm2" to version'* ]]; then
+          echo "3.5.0"
+          exit 0
+        fi
+        if [[ "$script" == *'set targetSessionID to "session-77"'* && "$script" == *'tell s to select'* ]]; then
+          echo "session"
+          exit 0
+        fi
+        if [[ "$script" == *'set targetSessionID to "session-77"'* && "$script" == *'repeat 10 times'* ]]; then
+          echo "session"
+          exit 0
+        fi
+        echo "unexpected script" >&2
         exit 1
         """
 }

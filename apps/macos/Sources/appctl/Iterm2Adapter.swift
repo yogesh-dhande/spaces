@@ -1,7 +1,17 @@
 import Foundation
 
 open class Iterm2Adapter: @unchecked Sendable {
-    public init() {}
+    private let scheduleVerificationWork: @Sendable (@escaping @Sendable () -> Void) -> Void
+
+    public init() {
+        self.scheduleVerificationWork = { work in
+            Task.detached(priority: .utility) { work() }
+        }
+    }
+
+    public init(scheduleVerificationWork: @escaping @Sendable (@escaping @Sendable () -> Void) -> Void) {
+        self.scheduleVerificationWork = scheduleVerificationWork
+    }
 
     open func isAvailable() -> Bool { (try? AppleScript.run("tell application \"iTerm2\" to version")) != nil }
 
@@ -304,13 +314,7 @@ open class Iterm2Adapter: @unchecked Sendable {
                         tell w to select
                         select t
                         tell s to select
-                        repeat 10 times
-                          if (id of current session of w as string) is targetSessionID then
-                            return "session"
-                          end if
-                          delay 0.05
-                        end repeat
-                        return ""
+                        return "session"
                       end if
                     end repeat
                   end repeat
@@ -345,7 +349,62 @@ open class Iterm2Adapter: @unchecked Sendable {
             end tell
             """
         let output = try AppleScript.run(script)
+        let result = output.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !result.isEmpty else { return false }
+        if result == "session", let preferredSessionID, !preferredSessionID.isEmpty {
+            scheduleSessionFocusVerification(preferredSessionID: preferredSessionID, windowID: windowID)
+        }
+        return true
+    }
+
+    open func scheduleSessionFocusVerification(preferredSessionID: String, windowID: Int?) {
+        scheduleVerificationWork { [weak self] in
+            guard let self else { return }
+            do {
+                let verified = try self.verifyFocusedSession(preferredSessionID: preferredSessionID, windowID: windowID)
+                if !verified {
+                    self.logFocusVerification(
+                        "session_verification_failed session_id=\(preferredSessionID) window_id=\(windowID ?? -1)"
+                    )
+                }
+            } catch {
+                self.logFocusVerification(
+                    "session_verification_error session_id=\(preferredSessionID) window_id=\(windowID ?? -1) error=\(error.localizedDescription)"
+                )
+            }
+        }
+    }
+
+    open func verifyFocusedSession(preferredSessionID: String, windowID: Int?) throws -> Bool {
+        let escapedSessionID = appleScriptEscaped(preferredSessionID)
+        let targetWindowID = windowID ?? -1
+        let script = """
+            tell application "iTerm2"
+              set targetSessionID to "\(escapedSessionID)"
+              set targetWindowID to \(targetWindowID)
+
+              repeat with w in windows
+                if targetWindowID < 0 or id of w is targetWindowID then
+                  repeat 10 times
+                    if (id of current session of w as string) is targetSessionID then
+                      return "session"
+                    end if
+                    delay 0.05
+                  end repeat
+                  return ""
+                end if
+              end repeat
+
+              return ""
+            end tell
+            """
+        let output = try AppleScript.run(script)
         return !output.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    private func logFocusVerification(_ message: String) {
+        guard ProcessInfo.processInfo.environment["DEBUG"] == "1" else { return }
+        fputs("muxy: iterm \(message)\n", stderr)
     }
 }
 

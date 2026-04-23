@@ -143,6 +143,7 @@ Muxy focuses those windows; it does not decide their geometry.
 - When focusing an already-open browser session, Muxy should activate Chrome and select the first tab in that tracked window.
 - Terminal focus should land on the intended dedicated process or agent session.
 - Focusing a tracked terminal window should flash a short semitransparent overlay on top of the target window in both iTerm2 and Ghostty.
+- When iTerm2 session targeting needs extra verification, Muxy should still pulse as soon as the tracked terminal window is focused instead of waiting on the slower session-verification path.
 - The focus-pulse overlay color should be configured from the GUI settings panel.
 - Users should be able to choose the default terminal host globally, and both the GUI and CLI should respect that selection.
 - After the GUI focuses or opens an external window, Muxy should hide itself immediately so the target app stays unobstructed.

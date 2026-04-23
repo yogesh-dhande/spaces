@@ -3,6 +3,14 @@ import XCTest
 import appctl
 
 final class AppctlAdapterTests: XCTestCase {
+    private final class FocusVerifyingIterm2Adapter: Iterm2Adapter, @unchecked Sendable {
+        var scheduledVerification: [(sessionID: String, windowID: Int?)] = []
+
+        override func scheduleSessionFocusVerification(preferredSessionID: String, windowID: Int?) {
+            scheduledVerification.append((preferredSessionID, windowID))
+        }
+    }
+
     // Tests yabai adapter queries validation and window operations by arranging representative inputs and asserting the expected result.
     func testYabaiAdapterQueriesValidationAndWindowOperations() throws {
         // Mocked dependency: `yabai` CLI.
@@ -117,7 +125,21 @@ final class AppctlAdapterTests: XCTestCase {
         // Why: lock in the activation ordering needed to reliably front iTerm when switching from a browser to a terminal session.
         // Remaining risk: real iTerm AppleScript behavior can still vary by app version or OS automation quirks.
         try withMockCommands(["osascript": Self.osaScriptSessionFocusActivationMock]) {
-            let iterm = Iterm2Adapter()
+            let iterm = FocusVerifyingIterm2Adapter()
+            XCTAssertTrue(try iterm.focusSessionOrTab(preferredSessionID: "session-77", tabIndex: 2, windowID: 77))
+            XCTAssertEqual(iterm.scheduledVerification.count, 1)
+            XCTAssertEqual(iterm.scheduledVerification.first?.sessionID, "session-77")
+            XCTAssertEqual(iterm.scheduledVerification.first?.windowID, 77)
+        }
+    }
+
+    // Tests iTerm defers exact-session verification into the background by arranging representative inputs and asserting the expected result.
+    func testItermSessionFocusDefersVerificationIntoBackground() throws {
+        // Mocked dependency: `osascript` verifier for both the immediate focus script and the deferred session verifier.
+        // Why: lock in the lower-latency split where the visible focus path no longer blocks on the polling loop.
+        // Remaining risk: real iTerm timing can still differ even when both scripts are structurally correct.
+        try withMockCommands(["osascript": Self.osaScriptBackgroundSessionVerificationMock]) {
+            let iterm = Iterm2Adapter(scheduleVerificationWork: { work in work() })
             XCTAssertTrue(try iterm.focusSessionOrTab(preferredSessionID: "session-77", tabIndex: 2, windowID: 77))
         }
     }
@@ -379,6 +401,33 @@ final class AppctlAdapterTests: XCTestCase {
           fi
           echo "activate must precede window selection" >&2
           exit 1
+        fi
+
+        echo "unexpected script" >&2
+        exit 1
+        """
+
+    private static let osaScriptBackgroundSessionVerificationMock = """
+        #!/bin/bash
+        script="${*: -1}"
+
+        if [[ "$script" == *'tell application "iTerm2" to version'* ]]; then
+          echo "3.5.0"
+          exit 0
+        fi
+
+        if [[ "$script" == *'select t'* && "$script" == *'tell s to select'* ]]; then
+          if [[ "$script" == *'repeat 10 times'* ]]; then
+            echo "fast focus script should not include polling" >&2
+            exit 1
+          fi
+          echo "session"
+          exit 0
+        fi
+
+        if [[ "$script" == *'repeat 10 times'* && "$script" == *'id of current session of w as string'* ]]; then
+          echo "session"
+          exit 0
         fi
 
         echo "unexpected script" >&2

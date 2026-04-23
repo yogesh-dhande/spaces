@@ -131,6 +131,7 @@ It also lets lifecycle state stay explicit while runtime health is derived from 
 - CLI workspace focus resolves explicit names instead of numeric window indexes. Those names come from the same workspace-level focus model used for browser sessions, running processes, and agent terminals, and the names must stay unique within a workspace.
 - The CLI stays path-based: commands target the current working directory by default or accept an explicit workspace path argument.
 - Terminal focus pulsing is terminal-agnostic: Muxy queries the target yabai window and briefly presents an AppKit overlay aligned to that window instead of mutating terminal-specific appearance settings.
+- iTerm2 focus now splits into two phases: a fast AppleScript select path that returns as soon as the target session/window is brought forward, followed by a background verification pass that confirms the intended session became current without delaying the pulse overlay.
 - Tracked windows are persisted so Muxy can refocus or clean up only the windows it owns.
 - Direct focus requests auto-recover stale browser-session windows by reopening and re-tracking them, while process and generic window failures still surface typed missing-window errors to the GUI.
 - Browser-session existence is not polled during background refresh; stale browser mappings are detected on demand when the user focuses that session.
