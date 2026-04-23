@@ -46,6 +46,7 @@ final class OrchestratorTests: XCTestCase {
             XCTAssertTrue(mockIterm.lastCommand?.contains("Codex") == true)
             XCTAssertTrue(mockIterm.lastCommand?.contains("codex --dangerously-skip-permissions") == true)
             XCTAssertEqual(try store.agentWindows(workspaceID: workspace.id).count, 1)
+            XCTAssertEqual(try store.workspace(id: workspace.id)?.isRunning, true)
         }
     }
 
@@ -1815,6 +1816,7 @@ final class OrchestratorTests: XCTestCase {
         let trackedWindow = try XCTUnwrap(try store.windows(workspaceID: workspace.id).first(where: { $0.role == "browser" }))
         XCTAssertEqual(trackedWindow.targetURL, "http://localhost:3001")
         XCTAssertEqual(trackedWindow.windowID, 888)
+        XCTAssertEqual(try store.workspace(id: workspace.id)?.isRunning, true)
         let openLog = try String(contentsOf: chromeOpenLog)
         XCTAssertTrue(openLog.contains("set URL of active tab of newWindow"))
     }
@@ -2135,6 +2137,24 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertEqual(processes.first(where: { $0.templateName == "api" })?.command, "npm run api")
         XCTAssertEqual(processes.first(where: { $0.templateName == "api" })?.status, .running)
         XCTAssertNotNil(processes.first(where: { $0.templateName == "api" })?.windowID)
+    }
+
+    func testRecoverMissingConfiguredProcessMarksStoppedWorkspaceRunning() throws {
+        let (orchestrator, store, _, workspace, _, mockIterm, mockTmux) = try makeMockItermOrchestratorWithWorkspace()
+        try store.touchWorkspaceSettings(workspaceID: workspace.id, updatedAt: "now")
+        try store.setWorkspaceProcesses(workspaceID: workspace.id, processes: [ProcessTemplate(name: "api", command: "npm run api")])
+        _ = mockTmux.addWindow(sessionName: "muxy-\(workspace.id)-api", id: "@1", name: "api", isActive: true)
+        mockIterm.nextWindowID = 701
+        mockIterm.nextSessionID = "session-api"
+
+        try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) {
+            try withEnv(name: "YABAI_WINDOWS_JSON", value: "[]") {
+                try orchestrator.recoverMissingConfiguredProcess(workspaceID: workspace.id, processKey: "api")
+            }
+        }
+
+        XCTAssertEqual(try store.workspace(id: workspace.id)?.isRunning, true)
+        XCTAssertEqual(try store.runningProcesses(workspaceID: workspace.id).map(\.templateName), ["api"])
     }
 
     // Tests no-op settings saves do not restart a recovered named process.

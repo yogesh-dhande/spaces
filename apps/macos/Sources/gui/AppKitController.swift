@@ -221,7 +221,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     private enum WindowShortcutExecutionOutcome: Sendable {
         case focused(kind: String)
         case opened(kind: String)
-        case promptMissingConfiguredProcess(workspaceID: String, processKey: String, title: String)
         case noWorkspace
         case noMatch
     }
@@ -846,18 +845,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         }.value
     }
 
-    nonisolated private static func recoverMissingConfiguredProcessSnapshot(workspaceID: String, processKey: String) async -> Result<Void, Error> {
-        await Task.detached(priority: .userInitiated) {
-            do {
-                let db = try DatabaseLocator.defaultPath()
-                let store = try SQLiteStore(path: db)
-                let orchestrator = MuxyOrchestrator(store: store)
-                try orchestrator.recoverMissingConfiguredProcess(workspaceID: workspaceID, processKey: processKey)
-                return .success(())
-            } catch { return .failure(error) }
-        }.value
-    }
-
     nonisolated private static func launchConfiguredAgentSnapshot(workspaceID: String, name: String) async -> Result<Void, Error> {
         await Task.detached(priority: .userInitiated) {
             do {
@@ -891,11 +878,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                         try orchestrator.focusWorkspaceProcess(workspaceID: workspaceID, processID: processID)
                         return .success(.focused(kind: "dashboard_process"))
                     case .workspaceMissingConfiguredProcess(let workspaceID, let processKey):
-                        return .success(
-                            .promptMissingConfiguredProcess(
-                                workspaceID: workspaceID,
-                                processKey: processKey,
-                                title: processKey))
+                        try orchestrator.recoverMissingConfiguredProcess(workspaceID: workspaceID, processKey: processKey)
+                        return .success(.opened(kind: "dashboard_process"))
                     case .agentWindow(let record):
                         try orchestrator.focusAgentWindow(record)
                         return .success(.focused(kind: "dashboard_agent"))
@@ -941,11 +925,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                     return .success(.focused(kind: "window"))
                 case .missingConfiguredProcess:
                     guard let processKey = target.processKey else { return .success(.noMatch) }
-                    return .success(
-                        .promptMissingConfiguredProcess(
-                            workspaceID: selectedWorkspaceID,
-                            processKey: processKey,
-                            title: processKey))
+                    try orchestrator.recoverMissingConfiguredProcess(workspaceID: selectedWorkspaceID, processKey: processKey)
+                    return .success(.opened(kind: "process"))
                 case .agentLauncher:
                     guard let launcherName = target.launcherName else { return .success(.noMatch) }
                     _ = try orchestrator.launchAgentLauncher(workspaceID: selectedWorkspaceID, name: launcherName)
@@ -3915,7 +3896,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                     detail: resolveCommand(processCommand), shortcut: rowShortcut, processStatus: .idle,
                     action: { [weak self] in
                         guard let self else { return }
-                        self.showMissingConfiguredProcessRecoveryPrompt(workspaceID: workspaceID, processKey: processKey, title: processLabel)
+                        await self.performWindowFocus(.workspaceMissingConfiguredProcess(workspaceID: workspaceID, processKey: processKey))
                     })
                 processesStack.addArrangedSubview(row)
                 constrainFormFieldToFillWidth(row, in: processesStack)
@@ -3966,10 +3947,12 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                     agentStatus: entry.agentWindow?.status,
                     action: { [weak self] in
                         guard let self else { return }
-                        if let matchedAgent = entry.agentWindow {
+                        if let matchedAgent = entry.agentWindow, linkedWin != nil {
                             await self.performWindowFocus(.agentWindow(matchedAgent))
                         } else if let launcherName = entry.launcherName {
                             await self.launchConfiguredAgent(workspaceID: workspace.id, name: launcherName)
+                        } else if let matchedAgent = entry.agentWindow {
+                            await self.performWindowFocus(.agentWindow(matchedAgent))
                         }
                     })
                 codingAgentsStack.addArrangedSubview(row)
@@ -6367,13 +6350,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     }
 
     private func performWindowFocus(_ request: WindowFocusRequest) async {
-        if case .workspaceMissingConfiguredProcess(let workspaceID, let processKey) = request {
-            showMissingConfiguredProcessRecoveryPrompt(
-                workspaceID: workspaceID,
-                processKey: processKey,
-                title: processKey)
-            return
-        }
         let result = await Self.performWindowFocusSnapshot(request)
         switch result {
         case .success:
@@ -6424,11 +6400,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             logWindowShortcutProfile("stage=total index=\(index) elapsed_ms=\(windowShortcutElapsedMS(since: startedAt))")
             reloadData()
             hideAfterSuccessfulExternalWindowAction(.open)
-        case .success(.promptMissingConfiguredProcess(let workspaceID, let processKey, let title)):
-            showMissingConfiguredProcessRecoveryPrompt(workspaceID: workspaceID, processKey: processKey, title: title)
-            logWindowShortcutProfile(
-                "stage=prompt_missing_process index=\(index) elapsed_ms=\(windowShortcutElapsedMS(since: routeStartedAt))"
-            )
         case .success(.noWorkspace):
             logWindowShortcutProfile(
                 "stage=aborted index=\(index) reason=no_workspace elapsed_ms=\(windowShortcutElapsedMS(since: startedAt))"
@@ -6597,29 +6568,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             showWindowIssueModal(title: "Agent window not found", detail: "\(context.title) is no longer open.")
         case .window:
             showWindowIssueModal(title: "Window not found", detail: "\(context.title) is no longer open.")
-        }
-    }
-
-    private func showMissingConfiguredProcessRecoveryPrompt(workspaceID: String, processKey: String, title: String) {
-        showWindowIssueModal(
-            title: "Process window not found",
-            detail: "\(title) is no longer open.",
-            actionTitle: "Recover (Cmd+R)",
-            action: { [weak self] in
-                Task { await self?.recoverMissingConfiguredProcess(workspaceID: workspaceID, processKey: processKey, title: title) }
-            })
-    }
-
-    private func recoverMissingConfiguredProcess(workspaceID: String, processKey: String, title: String) async {
-        showOperationProgressOverlay(message: "Recovering Process", detail: title)
-        let result = await Self.recoverMissingConfiguredProcessSnapshot(workspaceID: workspaceID, processKey: processKey)
-        hideOperationProgressOverlay()
-        switch result {
-        case .success:
-            reloadData()
-            showWindowIssueToast(title: "Process recovered", detail: "\(title) reopened in a new terminal window.")
-        case .failure(let error):
-            showError(error)
         }
     }
 

@@ -1263,6 +1263,7 @@ public final class MuxyOrchestrator {
             let focused = try focusTrackedWindowOrRecoverBrowserWindow(window, workspaceID: workspaceID)
             guard focused else { throw missingTrackedWindowError(for: window, workspaceID: workspaceID) }
             rememberNavigationTarget(navigationTarget(for: window), workspaceID: workspaceID)
+            try markWorkspaceRunningIfNeeded(workspaceID: workspaceID)
             try setActiveWorkspace(id: workspaceID)
             return
         }
@@ -1281,6 +1282,7 @@ public final class MuxyOrchestrator {
         let focused = try focusWorkspaceProcessRecord(process, workspaceID: workspaceID)
         guard focused else { throw missingTrackedProcessError(process, workspaceID: workspaceID) }
         rememberNavigationTarget(.process(process), workspaceID: workspaceID)
+        try markWorkspaceRunningIfNeeded(workspaceID: workspaceID)
         try setActiveWorkspace(id: workspaceID)
     }
 
@@ -4067,6 +4069,7 @@ public final class MuxyOrchestrator {
         let focused = try focusAgentWindowRecord(record)
         guard focused else { throw missingTrackedAgentError(record) }
         rememberNavigationTarget(.agent(record), workspaceID: record.workspaceID)
+        try markWorkspaceRunningIfNeeded(workspaceID: record.workspaceID)
         try setActiveWorkspace(id: record.workspaceID)
     }
 
@@ -4078,16 +4081,16 @@ public final class MuxyOrchestrator {
 
     public func recoverMissingConfiguredProcess(workspaceID: String, processKey: String) throws {
         let (project, workspace) = try resolveWorkspace(id: workspaceID)
-        guard workspace.isRunning else {
-            throw MuxyError.invalidArgument(message: "Workspace must be running to recover a missing configured process.")
-        }
         let settings = try loadWorkspaceSettings(project: project, workspace: workspace)
         guard let template = (settings?.processes ?? []).first(where: { configuredProcessMatchesKey($0, key: processKey) }) else {
             throw MuxyError.invalidArgument(message: "Configured process not found for recovery.")
         }
         let running = try store.runningProcesses(workspaceID: workspaceID)
         let expectedKey = configuredProcessMatchKey(name: template.name)
-        guard !running.contains(where: { runningProcessMatchKey(name: $0.templateName) == expectedKey }) else { return }
+        guard !running.contains(where: { runningProcessMatchKey(name: $0.templateName) == expectedKey }) else {
+            try markWorkspaceRunningIfNeeded(workspace)
+            return
+        }
 
         let namedPorts = try store.workspacePortsNamed(workspaceID: workspace.id)
         let env = buildWorkspaceEnv(project: project, workspace: workspace, namedPorts: namedPorts)
@@ -4097,6 +4100,7 @@ public final class MuxyOrchestrator {
         }
         guard tmux.isAvailable() else { throw MuxyError.dependencyMissing(message: "tmux is required to launch processes.") }
         _ = try launchConfiguredProcess(template: template, workspace: workspace, env: env, terminalHost: terminalHost)
+        try markWorkspaceRunningIfNeeded(workspace)
     }
 
     @discardableResult public func launchAgentLauncher(workspaceID: String, name: String, background: Bool = false) throws -> AgentWindowRecord {
@@ -4111,12 +4115,18 @@ public final class MuxyOrchestrator {
         if let existing = try store.agentWindows(workspaceID: workspaceID).first(where: {
             normalizedFocusName($0.label ?? "") == normalizedFocusName(launcher.name)
         }) {
-            if try focusAgentWindowRecord(existing) { return existing }
+            if try focusAgentWindowRecord(existing) {
+                try markWorkspaceRunningIfNeeded(workspace)
+                return existing
+            }
             let existingWindowID = try trackedAgentWindowID(existing) ?? existing.yabaiWindowID ?? existing.windowID
             // A failed focus attempt is not enough evidence to destroy the reserved row.
             // Only evict the existing record when its terminal is actually gone; otherwise
             // keep the current slot and treat launch as an idempotent no-op.
-            if agentWindowIsOpen(existingWindowID) || existing.tmuxWindowID != nil { return existing }
+            if agentWindowIsOpen(existingWindowID) || existing.tmuxWindowID != nil {
+                try markWorkspaceRunningIfNeeded(workspace)
+                return existing
+            }
             try removeStaleAgentWindow(existing)
         }
 
@@ -4139,7 +4149,7 @@ public final class MuxyOrchestrator {
             background: background)
         let capturedWindowID =
             try captureNewAppWindowID(snapshot: snapshot, appName: terminalAppName(for: terminalHost)) ?? terminalHandle.fallbackWindowID
-        return try registerAgentWindow(
+        let record = try registerAgentWindow(
             workspaceID: workspace.id,
             provider: agentProvider(for: terminalHost),
             label: launcher.name,
@@ -4148,6 +4158,8 @@ public final class MuxyOrchestrator {
             yabaiWindowID: capturedWindowID,
             status: .idle,
             claimedLauncherName: launcher.name)
+        try markWorkspaceRunningIfNeeded(workspace)
+        return record
     }
 
     private func configuredProcessMatchesKey(_ template: ProcessTemplate, key: String) -> Bool {
@@ -4200,6 +4212,18 @@ public final class MuxyOrchestrator {
             detail: matchedSession.prefix, targetURL: matchedSession.prefix, windowID: newWindow.id, role: "browser",
             orderIndex: existingWindow?.orderIndex ?? matchedSession.index, lastSeenAt: nowISO8601())
         try store.upsert(window: storedWindow)
+        try markWorkspaceRunningIfNeeded(workspace)
+    }
+
+    private func markWorkspaceRunningIfNeeded(_ workspace: WorkspaceRecord) throws {
+        guard !workspace.isRunning else { return }
+        let launchedAt = workspace.lastLaunchedAt ?? nowISO8601()
+        try store.updateWorkspaceRunning(id: workspace.id, isRunning: true, launchedAt: launchedAt)
+    }
+
+    private func markWorkspaceRunningIfNeeded(workspaceID: String) throws {
+        guard let workspace = try store.workspace(id: workspaceID) else { return }
+        try markWorkspaceRunningIfNeeded(workspace)
     }
 
     private func recoverRunningProcessTerminalIfPossible(workspaceID: String, process: RunningProcessRecord) throws -> Bool {
