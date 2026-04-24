@@ -28,6 +28,8 @@ scripts/lint.sh
 scripts/coverage.sh
 ```
 
+`scripts/lint.sh` auto-formats `apps/macos/Sources` and `apps/macos/Tests` with `swift format` before linting, which keeps formatter noise out of the diagnostics.
+
 Useful commands:
 
 ```bash

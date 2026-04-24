@@ -2,10 +2,14 @@
 set -eu
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
+swift_paths="$root/Sources $root/Tests"
 
 if swift format --help >/dev/null 2>&1; then
+  echo "Running swift format autoformat..."
+  swift format format --in-place --parallel --recursive $swift_paths
+
   echo "Running swift format lint..."
-  swift format lint --recursive "$root/Sources" "$root/Tests"
+  swift format lint --parallel --recursive $swift_paths
   exit 0
 fi
 

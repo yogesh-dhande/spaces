@@ -27,6 +27,8 @@ scripts/lint.sh
 scripts/coverage.sh
 ```
 
+`scripts/lint.sh` auto-formats `apps/macos/Sources` and `apps/macos/Tests` with `swift format` before running lint so formatter-driven warnings do not drown out real issues.
+
 Git commits can use the repo hook in `.githooks/pre-commit`, which auto-formats staged Swift files under `apps/macos/Sources` and `apps/macos/Tests` before running lint and coverage.
 
 Enable the repo-managed hooks once per clone:
@@ -49,7 +51,7 @@ Expected output:
 
 The pre-commit hook currently does three things:
 - formats staged macOS Swift source and test files with `swift format`
-- runs `scripts/lint.sh`
+- runs `scripts/lint.sh`, which also auto-formats the full macOS Swift source and test tree before linting
 - runs `scripts/coverage.sh`
 
 Useful local entry points:

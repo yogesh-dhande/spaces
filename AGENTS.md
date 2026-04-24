@@ -33,6 +33,7 @@
 
 ## Documentation Rules
 - Keep docs short and non-overlapping.
+- Treat `README.md`, `apps/macos/spec.md`, `apps/macos/docs/architecture.md`, and `design.md` as current-state references, not changelogs; avoid temporal wording like "now", "previously", "new", or "changed" when describing the intended steady state.
 - Update `apps/macos/spec.md` when UX or user-visible behavior changes.
 - Update `apps/macos/docs/architecture.md` when data flow, persistence, or implementation structure changes.
 - Update `design.md` when the visual system, reusable interaction patterns, or UI styling guidance changes.
