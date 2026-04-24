@@ -98,6 +98,8 @@ Muxy focuses those windows; it does not decide their geometry.
 - Sidebar project rows should use the leading chevron/name area to expand or collapse workspace lists.
 - Sidebar project row collapsed state should persist across app restarts and sidebar refreshes.
 - Sidebar project rows should expose a dedicated settings action that opens project settings in the detail pane.
+- Sidebar workspace rows show the workspace title on the first line and the git branch name on a second indented line underneath; the branch line is omitted when the workspace has no branch recorded.
+- The workspace detail pane is a single scrollable page: title + actions at the top, directory path with copy and reveal-in-Finder buttons, inline tooltip editor, then configuration sections for Processes, Browser sessions, Coding agents, Named ports, and Stop script. Each section shows its configured items as rows and expands inline into an edit form when the pencil icon is clicked; the `+ add` header button appends a new item. A `⋯` overflow button in the action row exposes Copy path (⌘⇧C) and Reveal in Finder (⌘⇧F) as keyboard-invokable menu items.
 
 ## Workspaces
 
@@ -174,17 +176,14 @@ Muxy focuses those windows; it does not decide their geometry.
 - When Muxy is summoned, it should select the workspace for the window that was focused immediately before activation when that window belongs to a tracked workspace; otherwise it should keep the previously selected workspace.
 - The app should expose a configurable shortcut leader that supplies the shared modifiers for leader-based shortcuts like workspace navigation, dashboard, editor, Finder, and queued window focus.
 - Window rows in the selected workspace should expose numbered shortcuts for direct focus.
-- Workspace Run-tab rows and their numbered focus shortcuts should keep the saved workspace-settings order for configured browser sessions and processes, and append newly added ad-hoc windows after those configured rows.
-- Configured browser-session, process, and coding-agent rows should stay visible in the Run tab even when the workspace is stopped.
-- Run-tab row clicks and numbered shortcuts should follow one target-level rule: make that target available now.
-- A live row should focus its live target.
-- A configured row whose target is not live should open just that target instead of requiring a full workspace launch or restart.
+- Numbered window focus shortcuts should keep the saved workspace-settings order for configured browser sessions and processes, and append newly added ad-hoc windows after those configured rows.
+- Window focus actions and numbered shortcuts should follow one target-level rule: make that target available now.
+- A live target should receive focus. A configured target that is not live should be opened directly instead of requiring a full workspace launch or restart.
 - Opening a configured browser session, process, or coding agent from a stopped workspace should move that workspace out of the stopped state immediately.
-- Partial runtime is a first-class workspace state: some configured rows may be live and focusable while other configured rows remain directly openable.
-- Run-tab row actions should operate on one target only and must not route through full-workspace `Launch` or `Restart` semantics.
-- The GUI must not present a clickable Run-tab row action that is expected to fail in the current workspace state.
-- Missing configured processes in the Run tab and dashboard should open that one configured process directly and reuse the same configured row instead of creating a duplicate row.
-- Run-tab rows should show the tracked window or process name as the primary label and the target detail, such as a browser URL or process command, as secondary text.
+- Partial runtime is a first-class workspace state: some configured targets may be live and focusable while others remain directly openable.
+- Window focus actions must operate on one target only and must not route through full-workspace `Launch` or `Restart` semantics.
+- Missing configured processes in the dashboard should open that one configured process directly and reuse the same configured row instead of creating a duplicate row.
+- Dashboard rows should show the tracked window or process name as the primary label and the target detail, such as a browser URL or process command, as secondary text.
 - Ad-hoc terminal rows should keep their generated focus name as the primary label and use the live terminal window title as secondary text.
 - CLI-driven focus through `mx workspace up --focus` should require an explicit tracked window target instead of picking an arbitrary window.
 - CLI focus should use unique names across focusable browser sessions, processes, and coding-agent terminals, and `mx workspace up --focus` should require one of those names explicitly.

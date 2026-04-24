@@ -4,6 +4,7 @@
 - Use this file for coding workflow, verification, and implementation guardrails.
 - Put product behavior in `apps/macos/spec.md`.
 - Put data flow, persistence, and module structure in `apps/macos/docs/architecture.md`.
+- Put UI design and interaction guidelines in `design.md`.
 - Put repository development and deploy commands in `README.md`.
 
 ## Product Constraints
@@ -34,6 +35,7 @@
 - Keep docs short and non-overlapping.
 - Update `apps/macos/spec.md` when UX or user-visible behavior changes.
 - Update `apps/macos/docs/architecture.md` when data flow, persistence, or implementation structure changes.
+- Update `design.md` when the visual system, reusable interaction patterns, or UI styling guidance changes.
 - Update `apps/macos/README.md` when development or release workflow changes.
 - Update `apps/web/app/docs/content.ts` when docs navigation or summaries need to reflect new product docs.
 - When behavior is added through the CLI, update CLI help and architecture docs in the same change.
@@ -46,6 +48,7 @@
 
 ## GUI Rules
 - UI should feel modern and compact.
+- Follow `design.md` when adding or updating UI.
 - Use icons for obvious actions such as add or remove.
 - Use text labels for actions that are not obvious.
 - Use icons instead of text for status where practical.

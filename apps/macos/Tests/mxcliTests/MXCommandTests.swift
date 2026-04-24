@@ -39,6 +39,21 @@ final class MXCommandTests: XCTestCase {
         XCTAssertEqual(command.tooltip, "Summary")
     }
 
+    func testWorkspacePathParsesExplicitPath() throws {
+        let command = try WorkspacePathCommand.parse(["/tmp/worktree"])
+        XCTAssertEqual(command.path, "/tmp/worktree")
+    }
+
+    func testWorkspacePathDefaultsToCurrentDirectory() throws {
+        let command = try WorkspacePathCommand.parse([])
+        XCTAssertNil(command.path)
+    }
+
+    func testWorkspacePathIsListedAsASubcommand() {
+        let subcommands = WorkspaceCommand.configuration.subcommands.map { String(describing: $0) }
+        XCTAssertTrue(subcommands.contains("WorkspacePathCommand"), "Expected `workspace path` to be wired into WorkspaceCommand; got \(subcommands)")
+    }
+
     func testAgentEventParsesTypedEnums() throws {
         let command = try AgentEventCommand.parse(["--type", "waiting", "/tmp/worktree"])
 

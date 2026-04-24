@@ -89,6 +89,13 @@ enum Theme {
     }
     static let iconAgentFg = muted
 
+    /// Type-icon tile for port definitions: orange tint over orange glyph.
+    static let iconPortBg = NSColor(name: nil) { appearance in
+        let isDark = appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+        return isDark ? color(245, 167, 66, alpha: 0.14) : color(208, 122, 26, alpha: 0.12)
+    }
+    static let iconPortFg = orange
+
     /// Running status dot: solid green with an expanded halo at 0.22 alpha.
     static let statusRunningFill = green
     static let statusRunningHalo = NSColor(name: nil) { appearance in

@@ -33,7 +33,7 @@ flowchart LR
 
 ## Module Responsibilities
 - `MuxyApp`: minimal app entry point that boots AppKit.
-- `gui`: AppKit UI layer that renders state and dispatches actions into `streamctl`.
+- `gui`: AppKit UI layer that renders state and dispatches actions into `streamctl`. Shared visual language lives in `Theme.swift` (brand color tokens mirroring `apps/web/app/globals.css`) and `RowPrimitives.swift` (status dot, type icon tile, shortcut/project/branch chips, `ColoredBackgroundView` helper). The workspace detail pane is a single scrollable `NSStackView`; it stacks the header, directory meta row, inline tooltip editor, and five configuration sections (Processes, Browser sessions, Coding agents, Named ports, Stop script) in order. Each section is a self-contained class (e.g. `ProcessesSection.swift`) that owns its transient form state, swaps each row between collapsed and editing subviews via `NSAnimationContext`, and publishes commits through an `onCommit` closure that the host bridges to `orchestrator.updateWorkspaceSettings`. The `⋯` overflow menu is built by the static `AppKitController.makeWorkspaceOverflowMenu(workspaceID:path:target:)`, which emits a stock `NSMenu` whose items forward to `copyDirectoryPath(_:)` / `revealDirectoryInFinder(_:)` via a shared `senderIdentifier(_:)` helper that works for both `NSMenuItem` and `NSControl` senders.
 - `mx`: executable shim that boots the declarative CLI parser.
 - `mxcli`: declarative `swift-argument-parser` command tree for `mx`, including command help, leaf validation, and translation from CLI inputs into orchestration calls.
 - `streamctl`: core orchestration, lifecycle, validation, persistence coordination, and environment building.
@@ -219,7 +219,7 @@ Implementation note:
 - Agent windows are stored separately from regular process windows because they carry provider and lifecycle metadata, but `init` also reconciles them against tracked terminal windows so ad-hoc agent terminals become focusable tracked rows.
 - Configured agent-launcher names are treated as reserved focus labels. The launcher-owned agent instance may keep that exact label, while unrelated ad-hoc agents that report the same label are suffixed during registration so GUI rows and CLI focus targets stay unambiguous.
 - Workspace launch now opens configured coding agents through the same direct-terminal path as manual agent launch. That creates the tracked agent rows eagerly, while later `mx agent event` calls still supply the actual lifecycle status.
-- The Run tab keeps configured and ad-hoc agent rows in one `Coding Agents` section. Configured rows occupy their stable slots first, then unmatched ad-hoc agent rows append after them so shortcut ordering remains deterministic.
+- The dashboard and numbered window shortcuts keep configured and ad-hoc agent rows in one `Coding Agents` section. Configured rows occupy their stable slots first, then unmatched ad-hoc agent rows append after them so shortcut ordering remains deterministic.
 - Configured-agent relaunch is conservative: if a reserved row still points at a live tracked terminal, Muxy keeps that row and treats launch as a no-op. Only clearly stale rows are evicted and replaced.
 - Agent reconciliation prefers terminal identity first:
   `iTerm2` uses the shell session ID from the environment.
