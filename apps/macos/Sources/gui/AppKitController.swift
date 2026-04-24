@@ -5923,8 +5923,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         return nil
     }
 
-    nonisolated static func activationWorkspaceID(focusedWorkspaceID: String?, selectedWorkspaceID: String?) -> String? {
-        focusedWorkspaceID ?? selectedWorkspaceID
+    nonisolated static func activationSelectionTarget(focusedWorkspaceID: String?) -> SidebarArrowSelectionTarget {
+        if let focusedWorkspaceID { return .workspace(focusedWorkspaceID) }
+        return .dashboard
     }
 
     private func loadShortcutSpecs() {
@@ -6315,14 +6316,21 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     }
 
     private func refreshWorkspaceSelectionForActivation(focusedWorkspaceID: String?) {
-        let targetWorkspaceID = Self.activationWorkspaceID(focusedWorkspaceID: focusedWorkspaceID, selectedWorkspaceID: selectedWorkspaceID)
-        guard let targetWorkspaceID else { return }
-        guard let (_, workspace) = findWorkspace(id: targetWorkspaceID) else { return }
-        if selectedWorkspaceID == targetWorkspaceID, !showingDashboard, !showingSettings {
-            refreshSelection()
-            return
+        switch Self.activationSelectionTarget(focusedWorkspaceID: focusedWorkspaceID) {
+        case .dashboard:
+            if showingDashboard, !showingSettings {
+                refreshSelection()
+                return
+            }
+            showDashboardDetail()
+        case .workspace(let targetWorkspaceID):
+            guard let (_, workspace) = findWorkspace(id: targetWorkspaceID) else { return }
+            if selectedWorkspaceID == targetWorkspaceID, !showingDashboard, !showingSettings {
+                refreshSelection()
+                return
+            }
+            selectWorkspace(workspace)
         }
-        selectWorkspace(workspace)
     }
 
     public func outlineView(_ outlineView: NSOutlineView, numberOfChildrenOfItem item: Any?) -> Int {
