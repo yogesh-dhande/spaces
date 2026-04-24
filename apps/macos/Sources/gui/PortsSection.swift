@@ -11,6 +11,7 @@ import streamctl
     // MARK: State
 
     private var ports: [PortDefinition]
+    private var collapsedDisplayPorts: [Int?]
     private let rowsStack = NSStackView()
     private let countLabel = NSTextField(labelWithString: "")
     private var rows: [PortRowView] = []
@@ -18,8 +19,9 @@ import streamctl
 
     // MARK: Init
 
-    init(ports: [PortDefinition] = []) {
+    init(ports: [PortDefinition] = [], collapsedDisplayPorts: [Int?] = []) {
         self.ports = ports
+        self.collapsedDisplayPorts = collapsedDisplayPorts
 
         let container = NSStackView()
         container.orientation = .vertical
@@ -66,11 +68,13 @@ import streamctl
 
     // MARK: Public API
 
-    func reload(ports: [PortDefinition]) {
+    func reload(ports: [PortDefinition], collapsedDisplayPorts: [Int?]? = nil) {
         self.ports = ports
+        if let collapsedDisplayPorts { self.collapsedDisplayPorts = collapsedDisplayPorts }
         refreshRows(animated: true)
     }
     var rowCount: Int { rows.count }
+    func row(at index: Int) -> PortRowView? { index >= 0 && index < rows.count ? rows[index] : nil }
     func isEditing(at index: Int) -> Bool { index >= 0 && index < rows.count ? rows[index].isEditing : false }
 
     // MARK: Header
@@ -118,7 +122,7 @@ import streamctl
         clearRowsStack()
         rows.removeAll()
         for (index, port) in ports.enumerated() {
-            let row = PortRowView(port: port)
+            let row = PortRowView(port: port, reservedPort: collapsedDisplayPorts[safe: index] ?? nil)
             row.onBeginEdit = { [weak self] in self?.handleBeginEdit(row: row) }
             row.onCancel = { [weak self] in self?.handleCancel(row: row) }
             row.onSave = { [weak self] edited in self?.handleSave(row: row, edited: edited) }
@@ -164,7 +168,7 @@ import streamctl
         ports[index] = edited
         if pendingDraftIndex == index { pendingDraftIndex = nil }
         row.exitEditing(animated: true)
-        row.rebindCollapsedContent(from: edited)
+        row.rebindCollapsedContent(from: edited, reservedPort: collapsedDisplayPorts[safe: index] ?? nil)
         onCommit?(ports)
     }
 
@@ -221,10 +225,11 @@ import streamctl
     private(set) var isEditing: Bool = false
 
     private let nameLabel = NSTextField(labelWithString: "")
+    private let detailLabel = NSTextField(labelWithString: "")
     private var currentPort: PortDefinition
     private var nameField: NSTextField?
 
-    init(port: PortDefinition) {
+    init(port: PortDefinition, reservedPort: Int? = nil) {
         self.currentPort = port
         super.init(frame: .zero)
         body.orientation = .vertical
@@ -237,21 +242,26 @@ import streamctl
             body.topAnchor.constraint(equalTo: topAnchor), body.bottomAnchor.constraint(equalTo: bottomAnchor),
         ])
         let collapsedLine = Self.makeCollapsedLine(
-            nameLabel: nameLabel, onEdit: { [weak self] in self?.onBeginEdit?() }, onRemove: { [weak self] in self?.onRemove?() })
+            nameLabel: nameLabel, detailLabel: detailLabel, onEdit: { [weak self] in self?.onBeginEdit?() },
+            onRemove: { [weak self] in self?.onRemove?() })
         collapsedContainer = collapsedLine.row
         body.addArrangedSubview(collapsedContainer)
         collapsedContainer.widthAnchor.constraint(equalTo: body.widthAnchor).isActive = true
         configureActionButtonsForHover(collapsedLine.actionButtons)
-        rebindCollapsedContent(from: port)
+        rebindCollapsedContent(from: port, reservedPort: reservedPort)
     }
 
     @available(*, unavailable) required init?(coder: NSCoder) { fatalError() }
 
-    func rebindCollapsedContent(from port: PortDefinition) {
+    func rebindCollapsedContent(from port: PortDefinition, reservedPort: Int? = nil) {
         currentPort = port
         nameLabel.stringValue = port.name.isEmpty ? "(unnamed)" : port.name
         nameLabel.font = .systemFont(ofSize: 13, weight: .medium)
         nameLabel.textColor = Theme.text
+        detailLabel.stringValue = reservedPort.map(String.init) ?? ""
+        detailLabel.font = .systemFont(ofSize: 12, weight: .regular)
+        detailLabel.textColor = Theme.muted
+        detailLabel.lineBreakMode = .byTruncatingTail
     }
 
     func enterEditing(prefill: PortDefinition?, animated: Bool) {
@@ -305,19 +315,28 @@ import streamctl
 
     func formSnapshot() -> PortDefinition { PortDefinition(name: nameField?.stringValue ?? "") }
 
-    private static func makeCollapsedLine(nameLabel: NSTextField, onEdit: @escaping () -> Void, onRemove: @escaping () -> Void) -> (
-        row: NSStackView, actionButtons: [NSButton]
-    ) {
+    var collapsedPrimaryTextForTesting: String { nameLabel.stringValue }
+    var collapsedDetailTextForTesting: String { detailLabel.stringValue }
+
+    private static func makeCollapsedLine(
+        nameLabel: NSTextField, detailLabel: NSTextField, onEdit: @escaping () -> Void, onRemove: @escaping () -> Void
+    ) -> (row: NSStackView, actionButtons: [NSButton]) {
         let leading: [NSView] = [RowPrimitives.typeIconTile(.port, symbol: "network", accessibilityLabel: "Port")]
         let editButton = buildActionButton(symbol: "pencil", tooltip: "Edit") { _ in onEdit() }
         editButton.setAccessibilityIdentifier("port-row-edit")
         let removeButton = buildActionButton(symbol: "trash", tooltip: "Remove") { _ in onRemove() }
         removeButton.setAccessibilityIdentifier("port-row-remove")
+        let textStack = NSStackView(views: [nameLabel, detailLabel])
+        textStack.orientation = .horizontal
+        textStack.alignment = .firstBaseline
+        textStack.spacing = 6
+        detailLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        textStack.translatesAutoresizingMaskIntoConstraints = false
         let spacer = NSView()
         spacer.translatesAutoresizingMaskIntoConstraints = false
         spacer.setContentHuggingPriority(.fittingSizeCompression, for: .horizontal)
 
-        let row = NSStackView(views: leading + [nameLabel, spacer, editButton, removeButton])
+        let row = NSStackView(views: leading + [textStack, spacer, editButton, removeButton])
         row.orientation = .horizontal
         row.alignment = .centerY
         row.spacing = 10

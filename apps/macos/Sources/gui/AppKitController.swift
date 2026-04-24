@@ -3727,7 +3727,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
     private func workspacePortsSection(workspace: WorkspaceSummary) -> NSView? {
         guard let config = try? orchestrator.workspaceSettings(workspaceID: workspace.id) else { return nil }
-        let section = PortsSection(ports: config.ports)
+        let reservedPorts = (try? orchestrator.workspacePortsNamed(workspaceID: workspace.id).map(\.port)) ?? []
+        let section = PortsSection(ports: config.ports, collapsedDisplayPorts: reservedPorts.map(Optional.some))
         section.onCommit = { [weak self] updated in
             guard let self else { return }
             do {

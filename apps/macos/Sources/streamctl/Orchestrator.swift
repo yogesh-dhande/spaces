@@ -216,7 +216,6 @@ public final class MuxyOrchestrator {
         guard var existing = try loadWorkspaceSettings(project: project, workspace: workspace) else {
             throw MuxyError.missingProject(dir: project.dir)
         }
-        let previous = existing
         update(&existing)
         try validateWorkspaceFocusNames(
             workspaceID: workspace.id, processes: existing.processes, browserSessions: existing.browserSessions,
@@ -228,7 +227,8 @@ public final class MuxyOrchestrator {
         try store.setWorkspaceBrowserSessions(workspaceID: workspace.id, sessions: existing.browserSessions)
         try store.setWorkspaceAgentLaunchers(workspaceID: workspace.id, launchers: existing.agentLaunchers)
         try store.touchWorkspaceSettings(workspaceID: workspace.id, updatedAt: nowISO8601())
-        if workspace.isRunning { try applyWorkspaceSettingsUpdate(project: project, workspace: workspace, previous: previous, updated: existing) }
+        let appConfig = try store.appConfig()
+        _ = try PortAllocator(store: store).syncPorts(workspaceID: workspace.id, definitions: existing.ports, range: appConfig.portRange)
     }
 
     public func updateWorkspaceTooltip(workspaceID: String, tooltip: String?) throws {
@@ -1043,8 +1043,8 @@ public final class MuxyOrchestrator {
         }
         let snapshot = bestEffortYabaiWindowSnapshot()
         let terminalHandle = try launchProcessInTmux(
-            workspace: workspace, processName: process.templateName, command: command, env: env, terminalHost: terminalHost, background: background,
-            replaceExistingSession: true)
+            workspace: workspace, processName: process.templateName, rawCommand: process.command, command: command, env: env,
+            terminalHost: terminalHost, background: background, replaceExistingSession: true)
         let capturedWindowID =
             bestEffortCaptureNewAppWindowID(snapshot: snapshot, appName: terminalAppName(for: terminalHost)) ?? terminalHandle.fallbackWindowID
             ?? process.windowID
@@ -1991,21 +1991,21 @@ public final class MuxyOrchestrator {
     }
 
     @discardableResult private func attachProcessTmuxSession(
-        workspace: WorkspaceRecord, processName: String, terminalHost: TerminalHost, background: Bool = false
+        workspace: WorkspaceRecord, processName: String, commandDescription: String? = nil, terminalHost: TerminalHost, background: Bool = false
     ) throws -> ManagedTerminalHandle {
         let sessionName = processTmuxSessionName(workspaceID: workspace.id, processName: processName)
         let windowInfo = try openManagedTerminalWindow(
             terminalHost: terminalHost, command: tmuxAttachCommand(sessionName: sessionName, cwd: workspace.dir), cwd: workspace.dir,
             background: background)
         guard waitForTmuxSession(named: sessionName) else {
-            throw MuxyError.invalidArgument(message: "Timed out waiting for tmux session to become available.")
+            throw MuxyError.invalidArgument(message: tmuxSessionTimeoutMessage(processName: processName, commandDescription: commandDescription))
         }
         return windowInfo
     }
 
     private func launchProcessInTmux(
-        workspace: WorkspaceRecord, processName: String, command: DirectProcessCommand, env: [String: String], terminalHost: TerminalHost,
-        background: Bool = false, replaceExistingSession: Bool
+        workspace: WorkspaceRecord, processName: String, rawCommand: String, command: DirectProcessCommand, env: [String: String],
+        terminalHost: TerminalHost, background: Bool = false, replaceExistingSession: Bool
     ) throws -> ManagedTerminalHandle {
         let sessionName = processTmuxSessionName(workspaceID: workspace.id, processName: processName)
         if replaceExistingSession, tmux.hasSession(named: sessionName) { try? tmux.killSession(named: sessionName) }
@@ -2013,9 +2013,9 @@ public final class MuxyOrchestrator {
             named: sessionName, windowName: processName, cwd: workspace.dir, env: env.merging(command.environment) { _, new in new },
             command: [command.executable] + command.arguments)
         let windowInfo = try attachProcessTmuxSession(
-            workspace: workspace, processName: processName, terminalHost: terminalHost, background: background)
+            workspace: workspace, processName: processName, commandDescription: rawCommand, terminalHost: terminalHost, background: background)
         guard waitForTmuxSession(named: sessionName) else {
-            throw MuxyError.invalidArgument(message: "Timed out waiting for tmux session to become available.")
+            throw MuxyError.invalidArgument(message: tmuxSessionTimeoutMessage(processName: processName, commandDescription: rawCommand))
         }
         return windowInfo
     }
@@ -2130,6 +2130,19 @@ public final class MuxyOrchestrator {
         let resolved = applyEnvVars(raw, env: env)
         return
             "Process commands must be direct executable invocations without shell syntax: \(resolved). For composite commands, wrap them explicitly, for example: bash -lc \"\(resolved)\""
+    }
+
+    private func tmuxSessionTimeoutMessage(processName: String, commandDescription: String?) -> String {
+        let trimmedProcessName = processName.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedCommand = commandDescription?.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let trimmedCommand, !trimmedCommand.isEmpty, !trimmedProcessName.isEmpty {
+            return "Timed out waiting for tmux session to become available for process '\(trimmedProcessName)' (\(trimmedCommand))."
+        }
+        if let trimmedCommand, !trimmedCommand.isEmpty {
+            return "Timed out waiting for tmux session to become available for command '\(trimmedCommand)'."
+        }
+        if !trimmedProcessName.isEmpty { return "Timed out waiting for tmux session to become available for process '\(trimmedProcessName)'." }
+        return "Timed out waiting for tmux session to become available."
     }
 
     @discardableResult private func ensureWorkspaceTerminalAttached(workspace: WorkspaceRecord, background: Bool = false) throws -> ItermWindowInfo {
@@ -3097,16 +3110,6 @@ public final class MuxyOrchestrator {
         return env
     }
 
-    private func applyWorkspaceSettingsUpdate(
-        project: ProjectRecord, workspace: WorkspaceRecord, previous: WorkspaceSettings, updated: WorkspaceSettings
-    ) throws {
-        let namedPorts = try store.workspacePortsNamed(workspaceID: workspace.id)
-        let env = buildWorkspaceEnv(project: project, workspace: workspace, namedPorts: namedPorts)
-        try reconcileProcesses(workspace: workspace, previous: previous.processes, updated: updated.processes, env: env)
-        try reconcileBrowserSessions(project: project, workspace: workspace, sessions: updated.browserSessions, env: env)
-        try pruneMissingWindows(workspaceID: workspace.id)
-    }
-
     private func processKey(for template: ProcessTemplate) -> String {
         let name = template.name?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         let command = template.command.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -3404,8 +3407,8 @@ public final class MuxyOrchestrator {
             }
             let snapshot = bestEffortYabaiWindowSnapshot()
             let terminalHandle = try launchProcessInTmux(
-                workspace: workspace, processName: name, command: command, env: env, terminalHost: terminalHost, background: background,
-                replaceExistingSession: true)
+                workspace: workspace, processName: name, rawCommand: template.command, command: command, env: env, terminalHost: terminalHost,
+                background: background, replaceExistingSession: true)
             let windowID =
                 bestEffortCaptureNewAppWindowID(snapshot: snapshot, appName: terminalAppName(for: terminalHost)) ?? terminalHandle.fallbackWindowID
             let tmuxWindow = try currentTmuxWindowInfo(workspaceID: workspace.id, processName: name)
@@ -4262,7 +4265,8 @@ public final class MuxyOrchestrator {
 
         let snapshot = bestEffortYabaiWindowSnapshot()
         let terminalHandle = try attachProcessTmuxSession(
-            workspace: workspace, processName: process.templateName, terminalHost: terminalHost, background: false)
+            workspace: workspace, processName: process.templateName, commandDescription: process.command, terminalHost: terminalHost,
+            background: false)
         let capturedWindowID =
             bestEffortCaptureNewAppWindowID(snapshot: snapshot, appName: terminalAppName(for: terminalHost)) ?? terminalHandle.fallbackWindowID
         let now = nowISO8601()
@@ -4299,8 +4303,8 @@ public final class MuxyOrchestrator {
         }
         let snapshot = try yabai.listWindows()
         let terminalHandle = try launchProcessInTmux(
-            workspace: workspace, processName: name, command: command, env: env, terminalHost: terminalHost, background: background,
-            replaceExistingSession: true)
+            workspace: workspace, processName: name, rawCommand: template.command, command: command, env: env, terminalHost: terminalHost,
+            background: background, replaceExistingSession: true)
         let capturedWindowID =
             bestEffortCaptureNewAppWindowID(snapshot: snapshot, appName: terminalAppName(for: terminalHost)) ?? terminalHandle.fallbackWindowID
         let tmuxWindow = try currentTmuxWindowInfo(workspaceID: workspace.id, processName: name)

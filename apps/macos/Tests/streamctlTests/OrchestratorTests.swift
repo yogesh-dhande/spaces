@@ -2185,6 +2185,43 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertTrue(mockTmux.killedSessionNames.isEmpty)
     }
 
+    func testUpdateWorkspaceSettingsWhileRunningDoesNotReconcileProcessesAndSyncsPorts() throws {
+        let (orchestrator, store, _, workspace, _, mockIterm, mockTmux) = try makeMockItermOrchestratorWithWorkspace()
+        try store.touchWorkspaceSettings(workspaceID: workspace.id, updatedAt: "now")
+        try store.setWorkspaceProcesses(workspaceID: workspace.id, processes: [ProcessTemplate(name: "web", command: "npm run web")])
+        try store.setWorkspacePorts(workspaceID: workspace.id, ports: [24000], names: ["API_PORT"])
+        try store.updateWorkspaceRunning(id: workspace.id, isRunning: true, launchedAt: "now")
+        try store.upsert(
+            runningProcess: RunningProcessRecord(
+                id: UUID().uuidString, workspaceID: workspace.id, templateName: "web", command: "npm run web", terminalApp: "iTerm2", windowID: 222,
+                terminalTrackingID: "session-web", itermTabIndex: nil, tmuxWindowID: "@2", pid: 2222, status: .running, logPath: nil,
+                lastOutputAt: nil, startedAt: "now", exitedAt: nil))
+        _ = mockTmux.addWindow(sessionName: "muxy-\(workspace.id)-web", id: "@2", name: "web", isActive: true)
+
+        try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) {
+            try orchestrator.updateWorkspaceSettings(workspaceID: workspace.id) { settings in
+                settings.processes = [ProcessTemplate(name: "worker", command: "npm run worker")]
+                settings.ports = [PortDefinition(name: "API_PORT"), PortDefinition(name: "WEB_PORT")]
+            }
+        }
+
+        let processes = try store.runningProcesses(workspaceID: workspace.id)
+        XCTAssertEqual(processes.count, 1)
+        XCTAssertEqual(processes.first?.templateName, "web")
+        XCTAssertEqual(mockIterm.openWindowAndRunCallCount, 0)
+        XCTAssertTrue(mockTmux.killedSessionNames.isEmpty)
+
+        let namedPorts = try store.workspacePortsNamed(workspaceID: workspace.id)
+        XCTAssertEqual(namedPorts.map(\.port), [24000, 20000])
+        XCTAssertEqual(namedPorts.map(\.name), ["API_PORT", "WEB_PORT"])
+        XCTAssertTrue(PortReserver.shared.reservedWorkspaceIDs().contains(workspace.id))
+
+        let runtimeStatus = try orchestrator.workspaceRuntimeStatus(workspaceID: workspace.id)
+        XCTAssertEqual(runtimeStatus.missingConfiguredProcessCount, 1)
+
+        PortReserver.shared.releasePorts(workspaceID: workspace.id)
+    }
+
     // Tests workspace cycling includes orphaned running processes so recovered iTerm windows remain reachable even before a terminal row is rebuilt.
     func testFocusNextWindowIncludesOrphanedRunningProcessTargets() throws {
         let (orchestrator, store, _, workspace, root, mockIterm, _) = try makeMockItermOrchestratorWithWorkspace()
@@ -3014,6 +3051,42 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertEqual(try store.workspace(id: workspace.id)?.isRunning, true)
     }
 
+    func testLaunchWorkspaceProcessTimeoutIncludesProcessAndCommand() throws {
+        final class NeverReadyTmuxAdapter: MockTmuxAdapter, @unchecked Sendable {
+            override func hasSession(named sessionName: String) -> Bool { false }
+        }
+        final class FastAdvancingClock {
+            private var now = Date(timeIntervalSince1970: 0)
+            func tick() -> Date {
+                defer { now = now.addingTimeInterval(10) }
+                return now
+            }
+        }
+
+        let root = try makeTempDirectory()
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let store = try makeTemporaryStore()
+        let mockIterm = MockIterm2Adapter()
+        let mockTmux = NeverReadyTmuxAdapter()
+        mockIterm.pairedTmux = mockTmux
+        let clock = FastAdvancingClock()
+        let orchestrator = MuxyOrchestrator(store: store, iterm: mockIterm, tmux: mockTmux, currentDate: clock.tick)
+
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
+        try orchestrator.updateWorkspaceSettings(workspaceID: workspace.id) { settings in
+            settings.processes = [ProcessTemplate(name: "which", command: "which")]
+        }
+
+        XCTAssertThrowsError(
+            try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) { try orchestrator.launchWorkspace(workspaceID: workspace.id) }
+        ) { error in
+            guard case MuxyError.invalidArgument(let message) = error else { return XCTFail("Unexpected error: \(error)") }
+            XCTAssertEqual(message, "Timed out waiting for tmux session to become available for process 'which' (which).")
+        }
+    }
+
     // Tests launch workspace waits for pending setup to finish by arranging a deferred setup run and asserting launch completes afterwards.
     func testLaunchWorkspaceWaitsForPendingSetupToFinish() throws {
         let root = try makeTempDirectory()
@@ -3178,6 +3251,7 @@ final class OrchestratorTests: XCTestCase {
         try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) {
             try orchestrator.updateWorkspaceSettings(workspaceID: workspace.id) { settings in
                 settings.stopScript = "echo workspace-stop"
+                settings.ports = [PortDefinition(name: "API_PORT"), PortDefinition(name: "WEB_PORT")]
                 settings.processes = [ProcessTemplate(name: "job", command: "echo job")]
                 settings.statusChecks = [StatusCheckDefinition(process: "job", command: "echo ok", interval: 30, timeout: 3)]
                 settings.browserSessions = []

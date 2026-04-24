@@ -99,7 +99,7 @@ Muxy focuses those windows; it does not decide their geometry.
 - Sidebar project row collapsed state should persist across app restarts and sidebar refreshes.
 - Sidebar project rows should expose a dedicated settings action that opens project settings in the detail pane.
 - Sidebar workspace rows show the workspace title on the first line and the git branch name on a second indented line underneath; the branch line is omitted when the workspace has no branch recorded.
-- The workspace detail pane is a single scrollable page: title + actions at the top, directory path with copy and reveal-in-Finder buttons, inline tooltip editor, then configuration sections for Processes, Browser sessions, Coding agents, Named ports, and Stop script. Each section shows its configured items as rows and expands inline into an edit form when the pencil icon is clicked; the `+ add` header button appends a new item. A `⋯` overflow button in the action row exposes Copy path (⌘⇧C) and Reveal in Finder (⌘⇧F) as keyboard-invokable menu items.
+- The workspace detail pane is a single scrollable page: title + actions at the top, directory path with copy and reveal-in-Finder buttons, inline tooltip editor, then configuration sections for Processes, Browser sessions, Coding agents, Named ports, and Stop script. Each section shows its configured items as rows and expands inline into an edit form when the pencil icon is clicked; the `+ add` header button appends a new item. Named-port rows should show the reserved port number as secondary text next to the configured name. A `⋯` overflow button in the action row exposes Copy path (⌘⇧C) and Reveal in Finder (⌘⇧F) as keyboard-invokable menu items.
 
 ## Workspaces
 
@@ -121,6 +121,7 @@ Muxy focuses those windows; it does not decide their geometry.
 - Browser sessions stay configured while the workspace is running, but Muxy should leave them unopened until the user explicitly focuses that browser session.
 - Unopened browser sessions should not degrade runtime health or show missing-window warnings for an otherwise running workspace.
 - Workspace processes should be launched inside tmux so Muxy can recover the terminal view without losing the underlying process when a supported terminal-host window closes.
+- Editing workspace settings while a workspace is already running must not start or stop processes, browser sessions, or coding agents as part of save-time reconciliation. New configured rows should appear immediately with their non-running status so the user can decide what to open or recover.
 - Process commands are treated as direct executable invocations with arguments.
 - If a user needs composite shell behavior such as `cd x && y`, pipes, or redirection, they should wrap it explicitly, for example `bash -lc "cd x && y"`.
 - Stop shuts down tracked runtime state and closes tracked dedicated windows safely.
@@ -132,6 +133,7 @@ Muxy focuses those windows; it does not decide their geometry.
 - `workspace update` should own post-creation workspace metadata edits such as title and tooltip.
 - Launch should wait for setup to finish and should surface setup failures clearly.
 - Named ports must be available to setup scripts, stop scripts, process commands, and status checks.
+- Adding a named port from the workspace detail view should reserve its port number immediately instead of waiting for the next workspace launch.
 - Stopping or restarting a workspace must never close unrelated user windows.
 - Runtime health is separate from lifecycle state:
   - `Running` workspaces can be healthy or degraded
