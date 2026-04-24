@@ -53,6 +53,12 @@ export const docsPageLinks: DocsPageLink[] = [
       "Attach Chrome URLs to a workspace so the pages you need reopen with it and stay focusable by keyboard shortcuts.",
   },
   {
+    href: "/docs/coding-agents",
+    title: "Coding Agents",
+    summary:
+      "Track Claude Code, Codex, and other coding agents per workspace, and wire up global hooks so each session reports its state to Muxy automatically.",
+  },
+  {
     href: "/docs/status-checks",
     title: "Status Checks",
     summary:
@@ -139,6 +145,7 @@ export const docsPublishingOrder = [
   "Processes",
   "Status Checks",
   "Browser Sessions",
+  "Coding Agents",
   "Keyboard Shortcuts",
   "Troubleshooting",
   "Cookbook Guides",
