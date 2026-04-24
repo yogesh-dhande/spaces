@@ -273,7 +273,7 @@ import streamctl
 
 // MARK: - ProcessRowView
 
-@MainActor final class ProcessRowView: NSView {
+@MainActor final class ProcessRowView: HoverRevealRowView {
     // Callbacks
     var onBeginEdit: (() -> Void)?
     var onCancel: (() -> Void)?
@@ -304,7 +304,6 @@ import streamctl
         self.shortcutChip = shortcut.map { RowPrimitives.shortcutChip($0) }
         self.statusDot = RowPrimitives.statusDot(status)
         super.init(frame: .zero)
-        translatesAutoresizingMaskIntoConstraints = false
 
         body.orientation = .vertical
         body.alignment = .leading
@@ -316,11 +315,13 @@ import streamctl
             body.topAnchor.constraint(equalTo: topAnchor), body.bottomAnchor.constraint(equalTo: bottomAnchor),
         ])
 
-        collapsedContainer = Self.makeCollapsedLine(
+        let collapsedLine = Self.makeCollapsedLine(
             shortcut: shortcutChip, statusDot: statusDot, nameLabel: nameLabel, detailLabel: detailLabel,
             onEdit: { [weak self] in self?.onBeginEdit?() }, onRemove: { [weak self] in self?.onRemove?() }, onFocus: onFocus)
+        collapsedContainer = collapsedLine.row
         body.addArrangedSubview(collapsedContainer)
         collapsedContainer.widthAnchor.constraint(equalTo: body.widthAnchor).isActive = true
+        configureActionButtonsForHover(collapsedLine.actionButtons)
 
         rebindCollapsedContent(from: process, shortcut: shortcut, status: status)
     }
@@ -420,7 +421,7 @@ import streamctl
     private static func makeCollapsedLine(
         shortcut: NSView?, statusDot: NSView, nameLabel: NSTextField, detailLabel: NSTextField, onEdit: @escaping () -> Void,
         onRemove: @escaping () -> Void, onFocus: (() -> Void)?
-    ) -> NSStackView {
+    ) -> (row: NSStackView, actionButtons: [NSButton]) {
         var contentViews: [NSView] = []
         contentViews.append(RowPrimitives.statusSlot(statusDot))
         if let shortcut { contentViews.append(shortcut) }
@@ -451,7 +452,7 @@ import streamctl
 
         let editButton = buildActionButton(symbol: "pencil", tooltip: "Edit") { _ in onEdit() }
         editButton.setAccessibilityIdentifier("process-row-edit")
-        let removeButton = buildActionButton(symbol: "xmark", tooltip: "Remove") { _ in onRemove() }
+        let removeButton = buildActionButton(symbol: "trash", tooltip: "Remove") { _ in onRemove() }
         removeButton.setAccessibilityIdentifier("process-row-remove")
 
         let row = NSStackView(views: [contentArea, editButton, removeButton])
@@ -460,7 +461,7 @@ import streamctl
         row.spacing = 10
         row.edgeInsets = NSEdgeInsets(top: 9, left: 14, bottom: 9, right: 14)
         row.translatesAutoresizingMaskIntoConstraints = false
-        return row
+        return (row, [editButton, removeButton])
     }
 
     private static func makeEditingForm(process: ProcessTemplate, onCancel: @escaping () -> Void, onSave: @escaping (ProcessTemplate) -> Void) -> (
@@ -560,7 +561,6 @@ import streamctl
         button.isBordered = false
         button.toolTip = tooltip
         button.contentTintColor = Theme.muted
-        button.alphaValue = 0.6  // prototype stand-in for hover-only fade-in; polish in 2b.2
         let target = ClosureTarget()
         target.onCancel = { onClick(button) }
         button.target = target

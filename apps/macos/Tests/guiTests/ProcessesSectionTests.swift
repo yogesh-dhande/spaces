@@ -120,6 +120,30 @@ import streamctl
         #expect(abs((browserX ?? 0) - (agentX ?? 0)) < 0.5)
     }
 
+    @Test func rowHoverVisibilityTogglesActionButtons() {
+        let row = ProcessRowView(process: ProcessTemplate(name: "api", command: "bun run dev"), shortcut: nil, status: .idle)
+
+        #expect(row.areActionButtonsVisible == false)
+        #expect(row.actionButtonAlphaValuesForTesting == [0, 0])
+
+        row.setActionButtonsVisible(true, animated: false)
+
+        #expect(row.areActionButtonsVisible)
+        #expect(row.actionButtonAlphaValuesForTesting == [1, 1])
+    }
+
+    @Test func browserSessionCollapsedRowShowsResolvedURLButEditFormKeepsRawTemplate() {
+        let section = BrowserSessionsSection(
+            sessions: [BrowserSession(name: "frontend url", url: "http://localhost:$FRONTEND_PORT")], collapsedDisplayURLs: ["http://localhost:3000"])
+
+        let row = section.browserRow(at: 0)!
+        #expect(row.collapsedPrimaryTextForTesting == "frontend url")
+        #expect(row.collapsedDetailTextForTesting == "http://localhost:3000")
+
+        row.enterEditing(prefill: nil, animated: false)
+        #expect(row.editingURLValueForTesting == "http://localhost:$FRONTEND_PORT")
+    }
+
     // MARK: Edit + Save + Cancel mechanics
 
     @Test func enterEditingSwapsTheRowSubtreeToAForm() {
@@ -226,6 +250,13 @@ extension ProcessesSection {
 extension ProcessRowView {
     var statusDotForTesting: StatusDotView? { subviews.flatMap { $0.subviewsRecursive() }.compactMap { $0 as? StatusDotView }.first }
 
+    var actionButtonAlphaValuesForTesting: [CGFloat] {
+        subviews.flatMap { $0.subviewsRecursive() }.compactMap { $0 as? NSButton }.filter { id in
+            let identifier = id.accessibilityIdentifier()
+            return identifier == "process-row-edit" || identifier == "process-row-remove"
+        }.map(\.alphaValue)
+    }
+
     var collapsedHasShortcutChip: Bool {
         // Prototype check: the shortcut chip is created at init if a shortcut
         // was provided; since we don't expose the chip directly, look for a
@@ -267,6 +298,18 @@ extension ProcessRowView {
 
 extension BrowserSessionRowView {
     func shortcutChipMinXForTesting(shortcut: String) -> CGFloat? { shortcutChipFrameForTesting(shortcut: shortcut)?.minX }
+}
+
+extension BrowserSessionsSection {
+    func browserRow(at index: Int) -> BrowserSessionRowView? {
+        guard index >= 0, index < rowCount else { return nil }
+        return rowsStackForTesting.arrangedSubviews.compactMap { $0 as? BrowserSessionRowView }[safe: index]
+    }
+
+    fileprivate var rowsStackForTesting: NSStackView {
+        let outer = view.subviews.compactMap({ $0 as? NSStackView }).first
+        return outer?.arrangedSubviews.compactMap({ $0 as? NSStackView }).last ?? NSStackView()
+    }
 }
 
 extension AgentLauncherRowView {

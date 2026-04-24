@@ -209,7 +209,7 @@ import streamctl
 
 // MARK: - PortRowView
 
-@MainActor final class PortRowView: NSView {
+@MainActor final class PortRowView: HoverRevealRowView {
     var onBeginEdit: (() -> Void)?
     var onCancel: (() -> Void)?
     var onSave: ((PortDefinition) -> Void)?
@@ -227,7 +227,6 @@ import streamctl
     init(port: PortDefinition) {
         self.currentPort = port
         super.init(frame: .zero)
-        translatesAutoresizingMaskIntoConstraints = false
         body.orientation = .vertical
         body.alignment = .leading
         body.spacing = 0
@@ -237,10 +236,12 @@ import streamctl
             body.leadingAnchor.constraint(equalTo: leadingAnchor), body.trailingAnchor.constraint(equalTo: trailingAnchor),
             body.topAnchor.constraint(equalTo: topAnchor), body.bottomAnchor.constraint(equalTo: bottomAnchor),
         ])
-        collapsedContainer = Self.makeCollapsedLine(
+        let collapsedLine = Self.makeCollapsedLine(
             nameLabel: nameLabel, onEdit: { [weak self] in self?.onBeginEdit?() }, onRemove: { [weak self] in self?.onRemove?() })
+        collapsedContainer = collapsedLine.row
         body.addArrangedSubview(collapsedContainer)
         collapsedContainer.widthAnchor.constraint(equalTo: body.widthAnchor).isActive = true
+        configureActionButtonsForHover(collapsedLine.actionButtons)
         rebindCollapsedContent(from: port)
     }
 
@@ -304,11 +305,13 @@ import streamctl
 
     func formSnapshot() -> PortDefinition { PortDefinition(name: nameField?.stringValue ?? "") }
 
-    private static func makeCollapsedLine(nameLabel: NSTextField, onEdit: @escaping () -> Void, onRemove: @escaping () -> Void) -> NSStackView {
+    private static func makeCollapsedLine(nameLabel: NSTextField, onEdit: @escaping () -> Void, onRemove: @escaping () -> Void) -> (
+        row: NSStackView, actionButtons: [NSButton]
+    ) {
         let leading: [NSView] = [RowPrimitives.typeIconTile(.port, symbol: "network", accessibilityLabel: "Port")]
         let editButton = buildActionButton(symbol: "pencil", tooltip: "Edit") { _ in onEdit() }
         editButton.setAccessibilityIdentifier("port-row-edit")
-        let removeButton = buildActionButton(symbol: "xmark", tooltip: "Remove") { _ in onRemove() }
+        let removeButton = buildActionButton(symbol: "trash", tooltip: "Remove") { _ in onRemove() }
         removeButton.setAccessibilityIdentifier("port-row-remove")
         let spacer = NSView()
         spacer.translatesAutoresizingMaskIntoConstraints = false
@@ -320,7 +323,7 @@ import streamctl
         row.spacing = 10
         row.edgeInsets = NSEdgeInsets(top: 9, left: 14, bottom: 9, right: 14)
         row.translatesAutoresizingMaskIntoConstraints = false
-        return row
+        return (row, [editButton, removeButton])
     }
 
     private static func makeEditingForm(port: PortDefinition, onCancel: @escaping () -> Void, onSave: @escaping (PortDefinition) -> Void) -> (
@@ -388,7 +391,6 @@ import streamctl
         button.isBordered = false
         button.toolTip = tooltip
         button.contentTintColor = Theme.muted
-        button.alphaValue = 0.6
         let target = PortFormTarget()
         target.onCancel = { onClick(button) }
         button.target = target

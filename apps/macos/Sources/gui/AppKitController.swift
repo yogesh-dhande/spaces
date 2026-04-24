@@ -3649,7 +3649,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
     private func workspaceBrowserSessionsSection(workspace: WorkspaceSummary, shortcutIndicesByURL: [String: Int]) -> NSView? {
         guard let config = try? orchestrator.workspaceSettings(workspaceID: workspace.id) else { return nil }
-        let section = BrowserSessionsSection(sessions: config.browserSessions)
+        let resolvedSessions = (try? orchestrator.resolvedWorkspaceBrowserSessions(workspaceID: workspace.id)) ?? []
+        let displayURLs = Self.browserSessionDisplayURLs(configuredSessions: config.browserSessions, resolvedSessions: resolvedSessions)
+        let section = BrowserSessionsSection(sessions: config.browserSessions, collapsedDisplayURLs: displayURLs)
         section.onCommit = { [weak self] updated in
             guard let self else { return }
             do {
@@ -3659,9 +3661,15 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         }
         var urlToIndex: [String: Int] = [:]
         var shortcutMap: [String: String] = [:]
+        var resolvedSessionCursor = 0
         for session in config.browserSessions {
             guard let url = session.url, !url.isEmpty else { continue }
-            guard let index = shortcutIndicesByURL[url] else { continue }
+            guard
+                let matchedURL = Self.matchedBrowserSessionShortcutURL(
+                    configuredSession: session, rawURL: url, resolvedSessions: resolvedSessions, resolvedSessionCursor: &resolvedSessionCursor,
+                    shortcutIndicesByURL: shortcutIndicesByURL)
+            else { continue }
+            guard let index = shortcutIndicesByURL[matchedURL] else { continue }
             shortcutMap[url] = windowShortcutBadgeText(index: index)
             urlToIndex[url] = index
         }
@@ -3671,6 +3679,50 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         }
         section.shortcutsByURL = shortcutMap
         return section.view
+    }
+
+    static func browserSessionDisplayURLs(configuredSessions: [BrowserSession], resolvedSessions: [BrowserSession]) -> [String?] {
+        var resolvedSessionCursor = 0
+        return configuredSessions.map { session in
+            guard let rawURL = session.url, !rawURL.isEmpty else { return nil }
+            return matchedBrowserSessionResolvedURL(
+                configuredSession: session, rawURL: rawURL, resolvedSessions: resolvedSessions, resolvedSessionCursor: &resolvedSessionCursor)
+                ?? rawURL
+        }
+    }
+
+    static func matchedBrowserSessionResolvedURL(
+        configuredSession: BrowserSession, rawURL: String, resolvedSessions: [BrowserSession], resolvedSessionCursor: inout Int
+    ) -> String? {
+        let resolvedURLs = Set(resolvedSessions.compactMap(\.url).filter { !$0.isEmpty })
+        return matchedBrowserSessionShortcutURL(
+            configuredSession: configuredSession, rawURL: rawURL, resolvedSessions: resolvedSessions, resolvedSessionCursor: &resolvedSessionCursor,
+            shortcutIndicesByURL: Dictionary(uniqueKeysWithValues: resolvedURLs.map { ($0, 0) }))
+    }
+
+    static func matchedBrowserSessionShortcutURL(
+        configuredSession: BrowserSession, rawURL: String, resolvedSessions: [BrowserSession], resolvedSessionCursor: inout Int,
+        shortcutIndicesByURL: [String: Int]
+    ) -> String? {
+        if shortcutIndicesByURL[rawURL] != nil { return rawURL }
+
+        let trimmedName = configuredSession.name?.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let trimmedName, !trimmedName.isEmpty,
+            let matched = resolvedSessions.first(where: {
+                $0.name?.trimmingCharacters(in: .whitespacesAndNewlines) == trimmedName && ($0.url.map { shortcutIndicesByURL[$0] != nil } ?? false)
+            })?.url
+        {
+            return matched
+        }
+
+        guard rawURL.contains("$") else { return nil }
+        while resolvedSessionCursor < resolvedSessions.count {
+            let candidate = resolvedSessions[resolvedSessionCursor]
+            resolvedSessionCursor += 1
+            guard let candidateURL = candidate.url, shortcutIndicesByURL[candidateURL] != nil else { continue }
+            return candidateURL
+        }
+        return nil
     }
 
     private func workspacePortsSection(workspace: WorkspaceSummary) -> NSView? {

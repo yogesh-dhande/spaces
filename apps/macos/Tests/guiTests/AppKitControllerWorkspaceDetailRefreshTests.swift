@@ -49,6 +49,25 @@ import streamctl
         #expect(AppKitController.shouldShowConfiguredBrowserSessions(workspaceIsRunning: false))
     }
 
+    @MainActor @Test func browserSessionShortcutMatchingFallsBackToResolvedURLForTemplatedSession() {
+        var resolvedCursor = 0
+        let matchedURL = AppKitController.matchedBrowserSessionShortcutURL(
+            configuredSession: BrowserSession(name: "frontend url", url: "http://localhost:$FRONTEND_PORT"),
+            rawURL: "http://localhost:$FRONTEND_PORT", resolvedSessions: [BrowserSession(name: "frontend url", url: "http://localhost:3000")],
+            resolvedSessionCursor: &resolvedCursor, shortcutIndicesByURL: ["http://localhost:3000": 1])
+
+        #expect(matchedURL == "http://localhost:3000")
+        #expect(resolvedCursor == 0, "Named match should not consume the sequential fallback cursor")
+    }
+
+    @MainActor @Test func browserSessionDisplayURLsPreferResolvedValues() {
+        let displayURLs = AppKitController.browserSessionDisplayURLs(
+            configuredSessions: [BrowserSession(name: "frontend url", url: "http://localhost:$FRONTEND_PORT")],
+            resolvedSessions: [BrowserSession(name: "frontend url", url: "http://localhost:3000")])
+
+        #expect(displayURLs == ["http://localhost:3000"])
+    }
+
     @MainActor @Test func workspaceDetailSectionsKeepBrowserSessionsAheadOfCodingAgents() {
         let processes = NSView()
         let browserSessions = NSView()

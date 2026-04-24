@@ -278,7 +278,7 @@ import streamctl
 
 // MARK: - AgentLauncherRowView
 
-@MainActor final class AgentLauncherRowView: NSView {
+@MainActor final class AgentLauncherRowView: HoverRevealRowView {
     var onBeginEdit: (() -> Void)?
     var onCancel: (() -> Void)?
     var onSave: ((AgentLauncher) -> Void)?
@@ -303,7 +303,6 @@ import streamctl
         self.isEditable = isEditable
         self.onFocus = onFocus
         super.init(frame: .zero)
-        translatesAutoresizingMaskIntoConstraints = false
 
         body.orientation = .vertical
         body.alignment = .leading
@@ -316,11 +315,13 @@ import streamctl
         ])
 
         let shortcutView = shortcut.map { RowPrimitives.shortcutChip($0) }
-        collapsedContainer = Self.makeCollapsedLine(
+        let collapsedLine = Self.makeCollapsedLine(
             shortcut: shortcutView, status: status, isEditable: isEditable, nameLabel: nameLabel, detailLabel: detailLabel,
             onEdit: { [weak self] in self?.onBeginEdit?() }, onRemove: { [weak self] in self?.onRemove?() }, onFocus: onFocus)
+        collapsedContainer = collapsedLine.row
         body.addArrangedSubview(collapsedContainer)
         collapsedContainer.widthAnchor.constraint(equalTo: body.widthAnchor).isActive = true
+        configureActionButtonsForHover(collapsedLine.actionButtons)
         rebindCollapsedContent(from: launcher)
     }
 
@@ -398,7 +399,7 @@ import streamctl
     private static func makeCollapsedLine(
         shortcut: NSView? = nil, status: AgentWindowStatus?, isEditable: Bool, nameLabel: NSTextField, detailLabel: NSTextField,
         onEdit: @escaping () -> Void, onRemove: @escaping () -> Void, onFocus: (() -> Void)?
-    ) -> NSStackView {
+    ) -> (row: NSStackView, actionButtons: [NSButton]) {
         var contentViews: [NSView] = []
         contentViews.append(RowPrimitives.statusSlot(status.flatMap(makeStatusIndicator)))
         if let shortcut { contentViews.append(shortcut) }
@@ -431,12 +432,12 @@ import streamctl
             row.spacing = 10
             row.edgeInsets = NSEdgeInsets(top: 9, left: 14, bottom: 9, right: 14)
             row.translatesAutoresizingMaskIntoConstraints = false
-            return row
+            return (row, [])
         }
 
         let editButton = buildActionButton(symbol: "pencil", tooltip: "Edit") { _ in onEdit() }
         editButton.setAccessibilityIdentifier("agent-launcher-row-edit")
-        let removeButton = buildActionButton(symbol: "xmark", tooltip: "Remove") { _ in onRemove() }
+        let removeButton = buildActionButton(symbol: "trash", tooltip: "Remove") { _ in onRemove() }
         removeButton.setAccessibilityIdentifier("agent-launcher-row-remove")
 
         let row = NSStackView(views: [contentArea, editButton, removeButton])
@@ -445,7 +446,7 @@ import streamctl
         row.spacing = 10
         row.edgeInsets = NSEdgeInsets(top: 9, left: 14, bottom: 9, right: 14)
         row.translatesAutoresizingMaskIntoConstraints = false
-        return row
+        return (row, [editButton, removeButton])
     }
 
     private static func makeStatusIndicator(_ status: AgentWindowStatus) -> NSView {
@@ -553,7 +554,6 @@ import streamctl
         button.isBordered = false
         button.toolTip = tooltip
         button.contentTintColor = Theme.muted
-        button.alphaValue = 0.6
         let target = AgentLauncherFormTarget()
         target.onCancel = { onClick(button) }
         button.target = target

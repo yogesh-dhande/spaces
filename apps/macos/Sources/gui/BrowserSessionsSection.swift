@@ -11,6 +11,7 @@ import streamctl
     // MARK: State
 
     private var sessions: [BrowserSession]
+    private var collapsedDisplayURLs: [String?]
     private let rowsStack = NSStackView()
     private let countLabel = NSTextField(labelWithString: "")
     private var rows: [BrowserSessionRowView] = []
@@ -26,8 +27,9 @@ import streamctl
 
     // MARK: Init
 
-    init(sessions: [BrowserSession] = []) {
+    init(sessions: [BrowserSession] = [], collapsedDisplayURLs: [String?] = []) {
         self.sessions = sessions
+        self.collapsedDisplayURLs = collapsedDisplayURLs
 
         let container = NSStackView()
         container.orientation = .vertical
@@ -74,8 +76,9 @@ import streamctl
 
     // MARK: Public API
 
-    func reload(sessions: [BrowserSession]) {
+    func reload(sessions: [BrowserSession], collapsedDisplayURLs: [String?]? = nil) {
         self.sessions = sessions
+        if let collapsedDisplayURLs { self.collapsedDisplayURLs = collapsedDisplayURLs }
         refreshRows(animated: true)
     }
     var rowCount: Int { rows.count }
@@ -126,9 +129,10 @@ import streamctl
         clearRowsStack()
         rows.removeAll()
         for (index, session) in sessions.enumerated() {
+            let collapsedDisplayURL = collapsedDisplayURLs[safe: index] ?? session.url
             let shortcut = (session.url.map { shortcutsByURL[$0] } ?? nil)
             let focusAction: (() -> Void)? = onFocus.map { handler in { handler(session) } }
-            let row = BrowserSessionRowView(session: session, shortcut: shortcut, onFocus: focusAction)
+            let row = BrowserSessionRowView(session: session, displayURL: collapsedDisplayURL, shortcut: shortcut, onFocus: focusAction)
             row.onBeginEdit = { [weak self] in self?.handleBeginEdit(row: row) }
             row.onCancel = { [weak self] in self?.handleCancel(row: row) }
             row.onSave = { [weak self] edited in self?.handleSave(row: row, edited: edited) }
@@ -174,7 +178,7 @@ import streamctl
         sessions[index] = edited
         if pendingDraftIndex == index { pendingDraftIndex = nil }
         row.exitEditing(animated: true)
-        row.rebindCollapsedContent(from: edited)
+        row.rebindCollapsedContent(from: edited, displayURL: row.collapsedDisplayURL)
         onCommit?(sessions)
     }
 
@@ -220,7 +224,7 @@ import streamctl
 
 // MARK: - BrowserSessionRowView
 
-@MainActor final class BrowserSessionRowView: NSView {
+@MainActor final class BrowserSessionRowView: HoverRevealRowView {
     var onBeginEdit: (() -> Void)?
     var onCancel: (() -> Void)?
     var onSave: ((BrowserSession) -> Void)?
@@ -234,16 +238,17 @@ import streamctl
     private let nameLabel = NSTextField(labelWithString: "")
     private let detailLabel = NSTextField(labelWithString: "")
     private var currentSession: BrowserSession
+    private(set) var collapsedDisplayURL: String?
     private var onFocus: (() -> Void)?
 
     private var nameField: NSTextField?
     private var urlField: NSTextField?
 
-    init(session: BrowserSession, shortcut: String? = nil, onFocus: (() -> Void)? = nil) {
+    init(session: BrowserSession, displayURL: String? = nil, shortcut: String? = nil, onFocus: (() -> Void)? = nil) {
         self.currentSession = session
+        self.collapsedDisplayURL = displayURL
         self.onFocus = onFocus
         super.init(frame: .zero)
-        translatesAutoresizingMaskIntoConstraints = false
         body.orientation = .vertical
         body.alignment = .leading
         body.spacing = 0
@@ -254,23 +259,27 @@ import streamctl
             body.topAnchor.constraint(equalTo: topAnchor), body.bottomAnchor.constraint(equalTo: bottomAnchor),
         ])
         let shortcutView = shortcut.map { RowPrimitives.shortcutChip($0) }
-        collapsedContainer = Self.makeCollapsedLine(
+        let collapsedLine = Self.makeCollapsedLine(
             shortcut: shortcutView, nameLabel: nameLabel, detailLabel: detailLabel, onEdit: { [weak self] in self?.onBeginEdit?() },
             onRemove: { [weak self] in self?.onRemove?() }, onFocus: onFocus)
+        collapsedContainer = collapsedLine.row
         body.addArrangedSubview(collapsedContainer)
         collapsedContainer.widthAnchor.constraint(equalTo: body.widthAnchor).isActive = true
-        rebindCollapsedContent(from: session)
+        configureActionButtonsForHover(collapsedLine.actionButtons)
+        rebindCollapsedContent(from: session, displayURL: displayURL)
     }
 
     @available(*, unavailable) required init?(coder: NSCoder) { fatalError() }
 
-    func rebindCollapsedContent(from session: BrowserSession) {
+    func rebindCollapsedContent(from session: BrowserSession, displayURL: String? = nil) {
         currentSession = session
-        let primaryText = session.name ?? session.url ?? "(unnamed)"
+        collapsedDisplayURL = displayURL ?? session.url
+        let visibleURL = collapsedDisplayURL ?? session.url
+        let primaryText = session.name ?? visibleURL ?? "(unnamed)"
         nameLabel.stringValue = primaryText
         nameLabel.font = .systemFont(ofSize: 13, weight: .medium)
         nameLabel.textColor = Theme.text
-        let detailText = session.name != nil ? (session.url ?? "") : ""
+        let detailText = session.name != nil ? (visibleURL ?? "") : ""
         detailLabel.stringValue = detailText
         detailLabel.font = .systemFont(ofSize: 12, weight: .regular)
         detailLabel.textColor = Theme.muted
@@ -340,7 +349,7 @@ import streamctl
     private static func makeCollapsedLine(
         shortcut: NSView? = nil, nameLabel: NSTextField, detailLabel: NSTextField, onEdit: @escaping () -> Void, onRemove: @escaping () -> Void,
         onFocus: (() -> Void)?
-    ) -> NSStackView {
+    ) -> (row: NSStackView, actionButtons: [NSButton]) {
         var contentViews: [NSView] = []
         contentViews.append(RowPrimitives.statusSlot())
         if let shortcut { contentViews.append(shortcut) }
@@ -368,7 +377,7 @@ import streamctl
 
         let editButton = buildActionButton(symbol: "pencil", tooltip: "Edit") { _ in onEdit() }
         editButton.setAccessibilityIdentifier("browser-session-row-edit")
-        let removeButton = buildActionButton(symbol: "xmark", tooltip: "Remove") { _ in onRemove() }
+        let removeButton = buildActionButton(symbol: "trash", tooltip: "Remove") { _ in onRemove() }
         removeButton.setAccessibilityIdentifier("browser-session-row-remove")
 
         let row = NSStackView(views: [contentArea, editButton, removeButton])
@@ -377,7 +386,7 @@ import streamctl
         row.spacing = 10
         row.edgeInsets = NSEdgeInsets(top: 9, left: 14, bottom: 9, right: 14)
         row.translatesAutoresizingMaskIntoConstraints = false
-        return row
+        return (row, [editButton, removeButton])
     }
 
     private static func makeEditingForm(session: BrowserSession, onCancel: @escaping () -> Void, onSave: @escaping (BrowserSession) -> Void) -> (
@@ -457,7 +466,6 @@ import streamctl
         button.isBordered = false
         button.toolTip = tooltip
         button.contentTintColor = Theme.muted
-        button.alphaValue = 0.6
         let target = BrowserSessionFormTarget()
         target.onCancel = { onClick(button) }
         button.target = target
@@ -467,6 +475,12 @@ import streamctl
     }
 
     private static var targetKey: UInt8 = 0
+}
+
+extension BrowserSessionRowView {
+    var collapsedPrimaryTextForTesting: String { nameLabel.stringValue }
+    var collapsedDetailTextForTesting: String { detailLabel.stringValue }
+    var editingURLValueForTesting: String? { urlField?.stringValue }
 }
 
 @MainActor private final class BrowserSessionFormTarget: NSObject, NSTextFieldDelegate {
