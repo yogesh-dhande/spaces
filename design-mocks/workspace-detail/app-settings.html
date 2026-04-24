@@ -1,0 +1,401 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Muxy · Settings</title>
+<link rel="stylesheet" href="shared.css">
+<style>
+  /* Settings-specific */
+  .setting-row {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    padding: 10px 14px;
+  }
+  .setting-row + .setting-row { border-top: 1px solid var(--border); }
+  .setting-row .label-col {
+    flex: 1;
+    min-width: 0;
+  }
+  .setting-row .label-col .name { font-size: 13px; font-weight: 500; }
+  .setting-row .label-col .hint { font-size: 11.5px; color: var(--muted); }
+  .setting-row .control { flex-shrink: 0; }
+
+  select.popup {
+    background: var(--surface);
+    color: var(--text);
+    border: 1px solid var(--border-strong);
+    border-radius: 5px;
+    padding: 4px 24px 4px 10px;
+    font: inherit; font-size: 12.5px;
+    appearance: none;
+    background-image: linear-gradient(45deg, transparent 50%, var(--muted) 50%),
+                      linear-gradient(135deg, var(--muted) 50%, transparent 50%);
+    background-position: calc(100% - 11px) 50%, calc(100% - 6px) 50%;
+    background-size: 5px 5px, 5px 5px;
+    background-repeat: no-repeat;
+    min-width: 180px;
+  }
+
+  .sk-row {
+    display: grid;
+    grid-template-columns: 1fr auto;
+    gap: 14px;
+    align-items: center;
+    padding: 7px 14px;
+  }
+  .sk-row + .sk-row { border-top: 1px solid var(--border); }
+  .sk-row .name { font-size: 12.5px; }
+  .sk-chord {
+    display: inline-flex; gap: 3px;
+    align-items: center;
+  }
+  .sk-chord kbd {
+    background: var(--chip-bg);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 1px 6px;
+    font-size: 11px;
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    color: var(--text);
+    min-width: 20px; text-align: center;
+  }
+  .sk-chord.unset kbd { color: var(--muted); }
+  .sk-controls {
+    display: inline-flex;
+    gap: 4px;
+    margin-left: 10px;
+  }
+  .sk-btn {
+    font-size: 10.5px;
+    background: transparent;
+    border: 1px solid var(--border-strong);
+    border-radius: 5px;
+    padding: 2px 9px;
+    cursor: pointer;
+    color: var(--muted);
+    transition: color 0.1s, border-color 0.1s, background 0.1s;
+  }
+  .sk-btn:hover { color: var(--text); border-color: var(--text); }
+  .sk-btn.record:hover { color: var(--accent); border-color: var(--accent); }
+  .sk-btn.reset:hover { color: var(--red); border-color: var(--red); }
+  .sk-btn.recording {
+    color: var(--accent);
+    border-color: var(--accent);
+    background: var(--accent-tint);
+  }
+  .sk-btn:disabled {
+    opacity: 0.3;
+    cursor: not-allowed;
+  }
+  .sk-btn:disabled:hover {
+    color: var(--muted);
+    border-color: var(--border-strong);
+  }
+
+  .toggle {
+    position: relative;
+    width: 34px; height: 20px;
+    background: var(--chip-bg);
+    border-radius: 12px;
+    cursor: pointer;
+    transition: background 0.15s;
+    border: 1px solid var(--border);
+  }
+  .toggle.on { background: var(--green); border-color: var(--green); }
+  .toggle .knob {
+    position: absolute;
+    top: 1px; left: 1px;
+    width: 16px; height: 16px;
+    border-radius: 50%;
+    background: white;
+    transition: left 0.15s;
+    box-shadow: 0 1px 2px rgba(0,0,0,0.2);
+  }
+  .toggle.on .knob { left: 15px; }
+
+  .color-well {
+    width: 26px; height: 22px;
+    border-radius: 5px;
+    border: 1px solid var(--border-strong);
+    cursor: pointer;
+    display: inline-block;
+    vertical-align: middle;
+  }
+</style>
+</head>
+<body>
+<div class="app-shell">
+
+  <aside class="sidebar">
+    <div class="sidebar-head">
+      <span class="brand-icon">M</span>
+      <span class="brand">Muxy</span>
+      <button class="icon-btn" title="New project">+</button>
+      <button class="icon-btn selected" title="Settings" style="background: var(--row-selected); color: var(--accent)">⚙</button>
+    </div>
+
+    <a class="side-row" href="app-dashboard.html">
+      <span class="type-icon project" style="width:18px;height:18px;font-size:10px;border-radius:4px">◈</span>
+      <span class="label">Dashboard</span>
+      <span class="badge">3</span>
+    </a>
+
+    <div class="sidebar-section-label">Projects</div>
+
+    <div class="side-row project">
+      <svg class="chev" viewBox="0 0 12 12"><path d="M4 2 L8 6 L4 10" stroke="currentColor" stroke-width="1.5" fill="none"/></svg>
+      <span class="label">Muxy</span>
+      <span class="trail">
+        <button class="icon-btn sm">⚙</button>
+        <button class="icon-btn sm">+</button>
+      </span>
+    </div>
+    <div class="side-workspaces">
+      <a class="side-row workspace" href="app-workspace.html">
+        <span class="row-line">
+          <span class="status-dot running"></span>
+          <span class="label">main-dev</span>
+          <span class="warn">⚠</span>
+        </span>
+        <span class="branch">main</span>
+      </a>
+      <a class="side-row workspace" href="#">
+        <span class="row-line">
+          <span class="status-dot stopped"></span>
+          <span class="label">feature-sidebar</span>
+        </span>
+        <span class="branch">feature/sidebar</span>
+      </a>
+    </div>
+    <div class="side-row project">
+      <svg class="chev" viewBox="0 0 12 12"><path d="M4 2 L8 6 L4 10" stroke="currentColor" stroke-width="1.5" fill="none"/></svg>
+      <span class="label">muxy-web</span>
+    </div>
+  </aside>
+
+  <main class="detail">
+    <div class="topbar-back">
+      <a href="index.html">← All designs</a>
+      <span>·</span>
+      <span>Settings</span>
+    </div>
+
+    <div class="detail-head">
+      <h1>Settings</h1>
+      <span class="subtitle">App preferences</span>
+    </div>
+
+    <!-- Preferred editor -->
+    <div class="section">
+      <div class="section-head">
+        <h2>Editor & terminal</h2>
+      </div>
+      <div class="setting-row">
+        <div class="label-col">
+          <div class="name">Preferred editor</div>
+          <div class="hint">Opened when you use the editor shortcut from inside a workspace</div>
+        </div>
+        <div class="control">
+          <select class="popup">
+            <option>VS Code</option>
+            <option selected>Cursor</option>
+            <option>Windsurf</option>
+            <option>Zed</option>
+          </select>
+        </div>
+      </div>
+      <div class="setting-row">
+        <div class="label-col">
+          <div class="name">Terminal host</div>
+          <div class="hint">Used for process panes and coding agents</div>
+        </div>
+        <div class="control">
+          <select class="popup">
+            <option>iTerm2</option>
+            <option selected>Ghostty</option>
+            <option>Terminal</option>
+            <option>Warp</option>
+          </select>
+        </div>
+      </div>
+    </div>
+
+    <!-- Window focus pulse -->
+    <div class="section">
+      <div class="section-head">
+        <h2>Window focus pulse</h2>
+        <span class="subtitle">Flashes the border of a window when focus moves to it</span>
+      </div>
+      <div class="setting-row">
+        <div class="label-col">
+          <div class="name">Enable focus pulse</div>
+          <div class="hint">Briefly tints the border so the focused window is obvious</div>
+        </div>
+        <div class="control"><div class="toggle on"><div class="knob"></div></div></div>
+      </div>
+      <div class="setting-row">
+        <div class="label-col">
+          <div class="name">Pulse color</div>
+          <div class="hint">Default #483d6e</div>
+        </div>
+        <div class="control" style="display: flex; align-items: center; gap: 8px">
+          <span class="color-well" style="background: #483d6e"></span>
+          <button class="btn">Reset</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Keyboard shortcuts -->
+    <div class="section">
+      <div class="section-head">
+        <h2>Keyboard shortcuts</h2>
+        <span class="subtitle">Click <kbd>record</kbd> on a row to capture a new chord</span>
+      </div>
+
+      <div class="sk-row">
+        <span class="name">Toggle app</span>
+        <span class="sk-chord">
+          <kbd>⌃</kbd><kbd>⌥</kbd><kbd>⌘</kbd><kbd>M</kbd>
+          <span class="sk-controls">
+            <button class="sk-btn record">record</button>
+            <button class="sk-btn reset">reset</button>
+          </span>
+        </span>
+      </div>
+      <div class="sk-row">
+        <span class="name">Leader key</span>
+        <span class="sk-chord">
+          <kbd>⌃</kbd><kbd>Space</kbd>
+          <span class="sk-controls">
+            <button class="sk-btn record recording">listening…</button>
+            <button class="sk-btn reset">reset</button>
+          </span>
+        </span>
+      </div>
+      <div class="sk-row">
+        <span class="name">Show dashboard</span>
+        <span class="sk-chord">
+          <kbd>⌘</kbd><kbd>0</kbd>
+          <span class="sk-controls">
+            <button class="sk-btn record">record</button>
+            <button class="sk-btn reset">reset</button>
+          </span>
+        </span>
+      </div>
+      <div class="sk-row">
+        <span class="name">New project</span>
+        <span class="sk-chord unset">
+          <kbd>—</kbd>
+          <span class="sk-controls">
+            <button class="sk-btn record">record</button>
+            <button class="sk-btn reset" disabled>reset</button>
+          </span>
+        </span>
+      </div>
+      <div class="sk-row">
+        <span class="name">New workspace</span>
+        <span class="sk-chord">
+          <kbd>⌘</kbd><kbd>N</kbd>
+          <span class="sk-controls">
+            <button class="sk-btn record">record</button>
+            <button class="sk-btn reset">reset</button>
+          </span>
+        </span>
+      </div>
+      <div class="sk-row">
+        <span class="name">Reload data</span>
+        <span class="sk-chord">
+          <kbd>⌘</kbd><kbd>R</kbd>
+          <span class="sk-controls">
+            <button class="sk-btn record">record</button>
+            <button class="sk-btn reset">reset</button>
+          </span>
+        </span>
+      </div>
+      <div class="sk-row">
+        <span class="name">Next window</span>
+        <span class="sk-chord">
+          <kbd>⌘</kbd><kbd>]</kbd>
+          <span class="sk-controls">
+            <button class="sk-btn record">record</button>
+            <button class="sk-btn reset">reset</button>
+          </span>
+        </span>
+      </div>
+      <div class="sk-row">
+        <span class="name">Previous window</span>
+        <span class="sk-chord">
+          <kbd>⌘</kbd><kbd>[</kbd>
+          <span class="sk-controls">
+            <button class="sk-btn record">record</button>
+            <button class="sk-btn reset">reset</button>
+          </span>
+        </span>
+      </div>
+      <div class="sk-row">
+        <span class="name">Open editor</span>
+        <span class="sk-chord">
+          <kbd>⌘</kbd><kbd>E</kbd>
+          <span class="sk-controls">
+            <button class="sk-btn record">record</button>
+            <button class="sk-btn reset">reset</button>
+          </span>
+        </span>
+      </div>
+      <div class="sk-row">
+        <span class="name">Open terminal</span>
+        <span class="sk-chord">
+          <kbd>⌘</kbd><kbd>T</kbd>
+          <span class="sk-controls">
+            <button class="sk-btn record">record</button>
+            <button class="sk-btn reset">reset</button>
+          </span>
+        </span>
+      </div>
+      <div class="sk-row">
+        <span class="name">Open Finder</span>
+        <span class="sk-chord">
+          <kbd>⌘</kbd><kbd>F</kbd>
+          <span class="sk-controls">
+            <button class="sk-btn record">record</button>
+            <button class="sk-btn reset">reset</button>
+          </span>
+        </span>
+      </div>
+      <div class="sk-row">
+        <span class="name">Open settings</span>
+        <span class="sk-chord">
+          <kbd>⌘</kbd><kbd>,</kbd>
+          <span class="sk-controls">
+            <button class="sk-btn record">record</button>
+            <button class="sk-btn reset">reset</button>
+          </span>
+        </span>
+      </div>
+      <div class="sk-row">
+        <span class="name">Focus window 1–9</span>
+        <span class="sk-chord">
+          <kbd>⌘</kbd><kbd>1</kbd><span style="color: var(--muted)">–</span><kbd>9</kbd>
+          <span class="sk-controls">
+            <button class="sk-btn record">record</button>
+            <button class="sk-btn reset">reset</button>
+          </span>
+        </span>
+      </div>
+      <div class="sk-row">
+        <span class="name">Queue window 1–9</span>
+        <span class="sk-chord">
+          <kbd>⌘</kbd><kbd>⇧</kbd><kbd>1</kbd><span style="color: var(--muted)">–</span><kbd>9</kbd>
+          <span class="sk-controls">
+            <button class="sk-btn record">record</button>
+            <button class="sk-btn reset">reset</button>
+          </span>
+        </span>
+      </div>
+    </div>
+
+  </main>
+</div>
+</body>
+</html>

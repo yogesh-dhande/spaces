@@ -1,0 +1,140 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Muxy — workspace detail design options</title>
+<style>
+  :root {
+    --bg: #f8f7f1;
+    --surface: #ffffff;
+    --text: #102028;
+    --muted: #3a4d57;
+    --border: #d5d8d3;
+    --accent: #0f7a76;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0f1517;
+      --surface: #1d2a2d;
+      --text: #eaf0ef;
+      --muted: #adc0c4;
+      --border: #304346;
+      --accent: #59dbcd;
+    }
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0;
+    padding: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", sans-serif;
+    font-size: 13px;
+    line-height: 1.5;
+  }
+  .wrap { max-width: 780px; margin: 0 auto; padding: 48px 24px; }
+  h1 { font-size: 22px; font-weight: 600; margin: 0 0 4px; letter-spacing: -0.01em; }
+  .sub { color: var(--muted); margin: 0 0 28px; }
+  .card {
+    display: block;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 18px 20px;
+    margin-bottom: 12px;
+    text-decoration: none;
+    color: inherit;
+    transition: transform 0.08s ease, border-color 0.12s ease;
+  }
+  .card:hover { border-color: var(--accent); transform: translateY(-1px); }
+  .title { font-weight: 600; font-size: 15px; margin: 0 0 4px; }
+  .desc { color: var(--muted); margin: 0; font-size: 12.5px; }
+  .badge {
+    display: inline-block;
+    font-size: 11px;
+    font-weight: 500;
+    color: var(--muted);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 1px 6px;
+    margin-left: 8px;
+    vertical-align: middle;
+  }
+  .note {
+    color: var(--muted);
+    font-size: 12px;
+    margin-top: 24px;
+    padding-top: 16px;
+    border-top: 1px solid var(--border);
+  }
+  kbd {
+    font-family: inherit;
+    font-size: 11px;
+    background: rgba(0,0,0,0.06);
+    border: 1px solid var(--border);
+    border-radius: 3px;
+    padding: 0 4px;
+  }
+  @media (prefers-color-scheme: dark) {
+    kbd { background: rgba(255,255,255,0.08); }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Muxy — design mocks</h1>
+  <p class="sub">Full app-shell screens (sidebar + detail) built on variant D's visual language. Click through to see how the four screens fit together.</p>
+
+  <a class="card" href="app-workspace.html">
+    <p class="title">Workspace detail <span class="badge">variant D in shell</span></p>
+    <p class="desc">Full app shell with sidebar + workspace detail. Browser sessions, processes, and coding agents are each a live-and-config section; ports and stop script follow. Shortcut + status on the left of every row.</p>
+  </a>
+
+  <a class="card" href="app-dashboard.html">
+    <p class="title">Dashboard</p>
+    <p class="desc">Attention center shown when no workspace is selected. Items grouped by workspace (project · workspace header), each row shows the live status and a dismiss ✕. Collapsed list of healthy workspaces below.</p>
+  </a>
+
+  <a class="card" href="app-new-project.html">
+    <p class="title">New project</p>
+    <p class="desc">Inline creation form. Source (existing dir / clone), setup script, ports, processes, browser sessions, coding agents, stop script — every section uses the same inline-editable row pattern the workspace detail uses. Cancel / Create at the bottom.</p>
+  </a>
+
+  <a class="card" href="app-settings.html">
+    <p class="title">Settings</p>
+    <p class="desc">App preferences. Editor + terminal host popups, window focus pulse (toggle + color well), then a 14-row keyboard-shortcut table with record affordance per row.</p>
+  </a>
+
+  <p class="note" style="margin-top: 28px; border-top: none; color: var(--muted); font-size: 11.5px">Earlier workspace-detail explorations (kept for reference):</p>
+
+  <a class="card" href="variant-d.html">
+    <p class="title">D · Live rows are the config <span class="badge">standalone</span></p>
+    <p class="desc">Original variant D mock without the sidebar shell.</p>
+  </a>
+
+  <a class="card" href="variant-e.html">
+    <p class="title">E · One unified item list <span class="badge">most compact</span></p>
+    <p class="desc">Single "Items" list with browsers/processes/agents mixed and filter chips.</p>
+  </a>
+
+  <p class="note" style="margin-top: 32px; border-top: none; color: var(--muted); font-size: 11.5px">Earlier explorations (kept for reference):</p>
+
+  <a class="card" href="variant-a.html">
+    <p class="title">A · Unified flow <span class="badge">separate windows list</span></p>
+    <p class="desc">Keeps a distinct Tracked-windows section above the five config sections. Superseded by D — the live-row / config duplication it introduces is unnecessary when there's a 1:1 mapping.</p>
+  </a>
+
+  <a class="card" href="variant-b.html">
+    <p class="title">B · Live primary + config rail <span class="badge">two column</span></p>
+    <p class="desc">Two-column layout (ruled out).</p>
+  </a>
+
+  <a class="card" href="variant-c.html">
+    <p class="title">C · Compact card grid <span class="badge">grid</span></p>
+    <p class="desc">Cards are denser but still duplicate the tracked-windows list at the top.</p>
+  </a>
+
+  <p class="note">Sample data in all three variants is identical for easy comparison. Press <kbd>⌘</kbd>+click any row in the mocks to see the hover states; the edit/save affordance is fully clickable on the session and process rows.</p>
+</div>
+</body>
+</html>

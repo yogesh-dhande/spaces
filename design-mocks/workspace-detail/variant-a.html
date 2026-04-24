@@ -1,0 +1,577 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Variant A — Unified flow</title>
+<style>
+  :root {
+    --bg: #f5f5f7;
+    --surface: #ffffff;
+    --surface-2: #fafafa;
+    --text: #1d1d1f;
+    --muted: #6e6e73;
+    --muted-2: #8e8e93;
+    --border: rgba(0,0,0,0.08);
+    --border-strong: rgba(0,0,0,0.14);
+    --accent: #0071e3;
+    --green: #34c759;
+    --red: #ff3b30;
+    --orange: #ff9500;
+    --row-hover: rgba(0,0,0,0.04);
+    --chip-bg: rgba(0,0,0,0.05);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #1c1c1e;
+      --surface: #2c2c2e;
+      --surface-2: #242426;
+      --text: #f5f5f7;
+      --muted: #98989d;
+      --muted-2: #8e8e93;
+      --border: rgba(255,255,255,0.12);
+      --border-strong: rgba(255,255,255,0.18);
+      --accent: #0a84ff;
+      --green: #30d158;
+      --red: #ff453a;
+      --orange: #ff9f0a;
+      --row-hover: rgba(255,255,255,0.06);
+      --chip-bg: rgba(255,255,255,0.08);
+    }
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0;
+    padding: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", sans-serif;
+    font-size: 13px;
+    line-height: 1.45;
+  }
+  .app {
+    max-width: 780px;
+    margin: 0 auto;
+    padding: 28px 20px 80px;
+  }
+  .topbar {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 18px;
+  }
+  .topbar a { color: var(--muted); text-decoration: none; font-size: 12px; }
+  .topbar a:hover { color: var(--accent); }
+  .title-row { display: flex; align-items: baseline; gap: 10px; }
+  h1 { font-size: 20px; font-weight: 600; margin: 0; letter-spacing: -0.01em; }
+  .project-chip {
+    font-size: 11px;
+    color: var(--muted);
+    background: var(--chip-bg);
+    border-radius: 4px;
+    padding: 2px 7px;
+  }
+  .row-actions { margin-left: auto; display: flex; gap: 6px; }
+  .icon-btn {
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: 6px;
+    width: 26px;
+    height: 26px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    color: var(--muted);
+  }
+  .icon-btn:hover { background: var(--row-hover); color: var(--text); }
+
+  /* Tooltip */
+  .tooltip-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 10px 12px;
+    margin-bottom: 18px;
+  }
+  .tooltip-row .label {
+    color: var(--muted);
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    font-weight: 600;
+  }
+  .tooltip-row .value {
+    flex: 1;
+    font-size: 13px;
+  }
+
+  /* Section */
+  .section {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    margin-bottom: 12px;
+    overflow: hidden;
+  }
+  .section-head {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 14px;
+    border-bottom: 1px solid var(--border);
+    cursor: pointer;
+    user-select: none;
+  }
+  .section.collapsed .section-head { border-bottom-color: transparent; }
+  .section-head h2 {
+    margin: 0;
+    font-size: 13px;
+    font-weight: 600;
+    letter-spacing: -0.005em;
+  }
+  .section-head .count {
+    font-size: 11px;
+    color: var(--muted);
+    font-weight: 500;
+  }
+  .chev {
+    width: 12px;
+    color: var(--muted);
+    transform: rotate(90deg);
+    transition: transform 0.15s ease;
+  }
+  .section.collapsed .chev { transform: rotate(0deg); }
+  .add-btn {
+    margin-left: auto;
+    background: transparent;
+    border: 1px dashed var(--border-strong);
+    border-radius: 6px;
+    padding: 2px 8px;
+    font-size: 11px;
+    color: var(--muted);
+    cursor: pointer;
+  }
+  .add-btn:hover { color: var(--accent); border-color: var(--accent); }
+  .section-body { padding: 4px 0; }
+  .section.collapsed .section-body { display: none; }
+
+  /* Tracked windows rows (live) */
+  .tw-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 8px 14px;
+    cursor: pointer;
+  }
+  .tw-row:hover { background: var(--row-hover); }
+  .tw-row + .tw-row { border-top: 1px solid var(--border); }
+  .tw-icon {
+    width: 22px; height: 22px;
+    border-radius: 5px;
+    display: inline-flex; align-items: center; justify-content: center;
+    font-size: 12px;
+    flex-shrink: 0;
+  }
+  .tw-icon.browser { background: rgba(0,113,227,0.12); color: var(--accent); }
+  .tw-icon.process { background: rgba(52,199,89,0.14); color: var(--green); }
+  .tw-icon.agent { background: rgba(142,142,147,0.18); color: var(--muted); }
+  .tw-icon.agent.missing { background: rgba(255,149,0,0.18); color: var(--orange); }
+  .tw-label { font-weight: 500; }
+  .tw-detail {
+    color: var(--muted);
+    font-size: 12px;
+    margin-left: 6px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .tw-body { flex: 1; min-width: 0; display: flex; align-items: baseline; }
+  .shortcut {
+    font-size: 10.5px;
+    color: var(--muted);
+    background: var(--chip-bg);
+    border-radius: 4px;
+    padding: 1px 5px;
+    font-weight: 500;
+  }
+  .status-dot {
+    width: 8px; height: 8px; border-radius: 50%;
+    flex-shrink: 0;
+  }
+  .status-dot.running { background: var(--green); box-shadow: 0 0 0 3px rgba(52,199,89,0.18); }
+  .status-dot.exited { background: transparent; border: 1.5px solid var(--red); }
+  .status-dot.idle { background: transparent; border: 1.5px solid var(--muted-2); }
+  .status-dot.waiting { background: var(--orange); }
+
+  /* Inline editor rows (config) */
+  .cfg-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 7px 14px;
+    border-top: 1px solid var(--border);
+    transition: background 0.08s ease;
+  }
+  .cfg-row:first-child { border-top: none; }
+  .cfg-row:hover { background: var(--row-hover); }
+  .cfg-name {
+    font-weight: 500;
+    min-width: 90px;
+    flex-shrink: 0;
+  }
+  .cfg-value {
+    color: var(--muted);
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    font-size: 12px;
+    flex: 1;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .port-value {
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    font-size: 12px;
+    color: var(--text);
+    background: var(--chip-bg);
+    border-radius: 4px;
+    padding: 1px 7px;
+  }
+  .cfg-actions { display: flex; gap: 2px; opacity: 0.4; transition: opacity 0.1s; }
+  .cfg-row:hover .cfg-actions { opacity: 1; }
+
+  /* Inline edit form (expanded state) */
+  .cfg-row.editing {
+    background: var(--surface-2);
+    padding: 12px 14px;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 8px;
+  }
+  .cfg-row.editing .cfg-fields {
+    display: grid;
+    grid-template-columns: 120px 1fr;
+    gap: 6px 10px;
+    align-items: center;
+  }
+  .cfg-row.editing label {
+    font-size: 11px;
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    font-weight: 600;
+  }
+  .cfg-row.editing input,
+  .cfg-row.editing select,
+  .cfg-row.editing textarea {
+    background: var(--surface);
+    color: var(--text);
+    border: 1px solid var(--border-strong);
+    border-radius: 5px;
+    padding: 4px 7px;
+    font: inherit;
+    font-size: 12.5px;
+    width: 100%;
+  }
+  .cfg-row.editing input:focus {
+    outline: none;
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px rgba(0,113,227,0.2);
+  }
+  .cfg-form-footer {
+    display: flex;
+    gap: 6px;
+    justify-content: flex-end;
+    margin-top: 2px;
+  }
+  .btn {
+    background: var(--surface);
+    color: var(--text);
+    border: 1px solid var(--border-strong);
+    border-radius: 5px;
+    padding: 4px 12px;
+    font: inherit;
+    font-size: 12px;
+    cursor: pointer;
+  }
+  .btn.primary {
+    background: var(--accent);
+    color: white;
+    border-color: var(--accent);
+  }
+  .btn:hover { filter: brightness(1.05); }
+
+  /* Stop script */
+  .stop-script {
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    font-size: 12px;
+    background: var(--surface-2);
+    border-top: 1px solid var(--border);
+    padding: 10px 14px;
+    white-space: pre-wrap;
+    color: var(--text);
+    margin: 0;
+  }
+  .stop-script-empty { color: var(--muted); font-style: italic; padding: 10px 14px; }
+
+  /* Status checks nested under a process */
+  .checks {
+    padding: 2px 14px 8px 46px;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+  .check {
+    font-size: 11px;
+    color: var(--muted);
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    background: var(--chip-bg);
+    border-radius: 4px;
+    padding: 1px 7px;
+  }
+  .check .d { width: 6px; height: 6px; border-radius: 50%; }
+  .check.pass .d { background: var(--green); }
+  .check.fail .d { background: var(--red); }
+
+  .empty-hint {
+    padding: 10px 14px;
+    color: var(--muted);
+    font-size: 12px;
+    font-style: italic;
+  }
+</style>
+</head>
+<body>
+<div class="app">
+  <div class="topbar">
+    <a href="index.html">← All designs</a>
+    <span style="color: var(--muted)">·</span>
+    <span style="font-weight: 600; font-size: 12px">Variant A — Unified flow</span>
+  </div>
+
+  <div class="title-row">
+    <h1>main-dev</h1>
+    <span class="project-chip">Muxy</span>
+    <div class="row-actions">
+      <button class="icon-btn" title="Launch workspace">▶</button>
+      <button class="icon-btn" title="More">⋯</button>
+    </div>
+  </div>
+
+  <!-- Tooltip -->
+  <div class="tooltip-row" style="margin-top: 14px">
+    <span class="label">Tooltip</span>
+    <span class="value">Working on workspace detail redesign</span>
+    <button class="icon-btn" title="Edit tooltip">✎</button>
+  </div>
+
+  <!-- Tracked Windows -->
+  <div class="section">
+    <div class="section-head">
+      <svg class="chev" viewBox="0 0 12 12"><path d="M4 2 L8 6 L4 10" stroke="currentColor" stroke-width="1.5" fill="none"/></svg>
+      <h2>Tracked windows</h2>
+      <span class="count">6</span>
+    </div>
+    <div class="section-body">
+      <div class="tw-row">
+        <span class="status-dot running" title="running"></span>
+        <span class="tw-icon process">▣</span>
+        <div class="tw-body">
+          <span class="tw-label">api</span>
+          <span class="tw-detail">bun run dev · localhost:52341</span>
+        </div>
+        <span class="shortcut">⌘1</span>
+      </div>
+      <div class="checks">
+        <span class="check pass"><span class="d"></span>http 200</span>
+        <span class="check pass"><span class="d"></span>db ping</span>
+      </div>
+
+      <div class="tw-row">
+        <span class="status-dot running" title="running"></span>
+        <span class="tw-icon process">▣</span>
+        <div class="tw-body">
+          <span class="tw-label">worker</span>
+          <span class="tw-detail">bun run worker</span>
+        </div>
+        <span class="shortcut">⌘2</span>
+      </div>
+
+      <div class="tw-row">
+        <span class="status-dot" title=""></span>
+        <span class="tw-icon browser">◉</span>
+        <div class="tw-body">
+          <span class="tw-label">docs</span>
+          <span class="tw-detail">docs.muxy.dev</span>
+        </div>
+        <span class="shortcut">⌘3</span>
+      </div>
+
+      <div class="tw-row">
+        <span class="status-dot" title=""></span>
+        <span class="tw-icon browser">◉</span>
+        <div class="tw-body">
+          <span class="tw-label">github</span>
+          <span class="tw-detail">github.com/muxy/muxy</span>
+        </div>
+        <span class="shortcut">⌘4</span>
+      </div>
+
+      <div class="tw-row">
+        <span class="status-dot waiting" title="waiting on input"></span>
+        <span class="tw-icon agent">◆</span>
+        <div class="tw-body">
+          <span class="tw-label">claude</span>
+          <span class="tw-detail">claude code · waiting on input</span>
+        </div>
+        <span class="shortcut">⌘5</span>
+      </div>
+
+      <div class="tw-row">
+        <span class="status-dot idle" title="idle"></span>
+        <span class="tw-icon agent">◆</span>
+        <div class="tw-body">
+          <span class="tw-label">codex</span>
+          <span class="tw-detail">codex</span>
+        </div>
+        <span class="shortcut">⌘6</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- Browser sessions -->
+  <div class="section">
+    <div class="section-head">
+      <svg class="chev" viewBox="0 0 12 12"><path d="M4 2 L8 6 L4 10" stroke="currentColor" stroke-width="1.5" fill="none"/></svg>
+      <h2>Browser sessions</h2>
+      <span class="count">2</span>
+      <button class="add-btn" title="Add browser session">+ add</button>
+    </div>
+    <div class="section-body">
+      <div class="cfg-row">
+        <span class="cfg-name">docs</span>
+        <span class="cfg-value">https://docs.muxy.dev</span>
+        <div class="cfg-actions">
+          <button class="icon-btn" title="Edit">✎</button>
+          <button class="icon-btn" title="Remove">✕</button>
+        </div>
+      </div>
+      <div class="cfg-row editing">
+        <div class="cfg-fields">
+          <label>Name</label><input value="github" />
+          <label>URL</label><input value="https://github.com/muxy/muxy" />
+        </div>
+        <div class="cfg-form-footer">
+          <button class="btn">Cancel</button>
+          <button class="btn primary">Save</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Processes -->
+  <div class="section">
+    <div class="section-head">
+      <svg class="chev" viewBox="0 0 12 12"><path d="M4 2 L8 6 L4 10" stroke="currentColor" stroke-width="1.5" fill="none"/></svg>
+      <h2>Processes</h2>
+      <span class="count">2</span>
+      <button class="add-btn" title="Add process">+ add</button>
+    </div>
+    <div class="section-body">
+      <div class="cfg-row">
+        <span class="cfg-name">api</span>
+        <span class="cfg-value">bun run dev</span>
+        <div class="cfg-actions">
+          <button class="icon-btn" title="Edit">✎</button>
+          <button class="icon-btn" title="Remove">✕</button>
+        </div>
+      </div>
+      <div class="cfg-row">
+        <span class="cfg-name">worker</span>
+        <span class="cfg-value">bun run worker</span>
+        <div class="cfg-actions">
+          <button class="icon-btn" title="Edit">✎</button>
+          <button class="icon-btn" title="Remove">✕</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Named ports -->
+  <div class="section">
+    <div class="section-head">
+      <svg class="chev" viewBox="0 0 12 12"><path d="M4 2 L8 6 L4 10" stroke="currentColor" stroke-width="1.5" fill="none"/></svg>
+      <h2>Named ports</h2>
+      <span class="count">2</span>
+      <button class="add-btn" title="Add port">+ add</button>
+    </div>
+    <div class="section-body">
+      <div class="cfg-row">
+        <span class="cfg-name">api_port</span>
+        <span class="cfg-value">$API_PORT</span>
+        <span class="port-value">52341</span>
+        <div class="cfg-actions">
+          <button class="icon-btn" title="Edit">✎</button>
+          <button class="icon-btn" title="Remove">✕</button>
+        </div>
+      </div>
+      <div class="cfg-row">
+        <span class="cfg-name">worker_port</span>
+        <span class="cfg-value">$WORKER_PORT</span>
+        <span class="port-value">52342</span>
+        <div class="cfg-actions">
+          <button class="icon-btn" title="Edit">✎</button>
+          <button class="icon-btn" title="Remove">✕</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Coding agents -->
+  <div class="section">
+    <div class="section-head">
+      <svg class="chev" viewBox="0 0 12 12"><path d="M4 2 L8 6 L4 10" stroke="currentColor" stroke-width="1.5" fill="none"/></svg>
+      <h2>Coding agents</h2>
+      <span class="count">2</span>
+      <button class="add-btn" title="Add agent">+ add</button>
+    </div>
+    <div class="section-body">
+      <div class="cfg-row">
+        <span class="cfg-name">claude</span>
+        <span class="cfg-value">claude code</span>
+        <div class="cfg-actions">
+          <button class="icon-btn" title="Edit">✎</button>
+          <button class="icon-btn" title="Remove">✕</button>
+        </div>
+      </div>
+      <div class="cfg-row">
+        <span class="cfg-name">codex</span>
+        <span class="cfg-value">codex</span>
+        <div class="cfg-actions">
+          <button class="icon-btn" title="Edit">✎</button>
+          <button class="icon-btn" title="Remove">✕</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Stop script -->
+  <div class="section collapsed">
+    <div class="section-head">
+      <svg class="chev" viewBox="0 0 12 12"><path d="M4 2 L8 6 L4 10" stroke="currentColor" stroke-width="1.5" fill="none"/></svg>
+      <h2>Stop script</h2>
+      <span class="count">1 line</span>
+      <button class="add-btn" title="Edit stop script">✎ edit</button>
+    </div>
+    <div class="section-body">
+      <pre class="stop-script">pkill -f "bun run"</pre>
+    </div>
+  </div>
+
+</div>
+</body>
+</html>

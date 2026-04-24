@@ -1,0 +1,527 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Variant B — Live primary + config rail</title>
+<style>
+  :root {
+    --bg: #f5f5f7;
+    --surface: #ffffff;
+    --surface-2: #fafafa;
+    --text: #1d1d1f;
+    --muted: #6e6e73;
+    --muted-2: #8e8e93;
+    --border: rgba(0,0,0,0.08);
+    --border-strong: rgba(0,0,0,0.14);
+    --accent: #0071e3;
+    --green: #34c759;
+    --red: #ff3b30;
+    --orange: #ff9500;
+    --row-hover: rgba(0,0,0,0.04);
+    --chip-bg: rgba(0,0,0,0.05);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #1c1c1e;
+      --surface: #2c2c2e;
+      --surface-2: #242426;
+      --text: #f5f5f7;
+      --muted: #98989d;
+      --muted-2: #8e8e93;
+      --border: rgba(255,255,255,0.12);
+      --border-strong: rgba(255,255,255,0.18);
+      --accent: #0a84ff;
+      --green: #30d158;
+      --red: #ff453a;
+      --orange: #ff9f0a;
+      --row-hover: rgba(255,255,255,0.06);
+      --chip-bg: rgba(255,255,255,0.08);
+    }
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0;
+    padding: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", sans-serif;
+    font-size: 13px;
+    line-height: 1.45;
+  }
+  .app { max-width: 1100px; margin: 0 auto; padding: 28px 20px 80px; }
+
+  .topbar {
+    display: flex; align-items: center; gap: 10px; margin-bottom: 18px;
+  }
+  .topbar a { color: var(--muted); text-decoration: none; font-size: 12px; }
+  .topbar a:hover { color: var(--accent); }
+
+  .header {
+    display: flex;
+    align-items: baseline;
+    gap: 10px;
+    margin-bottom: 14px;
+  }
+  h1 { font-size: 20px; font-weight: 600; margin: 0; letter-spacing: -0.01em; }
+  .project-chip { font-size: 11px; color: var(--muted); background: var(--chip-bg); border-radius: 4px; padding: 2px 7px; }
+  .right-actions { margin-left: auto; display: flex; gap: 6px; }
+
+  .icon-btn {
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: 6px;
+    width: 26px; height: 26px;
+    display: inline-flex; align-items: center; justify-content: center;
+    cursor: pointer;
+    color: var(--muted);
+  }
+  .icon-btn:hover { background: var(--row-hover); color: var(--text); }
+
+  /* Tooltip */
+  .tooltip-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 10px 12px;
+    margin-bottom: 16px;
+  }
+  .tooltip-row .label {
+    color: var(--muted);
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    font-weight: 600;
+  }
+  .tooltip-row .value { flex: 1; font-size: 13px; }
+
+  /* Layout */
+  .grid {
+    display: grid;
+    grid-template-columns: 1.75fr 1fr;
+    gap: 14px;
+  }
+  @media (max-width: 860px) {
+    .grid { grid-template-columns: 1fr; }
+  }
+
+  .panel {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    overflow: hidden;
+  }
+  .panel + .panel { margin-top: 12px; }
+  .panel-head {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 14px;
+    border-bottom: 1px solid var(--border);
+  }
+  .panel-head h2 {
+    margin: 0;
+    font-size: 13px;
+    font-weight: 600;
+  }
+  .panel-head .count { font-size: 11px; color: var(--muted); font-weight: 500; }
+  .add-btn {
+    margin-left: auto;
+    background: transparent;
+    border: 1px dashed var(--border-strong);
+    border-radius: 6px;
+    padding: 2px 8px;
+    font-size: 11px;
+    color: var(--muted);
+    cursor: pointer;
+  }
+  .add-btn:hover { color: var(--accent); border-color: var(--accent); }
+  .panel-body { padding: 4px 0; }
+
+  /* Tracked windows rows */
+  .tw-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 9px 14px;
+    cursor: pointer;
+  }
+  .tw-row:hover { background: var(--row-hover); }
+  .tw-row + .tw-row { border-top: 1px solid var(--border); }
+  .tw-icon {
+    width: 24px; height: 24px;
+    border-radius: 6px;
+    display: inline-flex; align-items: center; justify-content: center;
+    font-size: 13px;
+    flex-shrink: 0;
+  }
+  .tw-icon.browser { background: rgba(0,113,227,0.12); color: var(--accent); }
+  .tw-icon.process { background: rgba(52,199,89,0.14); color: var(--green); }
+  .tw-icon.agent { background: rgba(142,142,147,0.18); color: var(--muted); }
+  .tw-body { flex: 1; min-width: 0; display: flex; align-items: baseline; gap: 6px; }
+  .tw-label { font-weight: 500; }
+  .tw-detail {
+    color: var(--muted);
+    font-size: 12px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .shortcut {
+    font-size: 10.5px;
+    color: var(--muted);
+    background: var(--chip-bg);
+    border-radius: 4px;
+    padding: 1px 5px;
+    font-weight: 500;
+  }
+  .status-dot {
+    width: 8px; height: 8px; border-radius: 50%;
+    flex-shrink: 0;
+  }
+  .status-dot.running { background: var(--green); box-shadow: 0 0 0 3px rgba(52,199,89,0.18); }
+  .status-dot.exited { background: transparent; border: 1.5px solid var(--red); }
+  .status-dot.idle { background: transparent; border: 1.5px solid var(--muted-2); }
+  .status-dot.waiting { background: var(--orange); }
+
+  .checks {
+    padding: 2px 14px 8px 48px;
+    display: flex; flex-wrap: wrap; gap: 6px;
+  }
+  .check {
+    font-size: 11px;
+    color: var(--muted);
+    display: inline-flex; align-items: center; gap: 4px;
+    background: var(--chip-bg);
+    border-radius: 4px;
+    padding: 1px 7px;
+  }
+  .check .d { width: 6px; height: 6px; border-radius: 50%; }
+  .check.pass .d { background: var(--green); }
+  .check.fail .d { background: var(--red); }
+
+  /* Config rail rows */
+  .cfg-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 12px;
+    font-size: 12.5px;
+  }
+  .cfg-row + .cfg-row { border-top: 1px solid var(--border); }
+  .cfg-row:hover { background: var(--row-hover); }
+  .cfg-name { font-weight: 500; min-width: 80px; }
+  .cfg-value {
+    color: var(--muted);
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    font-size: 11.5px;
+    flex: 1;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .port-value {
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    font-size: 11.5px;
+    color: var(--text);
+    background: var(--chip-bg);
+    border-radius: 4px;
+    padding: 1px 6px;
+  }
+  .cfg-actions {
+    display: flex;
+    gap: 1px;
+    opacity: 0.35;
+    transition: opacity 0.1s;
+  }
+  .cfg-row:hover .cfg-actions { opacity: 1; }
+  .cfg-actions .icon-btn { width: 22px; height: 22px; font-size: 11px; }
+
+  /* Editing form */
+  .cfg-row.editing {
+    flex-direction: column;
+    align-items: stretch;
+    padding: 10px 12px;
+    background: var(--surface-2);
+    gap: 7px;
+  }
+  .cfg-row.editing .cfg-fields {
+    display: grid;
+    grid-template-columns: 80px 1fr;
+    gap: 5px 8px;
+    align-items: center;
+  }
+  .cfg-row.editing label {
+    font-size: 10.5px;
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    font-weight: 600;
+  }
+  .cfg-row.editing input,
+  .cfg-row.editing select {
+    background: var(--surface);
+    color: var(--text);
+    border: 1px solid var(--border-strong);
+    border-radius: 5px;
+    padding: 3px 6px;
+    font: inherit;
+    font-size: 12px;
+    width: 100%;
+  }
+  .cfg-row.editing input:focus {
+    outline: none; border-color: var(--accent);
+    box-shadow: 0 0 0 3px rgba(0,113,227,0.2);
+  }
+  .cfg-form-footer { display: flex; gap: 6px; justify-content: flex-end; }
+  .btn {
+    background: var(--surface);
+    color: var(--text);
+    border: 1px solid var(--border-strong);
+    border-radius: 5px;
+    padding: 3px 10px;
+    font: inherit;
+    font-size: 11.5px;
+    cursor: pointer;
+  }
+  .btn.primary { background: var(--accent); color: white; border-color: var(--accent); }
+
+  /* Stop script panel: full textarea inline */
+  .stop-script {
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    font-size: 11.5px;
+    padding: 10px 14px;
+    white-space: pre-wrap;
+    color: var(--text);
+    margin: 0;
+    background: var(--surface-2);
+  }
+</style>
+</head>
+<body>
+<div class="app">
+  <div class="topbar">
+    <a href="index.html">← All designs</a>
+    <span style="color: var(--muted)">·</span>
+    <span style="font-weight: 600; font-size: 12px">Variant B — Live primary + config rail</span>
+  </div>
+
+  <div class="header">
+    <h1>main-dev</h1>
+    <span class="project-chip">Muxy</span>
+    <div class="right-actions">
+      <button class="icon-btn" title="Launch workspace">▶</button>
+      <button class="icon-btn" title="More">⋯</button>
+    </div>
+  </div>
+
+  <div class="tooltip-row">
+    <span class="label">Tooltip</span>
+    <span class="value">Working on workspace detail redesign</span>
+    <button class="icon-btn" title="Edit tooltip">✎</button>
+  </div>
+
+  <div class="grid">
+    <!-- Left: Tracked windows -->
+    <div>
+      <div class="panel">
+        <div class="panel-head">
+          <h2>Tracked windows</h2>
+          <span class="count">6</span>
+        </div>
+        <div class="panel-body">
+          <div class="tw-row">
+            <span class="status-dot running"></span>
+            <span class="tw-icon process">▣</span>
+            <div class="tw-body">
+              <span class="tw-label">api</span>
+              <span class="tw-detail">bun run dev · localhost:52341</span>
+            </div>
+            <span class="shortcut">⌘1</span>
+          </div>
+          <div class="checks">
+            <span class="check pass"><span class="d"></span>http 200</span>
+            <span class="check pass"><span class="d"></span>db ping</span>
+          </div>
+
+          <div class="tw-row">
+            <span class="status-dot running"></span>
+            <span class="tw-icon process">▣</span>
+            <div class="tw-body">
+              <span class="tw-label">worker</span>
+              <span class="tw-detail">bun run worker</span>
+            </div>
+            <span class="shortcut">⌘2</span>
+          </div>
+
+          <div class="tw-row">
+            <span class="status-dot"></span>
+            <span class="tw-icon browser">◉</span>
+            <div class="tw-body">
+              <span class="tw-label">docs</span>
+              <span class="tw-detail">docs.muxy.dev</span>
+            </div>
+            <span class="shortcut">⌘3</span>
+          </div>
+
+          <div class="tw-row">
+            <span class="status-dot"></span>
+            <span class="tw-icon browser">◉</span>
+            <div class="tw-body">
+              <span class="tw-label">github</span>
+              <span class="tw-detail">github.com/muxy/muxy</span>
+            </div>
+            <span class="shortcut">⌘4</span>
+          </div>
+
+          <div class="tw-row">
+            <span class="status-dot waiting"></span>
+            <span class="tw-icon agent">◆</span>
+            <div class="tw-body">
+              <span class="tw-label">claude</span>
+              <span class="tw-detail">claude code · waiting on input</span>
+            </div>
+            <span class="shortcut">⌘5</span>
+          </div>
+
+          <div class="tw-row">
+            <span class="status-dot idle"></span>
+            <span class="tw-icon agent">◆</span>
+            <div class="tw-body">
+              <span class="tw-label">codex</span>
+              <span class="tw-detail">codex</span>
+            </div>
+            <span class="shortcut">⌘6</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Right: Config rail -->
+    <div>
+      <div class="panel">
+        <div class="panel-head">
+          <h2>Browser sessions</h2>
+          <span class="count">2</span>
+          <button class="add-btn" title="Add session">+</button>
+        </div>
+        <div class="panel-body">
+          <div class="cfg-row">
+            <span class="cfg-name">docs</span>
+            <span class="cfg-value">docs.muxy.dev</span>
+            <div class="cfg-actions">
+              <button class="icon-btn" title="Edit">✎</button>
+              <button class="icon-btn" title="Remove">✕</button>
+            </div>
+          </div>
+          <div class="cfg-row">
+            <span class="cfg-name">github</span>
+            <span class="cfg-value">github.com/muxy/muxy</span>
+            <div class="cfg-actions">
+              <button class="icon-btn" title="Edit">✎</button>
+              <button class="icon-btn" title="Remove">✕</button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="panel">
+        <div class="panel-head">
+          <h2>Processes</h2>
+          <span class="count">2</span>
+          <button class="add-btn" title="Add process">+</button>
+        </div>
+        <div class="panel-body">
+          <div class="cfg-row editing">
+            <div class="cfg-fields">
+              <label>Name</label><input value="api" />
+              <label>Command</label><input value="bun run dev" />
+              <label>On exit</label>
+              <select>
+                <option>leave running</option>
+                <option selected>restart</option>
+                <option>mark failed</option>
+              </select>
+            </div>
+            <div class="cfg-form-footer">
+              <button class="btn">Cancel</button>
+              <button class="btn primary">Save</button>
+            </div>
+          </div>
+          <div class="cfg-row">
+            <span class="cfg-name">worker</span>
+            <span class="cfg-value">bun run worker</span>
+            <div class="cfg-actions">
+              <button class="icon-btn" title="Edit">✎</button>
+              <button class="icon-btn" title="Remove">✕</button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="panel">
+        <div class="panel-head">
+          <h2>Named ports</h2>
+          <span class="count">2</span>
+          <button class="add-btn" title="Add port">+</button>
+        </div>
+        <div class="panel-body">
+          <div class="cfg-row">
+            <span class="cfg-name">api_port</span>
+            <span class="port-value">52341</span>
+            <div class="cfg-actions">
+              <button class="icon-btn" title="Edit">✎</button>
+              <button class="icon-btn" title="Remove">✕</button>
+            </div>
+          </div>
+          <div class="cfg-row">
+            <span class="cfg-name">worker_port</span>
+            <span class="port-value">52342</span>
+            <div class="cfg-actions">
+              <button class="icon-btn" title="Edit">✎</button>
+              <button class="icon-btn" title="Remove">✕</button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="panel">
+        <div class="panel-head">
+          <h2>Coding agents</h2>
+          <span class="count">2</span>
+          <button class="add-btn" title="Add agent">+</button>
+        </div>
+        <div class="panel-body">
+          <div class="cfg-row">
+            <span class="cfg-name">claude</span>
+            <span class="cfg-value">claude code</span>
+            <div class="cfg-actions">
+              <button class="icon-btn" title="Edit">✎</button>
+              <button class="icon-btn" title="Remove">✕</button>
+            </div>
+          </div>
+          <div class="cfg-row">
+            <span class="cfg-name">codex</span>
+            <span class="cfg-value">codex</span>
+            <div class="cfg-actions">
+              <button class="icon-btn" title="Edit">✎</button>
+              <button class="icon-btn" title="Remove">✕</button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="panel">
+        <div class="panel-head">
+          <h2>Stop script</h2>
+          <button class="add-btn" title="Edit">✎</button>
+        </div>
+        <pre class="stop-script">pkill -f "bun run"</pre>
+      </div>
+    </div>
+  </div>
+</div>
+</body>
+</html>

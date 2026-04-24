@@ -1,0 +1,437 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Variant D — Live rows are the config</title>
+<style>
+  :root {
+    --bg: #f5f5f7;
+    --surface: #ffffff;
+    --surface-2: #fafafa;
+    --text: #1d1d1f;
+    --muted: #6e6e73;
+    --muted-2: #8e8e93;
+    --border: rgba(0,0,0,0.08);
+    --border-strong: rgba(0,0,0,0.14);
+    --accent: #0071e3;
+    --green: #34c759;
+    --red: #ff3b30;
+    --orange: #ff9500;
+    --row-hover: rgba(0,0,0,0.04);
+    --chip-bg: rgba(0,0,0,0.05);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #1c1c1e;
+      --surface: #2c2c2e;
+      --surface-2: #242426;
+      --text: #f5f5f7;
+      --muted: #98989d;
+      --muted-2: #8e8e93;
+      --border: rgba(255,255,255,0.12);
+      --border-strong: rgba(255,255,255,0.18);
+      --accent: #0a84ff;
+      --green: #30d158;
+      --red: #ff453a;
+      --orange: #ff9f0a;
+      --row-hover: rgba(255,255,255,0.06);
+      --chip-bg: rgba(255,255,255,0.08);
+    }
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; padding: 0;
+    background: var(--bg); color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", sans-serif;
+    font-size: 13px; line-height: 1.45;
+  }
+  .app { max-width: 780px; margin: 0 auto; padding: 28px 20px 80px; }
+
+  .topbar { display: flex; align-items: center; gap: 10px; margin-bottom: 18px; }
+  .topbar a { color: var(--muted); text-decoration: none; font-size: 12px; }
+  .topbar a:hover { color: var(--accent); }
+
+  .header { display: flex; align-items: baseline; gap: 10px; margin-bottom: 14px; }
+  h1 { font-size: 20px; font-weight: 600; margin: 0; letter-spacing: -0.01em; }
+  .project-chip { font-size: 11px; color: var(--muted); background: var(--chip-bg); border-radius: 4px; padding: 2px 7px; }
+  .right-actions { margin-left: auto; display: flex; gap: 6px; }
+
+  .icon-btn {
+    background: transparent; border: 1px solid transparent; border-radius: 6px;
+    width: 26px; height: 26px;
+    display: inline-flex; align-items: center; justify-content: center;
+    cursor: pointer; color: var(--muted);
+  }
+  .icon-btn:hover { background: var(--row-hover); color: var(--text); }
+  .icon-btn.sm { width: 22px; height: 22px; font-size: 11px; }
+
+  /* Tooltip */
+  .tooltip-row {
+    display: flex; align-items: center; gap: 10px;
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 8px; padding: 10px 12px;
+    margin-bottom: 18px;
+  }
+  .tooltip-row .label {
+    color: var(--muted); font-size: 11px;
+    text-transform: uppercase; letter-spacing: 0.06em; font-weight: 600;
+  }
+  .tooltip-row .value { flex: 1; font-size: 13px; }
+
+  /* Section */
+  .section {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 10px; margin-bottom: 12px; overflow: hidden;
+  }
+  .section-head {
+    display: flex; align-items: center; gap: 8px;
+    padding: 10px 14px; border-bottom: 1px solid var(--border);
+  }
+  .section-head h2 {
+    margin: 0; font-size: 13px; font-weight: 600;
+    letter-spacing: -0.005em;
+  }
+  .section-head .count { font-size: 11px; color: var(--muted); font-weight: 500; }
+  .add-btn {
+    margin-left: auto;
+    background: transparent;
+    border: 1px dashed var(--border-strong);
+    border-radius: 6px;
+    padding: 2px 8px;
+    font-size: 11px; color: var(--muted);
+    cursor: pointer;
+  }
+  .add-btn:hover { color: var(--accent); border-color: var(--accent); }
+  .section-body { padding: 0; }
+
+  /* Unified row: shows status + type + name/detail + edit inline */
+  .row {
+    display: flex; align-items: center; gap: 10px;
+    padding: 9px 14px;
+    cursor: pointer;
+    position: relative;
+  }
+  .row + .row { border-top: 1px solid var(--border); }
+  .row:hover { background: var(--row-hover); }
+  .status-dot {
+    width: 8px; height: 8px; border-radius: 50%;
+    flex-shrink: 0;
+  }
+  .status-dot.running { background: var(--green); box-shadow: 0 0 0 3px rgba(52,199,89,0.18); }
+  .status-dot.exited { background: transparent; border: 1.5px solid var(--red); }
+  .status-dot.idle { background: transparent; border: 1.5px solid var(--muted-2); }
+  .status-dot.waiting { background: var(--orange); }
+  .type-icon {
+    width: 22px; height: 22px; border-radius: 5px;
+    display: inline-flex; align-items: center; justify-content: center;
+    font-size: 12px; flex-shrink: 0;
+  }
+  .type-icon.browser { background: rgba(0,113,227,0.12); color: var(--accent); }
+  .type-icon.process { background: rgba(52,199,89,0.14); color: var(--green); }
+  .type-icon.agent { background: rgba(142,142,147,0.18); color: var(--muted); }
+  .row-body { flex: 1; min-width: 0; display: flex; align-items: baseline; gap: 6px; }
+  .row-label { font-weight: 500; }
+  .row-detail {
+    color: var(--muted); font-size: 12px;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .shortcut {
+    font-size: 10.5px; color: var(--muted);
+    background: var(--chip-bg);
+    border-radius: 4px; padding: 1px 5px; font-weight: 500;
+    flex-shrink: 0;
+    min-width: 26px; text-align: center;
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  }
+  .row-actions {
+    display: flex; gap: 1px;
+    opacity: 0.35; transition: opacity 0.1s;
+  }
+  .row:hover .row-actions { opacity: 1; }
+
+  /* Nested status checks */
+  .checks {
+    padding: 0 14px 8px 46px;
+    display: flex; flex-wrap: wrap; gap: 6px;
+  }
+  .check {
+    font-size: 11px; color: var(--muted);
+    display: inline-flex; align-items: center; gap: 4px;
+    background: var(--chip-bg);
+    border-radius: 4px; padding: 1px 7px;
+  }
+  .check .d { width: 6px; height: 6px; border-radius: 50%; }
+  .check.pass .d { background: var(--green); }
+  .check.fail .d { background: var(--red); }
+
+  /* Inline edit form */
+  .row.editing {
+    flex-direction: column; align-items: stretch;
+    padding: 12px 14px;
+    background: var(--surface-2);
+    gap: 8px;
+    cursor: default;
+  }
+  .row.editing .edit-head {
+    display: flex; align-items: center; gap: 8px;
+  }
+  .row.editing .edit-head .row-label { font-size: 13px; }
+  .row.editing .fields {
+    display: grid;
+    grid-template-columns: 110px 1fr;
+    gap: 6px 10px;
+    align-items: center;
+    margin-top: 2px;
+  }
+  .row.editing label {
+    font-size: 11px; color: var(--muted);
+    text-transform: uppercase; letter-spacing: 0.04em; font-weight: 600;
+  }
+  .row.editing input,
+  .row.editing select {
+    background: var(--surface);
+    color: var(--text);
+    border: 1px solid var(--border-strong);
+    border-radius: 5px;
+    padding: 4px 7px;
+    font: inherit; font-size: 12.5px;
+    width: 100%;
+  }
+  .row.editing input:focus {
+    outline: none; border-color: var(--accent);
+    box-shadow: 0 0 0 3px rgba(0,113,227,0.2);
+  }
+  .row.editing .form-footer {
+    display: flex; gap: 6px; justify-content: space-between;
+    margin-top: 4px;
+  }
+  .row.editing .form-footer .right { display: flex; gap: 6px; }
+  .btn {
+    background: var(--surface); color: var(--text);
+    border: 1px solid var(--border-strong);
+    border-radius: 5px; padding: 4px 12px;
+    font: inherit; font-size: 12px;
+    cursor: pointer;
+  }
+  .btn.primary { background: var(--accent); color: white; border-color: var(--accent); }
+  .btn.danger { border-color: transparent; color: var(--red); }
+
+  /* Ports: name + resolved value + edit */
+  .port-value {
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    font-size: 12px;
+    color: var(--text);
+    background: var(--chip-bg);
+    border-radius: 4px; padding: 1px 7px;
+  }
+
+  /* Stop script */
+  .stop-row {
+    display: flex; align-items: center; gap: 10px;
+    padding: 10px 14px;
+  }
+  .stop-row .script {
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    font-size: 12px;
+    flex: 1; overflow: hidden;
+    text-overflow: ellipsis; white-space: nowrap;
+  }
+
+</style>
+</head>
+<body>
+<div class="app">
+  <div class="topbar">
+    <a href="index.html">← All designs</a>
+    <span style="color: var(--muted)">·</span>
+    <span style="font-weight: 600; font-size: 12px">Variant D — Live rows are the config</span>
+  </div>
+
+  <div class="header">
+    <h1>main-dev</h1>
+    <span class="project-chip">Muxy</span>
+    <div class="right-actions">
+      <button class="icon-btn" title="Launch workspace">▶</button>
+      <button class="icon-btn" title="More">⋯</button>
+    </div>
+  </div>
+
+  <div class="tooltip-row">
+    <span class="label">Tooltip</span>
+    <span class="value">Working on workspace detail redesign</span>
+    <button class="icon-btn" title="Edit tooltip">✎</button>
+  </div>
+
+  <!-- Browser sessions = live rows -->
+  <div class="section">
+    <div class="section-head">
+      <h2>Browser sessions</h2>
+      <span class="count">2</span>
+      <button class="add-btn" title="Add session">+ add</button>
+    </div>
+    <div class="section-body">
+      <div class="row">
+        <span class="shortcut">⌘1</span>
+        <span class="status-dot idle" title="not open"></span>
+        <span class="type-icon browser">◉</span>
+        <div class="row-body">
+          <span class="row-label">docs</span>
+          <span class="row-detail">docs.muxy.dev</span>
+        </div>
+        <div class="row-actions">
+          <button class="icon-btn sm" title="Edit">✎</button>
+          <button class="icon-btn sm" title="Remove">✕</button>
+        </div>
+      </div>
+      <div class="row">
+        <span class="shortcut">⌘2</span>
+        <span class="status-dot running" title="open"></span>
+        <span class="type-icon browser">◉</span>
+        <div class="row-body">
+          <span class="row-label">github</span>
+          <span class="row-detail">github.com/muxy/muxy</span>
+        </div>
+        <div class="row-actions">
+          <button class="icon-btn sm" title="Edit">✎</button>
+          <button class="icon-btn sm" title="Remove">✕</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Processes -->
+  <div class="section">
+    <div class="section-head">
+      <h2>Processes</h2>
+      <span class="count">2</span>
+      <button class="add-btn" title="Add process">+ add</button>
+    </div>
+    <div class="section-body">
+      <div class="row">
+        <span class="shortcut">⌘3</span>
+        <span class="status-dot running" title="running"></span>
+        <span class="type-icon process">▣</span>
+        <div class="row-body">
+          <span class="row-label">api</span>
+          <span class="row-detail">bun run dev · localhost:52341</span>
+        </div>
+        <div class="row-actions">
+          <button class="icon-btn sm" title="Edit">✎</button>
+          <button class="icon-btn sm" title="Remove">✕</button>
+        </div>
+      </div>
+      <div class="checks">
+        <span class="check pass"><span class="d"></span>http 200</span>
+        <span class="check pass"><span class="d"></span>db ping</span>
+      </div>
+
+      <!-- editing state -->
+      <div class="row editing">
+        <div class="edit-head">
+          <span class="shortcut">⌘4</span>
+          <span class="status-dot running"></span>
+          <span class="type-icon process">▣</span>
+          <span class="row-label">worker</span>
+        </div>
+        <div class="fields">
+          <label>Name</label><input value="worker" />
+          <label>Command</label><input value="bun run worker" />
+          <label>On exit</label>
+          <select>
+            <option>leave running</option>
+            <option selected>restart</option>
+            <option>mark failed</option>
+          </select>
+        </div>
+        <div class="form-footer">
+          <div class="right" style="margin-left: auto">
+            <button class="btn">Cancel</button>
+            <button class="btn primary">Save</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Coding agents -->
+  <div class="section">
+    <div class="section-head">
+      <h2>Coding agents</h2>
+      <span class="count">2</span>
+      <button class="add-btn" title="Add agent">+ add</button>
+    </div>
+    <div class="section-body">
+      <div class="row">
+        <span class="shortcut">⌘5</span>
+        <span class="status-dot waiting" title="waiting on input"></span>
+        <span class="type-icon agent">◆</span>
+        <div class="row-body">
+          <span class="row-label">claude</span>
+          <span class="row-detail">claude code · waiting on input</span>
+        </div>
+        <div class="row-actions">
+          <button class="icon-btn sm" title="Edit">✎</button>
+          <button class="icon-btn sm" title="Remove">✕</button>
+        </div>
+      </div>
+      <div class="row">
+        <span class="shortcut">⌘6</span>
+        <span class="status-dot idle" title="idle"></span>
+        <span class="type-icon agent">◆</span>
+        <div class="row-body">
+          <span class="row-label">codex</span>
+          <span class="row-detail">codex</span>
+        </div>
+        <div class="row-actions">
+          <button class="icon-btn sm" title="Edit">✎</button>
+          <button class="icon-btn sm" title="Remove">✕</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Named ports -->
+  <div class="section">
+    <div class="section-head">
+      <h2>Named ports</h2>
+      <span class="count">2</span>
+      <button class="add-btn" title="Add port">+ add</button>
+    </div>
+    <div class="section-body">
+      <div class="row">
+        <div class="row-body">
+          <span class="row-label" style="min-width: 100px">api_port</span>
+          <span class="port-value">52341</span>
+        </div>
+        <div class="row-actions">
+          <button class="icon-btn sm" title="Edit">✎</button>
+          <button class="icon-btn sm" title="Remove">✕</button>
+        </div>
+      </div>
+      <div class="row">
+        <div class="row-body">
+          <span class="row-label" style="min-width: 100px">worker_port</span>
+          <span class="port-value">52342</span>
+        </div>
+        <div class="row-actions">
+          <button class="icon-btn sm" title="Edit">✎</button>
+          <button class="icon-btn sm" title="Remove">✕</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Stop script -->
+  <div class="section">
+    <div class="section-head">
+      <h2>Stop script</h2>
+      <button class="add-btn" title="Edit">✎ edit</button>
+    </div>
+    <div class="stop-row">
+      <span class="script">pkill -f "bun run"</span>
+    </div>
+  </div>
+
+</div>
+</body>
+</html>

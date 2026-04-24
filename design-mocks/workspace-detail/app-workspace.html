@@ -1,0 +1,364 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Muxy · main-dev</title>
+<link rel="stylesheet" href="shared.css">
+<style>
+  /* Workspace-specific inline edit form */
+  .row.editing {
+    flex-direction: column; align-items: stretch;
+    padding: 12px 14px;
+    background: var(--surface-2);
+    gap: 8px; cursor: default;
+  }
+  .row.editing .edit-head { display: flex; align-items: center; gap: 8px; }
+  .row.editing .fields {
+    display: grid;
+    grid-template-columns: 110px 1fr;
+    gap: 6px 10px;
+    align-items: center;
+    margin-top: 2px;
+  }
+  .row.editing label {
+    font-size: 11px; color: var(--muted);
+    text-transform: uppercase; letter-spacing: 0.04em; font-weight: 600;
+  }
+  .row.editing input,
+  .row.editing select {
+    background: var(--surface);
+    color: var(--text);
+    border: 1px solid var(--border-strong);
+    border-radius: 5px;
+    padding: 4px 7px;
+    font: inherit; font-size: 12.5px;
+    width: 100%;
+  }
+  .row.editing input:focus {
+    outline: none; border-color: var(--accent);
+    box-shadow: 0 0 0 3px var(--accent-tint);
+  }
+  .row.editing .form-footer {
+    display: flex; gap: 6px; justify-content: flex-end;
+    margin-top: 4px;
+  }
+
+  .checks {
+    padding: 0 14px 8px 46px;
+    display: flex; flex-wrap: wrap; gap: 6px;
+  }
+  .check {
+    font-size: 11px; color: var(--muted);
+    display: inline-flex; align-items: center; gap: 4px;
+    background: var(--chip-bg);
+    border-radius: 4px; padding: 1px 7px;
+  }
+  .check .d { width: 6px; height: 6px; border-radius: 50%; }
+  .check.pass .d { background: var(--green); }
+  .check.fail .d { background: var(--red); }
+
+  .port-value {
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    font-size: 12px;
+    color: var(--text);
+    background: var(--chip-bg);
+    border-radius: 4px; padding: 1px 7px;
+  }
+  .stop-row {
+    display: flex; align-items: center; gap: 10px;
+    padding: 10px 14px;
+  }
+  .stop-row .script {
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    font-size: 12px;
+    flex: 1; overflow: hidden;
+    text-overflow: ellipsis; white-space: nowrap;
+  }
+</style>
+</head>
+<body>
+<div class="app-shell">
+
+  <aside class="sidebar">
+    <div class="sidebar-head">
+      <span class="brand-icon">M</span>
+      <span class="brand">Muxy</span>
+      <button class="icon-btn" title="New project">+</button>
+      <button class="icon-btn" title="Settings">⚙</button>
+    </div>
+
+    <a class="side-row" href="app-dashboard.html">
+      <span class="type-icon project" style="width:18px;height:18px;font-size:10px;border-radius:4px">◈</span>
+      <span class="label">Dashboard</span>
+      <span class="badge">3</span>
+    </a>
+
+    <div class="sidebar-section-label">Projects</div>
+
+    <div class="side-row project">
+      <svg class="chev" viewBox="0 0 12 12"><path d="M4 2 L8 6 L4 10" stroke="currentColor" stroke-width="1.5" fill="none"/></svg>
+      <span class="label">Muxy</span>
+      <span class="trail">
+        <button class="icon-btn sm" title="Project settings">⚙</button>
+        <button class="icon-btn sm" title="New workspace">+</button>
+      </span>
+    </div>
+    <div class="side-workspaces">
+      <a class="side-row workspace selected" href="app-workspace.html">
+        <span class="row-line">
+          <span class="status-dot running"></span>
+          <span class="label">main-dev</span>
+          <span class="warn" title="worker process exited">⚠</span>
+        </span>
+        <span class="branch">main</span>
+      </a>
+      <a class="side-row workspace" href="#">
+        <span class="row-line">
+          <span class="status-dot stopped"></span>
+          <span class="label">feature-sidebar</span>
+        </span>
+        <span class="branch">feature/sidebar</span>
+      </a>
+      <a class="side-row workspace" href="#">
+        <span class="row-line">
+          <span class="status-dot stopped"></span>
+          <span class="label">release-0.9</span>
+        </span>
+        <span class="branch">release/0.9</span>
+      </a>
+    </div>
+
+    <div class="side-row project">
+      <svg class="chev" viewBox="0 0 12 12"><path d="M4 2 L8 6 L4 10" stroke="currentColor" stroke-width="1.5" fill="none"/></svg>
+      <span class="label">muxy-web</span>
+      <span class="trail">
+        <button class="icon-btn sm">⚙</button>
+        <button class="icon-btn sm">+</button>
+      </span>
+    </div>
+    <div class="side-workspaces">
+      <a class="side-row workspace" href="#">
+        <span class="row-line">
+          <span class="status-dot running"></span>
+          <span class="label">main</span>
+        </span>
+        <span class="branch">main</span>
+      </a>
+    </div>
+
+    <div class="side-row project collapsed">
+      <svg class="chev" viewBox="0 0 12 12"><path d="M4 2 L8 6 L4 10" stroke="currentColor" stroke-width="1.5" fill="none"/></svg>
+      <span class="label">infra-scripts</span>
+    </div>
+  </aside>
+
+  <main class="detail">
+    <div class="topbar-back">
+      <a href="index.html">← All designs</a>
+      <span>·</span>
+      <span>Workspace · main-dev</span>
+    </div>
+
+    <div class="detail-head">
+      <h1>main-dev</h1>
+      <span class="project-chip">Muxy</span>
+      <span class="branch-chip" title="branch">main</span>
+      <div class="actions">
+        <button class="icon-btn" title="Launch workspace">▶</button>
+        <div class="menu-wrap">
+          <button class="icon-btn" title="More">⋯</button>
+          <!-- Menu shown opened to illustrate (stock NSMenu shape) -->
+          <div class="menu" role="menu">
+            <a class="item" href="#"><span class="glyph">⧉</span>Copy path<span class="k">⌘⇧C</span></a>
+            <a class="item" href="#"><span class="glyph">◱</span>Reveal in Finder<span class="k">⌘F</span></a>
+            <div class="sep"></div>
+            <a class="item" href="#"><span class="glyph">✎</span>Open in editor<span class="k">⌘E</span></a>
+            <a class="item" href="#"><span class="glyph">▤</span>Open terminal here<span class="k">⌘T</span></a>
+            <div class="sep"></div>
+            <a class="item" href="#"><span class="glyph">↻</span>Restart</a>
+            <a class="item" href="#"><span class="glyph">⏸</span>Stop</a>
+            <a class="item" href="#"><span class="glyph">≡</span>Rename…</a>
+            <div class="sep"></div>
+            <a class="item danger" href="#"><span class="glyph">✕</span>Archive workspace…</a>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Thin meta line: path + quick actions -->
+    <div class="meta-line">
+      <span class="path" title="Click to copy">~/projects/muxy/.muxy/workspaces/main-dev</span>
+      <button class="icon-btn sm" title="Copy path">⧉</button>
+      <button class="icon-btn sm" title="Reveal in Finder">◱</button>
+    </div>
+
+    <!-- Tooltip (only prominent field) -->
+    <div class="field-row">
+      <span class="label">Tooltip</span>
+      <span class="value">Working on workspace detail redesign</span>
+      <button class="icon-btn" title="Edit tooltip">✎</button>
+    </div>
+
+    <!-- Browser sessions -->
+    <div class="section">
+      <div class="section-head">
+        <h2>Browser sessions</h2>
+        <span class="count">2</span>
+        <button class="add-btn" title="Add session">+ add</button>
+      </div>
+      <div class="row">
+        <span class="shortcut">⌘1</span>
+        <span class="status-dot idle" title="not open"></span>
+        <span class="type-icon browser">◉</span>
+        <div class="row-body">
+          <span class="row-label">docs</span>
+          <span class="row-detail">docs.muxy.dev</span>
+        </div>
+        <div class="row-actions">
+          <button class="icon-btn sm" title="Edit">✎</button>
+          <button class="icon-btn sm" title="Remove">✕</button>
+        </div>
+      </div>
+      <div class="row">
+        <span class="shortcut">⌘2</span>
+        <span class="status-dot running" title="open"></span>
+        <span class="type-icon browser">◉</span>
+        <div class="row-body">
+          <span class="row-label">github</span>
+          <span class="row-detail">github.com/muxy/muxy</span>
+        </div>
+        <div class="row-actions">
+          <button class="icon-btn sm" title="Edit">✎</button>
+          <button class="icon-btn sm" title="Remove">✕</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Processes -->
+    <div class="section">
+      <div class="section-head">
+        <h2>Processes</h2>
+        <span class="count">2</span>
+        <button class="add-btn" title="Add process">+ add</button>
+      </div>
+      <div class="row">
+        <span class="shortcut">⌘3</span>
+        <span class="status-dot running" title="running"></span>
+        <span class="type-icon process">▣</span>
+        <div class="row-body">
+          <span class="row-label">api</span>
+          <span class="row-detail">bun run dev · localhost:52341</span>
+        </div>
+        <div class="row-actions">
+          <button class="icon-btn sm" title="Edit">✎</button>
+          <button class="icon-btn sm" title="Remove">✕</button>
+        </div>
+      </div>
+      <div class="checks">
+        <span class="check pass"><span class="d"></span>http 200</span>
+        <span class="check pass"><span class="d"></span>db ping</span>
+      </div>
+
+      <div class="row editing">
+        <div class="edit-head">
+          <span class="shortcut">⌘4</span>
+          <span class="status-dot running"></span>
+          <span class="type-icon process">▣</span>
+          <span class="row-label">worker</span>
+        </div>
+        <div class="fields">
+          <label>Name</label><input value="worker" />
+          <label>Command</label><input value="bun run worker" />
+          <label>On exit</label>
+          <select>
+            <option>leave running</option>
+            <option selected>restart</option>
+            <option>mark failed</option>
+          </select>
+        </div>
+        <div class="form-footer">
+          <button class="btn">Cancel</button>
+          <button class="btn primary">Save</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Coding agents -->
+    <div class="section">
+      <div class="section-head">
+        <h2>Coding agents</h2>
+        <span class="count">2</span>
+        <button class="add-btn" title="Add agent">+ add</button>
+      </div>
+      <div class="row">
+        <span class="shortcut">⌘5</span>
+        <span class="status-dot waiting" title="waiting on input"></span>
+        <span class="type-icon agent">◆</span>
+        <div class="row-body">
+          <span class="row-label">claude</span>
+          <span class="row-detail">claude code · waiting on input</span>
+        </div>
+        <div class="row-actions">
+          <button class="icon-btn sm" title="Edit">✎</button>
+          <button class="icon-btn sm" title="Remove">✕</button>
+        </div>
+      </div>
+      <div class="row">
+        <span class="shortcut">⌘6</span>
+        <span class="status-dot idle" title="idle"></span>
+        <span class="type-icon agent">◆</span>
+        <div class="row-body">
+          <span class="row-label">codex</span>
+          <span class="row-detail">codex</span>
+        </div>
+        <div class="row-actions">
+          <button class="icon-btn sm" title="Edit">✎</button>
+          <button class="icon-btn sm" title="Remove">✕</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Named ports -->
+    <div class="section">
+      <div class="section-head">
+        <h2>Named ports</h2>
+        <span class="count">2</span>
+        <button class="add-btn" title="Add port">+ add</button>
+      </div>
+      <div class="row">
+        <div class="row-body">
+          <span class="row-label" style="min-width: 100px">api_port</span>
+          <span class="port-value">52341</span>
+        </div>
+        <div class="row-actions">
+          <button class="icon-btn sm" title="Edit">✎</button>
+          <button class="icon-btn sm" title="Remove">✕</button>
+        </div>
+      </div>
+      <div class="row">
+        <div class="row-body">
+          <span class="row-label" style="min-width: 100px">worker_port</span>
+          <span class="port-value">52342</span>
+        </div>
+        <div class="row-actions">
+          <button class="icon-btn sm" title="Edit">✎</button>
+          <button class="icon-btn sm" title="Remove">✕</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Stop script -->
+    <div class="section">
+      <div class="section-head">
+        <h2>Stop script</h2>
+        <button class="add-btn" title="Edit">✎ edit</button>
+      </div>
+      <div class="stop-row">
+        <span class="script">pkill -f "bun run"</span>
+      </div>
+    </div>
+
+  </main>
+</div>
+</body>
+</html>
