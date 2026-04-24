@@ -1214,8 +1214,29 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         }
     }
 
+    enum RunningWorkspaceProcessEditDecision: Equatable, Sendable {
+        case applyImmediately
+        case confirmRestart(processNames: [String])
+    }
+
     nonisolated static func processTemplateKey(for template: ProcessTemplate) -> String {
         template.name?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+    }
+
+    nonisolated static func runningWorkspaceProcessEditDecision(previous: [ProcessTemplate], updated: [ProcessTemplate])
+        -> RunningWorkspaceProcessEditDecision
+    {
+        let pairedCount = min(previous.count, updated.count)
+        let changedProcessNames = (0..<pairedCount).compactMap { index -> String? in
+            guard previous[index].command != updated[index].command else { return nil }
+            let trimmedUpdatedName = updated[index].name?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            if !trimmedUpdatedName.isEmpty { return trimmedUpdatedName }
+            let trimmedPreviousName = previous[index].name?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            if !trimmedPreviousName.isEmpty { return trimmedPreviousName }
+            return "Process \(index + 1)"
+        }
+        if changedProcessNames.isEmpty { return .applyImmediately }
+        return .confirmRestart(processNames: changedProcessNames)
     }
 
     // Configured-process rows match live runtime rows by the raw configured name.
@@ -3571,9 +3592,25 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         section.onCommit = { [weak self] updated in
             guard let self else { return }
             do {
-                try orchestrator.updateWorkspaceSettings(workspaceID: workspace.id) { $0.processes = updated }
+                if workspace.isRunning {
+                    switch Self.runningWorkspaceProcessEditDecision(previous: config.processes, updated: updated) {
+                    case .applyImmediately:
+                        try orchestrator.updateRunningWorkspaceProcesses(workspaceID: workspace.id, processes: updated, restartChangedCommands: false)
+                    case .confirmRestart(let processNames):
+                        guard confirmRunningWorkspaceProcessCommandChanges(processNames: processNames) else {
+                            reloadData()
+                            return
+                        }
+                        try orchestrator.updateRunningWorkspaceProcesses(workspaceID: workspace.id, processes: updated, restartChangedCommands: true)
+                    }
+                } else {
+                    try orchestrator.updateWorkspaceSettings(workspaceID: workspace.id) { $0.processes = updated }
+                }
                 reloadData()
-            } catch { showError(error) }
+            } catch {
+                reloadData()
+                showError(error)
+            }
         }
         var nameToIndex: [String: Int] = [:]
         var shortcutMap: [String: String] = [:]
@@ -3592,6 +3629,18 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         section.statusByName = statusByName
         section.shortcutsByName = shortcutMap
         return section.view
+    }
+
+    private func confirmRunningWorkspaceProcessCommandChanges(processNames: [String]) -> Bool {
+        let alert = NSAlert()
+        let names = processNames.joined(separator: ", ")
+        alert.messageText = processNames.count == 1 ? "Restart running process?" : "Restart running processes?"
+        alert.informativeText =
+            "Changing the command for \(names) requires an immediate restart. Choose Restart to apply the new command now, or Cancel Changes to keep the existing configuration."
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: processNames.count == 1 ? "Restart Process" : "Restart Processes")
+        alert.addButton(withTitle: "Cancel Changes")
+        return alert.runModal() == .alertFirstButtonReturn
     }
 
     static func orderedWorkspaceDetailSections(

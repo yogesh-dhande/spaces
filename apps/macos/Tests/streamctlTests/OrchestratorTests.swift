@@ -2222,6 +2222,100 @@ final class OrchestratorTests: XCTestCase {
         PortReserver.shared.releasePorts(workspaceID: workspace.id)
     }
 
+    func testUpdateRunningWorkspaceProcessesRelabelsRunningProcessAndUpdatesOnExit() throws {
+        let (orchestrator, store, _, workspace, _, mockIterm, mockTmux) = try makeMockItermOrchestratorWithWorkspace()
+        try store.touchWorkspaceSettings(workspaceID: workspace.id, updatedAt: "now")
+        try store.setWorkspaceProcesses(workspaceID: workspace.id, processes: [ProcessTemplate(name: "web", command: "npm run web", onExit: .none)])
+        try store.updateWorkspaceRunning(id: workspace.id, isRunning: true, launchedAt: "now")
+        let processID = UUID().uuidString
+        try store.upsert(
+            runningProcess: RunningProcessRecord(
+                id: processID, workspaceID: workspace.id, templateName: "web", command: "npm run web", terminalApp: "iTerm2", windowID: 222,
+                terminalTrackingID: "session-web", itermTabIndex: nil, tmuxWindowID: "@2", pid: 2222, status: .running, logPath: nil,
+                lastOutputAt: nil, startedAt: "now", exitedAt: nil))
+        try store.upsert(
+            window: WindowRecord(
+                id: processID, workspaceID: workspace.id, app: "iTerm2", name: "web", detail: "npm run web", windowID: 222,
+                terminalTrackingID: "session-web", terminalNativeID: nil, itermTabIndex: nil, tmuxWindowID: "@2", role: "terminal", orderIndex: 200,
+                lastSeenAt: "now"))
+        _ = mockTmux.addWindow(sessionName: "muxy-\(workspace.id)-web", id: "@2", name: "web", isActive: true)
+
+        try orchestrator.updateRunningWorkspaceProcesses(
+            workspaceID: workspace.id, processes: [ProcessTemplate(name: "frontend", command: "npm run web", onExit: .restart)],
+            restartChangedCommands: false)
+
+        let configured = try store.workspaceProcesses(workspaceID: workspace.id)
+        XCTAssertEqual(configured.count, 1)
+        XCTAssertEqual(configured.first?.name, "frontend")
+        XCTAssertEqual(configured.first?.command, "npm run web")
+        XCTAssertEqual(configured.first?.onExit, .restart)
+        let running = try store.runningProcesses(workspaceID: workspace.id)
+        XCTAssertEqual(running.map(\.templateName), ["frontend"])
+        XCTAssertEqual(running.first?.command, "npm run web")
+        let windows = try store.windows(workspaceID: workspace.id).filter { $0.role == "terminal" }
+        XCTAssertEqual(windows.map(\.name), ["frontend"])
+        XCTAssertEqual(mockIterm.openWindowAndRunCallCount, 0)
+        XCTAssertTrue(mockTmux.killedSessionNames.isEmpty)
+    }
+
+    func testUpdateRunningWorkspaceProcessesRestartsChangedCommandAfterConfirmation() throws {
+        let (orchestrator, store, _, workspace, _, mockIterm, mockTmux) = try makeMockItermOrchestratorWithWorkspace()
+        try store.touchWorkspaceSettings(workspaceID: workspace.id, updatedAt: "now")
+        try store.setWorkspaceProcesses(workspaceID: workspace.id, processes: [ProcessTemplate(name: "web", command: "npm run web", onExit: .none)])
+        try store.updateWorkspaceRunning(id: workspace.id, isRunning: true, launchedAt: "now")
+        let processID = UUID().uuidString
+        try store.upsert(
+            runningProcess: RunningProcessRecord(
+                id: processID, workspaceID: workspace.id, templateName: "web", command: "npm run web", terminalApp: "iTerm2", windowID: 222,
+                terminalTrackingID: "session-web", itermTabIndex: nil, tmuxWindowID: "@2", pid: 2222, status: .running, logPath: nil,
+                lastOutputAt: nil, startedAt: "now", exitedAt: nil))
+        _ = mockTmux.addWindow(sessionName: "muxy-\(workspace.id)-web", id: "@2", name: "web", isActive: true)
+        mockIterm.nextWindowID = 602
+        mockIterm.nextSessionID = "session-web-v2"
+
+        try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) {
+            try orchestrator.updateRunningWorkspaceProcesses(
+                workspaceID: workspace.id, processes: [ProcessTemplate(name: "frontend", command: "npm run web:v2", onExit: .notify)],
+                restartChangedCommands: true)
+        }
+
+        let configured = try store.workspaceProcesses(workspaceID: workspace.id)
+        XCTAssertEqual(configured.count, 1)
+        XCTAssertEqual(configured.first?.name, "frontend")
+        XCTAssertEqual(configured.first?.command, "npm run web:v2")
+        XCTAssertEqual(configured.first?.onExit, .notify)
+        let running = try store.runningProcesses(workspaceID: workspace.id)
+        XCTAssertEqual(running.map(\.templateName), ["frontend"])
+        XCTAssertEqual(running.first?.command, "npm run web:v2")
+        XCTAssertEqual(mockIterm.openWindowAndRunCallCount, 1)
+    }
+
+    func testUpdateRunningWorkspaceProcessesRejectsChangedCommandWithoutRestartConfirmation() throws {
+        let (orchestrator, store, _, workspace, _, mockIterm, mockTmux) = try makeMockItermOrchestratorWithWorkspace()
+        try store.touchWorkspaceSettings(workspaceID: workspace.id, updatedAt: "now")
+        try store.setWorkspaceProcesses(workspaceID: workspace.id, processes: [ProcessTemplate(name: "web", command: "npm run web", onExit: .none)])
+        try store.updateWorkspaceRunning(id: workspace.id, isRunning: true, launchedAt: "now")
+        try store.upsert(
+            runningProcess: RunningProcessRecord(
+                id: UUID().uuidString, workspaceID: workspace.id, templateName: "web", command: "npm run web", terminalApp: "iTerm2", windowID: 222,
+                terminalTrackingID: "session-web", itermTabIndex: nil, tmuxWindowID: "@2", pid: 2222, status: .running, logPath: nil,
+                lastOutputAt: nil, startedAt: "now", exitedAt: nil))
+        _ = mockTmux.addWindow(sessionName: "muxy-\(workspace.id)-web", id: "@2", name: "web", isActive: true)
+
+        XCTAssertThrowsError(
+            try orchestrator.updateRunningWorkspaceProcesses(
+                workspaceID: workspace.id, processes: [ProcessTemplate(name: "web", command: "npm run web:v2", onExit: .none)],
+                restartChangedCommands: false))
+
+        let configured = try store.workspaceProcesses(workspaceID: workspace.id)
+        XCTAssertEqual(configured.count, 1)
+        XCTAssertEqual(configured.first?.name, "web")
+        XCTAssertEqual(configured.first?.command, "npm run web")
+        XCTAssertEqual(configured.first?.onExit, ProcessExitAction.none)
+        XCTAssertEqual(try store.runningProcesses(workspaceID: workspace.id).map(\.command), ["npm run web"])
+        XCTAssertEqual(mockIterm.openWindowAndRunCallCount, 0)
+    }
+
     // Tests workspace cycling includes orphaned running processes so recovered iTerm windows remain reachable even before a terminal row is rebuilt.
     func testFocusNextWindowIncludesOrphanedRunningProcessTargets() throws {
         let (orchestrator, store, _, workspace, root, mockIterm, _) = try makeMockItermOrchestratorWithWorkspace()

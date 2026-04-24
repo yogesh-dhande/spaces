@@ -121,7 +121,7 @@ Muxy focuses those windows; it does not decide their geometry.
 - Browser sessions stay configured while the workspace is running, but Muxy should leave them unopened until the user explicitly focuses that browser session.
 - Unopened browser sessions should not degrade runtime health or show missing-window warnings for an otherwise running workspace.
 - Workspace processes should be launched inside tmux so Muxy can recover the terminal view without losing the underlying process when a supported terminal-host window closes.
-- Editing workspace settings while a workspace is already running must not start or stop processes, browser sessions, or coding agents as part of save-time reconciliation. New configured rows should appear immediately with their non-running status so the user can decide what to open or recover.
+- Editing workspace settings while a workspace is already running must not start or stop browser sessions or coding agents as part of save-time reconciliation. Process name and on-exit edits should update tracked running processes immediately, while command edits should require explicit confirmation to restart the affected running processes; canceling that prompt should leave the existing process configuration unchanged. New configured rows should appear immediately with their non-running status so the user can decide what to open or recover.
 - Process commands are treated as direct executable invocations with arguments.
 - If a user needs composite shell behavior such as `cd x && y`, pipes, or redirection, they should wrap it explicitly, for example `bash -lc "cd x && y"`.
 - Stop shuts down tracked runtime state and closes tracked dedicated windows safely.
