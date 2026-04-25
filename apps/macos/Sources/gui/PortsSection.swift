@@ -354,27 +354,19 @@ import streamctl
     ) {
         let nameField = NSTextField(string: port.name)
         nameField.placeholderString = "Env var name (e.g. PORT)"
+        nameField.font = .systemFont(ofSize: 13, weight: .medium)
+        nameField.setContentHuggingPriority(.defaultLow, for: .horizontal)
         nameField.setAccessibilityIdentifier("port-row-edit-name")
 
-        let label = NSTextField(labelWithString: "Name")
-        label.font = .systemFont(ofSize: 11, weight: .semibold)
-        label.textColor = Theme.muted
-        label.alignment = .right
-        label.setContentHuggingPriority(.required, for: .horizontal)
-        label.widthAnchor.constraint(greaterThanOrEqualToConstant: 70).isActive = true
-        let nameRow = NSStackView(views: [label, nameField])
-        nameRow.orientation = .horizontal
-        nameRow.alignment = .centerY
-        nameRow.spacing = 10
-        nameRow.translatesAutoresizingMaskIntoConstraints = false
-        nameField.setContentHuggingPriority(.defaultLow, for: .horizontal)
-
-        let cancelButton = NSButton(title: "Cancel", target: nil, action: nil)
-        cancelButton.bezelStyle = .rounded
+        let cancelButton = buildActionButton(symbol: "xmark", tooltip: "Cancel") { _ in onCancel() }
         cancelButton.setAccessibilityIdentifier("port-row-edit-cancel")
-        let saveButton = NSButton(title: "Save", target: nil, action: nil)
-        saveButton.bezelStyle = .rounded
-        saveButton.keyEquivalent = "\r"
+
+        let doSave = { [weak nameField] in
+            let name = nameField?.stringValue ?? ""
+            guard !name.trimmingCharacters(in: .whitespaces).isEmpty else { return }
+            onSave(PortDefinition(id: port.id, name: name))
+        }
+        let saveButton = buildActionButton(symbol: "checkmark", tooltip: "Save") { _ in doSave() }
         saveButton.setAccessibilityIdentifier("port-row-edit-save")
 
         let refreshSaveEnabled: () -> Void = { [weak saveButton, weak nameField] in
@@ -383,25 +375,17 @@ import streamctl
 
         let target = PortFormTarget()
         target.onCancel = onCancel
-        target.onSave = { [weak nameField] in onSave(PortDefinition(id: port.id, name: nameField?.stringValue ?? "")) }
+        target.onSave = doSave
         target.onTextChange = refreshSaveEnabled
         nameField.delegate = target
-        cancelButton.target = target
-        cancelButton.action = #selector(PortFormTarget.triggerCancel)
-        saveButton.target = target
-        saveButton.action = #selector(PortFormTarget.triggerSave)
         refreshSaveEnabled()
 
-        let trailingButtons = NSStackView(views: [NSView(), cancelButton, saveButton])
-        trailingButtons.orientation = .horizontal
-        trailingButtons.alignment = .centerY
-        trailingButtons.spacing = 6
-        trailingButtons.translatesAutoresizingMaskIntoConstraints = false
-        let form = NSStackView(views: [nameRow, trailingButtons])
-        form.orientation = .vertical
-        form.alignment = .leading
-        form.spacing = 6
-        form.edgeInsets = NSEdgeInsets(top: 10, left: 14, bottom: 10, right: 14)
+        let icon = RowPrimitives.typeIconTile(.port, symbol: "network", accessibilityLabel: "Port")
+        let form = NSStackView(views: [icon, nameField, cancelButton, saveButton])
+        form.orientation = .horizontal
+        form.alignment = .centerY
+        form.spacing = 10
+        form.edgeInsets = NSEdgeInsets(top: 9, left: 14, bottom: 9, right: 14)
         form.translatesAutoresizingMaskIntoConstraints = false
         objc_setAssociatedObject(form, &Self.targetKey, target, .OBJC_ASSOCIATION_RETAIN)
         return (form, nameField)
@@ -432,6 +416,17 @@ import streamctl
     @objc func triggerCancel() { onCancel?() }
     @objc func triggerSave() { onSave?() }
     func controlTextDidChange(_ obj: Notification) { onTextChange?() }
+    func control(_ control: NSControl, textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
+        if commandSelector == #selector(NSResponder.insertNewline(_:)) {
+            onSave?()
+            return true
+        }
+        if commandSelector == #selector(NSResponder.cancelOperation(_:)) {
+            onCancel?()
+            return true
+        }
+        return false
+    }
 }
 
 extension Array { fileprivate subscript(safe index: Int) -> Element? { indices.contains(index) ? self[index] : nil } }
