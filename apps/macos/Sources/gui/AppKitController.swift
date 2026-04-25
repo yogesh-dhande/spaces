@@ -6615,13 +6615,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         return sidebarThemeColor(light: (240, 238, 230), dark: (24, 36, 39), alpha: alpha)
     }
 
-    private func sidebarSelectedCardBackgroundColor() -> NSColor {
-        // Stronger selected tint so active workspace is obvious at a glance.
-        sidebarThemeColor(light: (217, 236, 234), dark: (27, 57, 60), alpha: 0.92)
-    }
+    private func sidebarSelectedCardBackgroundColor() -> NSColor { sidebarThemeColor(light: (226, 224, 216), dark: (24, 35, 39), alpha: 0.85) }
 
     private func sidebarCardBorderColor(isSelected: Bool) -> NSColor {
-        if isSelected { return sidebarThemeColor(light: (13, 95, 93), dark: (61, 198, 184), alpha: 0.50) }
+        if isSelected { return sidebarThemeColor(light: (13, 95, 93), dark: (61, 198, 184), alpha: 0.28) }
         return sidebarThemeColor(light: (213, 216, 211), dark: (48, 67, 70), alpha: 0.72)
     }
 
