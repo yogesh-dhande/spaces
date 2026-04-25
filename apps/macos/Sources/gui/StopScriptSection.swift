@@ -59,7 +59,7 @@ import AppKit
         self.container = stack
 
         let card = ColoredBackgroundView()
-        card.fillColor = Theme.surface
+        card.fillColor = .clear
         card.cornerRadius = 10
         card.translatesAutoresizingMaskIntoConstraints = false
         card.addSubview(stack)

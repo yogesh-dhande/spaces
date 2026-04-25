@@ -41,10 +41,6 @@ import streamctl
         container.addArrangedSubview(header)
         header.widthAnchor.constraint(equalTo: container.widthAnchor).isActive = true
 
-        let divider = Self.makeDivider()
-        container.addArrangedSubview(divider)
-        divider.widthAnchor.constraint(equalTo: container.widthAnchor).isActive = true
-
         rowsStack.orientation = .vertical
         rowsStack.alignment = .leading
         rowsStack.spacing = 0
@@ -53,7 +49,7 @@ import streamctl
         rowsStack.widthAnchor.constraint(equalTo: container.widthAnchor).isActive = true
 
         let card = ColoredBackgroundView()
-        card.fillColor = Theme.surface
+        card.fillColor = .clear
         card.cornerRadius = 10
         card.translatesAutoresizingMaskIntoConstraints = false
         card.addSubview(container)
@@ -140,11 +136,6 @@ import streamctl
             rows.append(row)
             rowsStack.addArrangedSubview(row)
             row.widthAnchor.constraint(equalTo: rowsStack.widthAnchor).isActive = true
-            if index > 0 {
-                let sep = Self.makeDivider()
-                rowsStack.insertArrangedSubview(sep, at: rowsStack.arrangedSubviews.count - 1)
-                sep.widthAnchor.constraint(equalTo: rowsStack.widthAnchor).isActive = true
-            }
             if let snapshot = existingEditing[row.identity(from: session)] { row.enterEditing(prefill: snapshot, animated: false) }
         }
         countLabel.stringValue = "\(sessions.count)"

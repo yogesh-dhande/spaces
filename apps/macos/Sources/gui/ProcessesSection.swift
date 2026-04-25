@@ -61,10 +61,6 @@ import streamctl
         container.addArrangedSubview(header)
         header.widthAnchor.constraint(equalTo: container.widthAnchor).isActive = true
 
-        let divider = Self.makeDivider()
-        container.addArrangedSubview(divider)
-        divider.widthAnchor.constraint(equalTo: container.widthAnchor).isActive = true
-
         rowsStack.orientation = .vertical
         rowsStack.alignment = .leading
         rowsStack.spacing = 0
@@ -74,7 +70,7 @@ import streamctl
 
         // Wrap in a section card so it reads as one unit.
         let card = ColoredBackgroundView()
-        card.fillColor = Theme.surface
+        card.fillColor = .clear
         card.cornerRadius = 10
         card.translatesAutoresizingMaskIntoConstraints = false
         card.addSubview(container)
@@ -168,7 +164,7 @@ import streamctl
         clearRowsStack()
         rows.removeAll()
 
-        for (index, process) in processes.enumerated() {
+        for (_, process) in processes.enumerated() {
             let focusAction: (() -> Void)? = onFocus.map { handler in { handler(process) } }
             let row = ProcessRowView(
                 process: process, shortcut: shortcutsByName[process.name ?? ""], status: statusByName[process.name ?? ""] ?? .idle,
@@ -181,12 +177,6 @@ import streamctl
             rows.append(row)
             rowsStack.addArrangedSubview(row)
             row.widthAnchor.constraint(equalTo: rowsStack.widthAnchor).isActive = true
-            if index > 0 {
-                let sep = Self.makeDivider()
-                rowsStack.insertArrangedSubview(sep, at: rowsStack.arrangedSubviews.count - 1)
-                sep.widthAnchor.constraint(equalTo: rowsStack.widthAnchor).isActive = true
-            }
-
             // Restore editing state if this row was mid-edit pre-refresh.
             if let snapshot = existingEditing[row.identity(from: process)] { row.enterEditing(prefill: snapshot, animated: false) }
         }
