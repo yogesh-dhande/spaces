@@ -403,16 +403,14 @@ import streamctl
     // MARK: Identity + snapshot helpers (for refresh reconciliation)
 
     func identity(from process: ProcessTemplate?) -> String {
-        // Prefer name; fall back to command so a process under edit remains
-        // distinguishable even if its name was blanked mid-edit.
-        let fromState = currentProcess.name ?? currentProcess.command
-        let fromArg = process?.name ?? process?.command ?? ""
+        let fromState = currentProcess.id
+        let fromArg = process?.id ?? ""
         return fromState.isEmpty ? fromArg : fromState
     }
 
     func formSnapshot() -> ProcessTemplate {
         ProcessTemplate(
-            name: (nameField?.stringValue).flatMap { $0.isEmpty ? nil : $0 }, command: commandField?.stringValue ?? "",
+            id: currentProcess.id, name: (nameField?.stringValue).flatMap { $0.isEmpty ? nil : $0 }, command: commandField?.stringValue ?? "",
             onExit: ProcessExitAction(rawValue: onExitPopup?.selectedItem?.representedObject as? String ?? "") ?? .none)
     }
 
@@ -514,7 +512,8 @@ import streamctl
         target.onCancel = onCancel
         target.onSave = { [weak nameField, weak commandField, weak onExitPopup] in
             let edited = ProcessTemplate(
-                name: nameField?.stringValue.isEmpty == false ? nameField?.stringValue : nil, command: commandField?.stringValue ?? "",
+                id: process.id, name: nameField?.stringValue.isEmpty == false ? nameField?.stringValue : nil,
+                command: commandField?.stringValue ?? "",
                 onExit: ProcessExitAction(rawValue: onExitPopup?.selectedItem?.representedObject as? String ?? "") ?? .none)
             onSave(edited)
         }

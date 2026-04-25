@@ -62,12 +62,13 @@ import streamctl
     }
 
     @Test func reloadPreservesEditingStateAcrossSameProcessList() {
-        let section = ProcessesSection(processes: [ProcessTemplate(name: "api", command: "bun run dev")])
+        let process = ProcessTemplate(name: "api", command: "bun run dev")
+        let section = ProcessesSection(processes: [process])
         // Simulate what the host would do when status updates arrive.
         section.row(at: 0)?.enterEditing(prefill: nil, animated: false)
         #expect(section.isEditing(at: 0))
 
-        section.reload(processes: [ProcessTemplate(name: "api", command: "bun run dev")])
+        section.reload(processes: [process])
         #expect(section.isEditing(at: 0), "Editing state should survive a no-op reload")
     }
 

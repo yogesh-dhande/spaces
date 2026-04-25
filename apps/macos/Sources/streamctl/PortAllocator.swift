@@ -12,8 +12,27 @@ public final class PortAllocator {
             return []
         }
 
-        let existingPorts = try store.workspacePorts(workspaceID: workspaceID)
-        var allocated = Array(existingPorts.prefix(count))
+        let existingAssignments = try store.workspacePortsAssigned(workspaceID: workspaceID)
+        var existingByDefinitionID: [String: Int] = [:]
+        for assignment in existingAssignments where !assignment.definitionID.isEmpty {
+            existingByDefinitionID[assignment.definitionID] = assignment.port
+        }
+        let existingNameCounts = Dictionary(existingAssignments.map { ($0.name, 1) }, uniquingKeysWith: +)
+        var usedPorts = Set<Int>()
+        var allocated: [Int] = []
+        for definition in definitions {
+            if let existingPort = existingByDefinitionID[definition.id] {
+                allocated.append(existingPort)
+                usedPorts.insert(existingPort)
+                continue
+            }
+            if existingNameCounts[definition.name] == 1,
+                let existingPort = existingAssignments.first(where: { $0.name == definition.name && !usedPorts.contains($0.port) })?.port
+            {
+                allocated.append(existingPort)
+                usedPorts.insert(existingPort)
+            }
+        }
         if allocated.count < count {
             var inUse = try allReservedPorts(excludingWorkspaceID: workspaceID)
             for port in allocated { inUse.insert(port) }
@@ -29,7 +48,7 @@ public final class PortAllocator {
             throw MuxyError.invalidArgument(message: "Insufficient free ports in range \(range.start)-\(range.end).")
         }
 
-        try store.setWorkspacePorts(workspaceID: workspaceID, ports: allocated, names: definitions.map(\.name))
+        try store.setWorkspacePorts(workspaceID: workspaceID, ports: allocated, names: definitions.map(\.name), definitionIDs: definitions.map(\.id))
         PortReserver.shared.reservePorts(workspaceID: workspaceID, ports: allocated)
         return allocated
     }
@@ -51,7 +70,7 @@ public final class PortAllocator {
             throw MuxyError.invalidArgument(message: "Insufficient free ports in range \(range.start)-\(range.end).")
         }
         let names = definitions.map(\.name)
-        try store.setWorkspacePorts(workspaceID: workspaceID, ports: allocated, names: names)
+        try store.setWorkspacePorts(workspaceID: workspaceID, ports: allocated, names: names, definitionIDs: definitions.map(\.id))
         PortReserver.shared.reservePorts(workspaceID: workspaceID, ports: allocated)
         return allocated
     }

@@ -311,9 +311,13 @@ import streamctl
         nameField = nil
     }
 
-    func identity(from port: PortDefinition?) -> String { currentPort.name.isEmpty ? (port?.name ?? "") : currentPort.name }
+    func identity(from port: PortDefinition?) -> String {
+        let fromState = currentPort.id
+        let fromArg = port?.id ?? ""
+        return fromState.isEmpty ? fromArg : fromState
+    }
 
-    func formSnapshot() -> PortDefinition { PortDefinition(name: nameField?.stringValue ?? "") }
+    func formSnapshot() -> PortDefinition { PortDefinition(id: currentPort.id, name: nameField?.stringValue ?? "") }
 
     var collapsedPrimaryTextForTesting: String { nameLabel.stringValue }
     var collapsedDetailTextForTesting: String { detailLabel.stringValue }
@@ -379,7 +383,7 @@ import streamctl
 
         let target = PortFormTarget()
         target.onCancel = onCancel
-        target.onSave = { [weak nameField] in onSave(PortDefinition(name: nameField?.stringValue ?? "")) }
+        target.onSave = { [weak nameField] in onSave(PortDefinition(id: port.id, name: nameField?.stringValue ?? "")) }
         target.onTextChange = refreshSaveEnabled
         nameField.delegate = target
         cancelButton.target = target

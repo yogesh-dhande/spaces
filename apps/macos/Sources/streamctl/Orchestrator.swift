@@ -216,7 +216,11 @@ public final class MuxyOrchestrator {
         guard var existing = try loadWorkspaceSettings(project: project, workspace: workspace) else {
             throw MuxyError.missingProject(dir: project.dir)
         }
+        let previousPorts = existing.ports
+        let previousProcesses = existing.processes
         update(&existing)
+        existing.ports = normalizePortDefinitionIDs(previous: previousPorts, updated: existing.ports)
+        existing.processes = normalizeProcessTemplateIDs(previous: previousProcesses, updated: existing.processes)
         try validateWorkspaceFocusNames(
             workspaceID: workspace.id, processes: existing.processes, browserSessions: existing.browserSessions,
             agentLaunchers: existing.agentLaunchers, agentWindows: try store.agentWindows(workspaceID: workspace.id))
@@ -236,15 +240,16 @@ public final class MuxyOrchestrator {
         guard var existing = try loadWorkspaceSettings(project: project, workspace: workspace) else {
             throw MuxyError.missingProject(dir: project.dir)
         }
+        let normalizedProcesses = normalizeProcessTemplateIDs(previous: existing.processes, updated: processes)
         try validateWorkspaceFocusNames(
-            workspaceID: workspace.id, processes: processes, browserSessions: existing.browserSessions, agentLaunchers: existing.agentLaunchers,
-            agentWindows: try store.agentWindows(workspaceID: workspace.id))
+            workspaceID: workspace.id, processes: normalizedProcesses, browserSessions: existing.browserSessions,
+            agentLaunchers: existing.agentLaunchers, agentWindows: try store.agentWindows(workspaceID: workspace.id))
         if workspace.isRunning {
             try applyRunningWorkspaceProcessEdits(
-                project: project, workspace: workspace, previous: existing.processes, updated: processes,
+                project: project, workspace: workspace, previous: existing.processes, updated: normalizedProcesses,
                 restartChangedCommands: restartChangedCommands)
         }
-        existing.processes = processes
+        existing.processes = normalizedProcesses
         try store.setWorkspaceProcesses(workspaceID: workspace.id, processes: existing.processes)
         try store.touchWorkspaceSettings(workspaceID: workspace.id, updatedAt: nowISO8601())
     }
@@ -2980,6 +2985,65 @@ public final class MuxyOrchestrator {
         return true
     }
 
+    private func normalizePortDefinitionIDs(previous: [PortDefinition], updated: [PortDefinition]) -> [PortDefinition] {
+        let previousByID = Dictionary(uniqueKeysWithValues: previous.map { ($0.id, $0) })
+        let previousNameCounts = Dictionary(previous.map { ($0.name, 1) }, uniquingKeysWith: +)
+        var usedIDs = Set<String>()
+
+        return updated.map { definition in
+            if previousByID[definition.id] != nil {
+                usedIDs.insert(definition.id)
+                return definition
+            }
+            guard previousNameCounts[definition.name] == 1,
+                let match = previous.first(where: { $0.name == definition.name && !usedIDs.contains($0.id) })
+            else { return definition }
+            usedIDs.insert(match.id)
+            return PortDefinition(id: match.id, name: definition.name)
+        }
+    }
+
+    private func normalizeProcessTemplateIDs(previous: [ProcessTemplate], updated: [ProcessTemplate]) -> [ProcessTemplate] {
+        let previousByID = Dictionary(uniqueKeysWithValues: previous.map { ($0.id, $0) })
+        let previousNames = previous.compactMap { template -> String? in
+            let trimmed = template.name?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            return trimmed.isEmpty ? nil : trimmed
+        }
+        let previousCommands = previous.map { $0.command.trimmingCharacters(in: .whitespacesAndNewlines) }
+        let nameCounts = Dictionary(previousNames.map { ($0, 1) }, uniquingKeysWith: +)
+        let commandCounts = Dictionary(previousCommands.map { ($0, 1) }, uniquingKeysWith: +)
+        var usedIDs = Set<String>()
+
+        return updated.map { template in
+            if previousByID[template.id] != nil {
+                usedIDs.insert(template.id)
+                return template
+            }
+
+            let trimmedName = template.name?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            if !trimmedName.isEmpty, nameCounts[trimmedName] == 1,
+                let match = previous.first(where: {
+                    ($0.name?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "") == trimmedName && !usedIDs.contains($0.id)
+                })
+            {
+                usedIDs.insert(match.id)
+                return ProcessTemplate(id: match.id, name: template.name, command: template.command, kind: template.kind, onExit: template.onExit)
+            }
+
+            let trimmedCommand = template.command.trimmingCharacters(in: .whitespacesAndNewlines)
+            if trimmedName.isEmpty, commandCounts[trimmedCommand] == 1,
+                let match = previous.first(where: {
+                    $0.command.trimmingCharacters(in: .whitespacesAndNewlines) == trimmedCommand && !usedIDs.contains($0.id)
+                })
+            {
+                usedIDs.insert(match.id)
+                return ProcessTemplate(id: match.id, name: template.name, command: template.command, kind: template.kind, onExit: template.onExit)
+            }
+
+            return template
+        }
+    }
+
     private func processTemplatesMatch(_ lhs: [ProcessTemplate], _ rhs: [ProcessTemplate]) -> Bool {
         guard lhs.count == rhs.count else { return false }
         for (left, right) in zip(lhs, rhs) {
@@ -3147,10 +3211,9 @@ public final class MuxyOrchestrator {
     }
 
     private func runningWorkspaceProcessEdits(previous: [ProcessTemplate], updated: [ProcessTemplate]) -> [RunningWorkspaceProcessEdit] {
-        let pairedCount = min(previous.count, updated.count)
-        return (0..<pairedCount).compactMap { index in
-            let previousTemplate = previous[index]
-            let updatedTemplate = updated[index]
+        let previousByID = Dictionary(uniqueKeysWithValues: previous.map { ($0.id, $0) })
+        return updated.compactMap { updatedTemplate in
+            guard let previousTemplate = previousByID[updatedTemplate.id] else { return nil }
             let previousKey = processKey(for: previousTemplate)
             let updatedKey = processKey(for: updatedTemplate)
             let edit = RunningWorkspaceProcessEdit(
@@ -3253,16 +3316,12 @@ public final class MuxyOrchestrator {
 
         let running = try store.runningProcesses(workspaceID: workspace.id)
         let runningByKey = Dictionary(uniqueKeysWithValues: running.map { ($0.templateName, $0) })
+        let previousByID = Dictionary(uniqueKeysWithValues: previous.map { ($0.id, $0) })
 
         var desiredByMatch: [String: DesiredProcess] = [:]
-        for (idx, template) in updated.enumerated() {
+        for template in updated {
             let desiredKey = processKey(for: template)
-            let hasName = !(template.name?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "").isEmpty
-            var matchKey = desiredKey
-            if !hasName, idx < previous.count {
-                let previousKey = processKey(for: previous[idx])
-                if desiredKey == template.command && !previousKey.isEmpty { matchKey = previousKey }
-            }
+            let matchKey = previousByID[template.id].map(processKey(for:)) ?? desiredKey
             if desiredByMatch[matchKey] == nil {
                 desiredByMatch[matchKey] = DesiredProcess(matchKey: matchKey, desiredKey: desiredKey, template: template)
             }

@@ -74,7 +74,7 @@ import streamctl
             let command = row.commandField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
             let onExit = ProcessExitAction(rawValue: row.onExitPopup.titleOfSelectedItem ?? "") ?? .none
             guard !command.isEmpty else { return nil }
-            return ProcessTemplate(name: name, command: command, onExit: onExit)
+            return ProcessTemplate(id: row.processID, name: name, command: command, onExit: onExit)
         }
     }
 
@@ -104,6 +104,7 @@ import streamctl
         row.checksSection.translatesAutoresizingMaskIntoConstraints = false
         row.checksSection.widthAnchor.constraint(equalTo: rowsStack.widthAnchor).isActive = true
         if let process {
+            row.processID = process.id
             row.nameField.stringValue = process.name ?? ""
             row.commandField.stringValue = process.command
             row.onExitPopup.selectItem(withTitle: process.onExit.rawValue)
@@ -141,6 +142,7 @@ import streamctl
         let commandField = NSTextField(string: "")
         let onExitPopup = NSPopUpButton()
         let removeButton: NSButton
+        var processID = UUID().uuidString
         private let checksStack = NSStackView()
         private let checksFieldHeader = NSStackView()
         private var checkRows: [StatusCheckRowRefs] = []

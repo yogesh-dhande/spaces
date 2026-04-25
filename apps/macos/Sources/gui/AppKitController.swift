@@ -1226,14 +1226,14 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     nonisolated static func runningWorkspaceProcessEditDecision(previous: [ProcessTemplate], updated: [ProcessTemplate])
         -> RunningWorkspaceProcessEditDecision
     {
-        let pairedCount = min(previous.count, updated.count)
-        let changedProcessNames = (0..<pairedCount).compactMap { index -> String? in
-            guard previous[index].command != updated[index].command else { return nil }
-            let trimmedUpdatedName = updated[index].name?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let previousByID = Dictionary(uniqueKeysWithValues: previous.map { ($0.id, $0) })
+        let changedProcessNames = updated.compactMap { updatedTemplate -> String? in
+            guard let previousTemplate = previousByID[updatedTemplate.id], previousTemplate.command != updatedTemplate.command else { return nil }
+            let trimmedUpdatedName = updatedTemplate.name?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
             if !trimmedUpdatedName.isEmpty { return trimmedUpdatedName }
-            let trimmedPreviousName = previous[index].name?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            let trimmedPreviousName = previousTemplate.name?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
             if !trimmedPreviousName.isEmpty { return trimmedPreviousName }
-            return "Process \(index + 1)"
+            return "Process"
         }
         if changedProcessNames.isEmpty { return .applyImmediately }
         return .confirmRestart(processNames: changedProcessNames)
