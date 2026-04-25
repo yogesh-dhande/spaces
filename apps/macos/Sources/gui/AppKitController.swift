@@ -2941,12 +2941,13 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         repoURLField.placeholderString = "https://github.com/org/repo.git"
         repoURLField.delegate = self
 
-        let setupView = makeEditableTextView()
-        let stopView = makeEditableTextView()
-        let portEditor = PortEditor()
-        let processEditor = ProcessEditor()
-        let browserSessionEditor = BrowserSessionEditor()
-        let agentLauncherEditor = AgentLauncherEditor()
+        let setupScriptSection = SetupScriptSection(value: "", subtitle: "Runs when each new workspace is created or revived from archive.")
+        let stopScriptSection = StopScriptSection(value: "", subtitle: "Runs on workspace stop, restart, or archive.")
+        let portsSection = PortsSection(subtitle: "Named ports allocated per workspace, available as env vars.")
+        let processesSection = ProcessesSection(subtitle: "Commands that run inside each workspace.")
+        let browserSessionsSection = BrowserSessionsSection(subtitle: "Browser windows opened automatically on launch.")
+        let agentLaunchersSection = AgentLaunchersSection(subtitle: "Interactive coding agents that open outside tmux.")
+
         // --- Source row: popup + dir/URL input on same line ---
         let localSourceSection = NSStackView()
         localSourceSection.orientation = .horizontal
@@ -3002,47 +3003,24 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             icon: "folder.badge.plus", title: "Source", subtitle: "Where does your project live?", contentViews: [sourceContentStack])
         stack.addArrangedSubview(sourceCard)
 
-        // --- Setup script card ---
-        let setupScroll = scrollableTextView(setupView, height: 90)
-        let setupCard = formSectionCard(
-            icon: "terminal", title: "Setup script", subtitle: "Runs when each new workspace is created or revived from archive.",
-            contentViews: [setupScroll])
-        setupCard.isHidden = true
-        stack.addArrangedSubview(setupCard)
+        // --- Section cards (shown once source is configured) ---
+        setupScriptSection.view.isHidden = true
+        stack.addArrangedSubview(setupScriptSection.view)
 
-        // --- Port definitions card ---
-        let addPortCard = formSectionCard(
-            icon: "network", title: "Port definitions",
-            subtitle: "Named ports allocated per workspace. Available as env vars in scripts and commands.", contentViews: [portEditor.container])
-        addPortCard.isHidden = true
-        stack.addArrangedSubview(addPortCard)
+        portsSection.view.isHidden = true
+        stack.addArrangedSubview(portsSection.view)
 
-        // --- Processes card ---
-        let processCard = formSectionCard(
-            icon: "terminal.fill", title: "Processes", subtitle: "Define the commands that run inside your workspace.",
-            contentViews: [processEditor.container])
-        processCard.isHidden = true
-        stack.addArrangedSubview(processCard)
+        processesSection.view.isHidden = true
+        stack.addArrangedSubview(processesSection.view)
 
-        // --- Browser sessions card ---
-        let browserCard = formSectionCard(
-            icon: "globe", title: "Browser sessions", subtitle: "Optional names with URL prefixes to open automatically.",
-            contentViews: [browserSessionEditor.container])
-        browserCard.isHidden = true
-        stack.addArrangedSubview(browserCard)
+        browserSessionsSection.view.isHidden = true
+        stack.addArrangedSubview(browserSessionsSection.view)
 
-        let agentLauncherCard = formSectionCard(
-            icon: "cpu.fill", title: "Coding agents", subtitle: "Named interactive coding agents that open outside tmux.",
-            contentViews: [agentLauncherEditor.container])
-        agentLauncherCard.isHidden = true
-        stack.addArrangedSubview(agentLauncherCard)
+        agentLaunchersSection.view.isHidden = true
+        stack.addArrangedSubview(agentLaunchersSection.view)
 
-        // --- Stop script card ---
-        let stopScroll = scrollableTextView(stopView, height: 90)
-        let stopCard = formSectionCard(
-            icon: "stop.circle", title: "Stop script", subtitle: "Seeded into workspaces and run on stop/restart/archive", contentViews: [stopScroll])
-        stopCard.isHidden = true
-        stack.addArrangedSubview(stopCard)
+        stopScriptSection.view.isHidden = true
+        stack.addArrangedSubview(stopScriptSection.view)
 
         // --- Buttons ---
         let createButton = actionButton(
@@ -3064,21 +3042,25 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
         // --- Width constraints ---
         constrainFormFieldToFillWidth(sourceCard, in: stack)
-        constrainFormFieldToFillWidth(setupCard, in: stack)
-        constrainFormFieldToFillWidth(addPortCard, in: stack)
-        constrainFormFieldToFillWidth(processCard, in: stack)
-        constrainFormFieldToFillWidth(browserCard, in: stack)
-        constrainFormFieldToFillWidth(agentLauncherCard, in: stack)
-        constrainFormFieldToFillWidth(stopCard, in: stack)
+        constrainFormFieldToFillWidth(setupScriptSection.view, in: stack)
+        constrainFormFieldToFillWidth(portsSection.view, in: stack)
+        constrainFormFieldToFillWidth(processesSection.view, in: stack)
+        constrainFormFieldToFillWidth(browserSessionsSection.view, in: stack)
+        constrainFormFieldToFillWidth(agentLaunchersSection.view, in: stack)
+        constrainFormFieldToFillWidth(stopScriptSection.view, in: stack)
         constrainFormFieldToFillWidth(buttonRow, in: stack)
 
         showScrollableDetailStack(stack)
 
         createButton.tag = storeAddProjectFields(
             sourcePopup: sourcePopup, localSourceSection: localSourceSection, cloneSourceSection: cloneSourceSection, dirField: dirField,
-            repoURLField: repoURLField, setupView: setupView, stopView: stopView, portEditor: portEditor, processEditor: processEditor,
-            browserSessionEditor: browserSessionEditor, agentLauncherEditor: agentLauncherEditor, browseButton: browseButton,
-            progressiveInputViews: [setupCard, addPortCard, processCard, browserCard, agentLauncherCard, stopCard], createButton: createButton)
+            repoURLField: repoURLField, setupScriptSection: setupScriptSection, stopScriptSection: stopScriptSection, portsSection: portsSection,
+            processesSection: processesSection, browserSessionsSection: browserSessionsSection, agentLaunchersSection: agentLaunchersSection,
+            browseButton: browseButton,
+            progressiveInputViews: [
+                setupScriptSection.view, portsSection.view, processesSection.view, browserSessionsSection.view, agentLaunchersSection.view,
+                stopScriptSection.view,
+            ], createButton: createButton)
         activeAddProjectFormTag = createButton.tag
         if let refs = AddProjectFieldCache.shared.cache[createButton.tag] { updateAddProjectSourceUI(refs) }
     }
@@ -4800,16 +4782,16 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
     private func storeAddProjectFields(
         sourcePopup: NSPopUpButton, localSourceSection: NSStackView, cloneSourceSection: NSStackView, dirField: NSTextField,
-        repoURLField: NSTextField, setupView: NSTextView, stopView: NSTextView, portEditor: PortEditor, processEditor: ProcessEditor,
-        browserSessionEditor: BrowserSessionEditor, agentLauncherEditor: AgentLauncherEditor, browseButton: NSButton, progressiveInputViews: [NSView],
-        createButton: NSButton
+        repoURLField: NSTextField, setupScriptSection: SetupScriptSection, stopScriptSection: StopScriptSection, portsSection: PortsSection,
+        processesSection: ProcessesSection, browserSessionsSection: BrowserSessionsSection, agentLaunchersSection: AgentLaunchersSection,
+        browseButton: NSButton, progressiveInputViews: [NSView], createButton: NSButton
     ) -> Int {
         let id = UUID().uuidString.hashValue
         AddProjectFieldCache.shared.cache[id] = AddProjectFieldRefs(
             sourcePopup: sourcePopup, localSourceSection: localSourceSection, cloneSourceSection: cloneSourceSection, dirField: dirField,
             repoURLField: repoURLField, browseButton: browseButton, progressiveInputViews: progressiveInputViews, createButton: createButton,
-            setupView: setupView, stopView: stopView, portEditor: portEditor, processEditor: processEditor,
-            browserSessionEditor: browserSessionEditor, agentLauncherEditor: agentLauncherEditor)
+            setupScriptSection: setupScriptSection, stopScriptSection: stopScriptSection, portsSection: portsSection,
+            processesSection: processesSection, browserSessionsSection: browserSessionsSection, agentLaunchersSection: agentLaunchersSection)
         sourcePopup.tag = id
         browseButton.tag = id
         return id
@@ -5012,25 +4994,25 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     @objc private func createProject(_ sender: NSButton) {
         guard let refs = AddProjectFieldCache.shared.cache[sender.tag] else { return }
         do {
+            let setupScript = refs.setupScriptSection.currentValue.isEmpty ? nil : refs.setupScriptSection.currentValue
+            let stopScript = refs.stopScriptSection.currentValue.isEmpty ? nil : refs.stopScriptSection.currentValue
             let input: ProjectCreateInput
             let progressDetail: String
             if refs.sourcePopup.indexOfSelectedItem == 1 {
                 let repoURL = refs.repoURLField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
                 guard !repoURL.isEmpty else { throw MuxyError.invalidArgument(message: "Git repository URL is required.") }
                 input = ProjectCreateInput(
-                    gitURL: repoURL, directoryPath: nil, setupScript: refs.setupView.string.isEmpty ? nil : refs.setupView.string,
-                    stopScript: refs.stopView.string.isEmpty ? nil : refs.stopView.string, ports: refs.portEditor.currentDefinitions(),
-                    processes: refs.processEditor.currentProcesses(), browserSessions: refs.browserSessionEditor.currentSessions(),
-                    statusChecks: refs.processEditor.currentStatusChecks(), agentLaunchers: refs.agentLauncherEditor.currentLaunchers())
+                    gitURL: repoURL, directoryPath: nil, setupScript: setupScript, stopScript: stopScript, ports: refs.portsSection.currentPorts,
+                    processes: refs.processesSection.currentProcesses, browserSessions: refs.browserSessionsSection.currentSessions, statusChecks: [],
+                    agentLaunchers: refs.agentLaunchersSection.currentLaunchers)
                 progressDetail = "Cloning repository and applying project settings."
             } else {
                 let dir = refs.dirField.toolTip?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
                 guard !dir.isEmpty else { return }
                 input = ProjectCreateInput(
-                    gitURL: nil, directoryPath: dir, setupScript: refs.setupView.string.isEmpty ? nil : refs.setupView.string,
-                    stopScript: refs.stopView.string.isEmpty ? nil : refs.stopView.string, ports: refs.portEditor.currentDefinitions(),
-                    processes: refs.processEditor.currentProcesses(), browserSessions: refs.browserSessionEditor.currentSessions(),
-                    statusChecks: refs.processEditor.currentStatusChecks(), agentLaunchers: refs.agentLauncherEditor.currentLaunchers())
+                    gitURL: nil, directoryPath: dir, setupScript: setupScript, stopScript: stopScript, ports: refs.portsSection.currentPorts,
+                    processes: refs.processesSection.currentProcesses, browserSessions: refs.browserSessionsSection.currentSessions, statusChecks: [],
+                    agentLaunchers: refs.agentLaunchersSection.currentLaunchers)
                 progressDetail = "Registering project and applying project settings."
             }
             let originalTitle = sender.title

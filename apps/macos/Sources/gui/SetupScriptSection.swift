@@ -1,6 +1,6 @@
 import AppKit
 
-@MainActor final class StopScriptSection {
+@MainActor final class SetupScriptSection {
     // MARK: Public surface
 
     let view: NSView
@@ -18,7 +18,7 @@ import AppKit
     init(value: String, subtitle: String? = nil) {
         self.currentValue = value
 
-        let titleLabel = NSTextField(labelWithString: "Stop Script")
+        let titleLabel = NSTextField(labelWithString: "Setup Script")
         titleLabel.font = .systemFont(ofSize: 13, weight: .semibold)
         titleLabel.textColor = Theme.text
 
@@ -46,7 +46,7 @@ import AppKit
         editButton.toolTip = "Edit"
         editButton.contentTintColor = Theme.muted
         editButton.alphaValue = 0.6
-        editButton.setAccessibilityIdentifier("stop-script-edit")
+        editButton.setAccessibilityIdentifier("setup-script-edit")
 
         let headerSpacer = NSView()
         headerSpacer.translatesAutoresizingMaskIntoConstraints = false
@@ -79,10 +79,10 @@ import AppKit
         ])
         self.view = card
 
-        let editTarget = StopScriptSectionTarget()
+        let editTarget = SetupScriptSectionTarget()
         editTarget.onAction = { [weak self] in self?.enterEditing() }
         editButton.target = editTarget
-        editButton.action = #selector(StopScriptSectionTarget.triggerAction)
+        editButton.action = #selector(SetupScriptSectionTarget.triggerAction)
         objc_setAssociatedObject(editButton, &Self.editButtonTargetKey, editTarget, .OBJC_ASSOCIATION_RETAIN)
 
         objc_setAssociatedObject(card, &Self.anchorKey, self, .OBJC_ASSOCIATION_RETAIN)
@@ -177,7 +177,7 @@ import AppKit
         textView.minSize = NSSize(width: 0, height: 0)
         textView.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
         textView.string = value
-        textView.setAccessibilityIdentifier("workspace-stop-script-field")
+        textView.setAccessibilityIdentifier("project-setup-script-field")
 
         let scrollView = NSScrollView()
         scrollView.hasVerticalScroller = true
@@ -202,20 +202,20 @@ import AppKit
 
         let cancelButton = NSButton(title: "Cancel", target: nil, action: nil)
         cancelButton.bezelStyle = .rounded
-        cancelButton.setAccessibilityIdentifier("workspace-stop-script-cancel")
+        cancelButton.setAccessibilityIdentifier("project-setup-script-cancel")
 
         let saveButton = NSButton(title: "Save", target: nil, action: nil)
         saveButton.bezelStyle = .rounded
         saveButton.keyEquivalent = "\r"
-        saveButton.setAccessibilityIdentifier("workspace-stop-script-save")
+        saveButton.setAccessibilityIdentifier("project-setup-script-save")
 
-        let target = StopScriptSectionTarget()
+        let target = SetupScriptSectionTarget()
         target.onCancel = onCancel
         target.onSave = { [weak textView] in onSave(textView?.string ?? "") }
         cancelButton.target = target
-        cancelButton.action = #selector(StopScriptSectionTarget.triggerCancel)
+        cancelButton.action = #selector(SetupScriptSectionTarget.triggerCancel)
         saveButton.target = target
-        saveButton.action = #selector(StopScriptSectionTarget.triggerSave)
+        saveButton.action = #selector(SetupScriptSectionTarget.triggerSave)
 
         let buttonRow = NSStackView(views: [NSView(), cancelButton, saveButton])
         buttonRow.orientation = .horizontal
@@ -241,7 +241,7 @@ import AppKit
 
 // MARK: - Target
 
-@MainActor private final class StopScriptSectionTarget: NSObject {
+@MainActor private final class SetupScriptSectionTarget: NSObject {
     var onAction: (() -> Void)?
     var onCancel: (() -> Void)?
     var onSave: (() -> Void)?

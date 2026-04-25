@@ -9,10 +9,10 @@ struct AddProjectFieldRefs {
     let browseButton: NSButton
     let progressiveInputViews: [NSView]
     let createButton: NSButton
-    let setupView: NSTextView
-    let stopView: NSTextView
-    let portEditor: PortEditor
-    let processEditor: ProcessEditor
-    let browserSessionEditor: BrowserSessionEditor
-    let agentLauncherEditor: AgentLauncherEditor
+    let setupScriptSection: SetupScriptSection
+    let stopScriptSection: StopScriptSection
+    let portsSection: PortsSection
+    let processesSection: ProcessesSection
+    let browserSessionsSection: BrowserSessionsSection
+    let agentLaunchersSection: AgentLaunchersSection
 }
