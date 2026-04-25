@@ -2513,56 +2513,58 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         shortcutButtonsBySetting.removeAll()
         activeShortcutCaptureSetting = nil
         for view in detailContainer.subviews { view.removeFromSuperview() }
+
         let stack = NSStackView()
         stack.orientation = .vertical
         stack.alignment = .leading
-        stack.spacing = 12
+        stack.spacing = 20
         stack.translatesAutoresizingMaskIntoConstraints = false
 
+        // --- Header ---
         let header = NSTextField(labelWithString: "Settings")
         header.font = .systemFont(ofSize: 20, weight: .semibold)
-        stack.addArrangedSubview(header)
-        stack.addArrangedSubview(label(text: "Preferred editor"))
+        let pageSubtitle = NSTextField(labelWithString: "App preferences")
+        pageSubtitle.font = .systemFont(ofSize: 12)
+        pageSubtitle.textColor = .secondaryLabelColor
+        let headerStack = NSStackView()
+        headerStack.orientation = .vertical
+        headerStack.alignment = .leading
+        headerStack.spacing = 2
+        headerStack.addArrangedSubview(header)
+        headerStack.addArrangedSubview(pageSubtitle)
+        stack.addArrangedSubview(headerStack)
 
+        // --- Editor & terminal section ---
         let options = installedEditorOptions()
         let currentEditor: EditorPreference? = {
             guard let editor = configCache?.editor, editor != .none else { return nil }
             return editor
         }()
+        let editorPopUp = NSPopUpButton()
+        editorPopUp.translatesAutoresizingMaskIntoConstraints = false
+        editorPopUp.autoenablesItems = false
         if options.isEmpty {
-            let note = NSTextField(labelWithString: "No supported editors detected (VS Code, Cursor, Windsurf).")
-            note.font = .systemFont(ofSize: 12)
-            note.textColor = .secondaryLabelColor
-            stack.addArrangedSubview(note)
+            editorPopUp.addItem(withTitle: "None detected")
+            editorPopUp.isEnabled = false
         } else {
-            let popUp = NSPopUpButton()
-            popUp.translatesAutoresizingMaskIntoConstraints = false
-            popUp.autoenablesItems = false
-            popUp.addItem(withTitle: "Select editor")
-            popUp.item(at: 0)?.isEnabled = false
+            editorPopUp.addItem(withTitle: "Select editor")
+            editorPopUp.item(at: 0)?.isEnabled = false
             for option in options {
-                popUp.addItem(withTitle: option.displayName)
-                popUp.itemArray.last?.representedObject = option.preference
+                editorPopUp.addItem(withTitle: option.displayName)
+                editorPopUp.itemArray.last?.representedObject = option.preference
             }
-            if let current = currentEditor, let item = popUp.itemArray.first(where: { ($0.representedObject as? EditorPreference) == current }) {
-                popUp.select(item)
+            if let current = currentEditor, let item = editorPopUp.itemArray.first(where: { ($0.representedObject as? EditorPreference) == current })
+            {
+                editorPopUp.select(item)
             } else {
-                popUp.selectItem(at: 0)
+                editorPopUp.selectItem(at: 0)
             }
-            popUp.target = self
-            popUp.action = #selector(editorPreferenceChanged(_:))
-            stack.addArrangedSubview(popUp)
-            constrainFormFieldToFillWidth(popUp, in: stack)
+            editorPopUp.target = self
+            editorPopUp.action = #selector(editorPreferenceChanged(_:))
         }
+        editorPopUp.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        editorPopUp.setAccessibilityIdentifier("settings-editor")
 
-        if let current = currentEditor, !options.contains(where: { $0.preference == current }) {
-            let note = NSTextField(labelWithString: "Saved editor \"\(editorDisplayName(current))\" is not installed.")
-            note.font = .systemFont(ofSize: 11)
-            note.textColor = .secondaryLabelColor
-            stack.addArrangedSubview(note)
-        }
-
-        stack.addArrangedSubview(label(text: "Terminal host"))
         let terminalPopUp = NSPopUpButton()
         terminalPopUp.translatesAutoresizingMaskIntoConstraints = false
         for host in TerminalHost.allCases {
@@ -2577,51 +2579,24 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         terminalPopUp.setAccessibilityIdentifier("settings-terminal-host")
         terminalPopUp.target = self
         terminalPopUp.action = #selector(terminalHostChanged(_:))
-        stack.addArrangedSubview(terminalPopUp)
-        constrainFormFieldToFillWidth(terminalPopUp, in: stack)
+        terminalPopUp.setContentHuggingPriority(.defaultLow, for: .horizontal)
 
-        stack.addArrangedSubview(label(text: "Keyboard shortcuts"))
-        let shortcutsNote = NSTextField(
-            labelWithString:
-                "Click a shortcut to capture it. For Shortcut leader, hold the modifiers you want. Leader-based rows inherit that modifier chord and capture only the trailing key. For the window 1-9 rows, capture the modifier plus any digit. The queued window shortcut replays captured digits in order when you release the modifiers."
-        )
-        shortcutsNote.font = .systemFont(ofSize: 11)
-        shortcutsNote.textColor = .secondaryLabelColor
-        shortcutsNote.maximumNumberOfLines = 0
-        shortcutsNote.lineBreakMode = .byWordWrapping
-        stack.addArrangedSubview(shortcutsNote)
-
-        let shortcutSupportNote = NSTextField(
-            labelWithString:
-                "Supported leader modifiers: command, shift, option, control. Supported shortcut keys: letters, digits, F1-F20, arrows, return, tab, space, escape, delete, and common punctuation such as [ ] , . / \\ ; ' = - `."
-        )
-        shortcutSupportNote.font = .systemFont(ofSize: 11)
-        shortcutSupportNote.textColor = .secondaryLabelColor
-        shortcutSupportNote.maximumNumberOfLines = 0
-        shortcutSupportNote.lineBreakMode = .byWordWrapping
-        stack.addArrangedSubview(shortcutSupportNote)
-
-        for setting in ShortcutSetting.settingsPanelCases {
-            let row = shortcutSettingsRow(setting: setting)
-            stack.addArrangedSubview(row)
-            constrainFormFieldToFillWidth(row, in: stack)
+        var editorContentViews: [NSView] = [
+            settingsLabeledField(
+                name: "Preferred editor", hint: "Opened when you use the editor shortcut from inside a workspace", control: editorPopUp),
+            settingsLabeledField(name: "Terminal host", hint: "Used for process panes and coding agents", control: terminalPopUp),
+        ]
+        if let current = currentEditor, !options.contains(where: { $0.preference == current }) {
+            let note = helpTextLabel("Saved editor \"\(editorDisplayName(current))\" is not installed.")
+            editorContentViews.append(note)
         }
+        let editorCard = formSectionCard(icon: "square.and.pencil", title: "Editor & terminal", contentViews: editorContentViews)
+        stack.addArrangedSubview(editorCard)
+        constrainFormFieldToFillWidth(editorCard, in: stack)
 
-        // --- window focus pulse ---
-        stack.addArrangedSubview(label(text: "Window focus pulse"))
-        let pulseColorNote = NSTextField(
-            labelWithString:
-                "Briefly overlays focused supported windows, currently iTerm2 and Ghostty terminals. Default color: \(SettingsKey.defaultWindowFocusPulseColor)."
-        )
-        pulseColorNote.font = .systemFont(ofSize: 11)
-        pulseColorNote.textColor = .secondaryLabelColor
-        pulseColorNote.maximumNumberOfLines = 0
-        pulseColorNote.lineBreakMode = .byWordWrapping
-        stack.addArrangedSubview(pulseColorNote)
-
-        let pulseEnabledCheckbox = NSButton(checkboxWithTitle: "Enable focus pulse", target: self, action: #selector(windowPulseEnabledChanged(_:)))
+        // --- Window focus pulse section ---
+        let pulseEnabledCheckbox = NSButton(checkboxWithTitle: "", target: self, action: #selector(windowPulseEnabledChanged(_:)))
         pulseEnabledCheckbox.state = ((try? orchestrator.windowFocusPulseEnabled()) ?? SettingsKey.defaultWindowFocusPulseEnabled) ? .on : .off
-        stack.addArrangedSubview(pulseEnabledCheckbox)
 
         let (pulseR, pulseG, pulseB) = (try? orchestrator.windowFocusPulseColor()) ?? (r: 72, g: 98, b: 110)
         let colorWell = NSColorWell()
@@ -2629,21 +2604,172 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         colorWell.translatesAutoresizingMaskIntoConstraints = false
         colorWell.target = self
         colorWell.action = #selector(windowPulseColorChanged(_:))
+        colorWell.widthAnchor.constraint(equalToConstant: 36).isActive = true
+        colorWell.heightAnchor.constraint(equalToConstant: 24).isActive = true
         pulseColorWell = colorWell
 
         let resetColorButton = actionButton(
             title: "Reset", symbol: nil, tooltip: "Reset to default color (\(SettingsKey.defaultWindowFocusPulseColor))",
             action: #selector(resetWindowPulseColor(_:)), primary: false)
+        let colorControlRow = NSStackView()
+        colorControlRow.orientation = .horizontal
+        colorControlRow.alignment = .centerY
+        colorControlRow.spacing = 8
+        colorControlRow.addArrangedSubview(colorWell)
+        colorControlRow.addArrangedSubview(resetColorButton)
 
-        let colorRow = NSStackView()
-        colorRow.orientation = .horizontal
-        colorRow.alignment = .centerY
-        colorRow.spacing = 8
-        colorRow.addArrangedSubview(colorWell)
-        colorRow.addArrangedSubview(resetColorButton)
-        stack.addArrangedSubview(colorRow)
+        let pulseCard = formSectionCard(
+            icon: "eye", title: "Window focus pulse", subtitle: "Briefly overlays focused terminal windows when focus moves to them",
+            contentViews: [
+                settingsSettingRow(
+                    name: "Enable focus pulse", hint: "Tints the border so the focused window is obvious", control: pulseEnabledCheckbox),
+                settingsSettingRow(name: "Pulse color", hint: "Default \(SettingsKey.defaultWindowFocusPulseColor)", control: colorControlRow),
+            ])
+        stack.addArrangedSubview(pulseCard)
+        constrainFormFieldToFillWidth(pulseCard, in: stack)
+
+        // --- Keyboard shortcuts section ---
+        let shortcutContainer = buildShortcutRowsContainer()
+        let shortcutCard = formSectionCard(
+            icon: "keyboard", title: "Keyboard shortcuts",
+            subtitle: "Click record on a row to capture a new chord. Leader-based shortcuts inherit the leader modifier.",
+            contentViews: [shortcutContainer])
+        stack.addArrangedSubview(shortcutCard)
+        constrainFormFieldToFillWidth(shortcutCard, in: stack)
 
         showScrollableDetailStack(stack)
+    }
+
+    private func settingsLabeledField(name: String, hint: String, control: NSView) -> NSView {
+        let nameLabel = NSTextField(labelWithString: name)
+        nameLabel.font = .systemFont(ofSize: 13, weight: .medium)
+
+        let hintLabel = NSTextField(labelWithString: hint)
+        hintLabel.font = .systemFont(ofSize: 11)
+        hintLabel.textColor = .secondaryLabelColor
+        hintLabel.lineBreakMode = .byWordWrapping
+        hintLabel.maximumNumberOfLines = 2
+        hintLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+
+        control.translatesAutoresizingMaskIntoConstraints = false
+        control.setContentHuggingPriority(.defaultLow, for: .horizontal)
+
+        let stack = NSStackView()
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 6
+        stack.addArrangedSubview(nameLabel)
+        stack.addArrangedSubview(hintLabel)
+        stack.addArrangedSubview(control)
+        control.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
+        return stack
+    }
+
+    private func settingsSettingRow(name: String, hint: String, control: NSView) -> NSView {
+        let nameLabel = NSTextField(labelWithString: name)
+        nameLabel.font = .systemFont(ofSize: 13, weight: .medium)
+
+        let hintLabel = NSTextField(labelWithString: hint)
+        hintLabel.font = .systemFont(ofSize: 11)
+        hintLabel.textColor = .secondaryLabelColor
+        hintLabel.lineBreakMode = .byWordWrapping
+        hintLabel.maximumNumberOfLines = 2
+        hintLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+
+        let labelStack = NSStackView()
+        labelStack.orientation = .vertical
+        labelStack.alignment = .leading
+        labelStack.spacing = 2
+        labelStack.addArrangedSubview(nameLabel)
+        labelStack.addArrangedSubview(hintLabel)
+        labelStack.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        labelStack.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+
+        control.setContentHuggingPriority(.required, for: .horizontal)
+
+        let row = NSStackView()
+        row.orientation = .horizontal
+        row.alignment = .centerY
+        row.spacing = 14
+        row.addArrangedSubview(labelStack)
+        row.addArrangedSubview(control)
+        return row
+    }
+
+    private func buildShortcutRowsContainer() -> NSView {
+        let container = NSView()
+        container.translatesAutoresizingMaskIntoConstraints = false
+        container.wantsLayer = true
+        container.layer?.cornerRadius = UIRadius.compact
+        container.layer?.borderWidth = 1
+        container.layer?.borderColor = sidebarCardBorderColor(isSelected: false).cgColor
+        container.layer?.masksToBounds = true
+
+        let captureWidth: CGFloat = 140
+        let rowHeight: CGFloat = 28
+        let hPad: CGFloat = 10
+        let vPad: CGFloat = 4
+        var previousBottom: NSLayoutYAxisAnchor = container.topAnchor
+
+        for (i, setting) in ShortcutSetting.settingsPanelCases.enumerated() {
+            if i > 0 {
+                let sep = NSView()
+                sep.translatesAutoresizingMaskIntoConstraints = false
+                sep.wantsLayer = true
+                sep.layer?.backgroundColor = sidebarCardBorderColor(isSelected: false).withAlphaComponent(0.5).cgColor
+                container.addSubview(sep)
+                NSLayoutConstraint.activate([
+                    sep.leadingAnchor.constraint(equalTo: container.leadingAnchor), sep.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+                    sep.topAnchor.constraint(equalTo: previousBottom), sep.heightAnchor.constraint(equalToConstant: 1),
+                ])
+                previousBottom = sep.bottomAnchor
+            }
+
+            let titleLabel = NSTextField(labelWithString: setting.label)
+            titleLabel.font = .systemFont(ofSize: 12)
+            titleLabel.translatesAutoresizingMaskIntoConstraints = false
+            titleLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+
+            let captureButton = NSButton(title: "", target: self, action: #selector(beginShortcutCapture(_:)))
+            captureButton.identifier = NSUserInterfaceItemIdentifier(setting.settingKey)
+            captureButton.isBordered = false
+            captureButton.alignment = .center
+            captureButton.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
+            captureButton.translatesAutoresizingMaskIntoConstraints = false
+            updateShortcutCaptureButtonText(captureButton, text: shortcutCaptureButtonTitle(setting: setting), active: false)
+            styleShortcutCaptureButton(captureButton, active: false)
+            captureButton.widthAnchor.constraint(equalToConstant: captureWidth).isActive = true
+            shortcutButtonsBySetting[setting.settingKey] = captureButton
+
+            let resetButton = actionButton(
+                title: "Reset", symbol: nil, tooltip: "Reset to default shortcut", action: #selector(resetShortcutSetting(_:)), primary: false)
+            resetButton.identifier = NSUserInterfaceItemIdentifier(setting.settingKey)
+            resetButton.setContentHuggingPriority(.required, for: .horizontal)
+
+            // Right-side group: capture button + reset button, pinned to trailing edge.
+            // Grouping them ensures both columns align identically across all rows.
+            let rightStack = NSStackView(views: [captureButton, resetButton])
+            rightStack.orientation = .horizontal
+            rightStack.alignment = .centerY
+            rightStack.spacing = 8
+            rightStack.translatesAutoresizingMaskIntoConstraints = false
+
+            container.addSubview(titleLabel)
+            container.addSubview(rightStack)
+
+            NSLayoutConstraint.activate([
+                rightStack.topAnchor.constraint(equalTo: previousBottom, constant: vPad),
+                rightStack.heightAnchor.constraint(equalToConstant: rowHeight),
+                rightStack.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -hPad),
+                titleLabel.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: hPad),
+                titleLabel.trailingAnchor.constraint(lessThanOrEqualTo: rightStack.leadingAnchor, constant: -8),
+                titleLabel.centerYAnchor.constraint(equalTo: rightStack.centerYAnchor),
+            ])
+            previousBottom = rightStack.bottomAnchor
+        }
+
+        container.bottomAnchor.constraint(equalTo: previousBottom, constant: vPad).isActive = true
+        return container
     }
 
     private func showProjectDetail(project: ProjectSummary) {
@@ -2792,7 +2918,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             browserSessionEditor: browserSessionEditor, agentLauncherEditor: agentLauncherEditor)
     }
 
-    private func formSectionCard(icon: String, title: String, subtitle: String, trailingView: NSView? = nil, contentViews: [NSView]) -> NSView {
+    private func formSectionCard(icon: String, title: String, subtitle: String = "", trailingView: NSView? = nil, contentViews: [NSView]) -> NSView {
         let section = NSView()
         section.translatesAutoresizingMaskIntoConstraints = false
         section.setContentHuggingPriority(.required, for: .vertical)
@@ -2824,7 +2950,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         titleStack.alignment = .leading
         titleStack.spacing = 2
         titleStack.addArrangedSubview(titleLabel)
-        titleStack.addArrangedSubview(subtitleLabel)
+        if !subtitle.isEmpty { titleStack.addArrangedSubview(subtitleLabel) }
         titleStack.setContentHuggingPriority(.defaultLow, for: .horizontal)
 
         let headerRow = NSStackView()
@@ -4281,8 +4407,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
         let title = NSTextField(labelWithString: setting.label)
         title.font = .systemFont(ofSize: 12)
-        title.setContentHuggingPriority(.required, for: .horizontal)
-        title.widthAnchor.constraint(equalToConstant: shortcutLabelColumnWidth).isActive = true
+        title.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        title.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
 
         let captureButton = actionButton(
             title: shortcutCaptureButtonTitle(setting: setting), symbol: nil, tooltip: "Click to capture shortcut",
@@ -4291,10 +4417,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         captureButton.alignment = .center
         captureButton.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
         captureButton.isBordered = false
+        captureButton.translatesAutoresizingMaskIntoConstraints = false
         captureButton.setContentHuggingPriority(.defaultLow, for: .horizontal)
         captureButton.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        captureButton.heightAnchor.constraint(equalToConstant: 34).isActive = true
-        captureButton.widthAnchor.constraint(equalToConstant: 170).isActive = true
+        captureButton.heightAnchor.constraint(equalToConstant: 28).isActive = true
+        captureButton.widthAnchor.constraint(equalToConstant: 140).isActive = true
         updateShortcutCaptureButtonText(captureButton, text: shortcutCaptureButtonTitle(setting: setting), active: false)
         styleShortcutCaptureButton(captureButton, active: false)
         shortcutButtonsBySetting[setting.settingKey] = captureButton
