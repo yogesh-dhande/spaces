@@ -3323,11 +3323,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         statusDot.contentTintColor = isLifecycleRunning ? accentColor : .tertiaryLabelColor
         statusDot.toolTip = isLifecycleRunning ? "Running" : "Stopped"
         statusDot.setContentHuggingPriority(.required, for: .horizontal)
-        let projectLabel = NSTextField(labelWithString: "\(project.name) /")
-        projectLabel.font = .systemFont(ofSize: 20, weight: .semibold)
-        projectLabel.textColor = sidebarPrimaryTextColor(isSelected: false, isArchived: false)
-        projectLabel.setContentHuggingPriority(.required, for: .horizontal)
-
         let workspaceTitleLabel = NSTextField(labelWithString: inlineWorkspaceFieldDisplayValue(workspace.title, field: .title))
         workspaceTitleLabel.font = .systemFont(ofSize: 20, weight: .semibold)
         workspaceTitleLabel.textColor = sidebarPrimaryTextColor(isSelected: false, isArchived: false)
@@ -3368,7 +3363,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         headerRow.alignment = .centerY
         headerRow.spacing = 8
         headerRow.addArrangedSubview(statusDot)
-        headerRow.addArrangedSubview(projectLabel)
         headerRow.addArrangedSubview(workspaceTitleLabel)
         headerRow.addArrangedSubview(runtimeWarningIcon)
         headerRow.addArrangedSubview(workspaceTitleField)
@@ -3391,86 +3385,49 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         workspaceTitleLabel.addGestureRecognizer(titleDoubleClick)
         workspaceTitleLabel.toolTip = "Double-click to edit title."
 
-        // --- Metadata rows ---
-        let dirRow = NSStackView()
-        dirRow.orientation = .horizontal
-        dirRow.alignment = .centerY
-        dirRow.spacing = 4
-        let folderIcon = NSImageView()
-        folderIcon.image = NSImage(systemSymbolName: "folder", accessibilityDescription: "Directory")
-        folderIcon.contentTintColor = .secondaryLabelColor
-        folderIcon.setContentHuggingPriority(.required, for: .horizontal)
-        let dirField = NSTextField(labelWithString: workspace.dir)
-        dirField.font = .systemFont(ofSize: 12)
-        dirField.textColor = .secondaryLabelColor
-        dirField.lineBreakMode = .byTruncatingHead
+        // --- Directory subtitle ---
+        let dirField = NSTextField(string: workspace.dir)
+        dirField.font = .monospacedSystemFont(ofSize: 11, weight: .regular)
+        dirField.textColor = .tertiaryLabelColor
+        dirField.lineBreakMode = .byTruncatingMiddle
+        dirField.isEditable = false
+        dirField.isSelectable = true
+        dirField.drawsBackground = false
+        dirField.isBordered = false
         dirField.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        let copyDirButton = NSButton(
-            image: NSImage(systemSymbolName: "doc.on.doc", accessibilityDescription: "Copy path")!, target: self,
-            action: #selector(copyDirectoryPath(_:)))
-        copyDirButton.bezelStyle = .inline
-        copyDirButton.isBordered = false
-        copyDirButton.toolTip = "Copy directory path"
-        copyDirButton.identifier = NSUserInterfaceItemIdentifier(workspace.dir)
-        copyDirButton.setAccessibilityIdentifier("workspace-detail-copy-path")
-        let revealDirButton = NSButton(
-            image: NSImage(systemSymbolName: "folder", accessibilityDescription: "Reveal in Finder")!, target: self,
-            action: #selector(revealDirectoryInFinder(_:)))
-        revealDirButton.bezelStyle = .inline
-        revealDirButton.isBordered = false
-        revealDirButton.toolTip = "Reveal in Finder"
-        revealDirButton.identifier = NSUserInterfaceItemIdentifier(workspace.dir)
-        revealDirButton.setAccessibilityIdentifier("workspace-detail-reveal-in-finder")
-        dirRow.addArrangedSubview(folderIcon)
-        dirRow.addArrangedSubview(dirField)
-        dirRow.addArrangedSubview(copyDirButton)
-        dirRow.addArrangedSubview(revealDirButton)
+        dirField.setAccessibilityIdentifier("workspace-detail-dir")
 
         // --- Inline editable metadata ---
-        let inlineBranchRow: NSView?
-        if project.isGitRepo, let branch = workspace.branch {
-            let branchRow = makeInlineWorkspaceMetadataEditRow(
-                workspaceID: workspace.id, field: .branch, icon: "arrow.triangle.branch", labelText: "Branch", value: branch,
-                placeholder: "Branch name", isEditable: !isProtectedBranchName(branch))
-            inlineBranchRow = branchRow
-        } else {
-            inlineBranchRow = nil
-        }
         let inlineTooltipRow = makeInlineWorkspaceMetadataEditRow(
             workspaceID: workspace.id, field: .tooltip, icon: "info.circle", labelText: "Tooltip", value: workspace.tooltip ?? "",
             placeholder: "Optional workspace context", isEditable: true)
 
-        // --- Action buttons ---
+        // --- Action buttons (icon-only) ---
+        let iconSymbolConfig = NSImage.SymbolConfiguration(pointSize: 16, weight: .regular)
         let launchOrRestartButton: NSButton
         if workspace.isRunning {
-            launchOrRestartButton = actionButton(
-                title: "Restart", symbol: "arrow.clockwise.circle", tooltip: "Restart", action: #selector(restartWorkspace(_:)), primary: false)
+            launchOrRestartButton = NSButton(
+                image: NSImage(systemSymbolName: "arrow.clockwise.circle", accessibilityDescription: "Restart")!.withSymbolConfiguration(
+                    iconSymbolConfig)!, target: self, action: #selector(restartWorkspace(_:)))
         } else {
-            launchOrRestartButton = actionButton(
-                title: "Launch", symbol: "play.circle", tooltip: "Launch", action: #selector(launchWorkspace(_:)), primary: false)
+            launchOrRestartButton = NSButton(
+                image: NSImage(systemSymbolName: "play.circle", accessibilityDescription: "Launch")!.withSymbolConfiguration(iconSymbolConfig)!,
+                target: self, action: #selector(launchWorkspace(_:)))
         }
+        launchOrRestartButton.bezelStyle = .inline
+        launchOrRestartButton.isBordered = false
+        launchOrRestartButton.toolTip = workspace.isRunning ? "Restart" : "Launch"
         launchOrRestartButton.identifier = NSUserInterfaceItemIdentifier(workspace.id)
         launchOrRestartButton.setAccessibilityIdentifier("workspace-detail-launch-restart")
-        let stopButton = actionButton(title: "Stop", symbol: "stop.circle", tooltip: "Stop", action: #selector(stopWorkspace(_:)), primary: false)
+
+        let stopButton = NSButton(
+            image: NSImage(systemSymbolName: "stop.circle", accessibilityDescription: "Stop")!.withSymbolConfiguration(iconSymbolConfig)!,
+            target: self, action: #selector(stopWorkspace(_:)))
+        stopButton.bezelStyle = .inline
+        stopButton.isBordered = false
+        stopButton.toolTip = "Stop"
         stopButton.identifier = NSUserInterfaceItemIdentifier(workspace.id)
         stopButton.setAccessibilityIdentifier("workspace-detail-stop")
-        let activeToggleButton = actionButton(
-            title: workspace.isActive ? "Deactivate" : "Activate", symbol: workspace.isActive ? "eye.slash" : "eye",
-            tooltip: workspace.isActive ? "Hide this workspace from the sidebar by default" : "Show this workspace in the sidebar by default",
-            action: #selector(toggleWorkspaceActive(_:)), primary: false)
-        activeToggleButton.identifier = NSUserInterfaceItemIdentifier(workspace.id)
-        let archiveButton = actionButton(
-            title: "Archive", symbol: "archivebox", tooltip: "Archive", action: #selector(archiveWorkspace(_:)), primary: false)
-        archiveButton.identifier = NSUserInterfaceItemIdentifier(workspace.id)
-        archiveButton.setAccessibilityIdentifier("workspace-detail-archive")
-        let muted = NSColor.systemRed.withAlphaComponent(0.6)
-        let redTitle = NSMutableAttributedString(
-            string: "Archive", attributes: [.foregroundColor: muted, .font: archiveButton.font ?? NSFont.systemFont(ofSize: 13)])
-        archiveButton.attributedTitle = redTitle
-        if let baseImage = NSImage(systemSymbolName: "archivebox", accessibilityDescription: "Archive") {
-            let config = NSImage.SymbolConfiguration(paletteColors: [muted])
-            archiveButton.image = baseImage.withSymbolConfiguration(config)
-        }
 
         let overflowButton = NSButton(
             image: NSImage(systemSymbolName: "ellipsis.circle", accessibilityDescription: "More actions")!, target: self,
@@ -3481,22 +3438,21 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         overflowButton.identifier = NSUserInterfaceItemIdentifier(workspace.id)
         overflowButton.setAccessibilityIdentifier("workspace-detail-overflow")
 
-        let topActionRow = NSStackView()
-        topActionRow.orientation = .horizontal
-        topActionRow.alignment = .centerY
-        topActionRow.spacing = 8
-        topActionRow.addArrangedSubview(NSView())
-        topActionRow.addArrangedSubview(launchOrRestartButton)
-        topActionRow.addArrangedSubview(stopButton)
-        topActionRow.addArrangedSubview(activeToggleButton)
-        topActionRow.addArrangedSubview(overflowButton)
+        // Add action buttons to the right side of the header row
+        let actionSpacer = NSView()
+        actionSpacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        headerRow.addArrangedSubview(actionSpacer)
+        headerRow.addArrangedSubview(launchOrRestartButton)
+        headerRow.addArrangedSubview(stopButton)
+        headerRow.addArrangedSubview(overflowButton)
 
         let headerAndActionsRow = NSStackView()
         headerAndActionsRow.orientation = .vertical
         headerAndActionsRow.alignment = .leading
         headerAndActionsRow.spacing = 4
-        headerAndActionsRow.addArrangedSubview(topActionRow)
         headerAndActionsRow.addArrangedSubview(headerRow)
+        headerAndActionsRow.addArrangedSubview(dirField)
+        headerAndActionsRow.setCustomSpacing(2, after: headerRow)
         if let warningSummary = runtimeStatus.warningSummary {
             let warningLabel = NSTextField(labelWithString: warningSummary)
             warningLabel.font = .systemFont(ofSize: 11)
@@ -3530,22 +3486,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let stopScriptSection = workspaceStopScriptSection(workspace: workspace)
 
         stack.addArrangedSubview(headerAndActionsRow)
-        if let inlineBranchRow {
-            let combinedRow = NSStackView()
-            combinedRow.orientation = .horizontal
-            combinedRow.alignment = .centerY
-            combinedRow.spacing = 12
-            combinedRow.translatesAutoresizingMaskIntoConstraints = false
-            inlineBranchRow.setContentHuggingPriority(.defaultHigh, for: .horizontal)
-            inlineBranchRow.setContentCompressionResistancePriority(.defaultHigh, for: .horizontal)
-            dirRow.setContentHuggingPriority(.defaultLow, for: .horizontal)
-            combinedRow.addArrangedSubview(inlineBranchRow)
-            combinedRow.addArrangedSubview(dirRow)
-            stack.addArrangedSubview(combinedRow)
-            constrainFormFieldToFillWidth(combinedRow, in: stack)
-        } else {
-            stack.addArrangedSubview(dirRow)
-        }
         stack.addArrangedSubview(inlineTooltipRow)
         for section in Self.orderedWorkspaceDetailSections(
             processesSection: processesSection, browserSessionsSection: browserSessionsSection, agentLaunchersSection: agentLaunchersSection,
@@ -3555,12 +3495,13 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             constrainFormFieldToFillWidth(section, in: stack)
             stack.setCustomSpacing(10, after: section)
         }
-        stack.addArrangedSubview(archiveButton)
+        if let agentLaunchersSection { stack.setCustomSpacing(36, after: agentLaunchersSection) }
+        if let portsSection { stack.setCustomSpacing(20, after: portsSection) }
         stack.setCustomSpacing(16, after: headerAndActionsRow)
         stack.setCustomSpacing(20, after: inlineTooltipRow)
         constrainFormFieldToFillWidth(inlineTooltipRow, in: stack)
-        constrainFormFieldToFillWidth(topActionRow, in: headerAndActionsRow)
         constrainFormFieldToFillWidth(headerRow, in: headerAndActionsRow)
+        constrainFormFieldToFillWidth(dirField, in: headerAndActionsRow)
         constrainFormFieldToFillWidth(headerAndActionsRow, in: stack)
         showScrollableDetailStack(stack)
         detailContainer.layoutSubtreeIfNeeded()
@@ -3854,20 +3795,13 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             case .branch: "workspace-detail-branch"
             case .tooltip: "workspace-detail-tooltip"
             }
+        let isMultiline = field == .tooltip
         let row = NSStackView()
         row.orientation = .horizontal
-        row.alignment = .centerY
+        row.alignment = isMultiline ? .top : .centerY
         row.spacing = 8
         row.translatesAutoresizingMaskIntoConstraints = false
         row.setAccessibilityIdentifier("\(automationID)-row")
-        if field == .tooltip, !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            row.wantsLayer = true
-            row.layer?.cornerRadius = UIRadius.compact
-            row.layer?.borderWidth = 1
-            row.layer?.borderColor = sidebarCardBorderColor(isSelected: false).cgColor
-            row.layer?.backgroundColor = sidebarThemeColor(light: (241, 239, 230), dark: (23, 33, 36)).cgColor
-            row.edgeInsets = NSEdgeInsets(top: 6, left: 8, bottom: 6, right: 8)
-        }
 
         let iconView = NSImageView()
         iconView.image = NSImage(systemSymbolName: icon, accessibilityDescription: labelText)
@@ -3877,7 +3811,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let valueLabel = NSTextField(labelWithString: inlineWorkspaceFieldDisplayValue(value, field: field))
         valueLabel.font = .systemFont(ofSize: 12)
         valueLabel.textColor = .secondaryLabelColor
-        valueLabel.lineBreakMode = .byTruncatingTail
+        valueLabel.lineBreakMode = isMultiline ? .byWordWrapping : .byTruncatingTail
+        if isMultiline { valueLabel.maximumNumberOfLines = 0 }
         valueLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         valueLabel.setAccessibilityIdentifier("\(automationID)-label")
         valueLabel.toolTip =
@@ -3893,6 +3828,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         textField.font = .systemFont(ofSize: 12)
         textField.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         textField.setAccessibilityIdentifier("\(automationID)-input")
+        if isMultiline {
+            textField.usesSingleLineMode = false
+            (textField.cell as? NSTextFieldCell)?.wraps = true
+            (textField.cell as? NSTextFieldCell)?.isScrollable = false
+        }
 
         let saveButton = NSButton(title: "Save", target: self, action: #selector(saveInlineWorkspaceMetadata(_:)))
         saveButton.controlSize = .small
@@ -5301,8 +5241,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         }
     }
 
-    @objc private func toggleWorkspaceActive(_ sender: NSButton) {
-        guard let id = sender.identifier?.rawValue else { return }
+    @objc private func toggleWorkspaceActive(_ sender: Any) {
+        guard let id = Self.senderIdentifier(sender) else { return }
         guard let (_, workspace) = findWorkspace(id: id) else { return }
         let targetIsActive = !workspace.isActive
         if !targetIsActive, workspace.isRunning {
@@ -5310,39 +5250,40 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             alert.alertStyle = .warning
             alert.messageText = "Deactivate workspace?"
             alert.informativeText =
-                "“\(workspace.title)” is currently running. Deactivating it will stop the workspace first, then hide it from the sidebar by default."
+                "\"\(workspace.title)\" is currently running. Deactivating it will stop the workspace first, then hide it from the sidebar by default."
             alert.addButton(withTitle: "Stop and Deactivate")
             alert.addButton(withTitle: "Cancel")
             let response = alert.runModal()
             guard response == .alertFirstButtonReturn else { return }
         }
-        sender.isEnabled = false
-        Task { @MainActor [weak self, weak sender] in
+        let button = sender as? NSButton
+        button?.isEnabled = false
+        Task { @MainActor [weak self, weak button] in
             guard let self else { return }
             if !targetIsActive, workspace.isRunning {
                 let stopResult = await Self.runWorkspaceLifecycleAction(.stop, workspaceID: id)
                 switch stopResult {
                 case .success(let outcome): if let notice = outcome.notice { showInfoMessage(title: "Workspace Stopped", message: notice) }
                 case .failure(let error):
-                    sender?.isEnabled = true
+                    button?.isEnabled = true
                     showError(error)
                     return
                 }
             }
             do {
                 try orchestrator.updateWorkspaceActive(workspaceID: id, isActive: targetIsActive)
-                sender?.isEnabled = true
+                button?.isEnabled = true
                 if !targetIsActive, !showInactiveWorkspaces, selectedWorkspaceID == id { selectedWorkspaceID = nil }
                 reloadData()
             } catch {
-                sender?.isEnabled = true
+                button?.isEnabled = true
                 showError(error)
             }
         }
     }
 
-    @objc private func archiveWorkspace(_ sender: NSButton) {
-        guard let id = sender.identifier?.rawValue else { return }
+    @objc private func archiveWorkspace(_ sender: Any) {
+        guard let id = Self.senderIdentifier(sender) else { return }
         let workspace = workspacesByProject.values.flatMap({ $0 }).first(where: { $0.id == id })
         if workspace?.isDefault == true {
             showInfoMessage(
@@ -5359,10 +5300,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         alert.addButton(withTitle: "Cancel")
         let response = alert.runModal()
         guard response == .alertFirstButtonReturn else { return }
+        let button = sender as? NSButton
         let didOptimisticallyArchive = optimisticallyArchiveWorkspaceInSidebar(workspaceID: id)
-        if !didOptimisticallyArchive { sender.isEnabled = false }
+        if !didOptimisticallyArchive { button?.isEnabled = false }
         showOperationProgressOverlay(message: "Archiving workspace...", detail: "Stopping runtime state and cleaning up workspace files.")
-        Task { @MainActor [weak self, weak sender] in
+        Task { @MainActor [weak self, weak button] in
             guard let self else { return }
             defer { hideOperationProgressOverlay() }
             let result = await Self.runWorkspaceLifecycleAction(.archive, workspaceID: id)
@@ -5371,12 +5313,12 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 if didOptimisticallyArchive {
                     requestSidebarReload()
                 } else {
-                    sender?.isEnabled = true
+                    button?.isEnabled = true
                     reloadData()
                 }
             case .failure(let error):
                 reloadData()
-                sender?.isEnabled = true
+                button?.isEnabled = true
                 showError(error)
             }
         }
@@ -5403,10 +5345,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     }
 
     /// Stock `NSMenu` for the workspace detail ⋯ overflow. Items carry the
-    /// workspace path (for Copy/Reveal) or workspace ID (for Archive) in their
+    /// workspace path (for Copy/Reveal) or workspace ID (for Archive/Deactivate) in their
     /// `identifier.rawValue`, letting the underlying action methods stay
     /// unchanged whether they're triggered by a button or a menu item.
-    static func makeWorkspaceOverflowMenu(workspaceID: String, path: String, target: AnyObject?) -> NSMenu {
+    static func makeWorkspaceOverflowMenu(workspaceID: String, path: String, isActive: Bool, target: AnyObject?) -> NSMenu {
         let menu = NSMenu()
 
         func addItem(title: String, symbol: String?, action: Selector, keyEquivalent: String, modifiers: NSEvent.ModifierFlags, identifier: String) {
@@ -5418,13 +5360,20 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             menu.addItem(item)
         }
 
-        _ = workspaceID  // reserved for future per-workspace actions (rename, archive)
         addItem(
             title: "Copy path", symbol: "doc.on.doc", action: #selector(AppKitController.copyDirectoryPath(_:)), keyEquivalent: "c",
             modifiers: [.command, .shift], identifier: path)
         addItem(
             title: "Reveal in Finder", symbol: "folder", action: #selector(AppKitController.revealDirectoryInFinder(_:)), keyEquivalent: "f",
             modifiers: [.command, .shift], identifier: path)
+        menu.addItem(.separator())
+        addItem(
+            title: isActive ? "Deactivate" : "Activate", symbol: isActive ? "eye.slash" : "eye",
+            action: #selector(AppKitController.toggleWorkspaceActive(_:)), keyEquivalent: "", modifiers: [], identifier: workspaceID)
+        menu.addItem(.separator())
+        addItem(
+            title: "Archive…", symbol: "archivebox", action: #selector(AppKitController.archiveWorkspace(_:)), keyEquivalent: "", modifiers: [],
+            identifier: workspaceID)
         return menu
     }
 
@@ -5432,7 +5381,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         guard let workspaceID = sender.identifier?.rawValue,
             let workspace = workspacesByProject.values.flatMap({ $0 }).first(where: { $0.id == workspaceID })
         else { return }
-        let menu = Self.makeWorkspaceOverflowMenu(workspaceID: workspaceID, path: workspace.dir, target: self)
+        let menu = Self.makeWorkspaceOverflowMenu(workspaceID: workspaceID, path: workspace.dir, isActive: workspace.isActive, target: self)
         let origin = NSPoint(x: 0, y: sender.bounds.maxY + 4)
         menu.popUp(positioning: nil, at: origin, in: sender)
     }
@@ -6525,13 +6474,20 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let row = NSStackView()
         row.orientation = .horizontal
         row.alignment = .centerY
-        row.spacing = 0
+        row.spacing = 4
         row.translatesAutoresizingMaskIntoConstraints = false
 
-        // Indent the branch under the workspace label, past the 10pt status icon + 6pt title-row spacing.
         let indent = NSView()
         indent.translatesAutoresizingMaskIntoConstraints = false
         indent.widthAnchor.constraint(equalToConstant: 16).isActive = true
+        indent.setContentHuggingPriority(.required, for: .horizontal)
+
+        let branchIcon = NSImageView()
+        branchIcon.image = NSImage(systemSymbolName: "arrow.triangle.branch", accessibilityDescription: "Branch")
+        branchIcon.contentTintColor = textColor
+        branchIcon.translatesAutoresizingMaskIntoConstraints = false
+        branchIcon.widthAnchor.constraint(equalToConstant: 10).isActive = true
+        branchIcon.heightAnchor.constraint(equalToConstant: 10).isActive = true
 
         let label = NSTextField(labelWithString: trimmed)
         label.font = .monospacedSystemFont(ofSize: 10.5, weight: .regular)
@@ -6541,6 +6497,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         label.setAccessibilityIdentifier(accessibilityID)
 
         row.addArrangedSubview(indent)
+        row.addArrangedSubview(branchIcon)
         row.addArrangedSubview(label)
         return row
     }
