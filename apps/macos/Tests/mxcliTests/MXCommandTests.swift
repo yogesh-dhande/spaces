@@ -263,7 +263,7 @@ final class MXCommandTests: XCTestCase {
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
         let project = ProjectRecord(
             id: UUID().uuidString, name: "TestProject", dir: projectDir.path, isGitRepo: false, defaultBranch: nil, setupScript: nil, stopScript: nil,
-            ports: [], processes: [], statusChecks: [], browserSessions: [])
+            ports: [], processes: [], browserSessions: [])
         try store.upsert(project: project)
         let workspace = WorkspaceRecord(
             id: UUID().uuidString, projectID: project.id, title: "default", dir: projectDir.appendingPathComponent("default", isDirectory: true).path,

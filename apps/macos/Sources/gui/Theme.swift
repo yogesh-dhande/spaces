@@ -160,6 +160,18 @@ enum Theme {
         applyButtonLayout(to: button)
     }
 
+    /// Applies a borderless text-button style for low-emphasis actions.
+    @MainActor static func applyTextStyle(to button: NSButton, color: NSColor = .secondaryLabelColor) {
+        button.isBordered = false
+        button.wantsLayer = false
+        button.layer = nil
+        button.contentTintColor = color
+        button.attributedTitle = NSAttributedString(
+            string: button.title, attributes: [.foregroundColor: color, .font: NSFont.systemFont(ofSize: 13, weight: .medium)])
+        button.translatesAutoresizingMaskIntoConstraints = false
+        button.setContentHuggingPriority(.required, for: .horizontal)
+    }
+
     // MARK: Helpers
 
     private static func dynamic(light: (Int, Int, Int), dark: (Int, Int, Int), alpha: CGFloat = 1.0) -> NSColor {

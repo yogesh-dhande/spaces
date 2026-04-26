@@ -59,12 +59,6 @@ export const docsPageLinks: DocsPageLink[] = [
       "Track Claude Code, Codex, and other coding agents per workspace, and wire up global hooks so each session reports its state to Muxy automatically.",
   },
   {
-    href: "/docs/status-checks",
-    title: "Status Checks",
-    summary:
-      "Get instant passed/failed health feedback on running processes before you switch context.",
-  },
-  {
     href: "/docs/shortcuts",
     title: "Keyboard Shortcuts",
     summary:
@@ -102,7 +96,7 @@ export const cookbookGuides: CookbookGuideLink[] = [
     href: "/docs/guides/nextjs-host",
     title: "Next.js (No Docker)",
     summary:
-      "Single-repo frontend running directly on host with Muxy-managed ports and status checks.",
+      "Single-repo frontend running directly on host with Muxy-managed ports.",
     stack: ["Next.js", "Host"],
   },
   {
@@ -143,7 +137,6 @@ export const docsPublishingOrder = [
   "Workspace Lifecycle",
   "Window Management",
   "Processes",
-  "Status Checks",
   "Browser Sessions",
   "Coding Agents",
   "Keyboard Shortcuts",

@@ -297,7 +297,7 @@ private enum SetupStepAction {
         detailTitleLabel?.stringValue = step.title
         detailBodyLabel?.stringValue = step.body
         rebuildCommandBox(for: step)
-        setDetailStatusChecking()
+        setDetailStatusLoading()
     }
 
     private func rebuildCommandBox(for step: SetupStep) {
@@ -421,7 +421,7 @@ private enum SetupStepAction {
         }
     }
 
-    private func setDetailStatusChecking() {
+    private func setDetailStatusLoading() {
         detailStatusSpinner?.startAnimation(nil)
         detailStatusSpinner?.isHidden = false
         detailStatusLabel?.stringValue = "Checking..."

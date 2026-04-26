@@ -672,218 +672,6 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertEqual(try orchestrator.guiOpenFinderShortcut(), "shift+f")
     }
 
-    // Tests run status checks persists results for matching processes by arranging representative inputs and asserting the expected result.
-    func testRunStatusChecksPersistsResultsForMatchingProcesses() throws {
-        let root = try makeTempDirectory()
-        let projectDir = root.appendingPathComponent("project", isDirectory: true)
-        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
-        let store = try makeTemporaryStore()
-        let orchestrator = MuxyOrchestrator(store: store)
-
-        let project = try orchestrator.addProject(dir: projectDir.path)
-        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
-        try store.touchWorkspaceSettings(workspaceID: workspace.id, updatedAt: "now")
-        try store.setWorkspaceStatusChecks(
-            workspaceID: workspace.id,
-            checks: [
-                StatusCheckDefinition(process: "api", command: "echo green", interval: 10, timeout: 2),
-                StatusCheckDefinition(name: "failing", process: "api", command: "echo red && exit 1", interval: 10, timeout: 2),
-                StatusCheckDefinition(process: "missing", command: "echo skipped", interval: 10, timeout: 2),
-            ])
-        let runningProcess = RunningProcessRecord(
-            id: UUID().uuidString, workspaceID: workspace.id, templateName: "api", command: "echo api", terminalApp: nil, windowID: nil, pid: 9000,
-            status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil)
-        try store.upsert(runningProcess: runningProcess)
-
-        let results = try orchestrator.runStatusChecks(workspaceID: workspace.id)
-
-        XCTAssertEqual(results.count, 2)
-        let byName = Dictionary(uniqueKeysWithValues: results.map { ($0.checkName, $0.status) })
-        XCTAssertEqual(byName["api"], .passed)
-        XCTAssertEqual(byName["failing"], .failed)
-
-        let persisted = try orchestrator.statusResults(processID: runningProcess.id)
-        XCTAssertEqual(persisted.count, 2)
-    }
-
-    // Tests run status checks due only respects interval by arranging representative inputs and asserting the expected result.
-    func testRunStatusChecksDueOnlyRespectsInterval() throws {
-        let root = try makeTempDirectory()
-        let projectDir = root.appendingPathComponent("project", isDirectory: true)
-        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
-        let store = try makeTemporaryStore()
-        let orchestrator = MuxyOrchestrator(store: store)
-
-        let project = try orchestrator.addProject(dir: projectDir.path)
-        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
-        try store.touchWorkspaceSettings(workspaceID: workspace.id, updatedAt: "now")
-        try store.setWorkspaceStatusChecks(
-            workspaceID: workspace.id,
-            checks: [StatusCheckDefinition(name: "health", process: "api", command: "echo ok", interval: 60, timeout: 2, onFail: .none)])
-        let runningProcess = RunningProcessRecord(
-            id: UUID().uuidString, workspaceID: workspace.id, templateName: "api", command: "echo api", terminalApp: nil, windowID: nil, pid: 9000,
-            status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil)
-        try store.upsert(runningProcess: runningProcess)
-
-        let now = Date()
-        let firstRun = try orchestrator.runStatusChecks(workspaceID: workspace.id, dueOnly: true, now: now)
-        XCTAssertEqual(firstRun.count, 1)
-
-        let secondRunWithinInterval = try orchestrator.runStatusChecks(workspaceID: workspace.id, dueOnly: true, now: now.addingTimeInterval(5))
-        XCTAssertTrue(secondRunWithinInterval.isEmpty)
-
-        let forcedRun = try orchestrator.runStatusChecks(workspaceID: workspace.id, dueOnly: false, now: now.addingTimeInterval(5))
-        XCTAssertEqual(forcedRun.count, 1)
-    }
-
-    // Tests run due status checks for running workspaces runs checks by arranging representative inputs and asserting the expected result.
-    func testRunDueStatusChecksForRunningWorkspacesRunsChecks() throws {
-        let root = try makeTempDirectory()
-        let projectDir = root.appendingPathComponent("project", isDirectory: true)
-        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
-        let store = try makeTemporaryStore()
-        let orchestrator = MuxyOrchestrator(store: store)
-
-        let project = try orchestrator.addProject(dir: projectDir.path)
-        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
-        try store.touchWorkspaceSettings(workspaceID: workspace.id, updatedAt: "now")
-        try store.updateWorkspaceRunning(id: workspace.id, isRunning: true, launchedAt: ISO8601DateFormatter().string(from: Date()))
-        try store.setWorkspaceStatusChecks(
-            workspaceID: workspace.id,
-            checks: [StatusCheckDefinition(name: "health", process: "api", command: "echo ok", interval: 10, timeout: 2, onFail: .none)])
-        let runningProcess = RunningProcessRecord(
-            id: UUID().uuidString, workspaceID: workspace.id, templateName: "api", command: "echo api", terminalApp: nil, windowID: nil, pid: 9000,
-            status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil)
-        try store.upsert(runningProcess: runningProcess)
-
-        let didRunChecks = try orchestrator.runDueStatusChecksForRunningWorkspaces(now: Date())
-        XCTAssertTrue(didRunChecks)
-
-        let persisted = try orchestrator.statusResults(processID: runningProcess.id)
-        XCTAssertEqual(persisted.count, 1)
-        XCTAssertEqual(persisted.first?.checkName, "health")
-        XCTAssertEqual(persisted.first?.status, .passed)
-    }
-
-    // Tests status check on fail none does nothing by arranging representative inputs and asserting the expected result.
-    func testStatusCheckOnFailNoneDoesNothing() throws {
-        let root = try makeTempDirectory()
-        let projectDir = root.appendingPathComponent("project", isDirectory: true)
-        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
-        let store = try makeTemporaryStore()
-        let orchestrator = MuxyOrchestrator(store: store)
-
-        let project = try orchestrator.addProject(dir: projectDir.path)
-        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
-        try store.touchWorkspaceSettings(workspaceID: workspace.id, updatedAt: "now")
-        try store.setWorkspaceStatusChecks(
-            workspaceID: workspace.id,
-            checks: [StatusCheckDefinition(process: "api", command: "echo failed && exit 1", interval: 10, timeout: 2, onFail: .none)])
-        let runningProcess = RunningProcessRecord(
-            id: UUID().uuidString, workspaceID: workspace.id, templateName: "api", command: "echo api", terminalApp: nil, windowID: nil, pid: 9000,
-            status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil)
-        try store.upsert(runningProcess: runningProcess)
-
-        let results = try orchestrator.runStatusChecks(workspaceID: workspace.id)
-
-        XCTAssertEqual(results.count, 1)
-        XCTAssertEqual(results.first?.status, .failed)
-        // Process should still be running (no restart)
-        let currentProcess = try store.runningProcesses(workspaceID: workspace.id).first!
-        XCTAssertEqual(currentProcess.status, .running)
-        XCTAssertEqual(currentProcess.pid, 9000)
-    }
-
-    // Tests status check on fail notify shows notification by arranging representative inputs and asserting the expected result.
-    func testStatusCheckOnFailNotifyShowsNotification() throws {
-        let root = try makeTempDirectory()
-        let projectDir = root.appendingPathComponent("project", isDirectory: true)
-        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
-        let store = try makeTemporaryStore()
-        let orchestrator = MuxyOrchestrator(store: store)
-
-        let project = try orchestrator.addProject(dir: projectDir.path)
-        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
-        try store.touchWorkspaceSettings(workspaceID: workspace.id, updatedAt: "now")
-        try store.setWorkspaceStatusChecks(
-            workspaceID: workspace.id,
-            checks: [
-                StatusCheckDefinition(name: "health", process: "api", command: "echo unhealthy && exit 1", interval: 10, timeout: 2, onFail: .notify)
-            ])
-        let runningProcess = RunningProcessRecord(
-            id: UUID().uuidString, workspaceID: workspace.id, templateName: "api", command: "echo api", terminalApp: nil, windowID: nil, pid: 9000,
-            status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil)
-        try store.upsert(runningProcess: runningProcess)
-
-        let results = try orchestrator.runStatusChecks(workspaceID: workspace.id)
-
-        XCTAssertEqual(results.count, 1)
-        XCTAssertEqual(results.first?.status, .failed)
-        // Process should still be running (no restart)
-        let currentProcess = try store.runningProcesses(workspaceID: workspace.id).first!
-        XCTAssertEqual(currentProcess.status, .running)
-        XCTAssertEqual(currentProcess.pid, 9000)
-        // Note: We can't easily test the actual notification delivery without complex mocking
-        // but we can verify the process wasn't restarted, which is the key behavior
-    }
-
-    // Tests status check on fail restart restarts process by arranging representative inputs and asserting the expected result.
-    func testStatusCheckOnFailRestartRestartsProcess() throws {
-        let root = try makeTempDirectory()
-        let projectDir = root.appendingPathComponent("project", isDirectory: true)
-        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
-        let store = try makeTemporaryStore()
-        let mockIterm = MockIterm2Adapter()
-        let mockTmux = MockTmuxAdapter()
-        mockIterm.pairedTmux = mockTmux
-        let orchestrator = MuxyOrchestrator(store: store, iterm: mockIterm, tmux: mockTmux)
-
-        let project = try orchestrator.addProject(dir: projectDir.path)
-        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
-        mockTmux.createSession(named: "muxy-\(workspace.id)")
-        _ = mockTmux.addWindow(sessionName: "muxy-\(workspace.id)", id: "@1", name: "api", index: 0, isActive: true)
-        try store.touchWorkspaceSettings(workspaceID: workspace.id, updatedAt: "now")
-        try store.setWorkspaceStatusChecks(
-            workspaceID: workspace.id,
-            checks: [
-                StatusCheckDefinition(name: "health", process: "api", command: "echo crashed && exit 1", interval: 10, timeout: 2, onFail: .restart)
-            ])
-        try store.upsert(
-            window: WindowRecord(
-                id: UUID().uuidString, workspaceID: workspace.id, app: "iTerm2", title: "api", windowID: 123, terminalTrackingID: "workspace-session",
-                tmuxWindowID: "@1", role: "terminal", orderIndex: 200, lastSeenAt: "now"))
-        let runningProcess = RunningProcessRecord(
-            id: UUID().uuidString, workspaceID: workspace.id, templateName: "api", command: "npm start", terminalApp: "iTerm2", windowID: 123,
-            terminalTrackingID: "workspace-session", itermTabIndex: nil, tmuxWindowID: "@1", pid: 9000, status: .running, logPath: nil,
-            lastOutputAt: nil, startedAt: "now", exitedAt: nil)
-        try store.upsert(runningProcess: runningProcess)
-
-        var results: [StatusResult] = []
-        try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) {
-            try withEnv(
-                name: "YABAI_WINDOWS_JSON",
-                value:
-                    #"[{"id":123,"pid":11,"app":"iTerm2","title":"api","space":1,"display":1,"is-sticky":false,"is-hidden":false,"is-visible":true,"is-native-fullscreen":false}]"#
-            ) { results = try orchestrator.runStatusChecks(workspaceID: workspace.id) }
-        }
-
-        XCTAssertEqual(results.count, 1)
-        XCTAssertEqual(results.first?.status, .failed)
-        XCTAssertEqual(mockIterm.openWindowAndRunCallCount, 1)
-        XCTAssertEqual(mockTmux.respawnWindowCallCount, 0)
-        XCTAssertTrue(mockTmux.respawnedWindowIDs.isEmpty)
-        let currentProcesses = try store.runningProcesses(workspaceID: workspace.id)
-        XCTAssertEqual(currentProcesses.count, 1)
-        let currentProcess = currentProcesses.first!
-        XCTAssertEqual(currentProcess.status, .running)
-        XCTAssertNotEqual(currentProcess.windowID, 123)
-        XCTAssertEqual(currentProcess.tmuxWindowID, try mockTmux.currentWindow(sessionName: "muxy-\(workspace.id)-api")?.id)
-        let expectedPID = try mockTmux.currentWindow(sessionName: "muxy-\(workspace.id)-api")?.panePID
-        XCTAssertEqual(currentProcess.pid, expectedPID)
-    }
-
-    // Tests status check on fail restart with missing pid does not crash by arranging representative inputs and asserting the expected result.
-
     // Tests check and update process statuses marks dead process as exited by arranging representative inputs and asserting the expected result.
     func testCheckAndUpdateProcessStatusesMarksDeadProcessAsExited() throws {
         let root = try makeTempDirectory()
@@ -907,40 +695,6 @@ final class OrchestratorTests: XCTestCase {
         let updated = try store.runningProcesses(workspaceID: workspace.id).first
         XCTAssertEqual(updated?.status, .exited)
         XCTAssertNotNil(updated?.exitedAt)
-    }
-
-    // Tests that status check results are marked as red when a process exits, so they don't stay green.
-    func testCheckAndUpdateProcessStatusesMarksStatusResultsAsFailedOnExit() throws {
-        let root = try makeTempDirectory()
-        let projectDir = root.appendingPathComponent("project", isDirectory: true)
-        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
-        let store = try makeTemporaryStore()
-        let mockTmux = MockTmuxAdapter()
-        let orchestrator = MuxyOrchestrator(store: store, tmux: mockTmux)
-
-        let project = try orchestrator.addProject(dir: projectDir.path)
-        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
-        let liveWindow = mockTmux.addWindow(sessionName: "muxy-\(workspace.id)", id: "@1", name: "api", index: 0, isActive: true)
-
-        // Create a dead process with a previously-green status result
-        let deadProcess = RunningProcessRecord(
-            id: UUID().uuidString, workspaceID: workspace.id, templateName: "api", command: "npm start", terminalApp: "iTerm2", windowID: 123,
-            terminalTrackingID: "workspace-session", itermTabIndex: nil, tmuxWindowID: liveWindow.id, pid: 99999, status: .running, logPath: nil,
-            lastOutputAt: nil, startedAt: ISO8601DateFormatter().string(from: Date().addingTimeInterval(-20)), exitedAt: nil)
-        try store.upsert(runningProcess: deadProcess)
-
-        // Simulate a previously-passing status check result
-        let greenResult = StatusResult(
-            processID: deadProcess.id, checkName: "health", status: .passed, message: nil, lastRunAt: ISO8601DateFormatter().string(from: Date()))
-        try store.upsert(statusResult: greenResult)
-
-        let didUpdate = try orchestrator.checkAndUpdateProcessStatuses()
-
-        XCTAssertTrue(didUpdate)
-        let results = try store.statusResults(processID: deadProcess.id)
-        XCTAssertEqual(results.count, 1)
-        // Status result must be red after process exit — not stale green
-        XCTAssertEqual(results.first?.status, .failed)
     }
 
     // Tests check and update process statuses skips newly started processes by arranging representative inputs and asserting the expected result.
@@ -2951,7 +2705,6 @@ final class OrchestratorTests: XCTestCase {
             p.setupScript = "echo setup"
             p.stopScript = "echo stop"
             p.processes = [ProcessTemplate(name: "api", command: "npm run api")]
-            p.statusChecks = [StatusCheckDefinition(name: "health", process: "api", command: "echo ok", interval: 10, timeout: 2, onFail: .notify)]
             p.browserSessions = [BrowserSession(name: "Docs", url: "https://example.com")]
         }
 
@@ -2959,7 +2712,6 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertEqual(loaded?.setupScript, "echo setup")
         XCTAssertEqual(loaded?.stopScript, "echo stop")
         XCTAssertEqual(loaded?.processes.first?.name, "api")
-        XCTAssertEqual(loaded?.statusChecks.first?.name, "health")
         XCTAssertEqual(loaded?.browserSessions.first?.url, "https://example.com")
     }
 
@@ -3033,14 +2785,12 @@ final class OrchestratorTests: XCTestCase {
         try orchestrator.updateProjectConfig(projectID: project.id) { config in
             config.stopScript = "echo stop"
             config.processes = [ProcessTemplate(name: "api", command: "npm run api")]
-            config.statusChecks = [StatusCheckDefinition(name: "health", process: "api", command: "echo ok", interval: 30, timeout: 3)]
             config.browserSessions = [BrowserSession(name: "Docs", url: "https://example.com")]
         }
 
         let settings = try orchestrator.workspaceSettings(workspaceID: defaultWorkspace.id)
         XCTAssertEqual(settings?.stopScript, "echo stop")
         XCTAssertEqual(settings?.processes.first?.name, "api")
-        XCTAssertEqual(settings?.statusChecks.first?.name, "health")
         XCTAssertEqual(settings?.browserSessions.first?.url, "https://example.com")
     }
 
@@ -3058,21 +2808,18 @@ final class OrchestratorTests: XCTestCase {
         try orchestrator.updateProjectConfig(projectID: project.id) { config in
             config.stopScript = "echo project-stop"
             config.processes = [ProcessTemplate(name: "api", command: "npm run api")]
-            config.statusChecks = [StatusCheckDefinition(name: "health", process: "api", command: "echo ok", interval: 30, timeout: 3)]
             config.browserSessions = [BrowserSession(name: "Docs", url: "https://example.com")]
         }
 
         try orchestrator.updateWorkspaceSettings(workspaceID: defaultWorkspace.id) { settings in
             settings.stopScript = "echo workspace-stop"
             settings.processes = [ProcessTemplate(name: "custom", command: "echo custom")]
-            settings.statusChecks = []
             settings.browserSessions = [BrowserSession(name: "Custom Docs", url: "https://custom.example.com")]
         }
 
         try orchestrator.updateProjectConfig(projectID: project.id) { config in
             config.stopScript = "echo project-stop-v2"
             config.processes = [ProcessTemplate(name: "api", command: "npm run api:v2")]
-            config.statusChecks = [StatusCheckDefinition(name: "health-v2", process: "api", command: "echo ok v2", interval: 45, timeout: 5)]
             config.browserSessions = [BrowserSession(name: "Docs", url: "https://example.com/v2")]
         }
 
@@ -3080,7 +2827,6 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertEqual(settings?.stopScript, "echo workspace-stop")
         XCTAssertEqual(settings?.processes.first?.name, "custom")
         XCTAssertEqual(settings?.processes.first?.command, "echo custom")
-        XCTAssertTrue(settings?.statusChecks.isEmpty ?? false)
         XCTAssertEqual(settings?.browserSessions.first?.url, "https://custom.example.com")
     }
 
@@ -3403,7 +3149,6 @@ final class OrchestratorTests: XCTestCase {
                 settings.stopScript = "echo workspace-stop"
                 settings.ports = [PortDefinition(name: "API_PORT"), PortDefinition(name: "WEB_PORT")]
                 settings.processes = [ProcessTemplate(name: "job", command: "echo job")]
-                settings.statusChecks = [StatusCheckDefinition(process: "job", command: "echo ok", interval: 30, timeout: 3)]
                 settings.browserSessions = []
             }
         }
@@ -3411,7 +3156,6 @@ final class OrchestratorTests: XCTestCase {
         let settings = try orchestrator.workspaceSettings(workspaceID: workspace.id)
         XCTAssertEqual(settings?.stopScript, "echo workspace-stop")
         XCTAssertEqual(settings?.processes.first?.name, "job")
-        XCTAssertEqual(settings?.statusChecks.first?.process, "job")
         XCTAssertTrue(settings?.browserSessions.isEmpty ?? false)
         XCTAssertEqual(try orchestrator.workspacePorts(workspaceID: workspace.id), [4100, 4101])
         XCTAssertEqual(try orchestrator.runningProcesses(workspaceID: workspace.id).count, 1)

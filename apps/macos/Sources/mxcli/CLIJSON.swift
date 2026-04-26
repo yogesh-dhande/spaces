@@ -17,12 +17,6 @@ enum CLITextRenderer {
             contentsOf: settings.processes.isEmpty
                 ? ["process\t-"] : settings.processes.map { "process\t\($0.name ?? "-")\t\($0.command)\ton-exit=\($0.onExit.rawValue)" })
         lines.append(
-            contentsOf: settings.statusChecks.isEmpty
-                ? ["status-check\t-"]
-                : settings.statusChecks.map {
-                    "status-check\t\($0.name ?? "-")\tprocess=\($0.process)\tcommand=\($0.command)\tinterval=\($0.interval)\ttimeout=\($0.timeout)\ton-fail=\($0.onFail.rawValue)"
-                })
-        lines.append(
             contentsOf: settings.browserSessions.isEmpty
                 ? ["browser-session\t-"] : settings.browserSessions.map { "browser-session\t\($0.name ?? "-")\t\($0.url ?? "-")" })
         lines.append(
@@ -32,11 +26,10 @@ enum CLITextRenderer {
     }
 
     static func workspaceRuntimeLines(
-        status: WorkspaceRuntimeStatus, processes: [RunningProcessRecord], windows: [WindowRecord],
-        statusResultsByProcessID: [String: [StatusResult]], agentWindows: [AgentWindowRecord]
+        status: WorkspaceRuntimeStatus, processes: [RunningProcessRecord], windows: [WindowRecord], agentWindows: [AgentWindowRecord]
     ) -> String {
         var lines = [
-            "status\tlifecycle=\(status.lifecycleState.rawValue)\truntime-health=\(status.runtimeHealth.rawValue)\trunning-processes=\(status.runningProcessCount)\texited-processes=\(status.exitedProcessCount)\tfailed-checks=\(status.failedCheckCount)\twaiting-agents=\(status.waitingAgentWindowCount)\tmissing-processes=\(status.missingConfiguredProcessCount)\tmissing-browser-sessions=\(status.missingConfiguredBrowserSessionCount)\twarning=\(status.warningSummary ?? "-")"
+            "status\tlifecycle=\(status.lifecycleState.rawValue)\truntime-health=\(status.runtimeHealth.rawValue)\trunning-processes=\(status.runningProcessCount)\texited-processes=\(status.exitedProcessCount)\twaiting-agents=\(status.waitingAgentWindowCount)\tmissing-processes=\(status.missingConfiguredProcessCount)\tmissing-browser-sessions=\(status.missingConfiguredBrowserSessionCount)\twarning=\(status.warningSummary ?? "-")"
         ]
         lines.append(
             contentsOf: processes.isEmpty
@@ -50,14 +43,6 @@ enum CLITextRenderer {
                 : windows.map {
                     "window\trole=\($0.role)\tapp=\($0.app)\tname=\($0.name ?? "-")\tdetail=\($0.detail ?? "-")\twindow=\($0.windowID.map(String.init) ?? "-")\tlast-seen=\($0.lastSeenAt)"
                 })
-
-        let checks = processes.flatMap { process in
-            (statusResultsByProcessID[process.id] ?? []).map { result in
-                "status-check\tprocess=\(process.templateName)\tname=\(result.checkName)\tstatus=\(result.status.rawValue)\tmessage=\(result.message ?? "-")\tlast-run=\(result.lastRunAt ?? "-")"
-            }
-        }
-        lines.append(contentsOf: checks.isEmpty ? ["status-check\t-"] : checks)
-
         lines.append(
             contentsOf: agentWindows.isEmpty
                 ? ["agent\t-"]
@@ -125,7 +110,6 @@ struct WorkspaceSettingsPayload: Encodable {
     let stopScript: String?
     let ports: [PortDefinition]
     let processes: [ProcessTemplate]
-    let statusChecks: [StatusCheckDefinition]
     let browserSessions: [BrowserSession]
     let agentLaunchers: [AgentLauncher]
 }
@@ -135,7 +119,6 @@ extension WorkspaceSettingsPayload {
         stopScript = value.stopScript
         ports = value.ports
         processes = value.processes
-        statusChecks = value.statusChecks
         browserSessions = value.browserSessions
         agentLaunchers = value.agentLaunchers
     }
@@ -144,24 +127,6 @@ extension WorkspaceSettingsPayload {
 struct PortAllocationPayload: Encodable {
     let name: String
     let port: Int
-}
-
-struct StatusResultPayload: Encodable {
-    let processID: String
-    let checkName: String
-    let status: String
-    let message: String?
-    let lastRunAt: String?
-}
-
-extension StatusResultPayload {
-    init(_ value: StatusResult) {
-        processID = value.processID
-        checkName = value.checkName
-        status = value.status.rawValue
-        message = value.message
-        lastRunAt = value.lastRunAt
-    }
 }
 
 struct WindowRecordPayload: Encodable {
@@ -205,7 +170,6 @@ struct WorkspaceRuntimeStatusPayload: Encodable {
     let hasTrackedRuntimeIndicators: Bool
     let runningProcessCount: Int
     let exitedProcessCount: Int
-    let failedCheckCount: Int
     let waitingAgentWindowCount: Int
     let missingConfiguredProcessCount: Int
     let missingConfiguredBrowserSessionCount: Int
@@ -221,7 +185,6 @@ extension WorkspaceRuntimeStatusPayload {
         hasTrackedRuntimeIndicators = value.hasTrackedRuntimeIndicators
         runningProcessCount = value.runningProcessCount
         exitedProcessCount = value.exitedProcessCount
-        failedCheckCount = value.failedCheckCount
         waitingAgentWindowCount = value.waitingAgentWindowCount
         missingConfiguredProcessCount = value.missingConfiguredProcessCount
         missingConfiguredBrowserSessionCount = value.missingConfiguredBrowserSessionCount
@@ -234,7 +197,6 @@ struct WorkspaceRuntimePayload: Encodable {
     let status: WorkspaceRuntimeStatusPayload
     let processes: [RunningProcessRecord]
     let windows: [WindowRecordPayload]
-    let statusResultsByProcessID: [String: [StatusResultPayload]]
     let agentWindows: [AgentWindowRecord]
 }
 
@@ -264,7 +226,6 @@ struct DashboardPayload: Encodable {
         let detail: String?
         let processStatus: String?
         let agentStatus: String?
-        let statusChecks: [StatusResultPayload]
         let eventDate: String?
         let focusRequest: FocusRequest?
     }
@@ -297,42 +258,34 @@ enum DashboardPayloadBuilder {
                 var processByWindowID: [Int: RunningProcessRecord] = [:]
                 for process in processes { if let windowID = process.windowID { processByWindowID[windowID] = process } }
 
-                var statusResultsByProcessID: [String: [StatusResult]] = [:]
-                for process in processes { statusResultsByProcessID[process.id] = (try? orchestrator.statusResults(processID: process.id)) ?? [] }
-
                 var items: [DashboardPayload.Item] = []
                 var matchedProcessIDs: Set<String> = []
 
                 for (index, window) in windows.enumerated() {
                     guard let windowID = window.windowID, let process = processByWindowID[windowID] else { continue }
                     matchedProcessIDs.insert(process.id)
-                    let allChecks = statusResultsByProcessID[process.id] ?? []
-                    let failedChecks = allChecks.filter { $0.status == .failed }
-                    guard process.status == .exited || !failedChecks.isEmpty else { continue }
+                    guard process.status == .exited else { continue }
 
                     let presentation = itemPresentation(window: window, process: process, configuredSessions: configuredSessions)
-                    let eventDate = process.status == .exited ? process.exitedAt : failedChecks.compactMap(\.lastRunAt).max()
+                    let eventDate = process.exitedAt
 
                     items.append(
                         DashboardPayload.Item(
-                            attentionID: dashboardAttentionID(process: process, failedChecks: failedChecks),
+                            attentionID: dashboardAttentionID(process: process),
                             kind: window.role == "browser" ? "browser" : (window.role == "terminal" ? "process" : "window"), icon: presentation.icon,
                             label: presentation.label, detail: presentation.detail, processStatus: process.status.rawValue, agentStatus: nil,
-                            statusChecks: allChecks.map(StatusResultPayload.init), eventDate: eventDate,
+                            eventDate: eventDate,
                             focusRequest: dashboardFocusRequest(
                                 window: window, windowListIndex: index + 1, process: process, workspaceID: workspace.id)))
                 }
 
                 for process in processes where !matchedProcessIDs.contains(process.id) {
-                    let allChecks = statusResultsByProcessID[process.id] ?? []
-                    let failedChecks = allChecks.filter { $0.status == .failed }
-                    guard process.status == .exited || !failedChecks.isEmpty else { continue }
-                    let eventDate = process.status == .exited ? process.exitedAt : failedChecks.compactMap(\.lastRunAt).max()
+                    guard process.status == .exited else { continue }
+                    let eventDate = process.exitedAt
                     items.append(
                         DashboardPayload.Item(
-                            attentionID: dashboardAttentionID(process: process, failedChecks: failedChecks), kind: "process", icon: "terminal",
-                            label: process.templateName, detail: process.command, processStatus: process.status.rawValue, agentStatus: nil,
-                            statusChecks: allChecks.map(StatusResultPayload.init), eventDate: eventDate,
+                            attentionID: dashboardAttentionID(process: process), kind: "process", icon: "terminal", label: process.templateName,
+                            detail: process.command, processStatus: process.status.rawValue, agentStatus: nil, eventDate: eventDate,
                             focusRequest: .init(
                                 kind: "workspace_process", workspaceID: workspace.id, windowIndex: nil, processID: process.id, agentWindowID: nil,
                                 targetURL: nil)))
@@ -343,7 +296,7 @@ enum DashboardPayloadBuilder {
                         DashboardPayload.Item(
                             attentionID: dashboardAttentionID(agentWindow: agentWindow), kind: "agent", icon: "cpu.fill",
                             label: agentWindow.label ?? "Coding Agent CLI", detail: nil, processStatus: nil, agentStatus: agentWindow.status.rawValue,
-                            statusChecks: [], eventDate: agentWindow.updatedAt,
+                            eventDate: agentWindow.updatedAt,
                             focusRequest: .init(
                                 kind: "agent_window", workspaceID: agentWindow.workspaceID, windowIndex: nil, processID: nil,
                                 agentWindowID: agentWindow.id, targetURL: nil)))
@@ -378,11 +331,8 @@ enum DashboardPayloadBuilder {
         return DashboardPayload(dismissedAttentionItemIDs: dismissedIDs, groups: groups)
     }
 
-    private static func dashboardAttentionID(process: RunningProcessRecord, failedChecks: [StatusResult]) -> String {
-        if process.status == .exited { return "process:\(process.id):exited:\(process.exitedAt ?? "unknown")" }
-        let failedCheckNames = failedChecks.map(\.checkName).sorted().joined(separator: ",")
-        let latestFailure = failedChecks.compactMap(\.lastRunAt).max() ?? "unknown"
-        return "process:\(process.id):failed:\(failedCheckNames):\(latestFailure)"
+    private static func dashboardAttentionID(process: RunningProcessRecord) -> String {
+        "process:\(process.id):exited:\(process.exitedAt ?? "unknown")"
     }
 
     private static func dashboardAttentionID(agentWindow: AgentWindowRecord) -> String {

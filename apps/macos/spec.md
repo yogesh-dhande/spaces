@@ -10,7 +10,7 @@ It should reduce the overhead of:
 - starting the right processes with the right ports and environment
 - reopening the right browser and terminal windows
 - switching focus to the right window set
-- noticing attention items such as failed processes, failed checks, or coding agents waiting on a human
+- noticing attention items such as failed processes or coding agents waiting on a human
 
 Muxy provides a desktop app and a CLI for power users and coding agents.
 
@@ -31,7 +31,7 @@ Muxy provides a desktop app and a CLI for power users and coding agents.
 - Launch workspace processes inside tmux.
   This lets Muxy recover the terminal view without losing the underlying process when a supported terminal-host window is closed or needs to be recreated.
 - Keep workspace lifecycle separate from runtime health.
-  `Running` and `Stopped` should stay easy to explain, while failed processes, failed checks, or stale tracked windows surface as warnings on top of that lifecycle state.
+  `Running` and `Stopped` should stay easy to explain, while failed processes or stale tracked windows surface as warnings on top of that lifecycle state.
 - Require explicit tracked-window targets for CLI-driven focus.
   Focus should not guess which window the user meant, because arbitrary focus becomes unpredictable as workspaces collect multiple windows.
   Example: one workspace may have a frontend browser, an admin browser, an API terminal, and a coding-agent terminal all open at once. If the user clicks Focus in the GUI or runs `mx workspace up --focus`, Muxy should not silently pick whichever window was captured first or happened to survive most recently. The user may want the admin browser now and the coding-agent terminal five seconds later. Requiring an explicit tracked window target keeps focus behavior deterministic. CLI focus targets should be selected by unique window names rather than numeric positions.
@@ -51,7 +51,6 @@ A project is a codebase plus reusable templates:
 - setup and stop scripts
 - named port definitions
 - process templates
-- status checks
 - browser sessions
 
 Users configure a project once, then derive workspaces from it.
@@ -99,6 +98,7 @@ Muxy focuses those windows; it does not decide their geometry.
 - Sidebar project rows should use the leading chevron/name area to expand or collapse workspace lists.
 - Sidebar project row collapsed state should persist across app restarts and sidebar refreshes.
 - Sidebar project rows should expose a dedicated settings action that opens project settings in the detail pane.
+- The project settings pane should use the same flat detail-header treatment as workspace detail: project title and directory path at the top, then project-level configuration sections and footer actions.
 - Sidebar workspace rows show the workspace title on the first line and the git branch name on a second indented line underneath; the branch line is omitted when the workspace has no branch recorded.
 - The workspace detail pane is a single scrollable page: title + actions at the top, directory path with copy and reveal-in-Finder buttons, inline tooltip editor, then configuration sections for Processes, Browser sessions, Coding agents, Named ports, and Stop script. Each section shows its configured items as rows and expands inline into an edit form when the pencil icon is clicked; the `+ add` header button appends a new item. Running process rows should expose stop and restart actions before edit and delete, while non-running process rows should show run before edit and delete. Named-port rows should show the reserved port number as secondary text next to the configured name. A `⋯` overflow button in the action row exposes Copy path and Reveal in Finder, with Reveal in Finder available as a keyboard-invokable menu item via `⌘⇧F`.
 
@@ -133,7 +133,7 @@ Muxy focuses those windows; it does not decide their geometry.
   - `--restart` forces a full restart
 - `workspace update` should own post-creation workspace metadata edits such as title and tooltip.
 - Launch should wait for setup to finish and should surface setup failures clearly.
-- Named ports must be available to setup scripts, stop scripts, process commands, and status checks.
+- Named ports must be available to setup scripts, stop scripts, and process commands.
 - Adding a named port from the workspace detail view should reserve its port number immediately instead of waiting for the next workspace launch.
 - Stopping or restarting a workspace must never close unrelated user windows.
 - Runtime health is separate from lifecycle state:
@@ -162,13 +162,13 @@ Muxy focuses those windows; it does not decide their geometry.
 
 ## Dashboard and Health
 - The app should surface attention items across workspaces in one place.
-- Attention includes exited processes, failed status checks, missing configured processes in running workspaces, and coding-agent states such as waiting or done.
+- Attention includes exited processes, missing configured processes in running workspaces, and coding-agent states such as waiting or done.
 - A stopped workspace can still contribute attention items when that helps the user notice something actionable.
 - Missing configured processes in running workspaces should appear in the dashboard with the same direct recovery path offered from the Run tab.
 - Dashboard attention rows should support direct window focus by click and by the numbered window shortcuts.
 - The dashboard sidebar badge and dock badge should reflect the number of visible dashboard attention rows after dismissals are applied.
 - Users should be able to dismiss individual dashboard attention items so they disappear from the dashboard list and dock badge until that specific attention event changes.
-- Dismissing a dashboard attention item must not hide the underlying process, status check, or agent row from the workspace detail pane.
+- Dismissing a dashboard attention item must not hide the underlying process or agent row from the workspace detail pane.
 
 ## Editing and Shortcuts
 - The app should support keyboard-driven use for common actions.

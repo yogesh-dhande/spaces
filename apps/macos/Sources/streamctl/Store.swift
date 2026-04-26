@@ -59,18 +59,6 @@ public final class SQLiteStore {
                 sql: "INSERT INTO project_processes(id, project_id, name, command, on_exit, order_index) VALUES (?, ?, ?, ?, ?, ?)",
                 bindings: [process.id, project.id, process.name ?? "", process.command, process.onExit.rawValue, String(index)])
         }
-        try execute(sql: "DELETE FROM project_status_checks WHERE project_id = ?", bindings: [project.id])
-        for (index, check) in project.statusChecks.enumerated() {
-            try execute(
-                sql: """
-                    INSERT INTO project_status_checks(id, project_id, name, process, command, interval, timeout, on_fail, order_index)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                bindings: [
-                    UUID().uuidString, project.id, check.name ?? "", check.process, check.command, String(check.interval), String(check.timeout),
-                    check.onFail.rawValue, String(index),
-                ])
-        }
         try execute(sql: "DELETE FROM project_browser_sessions WHERE project_id = ?", bindings: [project.id])
         for (index, session) in project.browserSessions.enumerated() {
             try execute(
@@ -358,37 +346,6 @@ public final class SQLiteStore {
         }
     }
 
-    public func setWorkspaceStatusChecks(workspaceID: String, checks: [StatusCheckDefinition]) throws {
-        try execute(sql: "DELETE FROM workspace_status_checks WHERE workspace_id = ?", bindings: [workspaceID])
-        for (index, check) in checks.enumerated() {
-            try execute(
-                sql: """
-                    INSERT INTO workspace_status_checks(id, workspace_id, name, process, command, interval, timeout, on_fail, order_index)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                bindings: [
-                    UUID().uuidString, workspaceID, check.name ?? "", check.process, check.command, String(check.interval), String(check.timeout),
-                    check.onFail.rawValue, String(index),
-                ])
-        }
-    }
-
-    public func workspaceStatusChecks(workspaceID: String) throws -> [StatusCheckDefinition] {
-        let rows = try queryRows(
-            sql: """
-                SELECT name, process, command, interval, timeout, on_fail
-                FROM workspace_status_checks
-                WHERE workspace_id = ?
-                ORDER BY order_index
-                """, bindings: [workspaceID])
-        return rows.map { row in
-            StatusCheckDefinition(
-                name: row[0].isEmpty ? nil : row[0], process: row[1], command: row[2],
-                interval: Int(row[3]) ?? PollingConstants.statusCheckDefaultInterval,
-                timeout: Int(row[4]) ?? PollingConstants.statusCheckDefaultTimeout, onFail: OnFailAction(rawValue: row[5]) ?? .none)
-        }
-    }
-
     public func setWorkspaceBrowserSessions(workspaceID: String, sessions: [BrowserSession]) throws {
         try execute(sql: "DELETE FROM workspace_browser_sessions WHERE workspace_id = ?", bindings: [workspaceID])
         for (index, session) in sessions.enumerated() {
@@ -566,38 +523,6 @@ public final class SQLiteStore {
 
     public func deleteRunningProcesses(workspaceID: String) throws {
         try execute(sql: "DELETE FROM running_processes WHERE workspace_id = ?", bindings: [workspaceID])
-    }
-
-    public func upsert(statusResult: StatusResult) throws {
-        try execute(
-            sql: """
-                INSERT INTO status_results(process_id, check_name, status, message, last_run_at)
-                VALUES (?, ?, ?, ?, ?)
-                ON CONFLICT(process_id, check_name) DO UPDATE SET
-                  status = excluded.status,
-                  message = excluded.message,
-                  last_run_at = excluded.last_run_at
-                """,
-            bindings: [
-                statusResult.processID, statusResult.checkName, statusResult.status.rawValue, statusResult.message ?? "",
-                statusResult.lastRunAt ?? "",
-            ])
-    }
-
-    public func markStatusResultsAsFailed(processID: String) throws {
-        try execute(
-            sql: "UPDATE status_results SET status = '\(StatusCheckStatus.failed.rawValue)', message = 'Process exited' WHERE process_id = ?",
-            bindings: [processID])
-    }
-
-    public func statusResults(processID: String) throws -> [StatusResult] {
-        let rows = try queryRows(
-            sql: "SELECT process_id, check_name, status, message, last_run_at FROM status_results WHERE process_id = ?", bindings: [processID])
-        return rows.map { row in
-            StatusResult(
-                processID: row[0], checkName: row[1], status: StatusCheckStatus(rawValue: row[2]) ?? .failed, message: row[3].isEmpty ? nil : row[3],
-                lastRunAt: row[4].isEmpty ? nil : row[4])
-        }
     }
 
     public func upsert(window: WindowRecord) throws {
@@ -1257,15 +1182,6 @@ public final class SQLiteStore {
                 id: row[0].isEmpty ? UUID().uuidString : row[0], name: row[1].isEmpty ? nil : row[1], command: row[2],
                 onExit: ProcessExitAction(rawValue: row[3]) ?? .none)
         }
-        let statusChecks = try queryRows(
-            sql: "SELECT name, process, command, interval, timeout, on_fail FROM project_status_checks WHERE project_id = ? ORDER BY order_index",
-            bindings: [id]
-        ).map { row in
-            StatusCheckDefinition(
-                name: row[0].isEmpty ? nil : row[0], process: row[1], command: row[2],
-                interval: Int(row[3]) ?? PollingConstants.statusCheckDefaultInterval,
-                timeout: Int(row[4]) ?? PollingConstants.statusCheckDefaultTimeout, onFail: OnFailAction(rawValue: row[5]) ?? .none)
-        }
         let browserSessions = try queryRows(
             sql: "SELECT name, url FROM project_browser_sessions WHERE project_id = ? ORDER BY order_index", bindings: [id]
         ).map { row in BrowserSession(name: row[0].isEmpty ? nil : row[0], url: row[1].isEmpty ? nil : row[1]) }
@@ -1275,7 +1191,7 @@ public final class SQLiteStore {
         return ProjectRecord(
             id: id, name: row[1], dir: row[2], isGitRepo: row[3] == "1", defaultBranch: row[4].isEmpty ? nil : row[4], isCollapsed: row[5] == "1",
             setupScript: row[6].isEmpty ? nil : row[6], stopScript: row[7].isEmpty ? nil : row[7], ports: ports, processes: processes,
-            statusChecks: statusChecks, browserSessions: browserSessions, agentLaunchers: agentLaunchers)
+            browserSessions: browserSessions, agentLaunchers: agentLaunchers)
     }
 
     private func decodeWorkspace(row: [String]) -> WorkspaceRecord? {

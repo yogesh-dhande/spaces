@@ -45,8 +45,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let processStatus: RunningProcessState?
         let agentStatus: AgentWindowStatus?
         let countsTowardBadge: Bool
-        /// All status checks for this process (green and red), matching Run tab display.
-        let statusChecks: [StatusResult]
         let eventDate: Date?
         let focusRequest: WindowFocusRequest?
     }
@@ -385,7 +383,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 case .success(let didUpdate): if didUpdate && self.canReloadAfterBackgroundWorkspaceRefresh() { self.requestSidebarReload() }
                 case .failure: break
                 }
-                do { try await Task.sleep(for: .seconds(PollingConstants.processStatusCheckInterval)) } catch { break }
+                do { try await Task.sleep(for: .seconds(PollingConstants.processMonitorInterval)) } catch { break }
             }
         }
     }
@@ -551,7 +549,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let ports: [PortDefinition]
         let processes: [ProcessTemplate]
         let browserSessions: [BrowserSession]
-        let statusChecks: [StatusCheckDefinition]
         let agentLaunchers: [AgentLauncher]
     }
 
@@ -605,11 +602,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         }
     }
 
-    nonisolated private static func dashboardAttentionID(process: RunningProcessRecord, failedChecks: [StatusResult]) -> String {
-        if process.status == .exited { return "process:\(process.id):exited:\(process.exitedAt ?? "unknown")" }
-        let failedCheckNames = failedChecks.map(\.checkName).sorted().joined(separator: ",")
-        let latestFailure = failedChecks.compactMap(\.lastRunAt).max() ?? "unknown"
-        return "process:\(process.id):failed:\(failedCheckNames):\(latestFailure)"
+    nonisolated private static func dashboardAttentionID(process: RunningProcessRecord) -> String {
+        "process:\(process.id):exited:\(process.exitedAt ?? "unknown")"
     }
 
     nonisolated private static func dashboardAttentionID(agentWindow: AgentWindowRecord) -> String {
@@ -661,7 +655,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 let store = try SQLiteStore(path: db)
                 let orchestrator = MuxyOrchestrator(store: store)
                 let didMutateWindows = try orchestrator.refreshWorkspaceWindows(workspaceID: workspaceID)
-                let didUpdateProcesses = try orchestrator.checkAndUpdateProcessStatuses() || orchestrator.runDueStatusChecksForRunningWorkspaces()
+                let didUpdateProcesses = try orchestrator.checkAndUpdateProcessStatuses()
                 return .success(.init(didMutateWindows: didMutateWindows, didUpdateProcesses: didUpdateProcesses))
             } catch { return .failure(error) }
         }.value
@@ -729,7 +723,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                     project.ports = input.ports
                     project.processes = input.processes
                     project.browserSessions = input.browserSessions
-                    project.statusChecks = input.statusChecks
                     project.agentLaunchers = input.agentLaunchers
                 }
                 return .success(record)
@@ -935,8 +928,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 let store = try SQLiteStore(path: db)
                 let orchestrator = MuxyOrchestrator(store: store)
                 let didUpdateProcessStates = try orchestrator.checkAndUpdateProcessStatuses()
-                let didRunStatusChecks = try orchestrator.runDueStatusChecksForRunningWorkspaces()
-                return .success(didUpdateProcessStates || didRunStatusChecks)
+                return .success(didUpdateProcessStates)
             } catch { return .failure(error) }
         }.value
     }
@@ -977,18 +969,13 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                     configuredProcesses: configuredProcesses, windows: windows, processes: processes, agentWindows: agentWindowsList)
                 var processByWindowID: [Int: RunningProcessRecord] = [:]
                 for process in processes { if let wid = process.windowID { processByWindowID[wid] = process } }
-                var statusResultsByProcessID: [String: [StatusResult]] = [:]
-                for process in processes { statusResultsByProcessID[process.id] = (try? orchestrator.statusResults(processID: process.id)) ?? [] }
-
                 var items: [DashboardAttentionEntry] = []
                 var matchedProcessIDs: Set<String> = []
 
                 for (idx, win) in windows.enumerated() {
                     guard let wid = win.windowID, let process = processByWindowID[wid] else { continue }
                     matchedProcessIDs.insert(process.id)
-                    let allChecks = statusResultsByProcessID[process.id] ?? []
-                    let hasFailedCheck = allChecks.contains { $0.status == .failed }
-                    guard process.status == .exited || hasFailedCheck else { continue }
+                    guard process.status == .exited else { continue }
                     let icon: String
                     let iconTint: DashboardIconTint
                     let label: String
@@ -1015,34 +1002,23 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                         label = win.name ?? win.app
                         detail = win.detail
                     }
-                    let redChecks = allChecks.filter { $0.status == .failed }
-                    let eventDate: Date? =
-                        process.status == .exited
-                        ? process.exitedAt.flatMap { iso8601Formatter.date(from: $0) }
-                        : redChecks.compactMap { $0.lastRunAt.flatMap { iso8601Formatter.date(from: $0) } }.max()
+                    let eventDate = process.exitedAt.flatMap { iso8601Formatter.date(from: $0) }
                     items.append(
                         DashboardAttentionEntry(
-                            attentionID: Self.dashboardAttentionID(process: process, failedChecks: redChecks), icon: icon, iconTint: iconTint,
-                            label: label, detail: detail, shortcut: "", processStatus: process.status, agentStatus: nil, countsTowardBadge: true,
-                            statusChecks: allChecks, eventDate: eventDate,
+                            attentionID: Self.dashboardAttentionID(process: process), icon: icon, iconTint: iconTint, label: label, detail: detail,
+                            shortcut: "", processStatus: process.status, agentStatus: nil, countsTowardBadge: true, eventDate: eventDate,
                             focusRequest: Self.dashboardFocusRequest(
                                 window: win, windowListIndex: idx + 1, process: process, workspaceID: workspace.id)))
                 }
 
                 for process in processes where !matchedProcessIDs.contains(process.id) {
-                    let allChecks = statusResultsByProcessID[process.id] ?? []
-                    let hasFailedCheck = allChecks.contains { $0.status == .failed }
-                    guard process.status == .exited || hasFailedCheck else { continue }
-                    let redChecks = allChecks.filter { $0.status == .failed }
-                    let eventDate: Date? =
-                        process.status == .exited
-                        ? process.exitedAt.flatMap { iso8601Formatter.date(from: $0) }
-                        : redChecks.compactMap { $0.lastRunAt.flatMap { iso8601Formatter.date(from: $0) } }.max()
+                    guard process.status == .exited else { continue }
+                    let eventDate = process.exitedAt.flatMap { iso8601Formatter.date(from: $0) }
                     items.append(
                         DashboardAttentionEntry(
-                            attentionID: Self.dashboardAttentionID(process: process, failedChecks: redChecks), icon: "terminal", iconTint: .terminal,
+                            attentionID: Self.dashboardAttentionID(process: process), icon: "terminal", iconTint: .terminal,
                             label: process.templateName, detail: process.command, shortcut: "", processStatus: process.status, agentStatus: nil,
-                            countsTowardBadge: true, statusChecks: allChecks, eventDate: eventDate,
+                            countsTowardBadge: true, eventDate: eventDate,
                             focusRequest: .workspaceProcess(workspaceID: workspace.id, processID: process.id)))
                 }
 
@@ -1050,7 +1026,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                     items.append(
                         DashboardAttentionEntry(
                             attentionID: item.attentionID, icon: "terminal", iconTint: .warning, label: item.label, detail: item.detail, shortcut: "",
-                            processStatus: .idle, agentStatus: nil, countsTowardBadge: true, statusChecks: [], eventDate: nil,
+                            processStatus: .idle, agentStatus: nil, countsTowardBadge: true, eventDate: nil,
                             focusRequest: .workspaceMissingConfiguredProcess(workspaceID: workspace.id, processKey: item.processKey)))
                 }
 
@@ -1059,8 +1035,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                         DashboardAttentionEntry(
                             attentionID: Self.dashboardAttentionID(agentWindow: agentWin), icon: "cpu.fill", iconTint: .warning,
                             label: agentWin.label ?? "Coding Agent CLI", detail: nil, shortcut: "", processStatus: nil, agentStatus: agentWin.status,
-                            countsTowardBadge: true, statusChecks: [], eventDate: iso8601Formatter.date(from: agentWin.updatedAt),
-                            focusRequest: .agentWindow(agentWin)))
+                            countsTowardBadge: true, eventDate: iso8601Formatter.date(from: agentWin.updatedAt), focusRequest: .agentWindow(agentWin))
+                    )
                 }
 
                 guard !items.isEmpty else { continue }
@@ -1961,13 +1937,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         container.addArrangedSubview(mainRow)
         constrainFormFieldToFillWidth(mainRow, in: container)
 
-        for check in entry.statusChecks {
-            let checkColor: NSColor = check.status == .passed ? .systemGreen : .systemRed
-            let checkRow = statusCheckSubRow(name: check.checkName, color: checkColor, status: check.status)
-            if let action { attachAsyncClickAction(to: checkRow, label: entry.label, shortcut: shortcut, action: action) }
-            container.addArrangedSubview(checkRow)
-            constrainFormFieldToFillWidth(checkRow, in: container)
-        }
         return container
     }
 
@@ -2782,127 +2751,108 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         stack.translatesAutoresizingMaskIntoConstraints = false
 
         // --- Header ---
-        let accentColor = sidebarThemeColor(light: (13, 95, 93), dark: (61, 198, 184))
-        let headerIcon = NSImageView()
-        if let img = NSImage(systemSymbolName: "folder.fill", accessibilityDescription: project.name) {
-            let config = NSImage.SymbolConfiguration(paletteColors: [accentColor]).applying(
-                NSImage.SymbolConfiguration(pointSize: 22, weight: .medium))
-            headerIcon.image = img.withSymbolConfiguration(config)
-        }
-        headerIcon.translatesAutoresizingMaskIntoConstraints = false
-        NSLayoutConstraint.activate([headerIcon.widthAnchor.constraint(equalToConstant: 28), headerIcon.heightAnchor.constraint(equalToConstant: 28)])
-
         let headerTitle = NSTextField(labelWithString: project.name)
         headerTitle.font = .systemFont(ofSize: 20, weight: .semibold)
         headerTitle.textColor = sidebarPrimaryTextColor(isSelected: false, isArchived: false)
-
-        let addWorkspaceButton = actionButton(
-            title: "New Workspace", symbol: "plus.rectangle.on.rectangle", tooltip: "New workspace for \(project.name)",
-            action: #selector(addWorkspaceFromToolbar), primary: false)
-        addWorkspaceButton.identifier = NSUserInterfaceItemIdentifier(project.id)
+        headerTitle.lineBreakMode = .byTruncatingTail
+        headerTitle.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
 
         let headerRow = NSStackView()
         headerRow.orientation = .horizontal
         headerRow.alignment = .centerY
-        headerRow.spacing = 10
-        headerRow.addArrangedSubview(headerIcon)
+        headerRow.spacing = 8
         headerRow.addArrangedSubview(headerTitle)
-        headerRow.addArrangedSubview(NSView())
-        if project.isGitRepo { headerRow.addArrangedSubview(addWorkspaceButton) }
 
-        let headerSubtitle = NSTextField(labelWithString: project.dir)
-        headerSubtitle.font = .systemFont(ofSize: 12)
-        headerSubtitle.textColor = .secondaryLabelColor
-        headerSubtitle.lineBreakMode = .byTruncatingMiddle
+        let dirField = NSTextField(string: project.dir)
+        dirField.font = .monospacedSystemFont(ofSize: 11, weight: .regular)
+        dirField.textColor = .tertiaryLabelColor
+        dirField.lineBreakMode = .byTruncatingMiddle
+        dirField.isEditable = false
+        dirField.isSelectable = true
+        dirField.drawsBackground = false
+        dirField.isBordered = false
+        dirField.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
 
-        stack.addArrangedSubview(headerRow)
-        stack.addArrangedSubview(headerSubtitle)
-        constrainFormFieldToFillWidth(headerRow, in: stack)
+        let headerAndActionsRow = NSStackView()
+        headerAndActionsRow.orientation = .vertical
+        headerAndActionsRow.alignment = .leading
+        headerAndActionsRow.spacing = 4
+        headerAndActionsRow.addArrangedSubview(headerRow)
+        headerAndActionsRow.addArrangedSubview(dirField)
+        headerAndActionsRow.setCustomSpacing(2, after: headerRow)
+
+        stack.addArrangedSubview(headerAndActionsRow)
+        constrainFormFieldToFillWidth(headerRow, in: headerAndActionsRow)
+        constrainFormFieldToFillWidth(dirField, in: headerAndActionsRow)
+        constrainFormFieldToFillWidth(headerAndActionsRow, in: stack)
 
         // --- Fields ---
-        let setupView = makeEditableTextView()
-        let stopView = makeEditableTextView()
-        let portEditor = PortEditor()
-        let processEditor = ProcessEditor()
-        let browserSessionEditor = BrowserSessionEditor()
-        let agentLauncherEditor = AgentLauncherEditor()
-        setupView.string = fullProject?.setupScript ?? ""
-        stopView.string = fullProject?.stopScript ?? ""
-        portEditor.setDefinitions(fullProject?.ports ?? [])
-        processEditor.setProcessesWithChecks(fullProject?.processes ?? [], statusChecks: fullProject?.statusChecks ?? [])
-        browserSessionEditor.setSessions(fullProject?.browserSessions ?? [])
-        agentLauncherEditor.setLaunchers(fullProject?.agentLaunchers ?? [])
+        let setupScriptSection = SetupScriptSection(
+            value: fullProject?.setupScript ?? "", subtitle: "Runs when each new workspace is created or revived from archive.")
+        let stopScriptSection = StopScriptSection(
+            value: fullProject?.stopScript ?? "", subtitle: "Runs on stop/restart/archive after process termination.")
+        let portsSection = PortsSection(
+            ports: fullProject?.ports ?? [], subtitle: "Named ports allocated per workspace. Available as env vars in scripts and commands.")
+        let processesSection = ProcessesSection(
+            processes: fullProject?.processes ?? [], subtitle: "Define the commands that run inside your workspace.", showsRuntimeControls: false)
+        let browserSessionsSection = BrowserSessionsSection(
+            sessions: fullProject?.browserSessions ?? [], subtitle: "Optional names with URL prefixes to open automatically.")
+        let agentLaunchersSection = AgentLaunchersSection(
+            launchers: fullProject?.agentLaunchers ?? [], subtitle: "Named interactive coding agents that open outside tmux.")
 
-        // --- Setup script card ---
-        let setupScroll = scrollableTextView(setupView, height: 90)
-        let setupCard = formSectionCard(
-            icon: "terminal", title: "Setup script", subtitle: "Runs when each new workspace is created or revived from archive.",
-            contentViews: [setupScroll])
-        stack.addArrangedSubview(setupCard)
-        constrainFormFieldToFillWidth(setupCard, in: stack)
+        setupScriptSection.onCommit = { [weak self] _ in self?.projectHasUnsavedChanges = true }
+        stopScriptSection.onCommit = { [weak self] _ in self?.projectHasUnsavedChanges = true }
+        portsSection.onCommit = { [weak self] _ in self?.projectHasUnsavedChanges = true }
+        portsSection.presentRemoveConfirmation = { [weak self] port, confirm in
+            self?.presentProjectPortRemoveConfirmation(port: port, confirm: confirm)
+        }
+        processesSection.onCommit = { [weak self] _ in self?.projectHasUnsavedChanges = true }
+        processesSection.presentRemoveConfirmation = { [weak self] process, confirm in
+            self?.presentProjectProcessRemoveConfirmation(process: process, confirm: confirm)
+        }
+        browserSessionsSection.onCommit = { [weak self] _ in self?.projectHasUnsavedChanges = true }
+        browserSessionsSection.presentRemoveConfirmation = { [weak self] session, confirm in
+            self?.presentProjectBrowserSessionRemoveConfirmation(session: session, confirm: confirm)
+        }
+        agentLaunchersSection.onCommit = { [weak self] _ in self?.projectHasUnsavedChanges = true }
+        agentLaunchersSection.presentRemoveConfirmation = { [weak self] launcher, confirm in
+            self?.presentProjectAgentLauncherRemoveConfirmation(launcher: launcher, confirm: confirm)
+        }
 
-        // --- Port definitions card ---
-        let portCard = formSectionCard(
-            icon: "network", title: "Port definitions",
-            subtitle: "Named ports allocated per workspace. Available as env vars in scripts and commands.", contentViews: [portEditor.container])
-        stack.addArrangedSubview(portCard)
-        constrainFormFieldToFillWidth(portCard, in: stack)
-
-        // --- Processes card ---
-        let processCard = formSectionCard(
-            icon: "terminal.fill", title: "Processes", subtitle: "Define the commands that run inside your workspace.",
-            contentViews: [processEditor.container])
-        stack.addArrangedSubview(processCard)
-        constrainFormFieldToFillWidth(processCard, in: stack)
-
-        // --- Browser sessions card ---
-        let browserCard = formSectionCard(
-            icon: "globe", title: "Browser sessions", subtitle: "Optional names with URL prefixes to open automatically.",
-            contentViews: [browserSessionEditor.container])
-        stack.addArrangedSubview(browserCard)
-        constrainFormFieldToFillWidth(browserCard, in: stack)
-
-        let agentLauncherCard = formSectionCard(
-            icon: "cpu.fill", title: "Coding agents", subtitle: "Named interactive coding agents that open outside tmux.",
-            contentViews: [agentLauncherEditor.container])
-        stack.addArrangedSubview(agentLauncherCard)
-        constrainFormFieldToFillWidth(agentLauncherCard, in: stack)
-
-        // --- Stop script card ---
-        let stopScroll = scrollableTextView(stopView, height: 90)
-        let stopCard = formSectionCard(
-            icon: "stop.circle", title: "Stop script", subtitle: "Runs on stop/restart/archive after process termination.", contentViews: [stopScroll]
-        )
-        stack.addArrangedSubview(stopCard)
-        constrainFormFieldToFillWidth(stopCard, in: stack)
+        for section in [
+            setupScriptSection.view, portsSection.view, processesSection.view, browserSessionsSection.view, agentLaunchersSection.view,
+            stopScriptSection.view,
+        ] {
+            stack.addArrangedSubview(section)
+            constrainFormFieldToFillWidth(section, in: stack)
+        }
 
         // --- Buttons ---
-        let saveButton = actionButton(
-            title: "Save", symbol: "square.and.arrow.down", tooltip: "Save project (⌘S)", action: #selector(saveProject(_:)), primary: true)
+        let saveButton = actionButton(title: "Save", symbol: nil, tooltip: "Save project (⌘S)", action: #selector(saveProject(_:)), primary: true)
         saveButton.identifier = NSUserInterfaceItemIdentifier(project.id)
         saveButton.keyEquivalent = "\r"
 
-        let deleteButton = iconButton(symbol: "trash", tooltip: "Delete project", action: #selector(deleteProject(_:)))
+        let deleteButton = NSButton(title: "Delete", target: self, action: #selector(deleteProject(_:)))
         deleteButton.identifier = NSUserInterfaceItemIdentifier(project.id)
-        let muted = NSColor.systemRed.withAlphaComponent(0.6)
-        deleteButton.contentTintColor = muted
+        Theme.applyTextStyle(to: deleteButton, color: .systemRed)
 
         let buttonRow = NSStackView()
         buttonRow.orientation = .horizontal
         buttonRow.spacing = 8
-        buttonRow.setViews([deleteButton], in: .leading)
-        buttonRow.setViews([saveButton], in: .trailing)
+        buttonRow.addArrangedSubview(deleteButton)
+        buttonRow.addArrangedSubview(NSView())
+        buttonRow.addArrangedSubview(saveButton)
         stack.addArrangedSubview(buttonRow)
         constrainFormFieldToFillWidth(buttonRow, in: stack)
 
         showScrollableDetailStack(stack)
 
         saveButton.tag = storeProjectFields(
-            projectID: project.id, setupView: setupView, stopView: stopView, portEditor: portEditor, processEditor: processEditor,
-            browserSessionEditor: browserSessionEditor, agentLauncherEditor: agentLauncherEditor)
+            projectID: project.id, setupScriptSection: setupScriptSection, stopScriptSection: stopScriptSection, portsSection: portsSection,
+            processesSection: processesSection, browserSessionsSection: browserSessionsSection, agentLaunchersSection: agentLaunchersSection)
         registerDirtyTracking(
-            setupView: setupView, stopView: stopView, portEditor: portEditor, processEditor: processEditor,
-            browserSessionEditor: browserSessionEditor, agentLauncherEditor: agentLauncherEditor)
+            setupScriptSection: setupScriptSection, stopScriptSection: stopScriptSection, portsSection: portsSection,
+            processesSection: processesSection, browserSessionsSection: browserSessionsSection, agentLaunchersSection: agentLaunchersSection)
     }
 
     private func formSectionCard(icon: String, title: String, subtitle: String = "", trailingView: NSView? = nil, contentViews: [NSView]) -> NSView {
@@ -2985,6 +2935,70 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         return section
     }
 
+    private func projectDetailSection(title: String, subtitle: String = "", trailingView: NSView? = nil, contentViews: [NSView]) -> NSView {
+        let section = NSView()
+        section.translatesAutoresizingMaskIntoConstraints = false
+        section.setContentHuggingPriority(.required, for: .vertical)
+
+        let titleLabel = NSTextField(labelWithString: title)
+        titleLabel.font = .systemFont(ofSize: 13, weight: .semibold)
+        titleLabel.textColor = Theme.text
+
+        let titleStack = NSStackView()
+        titleStack.orientation = .vertical
+        titleStack.alignment = .leading
+        titleStack.spacing = 2
+        titleStack.addArrangedSubview(titleLabel)
+        if !subtitle.isEmpty {
+            let subtitleLabel = NSTextField(labelWithString: subtitle)
+            subtitleLabel.font = .systemFont(ofSize: 11, weight: .regular)
+            subtitleLabel.textColor = Theme.muted
+            subtitleLabel.lineBreakMode = .byTruncatingTail
+            subtitleLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+            titleStack.addArrangedSubview(subtitleLabel)
+        }
+        titleStack.setContentHuggingPriority(.defaultLow, for: .horizontal)
+
+        let spacer = NSView()
+        spacer.translatesAutoresizingMaskIntoConstraints = false
+        spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
+
+        let headerRow = NSStackView(views: trailingView.map { [titleStack, spacer, $0] } ?? [titleStack, spacer])
+        headerRow.orientation = .horizontal
+        headerRow.alignment = .centerY
+        headerRow.spacing = 8
+        headerRow.edgeInsets = NSEdgeInsets(top: 10, left: 14, bottom: 10, right: 14)
+        headerRow.translatesAutoresizingMaskIntoConstraints = false
+
+        let innerStack = NSStackView()
+        innerStack.orientation = .vertical
+        innerStack.alignment = .leading
+        innerStack.spacing = 0
+        innerStack.translatesAutoresizingMaskIntoConstraints = false
+        innerStack.addArrangedSubview(headerRow)
+        for view in contentViews { innerStack.addArrangedSubview(view) }
+
+        let divider = ColoredBackgroundView()
+        divider.fillColor = Theme.border
+        divider.translatesAutoresizingMaskIntoConstraints = false
+        divider.heightAnchor.constraint(equalToConstant: 1).isActive = true
+
+        section.addSubview(innerStack)
+        section.addSubview(divider)
+        NSLayoutConstraint.activate([
+            innerStack.leadingAnchor.constraint(equalTo: section.leadingAnchor),
+            innerStack.trailingAnchor.constraint(equalTo: section.trailingAnchor), innerStack.topAnchor.constraint(equalTo: section.topAnchor),
+            divider.leadingAnchor.constraint(equalTo: section.leadingAnchor), divider.trailingAnchor.constraint(equalTo: section.trailingAnchor),
+            divider.topAnchor.constraint(equalTo: innerStack.bottomAnchor), divider.bottomAnchor.constraint(equalTo: section.bottomAnchor),
+        ])
+        headerRow.widthAnchor.constraint(equalTo: innerStack.widthAnchor).isActive = true
+        for view in contentViews {
+            view.translatesAutoresizingMaskIntoConstraints = false
+            view.widthAnchor.constraint(equalTo: innerStack.widthAnchor).isActive = true
+        }
+        return section
+    }
+
     private func showAddProjectForm() {
         clearInlineWorkspaceFieldRefs()
         activeAddWorkspaceFormTag = nil
@@ -3057,7 +3071,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let setupScriptSection = SetupScriptSection(value: "", subtitle: "Runs when each new workspace is created or revived from archive.")
         let stopScriptSection = StopScriptSection(value: "", subtitle: "Runs on workspace stop, restart, or archive.")
         let portsSection = PortsSection(subtitle: "Named ports allocated per workspace, available as env vars.")
-        let processesSection = ProcessesSection(subtitle: "Commands that run inside each workspace.")
+        let processesSection = ProcessesSection(subtitle: "Commands that run inside each workspace.", showsRuntimeControls: false)
         let browserSessionsSection = BrowserSessionsSection(subtitle: "Browser windows opened automatically on launch.")
         let agentLaunchersSection = AgentLaunchersSection(subtitle: "Interactive coding agents that open outside tmux.")
 
@@ -3416,7 +3430,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             workspaceRuntimeStatusByID[workspace.id]
             ?? WorkspaceRuntimeStatus(
                 workspaceID: workspace.id, lifecycleState: WorkspaceLifecycleState(isRunning: workspace.isRunning), runtimeHealth: .healthy,
-                hasTrackedRuntimeIndicators: false, runningProcessCount: 0, exitedProcessCount: 0, failedCheckCount: 0, waitingAgentWindowCount: 0,
+                hasTrackedRuntimeIndicators: false, runningProcessCount: 0, exitedProcessCount: 0, waitingAgentWindowCount: 0,
                 missingConfiguredProcessCount: 0, missingConfiguredBrowserSessionCount: 0)
         let isLifecycleRunning = runtimeStatus.lifecycleState == .running
         let statusDot = NSImageView()
@@ -4296,37 +4310,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         fputs("muxy: window_row_click \(message)\n", stderr)
     }
 
-    private func statusCheckSubRow(name: String, color: NSColor, status: StatusCheckStatus) -> NSView {
-        let row = NSStackView()
-        row.orientation = .horizontal
-        row.alignment = .centerY
-        row.spacing = 6
-        row.edgeInsets = NSEdgeInsets(top: 2, left: 28, bottom: 2, right: 8)
-
-        let arrow = NSTextField(labelWithString: "↳")
-        arrow.font = .systemFont(ofSize: 10)
-        arrow.textColor = .tertiaryLabelColor
-        arrow.setContentHuggingPriority(.required, for: .horizontal)
-
-        let dot = NSImageView()
-        dot.image = NSImage(systemSymbolName: "circle.fill", accessibilityDescription: status.rawValue)
-        dot.contentTintColor = color
-        dot.setContentHuggingPriority(.required, for: .horizontal)
-        dot.translatesAutoresizingMaskIntoConstraints = false
-        NSLayoutConstraint.activate([dot.widthAnchor.constraint(equalToConstant: 8), dot.heightAnchor.constraint(equalToConstant: 8)])
-
-        let label = NSTextField(labelWithString: name)
-        label.font = .systemFont(ofSize: 11)
-        label.textColor = .secondaryLabelColor
-        label.lineBreakMode = .byTruncatingTail
-        label.setContentHuggingPriority(.defaultLow, for: .horizontal)
-
-        row.addArrangedSubview(arrow)
-        row.addArrangedSubview(dot)
-        row.addArrangedSubview(label)
-        return row
-    }
-
     private func sectionHeader(icon: String, title: String) -> NSView {
         let row = NSStackView()
         row.orientation = .horizontal
@@ -4824,13 +4807,13 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     }
 
     private func storeProjectFields(
-        projectID: String, setupView: NSTextView, stopView: NSTextView, portEditor: PortEditor, processEditor: ProcessEditor,
-        browserSessionEditor: BrowserSessionEditor, agentLauncherEditor: AgentLauncherEditor
+        projectID: String, setupScriptSection: SetupScriptSection, stopScriptSection: StopScriptSection, portsSection: PortsSection,
+        processesSection: ProcessesSection, browserSessionsSection: BrowserSessionsSection, agentLaunchersSection: AgentLaunchersSection
     ) -> Int {
         let id = projectID.hashValue
         ProjectFieldCache.shared.cache[id] = ProjectFieldRefs(
-            projectID: projectID, setupView: setupView, stopView: stopView, portEditor: portEditor, processEditor: processEditor,
-            browserSessionEditor: browserSessionEditor, agentLauncherEditor: agentLauncherEditor)
+            projectID: projectID, setupScriptSection: setupScriptSection, stopScriptSection: stopScriptSection, portsSection: portsSection,
+            processesSection: processesSection, browserSessionsSection: browserSessionsSection, agentLaunchersSection: agentLaunchersSection)
         return id
     }
 
@@ -4998,13 +4981,12 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         guard let refs = ProjectFieldCache.shared.cache[sender.tag] else { return }
         do {
             try orchestrator.updateProjectConfig(projectID: refs.projectID) { config in
-                config.setupScript = refs.setupView.string.isEmpty ? nil : refs.setupView.string
-                config.stopScript = refs.stopView.string.isEmpty ? nil : refs.stopView.string
-                config.ports = refs.portEditor.currentDefinitions()
-                config.processes = refs.processEditor.currentProcesses()
-                config.browserSessions = refs.browserSessionEditor.currentSessions()
-                config.statusChecks = refs.processEditor.currentStatusChecks()
-                config.agentLaunchers = refs.agentLauncherEditor.currentLaunchers()
+                config.setupScript = refs.setupScriptSection.currentValue.isEmpty ? nil : refs.setupScriptSection.currentValue
+                config.stopScript = refs.stopScriptSection.currentValue.isEmpty ? nil : refs.stopScriptSection.currentValue
+                config.ports = refs.portsSection.currentPorts
+                config.processes = refs.processesSection.currentProcesses
+                config.browserSessions = refs.browserSessionsSection.currentSessions
+                config.agentLaunchers = refs.agentLaunchersSection.currentLaunchers
             }
             projectHasUnsavedChanges = false
             reloadData()
@@ -5057,7 +5039,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 guard !repoURL.isEmpty else { throw MuxyError.invalidArgument(message: "Git repository URL is required.") }
                 input = ProjectCreateInput(
                     gitURL: repoURL, directoryPath: nil, setupScript: setupScript, stopScript: stopScript, ports: refs.portsSection.currentPorts,
-                    processes: refs.processesSection.currentProcesses, browserSessions: refs.browserSessionsSection.currentSessions, statusChecks: [],
+                    processes: refs.processesSection.currentProcesses, browserSessions: refs.browserSessionsSection.currentSessions,
                     agentLaunchers: refs.agentLaunchersSection.currentLaunchers)
                 progressDetail = "Cloning repository and applying project settings."
             } else {
@@ -5065,7 +5047,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 guard !dir.isEmpty else { return }
                 input = ProjectCreateInput(
                     gitURL: nil, directoryPath: dir, setupScript: setupScript, stopScript: stopScript, ports: refs.portsSection.currentPorts,
-                    processes: refs.processesSection.currentProcesses, browserSessions: refs.browserSessionsSection.currentSessions, statusChecks: [],
+                    processes: refs.processesSection.currentProcesses, browserSessions: refs.browserSessionsSection.currentSessions,
                     agentLaunchers: refs.agentLaunchersSection.currentLaunchers)
                 progressDetail = "Registering project and applying project settings."
             }
@@ -5495,11 +5477,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     }
 
     private func parseProcesses(_ raw: String) -> [ProcessTemplate] {
-        _ = raw
-        return []
-    }
-
-    private func parseStatusChecks(_ raw: String) -> [StatusCheckDefinition] {
         _ = raw
         return []
     }
@@ -6585,7 +6562,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             workspaceRuntimeStatusByID[workspace.id]
             ?? WorkspaceRuntimeStatus(
                 workspaceID: workspace.id, lifecycleState: WorkspaceLifecycleState(isRunning: workspace.isRunning), runtimeHealth: .healthy,
-                hasTrackedRuntimeIndicators: false, runningProcessCount: 0, exitedProcessCount: 0, failedCheckCount: 0, waitingAgentWindowCount: 0,
+                hasTrackedRuntimeIndicators: false, runningProcessCount: 0, exitedProcessCount: 0, waitingAgentWindowCount: 0,
                 missingConfiguredProcessCount: 0, missingConfiguredBrowserSessionCount: 0)
         let isLifecycleRunning = runtimeStatus.lifecycleState == .running
         statusIcon.image = NSImage(systemSymbolName: isLifecycleRunning ? "circle.fill" : "circle", accessibilityDescription: "Status")
@@ -7005,20 +6982,16 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     }
 
     private func registerDirtyTracking(
-        setupView: NSTextView, stopView: NSTextView, portEditor: PortEditor, processEditor: ProcessEditor, browserSessionEditor: BrowserSessionEditor,
-        agentLauncherEditor: AgentLauncherEditor
+        setupScriptSection: SetupScriptSection, stopScriptSection: StopScriptSection, portsSection: PortsSection, processesSection: ProcessesSection,
+        browserSessionsSection: BrowserSessionsSection, agentLaunchersSection: AgentLaunchersSection
     ) {
         projectHasUnsavedChanges = false
-        NotificationCenter.default.addObserver(forName: NSText.didChangeNotification, object: setupView, queue: .main) { [weak self] _ in
-            Task { @MainActor in self?.projectHasUnsavedChanges = true }
-        }
-        NotificationCenter.default.addObserver(forName: NSText.didChangeNotification, object: stopView, queue: .main) { [weak self] _ in
-            Task { @MainActor in self?.projectHasUnsavedChanges = true }
-        }
-        portEditor.onDirty = { [weak self] in Task { @MainActor in self?.projectHasUnsavedChanges = true } }
-        processEditor.onDirty = { [weak self] in Task { @MainActor in self?.projectHasUnsavedChanges = true } }
-        browserSessionEditor.onDirty = { [weak self] in Task { @MainActor in self?.projectHasUnsavedChanges = true } }
-        agentLauncherEditor.onDirty = { [weak self] in Task { @MainActor in self?.projectHasUnsavedChanges = true } }
+        setupScriptSection.onCommit = { [weak self] _ in self?.projectHasUnsavedChanges = true }
+        stopScriptSection.onCommit = { [weak self] _ in self?.projectHasUnsavedChanges = true }
+        portsSection.onCommit = { [weak self] _ in self?.projectHasUnsavedChanges = true }
+        processesSection.onCommit = { [weak self] _ in self?.projectHasUnsavedChanges = true }
+        browserSessionsSection.onCommit = { [weak self] _ in self?.projectHasUnsavedChanges = true }
+        agentLaunchersSection.onCommit = { [weak self] _ in self?.projectHasUnsavedChanges = true }
     }
 
     private func saveCurrentDetail() -> Bool { saveCurrentProject() }
@@ -7047,13 +7020,12 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         guard let refs = ProjectFieldCache.shared.cache[tag] else { return true }
         do {
             try orchestrator.updateProjectConfig(projectID: refs.projectID) { config in
-                config.setupScript = refs.setupView.string.isEmpty ? nil : refs.setupView.string
-                config.stopScript = refs.stopView.string.isEmpty ? nil : refs.stopView.string
-                config.ports = refs.portEditor.currentDefinitions()
-                config.processes = refs.processEditor.currentProcesses()
-                config.browserSessions = refs.browserSessionEditor.currentSessions()
-                config.statusChecks = refs.processEditor.currentStatusChecks()
-                config.agentLaunchers = refs.agentLauncherEditor.currentLaunchers()
+                config.setupScript = refs.setupScriptSection.currentValue.isEmpty ? nil : refs.setupScriptSection.currentValue
+                config.stopScript = refs.stopScriptSection.currentValue.isEmpty ? nil : refs.stopScriptSection.currentValue
+                config.ports = refs.portsSection.currentPorts
+                config.processes = refs.processesSection.currentProcesses
+                config.browserSessions = refs.browserSessionsSection.currentSessions
+                config.agentLaunchers = refs.agentLaunchersSection.currentLaunchers
             }
             projectHasUnsavedChanges = false
             reloadData()
@@ -7080,5 +7052,47 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             window.endEditing(for: nil)
             _ = window.makeFirstResponder(nil)
         }
+    }
+
+    private func presentProjectPortRemoveConfirmation(port: PortDefinition, confirm: @escaping (Bool) -> Void) {
+        let alert = NSAlert()
+        alert.messageText = "Remove port \"\(port.name)\"?"
+        alert.informativeText = "This removes the port definition from the project."
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "Remove")
+        alert.addButton(withTitle: "Cancel")
+        confirm(alert.runModal() == .alertFirstButtonReturn)
+    }
+
+    private func presentProjectProcessRemoveConfirmation(process: ProcessTemplate, confirm: @escaping (Bool) -> Void) {
+        let alert = NSAlert()
+        let displayName = process.name ?? process.command
+        alert.messageText = "Remove \(displayName)?"
+        alert.informativeText = "This removes the process from the project."
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "Remove")
+        alert.addButton(withTitle: "Cancel")
+        confirm(alert.runModal() == .alertFirstButtonReturn)
+    }
+
+    private func presentProjectBrowserSessionRemoveConfirmation(session: BrowserSession, confirm: @escaping (Bool) -> Void) {
+        let alert = NSAlert()
+        let displayName = session.name ?? session.url ?? "this session"
+        alert.messageText = "Remove \(displayName)?"
+        alert.informativeText = "This removes the browser session from the project."
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "Remove")
+        alert.addButton(withTitle: "Cancel")
+        confirm(alert.runModal() == .alertFirstButtonReturn)
+    }
+
+    private func presentProjectAgentLauncherRemoveConfirmation(launcher: AgentLauncher, confirm: @escaping (Bool) -> Void) {
+        let alert = NSAlert()
+        alert.messageText = "Remove \(launcher.name)?"
+        alert.informativeText = "This removes the coding agent from the project."
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "Remove")
+        alert.addButton(withTitle: "Cancel")
+        confirm(alert.runModal() == .alertFirstButtonReturn)
     }
 }

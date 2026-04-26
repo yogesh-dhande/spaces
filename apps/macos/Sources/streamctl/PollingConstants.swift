@@ -7,7 +7,7 @@ public enum PollingConstants {
 
     public static let worktreeDiscoveryInterval: TimeInterval = 30
 
-    public static let processStatusCheckInterval: TimeInterval = 10
+    public static let processMonitorInterval: TimeInterval = 10
 
     public static let sidebarMetadataRefreshInterval: TimeInterval = 30
 

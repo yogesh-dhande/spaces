@@ -60,7 +60,6 @@ Projects persist:
 - setup and stop scripts
 - port definitions
 - process templates
-- status-check templates
 - browser-session templates
 
 ### Workspaces
@@ -76,7 +75,6 @@ Workspaces persist:
 Runtime state persists separately from project and workspace templates:
 - allocated ports
 - running processes
-- status-check results
 - tracked windows
 - tracked agent windows
 
@@ -118,7 +116,7 @@ It also lets lifecycle state stay explicit while runtime health is derived from 
 ## Environment and Process Model
 - Named port definitions are allocated per workspace and exposed as environment variables. Workspace-settings saves preserve existing allocations where possible, allocate newly added definitions immediately, and release removed definitions without waiting for the next launch.
 - Workspace processes also receive stable environment variables such as project and workspace directories.
-- Setup scripts, stop scripts, process commands, and status-check commands all execute against the workspace-specific environment.
+- Setup scripts, stop scripts, and process commands all execute against the workspace-specific environment.
 - Process launch and terminal recovery use tmux so the process lifetime can outlive a missing terminal window and be reattached later.
 - Global app settings include the selected terminal host, and the GUI is the configuration surface for that value.
 - Global settings also store the shared window focus pulse color and enabled state behind window-scoped keys.
@@ -247,7 +245,7 @@ Terminal host notes:
 
 ## Lifecycle and Health
 - Workspace lifecycle state is explicit and persisted on the workspace record.
-- Runtime health is derived from runtime records, configured browser/process expectations, status-check failures, and agent waiting state.
+- Runtime health is derived from runtime records, configured browser/process expectations, and agent waiting state.
 - The GUI should render lifecycle state directly and layer runtime-health warnings on top instead of inferring lifecycle from stale runtime leftovers.
 
 ## Shortcut Architecture

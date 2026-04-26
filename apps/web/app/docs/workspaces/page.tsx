@@ -10,13 +10,13 @@ export default function WorkspacesDocsPage() {
   return (
     <DocsShell
       title="Workspaces"
-      description="A workspace is the core runtime unit in Muxy. It owns process templates, browser sessions, status checks, window tracking, and reserved ports."
+      description="A workspace is the core runtime unit in Muxy. It owns process templates, browser sessions, window tracking, and reserved ports."
       pagePath="/docs/workspaces"
     >
       <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
         <h2 className="text-2xl font-semibold tracking-tight">What Is a Workspace?</h2>
         <p className="mt-2 text-sm leading-7 text-foreground-soft">
-          A workspace is one stream of work — a feature, a bug fix, an experiment. It belongs to a project, has its own directory (a git worktree for Git projects), and keeps its own copy of the project&apos;s processes, status checks, browser sessions, and ports.
+          A workspace is one stream of work — a feature, a bug fix, an experiment. It belongs to a project, has its own directory (a git worktree for Git projects), and keeps its own copy of the project&apos;s processes, browser sessions, and ports.
         </p>
       </article>
 
@@ -40,7 +40,7 @@ export default function WorkspacesDocsPage() {
       <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
         <h2 className="text-2xl font-semibold tracking-tight">Per-Workspace Settings</h2>
         <p className="mt-2 text-sm leading-7 text-foreground-soft">
-          A new workspace inherits the project&apos;s processes, status checks, browser sessions, and ports. From there, each workspace edits its own copy — the project&apos;s templates stay unchanged.
+          A new workspace inherits the project&apos;s processes, browser sessions, and ports. From there, each workspace edits its own copy — the project&apos;s templates stay unchanged.
         </p>
         <ul className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
           <li>• Double-click the title, branch, or tooltip to rename them inline. <code>Escape</code> or click away to cancel.</li>
@@ -72,7 +72,7 @@ API_PORT=21002`}</code>
       <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
         <h2 className="text-2xl font-semibold tracking-tight">Environment Variables</h2>
         <p className="mt-2 text-sm leading-7 text-foreground-soft">
-          Every workspace process, setup script, stop script, and status check runs with:
+          Every workspace process, setup script, and stop script runs with:
         </p>
         <ul className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
           <li>• The workspace&apos;s named ports (for example <code>FRONTEND_PORT=20001</code>, <code>API_PORT=20002</code>).</li>
@@ -84,7 +84,7 @@ API_PORT=21002`}</code>
       <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
         <h2 className="text-2xl font-semibold tracking-tight">Switching Between Workspaces</h2>
         <p className="mt-2 text-sm leading-7 text-foreground-soft">
-          Selecting another workspace swaps the whole context — its windows, processes, and status output all follow you.
+          Selecting another workspace swaps the whole context — its windows and processes all follow you.
         </p>
         <ul className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
           <li>• <code>cmd+alt+=</code> from anywhere brings Muxy forward; pick the workspace you want.</li>

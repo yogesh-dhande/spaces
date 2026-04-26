@@ -137,7 +137,6 @@ private struct SeedFixtureCommand: ParsableCommand {
                 #"bash -lc 'printf "project-stop:%s\n" "${MUXY_WORKSPACE_DIR}" >> "${MUXY_E2E_EVENTS_LOG:-/tmp/muxy-e2e-events.log}"'"#
             config.processes = [.init(name: "frontend", command: frontendCommand), .init(name: "backend", command: backendCommand)]
             config.browserSessions = [.init(name: "docs", url: docsURL), .init(name: "admin", url: adminURL)]
-            config.statusChecks = []
             config.agentLaunchers = []
         }
 

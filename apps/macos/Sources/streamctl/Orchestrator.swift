@@ -227,7 +227,6 @@ public final class MuxyOrchestrator {
         try store.setWorkspaceStopScript(workspaceID: workspace.id, stopScript: existing.stopScript)
         try store.setWorkspacePortDefinitions(workspaceID: workspace.id, definitions: existing.ports)
         try store.setWorkspaceProcesses(workspaceID: workspace.id, processes: existing.processes)
-        try store.setWorkspaceStatusChecks(workspaceID: workspace.id, checks: existing.statusChecks)
         try store.setWorkspaceBrowserSessions(workspaceID: workspace.id, sessions: existing.browserSessions)
         try store.setWorkspaceAgentLaunchers(workspaceID: workspace.id, launchers: existing.agentLaunchers)
         try store.touchWorkspaceSettings(workspaceID: workspace.id, updatedAt: nowISO8601())
@@ -397,7 +396,7 @@ public final class MuxyOrchestrator {
         record = ProjectRecord(
             id: normalizedID, name: record.name, dir: record.dir, isGitRepo: record.isGitRepo, defaultBranch: record.defaultBranch,
             setupScript: record.setupScript, stopScript: record.stopScript, ports: record.ports, processes: record.processes,
-            statusChecks: record.statusChecks, browserSessions: record.browserSessions, agentLaunchers: record.agentLaunchers)
+            browserSessions: record.browserSessions, agentLaunchers: record.agentLaunchers)
         try validateUniqueConfiguredFocusNames(
             processes: record.processes, browserSessions: record.browserSessions, agentLaunchers: record.agentLaunchers)
         try store.upsert(project: record)
@@ -808,12 +807,6 @@ public final class MuxyOrchestrator {
         let exitedProcessCount = runningProcesses.filter { $0.status == .exited }.count
         let waitingAgentWindowCount = agentWindows.filter { $0.status == .waiting }.count
 
-        var failedCheckCount = 0
-        for process in runningProcesses {
-            let failedChecks = try statusResults(processID: process.id).filter { $0.status == .failed }.count
-            failedCheckCount += failedChecks
-        }
-
         let settings = try loadWorkspaceSettings(project: project, workspace: workspace)
         let expectedProcessKeys = (settings?.processes ?? []).map { configuredProcessMatchKey(name: $0.name) }
         let trackedProcessKeys = runningProcesses.map { runningProcessMatchKey(name: $0.templateName) }
@@ -830,7 +823,7 @@ public final class MuxyOrchestrator {
             case .running:
                 if !hasTrackedRuntimeIndicators {
                     expectsManagedRuntime ? .missing : .healthy
-                } else if exitedProcessCount > 0 || failedCheckCount > 0 || waitingAgentWindowCount > 0 || missingConfiguredProcessCount > 0 {
+                } else if exitedProcessCount > 0 || waitingAgentWindowCount > 0 || missingConfiguredProcessCount > 0 {
                     .partial
                 } else {
                     .healthy
@@ -840,7 +833,7 @@ public final class MuxyOrchestrator {
         return WorkspaceRuntimeStatus(
             workspaceID: workspaceID, lifecycleState: lifecycleState, runtimeHealth: runtimeHealth,
             hasTrackedRuntimeIndicators: hasTrackedRuntimeIndicators, runningProcessCount: runningProcessCount,
-            exitedProcessCount: exitedProcessCount, failedCheckCount: failedCheckCount, waitingAgentWindowCount: waitingAgentWindowCount,
+            exitedProcessCount: exitedProcessCount, waitingAgentWindowCount: waitingAgentWindowCount,
             missingConfiguredProcessCount: missingConfiguredProcessCount, missingConfiguredBrowserSessionCount: missingConfiguredBrowserSessionCount)
     }
 
@@ -923,61 +916,11 @@ public final class MuxyOrchestrator {
                     pid: process.pid, status: .exited, logPath: process.logPath, lastOutputAt: process.lastOutputAt, startedAt: process.startedAt,
                     exitedAt: nowISO8601())
                 try store.upsert(runningProcess: updatedProcess)
-                try store.markStatusResultsAsFailed(processID: process.id)
                 didUpdate = true
                 try handleProcessExit(workspaceID: workspace.id, process: updatedProcess, project: project, workspace: workspace)
             }
         }
         return didUpdate
-    }
-
-    public func runStatusChecks(workspaceID: String, dueOnly: Bool = false, now: Date = Date()) throws -> [StatusResult] {
-        let (project, workspace) = try resolveWorkspace(id: workspaceID)
-        guard let config = try loadWorkspaceSettings(project: project, workspace: workspace) else { return [] }
-        let processes = try store.runningProcesses(workspaceID: workspaceID)
-        let checksByProcessID = Dictionary(grouping: config.statusChecks, by: \.process)
-        let namedPorts = try store.workspacePortsNamed(workspaceID: workspaceID)
-        let env = buildWorkspaceEnv(project: project, workspace: workspace, namedPorts: namedPorts)
-        var results: [StatusResult] = []
-        let iso8601 = ISO8601DateFormatter()
-        for process in processes where process.status == .running {
-            guard let checks = checksByProcessID[process.templateName], !checks.isEmpty else { continue }
-            let existingResults = Dictionary(uniqueKeysWithValues: try store.statusResults(processID: process.id).map { ($0.checkName, $0) })
-            for check in checks {
-                let checkName = check.name ?? check.process
-                if dueOnly, let existing = existingResults[checkName], let lastRunAt = existing.lastRunAt,
-                    let lastRunDate = iso8601.date(from: lastRunAt), now.timeIntervalSince(lastRunDate) < TimeInterval(max(check.interval, 1))
-                {
-                    continue
-                }
-
-                let resolvedCommand = applyEnvVars(check.command, env: env)
-                let outcome = try runCommandWithTimeout(command: resolvedCommand, cwd: workspace.dir, timeout: check.timeout, env: env)
-                let status: StatusCheckStatus = outcome.exitCode == 0 ? .passed : .failed
-                let result = StatusResult(
-                    processID: process.id, checkName: checkName, status: status, message: outcome.output.isEmpty ? nil : outcome.output,
-                    lastRunAt: nowISO8601())
-                try store.upsert(statusResult: result)
-                results.append(result)
-
-                // Handle onFail behavior for failed status checks
-                if outcome.exitCode != 0 { try handleStatusCheckFailure(workspaceID: workspaceID, process: process, check: check, result: result) }
-            }
-        }
-        return results
-    }
-
-    public func runDueStatusChecksForRunningWorkspaces(now: Date = Date()) throws -> Bool {
-        var didRunChecks = false
-        let allProjects = try store.projects()
-        for project in allProjects {
-            let workspaces = try store.workspaces(projectID: project.id, includeArchived: false)
-            for workspace in workspaces where workspace.isRunning {
-                let results = try runStatusChecks(workspaceID: workspace.id, dueOnly: true, now: now)
-                if !results.isEmpty { didRunChecks = true }
-            }
-        }
-        return didRunChecks
     }
     private func deliverNotification(title: String, body: String, subtitle: String? = nil) {
         guard NSClassFromString("XCTest") == nil else { return }
@@ -993,39 +936,6 @@ public final class MuxyOrchestrator {
                 }
             }
         }
-    }
-    private func handleStatusCheckFailure(workspaceID: String, process: RunningProcessRecord, check: StatusCheckDefinition, result: StatusResult)
-        throws
-    {
-        switch check.onFail {
-        case .none:
-            // Do nothing - just log the failure
-            break
-        case .notify:
-            deliverNotification(
-                title: "Status Check Failed", body: "Process '\(process.templateName)' check '\(result.checkName)' failed", subtitle: result.message)
-        case .restart:
-            // Restart the process
-            try restartFailedProcess(workspaceID: workspaceID, process: process, check: check, result: result)
-        }
-    }
-    private func restartFailedProcess(workspaceID: String, process: RunningProcessRecord, check: StatusCheckDefinition, result: StatusResult) throws {
-        // Log the restart attempt
-        fputs("muxy: Restarting process '\(process.templateName)' due to failed status check '\(result.checkName)'\n", stderr)
-        // Show notification about restart
-        deliverNotification(
-            title: "Process Restarting", body: "Process '\(process.templateName)' is being restarted due to failed status check",
-            subtitle: result.message.map { "Reason: \($0)" })
-
-        // Mark the process as exited in the database
-        let updatedProcess = RunningProcessRecord(
-            id: process.id, workspaceID: process.workspaceID, templateName: process.templateName, command: process.command,
-            terminalApp: process.terminalApp, windowID: process.windowID, terminalTrackingID: process.terminalTrackingID,
-            terminalNativeID: process.terminalNativeID, itermTabIndex: process.itermTabIndex, tmuxWindowID: process.tmuxWindowID, pid: process.pid,
-            status: .exited, logPath: process.logPath, lastOutputAt: process.lastOutputAt, startedAt: process.startedAt, exitedAt: nowISO8601())
-        try store.upsert(runningProcess: updatedProcess)
-        // Restart the process in a new terminal
-        try restartProcessInTerminal(workspaceID: workspaceID, process: process)
     }
     private func handleProcessExit(workspaceID: String, process: RunningProcessRecord, project: ProjectRecord, workspace: WorkspaceRecord) throws {
         // Find the process template to get the on-exit behavior
@@ -1102,8 +1012,6 @@ public final class MuxyOrchestrator {
         fputs("muxy: Process '\(process.templateName)' with pid \(pid) did not exit in time; restart will use a new tmux window\n", stderr)
         return false
     }
-
-    public func statusResults(processID: String) throws -> [StatusResult] { try store.statusResults(processID: processID) }
 
     public func windows(workspaceID: String) throws -> [WindowRecord] { try indexedWorkspaceWindows(workspaceID: workspaceID) }
 
@@ -2326,7 +2234,6 @@ public final class MuxyOrchestrator {
                         terminalNativeID: process.terminalNativeID, itermTabIndex: process.itermTabIndex, tmuxWindowID: process.tmuxWindowID,
                         pid: process.pid, status: .exited, logPath: process.logPath, lastOutputAt: process.lastOutputAt, startedAt: process.startedAt,
                         exitedAt: process.exitedAt ?? now))
-                try store.markStatusResultsAsFailed(processID: process.id)
                 didMutate = true
                 continue
             }
@@ -2962,13 +2869,12 @@ public final class MuxyOrchestrator {
             stopScript: try store.workspaceStopScript(workspaceID: defaultWorkspace.id),
             ports: try store.workspacePortDefinitions(workspaceID: defaultWorkspace.id),
             processes: try store.workspaceProcesses(workspaceID: defaultWorkspace.id),
-            statusChecks: try store.workspaceStatusChecks(workspaceID: defaultWorkspace.id),
             browserSessions: try store.workspaceBrowserSessions(workspaceID: defaultWorkspace.id),
             agentLaunchers: try store.workspaceAgentLaunchers(workspaceID: defaultWorkspace.id))
 
         let previousTemplate = WorkspaceSettings(
             stopScript: previousRecord.stopScript, ports: previousRecord.ports, processes: previousRecord.processes,
-            statusChecks: previousRecord.statusChecks, browserSessions: previousRecord.browserSessions, agentLaunchers: previousRecord.agentLaunchers)
+            browserSessions: previousRecord.browserSessions, agentLaunchers: previousRecord.agentLaunchers)
 
         guard workspaceSettingsMatch(currentSettings, previousTemplate) else { return }
 
@@ -2979,7 +2885,6 @@ public final class MuxyOrchestrator {
         guard lhs.stopScript == rhs.stopScript else { return false }
         guard lhs.ports == rhs.ports else { return false }
         guard processTemplatesMatch(lhs.processes, rhs.processes) else { return false }
-        guard statusChecksMatch(lhs.statusChecks, rhs.statusChecks) else { return false }
         guard browserSessionsMatch(lhs.browserSessions, rhs.browserSessions) else { return false }
         guard lhs.agentLaunchers == rhs.agentLaunchers else { return false }
         return true
@@ -3052,18 +2957,6 @@ public final class MuxyOrchestrator {
         return true
     }
 
-    private func statusChecksMatch(_ lhs: [StatusCheckDefinition], _ rhs: [StatusCheckDefinition]) -> Bool {
-        guard lhs.count == rhs.count else { return false }
-        for (left, right) in zip(lhs, rhs) {
-            if left.name != right.name || left.process != right.process || left.command != right.command || left.interval != right.interval
-                || left.timeout != right.timeout || left.onFail != right.onFail
-            {
-                return false
-            }
-        }
-        return true
-    }
-
     private func browserSessionsMatch(_ lhs: [BrowserSession], _ rhs: [BrowserSession]) -> Bool {
         guard lhs.count == rhs.count else { return false }
         for (left, right) in zip(lhs, rhs) where left.name != right.name || left.url != right.url { return false }
@@ -3077,7 +2970,6 @@ public final class MuxyOrchestrator {
         try store.setWorkspaceStopScript(workspaceID: workspace.id, stopScript: project.stopScript)
         try store.setWorkspacePortDefinitions(workspaceID: workspace.id, definitions: project.ports)
         try store.setWorkspaceProcesses(workspaceID: workspace.id, processes: project.processes)
-        try store.setWorkspaceStatusChecks(workspaceID: workspace.id, checks: project.statusChecks)
         try store.setWorkspaceBrowserSessions(workspaceID: workspace.id, sessions: project.browserSessions)
         try store.setWorkspaceAgentLaunchers(workspaceID: workspace.id, launchers: project.agentLaunchers)
         try store.touchWorkspaceSettings(workspaceID: workspace.id, updatedAt: nowISO8601())
@@ -3102,12 +2994,10 @@ public final class MuxyOrchestrator {
         let stopScript = try store.workspaceStopScript(workspaceID: workspace.id)
         let ports = try store.workspacePortDefinitions(workspaceID: workspace.id)
         let processes = try store.workspaceProcesses(workspaceID: workspace.id)
-        let statusChecks = try store.workspaceStatusChecks(workspaceID: workspace.id)
         let browserSessions = try store.workspaceBrowserSessions(workspaceID: workspace.id)
         let agentLaunchers = try store.workspaceAgentLaunchers(workspaceID: workspace.id)
         return WorkspaceSettings(
-            stopScript: stopScript, ports: ports, processes: processes, statusChecks: statusChecks, browserSessions: browserSessions,
-            agentLaunchers: agentLaunchers)
+            stopScript: stopScript, ports: ports, processes: processes, browserSessions: browserSessions, agentLaunchers: agentLaunchers)
     }
 
     private func runScript(_ script: String, cwd: String) throws { _ = try Shell.run(["/bin/bash", "-lc", script], cwd: cwd) }

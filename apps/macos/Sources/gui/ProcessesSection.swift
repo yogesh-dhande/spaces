@@ -42,6 +42,7 @@ import streamctl
     // MARK: State
 
     private var processes: [ProcessTemplate]
+    private let showsRuntimeControls: Bool
     private let rowsStack = NSStackView()
     private let countLabel = NSTextField(labelWithString: "")
     private var rows: [ProcessRowView] = []
@@ -51,8 +52,9 @@ import streamctl
 
     // MARK: Init
 
-    init(processes: [ProcessTemplate] = [], subtitle: String? = nil) {
+    init(processes: [ProcessTemplate] = [], subtitle: String? = nil, showsRuntimeControls: Bool = true) {
         self.processes = processes
+        self.showsRuntimeControls = showsRuntimeControls
 
         let container = NSStackView()
         container.orientation = .vertical
@@ -200,7 +202,7 @@ import streamctl
             let focusAction: (() -> Void)? = onFocus.map { handler in { handler(process) } }
             let row = ProcessRowView(
                 process: process, shortcut: shortcutsByName[process.name ?? ""], status: statusByName[process.name ?? ""] ?? .idle,
-                onFocus: focusAction)
+                onFocus: focusAction, showsRuntimeControls: showsRuntimeControls)
             row.onBeginEdit = { [weak self] in self?.handleBeginEdit(row: row) }
             row.onCancel = { [weak self] in self?.handleCancel(row: row) }
             row.onSave = { [weak self] edited in self?.handleSave(row: row, edited: edited) }
@@ -339,18 +341,22 @@ import streamctl
 
     private var currentProcess: ProcessTemplate
     private var currentStatus: RowPrimitives.StatusKind
+    private let showsRuntimeControls: Bool
 
     // Fields that appear in the editing subtree.
     private var nameField: NSTextField?
     private var commandField: NSTextField?
     private var onExitPopup: NSPopUpButton?
 
-    init(process: ProcessTemplate, shortcut: String?, status: RowPrimitives.StatusKind, onFocus: (() -> Void)? = nil) {
+    init(
+        process: ProcessTemplate, shortcut: String?, status: RowPrimitives.StatusKind, onFocus: (() -> Void)? = nil, showsRuntimeControls: Bool = true
+    ) {
         self.currentProcess = process
         self.onFocus = onFocus
         self.shortcutChip = shortcut.map { RowPrimitives.shortcutChip($0) }
         self.statusDot = RowPrimitives.statusDot(status)
         self.currentStatus = status
+        self.showsRuntimeControls = showsRuntimeControls
         super.init(frame: .zero)
 
         body.orientation = .vertical
@@ -534,6 +540,12 @@ import streamctl
     }
 
     private func updateRuntimeActionVisibility() {
+        guard showsRuntimeControls else {
+            runButton?.isHidden = true
+            stopButton?.isHidden = true
+            restartButton?.isHidden = true
+            return
+        }
         let showsRuntimeButtons = currentStatus == .running
         runButton?.isHidden = showsRuntimeButtons
         stopButton?.isHidden = !showsRuntimeButtons

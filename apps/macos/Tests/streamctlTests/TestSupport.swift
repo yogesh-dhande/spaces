@@ -18,7 +18,7 @@ func makeTemporaryStore(defaultTerminalHostResolver: @escaping @Sendable () -> T
 func makeProjectRecord(id: String = UUID().uuidString, dir: String) -> ProjectRecord {
     ProjectRecord(
         id: id, name: "Project", dir: dir, isGitRepo: false, defaultBranch: nil, setupScript: nil, stopScript: nil, ports: [], processes: [],
-        statusChecks: [], browserSessions: [])
+        browserSessions: [])
 }
 
 func makeWorkspaceRecord(id: String = UUID().uuidString, projectID: String, title: String, dir: String) -> WorkspaceRecord {
