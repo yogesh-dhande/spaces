@@ -2023,15 +2023,15 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertTrue(mockIterm.lastCommand?.contains("muxy-\(workspace.id)-api") == true)
     }
 
-    // Tests missing process-window recovery reattaches to the existing tmux session instead of restarting when the process is still alive.
-    func testRestartWorkspaceProcessReattachesWhenProcessIsStillRunning() throws {
+    // Tests explicit process restart kills the old tmux session and starts a fresh terminal instead of reattaching to it.
+    func testRestartWorkspaceProcessRestartsWhenTmuxSessionIsStillAvailable() throws {
         let (orchestrator, store, _, workspace, _, mockIterm, mockTmux) = try makeMockItermOrchestratorWithWorkspace()
         mockTmux.createSession(named: "muxy-\(workspace.id)-api")
 
         let process = RunningProcessRecord(
             id: UUID().uuidString, workspaceID: workspace.id, templateName: "api", command: "npm run api", terminalApp: "iTerm2", windowID: 999,
-            terminalTrackingID: "session-old", itermTabIndex: nil, tmuxWindowID: nil, pid: Int(ProcessInfo.processInfo.processIdentifier),
-            status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil)
+            terminalTrackingID: "session-old", itermTabIndex: nil, tmuxWindowID: nil, pid: 999_999, status: .running, logPath: nil, lastOutputAt: nil,
+            startedAt: "now", exitedAt: nil)
         try store.upsert(runningProcess: process)
 
         try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) {
@@ -2048,14 +2048,16 @@ final class OrchestratorTests: XCTestCase {
             }
         }
 
-        let recoveredProcess = try XCTUnwrap(try store.runningProcesses(workspaceID: workspace.id).first(where: { $0.id == process.id }))
-        XCTAssertEqual(recoveredProcess.pid, Int(ProcessInfo.processInfo.processIdentifier))
-        XCTAssertEqual(recoveredProcess.windowID, 888)
-        XCTAssertNotEqual(recoveredProcess.terminalTrackingID, process.terminalTrackingID)
+        let restartedProcess = try XCTUnwrap(try store.runningProcesses(workspaceID: workspace.id).first(where: { $0.id == process.id }))
+        XCTAssertEqual(restartedProcess.windowID, 888)
+        XCTAssertNotEqual(restartedProcess.terminalTrackingID, process.terminalTrackingID)
+        XCTAssertEqual(restartedProcess.tmuxWindowID, try mockTmux.currentWindow(sessionName: "muxy-\(workspace.id)-api")?.id)
         XCTAssertEqual(mockIterm.openWindowAndRunCallCount, 1)
         XCTAssertTrue(mockIterm.lastCommand?.contains("tmux attach-session -t") == true)
         XCTAssertTrue(mockIterm.lastCommand?.contains("muxy-\(workspace.id)-api") == true)
-        XCTAssertTrue(mockTmux.killedSessionNames.isEmpty)
+        XCTAssertEqual(mockTmux.killedSessionNames, ["muxy-\(workspace.id)-api"])
+        XCTAssertEqual(mockTmux.startSessionCallCount, 1)
+        XCTAssertEqual(mockTmux.lastStartedCommand, ["npm", "run", "api"])
     }
 
     // Tests running-process recovery reattaches without restarting when the tmux session is still available.
@@ -4309,6 +4311,33 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertEqual(r, 0)
         XCTAssertEqual(g, 255)
         XCTAssertEqual(b, 128)
+    }
+
+    func testStopWorkspaceProcessRemovesTrackedRuntimeAndClearsRunningFlagWhenLastProcessStops() throws {
+        let (orchestrator, store, _, workspace, _, _, mockTmux) = try makeMockItermOrchestratorWithWorkspace()
+        let sessionName = "muxy-\(workspace.id)-api"
+        let tmuxWindow = mockTmux.addWindow(sessionName: sessionName, id: "@1", name: "api", index: 0, isActive: true)
+        let processID = UUID().uuidString
+
+        try store.updateWorkspaceRunning(id: workspace.id, isRunning: true, launchedAt: "now")
+        try store.upsert(
+            window: WindowRecord(
+                id: UUID().uuidString, workspaceID: workspace.id, app: "iTerm2", title: "api", windowID: 559, terminalTrackingID: "workspace-session",
+                tmuxWindowID: tmuxWindow.id, role: "terminal", orderIndex: 200, lastSeenAt: "now"))
+        try store.upsert(
+            runningProcess: RunningProcessRecord(
+                id: processID, workspaceID: workspace.id, templateName: "api", command: "npm run api", terminalApp: "iTerm2", windowID: 559,
+                terminalTrackingID: "workspace-session", itermTabIndex: nil, tmuxWindowID: tmuxWindow.id, pid: nil, status: .running, logPath: nil,
+                lastOutputAt: nil, startedAt: "now", exitedAt: nil))
+
+        try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) {
+            try orchestrator.stopWorkspaceProcess(workspaceID: workspace.id, processID: processID)
+        }
+
+        XCTAssertTrue(try store.runningProcesses(workspaceID: workspace.id).isEmpty)
+        XCTAssertTrue(try store.windows(workspaceID: workspace.id).isEmpty)
+        XCTAssertFalse(try store.workspace(id: workspace.id)?.isRunning ?? true)
+        XCTAssertFalse(mockTmux.hasSession(named: sessionName))
     }
 
     // Tests focus terminal window triggers overlay pulse for iTerm2 by arranging representative inputs and asserting the expected result.

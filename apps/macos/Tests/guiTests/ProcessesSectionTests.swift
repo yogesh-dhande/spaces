@@ -122,15 +122,25 @@ import streamctl
     }
 
     @Test func rowHoverVisibilityTogglesActionButtons() {
-        let row = ProcessRowView(process: ProcessTemplate(name: "api", command: "bun run dev"), shortcut: nil, status: .idle)
+        let row = ProcessRowView(process: ProcessTemplate(name: "api", command: "bun run dev"), shortcut: nil, status: .running)
 
         #expect(row.areActionButtonsVisible == false)
-        #expect(row.actionButtonAlphaValuesForTesting == [0, 0])
+        #expect(row.actionButtonAlphaValuesForTesting == [0, 0, 0, 0, 0])
 
         row.setActionButtonsVisible(true, animated: false)
 
         #expect(row.areActionButtonsVisible)
-        #expect(row.actionButtonAlphaValuesForTesting == [1, 1])
+        #expect(row.actionButtonAlphaValuesForTesting == [1, 1, 1, 1, 1])
+    }
+
+    @Test func runningRowsShowStopAndRestartBeforeEditAndDelete() {
+        let row = ProcessRowView(process: ProcessTemplate(name: "api", command: "bun run dev"), shortcut: nil, status: .running)
+        #expect(row.visibleActionButtonIDsForTesting == ["process-row-stop", "process-row-restart", "process-row-edit", "process-row-remove"])
+    }
+
+    @Test func idleRowsShowRunBeforeEditAndDelete() {
+        let row = ProcessRowView(process: ProcessTemplate(name: "api", command: "bun run dev"), shortcut: nil, status: .idle)
+        #expect(row.visibleActionButtonIDsForTesting == ["process-row-run", "process-row-edit", "process-row-remove"])
     }
 
     @Test func browserSessionCollapsedRowShowsResolvedURLButEditFormKeepsRawTemplate() {
@@ -228,6 +238,26 @@ import streamctl
         #expect(section.rowCount == 1)
         #expect(commitCount == 0)
     }
+
+    @Test func runStopAndRestartCallbacksReceiveTheRowProcess() {
+        let process = ProcessTemplate(name: "api", command: "bun run dev")
+        let section = ProcessesSection(processes: [process])
+        var ranName: String?
+        var stoppedName: String?
+        var restartedName: String?
+        section.onRunProcess = { ranName = $0.name }
+        section.onStopProcess = { stoppedName = $0.name }
+        section.onRestartProcess = { restartedName = $0.name }
+
+        let row = section.row(at: 0)!
+        row.onRun?()
+        row.onStop?()
+        row.onRestart?()
+
+        #expect(ranName == "api")
+        #expect(stoppedName == "api")
+        #expect(restartedName == "api")
+    }
 }
 
 // MARK: Test hooks (internal surface used only by this test target)
@@ -254,8 +284,17 @@ extension ProcessRowView {
     var actionButtonAlphaValuesForTesting: [CGFloat] {
         subviews.flatMap { $0.subviewsRecursive() }.compactMap { $0 as? NSButton }.filter { id in
             let identifier = id.accessibilityIdentifier()
-            return identifier == "process-row-edit" || identifier == "process-row-remove"
+            return identifier == "process-row-run" || identifier == "process-row-stop" || identifier == "process-row-restart"
+                || identifier == "process-row-edit" || identifier == "process-row-remove"
         }.map(\.alphaValue)
+    }
+
+    var visibleActionButtonIDsForTesting: [String] {
+        subviews.flatMap { $0.subviewsRecursive() }.compactMap { $0 as? NSButton }.filter { !$0.isHidden }.compactMap { $0.accessibilityIdentifier() }
+            .filter { identifier in
+                identifier == "process-row-run" || identifier == "process-row-stop" || identifier == "process-row-restart"
+                    || identifier == "process-row-edit" || identifier == "process-row-remove"
+            }
     }
 
     var collapsedHasShortcutChip: Bool {

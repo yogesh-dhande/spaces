@@ -4288,8 +4288,14 @@ public final class MuxyOrchestrator {
 
     public func restartWorkspaceProcess(workspaceID: String, processID: String) throws {
         guard let process = try store.runningProcesses(workspaceID: workspaceID).first(where: { $0.id == processID }) else { return }
-        if try recoverRunningProcessTerminalIfPossible(workspaceID: workspaceID, process: process) { return }
         try restartProcessInTerminal(workspaceID: workspaceID, process: process)
+    }
+
+    public func stopWorkspaceProcess(workspaceID: String, processID: String) throws {
+        try withWorkspaceLifecycleLock(workspaceID: workspaceID) {
+            guard let process = try store.runningProcesses(workspaceID: workspaceID).first(where: { $0.id == processID }) else { return }
+            try stopRunningProcess(process, workspaceID: workspaceID)
+        }
     }
 
     public func recoverMissingConfiguredProcess(workspaceID: String, processKey: String) throws {
@@ -4429,6 +4435,30 @@ public final class MuxyOrchestrator {
     private func markWorkspaceRunningIfNeeded(workspaceID: String) throws {
         guard let workspace = try store.workspace(id: workspaceID) else { return }
         try markWorkspaceRunningIfNeeded(workspace)
+    }
+
+    private func stopRunningProcess(_ process: RunningProcessRecord, workspaceID: String) throws {
+        if let pid = resolvedRuntimePID(for: process) { terminateProcessGroup(pid: pid) }
+        if isManagedTerminalApp(process.terminalApp) { _ = try? closeTrackedItermTerminalContainer(process) }
+        let sessionName = processTmuxSessionName(workspaceID: workspaceID, processName: process.templateName)
+        if tmux.hasSession(named: sessionName) { try? tmux.killSession(named: sessionName) }
+
+        if let terminalWindow = try store.windows(workspaceID: workspaceID).first(where: {
+            ($0.windowID != nil && $0.windowID == process.windowID) || ($0.tmuxWindowID != nil && $0.tmuxWindowID == process.tmuxWindowID)
+        }) {
+            if terminalWindow.role == "terminal", isManagedTerminalApp(terminalWindow.app) {
+                _ = try? closeTrackedItermTerminalWindow(terminalWindow)
+            } else if let windowID = terminalWindow.windowID {
+                _ = try? yabai.closeWindow(id: windowID)
+            }
+            try store.deleteWindow(id: terminalWindow.id)
+        }
+
+        try store.deleteRunningProcess(id: process.id)
+
+        if try !hasTrackedRuntimeIndicators(workspaceID: workspaceID), let workspace = try store.workspace(id: workspaceID) {
+            try store.updateWorkspaceRunning(id: workspace.id, isRunning: false, launchedAt: workspace.lastLaunchedAt)
+        }
     }
 
     private func recoverRunningProcessTerminalIfPossible(workspaceID: String, process: RunningProcessRecord) throws -> Bool {

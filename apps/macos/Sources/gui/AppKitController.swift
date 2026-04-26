@@ -786,7 +786,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                     guard let processID = context.processID else {
                         throw MuxyError.invalidArgument(message: "Process recovery requires a process identifier.")
                     }
-                    try orchestrator.restartWorkspaceProcess(workspaceID: context.workspaceID, processID: processID)
+                    let recovered = try orchestrator.recoverRunningWorkspaceProcessIfPossible(workspaceID: context.workspaceID, processID: processID)
+                    if !recovered { try orchestrator.restartWorkspaceProcess(workspaceID: context.workspaceID, processID: processID) }
                 case .codingAgent, .window: throw MuxyError.invalidArgument(message: "This window cannot be recovered automatically.")
                 }
                 return .success(())
@@ -3625,6 +3626,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         workspace: WorkspaceSummary, shortcutIndicesByName: [String: Int], statusByName: [String: RowPrimitives.StatusKind]
     ) -> NSView? {
         guard let config = try? orchestrator.workspaceSettings(workspaceID: workspace.id) else { return nil }
+        let runningProcesses = (try? orchestrator.runningProcesses(workspaceID: workspace.id)) ?? []
+        let runningProcessIDByName = Dictionary(uniqueKeysWithValues: runningProcesses.map { (Self.processRuntimeKey(name: $0.templateName), $0.id) })
         let section = ProcessesSection(processes: config.processes)
         section.onCommit = { [weak self] updated in
             guard let self else { return }
@@ -3643,6 +3646,41 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 } else {
                     try orchestrator.updateWorkspaceSettings(workspaceID: workspace.id) { $0.processes = updated }
                 }
+                reloadData()
+            } catch {
+                reloadData()
+                showError(error)
+            }
+        }
+        section.onRunProcess = { [weak self] process in
+            guard let self else { return }
+            let key = Self.processTemplateKey(for: process)
+            do {
+                try orchestrator.recoverMissingConfiguredProcess(workspaceID: workspace.id, processKey: key)
+                reloadData()
+            } catch {
+                reloadData()
+                showError(error)
+            }
+        }
+        section.onStopProcess = { [weak self] process in
+            guard let self else { return }
+            let key = Self.processTemplateKey(for: process)
+            guard let processID = runningProcessIDByName[key] else { return }
+            do {
+                try orchestrator.stopWorkspaceProcess(workspaceID: workspace.id, processID: processID)
+                reloadData()
+            } catch {
+                reloadData()
+                showError(error)
+            }
+        }
+        section.onRestartProcess = { [weak self] process in
+            guard let self else { return }
+            let key = Self.processTemplateKey(for: process)
+            guard let processID = runningProcessIDByName[key] else { return }
+            do {
+                try orchestrator.restartWorkspaceProcess(workspaceID: workspace.id, processID: processID)
                 reloadData()
             } catch {
                 reloadData()

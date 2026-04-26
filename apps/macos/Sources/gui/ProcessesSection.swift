@@ -30,6 +30,9 @@ import streamctl
     /// Called when a collapsed row is clicked. Receives the process template so
     /// the host can dispatch the appropriate focus or launch action.
     var onFocus: ((ProcessTemplate) -> Void)?
+    var onRunProcess: ((ProcessTemplate) -> Void)?
+    var onStopProcess: ((ProcessTemplate) -> Void)?
+    var onRestartProcess: ((ProcessTemplate) -> Void)?
 
     /// Override the remove-confirmation flow. When set, called instead of
     /// `NSAlert`. Tests use this to bypass the modal. Default presents an
@@ -202,6 +205,9 @@ import streamctl
             row.onCancel = { [weak self] in self?.handleCancel(row: row) }
             row.onSave = { [weak self] edited in self?.handleSave(row: row, edited: edited) }
             row.onRemove = { [weak self] in self?.handleRemove(row: row) }
+            row.onRun = { [weak self] in self?.handleRun(row: row) }
+            row.onStop = { [weak self] in self?.handleStop(row: row) }
+            row.onRestart = { [weak self] in self?.handleRestart(row: row) }
 
             rows.append(row)
             rowsStack.addArrangedSubview(row)
@@ -244,6 +250,21 @@ import streamctl
         row.exitEditing(animated: true)
         row.rebindCollapsedContent(from: edited, shortcut: shortcutsByName[edited.name ?? ""], status: statusByName[edited.name ?? ""] ?? .idle)
         onCommit?(processes)
+    }
+
+    private func handleStop(row: ProcessRowView) {
+        guard let index = rows.firstIndex(of: row), index < processes.count else { return }
+        onStopProcess?(processes[index])
+    }
+
+    private func handleRun(row: ProcessRowView) {
+        guard let index = rows.firstIndex(of: row), index < processes.count else { return }
+        onRunProcess?(processes[index])
+    }
+
+    private func handleRestart(row: ProcessRowView) {
+        guard let index = rows.firstIndex(of: row), index < processes.count else { return }
+        onRestartProcess?(processes[index])
     }
 
     private func handleRemove(row: ProcessRowView) {
@@ -298,6 +319,9 @@ import streamctl
     var onCancel: (() -> Void)?
     var onSave: ((ProcessTemplate) -> Void)?
     var onRemove: (() -> Void)?
+    var onRun: (() -> Void)?
+    var onStop: (() -> Void)?
+    var onRestart: (() -> Void)?
 
     private let body = NSStackView()
     private var collapsedContainer: NSStackView = NSStackView()
@@ -308,9 +332,13 @@ import streamctl
     private let statusDot: StatusDotView
     private let nameLabel = NSTextField(labelWithString: "")
     private let detailLabel = NSTextField(labelWithString: "")
+    private var runButton: NSButton?
+    private var stopButton: NSButton?
+    private var restartButton: NSButton?
     private var onFocus: (() -> Void)?
 
     private var currentProcess: ProcessTemplate
+    private var currentStatus: RowPrimitives.StatusKind
 
     // Fields that appear in the editing subtree.
     private var nameField: NSTextField?
@@ -322,6 +350,7 @@ import streamctl
         self.onFocus = onFocus
         self.shortcutChip = shortcut.map { RowPrimitives.shortcutChip($0) }
         self.statusDot = RowPrimitives.statusDot(status)
+        self.currentStatus = status
         super.init(frame: .zero)
 
         body.orientation = .vertical
@@ -335,12 +364,16 @@ import streamctl
         ])
 
         let collapsedLine = Self.makeCollapsedLine(
-            shortcut: shortcutChip, statusDot: statusDot, nameLabel: nameLabel, detailLabel: detailLabel,
+            shortcut: shortcutChip, statusDot: statusDot, nameLabel: nameLabel, detailLabel: detailLabel, onRun: { [weak self] in self?.onRun?() },
+            onStop: { [weak self] in self?.onStop?() }, onRestart: { [weak self] in self?.onRestart?() },
             onEdit: { [weak self] in self?.onBeginEdit?() }, onRemove: { [weak self] in self?.onRemove?() }, onFocus: onFocus)
         collapsedContainer = collapsedLine.row
         body.addArrangedSubview(collapsedContainer)
         collapsedContainer.widthAnchor.constraint(equalTo: body.widthAnchor).isActive = true
         configureActionButtonsForHover(collapsedLine.actionButtons)
+        runButton = collapsedLine.runButton
+        stopButton = collapsedLine.stopButton
+        restartButton = collapsedLine.restartButton
 
         rebindCollapsedContent(from: process, shortcut: shortcut, status: status)
     }
@@ -351,6 +384,7 @@ import streamctl
 
     func rebindCollapsedContent(from process: ProcessTemplate, shortcut: String?, status: RowPrimitives.StatusKind) {
         currentProcess = process
+        currentStatus = status
         nameLabel.stringValue = process.name?.isEmpty == false ? (process.name ?? "") : "(unnamed)"
         nameLabel.font = .systemFont(ofSize: 13, weight: .medium)
         nameLabel.textColor = Theme.text
@@ -359,10 +393,16 @@ import streamctl
         detailLabel.textColor = Theme.muted
         detailLabel.lineBreakMode = .byTruncatingTail
         statusDot.kind = status
+        updateRuntimeActionVisibility()
         _ = shortcut
     }
 
-    func refreshStatus(from statusByName: [String: RowPrimitives.StatusKind]) { statusDot.kind = statusByName[currentProcess.name ?? ""] ?? .idle }
+    func refreshStatus(from statusByName: [String: RowPrimitives.StatusKind]) {
+        let status = statusByName[currentProcess.name ?? ""] ?? .idle
+        currentStatus = status
+        statusDot.kind = status
+        updateRuntimeActionVisibility()
+    }
 
     // MARK: Editing subtree
 
@@ -436,9 +476,13 @@ import streamctl
     // MARK: Builders
 
     private static func makeCollapsedLine(
-        shortcut: NSView?, statusDot: NSView, nameLabel: NSTextField, detailLabel: NSTextField, onEdit: @escaping () -> Void,
-        onRemove: @escaping () -> Void, onFocus: (() -> Void)?
-    ) -> (row: NSStackView, actionButtons: [NSButton]) {
+        shortcut: NSView?, statusDot: NSView, nameLabel: NSTextField, detailLabel: NSTextField, onRun: @escaping () -> Void,
+        onStop: @escaping () -> Void, onRestart: @escaping () -> Void, onEdit: @escaping () -> Void, onRemove: @escaping () -> Void,
+        onFocus: (() -> Void)?
+    ) -> (
+        row: NSStackView, actionButtons: [NSButton], runButton: NSButton, stopButton: NSButton, restartButton: NSButton, editButton: NSButton,
+        removeButton: NSButton
+    ) {
         var contentViews: [NSView] = []
         contentViews.append(RowPrimitives.statusSlot(statusDot))
         if let shortcut { contentViews.append(shortcut) }
@@ -467,18 +511,33 @@ import streamctl
         contentArea.translatesAutoresizingMaskIntoConstraints = false
         if let onFocus { attachRowClickAction(to: contentArea, action: onFocus) }
 
+        let runButton = buildActionButton(symbol: "play.fill", tooltip: "Run") { _ in onRun() }
+        runButton.setAccessibilityIdentifier("process-row-run")
+        let stopButton = buildActionButton(symbol: "stop.fill", tooltip: "Stop") { _ in onStop() }
+        stopButton.setAccessibilityIdentifier("process-row-stop")
+        let restartButton = buildActionButton(symbol: "arrow.clockwise", tooltip: "Restart") { _ in onRestart() }
+        restartButton.setAccessibilityIdentifier("process-row-restart")
         let editButton = buildActionButton(symbol: "pencil", tooltip: "Edit") { _ in onEdit() }
         editButton.setAccessibilityIdentifier("process-row-edit")
         let removeButton = buildActionButton(symbol: "trash", tooltip: "Remove") { _ in onRemove() }
         removeButton.setAccessibilityIdentifier("process-row-remove")
 
-        let row = NSStackView(views: [contentArea, editButton, removeButton])
+        let row = NSStackView(views: [contentArea, runButton, stopButton, restartButton, editButton, removeButton])
         row.orientation = .horizontal
         row.alignment = .centerY
         row.spacing = 10
         row.edgeInsets = NSEdgeInsets(top: 9, left: 14, bottom: 9, right: 14)
         row.translatesAutoresizingMaskIntoConstraints = false
-        return (row, [editButton, removeButton])
+        return (
+            row, [runButton, stopButton, restartButton, editButton, removeButton], runButton, stopButton, restartButton, editButton, removeButton
+        )
+    }
+
+    private func updateRuntimeActionVisibility() {
+        let showsRuntimeButtons = currentStatus == .running
+        runButton?.isHidden = showsRuntimeButtons
+        stopButton?.isHidden = !showsRuntimeButtons
+        restartButton?.isHidden = !showsRuntimeButtons
     }
 
     private static func makeEditingForm(process: ProcessTemplate, onCancel: @escaping () -> Void, onSave: @escaping (ProcessTemplate) -> Void) -> (
