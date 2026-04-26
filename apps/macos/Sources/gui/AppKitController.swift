@@ -3139,13 +3139,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
         // --- Buttons ---
         let createButton = actionButton(
-            title: "Create Project", symbol: nil, tooltip: "Create project (Return)", action: #selector(createProject(_:)), primary: true)
-        createButton.keyEquivalent = "\r"
+            title: "Create Project", symbol: nil, tooltip: "Create project", action: #selector(createProject(_:)), primary: true)
         createButton.isEnabled = false
-        let cancelButton = actionButton(
-            title: "Cancel (Esc)", symbol: nil, tooltip: "Cancel (Esc)", action: #selector(cancelProjectForm), primary: false)
-        cancelButton.keyEquivalent = "\u{1b}"
-        cancelButton.keyEquivalentModifierMask = []
+        let cancelButton = actionButton(title: "Cancel", symbol: nil, tooltip: "Cancel", action: #selector(cancelProjectForm), primary: false)
 
         let buttonRow = NSStackView()
         buttonRow.orientation = .horizontal
@@ -3332,16 +3328,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
         // --- Buttons ---
         let createButton = actionButton(
-            title: "Create Workspace (Cmd+Return)", symbol: nil, tooltip: "Create workspace (Cmd+Return)", action: #selector(createWorkspace(_:)),
-            primary: true)
+            title: "Create Workspace", symbol: nil, tooltip: "Create workspace", action: #selector(createWorkspace(_:)), primary: true)
         createButton.setAccessibilityIdentifier("add-workspace-create")
-        createButton.keyEquivalent = "\r"
-        createButton.keyEquivalentModifierMask = [.command]
-        let cancelButton = actionButton(
-            title: "Cancel (Esc)", symbol: nil, tooltip: "Cancel (Esc)", action: #selector(cancelProjectForm), primary: false)
+        let cancelButton = actionButton(title: "Cancel", symbol: nil, tooltip: "Cancel", action: #selector(cancelProjectForm), primary: false)
         cancelButton.setAccessibilityIdentifier("add-workspace-cancel")
-        cancelButton.keyEquivalent = "\u{1b}"
-        cancelButton.keyEquivalentModifierMask = []
 
         let buttonRow = NSStackView()
         buttonRow.orientation = .horizontal
