@@ -67,7 +67,8 @@ A workspace has:
 - per-workspace overrides for launch-time settings
 - a captured set of windows and runtime state
 
-Workspaces can be active or inactive in the sidebar, and can be running or stopped independently of that sidebar state.
+Workspaces can be visible or hidden in the sidebar, and can be running or stopped independently of that sidebar state.
+Hidden workspaces live in a collapsed `Hidden` section at the bottom of the sidebar.
 Running and stopped should be easy to explain:
 - `Running` means Muxy explicitly launched the workspace or another explicit workspace action marked it running.
 - `Stopped` means Muxy has not explicitly launched it, or Muxy explicitly stopped it.

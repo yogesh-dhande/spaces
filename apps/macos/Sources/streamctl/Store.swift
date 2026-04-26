@@ -4,7 +4,7 @@ import appctl
 
 public final class SQLiteStore {
     private let db: OpaquePointer
-    private let schemaVersion = 1
+    private let schemaVersion = 2
     private let busyTimeoutMS: Int32 = 5000
     private let busyRetryAttempts = 10
     private let busyRetryDelaySeconds: TimeInterval = 0.02
@@ -139,7 +139,7 @@ public final class SQLiteStore {
     public func upsert(workspace: WorkspaceRecord) throws {
         try execute(
             sql: """
-                INSERT INTO workspaces(id, project_id, title, dir, dirname, branch, target_branch, is_default, is_archived, is_active, is_running, last_launched_at, tooltip)
+                INSERT INTO workspaces(id, project_id, title, dir, dirname, branch, target_branch, is_default, is_archived, is_hidden, is_running, last_launched_at, tooltip)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(id) DO UPDATE SET
                   title = excluded.title,
@@ -149,14 +149,14 @@ public final class SQLiteStore {
                   target_branch = excluded.target_branch,
                   is_default = excluded.is_default,
                   is_archived = excluded.is_archived,
-                  is_active = excluded.is_active,
+                  is_hidden = excluded.is_hidden,
                   is_running = excluded.is_running,
                   last_launched_at = excluded.last_launched_at,
                   tooltip = excluded.tooltip
                 """,
             bindings: [
                 workspace.id, workspace.projectID, workspace.title, workspace.dir, workspace.dirname ?? "", workspace.branch ?? "",
-                workspace.targetBranch ?? "", workspace.isDefault ? "1" : "0", workspace.isArchived ? "1" : "0", workspace.isActive ? "1" : "0",
+                workspace.targetBranch ?? "", workspace.isDefault ? "1" : "0", workspace.isArchived ? "1" : "0", workspace.isHidden ? "1" : "0",
                 workspace.isRunning ? "1" : "0", workspace.lastLaunchedAt ?? "", workspace.tooltip ?? "",
             ])
         try execute(sql: "DELETE FROM ignored_worktrees WHERE worktree_dir = ?", bindings: [workspace.dir])
@@ -166,7 +166,7 @@ public final class SQLiteStore {
         guard
             let row = try queryRow(
                 sql: """
-                    SELECT id, project_id, title, dir, dirname, branch, target_branch, is_default, is_archived, is_active, is_running, last_launched_at, tooltip
+                    SELECT id, project_id, title, dir, dirname, branch, target_branch, is_default, is_archived, is_hidden, is_running, last_launched_at, tooltip
                     FROM workspaces WHERE id = ?
                     """, bindings: [id])
         else { return nil }
@@ -179,7 +179,7 @@ public final class SQLiteStore {
         guard
             let row = try queryRow(
                 sql: """
-                    SELECT id, project_id, title, dir, dirname, branch, target_branch, is_default, is_archived, is_active, is_running, last_launched_at, tooltip
+                    SELECT id, project_id, title, dir, dirname, branch, target_branch, is_default, is_archived, is_hidden, is_running, last_launched_at, tooltip
                     FROM workspaces WHERE project_id = ? AND title = ?
                     """, bindings: [projectID, title])
         else { return nil }
@@ -190,7 +190,7 @@ public final class SQLiteStore {
         guard
             let row = try queryRow(
                 sql: """
-                    SELECT id, project_id, title, dir, dirname, branch, target_branch, is_default, is_archived, is_active, is_running, last_launched_at, tooltip
+                    SELECT id, project_id, title, dir, dirname, branch, target_branch, is_default, is_archived, is_hidden, is_running, last_launched_at, tooltip
                     FROM workspaces WHERE dir = ?
                     """, bindings: [dir])
         else { return nil }
@@ -200,7 +200,7 @@ public final class SQLiteStore {
     public func workspaces(projectID: String, includeArchived: Bool = false) throws -> [WorkspaceRecord] {
         let rows = try queryRows(
             sql: """
-                SELECT id, project_id, title, dir, dirname, branch, target_branch, is_default, is_archived, is_active, is_running, last_launched_at, tooltip
+                SELECT id, project_id, title, dir, dirname, branch, target_branch, is_default, is_archived, is_hidden, is_running, last_launched_at, tooltip
                 FROM workspaces
                 WHERE project_id = ? AND (? = '1' OR is_archived = 0)
                 ORDER BY is_default DESC, title
@@ -251,8 +251,8 @@ public final class SQLiteStore {
         try execute(sql: "UPDATE workspaces SET is_archived = ? WHERE id = ?", bindings: [isArchived ? "1" : "0", id])
     }
 
-    public func updateWorkspaceActive(id: String, isActive: Bool) throws {
-        try execute(sql: "UPDATE workspaces SET is_active = ? WHERE id = ?", bindings: [isActive ? "1" : "0", id])
+    public func updateWorkspaceHidden(id: String, isHidden: Bool) throws {
+        try execute(sql: "UPDATE workspaces SET is_hidden = ? WHERE id = ?", bindings: [isHidden ? "1" : "0", id])
     }
 
     public func updateWorkspaceTooltip(id: String, tooltip: String?) throws {
@@ -876,7 +876,7 @@ public final class SQLiteStore {
                   target_branch TEXT,
                   is_default INTEGER NOT NULL,
                   is_archived INTEGER NOT NULL,
-                  is_active INTEGER NOT NULL DEFAULT 1,
+                  is_hidden INTEGER NOT NULL DEFAULT 0,
                   is_running INTEGER NOT NULL,
                   last_launched_at TEXT,
                   tooltip TEXT,
@@ -1050,16 +1050,13 @@ public final class SQLiteStore {
             try ensureTerminalTrackingAndNativeIDColumns()
             try ensureConfiguredTemplateIDColumns()
             return
-        case 6:
-            try migrateSchemaFromV6ToV7()
-            try createSchema()
-            try ensureWindowsTableColumns()
-            try ensureTerminalTrackingAndNativeIDColumns()
-            try ensureConfiguredTemplateIDColumns()
-            try setSchemaVersion(schemaVersion)
         default:
             throw NSError(
-                domain: "muxy.store", code: 10, userInfo: [NSLocalizedDescriptionKey: "Unsupported database schema version \(currentVersion)."])
+                domain: "muxy.store", code: 10,
+                userInfo: [
+                    NSLocalizedDescriptionKey:
+                        "Unsupported database schema version \(currentVersion). Remove ~/.muxy/muxy.db and recreate your workspaces."
+                ])
         }
     }
 
@@ -1285,7 +1282,7 @@ public final class SQLiteStore {
         guard row.count >= 13 else { return nil }
         return WorkspaceRecord(
             id: row[0], projectID: row[1], title: row[2], dir: row[3], dirname: row[4].isEmpty ? nil : row[4], branch: row[5].isEmpty ? nil : row[5],
-            targetBranch: row[6].isEmpty ? nil : row[6], isDefault: row[7] == "1", isArchived: row[8] == "1", isActive: row[9] != "0",
+            targetBranch: row[6].isEmpty ? nil : row[6], isDefault: row[7] == "1", isArchived: row[8] == "1", isHidden: row[9] != "0",
             isRunning: row[10] == "1", lastLaunchedAt: row[11].isEmpty ? nil : row[11], tooltip: row[12].isEmpty ? nil : row[12])
     }
 

@@ -165,7 +165,7 @@ public final class MuxyOrchestrator {
         return records.map {
             WorkspaceSummary(
                 id: $0.id, title: $0.title, branch: $0.branch, targetBranch: $0.targetBranch, dir: $0.dir, isRunning: $0.isRunning,
-                isArchived: $0.isArchived, isActive: $0.isActive, isDefault: $0.isDefault, tooltip: $0.tooltip)
+                isArchived: $0.isArchived, isHidden: $0.isHidden, isDefault: $0.isDefault, tooltip: $0.tooltip)
         }
     }
 
@@ -259,10 +259,10 @@ public final class MuxyOrchestrator {
         try store.updateWorkspaceTooltip(id: workspace.id, tooltip: tooltip)
     }
 
-    public func updateWorkspaceActive(workspaceID: String, isActive: Bool) throws {
+    public func updateWorkspaceHidden(workspaceID: String, isHidden: Bool) throws {
         let (_, workspace) = try resolveWorkspace(id: workspaceID)
-        guard workspace.isActive != isActive else { return }
-        try store.updateWorkspaceActive(id: workspace.id, isActive: isActive)
+        guard workspace.isHidden != isHidden else { return }
+        try store.updateWorkspaceHidden(id: workspace.id, isHidden: isHidden)
     }
 
     public func updateWorkspaceName(workspaceID: String, name: String) throws {
@@ -348,7 +348,7 @@ public final class MuxyOrchestrator {
         }
         let updatedWorkspace = WorkspaceRecord(
             id: workspace.id, projectID: workspace.projectID, title: updatedTitle, dir: workspace.dir, dirname: updatedDirname, branch: updatedBranch,
-            targetBranch: workspace.targetBranch, isDefault: workspace.isDefault, isArchived: workspace.isArchived, isActive: workspace.isActive,
+            targetBranch: workspace.targetBranch, isDefault: workspace.isDefault, isArchived: workspace.isArchived, isHidden: workspace.isHidden,
             isRunning: workspace.isRunning, lastLaunchedAt: workspace.lastLaunchedAt, tooltip: updatedTooltip)
         try store.upsert(workspace: updatedWorkspace)
     }
@@ -465,7 +465,7 @@ public final class MuxyOrchestrator {
             }
             let revived = WorkspaceRecord(
                 id: existing.id, projectID: project.id, title: trimmedName, dir: revivedDir, dirname: revivedDirname, branch: revivedBranch,
-                targetBranch: existing.targetBranch ?? resolvedTargetBranch, isDefault: false, isArchived: false, isActive: existing.isActive,
+                targetBranch: existing.targetBranch ?? resolvedTargetBranch, isDefault: false, isArchived: false, isHidden: existing.isHidden,
                 isRunning: false, lastLaunchedAt: nil)
             try store.upsert(workspace: revived)
             try seedWorkspaceSettings(project: project, workspace: revived)
@@ -579,7 +579,7 @@ public final class MuxyOrchestrator {
                     let updatedWorkspace = WorkspaceRecord(
                         id: workspace.id, projectID: workspace.projectID, title: workspace.title, dir: workspace.dir, dirname: workspace.dirname,
                         branch: worktree.branchName, targetBranch: workspace.targetBranch, isDefault: workspace.isDefault,
-                        isArchived: workspace.isArchived, isActive: workspace.isActive, isRunning: workspace.isRunning,
+                        isArchived: workspace.isArchived, isHidden: workspace.isHidden, isRunning: workspace.isRunning,
                         lastLaunchedAt: workspace.lastLaunchedAt, tooltip: workspace.tooltip)
                     try store.upsert(workspace: updatedWorkspace)
                 }
@@ -2890,7 +2890,7 @@ public final class MuxyOrchestrator {
             if existing.isArchived {
                 let revived = WorkspaceRecord(
                     id: existing.id, projectID: project.id, title: existing.title, dir: existing.dir, dirname: existing.dirname,
-                    branch: existing.branch, targetBranch: existing.targetBranch, isDefault: true, isArchived: false, isActive: existing.isActive,
+                    branch: existing.branch, targetBranch: existing.targetBranch, isDefault: true, isArchived: false, isHidden: existing.isHidden,
                     isRunning: existing.isRunning, lastLaunchedAt: existing.lastLaunchedAt)
                 try store.upsert(workspace: revived)
             }
@@ -2911,7 +2911,7 @@ public final class MuxyOrchestrator {
             if existing.isArchived {
                 let revived = WorkspaceRecord(
                     id: existing.id, projectID: project.id, title: existing.title, dir: existing.dir, dirname: existing.dirname,
-                    branch: existing.branch, targetBranch: existing.targetBranch, isDefault: true, isArchived: false, isActive: existing.isActive,
+                    branch: existing.branch, targetBranch: existing.targetBranch, isDefault: true, isArchived: false, isHidden: existing.isHidden,
                     isRunning: existing.isRunning, lastLaunchedAt: existing.lastLaunchedAt)
                 try store.upsert(workspace: revived)
             }

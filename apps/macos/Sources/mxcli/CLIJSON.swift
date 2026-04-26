@@ -101,7 +101,7 @@ struct WorkspaceSummaryPayload: Encodable {
     let dir: String
     let isRunning: Bool
     let isArchived: Bool
-    let isActive: Bool
+    let isHidden: Bool
     let isDefault: Bool
     let tooltip: String?
 }
@@ -115,7 +115,7 @@ extension WorkspaceSummaryPayload {
         dir = value.dir
         isRunning = value.isRunning
         isArchived = value.isArchived
-        isActive = value.isActive
+        isHidden = value.isHidden
         isDefault = value.isDefault
         tooltip = value.tooltip
     }

@@ -68,7 +68,7 @@ Workspaces persist:
 - directory identity
 - title, tooltip, and branch metadata
 - default and archived flags
-- active or inactive sidebar visibility state
+- hidden sidebar visibility state
 - explicit lifecycle state (`running` vs `stopped`)
 - seeded per-workspace copies of launch-time settings
 

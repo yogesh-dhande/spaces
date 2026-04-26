@@ -35,9 +35,9 @@ final class StoreTests: XCTestCase {
         let workspacePortColumns = try readTableColumns(dbURL: dbURL, table: "workspace_ports")
         let workspacePortDefinitionColumns = try readTableColumns(dbURL: dbURL, table: "workspace_port_definitions")
         let projectPortDefinitionColumns = try readTableColumns(dbURL: dbURL, table: "project_port_definitions")
-        XCTAssertEqual(version, 1)
+        XCTAssertEqual(version, 2)
         XCTAssertTrue(workspaceColumns.contains("title"))
-        XCTAssertTrue(workspaceColumns.contains("is_active"))
+        XCTAssertTrue(workspaceColumns.contains("is_hidden"))
         XCTAssertTrue(projectColumns.contains("is_collapsed"))
         XCTAssertFalse(workspaceSettingsColumns.contains("updated_at"))
         XCTAssertFalse(workspaceStatusColumns.contains("on_exit"))
@@ -50,8 +50,8 @@ final class StoreTests: XCTestCase {
         XCTAssertTrue(try readTableColumns(dbURL: dbURL, table: "workspace_terminal_windows").isEmpty)
     }
 
-    // Tests v6 migration preserves live data while removing dead schema by arranging a representative v6 DB and asserting the current v1 result.
-    func testSchemaMigrationFromV6ToCurrentSchemaPreservesData() throws {
+    // Tests older schemas are rejected with a reset instruction by arranging a representative v6 DB and asserting initialization fails clearly.
+    func testOlderSchemaIsRejectedWithResetInstruction() throws {
         let root = try makeTempDirectory()
         let dbURL = root.appendingPathComponent("v6.db")
         try runSQLiteExec(
@@ -134,27 +134,9 @@ final class StoreTests: XCTestCase {
                 INSERT INTO schema_version(version) VALUES (6);
                 """)
 
-        let store = try SQLiteStore(path: dbURL.path)
-        let workspaceStatusColumns = try readTableColumns(dbURL: dbURL, table: "workspace_status_checks")
-        let workspaceSettingsColumns = try readTableColumns(dbURL: dbURL, table: "workspace_settings")
-        let version = try readSingleInteger(dbURL: dbURL, sql: "SELECT version FROM schema_version")
-
-        XCTAssertEqual(version, 1)
-        XCTAssertTrue(workspaceStatusColumns.contains("on_fail"))
-        XCTAssertFalse(workspaceStatusColumns.contains("on_exit"))
-        XCTAssertFalse(workspaceSettingsColumns.contains("updated_at"))
-        XCTAssertTrue(try readTableColumns(dbURL: dbURL, table: "project_terminal_windows").isEmpty)
-        XCTAssertTrue(try readTableColumns(dbURL: dbURL, table: "workspace_terminal_windows").isEmpty)
-
-        XCTAssertEqual(try store.workspaceStopScript(workspaceID: "workspace-1"), "echo stop")
-        let setupState = try store.workspaceSetupState(workspaceID: "workspace-1")
-        XCTAssertEqual(setupState?.status, .failed)
-        XCTAssertEqual(setupState?.errorMessage, "boom")
-        XCTAssertEqual(setupState?.startedAt, "start")
-        XCTAssertEqual(setupState?.finishedAt, "end")
-        let workspaceChecks = try store.workspaceStatusChecks(workspaceID: "workspace-1")
-        XCTAssertEqual(workspaceChecks.count, 1)
-        XCTAssertEqual(workspaceChecks.first?.onFail, .restart)
+        XCTAssertThrowsError(try SQLiteStore(path: dbURL.path)) { error in
+            XCTAssertEqual(error.localizedDescription, "Unsupported database schema version 6. Remove ~/.muxy/muxy.db and recreate your workspaces.")
+        }
     }
 
     // Tests unsupported schema versions fail fast by arranging an older DB version and asserting initialization rejects it.
@@ -186,7 +168,7 @@ final class StoreTests: XCTestCase {
                 """)
 
         XCTAssertThrowsError(try SQLiteStore(path: dbURL.path)) { error in
-            XCTAssertTrue(error.localizedDescription.contains("Unsupported database schema version 5"))
+            XCTAssertEqual(error.localizedDescription, "Unsupported database schema version 5. Remove ~/.muxy/muxy.db and recreate your workspaces.")
         }
     }
 

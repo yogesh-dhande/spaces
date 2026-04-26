@@ -1185,7 +1185,7 @@ final class OrchestratorTests: XCTestCase {
     }
 
     // Tests workspace active state can be toggled independently of runtime state by arranging representative inputs and asserting persistence.
-    func testUpdateWorkspaceActivePersistsState() throws {
+    func testUpdateWorkspaceHiddenPersistsState() throws {
         let root = try makeTempDirectory()
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
@@ -1194,11 +1194,11 @@ final class OrchestratorTests: XCTestCase {
         let project = try orchestrator.addProject(dir: projectDir.path)
         let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
 
-        try orchestrator.updateWorkspaceActive(workspaceID: workspace.id, isActive: false)
-        XCTAssertFalse(try XCTUnwrap(store.workspace(id: workspace.id)).isActive)
+        try orchestrator.updateWorkspaceHidden(workspaceID: workspace.id, isHidden: true)
+        XCTAssertTrue(try XCTUnwrap(store.workspace(id: workspace.id)).isHidden)
 
-        try orchestrator.updateWorkspaceActive(workspaceID: workspace.id, isActive: true)
-        XCTAssertTrue(try XCTUnwrap(store.workspace(id: workspace.id)).isActive)
+        try orchestrator.updateWorkspaceHidden(workspaceID: workspace.id, isHidden: false)
+        XCTAssertFalse(try XCTUnwrap(store.workspace(id: workspace.id)).isHidden)
     }
 
     // Tests workspace metadata update rejects renaming protected main branch by arranging representative inputs and asserting the expected result.
@@ -5014,8 +5014,8 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertNil(try orchestrator.activeWorkspaceID())
     }
 
-    // Tests updateWorkspaceActive persists isActive state by arranging representative inputs and asserting the expected result.
-    func testUpdateWorkspaceActiveIdemopotentWhenSameValue() throws {
+    // Tests updateWorkspaceHidden persists isHidden state by arranging representative inputs and asserting the expected result.
+    func testUpdateWorkspaceHiddenIdemopotentWhenSameValue() throws {
         let root = try makeTempDirectory()
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
@@ -5025,13 +5025,13 @@ final class OrchestratorTests: XCTestCase {
         let project = try orchestrator.addProject(dir: projectDir.path)
         let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
 
-        // Default isActive is true; setting it to true again should be a no-op.
-        try orchestrator.updateWorkspaceActive(workspaceID: workspace.id, isActive: true)
-        XCTAssertEqual(try store.workspace(id: workspace.id)?.isActive, true)
+        // Default isHidden is false; setting it to false again should be a no-op.
+        try orchestrator.updateWorkspaceHidden(workspaceID: workspace.id, isHidden: false)
+        XCTAssertEqual(try store.workspace(id: workspace.id)?.isHidden, false)
 
-        // Setting to false should persist.
-        try orchestrator.updateWorkspaceActive(workspaceID: workspace.id, isActive: false)
-        XCTAssertEqual(try store.workspace(id: workspace.id)?.isActive, false)
+        // Setting to true should persist.
+        try orchestrator.updateWorkspaceHidden(workspaceID: workspace.id, isHidden: true)
+        XCTAssertEqual(try store.workspace(id: workspace.id)?.isHidden, true)
     }
 
     // Tests updateWorkspaceTooltip persists tooltip through orchestrator by arranging representative inputs and asserting the expected result.
@@ -5117,7 +5117,7 @@ final class OrchestratorTests: XCTestCase {
         runningWorkspace = WorkspaceRecord(
             id: workspace.id, projectID: workspace.projectID, title: workspace.title, dir: "/nonexistent/workspace-\(UUID().uuidString)",
             dirname: workspace.dirname, branch: workspace.branch, targetBranch: workspace.targetBranch, isDefault: workspace.isDefault,
-            isArchived: workspace.isArchived, isActive: workspace.isActive, isRunning: true, lastLaunchedAt: nil, tooltip: nil)
+            isArchived: workspace.isArchived, isHidden: workspace.isHidden, isRunning: true, lastLaunchedAt: nil, tooltip: nil)
         try store.upsert(workspace: runningWorkspace)
 
         // Stop should succeed (skip script because dir is missing) rather than throw.
@@ -5148,7 +5148,7 @@ final class OrchestratorTests: XCTestCase {
         let runningWorkspace = WorkspaceRecord(
             id: workspace.id, projectID: workspace.projectID, title: workspace.title, dir: projectDir.path, dirname: workspace.dirname,
             branch: workspace.branch, targetBranch: workspace.targetBranch, isDefault: workspace.isDefault, isArchived: workspace.isArchived,
-            isActive: workspace.isActive, isRunning: true, lastLaunchedAt: nil, tooltip: nil)
+            isHidden: workspace.isHidden, isRunning: true, lastLaunchedAt: nil, tooltip: nil)
         try store.upsert(workspace: runningWorkspace)
 
         // Stop workspace: should attempt to close the editor window via yabai (yabai.closeWindow may fail silently).
