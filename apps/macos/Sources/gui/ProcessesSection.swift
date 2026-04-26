@@ -576,13 +576,13 @@ import streamctl
         }
 
         let cancelButton = NSButton(title: "Cancel", target: nil, action: nil)
-        cancelButton.bezelStyle = .rounded
         cancelButton.setAccessibilityIdentifier("process-row-edit-cancel")
+        Theme.applySecondaryStyle(to: cancelButton)
 
         let saveButton = NSButton(title: "Save", target: nil, action: nil)
-        saveButton.bezelStyle = .rounded
         saveButton.keyEquivalent = "\r"
         saveButton.setAccessibilityIdentifier("process-row-edit-save")
+        Theme.applyPrimaryStyle(to: saveButton)
 
         // Target/action closures stored on NSButton require a Cocoa selector; use
         // a lightweight target helper tied to the form's lifetime.

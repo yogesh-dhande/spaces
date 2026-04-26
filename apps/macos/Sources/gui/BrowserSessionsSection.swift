@@ -437,12 +437,12 @@ import streamctl
         }
 
         let cancelButton = NSButton(title: "Cancel", target: nil, action: nil)
-        cancelButton.bezelStyle = .rounded
         cancelButton.setAccessibilityIdentifier("browser-session-row-edit-cancel")
+        Theme.applySecondaryStyle(to: cancelButton)
         let saveButton = NSButton(title: "Save", target: nil, action: nil)
-        saveButton.bezelStyle = .rounded
         saveButton.keyEquivalent = "\r"
         saveButton.setAccessibilityIdentifier("browser-session-row-edit-save")
+        Theme.applyPrimaryStyle(to: saveButton)
 
         let refreshSaveEnabled: () -> Void = { [weak saveButton, weak urlField] in
             saveButton?.isEnabled = !(urlField?.stringValue.trimmingCharacters(in: .whitespaces).isEmpty ?? true)

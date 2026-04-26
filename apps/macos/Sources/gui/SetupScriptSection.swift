@@ -201,13 +201,13 @@ import AppKit
         inputBg.heightAnchor.constraint(equalToConstant: 88).isActive = true
 
         let cancelButton = NSButton(title: "Cancel", target: nil, action: nil)
-        cancelButton.bezelStyle = .rounded
         cancelButton.setAccessibilityIdentifier("project-setup-script-cancel")
+        Theme.applySecondaryStyle(to: cancelButton)
 
         let saveButton = NSButton(title: "Save", target: nil, action: nil)
-        saveButton.bezelStyle = .rounded
         saveButton.keyEquivalent = "\r"
         saveButton.setAccessibilityIdentifier("project-setup-script-save")
+        Theme.applyPrimaryStyle(to: saveButton)
 
         let target = SetupScriptSectionTarget()
         target.onCancel = onCancel

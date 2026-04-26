@@ -520,13 +520,13 @@ import streamctl
         }
 
         let cancelButton = NSButton(title: "Cancel", target: nil, action: nil)
-        cancelButton.bezelStyle = .rounded
         cancelButton.setAccessibilityIdentifier("agent-launcher-row-edit-cancel")
+        Theme.applySecondaryStyle(to: cancelButton)
 
         let saveButton = NSButton(title: "Save", target: nil, action: nil)
-        saveButton.bezelStyle = .rounded
         saveButton.keyEquivalent = "\r"
         saveButton.setAccessibilityIdentifier("agent-launcher-row-edit-save")
+        Theme.applyPrimaryStyle(to: saveButton)
 
         let refreshSaveEnabled = { [weak saveButton, weak nameField, weak commandField] in
             let hasName = !(nameField?.stringValue.trimmingCharacters(in: .whitespaces).isEmpty ?? true)

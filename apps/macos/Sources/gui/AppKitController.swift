@@ -2409,8 +2409,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             actionButton = NSButton(title: "", target: self, action: #selector(handleWindowIssueToastAction))
             actionButton.bezelStyle = .rounded
             actionButton.controlSize = .small
-            actionButton.isBordered = true
-            actionButton.contentTintColor = .systemBlue
             stack.addArrangedSubview(actionButton)
 
             overlay.addSubview(stack)
@@ -2437,6 +2435,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         detailLabel.stringValue = detail
         actionButton.title = actionTitle ?? ""
         actionButton.isHidden = actionTitle == nil
+        if actionTitle != nil { Theme.applyPrimaryStyle(to: actionButton) }
         windowIssueToastActionHandler = action
         overlay.isHidden = false
 
@@ -2879,7 +2878,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
         // --- Buttons ---
         let saveButton = actionButton(
-            title: "Save Project", symbol: "square.and.arrow.down", tooltip: "Save project (⌘S)", action: #selector(saveProject(_:)), primary: true)
+            title: "Save", symbol: "square.and.arrow.down", tooltip: "Save project (⌘S)", action: #selector(saveProject(_:)), primary: true)
         saveButton.identifier = NSUserInterfaceItemIdentifier(project.id)
         saveButton.keyEquivalent = "\r"
 
@@ -2891,9 +2890,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let buttonRow = NSStackView()
         buttonRow.orientation = .horizontal
         buttonRow.spacing = 8
-        buttonRow.addArrangedSubview(deleteButton)
-        buttonRow.addArrangedSubview(NSView())
-        buttonRow.addArrangedSubview(saveButton)
+        buttonRow.setViews([deleteButton], in: .leading)
+        buttonRow.setViews([saveButton], in: .trailing)
         stack.addArrangedSubview(buttonRow)
         constrainFormFieldToFillWidth(buttonRow, in: stack)
 
@@ -3138,17 +3136,16 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         stack.addArrangedSubview(stopScriptSection.view)
 
         // --- Buttons ---
-        let createButton = actionButton(
-            title: "Create Project", symbol: nil, tooltip: "Create project", action: #selector(createProject(_:)), primary: true)
+        let createButton = actionButton(title: "Create", symbol: nil, tooltip: "Create project", action: #selector(createProject(_:)), primary: true)
         createButton.isEnabled = false
         let cancelButton = actionButton(title: "Cancel", symbol: nil, tooltip: "Cancel", action: #selector(cancelProjectForm), primary: false)
+        Theme.applySecondaryStyle(to: cancelButton)
 
         let buttonRow = NSStackView()
         buttonRow.orientation = .horizontal
         buttonRow.spacing = 8
-        buttonRow.addArrangedSubview(cancelButton)
-        buttonRow.addArrangedSubview(NSView())
-        buttonRow.addArrangedSubview(createButton)
+        buttonRow.setViews([cancelButton], in: .leading)
+        buttonRow.setViews([createButton], in: .trailing)
         stack.addArrangedSubview(buttonRow)
 
         // --- Width constraints ---
@@ -3328,17 +3325,17 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
         // --- Buttons ---
         let createButton = actionButton(
-            title: "Create Workspace", symbol: nil, tooltip: "Create workspace", action: #selector(createWorkspace(_:)), primary: true)
+            title: "Create", symbol: nil, tooltip: "Create workspace", action: #selector(createWorkspace(_:)), primary: true)
         createButton.setAccessibilityIdentifier("add-workspace-create")
         let cancelButton = actionButton(title: "Cancel", symbol: nil, tooltip: "Cancel", action: #selector(cancelProjectForm), primary: false)
         cancelButton.setAccessibilityIdentifier("add-workspace-cancel")
+        Theme.applySecondaryStyle(to: cancelButton)
 
         let buttonRow = NSStackView()
         buttonRow.orientation = .horizontal
         buttonRow.spacing = 8
-        buttonRow.addArrangedSubview(cancelButton)
-        buttonRow.addArrangedSubview(NSView())
-        buttonRow.addArrangedSubview(createButton)
+        buttonRow.setViews([cancelButton], in: .leading)
+        buttonRow.setViews([createButton], in: .trailing)
         stack.addArrangedSubview(buttonRow)
         constrainFormFieldToFillWidth(buttonRow, in: stack)
 
@@ -4718,29 +4715,13 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             button.imagePosition = .imageLeading
         }
         button.toolTip = tooltip
-        if primary {
-            button.controlSize = .large
-            stylePrimaryActionButton(button, title: title)
-        }
+        if primary { stylePrimaryActionButton(button, title: title) }
         return button
     }
 
-    private func primaryActionButtonColor() -> NSColor {
-        // Keep primary actions legible on both appearance modes.
-        sidebarThemeColor(light: (8, 66, 64), dark: (24, 124, 118))
-    }
-
     private func stylePrimaryActionButton(_ button: NSButton, title: String) {
-        let foregroundColor = NSColor.white
-        button.bezelStyle = .rounded
-        button.bezelColor = primaryActionButtonColor()
-        button.contentTintColor = foregroundColor
-        button.attributedTitle = NSAttributedString(
-            string: title, attributes: [.foregroundColor: foregroundColor, .font: NSFont.systemFont(ofSize: 13, weight: .semibold)])
-        if let image = button.image {
-            let configuration = NSImage.SymbolConfiguration(paletteColors: [foregroundColor])
-            button.image = image.withSymbolConfiguration(configuration)
-        }
+        Theme.applyPrimaryStyle(to: button)
+        if let image = button.image { button.image = image.withSymbolConfiguration(.init(paletteColors: [Theme.primaryButtonText])) }
     }
 
     private func constrainFormFieldToFillWidth(_ view: NSView, in stack: NSStackView) {
