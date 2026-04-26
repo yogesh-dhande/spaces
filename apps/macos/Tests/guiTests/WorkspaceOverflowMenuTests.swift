@@ -11,15 +11,15 @@ import Testing
         #expect(titles.contains("Reveal in Finder"))
     }
 
-    @Test func copyPathItemCarriesPathAndCmdShiftC() {
+    @Test func copyPathItemCarriesPathWithoutShortcut() {
         let menu = AppKitController.makeWorkspaceOverflowMenu(workspaceID: "ws-1", path: "/tmp/ws-1", isHidden: false, target: nil)
         guard let copy = menu.items.first(where: { $0.title == "Copy path" }) else {
             Issue.record("Copy path menu item missing")
             return
         }
         #expect(copy.identifier?.rawValue == "/tmp/ws-1")
-        #expect(copy.keyEquivalent == "c")
-        #expect(copy.keyEquivalentModifierMask == NSEvent.ModifierFlags([.command, .shift]))
+        #expect(copy.keyEquivalent == "")
+        #expect(copy.keyEquivalentModifierMask == [])
     }
 
     @Test func revealItemCarriesPathAndCmdShiftF() {

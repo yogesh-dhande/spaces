@@ -5460,8 +5460,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         }
 
         addItem(
-            title: "Copy path", symbol: "doc.on.doc", action: #selector(AppKitController.copyDirectoryPath(_:)), keyEquivalent: "c",
-            modifiers: [.command, .shift], identifier: path)
+            title: "Copy path", symbol: "doc.on.doc", action: #selector(AppKitController.copyDirectoryPath(_:)), keyEquivalent: "", modifiers: [],
+            identifier: path)
         addItem(
             title: "Reveal in Finder", symbol: "folder", action: #selector(AppKitController.revealDirectoryInFinder(_:)), keyEquivalent: "f",
             modifiers: [.command, .shift], identifier: path)
