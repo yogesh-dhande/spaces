@@ -6,7 +6,6 @@ extension AppKitController {
         case guiHotkey
         case guiLeaderHotkey
         case guiDashboardShortcut
-        case guiAddProjectShortcut
         case guiAddWorkspaceShortcut
         case guiReloadShortcut
         case guiNextShortcut
@@ -23,13 +22,12 @@ extension AppKitController {
             case .guiHotkey: return "Toggle app"
             case .guiLeaderHotkey: return "Shortcut leader"
             case .guiDashboardShortcut: return "Show dashboard"
-            case .guiAddProjectShortcut: return "New project"
             case .guiAddWorkspaceShortcut: return "New workspace"
             case .guiReloadShortcut: return "Reload data"
             case .guiNextShortcut: return "Next window"
             case .guiPreviousShortcut: return "Previous window"
             case .guiOpenEditorShortcut: return "Open editor"
-            case .guiOpenTerminalShortcut: return "Open terminal"
+            case .guiOpenTerminalShortcut: return "New terminal"
             case .guiOpenFinderShortcut: return "Open Finder"
             case .guiOpenSettingsShortcut: return "Open settings"
             case .guiWindowShortcut: return "Focus window 1-9"
@@ -39,14 +37,14 @@ extension AppKitController {
 
         static let settingsPanelCases: [ShortcutSetting] = [
             .guiLeaderHotkey, .guiHotkey, .guiNextShortcut, .guiPreviousShortcut, .guiOpenEditorShortcut, .guiDashboardShortcut,
-            .guiAddProjectShortcut, .guiAddWorkspaceShortcut, .guiReloadShortcut, .guiOpenTerminalShortcut, .guiOpenFinderShortcut,
-            .guiOpenSettingsShortcut, .guiWindowShortcut, .guiWindowSequenceShortcut,
+            .guiAddWorkspaceShortcut, .guiReloadShortcut, .guiOpenTerminalShortcut, .guiOpenFinderShortcut, .guiOpenSettingsShortcut,
+            .guiWindowShortcut, .guiWindowSequenceShortcut,
         ]
 
         var usesLeader: Bool {
             switch self {
-            case .guiDashboardShortcut, .guiNextShortcut, .guiPreviousShortcut, .guiOpenEditorShortcut, .guiOpenFinderShortcut, .guiReloadShortcut,
-                .guiWindowSequenceShortcut:
+            case .guiDashboardShortcut, .guiNextShortcut, .guiPreviousShortcut, .guiOpenEditorShortcut, .guiOpenTerminalShortcut,
+                .guiOpenFinderShortcut, .guiReloadShortcut, .guiWindowSequenceShortcut:
                 return true
             default: return false
             }
@@ -71,7 +69,6 @@ extension AppKitController {
             case .guiHotkey: return SettingsKey.guiHotkey
             case .guiLeaderHotkey: return SettingsKey.guiLeaderHotkey
             case .guiDashboardShortcut: return SettingsKey.guiDashboardShortcut
-            case .guiAddProjectShortcut: return SettingsKey.guiAddProjectShortcut
             case .guiAddWorkspaceShortcut: return SettingsKey.guiAddWorkspaceShortcut
             case .guiReloadShortcut: return SettingsKey.guiReloadShortcut
             case .guiNextShortcut: return SettingsKey.guiNextShortcut
@@ -90,7 +87,6 @@ extension AppKitController {
             case .guiHotkey: return SettingsKey.defaultGUIHotkey
             case .guiLeaderHotkey: return SettingsKey.defaultGUILeaderHotkey
             case .guiDashboardShortcut: return SettingsKey.defaultGUIDashboardShortcut
-            case .guiAddProjectShortcut: return SettingsKey.defaultGUIAddProjectShortcut
             case .guiAddWorkspaceShortcut: return SettingsKey.defaultGUIAddWorkspaceShortcut
             case .guiReloadShortcut: return SettingsKey.defaultGUIReloadShortcut
             case .guiNextShortcut: return SettingsKey.defaultGUINextShortcut
@@ -109,7 +105,6 @@ extension AppKitController {
             case SettingsKey.guiHotkey: self = .guiHotkey
             case SettingsKey.guiLeaderHotkey: self = .guiLeaderHotkey
             case SettingsKey.guiDashboardShortcut: self = .guiDashboardShortcut
-            case SettingsKey.guiAddProjectShortcut: self = .guiAddProjectShortcut
             case SettingsKey.guiAddWorkspaceShortcut: self = .guiAddWorkspaceShortcut
             case SettingsKey.guiReloadShortcut: self = .guiReloadShortcut
             case SettingsKey.guiNextShortcut: self = .guiNextShortcut

@@ -2650,10 +2650,12 @@ public final class MuxyOrchestrator {
     }
 
     public func guiOpenTerminalShortcut() throws -> String {
-        try store.setting(key: SettingsKey.guiOpenTerminalShortcut) ?? SettingsKey.defaultGUIOpenTerminalShortcut
+        try effectiveLeaderBackedShortcut(settingKey: SettingsKey.guiOpenTerminalShortcut, defaultValue: SettingsKey.defaultGUIOpenTerminalShortcut)
     }
 
-    public func setGUIOpenTerminalShortcut(_ raw: String?) throws { try store.setSetting(key: SettingsKey.guiOpenTerminalShortcut, value: raw) }
+    public func setGUIOpenTerminalShortcut(_ raw: String?) throws {
+        try store.setSetting(key: SettingsKey.guiOpenTerminalShortcut, value: try normalizeLeaderBackedShortcut(raw))
+    }
 
     public func guiOpenFinderShortcut() throws -> String {
         try effectiveLeaderBackedShortcut(settingKey: SettingsKey.guiOpenFinderShortcut, defaultValue: SettingsKey.defaultGUIOpenFinderShortcut)

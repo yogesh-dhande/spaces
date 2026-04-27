@@ -21,7 +21,7 @@ public enum SettingsKey {
     public static let guiOpenEditorShortcut = "gui_open_editor_shortcut"
     public static let defaultGUIOpenEditorShortcut = "e"
     public static let guiOpenTerminalShortcut = "gui_open_terminal_shortcut"
-    public static let defaultGUIOpenTerminalShortcut = "cmd+t"
+    public static let defaultGUIOpenTerminalShortcut = "t"
     public static let guiOpenFinderShortcut = "gui_open_finder_shortcut"
     public static let defaultGUIOpenFinderShortcut = "f"
     public static let guiOpenSettingsShortcut = "gui_open_settings_shortcut"

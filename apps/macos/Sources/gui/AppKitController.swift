@@ -104,7 +104,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     private var toggleShortcutSpec: HotkeySpec?
     private var dashboardShortcutSpec: HotkeySpec?
     private var shortcutMonitor: Any?
-    private var addProjectShortcutSpec: HotkeySpec?
     private var addWorkspaceShortcutSpec: HotkeySpec?
     private var reloadShortcutSpec: HotkeySpec?
     private var openEditorShortcutSpec: HotkeySpec?
@@ -4499,8 +4498,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
     private func workspaceDetailShortcutFooterSegments() -> [String] {
         [
-            "Dashboard \(footerShortcutHint(for: .guiDashboardShortcut))", "Next window \(footerShortcutHint(for: .guiNextShortcut))",
-            "Prev window \(footerShortcutHint(for: .guiPreviousShortcut))", "Settings \(footerShortcutHint(for: .guiOpenSettingsShortcut))",
+            "Toggle app \(footerShortcutHint(for: .guiHotkey))", "Dashboard \(footerShortcutHint(for: .guiDashboardShortcut))",
+            "Settings \(footerShortcutHint(for: .guiOpenSettingsShortcut))", "Open editor \(footerShortcutHint(for: .guiOpenEditorShortcut))",
+            "New terminal \(footerShortcutHint(for: .guiOpenTerminalShortcut))", "Next window \(footerShortcutHint(for: .guiNextShortcut))",
+            "Prev window \(footerShortcutHint(for: .guiPreviousShortcut))",
         ]
     }
 
@@ -5617,7 +5618,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             if event.type == .flagsChanged { return self.handleShortcutFlagsChanged(event: event) ? nil : event }
             self.recordStartupInteraction(kind: "key_down")
             if self.handleShortcutCaptureEvent(event: event) { return nil }
-            if self.handleAddProjectShortcut(event: event) { return nil }
             if self.handleNewWorkspaceShortcut(event: event) { return nil }
             if self.handleReloadShortcut(event: event) { return nil }
             if self.handleFormCancelShortcut(event: event) { return nil }
@@ -5698,12 +5698,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         guard event.keyCode == UInt16(kVK_Escape) else { return false }
         guard activeAddWorkspaceFormTag != nil || activeAddProjectFormTag != nil else { return false }
         cancelProjectForm()
-        return true
-    }
-
-    private func handleAddProjectShortcut(event: NSEvent) -> Bool {
-        guard let addProjectShortcutSpec, matches(event: event, spec: addProjectShortcutSpec) else { return false }
-        addProject()
         return true
     }
 
@@ -5962,7 +5956,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         }
         toggleShortcutSpec = loadShortcutSpec(setting: .guiHotkey)
         dashboardShortcutSpec = loadShortcutSpec(setting: .guiDashboardShortcut)
-        addProjectShortcutSpec = loadShortcutSpec(setting: .guiAddProjectShortcut)
         addWorkspaceShortcutSpec = loadShortcutSpec(setting: .guiAddWorkspaceShortcut)
         reloadShortcutSpec = loadShortcutSpec(setting: .guiReloadShortcut)
         nextShortcutSpec = loadShortcutSpec(setting: .guiNextShortcut)
@@ -5986,7 +5979,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         case .guiHotkey: return try orchestrator.guiHotkey()
         case .guiLeaderHotkey: return try orchestrator.guiLeaderHotkey()
         case .guiDashboardShortcut: return try orchestrator.guiDashboardShortcut()
-        case .guiAddProjectShortcut: return try orchestrator.guiAddProjectShortcut()
         case .guiAddWorkspaceShortcut: return try orchestrator.guiAddWorkspaceShortcut()
         case .guiReloadShortcut: return try orchestrator.guiReloadShortcut()
         case .guiNextShortcut: return try orchestrator.guiNextShortcut()
@@ -6005,7 +5997,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         case .guiHotkey: try orchestrator.setGUIHotkey(value)
         case .guiLeaderHotkey: try orchestrator.setGUILeaderHotkey(value)
         case .guiDashboardShortcut: try orchestrator.setGUIDashboardShortcut(value)
-        case .guiAddProjectShortcut: try orchestrator.setGUIAddProjectShortcut(value)
         case .guiAddWorkspaceShortcut: try orchestrator.setGUIAddWorkspaceShortcut(value)
         case .guiReloadShortcut: try orchestrator.setGUIReloadShortcut(value)
         case .guiNextShortcut: try orchestrator.setGUINextShortcut(value)
@@ -6024,7 +6015,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         case .guiHotkey: return toggleShortcutSpec
         case .guiLeaderHotkey: return nil
         case .guiDashboardShortcut: return dashboardShortcutSpec
-        case .guiAddProjectShortcut: return addProjectShortcutSpec
         case .guiAddWorkspaceShortcut: return addWorkspaceShortcutSpec
         case .guiReloadShortcut: return reloadShortcutSpec
         case .guiNextShortcut: return nextShortcutSpec

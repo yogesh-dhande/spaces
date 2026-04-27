@@ -101,6 +101,7 @@ Muxy focuses those windows; it does not decide their geometry.
 - The project settings pane should use the same flat detail-header treatment as workspace detail: project title and directory path at the top, then project-level configuration sections and footer actions.
 - Sidebar workspace rows show the workspace title on the first line and the git branch name on a second indented line underneath; the branch line is omitted when the workspace has no branch recorded.
 - The workspace detail pane is a single scrollable page: title + actions at the top, directory path with copy and reveal-in-Finder buttons, inline tooltip editor, then configuration sections for Processes, Browser sessions, Coding agents, Named ports, and Stop script. Each section shows its configured items as rows and expands inline into an edit form when the pencil icon is clicked; the `+ add` header button appends a new item. Running process rows should expose stop and restart actions before edit and delete, while non-running process rows should show run before edit and delete. Named-port rows should show the reserved port number as secondary text next to the configured name. A `⋯` overflow button in the action row exposes Copy path and Reveal in Finder, with Reveal in Finder available as a keyboard-invokable menu item via `⌘⇧F`.
+- The workspace detail footer should show inline shortcut hints for Toggle app, Dashboard, Settings, Open editor, New terminal, Next window, and Prev window, in that order.
 
 ## Workspaces
 
@@ -177,7 +178,7 @@ Muxy focuses those windows; it does not decide their geometry.
 - The global app-toggle shortcut should hide Muxy when it is already frontmost and visible, and show it otherwise.
 - Summoning Muxy from the global app-toggle shortcut should raise the main window above other apps and onto the active space.
 - When Muxy is summoned, it should select the workspace for the window that was focused immediately before activation when that window belongs to a tracked workspace; otherwise it should show the dashboard.
-- The app should expose a configurable shortcut leader that supplies the shared modifiers for leader-based shortcuts like workspace navigation, dashboard, editor, Finder, and queued window focus.
+- The app should expose a configurable shortcut leader that supplies the shared modifiers for leader-based shortcuts like workspace navigation, dashboard, editor, terminal, Finder, and queued window focus.
 - Window rows in the selected workspace should expose numbered shortcuts for direct focus.
 - Numbered window focus shortcuts should keep the saved workspace-settings order for configured browser sessions and processes, and append newly added ad-hoc windows after those configured rows.
 - Window focus actions and numbered shortcuts should follow one target-level rule: make that target available now.
