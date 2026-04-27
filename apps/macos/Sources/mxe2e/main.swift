@@ -5,14 +5,14 @@ import streamctl
 
 /// Small manual-testing helper that exposes fixture seeding and state-dump
 /// commands without expanding the user-facing `mx` CLI surface.
-@main struct MXE2ECommand: ParsableCommand {
+struct MXE2ECommand: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "mxe2e", abstract: "Manual real-system test helpers for Muxy.",
         subcommands: [
             SeedFixtureCommand.self, CleanupFixturesCommand.self, CreateWorkspaceCommand.self, LookupWorkspaceCommand.self,
             SelectWorkspaceDetailCommand.self, DumpWorkspaceCommand.self, FocusableWindowNamesCommand.self, ArchiveWorkspaceCommand.self,
             StopWorkspaceCommand.self, StopFixturesCommand.self, SetWorkspaceBrowserSessionURLsCommand.self, SetWorkspaceAgentLaunchersCommand.self,
-            SetWorkspaceStopScriptCommand.self, SetTerminalHostCommand.self, TerminalHostAvailableCommand.self,
+            SetWorkspaceStopScriptCommand.self, SetTerminalHostCommand.self, TerminalHostAvailableCommand.self, RecordScreenCommand.self,
         ])
 }
 
@@ -560,3 +560,5 @@ private func makeOrchestrator() throws -> MuxyOrchestrator { try MuxyOrchestrato
 /// Normalizes filesystem paths before lookups so shell callers can pass either
 /// relative or absolute values safely.
 private func normalizePath(_ path: String) -> String { URL(fileURLWithPath: path).standardizedFileURL.path }
+
+MXE2ECommand.main()

@@ -2971,10 +2971,16 @@ public final class MuxyOrchestrator {
             agentWindows: try store.agentWindows(workspaceID: workspace.id))
         try store.setWorkspaceStopScript(workspaceID: workspace.id, stopScript: project.stopScript)
         try store.setWorkspacePortDefinitions(workspaceID: workspace.id, definitions: project.ports)
-        try store.setWorkspaceProcesses(workspaceID: workspace.id, processes: project.processes)
+        try store.setWorkspaceProcesses(workspaceID: workspace.id, processes: seededWorkspaceProcesses(from: project.processes))
         try store.setWorkspaceBrowserSessions(workspaceID: workspace.id, sessions: project.browserSessions)
         try store.setWorkspaceAgentLaunchers(workspaceID: workspace.id, launchers: project.agentLaunchers)
         try store.touchWorkspaceSettings(workspaceID: workspace.id, updatedAt: nowISO8601())
+    }
+
+    private func seededWorkspaceProcesses(from templates: [ProcessTemplate]) -> [ProcessTemplate] {
+        templates.map { template in
+            ProcessTemplate(id: UUID().uuidString, name: template.name, command: template.command, kind: template.kind, onExit: template.onExit)
+        }
     }
 
     public func workspaceSetupState(workspaceID: String) throws -> WorkspaceSetupState {

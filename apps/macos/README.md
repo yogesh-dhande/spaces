@@ -49,6 +49,16 @@ Run the real-system GUI/CLI suite from the repository root with:
 apps/macos/Tests/e2e_real_system.sh
 ```
 
+To capture a product-demo video from the same suite, record the run with the native `ScreenCaptureKit` helper and optionally add short editing-friendly pauses between visible transitions:
+
+```bash
+apps/macos/Tests/e2e_real_system.sh \
+  --record-video /tmp/muxy-real-e2e.mp4 \
+  --pause-transitions
+```
+
+The recorder follows the current main display. `--capture-device` remains accepted as a no-op compatibility flag for older invocations.
+
 This suite is manual by design. It drives the real app, `mx`, `yabai`, Chrome, and the configured terminal host in an interactive macOS session instead of XCTest.
 
 Primary coverage includes:

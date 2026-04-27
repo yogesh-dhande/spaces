@@ -4681,6 +4681,30 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertEqual(state.status, .succeeded)
     }
 
+    // Tests createWorkspace seeds per-workspace process IDs so multiple workspaces can inherit the same project template without collisions.
+    func testCreateWorkspaceSeedsUniqueProcessIDsPerWorkspace() throws {
+        let root = try makeTempDirectory()
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let store = try makeTemporaryStore()
+        let orchestrator = MuxyOrchestrator(store: store)
+
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        try orchestrator.updateProjectConfig(projectID: project.id) { config in
+            config.processes = [.init(name: "frontend", command: "npm run dev"), .init(name: "backend", command: "npm run api")]
+        }
+
+        let defaultWorkspace = try XCTUnwrap(try store.workspaces(projectID: project.id).first(where: \.isDefault))
+        let defaultSettings = try XCTUnwrap(orchestrator.workspaceSettings(workspaceID: defaultWorkspace.id))
+
+        let createdWorkspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
+        let createdSettings = try XCTUnwrap(orchestrator.workspaceSettings(workspaceID: createdWorkspace.id))
+
+        XCTAssertEqual(defaultSettings.processes.map(\.name), createdSettings.processes.map(\.name))
+        XCTAssertEqual(defaultSettings.processes.map(\.command), createdSettings.processes.map(\.command))
+        XCTAssertTrue(Set(defaultSettings.processes.map(\.id)).isDisjoint(with: createdSettings.processes.map(\.id)))
+    }
+
     // MARK: - workspacePorts
 
     // Tests workspacePortsNamed returns named ports by arranging representative inputs and asserting the expected result.

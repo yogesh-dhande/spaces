@@ -21,7 +21,7 @@ enum RowPrimitives {
 
     /// 14×14 view that draws an 8-point dot. `running` also paints an outer
     /// halo that matches the CSS `box-shadow: 0 0 0 3px rgba(green, 0.22)`.
-    static func statusDot(_ kind: StatusKind) -> StatusDotView { StatusDotView(kind: kind) }
+    @MainActor static func statusDot(_ kind: StatusKind) -> StatusDotView { StatusDotView(kind: kind) }
 
     /// Fixed-width leading slot for a status indicator. When `content` is nil,
     /// the empty slot preserves shortcut alignment across rows.
@@ -55,7 +55,7 @@ enum RowPrimitives {
 
     /// 22×22 rounded tile with a tinted background and an SF Symbol glyph.
     /// `symbol` is a system symbol name (e.g. "globe", "terminal", "cpu.fill").
-    static func typeIconTile(_ kind: TypeKind, symbol: String, accessibilityLabel: String? = nil) -> NSView {
+    @MainActor static func typeIconTile(_ kind: TypeKind, symbol: String, accessibilityLabel: String? = nil) -> NSView {
         let (bg, fg): (NSColor, NSColor) = {
             switch kind {
             case .browser, .project: (Theme.iconBrowserBg, Theme.iconBrowserFg)
@@ -90,21 +90,21 @@ enum RowPrimitives {
 
     /// Monospace shortcut label like "⌘1" inside a muted rounded chip.
     /// Width enforces a minimum so single-digit shortcuts don't collapse.
-    static func shortcutChip(_ text: String) -> NSView {
+    @MainActor static func shortcutChip(_ text: String) -> NSView {
         makeChip(text: text, font: .monospacedSystemFont(ofSize: 10.5, weight: .medium), foreground: Theme.muted, minWidth: 26)
     }
 
     /// Project name chip (e.g. "Muxy") that sits next to the workspace title.
-    static func projectChip(_ text: String) -> NSView {
+    @MainActor static func projectChip(_ text: String) -> NSView {
         makeChip(text: text, font: .systemFont(ofSize: 11, weight: .regular), foreground: Theme.muted, minWidth: 0)
     }
 
     /// Branch name chip (e.g. "main").
-    static func branchChip(_ text: String) -> NSView {
+    @MainActor static func branchChip(_ text: String) -> NSView {
         makeChip(text: text, font: .monospacedSystemFont(ofSize: 11, weight: .regular), foreground: Theme.muted, minWidth: 0)
     }
 
-    private static func makeChip(text: String, font: NSFont, foreground: NSColor, minWidth: CGFloat) -> NSView {
+    @MainActor private static func makeChip(text: String, font: NSFont, foreground: NSColor, minWidth: CGFloat) -> NSView {
         let chip = ColoredBackgroundView()
         chip.fillColor = Theme.chipBg
         chip.cornerRadius = 4
@@ -155,7 +155,7 @@ nonisolated(unsafe) private var rowClickTargetAssocKey: UInt8 = 0
 /// color at assignment and stops responding to appearance changes; this view
 /// re-resolves the color inside `updateLayer()` under the view's effective
 /// appearance every time AppKit asks for a redraw.
-final class ColoredBackgroundView: NSView {
+@MainActor final class ColoredBackgroundView: NSView {
     var fillColor: NSColor = .clear { didSet { needsDisplay = true } }
     var cornerRadius: CGFloat = 0 {
         didSet {
@@ -187,7 +187,7 @@ final class ColoredBackgroundView: NSView {
 
 /// Draws a status dot. `running` additionally fills an outer halo so the
 /// running state pops against the row background.
-final class StatusDotView: NSView {
+@MainActor final class StatusDotView: NSView {
     var kind: RowPrimitives.StatusKind { didSet { needsDisplay = true } }
 
     init(kind: RowPrimitives.StatusKind) {

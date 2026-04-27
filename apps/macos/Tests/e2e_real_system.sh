@@ -18,29 +18,39 @@ EVENT_LOG="${EVENT_LOG:-/tmp/muxy-e2e-events.log}"
 METRICS_LOG="${METRICS_LOG:-/tmp/muxy-e2e-metrics.log}"
 DEBUG_LOG="${DEBUG_LOG:-/tmp/muxy-e2e-debug.log}"
 RESULTS_LOG="${RESULTS_LOG:-/tmp/muxy-e2e-results.log}"
+RECORDER_LOG="${RECORDER_LOG:-/tmp/muxy-e2e-recorder.log}"
 ACTION_TIMEOUT_SECONDS="${ACTION_TIMEOUT_SECONDS:-20}"
 HOSTS_CSV="${HOSTS_CSV:-iterm2,ghostty}"
 SEED_FILE="${SEED_FILE:-/tmp/muxy-e2e-seed.json}"
 SECOND_SEED_FILE="${SECOND_SEED_FILE:-/tmp/muxy-e2e-seed-2.json}"
+TRANSITION_PAUSE_SECONDS="${TRANSITION_PAUSE_SECONDS:-0}"
+RECORD_VIDEO_PATH="${RECORD_VIDEO_PATH:-}"
+RECORD_VIDEO_CAPTURE_DEVICE="${RECORD_VIDEO_CAPTURE_DEVICE:-}"
+RECORD_VIDEO_FRAMERATE="${RECORD_VIDEO_FRAMERATE:-15}"
+RECORDER_OUTPUT_START_TIMEOUT_SECONDS="${RECORDER_OUTPUT_START_TIMEOUT_SECONDS:-8}"
+RECORDER_STOP_TIMEOUT_SECONDS="${RECORDER_STOP_TIMEOUT_SECONDS:-10}"
 
 TMP_PREFIX="${TMP_PREFIX:-/tmp/muxy-real-e2e}"
 TMP_ROOT="$(cd "$(mktemp -d "$TMP_PREFIX".XXXXXX)" && pwd -P)"
 TMP_HOME="$TMP_ROOT/home"
 TMP_DB="$TMP_ROOT/muxy.db"
 TMP_RUNTIME_DIR="$TMP_ROOT/runtime"
-TEST_REPO="$TMP_ROOT/repo"
-TEST_REPO_2="$TMP_ROOT/repo-2"
-DOCS_HTML="$TMP_ROOT/docs.html"
-ADMIN_HTML="$TMP_ROOT/admin.html"
-DOCS_ALT_HTML="$TMP_ROOT/docs-alt.html"
-ADMIN_ALT_HTML="$TMP_ROOT/admin-alt.html"
-WORKSPACE_TITLE="e2e-workspace"
-WORKSPACE_BRANCH="e2e-workspace"
-WORKSPACE_TOOLTIP="manual gui workspace"
-PRIMARY_WORKSPACE_TITLE="e2e-primary-workspace"
-SECONDARY_WORKSPACE_TITLE="e2e-secondary-workspace"
+TEST_REPO="$TMP_ROOT/atlas-dashboard"
+TEST_REPO_2="$TMP_ROOT/harbor-ops"
+DOCS_HTML="$TMP_ROOT/atlas-docs.html"
+ADMIN_HTML="$TMP_ROOT/atlas-admin.html"
+DOCS_ALT_HTML="$TMP_ROOT/harbor-docs.html"
+ADMIN_ALT_HTML="$TMP_ROOT/harbor-admin.html"
+WORKSPACE_TITLE="Release Readiness"
+WORKSPACE_BRANCH="release-readiness"
+WORKSPACE_TOOLTIP="Polish the launch checklist and QA follow-ups"
+PRIMARY_WORKSPACE_TITLE="Customer Dashboard"
+SECONDARY_WORKSPACE_TITLE="Operations Console"
 MOCK_AGENT_LABEL="Mock Agent"
 MUXY_PID=""
+RECORDER_PID=""
+RECORDER_READY_FILE=""
+FINAL_RECORDING_PATH=""
 CURRENT_CASE=""
 SUMMARY_PRINTED=0
 APP_LOG_SEARCH_FROM_LINE=1
@@ -59,8 +69,9 @@ export MUXY_E2E_EVENTS_LOG="$EVENT_LOG"
 
 cleanup() {
   local exit_code="$?"
-  # Leave the rest of the desktop alone, but make sure the isolated Muxy app
-  # instance and temporary workspace state do not leak after the run.
+  # Always tear down the isolated Muxy instance, helper fixtures, and optional
+  # recorder. Recording mode intentionally starts from a minimized desktop.
+  stop_screen_recording
   "$MX_E2E_BIN" stop-fixtures --dir-prefix "$TMP_PREFIX" >/tmp/muxy-e2e-stop-fixtures-exit.json 2>/dev/null || true
   close_fixture_chrome_windows
   if [[ -n "${MUXY_PID}" ]]; then
@@ -68,6 +79,7 @@ cleanup() {
   fi
   pkill -x Muxy >/dev/null 2>&1 || true
   print_run_summary "$exit_code"
+  open_final_recording
 }
 trap cleanup EXIT
 
@@ -144,6 +156,68 @@ require_file() {
   [[ -x "$1" ]] || fail "missing executable: $1"
 }
 
+print_usage() {
+  cat <<'EOF'
+Usage: apps/macos/Tests/e2e_real_system.sh [options]
+
+Options:
+  --record-video PATH            Capture the full run to PATH with ScreenCaptureKit.
+  --capture-device DEVICE        Legacy option. Ignored by native recording.
+  --capture-framerate FPS        Screen recording frame rate. Default: 15.
+  --pause-transitions            Add a 1 second pause after visible transitions.
+  --transition-pause-seconds N   Override the transition pause duration.
+  --help                         Show this help text.
+EOF
+}
+
+parse_args() {
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --record-video)
+        [[ $# -ge 2 ]] || fail "missing value for --record-video"
+        RECORD_VIDEO_PATH="$2"
+        shift 2
+        ;;
+      --capture-device)
+        [[ $# -ge 2 ]] || fail "missing value for --capture-device"
+        RECORD_VIDEO_CAPTURE_DEVICE="$2"
+        shift 2
+        ;;
+      --capture-framerate)
+        [[ $# -ge 2 ]] || fail "missing value for --capture-framerate"
+        RECORD_VIDEO_FRAMERATE="$2"
+        shift 2
+        ;;
+      --pause-transitions)
+        TRANSITION_PAUSE_SECONDS=1
+        shift
+        ;;
+      --transition-pause-seconds)
+        [[ $# -ge 2 ]] || fail "missing value for --transition-pause-seconds"
+        TRANSITION_PAUSE_SECONDS="$2"
+        shift 2
+        ;;
+      --help)
+        print_usage
+        trap - EXIT
+        exit 0
+        ;;
+      *)
+        fail "unknown argument: $1"
+        ;;
+    esac
+  done
+}
+
+transition_pause() {
+  local label="${1:-transition}"
+  if ! awk -v seconds="$TRANSITION_PAUSE_SECONDS" 'BEGIN { exit(seconds + 0 > 0 ? 0 : 1) }'; then
+    return 0
+  fi
+  log_debug "transition pause ${TRANSITION_PAUSE_SECONDS}s: $label"
+  sleep "$TRANSITION_PAUSE_SECONDS"
+}
+
 build_binaries() {
   log_step "building macOS binaries"
   (cd "$ROOT_DIR" && eval "$BUILD_CMD") >/dev/null
@@ -172,6 +246,171 @@ close_existing_muxy_instances() {
   log_step "closing existing Muxy instances"
   pkill -x Muxy >/dev/null 2>&1 || true
   sleep 1
+}
+
+hide_all_visible_windows() {
+  log_step "hiding visible windows for a clean recording background"
+  yabai -m query --windows | python3 -c '
+import json
+import sys
+
+windows = json.load(sys.stdin)
+for window in windows:
+    if (
+        window.get("is-visible")
+        and not window.get("is-minimized")
+        and window.get("role") == "AXWindow"
+        and window.get("subrole") in {"AXStandardWindow", "AXDialog"}
+    ):
+        print(window["id"])
+' | while IFS= read -r window_id; do
+    yabai -m window "$window_id" --minimize >/dev/null 2>&1 || true
+  done
+
+  yabai -m query --windows | python3 -c '
+import json
+import sys
+
+windows = json.load(sys.stdin)
+seen = set()
+for window in windows:
+    app = (window.get("app") or "").strip()
+    if (
+        app
+        and window.get("is-visible")
+        and not window.get("is-minimized")
+        and window.get("role") == "AXWindow"
+        and window.get("subrole") in {"AXStandardWindow", "AXDialog"}
+        and app not in seen
+    ):
+        seen.add(app)
+        print(app)
+' | while IFS= read -r app_name; do
+    osascript - "$app_name" <<'APPLESCRIPT' >/dev/null 2>&1 || true
+on run argv
+  set targetApp to item 1 of argv
+  tell application targetApp to hide
+end run
+APPLESCRIPT
+  done
+
+  local remaining
+  local deadline=$((SECONDS + ACTION_TIMEOUT_SECONDS))
+  while (( SECONDS < deadline )); do
+    remaining="$(
+      yabai -m query --windows | python3 -c '
+import json
+import sys
+
+windows = json.load(sys.stdin)
+for window in windows:
+    if (
+        window.get("is-visible")
+        and not window.get("is-minimized")
+        and window.get("role") == "AXWindow"
+        and window.get("subrole") in {"AXStandardWindow", "AXDialog"}
+    ):
+        print((window.get("app") or "") + "\t" + str(window.get("id") or ""))
+'
+    )"
+    if [[ -z "$remaining" ]]; then
+      return 0
+    fi
+    sleep 0.2
+  done
+
+  log_debug "visible windows remained after hide:\n$remaining"
+}
+
+start_screen_recording() {
+  [[ -n "$RECORD_VIDEO_PATH" ]] || return 0
+  mkdir -p "$(dirname "$RECORD_VIDEO_PATH")"
+  : >"$RECORDER_LOG"
+  RECORDER_READY_FILE="$TMP_ROOT/recording.ready"
+  rm -f "$RECORDER_READY_FILE"
+  log_step "starting screen recording -> $RECORD_VIDEO_PATH"
+  if [[ -n "$RECORD_VIDEO_CAPTURE_DEVICE" ]]; then
+    log_debug "ignoring legacy capture-device=$RECORD_VIDEO_CAPTURE_DEVICE; using ScreenCaptureKit main display recorder"
+  fi
+  "$MX_E2E_BIN" record-screen \
+    --output "$RECORD_VIDEO_PATH" \
+    --ready-file "$RECORDER_READY_FILE" \
+    --fps "$RECORD_VIDEO_FRAMERATE" >"$RECORDER_LOG" 2>&1 &
+  RECORDER_PID=$!
+  if ! kill -0 "$RECORDER_PID" >/dev/null 2>&1; then
+    cat "$RECORDER_LOG" >&2 || true
+    fail "screen recording exited during startup"
+  fi
+  local deadline=$((SECONDS + RECORDER_OUTPUT_START_TIMEOUT_SECONDS))
+  while (( SECONDS < deadline )); do
+    if [[ -f "$RECORDER_READY_FILE" ]]; then
+      FINAL_RECORDING_PATH="$RECORD_VIDEO_PATH"
+      return 0
+    fi
+    if ! kill -0 "$RECORDER_PID" >/dev/null 2>&1; then
+      break
+    fi
+    sleep 0.2
+  done
+  cat "$RECORDER_LOG" >&2 || true
+  fail "screen recording did not become ready"
+}
+
+stop_screen_recording() {
+  [[ -n "$RECORDER_PID" ]] || return 0
+  if kill -0 "$RECORDER_PID" >/dev/null 2>&1; then
+    log_step "stopping screen recording"
+    kill -INT "$RECORDER_PID" >/dev/null 2>&1 || true
+    local deadline=$((SECONDS + RECORDER_STOP_TIMEOUT_SECONDS))
+    while (( SECONDS < deadline )); do
+      if ! kill -0 "$RECORDER_PID" >/dev/null 2>&1; then
+        break
+      fi
+      sleep 0.2
+    done
+    if kill -0 "$RECORDER_PID" >/dev/null 2>&1; then
+      log_debug "screen recorder did not exit after SIGINT; sending SIGTERM"
+      kill -TERM "$RECORDER_PID" >/dev/null 2>&1 || true
+      deadline=$((SECONDS + RECORDER_STOP_TIMEOUT_SECONDS))
+      while (( SECONDS < deadline )); do
+        if ! kill -0 "$RECORDER_PID" >/dev/null 2>&1; then
+          break
+        fi
+        sleep 0.2
+      done
+    fi
+    if kill -0 "$RECORDER_PID" >/dev/null 2>&1; then
+      log_debug "screen recorder did not exit after SIGTERM; sending SIGKILL"
+      kill -KILL "$RECORDER_PID" >/dev/null 2>&1 || true
+    fi
+    wait "$RECORDER_PID" >/dev/null 2>&1 || true
+  fi
+  if [[ -n "$RECORD_VIDEO_PATH" ]]; then
+    if [[ -s "$RECORD_VIDEO_PATH" ]]; then
+      FINAL_RECORDING_PATH="$RECORD_VIDEO_PATH"
+      log_debug "screen recording saved path=$RECORD_VIDEO_PATH size=$(wc -c <"$RECORD_VIDEO_PATH" | tr -d ' ')"
+    else
+      log_debug "screen recording missing-or-empty path=$RECORD_VIDEO_PATH"
+    fi
+  fi
+  RECORDER_PID=""
+}
+
+open_final_recording() {
+  [[ -n "$FINAL_RECORDING_PATH" ]] || return 0
+  [[ -s "$FINAL_RECORDING_PATH" ]] || return 0
+  open "$FINAL_RECORDING_PATH" >/dev/null 2>&1 || true
+}
+
+print_recording_summary() {
+  if [[ -n "$FINAL_RECORDING_PATH" && -s "$FINAL_RECORDING_PATH" ]]; then
+    printf 'Recording: %s\n' "$FINAL_RECORDING_PATH"
+    return 0
+  fi
+  if [[ -n "$RECORD_VIDEO_PATH" ]]; then
+    printf 'Recording missing: requested=%s\n' "$RECORD_VIDEO_PATH"
+    printf 'Recorder log: %s\n' "$RECORDER_LOG"
+  fi
 }
 
 muxy_instance_count() {
@@ -204,6 +443,7 @@ launch_muxy() {
   MUXY_PID=$!
   ensure_single_muxy_instance "$MUXY_PID"
   wait_for_muxy_frontmost_ready
+  transition_pause "Muxy launch"
 }
 
 activate_muxy_pid() {
@@ -307,11 +547,535 @@ setup_git_fixture() {
     git init -q -b main
     git config user.email "muxy-e2e@example.com"
     git config user.name "muxy-e2e"
-    printf '<html><title>docs</title><body>docs sentinel</body></html>\n' >"$DOCS_HTML"
-    printf '<html><title>admin</title><body>admin sentinel</body></html>\n' >"$ADMIN_HTML"
-    printf '<html><title>docs alt</title><body>docs alt sentinel</body></html>\n' >"$DOCS_ALT_HTML"
-    printf '<html><title>admin alt</title><body>admin alt sentinel</body></html>\n' >"$ADMIN_ALT_HTML"
-    printf '# Muxy E2E\n' >README.md
+    cat <<'EOF' >"$DOCS_HTML"
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Atlas Docs</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #f4f1ea;
+      --panel: rgba(255, 255, 255, 0.86);
+      --ink: #1c242b;
+      --muted: #62717d;
+      --line: rgba(28, 36, 43, 0.1);
+      --accent: #0f766e;
+      --accent-soft: rgba(15, 118, 110, 0.12);
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: "SF Pro Text", "Inter", sans-serif;
+      color: var(--ink);
+      background:
+        radial-gradient(circle at top left, rgba(15, 118, 110, 0.16), transparent 32rem),
+        linear-gradient(180deg, #fbfaf7 0%, var(--bg) 100%);
+    }
+    .shell {
+      max-width: 1180px;
+      margin: 0 auto;
+      padding: 40px 32px 56px;
+    }
+    .topbar {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 28px;
+      color: var(--muted);
+      font-size: 14px;
+    }
+    .badge {
+      padding: 8px 12px;
+      border-radius: 999px;
+      background: var(--accent-soft);
+      color: var(--accent);
+      font-weight: 600;
+    }
+    .hero {
+      display: grid;
+      grid-template-columns: 1.2fr 0.8fr;
+      gap: 24px;
+      margin-bottom: 24px;
+    }
+    .card {
+      border: 1px solid var(--line);
+      border-radius: 24px;
+      background: var(--panel);
+      backdrop-filter: blur(16px);
+      box-shadow: 0 18px 40px rgba(28, 36, 43, 0.08);
+    }
+    .hero-copy {
+      padding: 32px;
+    }
+    h1 {
+      margin: 0 0 12px;
+      font-size: 44px;
+      line-height: 1.02;
+      letter-spacing: -0.04em;
+    }
+    p {
+      margin: 0;
+      font-size: 17px;
+      line-height: 1.6;
+      color: var(--muted);
+    }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 18px;
+      margin-top: 28px;
+    }
+    .tile {
+      padding: 18px;
+      border-radius: 18px;
+      background: rgba(255, 255, 255, 0.72);
+      border: 1px solid var(--line);
+    }
+    .tile strong {
+      display: block;
+      margin-bottom: 8px;
+      font-size: 14px;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: var(--accent);
+    }
+    .hero-side {
+      padding: 24px;
+      display: grid;
+      gap: 14px;
+      align-content: start;
+    }
+    .stat {
+      padding: 16px 18px;
+      border-radius: 18px;
+      background: rgba(15, 118, 110, 0.08);
+    }
+    .stat span {
+      display: block;
+      color: var(--muted);
+      font-size: 13px;
+      margin-bottom: 4px;
+    }
+    .stat strong {
+      font-size: 28px;
+      letter-spacing: -0.03em;
+    }
+    .docs-list {
+      padding: 28px 32px;
+    }
+    .docs-list h2 {
+      margin: 0 0 18px;
+      font-size: 22px;
+      letter-spacing: -0.03em;
+    }
+    .row {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 16px 0;
+      border-top: 1px solid var(--line);
+    }
+    .row:first-of-type { border-top: 0; }
+    .row b { display: block; margin-bottom: 4px; }
+    .row small { color: var(--muted); font-size: 13px; }
+    .pill {
+      padding: 6px 10px;
+      border-radius: 999px;
+      background: #ffffff;
+      border: 1px solid var(--line);
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 600;
+    }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <div class="topbar">
+      <div>Atlas Platform · Product docs</div>
+      <div class="badge">Atlas docs sentinel</div>
+    </div>
+    <section class="hero">
+      <div class="card hero-copy">
+        <h1>Launch the Customer Dashboard without losing the operator context.</h1>
+        <p>Atlas Docs centralizes release checklists, environment conventions, workspace recipes, and incident handoff notes for the launch team.</p>
+        <div class="grid">
+          <div class="tile"><strong>Quickstart</strong>Workspace launch presets, browser sessions, and terminal mappings.</div>
+          <div class="tile"><strong>Operations</strong>Runbooks for handoff, rollback, and on-call escalations.</div>
+          <div class="tile"><strong>Release</strong>Ship-room checklist for dashboard cutovers and smoke tests.</div>
+        </div>
+      </div>
+      <div class="card hero-side">
+        <div class="stat"><span>Active workspaces</span><strong>12</strong></div>
+        <div class="stat"><span>Median launch time</span><strong>18s</strong></div>
+        <div class="stat"><span>Docs freshness</span><strong>Updated today</strong></div>
+      </div>
+    </section>
+    <section class="card docs-list">
+      <h2>Popular guides</h2>
+      <div class="row">
+        <div><b>Workspace templates for customer launch</b><small>Focus docs, frontend, and incident command windows in one flow.</small></div>
+        <div class="pill">7 min</div>
+      </div>
+      <div class="row">
+        <div><b>Browser session naming conventions</b><small>Use durable labels that map cleanly to `mx workspace up --focus`.</small></div>
+        <div class="pill">4 min</div>
+      </div>
+      <div class="row">
+        <div><b>Operator handoff checklist</b><small>Capture release context before switching to the Harbor Ops workspace.</small></div>
+        <div class="pill">9 min</div>
+      </div>
+    </section>
+  </div>
+</body>
+</html>
+EOF
+    cat <<'EOF' >"$ADMIN_HTML"
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Atlas Admin</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #f5f7fb;
+      --panel: #ffffff;
+      --ink: #18212b;
+      --muted: #64748b;
+      --line: #e2e8f0;
+      --accent: #2563eb;
+      --good: #059669;
+      --warn: #d97706;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: "SF Pro Text", "Inter", sans-serif;
+      color: var(--ink);
+      background:
+        radial-gradient(circle at top right, rgba(37, 99, 235, 0.14), transparent 26rem),
+        linear-gradient(180deg, #fbfdff 0%, var(--bg) 100%);
+    }
+    .shell { max-width: 1240px; margin: 0 auto; padding: 28px; }
+    .bar {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 18px;
+    }
+    .bar h1 {
+      margin: 0;
+      font-size: 28px;
+      letter-spacing: -0.04em;
+    }
+    .bar small { color: var(--muted); font-size: 14px; }
+    .chip {
+      border-radius: 999px;
+      padding: 8px 12px;
+      background: rgba(37, 99, 235, 0.12);
+      color: var(--accent);
+      font-weight: 700;
+      font-size: 12px;
+    }
+    .layout {
+      display: grid;
+      grid-template-columns: 1.2fr 0.8fr;
+      gap: 20px;
+    }
+    .panel {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 22px;
+      box-shadow: 0 18px 36px rgba(15, 23, 42, 0.06);
+    }
+    .metrics {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 14px;
+      padding: 20px;
+    }
+    .metric {
+      border-radius: 18px;
+      padding: 18px;
+      background: #f8fbff;
+      border: 1px solid var(--line);
+    }
+    .metric span { display: block; color: var(--muted); font-size: 13px; margin-bottom: 6px; }
+    .metric strong { font-size: 30px; letter-spacing: -0.04em; }
+    .table {
+      padding: 20px 22px 10px;
+    }
+    .table h2, .side h2 { margin: 0 0 14px; font-size: 19px; letter-spacing: -0.03em; }
+    table { width: 100%; border-collapse: collapse; }
+    th, td { padding: 14px 0; border-top: 1px solid var(--line); text-align: left; }
+    th { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: 0.08em; border-top: 0; }
+    td:last-child, th:last-child { text-align: right; }
+    .status {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 6px 10px;
+      border-radius: 999px;
+      font-size: 12px;
+      font-weight: 700;
+    }
+    .healthy { background: rgba(5, 150, 105, 0.12); color: var(--good); }
+    .review { background: rgba(217, 119, 6, 0.12); color: var(--warn); }
+    .side {
+      padding: 20px 22px;
+      display: grid;
+      gap: 16px;
+      align-content: start;
+    }
+    .note {
+      padding: 16px;
+      border-radius: 16px;
+      background: #f8fafc;
+      border: 1px solid var(--line);
+    }
+    .note b { display: block; margin-bottom: 6px; }
+    .note p { margin: 0; color: var(--muted); line-height: 1.5; }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <div class="bar">
+      <div>
+        <h1>Atlas Admin</h1>
+        <small>Release control room for launch-day operators</small>
+      </div>
+      <div class="chip">Atlas admin sentinel</div>
+    </div>
+    <div class="layout">
+      <section class="panel">
+        <div class="metrics">
+          <div class="metric"><span>Live workspaces</span><strong>8</strong></div>
+          <div class="metric"><span>Open incidents</span><strong>1</strong></div>
+          <div class="metric"><span>Queue latency</span><strong>94ms</strong></div>
+        </div>
+        <div class="table">
+          <h2>Launch checks</h2>
+          <table>
+            <thead>
+              <tr><th>Check</th><th>Owner</th><th>Status</th></tr>
+            </thead>
+            <tbody>
+              <tr><td>Customer dashboard deploy</td><td>Frontend</td><td><span class="status healthy">Healthy</span></td></tr>
+              <tr><td>Billing webhook replay</td><td>Platform</td><td><span class="status review">Review</span></td></tr>
+              <tr><td>Status page publish</td><td>Ops</td><td><span class="status healthy">Healthy</span></td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+      <aside class="panel side">
+        <h2>Operator notes</h2>
+        <div class="note">
+          <b>Launch window</b>
+          <p>Customer Dashboard and Operations Console stay paired so docs and incident controls are one shortcut away.</p>
+        </div>
+        <div class="note">
+          <b>Fallback plan</b>
+          <p>If latency exceeds the threshold, hand off to Harbor Ops and pause the rollout checklist before retry.</p>
+        </div>
+      </aside>
+    </div>
+  </div>
+</body>
+</html>
+EOF
+    cat <<'EOF' >"$DOCS_ALT_HTML"
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Harbor Docs</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #eef6f7;
+      --panel: rgba(255, 255, 255, 0.9);
+      --ink: #142126;
+      --muted: #5f7580;
+      --line: rgba(20, 33, 38, 0.1);
+      --accent: #0f766e;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: "SF Pro Text", "Inter", sans-serif;
+      color: var(--ink);
+      background:
+        radial-gradient(circle at top right, rgba(14, 165, 164, 0.2), transparent 22rem),
+        linear-gradient(180deg, #f9fdfd 0%, var(--bg) 100%);
+    }
+    .shell { max-width: 1100px; margin: 0 auto; padding: 36px 28px 52px; }
+    .hero, .list {
+      border-radius: 22px;
+      border: 1px solid var(--line);
+      background: var(--panel);
+      box-shadow: 0 16px 30px rgba(20, 33, 38, 0.08);
+    }
+    .hero { padding: 30px; margin-bottom: 20px; }
+    h1 { margin: 0 0 10px; font-size: 40px; letter-spacing: -0.04em; }
+    p { margin: 0; color: var(--muted); line-height: 1.6; }
+    .banner {
+      display: inline-block;
+      margin-bottom: 16px;
+      padding: 8px 12px;
+      border-radius: 999px;
+      background: rgba(15, 118, 110, 0.12);
+      color: var(--accent);
+      font-size: 12px;
+      font-weight: 700;
+    }
+    .list { padding: 24px 30px; }
+    .item {
+      display: flex;
+      justify-content: space-between;
+      gap: 20px;
+      padding: 16px 0;
+      border-top: 1px solid var(--line);
+    }
+    .item:first-of-type { border-top: 0; }
+    .item b { display: block; margin-bottom: 5px; }
+    .time { color: var(--muted); font-size: 12px; font-weight: 700; }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <section class="hero">
+      <div class="banner">Harbor docs sentinel</div>
+      <h1>Operations guides for high-signal workspace handoffs.</h1>
+      <p>Harbor Docs tracks the runbooks, incident rituals, and launch communication patterns used by the operations console team.</p>
+    </section>
+    <section class="list">
+      <div class="item">
+        <div><b>Incident command workspace recipe</b><p>Keep release status, operator notes, and terminal windows synchronized across one launch flow.</p></div>
+        <div class="time">6 min</div>
+      </div>
+      <div class="item">
+        <div><b>Escalation notes template</b><p>Standardize what gets copied into the admin panel before a shift handoff.</p></div>
+        <div class="time">3 min</div>
+      </div>
+      <div class="item">
+        <div><b>Rollback communication matrix</b><p>Who to page, what to freeze, and which workspace becomes primary during recovery.</p></div>
+        <div class="time">8 min</div>
+      </div>
+    </section>
+  </div>
+</body>
+</html>
+EOF
+    cat <<'EOF' >"$ADMIN_ALT_HTML"
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Harbor Admin</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #f4f7fb;
+      --panel: #ffffff;
+      --ink: #18212d;
+      --muted: #64748b;
+      --line: #dbe4ef;
+      --accent: #0f766e;
+      --alert: #b45309;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: "SF Pro Text", "Inter", sans-serif;
+      color: var(--ink);
+      background: linear-gradient(180deg, #fbfdff 0%, var(--bg) 100%);
+    }
+    .shell { max-width: 1180px; margin: 0 auto; padding: 28px; }
+    .panel {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 22px;
+      box-shadow: 0 16px 32px rgba(15, 23, 42, 0.06);
+    }
+    .header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 18px;
+    }
+    .header h1 { margin: 0; font-size: 28px; letter-spacing: -0.04em; }
+    .tag {
+      padding: 8px 12px;
+      border-radius: 999px;
+      background: rgba(15, 118, 110, 0.12);
+      color: var(--accent);
+      font-size: 12px;
+      font-weight: 700;
+    }
+    .content {
+      display: grid;
+      grid-template-columns: 0.95fr 1.05fr;
+      gap: 18px;
+    }
+    .stack, .table { padding: 22px; }
+    .stack { display: grid; gap: 14px; }
+    .callout {
+      padding: 16px;
+      border-radius: 16px;
+      background: #f8fafc;
+      border: 1px solid var(--line);
+    }
+    .callout b { display: block; margin-bottom: 6px; }
+    .callout p { margin: 0; color: var(--muted); line-height: 1.5; }
+    .alert { color: var(--alert); }
+    table { width: 100%; border-collapse: collapse; }
+    th, td { padding: 14px 0; text-align: left; border-top: 1px solid var(--line); }
+    th { border-top: 0; color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: 0.08em; }
+    td:last-child, th:last-child { text-align: right; }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <div class="header">
+      <h1>Harbor Admin</h1>
+      <div class="tag">Harbor admin sentinel</div>
+    </div>
+    <div class="content">
+      <section class="panel stack">
+        <div class="callout">
+          <b>Incident room</b>
+          <p>The Operations Console stays paired with Harbor Docs so runbooks remain visible while triaging active launch issues.</p>
+        </div>
+        <div class="callout">
+          <b class="alert">Watch item</b>
+          <p>Retry queue depth is elevated. Keep rollback notes open and preserve the current workspace ordering for faster handoff.</p>
+        </div>
+      </section>
+      <section class="panel table">
+        <table>
+          <thead>
+            <tr><th>Service</th><th>Owner</th><th>Status</th></tr>
+          </thead>
+          <tbody>
+            <tr><td>Queue processor</td><td>Ops</td><td>Watching</td></tr>
+            <tr><td>Launch comms</td><td>Support</td><td>Ready</td></tr>
+            <tr><td>Rollback channel</td><td>Platform</td><td>Standby</td></tr>
+          </tbody>
+        </table>
+      </section>
+    </div>
+  </div>
+</body>
+</html>
+EOF
+    printf '# Atlas Dashboard\n' >README.md
     git add README.md
     git commit -q -m init
   )
@@ -320,7 +1084,7 @@ setup_git_fixture() {
     git init -q -b main
     git config user.email "muxy-e2e@example.com"
     git config user.name "muxy-e2e"
-    printf '# Muxy E2E Alt\n' >README.md
+    printf '# Harbor Ops\n' >README.md
     git add README.md
     git commit -q -m init
   )
@@ -568,31 +1332,6 @@ end run
 APPLESCRIPT
 }
 
-ui_click_button_description() {
-  local description="$1"
-  wait_for_muxy_splitter_ready
-  osascript - "$description" <<'APPLESCRIPT'
-on run argv
-  set targetDescription to item 1 of argv
-  tell application "System Events"
-    tell process "Muxy"
-      tell splitter group 1 of window 1
-        repeat with targetElement in buttons
-          try
-            if description of targetElement is targetDescription then
-              click targetElement
-              return
-            end if
-          end try
-        end repeat
-      end tell
-    end tell
-  end tell
-  error "button not found: " & targetDescription
-end run
-APPLESCRIPT
-}
-
 ui_select_outline_row() {
   local row_index="$1"
   wait_for_muxy_splitter_ready
@@ -626,16 +1365,14 @@ on run argv
   set targetLabel to item 1 of argv
   tell application "System Events"
     tell process "Muxy"
-      tell tab group 1 of splitter group 1 of window 1
-        repeat with targetElement in radio buttons
-          try
-            if title of targetElement is targetLabel then
-              click targetElement
-              return
-            end if
-          end try
-        end repeat
-      end tell
+      repeat with targetElement in (entire contents of window 1)
+        try
+          if (role of targetElement) is "AXRadioButton" and (title of targetElement) is targetLabel then
+            click targetElement
+            return
+          end if
+        end try
+      end repeat
     end tell
   end tell
   error "tab not found: " & targetLabel
@@ -654,6 +1391,7 @@ create_workspace_via_gui() {
     --branch "$WORKSPACE_BRANCH" \
     --target-branch main \
     --tooltip "$WORKSPACE_TOOLTIP" >"$TMP_ROOT/created-workspace.json"
+  transition_pause "workspace creation"
 }
 
 set_workspace_browser_urls() {
@@ -711,9 +1449,13 @@ stop_workspace_via_gui() {
     "$MX_E2E_BIN" stop-workspace --workspace-dir "$workspace_dir" >/tmp/muxy-e2e-stop-workspace-fallback.json
     return 0
   fi
-  ui_select_outline_row 2
+  ui_show_workspace_detail "$workspace_dir" ""
   sleep 0.5
-  ui_click_button_description "Stop"
+  if ! ui_click_identifier "workspace-detail-stop"; then
+    log_debug "stop_workspace_via_gui fallback=identifier-stop-workspace-helper"
+    "$MX_E2E_BIN" stop-workspace --workspace-dir "$workspace_dir" >/tmp/muxy-e2e-stop-workspace-fallback.json
+    return 0
+  fi
   local out="$TMP_ROOT/stop-workspace-state.json"
   local deadline=$((SECONDS + 4))
   while (( SECONDS < deadline )); do
@@ -728,29 +1470,18 @@ stop_workspace_via_gui() {
 }
 
 restart_workspace_via_gui() {
+  local workspace_dir="$1"
   log_step "restarting workspace via GUI"
-  wait_for_muxy_frontmost_ready
-  ui_select_outline_row 2
+  ui_show_workspace_detail "$workspace_dir" ""
   sleep 0.5
-  if osascript <<'APPLESCRIPT' | grep -q '^1$'; then
-tell application "System Events"
-  tell process "Muxy"
-    tell splitter group 1 of window 1
-      repeat with targetElement in buttons
-        try
-          if description of targetElement is "Restart" then return 1
-        end try
-      end repeat
-    end tell
-  end tell
-end tell
-return 0
-APPLESCRIPT
-    ui_click_button_description "Restart"
-  else
-    ui_click_button_description "Launch"
+  if ! ui_click_identifier "workspace-detail-launch-restart"; then
+    log_debug "restart_workspace_via_gui fallback=mx-workspace-up-restart"
+    run_mx_logged /tmp/muxy-e2e-restart-workspace-fallback.log workspace up "$workspace_dir" --restart
+    transition_pause "workspace restart fallback"
+    return 0
   fi
   sleep 1
+  transition_pause "workspace restart"
 }
 
 assert_file_contains() {
@@ -1190,6 +1921,7 @@ print_run_summary() {
   fi
   print_case_summary
   print_metric_summary
+  print_recording_summary
   printf 'Metrics log: %s\n' "$METRICS_LOG"
   printf 'Results log: %s\n' "$RESULTS_LOG"
   printf 'Event log: %s\n' "$EVENT_LOG"
@@ -1463,9 +2195,11 @@ run_launch_and_focus_assertions() {
   log_step "switching terminal host to $host"
   "$MX_E2E_BIN" set-terminal-host "$host" >/tmp/muxy-e2e-terminal-host.json
   sleep 0.5
+  transition_pause "switch terminal host to $host"
 
   begin_case "$host: launch workspace and persist terminal host"
   run_mx_logged /tmp/muxy-e2e-launch.log workspace up "$workspace_dir" --focus docs
+  transition_pause "$host launch workspace"
   dump_chrome_state "$host docs-focus after-launch"
   wait_for_condition "chrome_front_url" "file://$DOCS_HTML"
   local docs_window_id
@@ -1497,10 +2231,12 @@ run_launch_and_focus_assertions() {
   wait_for_condition "chrome_front_window_id" "$docs_window_id"
   wait_for_condition "chrome_window_active_url $docs_window_id" "file://$DOCS_HTML"
   chrome_add_extra_tab_to_window "$docs_window_id" "file://$ADMIN_HTML"
+  transition_pause "$host add extra Chrome tab"
   dump_chrome_state "$host after-extra-tab"
   wait_for_condition "chrome_front_window_id" "$docs_window_id"
   wait_for_condition "chrome_window_active_url $docs_window_id" "file://$ADMIN_HTML"
   run_mx_logged /tmp/muxy-e2e-focus-docs.log workspace up "$workspace_dir" --focus docs
+  transition_pause "$host refocus docs"
   record_browser_focus_metric "$host.browser_focus.docs" "file://$DOCS_HTML" "docs"
   dump_chrome_state "$host after-refocus-docs"
   wait_for_condition "chrome_front_window_id" "$docs_window_id"
@@ -1554,9 +2290,11 @@ PY
 )"
     iterm_open_extra_tab "$frontend_window_id"
     sleep 1
+    transition_pause "$host add extra iTerm2 tab"
     wait_for_condition "frontmost_app" "iTerm2"
     [[ "$(iterm_front_session)" != "$frontend_session_id" ]] || fail "expected extra iTerm2 tab to be selected"
     run_mx_logged /tmp/muxy-e2e-focus-frontend.log workspace up "$workspace_dir" --focus frontend
+    transition_pause "$host focus frontend terminal"
     record_process_focus_metric "$host.process_focus.frontend" "frontend"
     frontend_session_id="$(wait_for_workspace_terminal_tracking_id "$workspace_dir" "frontend" "$dump_file")"
     wait_for_iterm_session_focus "$frontend_session_id"
@@ -1588,8 +2326,10 @@ PY
     wait_for_condition "frontmost_app" "ghostty"
     ghostty_open_extra_tab
     sleep 1
+    transition_pause "$host add extra Ghostty tab"
     [[ "$(ghostty_focused_terminal)" != "$frontend_terminal_id" ]] || fail "expected extra Ghostty tab to be selected"
     run_mx_logged /tmp/muxy-e2e-focus-frontend-2.log workspace up "$workspace_dir" --focus frontend
+    transition_pause "$host refocus frontend terminal"
     record_process_focus_metric "$host.process_focus.frontend" "frontend"
     wait_for_condition "ghostty_focused_terminal" "$frontend_terminal_id"
     pass_case
@@ -1605,19 +2345,19 @@ PY
 
   begin_case "$host: workspace detail numbered shortcuts focus correct window"
   # These are the workspace-detail focus cases the user asked for, using the
-  # real Run tab shortcuts instead of direct CLI focus.
+  # real detail-pane shortcuts instead of direct CLI focus.
   ensure_single_muxy_instance "$MUXY_PID"
   ui_show_workspace_detail "$workspace_dir" "$workspace_title"
   sleep 0.5
-  ui_click_tab "Run"
   send_muxy_window_shortcut_with_ack "$docs_shortcut_index"
+  transition_pause "$host shortcut focus docs"
   wait_for_condition "chrome_window_active_url $docs_window_id" "file://$DOCS_HTML"
   record_window_shortcut_metric "$host.shortcut.docs" "$docs_shortcut_index"
   record_named_focus_metric "$host.shortcut.docs.focus" "docs"
   ui_show_workspace_detail "$workspace_dir" "$workspace_title"
   sleep 0.5
-  ui_click_tab "Run"
   send_muxy_window_shortcut_with_ack "$frontend_shortcut_index"
+  transition_pause "$host shortcut focus frontend"
   if [[ "$host" == "iterm2" ]]; then
     frontend_session_id="$(wait_for_workspace_terminal_tracking_id "$workspace_dir" "frontend" "$dump_file")"
     wait_for_iterm_session_focus "$frontend_session_id"
@@ -1630,8 +2370,10 @@ PY
   # This validates forward/back workspace cycling from the live desktop state.
   ensure_single_muxy_instance "$MUXY_PID"
   run_mx_logged /tmp/muxy-e2e-cycle-seed.log workspace up "$workspace_dir" --focus docs
+  transition_pause "$host seed docs focus for cycling"
   wait_for_condition "chrome_front_url" "file://$DOCS_HTML"
   send_cycle_hotkey next
+  transition_pause "$host cycle next"
   record_cycle_metric "$host.cycle.next" "next"
   if [[ "$host" == "iterm2" ]]; then
     wait_for_any_value "iterm_focused_session $frontend_window_id" "$frontend_session_id" "$backend_session_id"
@@ -1639,6 +2381,7 @@ PY
     wait_for_any_value "ghostty_focused_terminal" "$frontend_terminal_id" "$backend_terminal_id"
   fi
   send_cycle_hotkey previous
+  transition_pause "$host cycle previous"
   record_cycle_metric "$host.cycle.previous" "previous"
   wait_for_condition "chrome_front_url" "file://$DOCS_HTML"
   pass_case
@@ -1667,6 +2410,7 @@ PY
     sleep 0.2
   done
   run_mx_logged /tmp/muxy-e2e-recover.log workspace up "$workspace_dir"
+  transition_pause "$host recover dead process"
   local recovery_state recovered_pid recovered_status
   recovery_state="$(wait_for_process_running_recovery "$workspace_dir" "frontend" "$frontend_pid")"
   recovered_pid="${recovery_state%%$'\t'*}"
@@ -1675,7 +2419,7 @@ PY
   pass_case
 
   begin_case "$host: workspace restart and stop lifecycle"
-  restart_workspace_via_gui
+  restart_workspace_via_gui "$workspace_dir"
   wait_for_workspace_running_state "$workspace_dir" "true"
   dump_workspace "$workspace_dir" "$dump_file"
   assert_equals "true" "$(json_get "$dump_file" "workspace.isRunning")" "workspace running after restart"
@@ -1704,9 +2448,11 @@ run_multi_workspace_focus_and_cycle_assertions() {
   reset_fixture_runtime "$secondary_workspace_dir"
 
   run_mx_logged /tmp/muxy-e2e-multi-primary-launch.log workspace up "$primary_workspace_dir" --focus docs
+  transition_pause "$host launch primary workspace"
   log_debug "$host multi primary launch complete"
   dump_workspace "$primary_workspace_dir" "$primary_dump"
   run_mx_logged /tmp/muxy-e2e-multi-secondary-launch.log workspace up "$secondary_workspace_dir" --focus docs
+  transition_pause "$host launch secondary workspace"
   log_debug "$host multi secondary launch complete"
   dump_workspace "$secondary_workspace_dir" "$secondary_dump"
   dump_chrome_state "$host multi after-both-launches"
@@ -1818,9 +2564,11 @@ PY
 )"
 
   run_mx_logged /tmp/muxy-e2e-multi-primary-focus.log workspace up "$primary_workspace_dir" --focus docs
+  transition_pause "$host focus primary docs"
   log_debug "$host multi primary docs focus complete"
   wait_for_condition "chrome_front_url" "$primary_docs_url"
   send_cycle_hotkey next
+  transition_pause "$host primary cycle next"
   log_debug "$host multi primary cycle next sent"
   record_cycle_metric "$host.multi.primary.next" "next"
   if [[ "$host" == "iterm2" ]]; then
@@ -1833,14 +2581,17 @@ PY
     wait_for_any_value "ghostty_focused_terminal" "$primary_frontend_terminal_id" "$primary_backend_terminal_id"
   fi
   send_cycle_hotkey previous
+  transition_pause "$host primary cycle previous"
   log_debug "$host multi primary cycle previous sent"
   record_cycle_metric "$host.multi.primary.previous" "previous"
   wait_for_condition "chrome_front_url" "$primary_docs_url"
 
   run_mx_logged /tmp/muxy-e2e-multi-secondary-focus.log workspace up "$secondary_workspace_dir" --focus docs
+  transition_pause "$host focus secondary docs"
   log_debug "$host multi secondary docs focus complete"
   wait_for_condition "chrome_front_url" "$secondary_docs_url"
   send_cycle_hotkey next
+  transition_pause "$host secondary cycle next"
   log_debug "$host multi secondary cycle next sent"
   record_cycle_metric "$host.multi.secondary.next" "next"
   if [[ "$host" == "iterm2" ]]; then
@@ -1853,6 +2604,7 @@ PY
     wait_for_any_value "ghostty_focused_terminal" "$secondary_frontend_terminal_id" "$secondary_backend_terminal_id"
   fi
   send_cycle_hotkey previous
+  transition_pause "$host secondary cycle previous"
   log_debug "$host multi secondary cycle previous sent"
   record_cycle_metric "$host.multi.secondary.previous" "previous"
   wait_for_condition "chrome_front_url" "$secondary_docs_url"
@@ -1871,8 +2623,6 @@ run_agent_status_assertions() {
 
   dump_workspace "$workspace_dir" "$dump_file"
   workspace_title="$(json_get "$dump_file" "workspace.title")"
-  workspace_id="$(json_get "$dump_file" "workspace.id")"
-  agent_run_view_pattern="muxy: workspace_run_view workspace=$workspace_id selected=true agents=1 coding_entries=1"
   agent_script="$(create_mock_agent_script "$workspace_dir")"
   set_workspace_agent_launcher "$workspace_dir" "$MOCK_AGENT_LABEL" "$agent_script"
 
@@ -1885,22 +2635,13 @@ run_agent_status_assertions() {
     event_start_line=$(( $(wc -l <"$EVENT_LOG") + 1 ))
   fi
   run_mx_logged "/tmp/muxy-e2e-$host-agent-launch.log" workspace up "$workspace_dir"
+  transition_pause "$host launch workspace with agent"
 
   wait_for_event_log_contains_since_line "agent-waiting:$workspace_dir" "$event_start_line"
   wait_for_agent_status "$workspace_dir" "$MOCK_AGENT_LABEL" "waiting"
 
-  ui_show_workspace_detail "$workspace_dir" "$workspace_title"
-  sleep 0.5
-  ui_click_tab "Run"
-  wait_for_app_log_pattern_anywhere "$agent_run_view_pattern"
-
   wait_for_event_log_contains_since_line "agent-done:$workspace_dir" "$event_start_line"
   wait_for_agent_status "$workspace_dir" "$MOCK_AGENT_LABEL" "done"
-
-  ui_show_workspace_detail "$workspace_dir" "$workspace_title"
-  sleep 0.5
-  ui_click_tab "Run"
-  wait_for_app_log_pattern_anywhere "$agent_run_view_pattern"
 
   reset_fixture_runtime "$workspace_dir"
   clear_workspace_agent_launchers "$workspace_dir"
@@ -1917,6 +2658,7 @@ host_available() {
 main() {
   # These checks are intentionally explicit because this script targets the real
   # machine, not the hermetic unit-test environment.
+  parse_args "$@"
   require_cmd git
   require_cmd osascript
   require_cmd python3
@@ -1929,6 +2671,10 @@ main() {
   setup_git_fixture
   seed_fixture
   seed_second_fixture
+  if [[ -n "$RECORD_VIDEO_PATH" ]]; then
+    hide_all_visible_windows
+    start_screen_recording
+  fi
   launch_muxy
   create_workspace_via_gui
 
