@@ -2914,6 +2914,35 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertTrue(events.contains("kill -INT -- -8765"))
     }
 
+    func testStopWorkspaceClosesManagedTerminalWindowOnlyOnce() throws {
+        let (orchestrator, store, _, workspace, root) = try makeOrchestratorWithWorkspace()
+        let closeLog = root.appendingPathComponent("stop-workspace-yabai-close.log")
+        try store.updateWorkspaceRunning(id: workspace.id, isRunning: true, launchedAt: "now")
+        try store.upsert(
+            window: WindowRecord(
+                id: UUID().uuidString, workspaceID: workspace.id, app: "iTerm2", title: "frontend", windowID: 501, role: "terminal", orderIndex: 200,
+                lastSeenAt: "now"))
+        try store.upsert(
+            window: WindowRecord(
+                id: UUID().uuidString, workspaceID: workspace.id, app: "iTerm2", title: "backend", windowID: 502, role: "terminal", orderIndex: 201,
+                lastSeenAt: "now"))
+        try store.upsert(
+            runningProcess: RunningProcessRecord(
+                id: UUID().uuidString, workspaceID: workspace.id, templateName: "frontend", command: "npm run dev", terminalApp: "iTerm2",
+                windowID: 501, pid: nil, status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil))
+        try store.upsert(
+            runningProcess: RunningProcessRecord(
+                id: UUID().uuidString, workspaceID: workspace.id, templateName: "backend", command: "npm run api", terminalApp: "iTerm2",
+                windowID: 502, pid: nil, status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil))
+
+        try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) {
+            try withEnv(name: "YABAI_CLOSE_LOG_FILE", value: closeLog.path) { _ = try orchestrator.stopWorkspace(workspaceID: workspace.id) }
+        }
+
+        let closedIDs = try String(contentsOf: closeLog).split(separator: "\n").map(String.init)
+        XCTAssertEqual(closedIDs, ["501", "502"])
+    }
+
     // Tests stop workspace closes tracked browser tabs without closing chrome window by arranging representative inputs and asserting the expected result.
 
     // Tests stop workspace closes the shared iTerm window without yabai-closing it by arranging representative inputs and asserting the expected result.

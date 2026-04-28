@@ -679,6 +679,15 @@ public final class MuxyOrchestrator {
         }
 
         let env = buildWorkspaceEnv(project: project, workspace: workspace, namedPorts: try store.workspacePortsNamed(workspaceID: workspace.id))
+        let shouldReleaseReservedPortsForLaunch = !(config?.processes.isEmpty ?? true)
+        if shouldReleaseReservedPortsForLaunch {
+            // Workspace port assignments remain pinned in the store until archive, but
+            // the placeholder reservation sockets must step aside while a real process
+            // binds the port during launch.
+            PortReserver.shared.releasePorts(workspaceID: workspace.id)
+        }
+        var shouldRestoreReservedPorts = shouldReleaseReservedPortsForLaunch
+        defer { if shouldRestoreReservedPorts { try? PortAllocator(store: store).reserveExistingPorts(workspaceID: workspace.id) } }
 
         var newWindows: [WindowRecord] = []
 
@@ -723,6 +732,7 @@ public final class MuxyOrchestrator {
         }
 
         try store.updateWorkspaceRunning(id: workspace.id, isRunning: true, launchedAt: nowISO8601())
+        shouldRestoreReservedPorts = false
     }
 
     @discardableResult public func stopWorkspace(workspaceID: String) throws -> WorkspaceStopOutcome {
@@ -736,10 +746,16 @@ public final class MuxyOrchestrator {
         let env = buildWorkspaceEnv(project: project, workspace: workspace, namedPorts: namedPorts)
         let settings = try loadWorkspaceSettings(project: project, workspace: workspace)
         let processes = try store.runningProcesses(workspaceID: workspace.id)
+        var closedManagedTerminalWindowIDs = Set<Int>()
         var skippedStopScriptBecauseWorkspaceDirectoryMissing = false
         for process in processes {
-            if let pid = resolvedRuntimePID(for: process) { terminateProcessGroup(pid: pid) }
-            if isManagedTerminalApp(process.terminalApp) { _ = try? closeTrackedItermTerminalContainer(process) }
+            if isManagedTerminalApp(process.terminalApp) {
+                _ = try? closeTrackedItermTerminalContainer(process)
+                if let windowID = process.windowID { closedManagedTerminalWindowIDs.insert(windowID) }
+                if let pid = resolvedRuntimePID(for: process) { terminateProcessGroup(pid: pid) }
+            } else if let pid = resolvedRuntimePID(for: process) {
+                terminateProcessGroup(pid: pid)
+            }
             let sessionName = processTmuxSessionName(workspaceID: workspace.id, processName: process.templateName)
             if tmux.hasSession(named: sessionName) { try? tmux.killSession(named: sessionName) }
         }
@@ -758,6 +774,7 @@ public final class MuxyOrchestrator {
                 continue
             }
             if window.role == "terminal", isManagedTerminalApp(window.app) {
+                if let windowID = window.windowID, closedManagedTerminalWindowIDs.contains(windowID) { continue }
                 _ = try? closeTrackedItermTerminalWindow(window)
                 continue
             }
@@ -769,6 +786,7 @@ public final class MuxyOrchestrator {
         try store.deleteAgentWindows(workspaceID: workspace.id)
         clearItermTerminalSessionMetadata(workspaceID: workspace.id)
         try store.updateWorkspaceRunning(id: workspace.id, isRunning: false, launchedAt: workspace.lastLaunchedAt)
+        try PortAllocator(store: store).reserveExistingPorts(workspaceID: workspace.id)
         return WorkspaceStopOutcome(skippedStopScriptBecauseWorkspaceDirectoryMissing: skippedStopScriptBecauseWorkspaceDirectoryMissing)
     }
 
@@ -4336,8 +4354,15 @@ public final class MuxyOrchestrator {
     }
 
     private func stopRunningProcess(_ process: RunningProcessRecord, workspaceID: String) throws {
-        if let pid = resolvedRuntimePID(for: process) { terminateProcessGroup(pid: pid) }
-        if isManagedTerminalApp(process.terminalApp) { _ = try? closeTrackedItermTerminalContainer(process) }
+        let closedManagedTerminalWindowID: Int?
+        if isManagedTerminalApp(process.terminalApp) {
+            _ = try? closeTrackedItermTerminalContainer(process)
+            closedManagedTerminalWindowID = process.windowID
+            if let pid = resolvedRuntimePID(for: process) { terminateProcessGroup(pid: pid) }
+        } else {
+            closedManagedTerminalWindowID = nil
+            if let pid = resolvedRuntimePID(for: process) { terminateProcessGroup(pid: pid) }
+        }
         let sessionName = processTmuxSessionName(workspaceID: workspaceID, processName: process.templateName)
         if tmux.hasSession(named: sessionName) { try? tmux.killSession(named: sessionName) }
 
@@ -4345,7 +4370,7 @@ public final class MuxyOrchestrator {
             ($0.windowID != nil && $0.windowID == process.windowID) || ($0.tmuxWindowID != nil && $0.tmuxWindowID == process.tmuxWindowID)
         }) {
             if terminalWindow.role == "terminal", isManagedTerminalApp(terminalWindow.app) {
-                _ = try? closeTrackedItermTerminalWindow(terminalWindow)
+                if terminalWindow.windowID != closedManagedTerminalWindowID { _ = try? closeTrackedItermTerminalWindow(terminalWindow) }
             } else if let windowID = terminalWindow.windowID {
                 _ = try? yabai.closeWindow(id: windowID)
             }
