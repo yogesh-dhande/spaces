@@ -54,6 +54,16 @@ FINAL_RECORDING_PATH=""
 CURRENT_CASE=""
 SUMMARY_PRINTED=0
 APP_LOG_SEARCH_FROM_LINE=1
+SETUP_FIXTURES_ONLY=0
+PRESERVE_FIXTURES_ON_EXIT=0
+FIXTURE_PORT_NAME="MUXY_E2E_HTTP_PORT"
+PRIMARY_DOCS_URL=""
+PRIMARY_ADMIN_URL=""
+SECONDARY_DOCS_URL=""
+SECONDARY_ADMIN_URL=""
+CREATED_DOCS_URL=""
+CREATED_ADMIN_URL=""
+FIXTURE_SERVER_PIDS=()
 
 mkdir -p "$TMP_HOME" "$TMP_RUNTIME_DIR"
 : >"$EVENT_LOG"
@@ -69,9 +79,14 @@ export MUXY_E2E_EVENTS_LOG="$EVENT_LOG"
 
 cleanup() {
   local exit_code="$?"
+  if (( PRESERVE_FIXTURES_ON_EXIT == 1 && exit_code == 0 )); then
+    print_run_summary "$exit_code"
+    return 0
+  fi
   # Always tear down the isolated Muxy instance, helper fixtures, and optional
   # recorder. Recording mode intentionally starts from a minimized desktop.
   stop_screen_recording
+  stop_fixture_http_servers
   "$MX_E2E_BIN" stop-fixtures --dir-prefix "$TMP_PREFIX" >/tmp/muxy-e2e-stop-fixtures-exit.json 2>/dev/null || true
   close_fixture_chrome_windows
   if [[ -n "${MUXY_PID}" ]]; then
@@ -165,6 +180,7 @@ Options:
   --capture-device DEVICE        Legacy option. Ignored by native recording.
   --capture-framerate FPS        Screen recording frame rate. Default: 15.
   --pause-transitions            Add a 1 second pause after visible transitions.
+  --setup-fixtures-only          Create projects/workspaces and leave the manual test environment running.
   --transition-pause-seconds N   Override the transition pause duration.
   --help                         Show this help text.
 EOF
@@ -190,6 +206,10 @@ parse_args() {
         ;;
       --pause-transitions)
         TRANSITION_PAUSE_SECONDS=1
+        shift
+        ;;
+      --setup-fixtures-only)
+        SETUP_FIXTURES_ONLY=1
         shift
         ;;
       --transition-pause-seconds)
@@ -1097,8 +1117,8 @@ seed_fixture() {
   "$MX_E2E_BIN" seed-fixture \
     --project-dir "$TEST_REPO" \
     --workspace-title "$PRIMARY_WORKSPACE_TITLE" \
-    --docs-url "file://$DOCS_HTML" \
-    --admin-url "file://$ADMIN_HTML" >"$SEED_FILE"
+    --docs-url "http://localhost:\$${FIXTURE_PORT_NAME}/docs" \
+    --admin-url "http://localhost:\$${FIXTURE_PORT_NAME}/admin" >"$SEED_FILE"
 }
 
 seed_second_fixture() {
@@ -1106,8 +1126,150 @@ seed_second_fixture() {
   "$MX_E2E_BIN" seed-fixture \
     --project-dir "$TEST_REPO_2" \
     --workspace-title "$SECONDARY_WORKSPACE_TITLE" \
-    --docs-url "file://$DOCS_ALT_HTML" \
-    --admin-url "file://$ADMIN_ALT_HTML" >"$SECOND_SEED_FILE"
+    --docs-url "http://localhost:\$${FIXTURE_PORT_NAME}/docs" \
+    --admin-url "http://localhost:\$${FIXTURE_PORT_NAME}/admin" >"$SECOND_SEED_FILE"
+}
+
+workspace_named_port() {
+  local workspace_dir="$1"
+  local port_name="$2"
+  python3 - "$TMP_DB" "$workspace_dir" "$port_name" <<'PY'
+import sqlite3
+import sys
+
+db_path, workspace_dir, port_name = sys.argv[1:4]
+conn = sqlite3.connect(db_path)
+try:
+    row = conn.execute(
+        """
+        SELECT wp.port_number
+        FROM workspace_ports AS wp
+        JOIN workspaces AS w ON w.id = wp.workspace_id
+        WHERE w.dir = ? AND wp.port_name = ?
+        ORDER BY wp.port_index
+        LIMIT 1
+        """,
+        (workspace_dir, port_name),
+    ).fetchone()
+finally:
+    conn.close()
+
+if row is None:
+    raise SystemExit(1)
+
+print(row[0])
+PY
+}
+
+fixture_url_for_workspace() {
+  local workspace_dir="$1"
+  local path="$2"
+  local port
+  port="$(workspace_named_port "$workspace_dir" "$FIXTURE_PORT_NAME")" || fail "missing named port $FIXTURE_PORT_NAME for $workspace_dir"
+  printf 'http://localhost:%s%s\n' "$port" "$path"
+}
+
+start_fixture_http_server() {
+  local label="$1"
+  local workspace_dir="$2"
+  local docs_file="$3"
+  local admin_file="$4"
+  local port
+  port="$(workspace_named_port "$workspace_dir" "$FIXTURE_PORT_NAME")" || fail "missing named port $FIXTURE_PORT_NAME for $workspace_dir"
+  local ready_file="$TMP_ROOT/${label}-server-ready"
+  local error_file="$TMP_ROOT/${label}-server-error"
+  rm -f "$ready_file" "$error_file"
+  python3 - "$port" "$docs_file" "$admin_file" "$ready_file" "$error_file" >>"$DEBUG_LOG" 2>&1 <<'PY' &
+import http.server
+import socketserver
+import sys
+from pathlib import Path
+
+port = int(sys.argv[1])
+docs_path = Path(sys.argv[2])
+admin_path = Path(sys.argv[3])
+ready_path = Path(sys.argv[4])
+error_path = Path(sys.argv[5])
+
+class Handler(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        routes = {
+            "/": docs_path,
+            "/docs": docs_path,
+            "/admin": admin_path,
+        }
+        path = routes.get(self.path)
+        if path is None:
+            self.send_response(404)
+            self.send_header("Content-Type", "text/plain; charset=utf-8")
+            self.end_headers()
+            self.wfile.write(b"not found\n")
+            return
+        body = path.read_bytes()
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, format, *args):
+        print(f"http[{port}] " + format % args)
+
+try:
+    class Server(socketserver.ThreadingMixIn, http.server.HTTPServer):
+        daemon_threads = True
+
+    with Server(("127.0.0.1", port), Handler) as server:
+        ready_path.write_text(str(port))
+        server.serve_forever()
+except Exception as exc:
+    error_path.write_text(str(exc))
+    raise
+PY
+  local server_pid=$!
+  FIXTURE_SERVER_PIDS+=("$server_pid")
+  local deadline=$((SECONDS + ACTION_TIMEOUT_SECONDS))
+  while (( SECONDS < deadline )); do
+    if [[ -f "$ready_file" ]]; then
+      log_debug "fixture_http_server label=$label pid=$server_pid port=$port workspace=$workspace_dir"
+      return 0
+    fi
+    if [[ -f "$error_file" ]]; then
+      fail "fixture HTTP server failed for $label on port $port: $(cat "$error_file")"
+    fi
+    if ! kill -0 "$server_pid" >/dev/null 2>&1; then
+      fail "fixture HTTP server exited before becoming ready for $label on port $port"
+    fi
+    sleep 0.1
+  done
+  fail "timed out waiting for fixture HTTP server for $label on port $port"
+}
+
+stop_fixture_http_servers() {
+  local pid
+  for pid in "${FIXTURE_SERVER_PIDS[@]:-}"; do
+    if [[ -n "$pid" ]]; then
+      kill "$pid" >/dev/null 2>&1 || true
+    fi
+  done
+}
+
+start_fixture_http_servers() {
+  local primary_workspace_dir="$1"
+  local secondary_workspace_dir="$2"
+  local created_workspace_dir="${3:-}"
+  log_step "starting localhost fixture servers on reserved workspace ports"
+  start_fixture_http_server "primary" "$primary_workspace_dir" "$DOCS_HTML" "$ADMIN_HTML"
+  start_fixture_http_server "secondary" "$secondary_workspace_dir" "$DOCS_ALT_HTML" "$ADMIN_ALT_HTML"
+  PRIMARY_DOCS_URL="$(fixture_url_for_workspace "$primary_workspace_dir" "/docs")"
+  PRIMARY_ADMIN_URL="$(fixture_url_for_workspace "$primary_workspace_dir" "/admin")"
+  SECONDARY_DOCS_URL="$(fixture_url_for_workspace "$secondary_workspace_dir" "/docs")"
+  SECONDARY_ADMIN_URL="$(fixture_url_for_workspace "$secondary_workspace_dir" "/admin")"
+  if [[ -n "$created_workspace_dir" ]]; then
+    start_fixture_http_server "created" "$created_workspace_dir" "$DOCS_HTML" "$ADMIN_HTML"
+    CREATED_DOCS_URL="$(fixture_url_for_workspace "$created_workspace_dir" "/docs")"
+    CREATED_ADMIN_URL="$(fixture_url_for_workspace "$created_workspace_dir" "/admin")"
+  fi
 }
 
 slugify_automation_id() {
@@ -2201,13 +2363,13 @@ run_launch_and_focus_assertions() {
   run_mx_logged /tmp/muxy-e2e-launch.log workspace up "$workspace_dir" --focus docs
   transition_pause "$host launch workspace"
   dump_chrome_state "$host docs-focus after-launch"
-  wait_for_condition "chrome_front_url" "file://$DOCS_HTML"
+  wait_for_condition "chrome_front_url" "$PRIMARY_DOCS_URL"
   local docs_window_id
   docs_window_id="$(chrome_front_window_id)"
   [[ -n "$docs_window_id" ]] || fail "docs focus did not leave a front Chrome window"
-  log_debug "$host docs_window_id=$docs_window_id expected_docs=file://$DOCS_HTML"
+  log_debug "$host docs_window_id=$docs_window_id expected_docs=$PRIMARY_DOCS_URL"
   wait_for_condition "chrome_front_window_id" "$docs_window_id"
-  wait_for_condition "chrome_window_active_url $docs_window_id" "file://$DOCS_HTML"
+  wait_for_condition "chrome_window_active_url $docs_window_id" "$PRIMARY_DOCS_URL"
 
   dump_workspace "$workspace_dir" "$dump_file"
   local workspace_id
@@ -2227,21 +2389,22 @@ run_launch_and_focus_assertions() {
   begin_case "$host: focus tracked Chrome tab with extra user tab present"
   # Prove the docs focus really left us on the tracked Chrome window before we
   # inject an untracked user tab into that same window.
+  local extra_user_tab_url="https://muxy.dev/"
   dump_chrome_state "$host docs-focus before-extra-tab"
   wait_for_condition "chrome_front_window_id" "$docs_window_id"
-  wait_for_condition "chrome_window_active_url $docs_window_id" "file://$DOCS_HTML"
-  chrome_add_extra_tab_to_window "$docs_window_id" "file://$ADMIN_HTML"
+  wait_for_condition "chrome_window_active_url $docs_window_id" "$PRIMARY_DOCS_URL"
+  chrome_add_extra_tab_to_window "$docs_window_id" "$extra_user_tab_url"
   transition_pause "$host add extra Chrome tab"
   dump_chrome_state "$host after-extra-tab"
   wait_for_condition "chrome_front_window_id" "$docs_window_id"
-  wait_for_condition "chrome_window_active_url $docs_window_id" "file://$ADMIN_HTML"
+  wait_for_condition "chrome_window_active_url $docs_window_id" "$extra_user_tab_url"
   run_mx_logged /tmp/muxy-e2e-focus-docs.log workspace up "$workspace_dir" --focus docs
   transition_pause "$host refocus docs"
-  record_browser_focus_metric "$host.browser_focus.docs" "file://$DOCS_HTML" "docs"
+  record_browser_focus_metric "$host.browser_focus.docs" "$PRIMARY_DOCS_URL" "docs"
   dump_chrome_state "$host after-refocus-docs"
   wait_for_condition "chrome_front_window_id" "$docs_window_id"
-  wait_for_condition "chrome_window_active_url $docs_window_id" "file://$DOCS_HTML"
-  wait_for_condition "chrome_front_url" "file://$DOCS_HTML"
+  wait_for_condition "chrome_window_active_url $docs_window_id" "$PRIMARY_DOCS_URL"
+  wait_for_condition "chrome_front_url" "$PRIMARY_DOCS_URL"
   pass_case
 
   dump_workspace "$workspace_dir" "$dump_file"
@@ -2351,7 +2514,7 @@ PY
   sleep 0.5
   send_muxy_window_shortcut_with_ack "$docs_shortcut_index"
   transition_pause "$host shortcut focus docs"
-  wait_for_condition "chrome_window_active_url $docs_window_id" "file://$DOCS_HTML"
+  wait_for_condition "chrome_window_active_url $docs_window_id" "$PRIMARY_DOCS_URL"
   record_window_shortcut_metric "$host.shortcut.docs" "$docs_shortcut_index"
   record_named_focus_metric "$host.shortcut.docs.focus" "docs"
   ui_show_workspace_detail "$workspace_dir" "$workspace_title"
@@ -2371,7 +2534,7 @@ PY
   ensure_single_muxy_instance "$MUXY_PID"
   run_mx_logged /tmp/muxy-e2e-cycle-seed.log workspace up "$workspace_dir" --focus docs
   transition_pause "$host seed docs focus for cycling"
-  wait_for_condition "chrome_front_url" "file://$DOCS_HTML"
+  wait_for_condition "chrome_front_url" "$PRIMARY_DOCS_URL"
   send_cycle_hotkey next
   transition_pause "$host cycle next"
   record_cycle_metric "$host.cycle.next" "next"
@@ -2383,7 +2546,7 @@ PY
   send_cycle_hotkey previous
   transition_pause "$host cycle previous"
   record_cycle_metric "$host.cycle.previous" "previous"
-  wait_for_condition "chrome_front_url" "file://$DOCS_HTML"
+  wait_for_condition "chrome_front_url" "$PRIMARY_DOCS_URL"
   pass_case
 
   begin_case "$host: dead process recovery"
@@ -2435,10 +2598,10 @@ run_multi_workspace_focus_and_cycle_assertions() {
   local host="$1"
   local primary_workspace_dir="$2"
   local secondary_workspace_dir="$3"
-  local primary_docs_url="file://$DOCS_HTML"
-  local primary_admin_url="file://$ADMIN_HTML"
-  local secondary_docs_url="file://$DOCS_ALT_HTML"
-  local secondary_admin_url="file://$ADMIN_ALT_HTML"
+  local primary_docs_url="$PRIMARY_DOCS_URL"
+  local primary_admin_url="$PRIMARY_ADMIN_URL"
+  local secondary_docs_url="$SECONDARY_DOCS_URL"
+  local secondary_admin_url="$SECONDARY_ADMIN_URL"
   local primary_dump="$TMP_ROOT/$host-primary-multi.json"
   local secondary_dump="$TMP_ROOT/$host-secondary-multi.json"
 
@@ -2685,9 +2848,28 @@ main() {
   workspace_dir="$(json_get "$SEED_FILE" "defaultWorkspace.dir")"
   local second_workspace_dir
   second_workspace_dir="$(json_get "$SECOND_SEED_FILE" "defaultWorkspace.dir")"
+  start_fixture_http_servers "$workspace_dir" "$second_workspace_dir" "$created_workspace_dir"
   local stop_marker="workspace-stop-override"
 
   set_workspace_stop_script_via_gui "$stop_marker" "$workspace_dir"
+
+  if (( SETUP_FIXTURES_ONLY == 1 )); then
+    PRESERVE_FIXTURES_ON_EXIT=1
+    begin_case "manual fixture setup"
+    pass_case
+    cat <<EOF
+Manual fixture environment is ready:
+  HOME=$TMP_HOME
+  DB=$TMP_DB
+  Primary workspace: $workspace_dir
+  Secondary workspace: $second_workspace_dir
+  Created workspace: $created_workspace_dir
+  Primary docs: $PRIMARY_DOCS_URL
+  Secondary docs: $SECONDARY_DOCS_URL
+  Muxy PID: $MUXY_PID
+EOF
+    return 0
+  fi
 
   IFS=',' read -r -a hosts <<<"$HOSTS_CSV"
   for host in "${hosts[@]}"; do

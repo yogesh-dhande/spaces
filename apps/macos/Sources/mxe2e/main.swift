@@ -147,6 +147,13 @@ private struct SeedFixtureCommand: ParsableCommand {
             }
         }
 
+        // The default workspace inherits project port definitions lazily, but
+        // the manual shell harness needs the concrete reserved port numbers
+        // immediately so it can start localhost fixture servers before launch.
+        if let workspace = try orchestrator.store.workspace(dir: project.id) {
+            try orchestrator.updateWorkspaceSettings(workspaceID: workspace.id) { _ in }
+        }
+
         let payload = SeedFixturePayload(
             projectID: project.id,
             defaultWorkspace: try orchestrator.store.workspace(dir: project.id).map {

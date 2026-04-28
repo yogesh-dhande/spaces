@@ -59,6 +59,12 @@ apps/macos/Tests/e2e_real_system.sh \
 
 The recorder follows the current main display. `--capture-device` remains accepted as a no-op compatibility flag for older invocations.
 
+To prepare the same fixture projects, localhost browser-session servers, and workspace records for manual exploration without running the assertions, use:
+
+```bash
+apps/macos/Tests/e2e_real_system.sh --setup-fixtures-only
+```
+
 This suite is manual by design. It drives the real app, `mx`, `yabai`, Chrome, and the configured terminal host in an interactive macOS session instead of XCTest.
 
 Primary coverage includes:
