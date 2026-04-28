@@ -10,21 +10,26 @@ private final class InlineWorkspaceEditorTextView: NSTextView {
     var onSave: (() -> Void)?
     var onCancel: (() -> Void)?
 
-    override func doCommand(by selector: Selector) {
-        if selector == #selector(NSResponder.cancelOperation(_:)) {
+    override func keyDown(with event: NSEvent) {
+        let flags = event.modifierFlags.intersection([.command, .shift, .option, .control])
+        switch Int(event.keyCode) {
+        case kVK_Escape:
             onCancel?()
             return
-        }
-        if selector == #selector(NSResponder.insertNewlineIgnoringFieldEditor(_:)) {
-            onSave?()
-            return
-        }
-        if selector == #selector(NSResponder.insertNewline(_:)) {
-            let flags = NSApp.currentEvent?.modifierFlags.intersection([.command, .shift, .option, .control]) ?? []
+        case kVK_Return, kVK_ANSI_KeypadEnter:
             if flags == .command {
                 onSave?()
                 return
             }
+        default: break
+        }
+        super.keyDown(with: event)
+    }
+
+    override func doCommand(by selector: Selector) {
+        if selector == #selector(NSResponder.cancelOperation(_:)) {
+            onCancel?()
+            return
         }
         super.doCommand(by: selector)
     }
