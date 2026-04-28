@@ -128,11 +128,14 @@ private struct SeedFixtureCommand: ParsableCommand {
         let orchestrator = try makeOrchestrator()
         let normalizedProjectDir = normalizePath(projectDir)
         let project = try orchestrator.project(id: normalizedProjectDir) ?? orchestrator.addProject(dir: normalizedProjectDir)
-        let frontendCommand = try makeProcessScript(projectDir: normalizedProjectDir, label: "FRONTEND")
-        let backendCommand = try makeProcessScript(projectDir: normalizedProjectDir, label: "BACKEND")
+        let uvExecutable = try resolveExecutablePath(named: "uv")
+        let frontendCommand =
+            "\(uvExecutable) run --project .muxy-e2e-demo muxy-e2e-demo frontend --port $MUXY_E2E_APP_PORT --site-dir .muxy-e2e-demo/site --backend-url http://127.0.0.1:$MUXY_E2E_API_PORT"
+        let backendCommand =
+            "\(uvExecutable) run --project .muxy-e2e-demo muxy-e2e-demo backend --port $MUXY_E2E_API_PORT --data-dir .muxy-e2e-demo/api"
 
         try orchestrator.updateProjectConfig(projectID: project.id) { config in
-            config.ports = [.init(name: "MUXY_E2E_HTTP_PORT")]
+            config.ports = [.init(name: "MUXY_E2E_APP_PORT"), .init(name: "MUXY_E2E_API_PORT")]
             config.stopScript =
                 #"bash -lc 'printf "project-stop:%s\n" "${MUXY_WORKSPACE_DIR}" >> "${MUXY_E2E_EVENTS_LOG:-/tmp/muxy-e2e-events.log}"'"#
             config.processes = [.init(name: "frontend", command: frontendCommand), .init(name: "backend", command: backendCommand)]
@@ -163,27 +166,21 @@ private struct SeedFixtureCommand: ParsableCommand {
         try emitJSON(payload)
     }
 
-    /// Writes a long-lived executable that sets visible terminal sentinels,
-    /// appends lifecycle events to the shared log, and stays alive until Muxy
-    /// stops or restarts the workspace. The real launch path now validates
-    /// process commands as direct executables, so the fixture uses scripts
-    /// instead of inline shell wrappers.
-    private func makeProcessScript(projectDir: String, label: String) throws -> String {
-        let filename = ".muxy-e2e-\(label.lowercased())"
-        let scriptURL = URL(fileURLWithPath: projectDir).appendingPathComponent(filename)
-        let lowercasedLabel = label.lowercased()
-        let script = """
-            #!/usr/bin/env bash
-            set -euo pipefail
-            printf '\\033]1;MUXY_E2E_\(label)\\007'
-            printf '\\033]2;MUXY_E2E_\(label)\\007'
-            printf '\(lowercasedLabel):%s\\n' "${MUXY_WORKSPACE_DIR}" >> "${MUXY_E2E_EVENTS_LOG:-/tmp/muxy-e2e-events.log}"
-            trap 'printf "\(lowercasedLabel)-exit:%s\\n" "${MUXY_WORKSPACE_DIR}" >> "${MUXY_E2E_EVENTS_LOG:-/tmp/muxy-e2e-events.log}"; exit 0' TERM INT
-            while true; do sleep 5; done
-            """
-        try script.write(to: scriptURL, atomically: true, encoding: .utf8)
-        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: scriptURL.path)
-        return scriptURL.path
+    /// Resolves the executable up front because the seeded process command is
+    /// launched by the GUI app through tmux, not by an interactive shell that
+    /// necessarily inherits the user's PATH customizations.
+    private func resolveExecutablePath(named name: String) throws -> String {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/which")
+        process.arguments = [name]
+        let output = Pipe()
+        process.standardOutput = output
+        process.standardError = Pipe()
+        try process.run()
+        process.waitUntilExit()
+        let path = String(data: output.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard process.terminationStatus == 0, let path, !path.isEmpty else { throw ValidationError("Required executable not found in PATH: \(name)") }
+        return path
     }
 }
 

@@ -35,12 +35,9 @@ TMP_ROOT="$(cd "$(mktemp -d "$TMP_PREFIX".XXXXXX)" && pwd -P)"
 TMP_HOME="$TMP_ROOT/home"
 TMP_DB="$TMP_ROOT/muxy.db"
 TMP_RUNTIME_DIR="$TMP_ROOT/runtime"
+FIXTURE_TEMPLATE_DIR="$ROOT_DIR/apps/macos/Tests/fixtures/e2e_demo"
 TEST_REPO="$TMP_ROOT/atlas-dashboard"
 TEST_REPO_2="$TMP_ROOT/harbor-ops"
-DOCS_HTML="$TMP_ROOT/atlas-docs.html"
-ADMIN_HTML="$TMP_ROOT/atlas-admin.html"
-DOCS_ALT_HTML="$TMP_ROOT/harbor-docs.html"
-ADMIN_ALT_HTML="$TMP_ROOT/harbor-admin.html"
 WORKSPACE_TITLE="Release Readiness"
 WORKSPACE_BRANCH="release-readiness"
 WORKSPACE_TOOLTIP="Polish the launch checklist and QA follow-ups"
@@ -56,14 +53,17 @@ SUMMARY_PRINTED=0
 APP_LOG_SEARCH_FROM_LINE=1
 SETUP_FIXTURES_ONLY=0
 PRESERVE_FIXTURES_ON_EXIT=0
-FIXTURE_PORT_NAME="MUXY_E2E_HTTP_PORT"
+APP_PORT_NAME="MUXY_E2E_APP_PORT"
+API_PORT_NAME="MUXY_E2E_API_PORT"
 PRIMARY_DOCS_URL=""
 PRIMARY_ADMIN_URL=""
+PRIMARY_BACKEND_STATUS_URL=""
 SECONDARY_DOCS_URL=""
 SECONDARY_ADMIN_URL=""
+SECONDARY_BACKEND_STATUS_URL=""
 CREATED_DOCS_URL=""
 CREATED_ADMIN_URL=""
-FIXTURE_SERVER_PIDS=()
+CREATED_BACKEND_STATUS_URL=""
 
 mkdir -p "$TMP_HOME" "$TMP_RUNTIME_DIR"
 : >"$EVENT_LOG"
@@ -86,7 +86,6 @@ cleanup() {
   # Always tear down the isolated Muxy instance, helper fixtures, and optional
   # recorder. Recording mode intentionally starts from a minimized desktop.
   stop_screen_recording
-  stop_fixture_http_servers
   "$MX_E2E_BIN" stop-fixtures --dir-prefix "$TMP_PREFIX" >/tmp/muxy-e2e-stop-fixtures-exit.json 2>/dev/null || true
   close_fixture_chrome_windows
   if [[ -n "${MUXY_PID}" ]]; then
@@ -246,8 +245,20 @@ build_binaries() {
   require_file "$MX_E2E_BIN"
 }
 
+stop_stale_fixture_port_listeners() {
+  local ports=(20000 20001 20002 20003 20004 20005)
+  local pid
+  for port in "${ports[@]}"; do
+    while IFS= read -r pid; do
+      [[ -n "$pid" ]] || continue
+      kill "$pid" >/dev/null 2>&1 || true
+    done < <(lsof -tiTCP:"$port" -sTCP:LISTEN 2>/dev/null || true)
+  done
+}
+
 cleanup_existing_fixture_projects() {
   log_step "cleaning existing E2E fixture projects"
+  stop_stale_fixture_port_listeners
   "$MX_E2E_BIN" stop-fixtures --dir-prefix "$TMP_PREFIX" >/tmp/muxy-e2e-stop-fixtures-start.json || true
   close_fixture_chrome_windows
   "$MX_E2E_BIN" cleanup-fixtures --dir-prefix "$TMP_PREFIX" >/tmp/muxy-e2e-cleanup.json || true
@@ -265,7 +276,14 @@ reset_fixture_runtime() {
 close_existing_muxy_instances() {
   log_step "closing existing Muxy instances"
   pkill -x Muxy >/dev/null 2>&1 || true
-  sleep 1
+  local deadline=$((SECONDS + ACTION_TIMEOUT_SECONDS))
+  while (( SECONDS < deadline )); do
+    if [[ "$(muxy_instance_count)" == "0" ]]; then
+      return 0
+    fi
+    sleep 0.2
+  done
+  fail "timed out waiting for existing Muxy instances to exit"
 }
 
 hide_all_visible_windows() {
@@ -490,7 +508,9 @@ APPLESCRIPT
 wait_for_muxy_frontmost_ready() {
   # Most GUI actions in this script assume a single visible Muxy window and an
   # active accessibility tree, so block until that state exists and Muxy is
-  # actually frontmost. The numbered shortcut tests are invalid otherwise.
+  # actually frontmost. The later UI automation still queries `process "Muxy"`
+  # by name, so the strict single-instance checks above are what keep System
+  # Events from drifting onto the user's regular app instance here.
   local deadline=$((SECONDS + ACTION_TIMEOUT_SECONDS))
   while (( SECONDS < deadline )); do
     if ! kill -0 "$MUXY_PID" >/dev/null 2>&1; then
@@ -562,550 +582,26 @@ APPLESCRIPT
 setup_git_fixture() {
   log_step "creating git fixture repo"
   mkdir -p "$TEST_REPO" "$TEST_REPO_2"
+  install_demo_fixture "atlas" "$TEST_REPO" "# Atlas Dashboard"
+  install_demo_fixture "harbor" "$TEST_REPO_2" "# Harbor Ops"
+}
+
+install_demo_fixture() {
+  local variant="$1"
+  local repo_dir="$2"
+  local readme_title="$3"
   (
-    cd "$TEST_REPO"
+    cd "$repo_dir"
     git init -q -b main
     git config user.email "muxy-e2e@example.com"
     git config user.name "muxy-e2e"
-    cat <<'EOF' >"$DOCS_HTML"
-<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Atlas Docs</title>
-  <style>
-    :root {
-      color-scheme: light;
-      --bg: #f4f1ea;
-      --panel: rgba(255, 255, 255, 0.86);
-      --ink: #1c242b;
-      --muted: #62717d;
-      --line: rgba(28, 36, 43, 0.1);
-      --accent: #0f766e;
-      --accent-soft: rgba(15, 118, 110, 0.12);
-    }
-    * { box-sizing: border-box; }
-    body {
-      margin: 0;
-      font-family: "SF Pro Text", "Inter", sans-serif;
-      color: var(--ink);
-      background:
-        radial-gradient(circle at top left, rgba(15, 118, 110, 0.16), transparent 32rem),
-        linear-gradient(180deg, #fbfaf7 0%, var(--bg) 100%);
-    }
-    .shell {
-      max-width: 1180px;
-      margin: 0 auto;
-      padding: 40px 32px 56px;
-    }
-    .topbar {
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      margin-bottom: 28px;
-      color: var(--muted);
-      font-size: 14px;
-    }
-    .badge {
-      padding: 8px 12px;
-      border-radius: 999px;
-      background: var(--accent-soft);
-      color: var(--accent);
-      font-weight: 600;
-    }
-    .hero {
-      display: grid;
-      grid-template-columns: 1.2fr 0.8fr;
-      gap: 24px;
-      margin-bottom: 24px;
-    }
-    .card {
-      border: 1px solid var(--line);
-      border-radius: 24px;
-      background: var(--panel);
-      backdrop-filter: blur(16px);
-      box-shadow: 0 18px 40px rgba(28, 36, 43, 0.08);
-    }
-    .hero-copy {
-      padding: 32px;
-    }
-    h1 {
-      margin: 0 0 12px;
-      font-size: 44px;
-      line-height: 1.02;
-      letter-spacing: -0.04em;
-    }
-    p {
-      margin: 0;
-      font-size: 17px;
-      line-height: 1.6;
-      color: var(--muted);
-    }
-    .grid {
-      display: grid;
-      grid-template-columns: repeat(3, minmax(0, 1fr));
-      gap: 18px;
-      margin-top: 28px;
-    }
-    .tile {
-      padding: 18px;
-      border-radius: 18px;
-      background: rgba(255, 255, 255, 0.72);
-      border: 1px solid var(--line);
-    }
-    .tile strong {
-      display: block;
-      margin-bottom: 8px;
-      font-size: 14px;
-      text-transform: uppercase;
-      letter-spacing: 0.08em;
-      color: var(--accent);
-    }
-    .hero-side {
-      padding: 24px;
-      display: grid;
-      gap: 14px;
-      align-content: start;
-    }
-    .stat {
-      padding: 16px 18px;
-      border-radius: 18px;
-      background: rgba(15, 118, 110, 0.08);
-    }
-    .stat span {
-      display: block;
-      color: var(--muted);
-      font-size: 13px;
-      margin-bottom: 4px;
-    }
-    .stat strong {
-      font-size: 28px;
-      letter-spacing: -0.03em;
-    }
-    .docs-list {
-      padding: 28px 32px;
-    }
-    .docs-list h2 {
-      margin: 0 0 18px;
-      font-size: 22px;
-      letter-spacing: -0.03em;
-    }
-    .row {
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      padding: 16px 0;
-      border-top: 1px solid var(--line);
-    }
-    .row:first-of-type { border-top: 0; }
-    .row b { display: block; margin-bottom: 4px; }
-    .row small { color: var(--muted); font-size: 13px; }
-    .pill {
-      padding: 6px 10px;
-      border-radius: 999px;
-      background: #ffffff;
-      border: 1px solid var(--line);
-      color: var(--muted);
-      font-size: 12px;
-      font-weight: 600;
-    }
-  </style>
-</head>
-<body>
-  <div class="shell">
-    <div class="topbar">
-      <div>Atlas Platform · Product docs</div>
-      <div class="badge">Atlas docs sentinel</div>
-    </div>
-    <section class="hero">
-      <div class="card hero-copy">
-        <h1>Launch the Customer Dashboard without losing the operator context.</h1>
-        <p>Atlas Docs centralizes release checklists, environment conventions, workspace recipes, and incident handoff notes for the launch team.</p>
-        <div class="grid">
-          <div class="tile"><strong>Quickstart</strong>Workspace launch presets, browser sessions, and terminal mappings.</div>
-          <div class="tile"><strong>Operations</strong>Runbooks for handoff, rollback, and on-call escalations.</div>
-          <div class="tile"><strong>Release</strong>Ship-room checklist for dashboard cutovers and smoke tests.</div>
-        </div>
-      </div>
-      <div class="card hero-side">
-        <div class="stat"><span>Active workspaces</span><strong>12</strong></div>
-        <div class="stat"><span>Median launch time</span><strong>18s</strong></div>
-        <div class="stat"><span>Docs freshness</span><strong>Updated today</strong></div>
-      </div>
-    </section>
-    <section class="card docs-list">
-      <h2>Popular guides</h2>
-      <div class="row">
-        <div><b>Workspace templates for customer launch</b><small>Focus docs, frontend, and incident command windows in one flow.</small></div>
-        <div class="pill">7 min</div>
-      </div>
-      <div class="row">
-        <div><b>Browser session naming conventions</b><small>Use durable labels that map cleanly to `mx workspace up --focus`.</small></div>
-        <div class="pill">4 min</div>
-      </div>
-      <div class="row">
-        <div><b>Operator handoff checklist</b><small>Capture release context before switching to the Harbor Ops workspace.</small></div>
-        <div class="pill">9 min</div>
-      </div>
-    </section>
-  </div>
-</body>
-</html>
-EOF
-    cat <<'EOF' >"$ADMIN_HTML"
-<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Atlas Admin</title>
-  <style>
-    :root {
-      color-scheme: light;
-      --bg: #f5f7fb;
-      --panel: #ffffff;
-      --ink: #18212b;
-      --muted: #64748b;
-      --line: #e2e8f0;
-      --accent: #2563eb;
-      --good: #059669;
-      --warn: #d97706;
-    }
-    * { box-sizing: border-box; }
-    body {
-      margin: 0;
-      font-family: "SF Pro Text", "Inter", sans-serif;
-      color: var(--ink);
-      background:
-        radial-gradient(circle at top right, rgba(37, 99, 235, 0.14), transparent 26rem),
-        linear-gradient(180deg, #fbfdff 0%, var(--bg) 100%);
-    }
-    .shell { max-width: 1240px; margin: 0 auto; padding: 28px; }
-    .bar {
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      margin-bottom: 18px;
-    }
-    .bar h1 {
-      margin: 0;
-      font-size: 28px;
-      letter-spacing: -0.04em;
-    }
-    .bar small { color: var(--muted); font-size: 14px; }
-    .chip {
-      border-radius: 999px;
-      padding: 8px 12px;
-      background: rgba(37, 99, 235, 0.12);
-      color: var(--accent);
-      font-weight: 700;
-      font-size: 12px;
-    }
-    .layout {
-      display: grid;
-      grid-template-columns: 1.2fr 0.8fr;
-      gap: 20px;
-    }
-    .panel {
-      background: var(--panel);
-      border: 1px solid var(--line);
-      border-radius: 22px;
-      box-shadow: 0 18px 36px rgba(15, 23, 42, 0.06);
-    }
-    .metrics {
-      display: grid;
-      grid-template-columns: repeat(3, 1fr);
-      gap: 14px;
-      padding: 20px;
-    }
-    .metric {
-      border-radius: 18px;
-      padding: 18px;
-      background: #f8fbff;
-      border: 1px solid var(--line);
-    }
-    .metric span { display: block; color: var(--muted); font-size: 13px; margin-bottom: 6px; }
-    .metric strong { font-size: 30px; letter-spacing: -0.04em; }
-    .table {
-      padding: 20px 22px 10px;
-    }
-    .table h2, .side h2 { margin: 0 0 14px; font-size: 19px; letter-spacing: -0.03em; }
-    table { width: 100%; border-collapse: collapse; }
-    th, td { padding: 14px 0; border-top: 1px solid var(--line); text-align: left; }
-    th { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: 0.08em; border-top: 0; }
-    td:last-child, th:last-child { text-align: right; }
-    .status {
-      display: inline-flex;
-      align-items: center;
-      gap: 8px;
-      padding: 6px 10px;
-      border-radius: 999px;
-      font-size: 12px;
-      font-weight: 700;
-    }
-    .healthy { background: rgba(5, 150, 105, 0.12); color: var(--good); }
-    .review { background: rgba(217, 119, 6, 0.12); color: var(--warn); }
-    .side {
-      padding: 20px 22px;
-      display: grid;
-      gap: 16px;
-      align-content: start;
-    }
-    .note {
-      padding: 16px;
-      border-radius: 16px;
-      background: #f8fafc;
-      border: 1px solid var(--line);
-    }
-    .note b { display: block; margin-bottom: 6px; }
-    .note p { margin: 0; color: var(--muted); line-height: 1.5; }
-  </style>
-</head>
-<body>
-  <div class="shell">
-    <div class="bar">
-      <div>
-        <h1>Atlas Admin</h1>
-        <small>Release control room for launch-day operators</small>
-      </div>
-      <div class="chip">Atlas admin sentinel</div>
-    </div>
-    <div class="layout">
-      <section class="panel">
-        <div class="metrics">
-          <div class="metric"><span>Live workspaces</span><strong>8</strong></div>
-          <div class="metric"><span>Open incidents</span><strong>1</strong></div>
-          <div class="metric"><span>Queue latency</span><strong>94ms</strong></div>
-        </div>
-        <div class="table">
-          <h2>Launch checks</h2>
-          <table>
-            <thead>
-              <tr><th>Check</th><th>Owner</th><th>Status</th></tr>
-            </thead>
-            <tbody>
-              <tr><td>Customer dashboard deploy</td><td>Frontend</td><td><span class="status healthy">Healthy</span></td></tr>
-              <tr><td>Billing webhook replay</td><td>Platform</td><td><span class="status review">Review</span></td></tr>
-              <tr><td>Status page publish</td><td>Ops</td><td><span class="status healthy">Healthy</span></td></tr>
-            </tbody>
-          </table>
-        </div>
-      </section>
-      <aside class="panel side">
-        <h2>Operator notes</h2>
-        <div class="note">
-          <b>Launch window</b>
-          <p>Customer Dashboard and Operations Console stay paired so docs and incident controls are one shortcut away.</p>
-        </div>
-        <div class="note">
-          <b>Fallback plan</b>
-          <p>If latency exceeds the threshold, hand off to Harbor Ops and pause the rollout checklist before retry.</p>
-        </div>
-      </aside>
-    </div>
-  </div>
-</body>
-</html>
-EOF
-    cat <<'EOF' >"$DOCS_ALT_HTML"
-<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Harbor Docs</title>
-  <style>
-    :root {
-      color-scheme: light;
-      --bg: #eef6f7;
-      --panel: rgba(255, 255, 255, 0.9);
-      --ink: #142126;
-      --muted: #5f7580;
-      --line: rgba(20, 33, 38, 0.1);
-      --accent: #0f766e;
-    }
-    * { box-sizing: border-box; }
-    body {
-      margin: 0;
-      font-family: "SF Pro Text", "Inter", sans-serif;
-      color: var(--ink);
-      background:
-        radial-gradient(circle at top right, rgba(14, 165, 164, 0.2), transparent 22rem),
-        linear-gradient(180deg, #f9fdfd 0%, var(--bg) 100%);
-    }
-    .shell { max-width: 1100px; margin: 0 auto; padding: 36px 28px 52px; }
-    .hero, .list {
-      border-radius: 22px;
-      border: 1px solid var(--line);
-      background: var(--panel);
-      box-shadow: 0 16px 30px rgba(20, 33, 38, 0.08);
-    }
-    .hero { padding: 30px; margin-bottom: 20px; }
-    h1 { margin: 0 0 10px; font-size: 40px; letter-spacing: -0.04em; }
-    p { margin: 0; color: var(--muted); line-height: 1.6; }
-    .banner {
-      display: inline-block;
-      margin-bottom: 16px;
-      padding: 8px 12px;
-      border-radius: 999px;
-      background: rgba(15, 118, 110, 0.12);
-      color: var(--accent);
-      font-size: 12px;
-      font-weight: 700;
-    }
-    .list { padding: 24px 30px; }
-    .item {
-      display: flex;
-      justify-content: space-between;
-      gap: 20px;
-      padding: 16px 0;
-      border-top: 1px solid var(--line);
-    }
-    .item:first-of-type { border-top: 0; }
-    .item b { display: block; margin-bottom: 5px; }
-    .time { color: var(--muted); font-size: 12px; font-weight: 700; }
-  </style>
-</head>
-<body>
-  <div class="shell">
-    <section class="hero">
-      <div class="banner">Harbor docs sentinel</div>
-      <h1>Operations guides for high-signal workspace handoffs.</h1>
-      <p>Harbor Docs tracks the runbooks, incident rituals, and launch communication patterns used by the operations console team.</p>
-    </section>
-    <section class="list">
-      <div class="item">
-        <div><b>Incident command workspace recipe</b><p>Keep release status, operator notes, and terminal windows synchronized across one launch flow.</p></div>
-        <div class="time">6 min</div>
-      </div>
-      <div class="item">
-        <div><b>Escalation notes template</b><p>Standardize what gets copied into the admin panel before a shift handoff.</p></div>
-        <div class="time">3 min</div>
-      </div>
-      <div class="item">
-        <div><b>Rollback communication matrix</b><p>Who to page, what to freeze, and which workspace becomes primary during recovery.</p></div>
-        <div class="time">8 min</div>
-      </div>
-    </section>
-  </div>
-</body>
-</html>
-EOF
-    cat <<'EOF' >"$ADMIN_ALT_HTML"
-<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Harbor Admin</title>
-  <style>
-    :root {
-      color-scheme: light;
-      --bg: #f4f7fb;
-      --panel: #ffffff;
-      --ink: #18212d;
-      --muted: #64748b;
-      --line: #dbe4ef;
-      --accent: #0f766e;
-      --alert: #b45309;
-    }
-    * { box-sizing: border-box; }
-    body {
-      margin: 0;
-      font-family: "SF Pro Text", "Inter", sans-serif;
-      color: var(--ink);
-      background: linear-gradient(180deg, #fbfdff 0%, var(--bg) 100%);
-    }
-    .shell { max-width: 1180px; margin: 0 auto; padding: 28px; }
-    .panel {
-      background: var(--panel);
-      border: 1px solid var(--line);
-      border-radius: 22px;
-      box-shadow: 0 16px 32px rgba(15, 23, 42, 0.06);
-    }
-    .header {
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      margin-bottom: 18px;
-    }
-    .header h1 { margin: 0; font-size: 28px; letter-spacing: -0.04em; }
-    .tag {
-      padding: 8px 12px;
-      border-radius: 999px;
-      background: rgba(15, 118, 110, 0.12);
-      color: var(--accent);
-      font-size: 12px;
-      font-weight: 700;
-    }
-    .content {
-      display: grid;
-      grid-template-columns: 0.95fr 1.05fr;
-      gap: 18px;
-    }
-    .stack, .table { padding: 22px; }
-    .stack { display: grid; gap: 14px; }
-    .callout {
-      padding: 16px;
-      border-radius: 16px;
-      background: #f8fafc;
-      border: 1px solid var(--line);
-    }
-    .callout b { display: block; margin-bottom: 6px; }
-    .callout p { margin: 0; color: var(--muted); line-height: 1.5; }
-    .alert { color: var(--alert); }
-    table { width: 100%; border-collapse: collapse; }
-    th, td { padding: 14px 0; text-align: left; border-top: 1px solid var(--line); }
-    th { border-top: 0; color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: 0.08em; }
-    td:last-child, th:last-child { text-align: right; }
-  </style>
-</head>
-<body>
-  <div class="shell">
-    <div class="header">
-      <h1>Harbor Admin</h1>
-      <div class="tag">Harbor admin sentinel</div>
-    </div>
-    <div class="content">
-      <section class="panel stack">
-        <div class="callout">
-          <b>Incident room</b>
-          <p>The Operations Console stays paired with Harbor Docs so runbooks remain visible while triaging active launch issues.</p>
-        </div>
-        <div class="callout">
-          <b class="alert">Watch item</b>
-          <p>Retry queue depth is elevated. Keep rollback notes open and preserve the current workspace ordering for faster handoff.</p>
-        </div>
-      </section>
-      <section class="panel table">
-        <table>
-          <thead>
-            <tr><th>Service</th><th>Owner</th><th>Status</th></tr>
-          </thead>
-          <tbody>
-            <tr><td>Queue processor</td><td>Ops</td><td>Watching</td></tr>
-            <tr><td>Launch comms</td><td>Support</td><td>Ready</td></tr>
-            <tr><td>Rollback channel</td><td>Platform</td><td>Standby</td></tr>
-          </tbody>
-        </table>
-      </section>
-    </div>
-  </div>
-</body>
-</html>
-EOF
-    printf '# Atlas Dashboard\n' >README.md
-    git add README.md
-    git commit -q -m init
-  )
-  (
-    cd "$TEST_REPO_2"
-    git init -q -b main
-    git config user.email "muxy-e2e@example.com"
-    git config user.name "muxy-e2e"
-    printf '# Harbor Ops\n' >README.md
-    git add README.md
+    mkdir -p .muxy-e2e-demo
+    cp "$FIXTURE_TEMPLATE_DIR/pyproject.toml" .muxy-e2e-demo/pyproject.toml
+    cp -R "$FIXTURE_TEMPLATE_DIR/src" .muxy-e2e-demo/src
+    cp -R "$FIXTURE_TEMPLATE_DIR/templates/$variant/site" .muxy-e2e-demo/site
+    cp -R "$FIXTURE_TEMPLATE_DIR/templates/$variant/api" .muxy-e2e-demo/api
+    printf '%s\n' "$readme_title" >README.md
+    git add README.md .muxy-e2e-demo
     git commit -q -m init
   )
 }
@@ -1117,8 +613,8 @@ seed_fixture() {
   "$MX_E2E_BIN" seed-fixture \
     --project-dir "$TEST_REPO" \
     --workspace-title "$PRIMARY_WORKSPACE_TITLE" \
-    --docs-url "http://localhost:\$${FIXTURE_PORT_NAME}/docs" \
-    --admin-url "http://localhost:\$${FIXTURE_PORT_NAME}/admin" >"$SEED_FILE"
+    --docs-url "http://localhost:\$${APP_PORT_NAME}/docs/" \
+    --admin-url "http://localhost:\$${APP_PORT_NAME}/admin/" >"$SEED_FILE"
 }
 
 seed_second_fixture() {
@@ -1126,8 +622,8 @@ seed_second_fixture() {
   "$MX_E2E_BIN" seed-fixture \
     --project-dir "$TEST_REPO_2" \
     --workspace-title "$SECONDARY_WORKSPACE_TITLE" \
-    --docs-url "http://localhost:\$${FIXTURE_PORT_NAME}/docs" \
-    --admin-url "http://localhost:\$${FIXTURE_PORT_NAME}/admin" >"$SECOND_SEED_FILE"
+    --docs-url "http://localhost:\$${APP_PORT_NAME}/docs/" \
+    --admin-url "http://localhost:\$${APP_PORT_NAME}/admin/" >"$SECOND_SEED_FILE"
 }
 
 workspace_named_port() {
@@ -1161,115 +657,44 @@ print(row[0])
 PY
 }
 
-fixture_url_for_workspace() {
+frontend_url_for_workspace() {
   local workspace_dir="$1"
   local path="$2"
   local port
-  port="$(workspace_named_port "$workspace_dir" "$FIXTURE_PORT_NAME")" || fail "missing named port $FIXTURE_PORT_NAME for $workspace_dir"
+  port="$(workspace_named_port "$workspace_dir" "$APP_PORT_NAME")" || fail "missing named port $APP_PORT_NAME for $workspace_dir"
   printf 'http://localhost:%s%s\n' "$port" "$path"
 }
 
-start_fixture_http_server() {
-  local label="$1"
-  local workspace_dir="$2"
-  local docs_file="$3"
-  local admin_file="$4"
+backend_url_for_workspace() {
+  local workspace_dir="$1"
+  local path="$2"
   local port
-  port="$(workspace_named_port "$workspace_dir" "$FIXTURE_PORT_NAME")" || fail "missing named port $FIXTURE_PORT_NAME for $workspace_dir"
-  local ready_file="$TMP_ROOT/${label}-server-ready"
-  local error_file="$TMP_ROOT/${label}-server-error"
-  rm -f "$ready_file" "$error_file"
-  python3 - "$port" "$docs_file" "$admin_file" "$ready_file" "$error_file" >>"$DEBUG_LOG" 2>&1 <<'PY' &
-import http.server
-import socketserver
+  port="$(workspace_named_port "$workspace_dir" "$API_PORT_NAME")" || fail "missing named port $API_PORT_NAME for $workspace_dir"
+  printf 'http://localhost:%s%s\n' "$port" "$path"
+}
+
+http_get_body() {
+  local url="$1"
+  python3 - "$url" <<'PY'
 import sys
-from pathlib import Path
+import urllib.request
 
-port = int(sys.argv[1])
-docs_path = Path(sys.argv[2])
-admin_path = Path(sys.argv[3])
-ready_path = Path(sys.argv[4])
-error_path = Path(sys.argv[5])
-
-class Handler(http.server.BaseHTTPRequestHandler):
-    def do_GET(self):
-        routes = {
-            "/": docs_path,
-            "/docs": docs_path,
-            "/admin": admin_path,
-        }
-        path = routes.get(self.path)
-        if path is None:
-            self.send_response(404)
-            self.send_header("Content-Type", "text/plain; charset=utf-8")
-            self.end_headers()
-            self.wfile.write(b"not found\n")
-            return
-        body = path.read_bytes()
-        self.send_response(200)
-        self.send_header("Content-Type", "text/html; charset=utf-8")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
-
-    def log_message(self, format, *args):
-        print(f"http[{port}] " + format % args)
-
-try:
-    class Server(socketserver.ThreadingMixIn, http.server.HTTPServer):
-        daemon_threads = True
-
-    with Server(("127.0.0.1", port), Handler) as server:
-        ready_path.write_text(str(port))
-        server.serve_forever()
-except Exception as exc:
-    error_path.write_text(str(exc))
-    raise
+with urllib.request.urlopen(sys.argv[1], timeout=2) as response:
+    print(response.read().decode("utf-8"))
 PY
-  local server_pid=$!
-  FIXTURE_SERVER_PIDS+=("$server_pid")
+}
+
+wait_for_http_body_contains() {
+  local url="$1"
+  local expected="$2"
   local deadline=$((SECONDS + ACTION_TIMEOUT_SECONDS))
   while (( SECONDS < deadline )); do
-    if [[ -f "$ready_file" ]]; then
-      log_debug "fixture_http_server label=$label pid=$server_pid port=$port workspace=$workspace_dir"
+    if body="$(http_get_body "$url" 2>/dev/null)" && grep -Fq "$expected" <<<"$body"; then
       return 0
     fi
-    if [[ -f "$error_file" ]]; then
-      fail "fixture HTTP server failed for $label on port $port: $(cat "$error_file")"
-    fi
-    if ! kill -0 "$server_pid" >/dev/null 2>&1; then
-      fail "fixture HTTP server exited before becoming ready for $label on port $port"
-    fi
-    sleep 0.1
+    sleep 0.2
   done
-  fail "timed out waiting for fixture HTTP server for $label on port $port"
-}
-
-stop_fixture_http_servers() {
-  local pid
-  for pid in "${FIXTURE_SERVER_PIDS[@]:-}"; do
-    if [[ -n "$pid" ]]; then
-      kill "$pid" >/dev/null 2>&1 || true
-    fi
-  done
-}
-
-start_fixture_http_servers() {
-  local primary_workspace_dir="$1"
-  local secondary_workspace_dir="$2"
-  local created_workspace_dir="${3:-}"
-  log_step "starting localhost fixture servers on reserved workspace ports"
-  start_fixture_http_server "primary" "$primary_workspace_dir" "$DOCS_HTML" "$ADMIN_HTML"
-  start_fixture_http_server "secondary" "$secondary_workspace_dir" "$DOCS_ALT_HTML" "$ADMIN_ALT_HTML"
-  PRIMARY_DOCS_URL="$(fixture_url_for_workspace "$primary_workspace_dir" "/docs")"
-  PRIMARY_ADMIN_URL="$(fixture_url_for_workspace "$primary_workspace_dir" "/admin")"
-  SECONDARY_DOCS_URL="$(fixture_url_for_workspace "$secondary_workspace_dir" "/docs")"
-  SECONDARY_ADMIN_URL="$(fixture_url_for_workspace "$secondary_workspace_dir" "/admin")"
-  if [[ -n "$created_workspace_dir" ]]; then
-    start_fixture_http_server "created" "$created_workspace_dir" "$DOCS_HTML" "$ADMIN_HTML"
-    CREATED_DOCS_URL="$(fixture_url_for_workspace "$created_workspace_dir" "/docs")"
-    CREATED_ADMIN_URL="$(fixture_url_for_workspace "$created_workspace_dir" "/admin")"
-  fi
+  fail "timed out waiting for HTTP content at $url containing: $expected"
 }
 
 slugify_automation_id() {
@@ -1417,6 +842,30 @@ on run argv
     end tell
   end tell
   error "identifier not found: " & targetID
+end run
+APPLESCRIPT
+}
+
+ui_click_workspace_detail_header_button() {
+  local description="$1"
+  osascript - "$description" <<'APPLESCRIPT'
+on run argv
+  set targetDescription to item 1 of argv
+  tell application "System Events"
+    tell process "Muxy"
+      tell scroll area 2 of splitter group 1 of window 1
+        repeat with targetButton in buttons
+          try
+            if (description of targetButton) is targetDescription then
+              click targetButton
+              return
+            end if
+          end try
+        end repeat
+      end tell
+    end tell
+  end tell
+  error "workspace-detail header button not found: " & targetDescription
 end run
 APPLESCRIPT
 }
@@ -1613,7 +1062,7 @@ stop_workspace_via_gui() {
   fi
   ui_show_workspace_detail "$workspace_dir" ""
   sleep 0.5
-  if ! ui_click_identifier "workspace-detail-stop"; then
+  if ! ui_click_workspace_detail_header_button "Stop"; then
     log_debug "stop_workspace_via_gui fallback=identifier-stop-workspace-helper"
     "$MX_E2E_BIN" stop-workspace --workspace-dir "$workspace_dir" >/tmp/muxy-e2e-stop-workspace-fallback.json
     return 0
@@ -1636,7 +1085,7 @@ restart_workspace_via_gui() {
   log_step "restarting workspace via GUI"
   ui_show_workspace_detail "$workspace_dir" ""
   sleep 0.5
-  if ! ui_click_identifier "workspace-detail-launch-restart"; then
+  if ! ui_click_workspace_detail_header_button "Restart"; then
     log_debug "restart_workspace_via_gui fallback=mx-workspace-up-restart"
     run_mx_logged /tmp/muxy-e2e-restart-workspace-fallback.log workspace up "$workspace_dir" --restart
     transition_pause "workspace restart fallback"
@@ -2384,6 +1833,8 @@ run_launch_and_focus_assertions() {
   else
     assert_equals "Ghostty" "$terminal_app" "Ghostty launch"
   fi
+  wait_for_http_body_contains "$PRIMARY_DOCS_URL" "Atlas docs sentinel"
+  wait_for_http_body_contains "$PRIMARY_BACKEND_STATUS_URL" '"workspace": "atlas-dashboard"'
   pass_case
 
   begin_case "$host: focus tracked Chrome tab with extra user tab present"
@@ -2599,9 +2050,7 @@ run_multi_workspace_focus_and_cycle_assertions() {
   local primary_workspace_dir="$2"
   local secondary_workspace_dir="$3"
   local primary_docs_url="$PRIMARY_DOCS_URL"
-  local primary_admin_url="$PRIMARY_ADMIN_URL"
   local secondary_docs_url="$SECONDARY_DOCS_URL"
-  local secondary_admin_url="$SECONDARY_ADMIN_URL"
   local primary_dump="$TMP_ROOT/$host-primary-multi.json"
   local secondary_dump="$TMP_ROOT/$host-secondary-multi.json"
 
@@ -2826,6 +2275,7 @@ main() {
   require_cmd osascript
   require_cmd python3
   require_cmd tmux
+  require_cmd uv
   require_cmd yabai
 
   build_binaries
@@ -2848,7 +2298,15 @@ main() {
   workspace_dir="$(json_get "$SEED_FILE" "defaultWorkspace.dir")"
   local second_workspace_dir
   second_workspace_dir="$(json_get "$SECOND_SEED_FILE" "defaultWorkspace.dir")"
-  start_fixture_http_servers "$workspace_dir" "$second_workspace_dir" "$created_workspace_dir"
+  PRIMARY_DOCS_URL="$(frontend_url_for_workspace "$workspace_dir" "/docs/")"
+  PRIMARY_ADMIN_URL="$(frontend_url_for_workspace "$workspace_dir" "/admin/")"
+  PRIMARY_BACKEND_STATUS_URL="$(backend_url_for_workspace "$workspace_dir" "/api/launch-status")"
+  SECONDARY_DOCS_URL="$(frontend_url_for_workspace "$second_workspace_dir" "/docs/")"
+  SECONDARY_ADMIN_URL="$(frontend_url_for_workspace "$second_workspace_dir" "/admin/")"
+  SECONDARY_BACKEND_STATUS_URL="$(backend_url_for_workspace "$second_workspace_dir" "/api/launch-status")"
+  CREATED_DOCS_URL="$(frontend_url_for_workspace "$created_workspace_dir" "/docs/")"
+  CREATED_ADMIN_URL="$(frontend_url_for_workspace "$created_workspace_dir" "/admin/")"
+  CREATED_BACKEND_STATUS_URL="$(backend_url_for_workspace "$created_workspace_dir" "/api/launch-status")"
   local stop_marker="workspace-stop-override"
 
   set_workspace_stop_script_via_gui "$stop_marker" "$workspace_dir"
@@ -2865,7 +2323,9 @@ Manual fixture environment is ready:
   Secondary workspace: $second_workspace_dir
   Created workspace: $created_workspace_dir
   Primary docs: $PRIMARY_DOCS_URL
+  Primary backend: $PRIMARY_BACKEND_STATUS_URL
   Secondary docs: $SECONDARY_DOCS_URL
+  Secondary backend: $SECONDARY_BACKEND_STATUS_URL
   Muxy PID: $MUXY_PID
 EOF
     return 0

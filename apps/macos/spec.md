@@ -136,6 +136,8 @@ Muxy focuses those windows; it does not decide their geometry.
 - Launch should wait for setup to finish and should surface setup failures clearly.
 - Named ports must be available to setup scripts, stop scripts, and process commands.
 - Adding a named port from the workspace detail view should reserve its port number immediately instead of waiting for the next workspace launch.
+- Named port assignments belong to the workspace until that workspace is archived. Stopping a workspace must not give its assigned port numbers back to other workspaces.
+- When a stopped workspace owns named ports, Muxy may hold placeholder reservations for those ports, but launching the workspace must hand those ports to the real process command so user-facing servers can bind them normally.
 - Stopping or restarting a workspace must never close unrelated user windows.
 - Runtime health is separate from lifecycle state:
   - `Running` workspaces can be healthy or degraded
