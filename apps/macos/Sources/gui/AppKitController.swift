@@ -6,6 +6,30 @@ import streamctl
 
 private let startupProfileBaselineUptime = ProcessInfo.processInfo.systemUptime
 
+private final class InlineWorkspaceEditorTextView: NSTextView {
+    var onSave: (() -> Void)?
+    var onCancel: (() -> Void)?
+
+    override func doCommand(by selector: Selector) {
+        if selector == #selector(NSResponder.cancelOperation(_:)) {
+            onCancel?()
+            return
+        }
+        if selector == #selector(NSResponder.insertNewlineIgnoringFieldEditor(_:)) {
+            onSave?()
+            return
+        }
+        if selector == #selector(NSResponder.insertNewline(_:)) {
+            let flags = NSApp.currentEvent?.modifierFlags.intersection([.command, .shift, .option, .control]) ?? []
+            if flags == .command {
+                onSave?()
+                return
+            }
+        }
+        super.doCommand(by: selector)
+    }
+}
+
 @MainActor
 public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineViewDataSource, NSOutlineViewDelegate, NSSplitViewDelegate,
     NSWindowDelegate, NSTextFieldDelegate
@@ -28,7 +52,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let workspaceID: String
         let field: InlineWorkspaceDetailField
         let valueLabel: NSTextField
-        let textField: NSTextField
+        let editorContainer: NSView
+        let textField: NSTextField?
+        let textView: NSTextView?
         let saveButton: NSButton
         let cancelButton: NSButton
         var originalValue: String
@@ -3462,17 +3488,19 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         workspaceTitleField.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         workspaceTitleField.setAccessibilityIdentifier("workspace-detail-title-input")
 
-        let titleSaveButton = NSButton(title: "Save", target: self, action: #selector(saveInlineWorkspaceMetadata(_:)))
+        let titleSaveButton = NSButton(title: "Save (↩)", target: self, action: #selector(saveInlineWorkspaceMetadata(_:)))
         titleSaveButton.controlSize = .small
         titleSaveButton.bezelStyle = .rounded
         titleSaveButton.isHidden = true
         titleSaveButton.setAccessibilityIdentifier("workspace-detail-title-save")
+        titleSaveButton.toolTip = "Save title edit (↩)."
 
-        let titleCancelButton = NSButton(title: "Cancel", target: self, action: #selector(cancelInlineWorkspaceMetadata(_:)))
+        let titleCancelButton = NSButton(title: "Cancel (Esc)", target: self, action: #selector(cancelInlineWorkspaceMetadata(_:)))
         titleCancelButton.controlSize = .small
         titleCancelButton.bezelStyle = .rounded
         titleCancelButton.isHidden = true
         titleCancelButton.setAccessibilityIdentifier("workspace-detail-title-cancel")
+        titleCancelButton.toolTip = "Cancel title edit (Esc)."
         let headerRow = NSStackView()
         headerRow.orientation = .horizontal
         headerRow.alignment = .centerY
@@ -3487,8 +3515,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
         let tag = UUID().uuidString.hashValue
         let refs = InlineWorkspaceDetailFieldRefs(
-            workspaceID: workspace.id, field: .title, valueLabel: workspaceTitleLabel, textField: workspaceTitleField, saveButton: titleSaveButton,
-            cancelButton: titleCancelButton, originalValue: workspace.title, isEditing: false)
+            workspaceID: workspace.id, field: .title, valueLabel: workspaceTitleLabel, editorContainer: workspaceTitleField,
+            textField: workspaceTitleField, textView: nil, saveButton: titleSaveButton, cancelButton: titleCancelButton,
+            originalValue: workspace.title, isEditing: false)
         inlineWorkspaceFieldRefsByTag[tag] = refs
         inlineWorkspaceFieldTagByObjectID[ObjectIdentifier(workspaceTitleField)] = tag
         inlineWorkspaceLabelTagByObjectID[ObjectIdentifier(workspaceTitleLabel)] = tag
@@ -3907,7 +3936,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             let hitView = contentView.hitTest(point)
             for tag in activeTags {
                 guard let refs = self.inlineWorkspaceFieldRefsByTag[tag] else { continue }
-                if self.isView(hitView, descendantOf: refs.textField) || self.isView(hitView, descendantOf: refs.saveButton)
+                if self.isView(hitView, descendantOf: refs.editorContainer) || self.isView(hitView, descendantOf: refs.saveButton)
                     || self.isView(hitView, descendantOf: refs.cancelButton)
                 {
                     return event
@@ -3955,10 +3984,23 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         row.translatesAutoresizingMaskIntoConstraints = false
         row.setAccessibilityIdentifier("\(automationID)-row")
 
+        let iconContainer = NSView()
+        iconContainer.translatesAutoresizingMaskIntoConstraints = false
+        iconContainer.setContentHuggingPriority(.required, for: .horizontal)
+        iconContainer.setContentCompressionResistancePriority(.required, for: .horizontal)
+
         let iconView = NSImageView()
-        iconView.image = NSImage(systemSymbolName: icon, accessibilityDescription: labelText)
+        let iconConfig = NSImage.SymbolConfiguration(pointSize: 13, weight: .regular)
+        iconView.image = NSImage(systemSymbolName: icon, accessibilityDescription: labelText)?.withSymbolConfiguration(iconConfig)
         iconView.contentTintColor = .secondaryLabelColor
-        iconView.setContentHuggingPriority(.required, for: .horizontal)
+        iconView.translatesAutoresizingMaskIntoConstraints = false
+        iconContainer.addSubview(iconView)
+
+        NSLayoutConstraint.activate([
+            iconContainer.widthAnchor.constraint(equalToConstant: 16), iconContainer.heightAnchor.constraint(equalToConstant: 16),
+            iconView.centerXAnchor.constraint(equalTo: iconContainer.centerXAnchor),
+            iconView.centerYAnchor.constraint(equalTo: iconContainer.centerYAnchor, constant: 1),
+        ])
 
         let valueLabel = NSTextField(labelWithString: inlineWorkspaceFieldDisplayValue(value, field: field))
         valueLabel.font = .systemFont(ofSize: 12)
@@ -3972,57 +4014,128 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             ? "Double-click to edit \(labelText.lowercased())."
             : (field == .branch ? "Protected branch names main/master cannot be renamed." : "\(labelText) is not editable.")
 
-        let textField = NSTextField(string: value)
-        textField.placeholderString = placeholder
-        textField.delegate = self
-        textField.isEnabled = isEditable
-        textField.isHidden = true
-        textField.font = .systemFont(ofSize: 12)
-        textField.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        textField.setAccessibilityIdentifier("\(automationID)-input")
+        let textField: NSTextField?
+        let textView: NSTextView?
+        let editorContainer: NSView
         if isMultiline {
-            textField.usesSingleLineMode = false
-            (textField.cell as? NSTextFieldCell)?.wraps = true
-            (textField.cell as? NSTextFieldCell)?.isScrollable = false
+            let multilineTextView = makeEditableTextView()
+            multilineTextView.string = value
+            multilineTextView.font = .systemFont(ofSize: 12)
+            multilineTextView.setAccessibilityIdentifier("\(automationID)-input")
+            let scrollView = scrollableTextView(multilineTextView, height: 72)
+            scrollView.isHidden = true
+            scrollView.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+            textField = nil
+            textView = multilineTextView
+            editorContainer = scrollView
+        } else {
+            let singleLineField = NSTextField(string: value)
+            singleLineField.placeholderString = placeholder
+            singleLineField.delegate = self
+            singleLineField.isEnabled = isEditable
+            singleLineField.isHidden = true
+            singleLineField.font = .systemFont(ofSize: 12)
+            singleLineField.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+            singleLineField.setAccessibilityIdentifier("\(automationID)-input")
+            textField = singleLineField
+            textView = nil
+            editorContainer = singleLineField
         }
 
-        let saveButton = NSButton(title: "Save", target: self, action: #selector(saveInlineWorkspaceMetadata(_:)))
+        let saveButtonTitle = isMultiline ? "Save (⌘↩)" : "Save (↩)"
+        let saveButton = NSButton(title: saveButtonTitle, target: self, action: #selector(saveInlineWorkspaceMetadata(_:)))
         saveButton.controlSize = .small
         saveButton.bezelStyle = .rounded
         saveButton.isHidden = true
         saveButton.setAccessibilityIdentifier("\(automationID)-save")
+        saveButton.toolTip = isMultiline ? "Save tooltip (⌘↩)." : "Save (↩)."
 
-        let cancelButton = NSButton(title: "Cancel", target: self, action: #selector(cancelInlineWorkspaceMetadata(_:)))
+        let cancelButton = NSButton(title: "Cancel (Esc)", target: self, action: #selector(cancelInlineWorkspaceMetadata(_:)))
         cancelButton.controlSize = .small
         cancelButton.bezelStyle = .rounded
         cancelButton.isHidden = true
         cancelButton.setAccessibilityIdentifier("\(automationID)-cancel")
+        cancelButton.toolTip = isMultiline ? "Cancel tooltip edit (Esc)." : "Cancel (Esc)."
 
-        row.addArrangedSubview(iconView)
-        row.addArrangedSubview(valueLabel)
-        row.addArrangedSubview(textField)
-        row.addArrangedSubview(saveButton)
-        row.addArrangedSubview(cancelButton)
+        row.addArrangedSubview(iconContainer)
+        if isMultiline {
+            let contentStack = NSStackView()
+            contentStack.orientation = .vertical
+            contentStack.alignment = .leading
+            contentStack.spacing = 6
+            contentStack.translatesAutoresizingMaskIntoConstraints = false
+            contentStack.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+
+            let buttonRow = NSStackView()
+            buttonRow.orientation = .horizontal
+            buttonRow.alignment = .centerY
+            buttonRow.spacing = 8
+            buttonRow.translatesAutoresizingMaskIntoConstraints = false
+            buttonRow.addArrangedSubview(saveButton)
+            buttonRow.addArrangedSubview(cancelButton)
+
+            contentStack.addArrangedSubview(valueLabel)
+            contentStack.addArrangedSubview(editorContainer)
+            contentStack.addArrangedSubview(buttonRow)
+            row.addArrangedSubview(contentStack)
+        } else {
+            row.addArrangedSubview(valueLabel)
+            row.addArrangedSubview(editorContainer)
+            row.addArrangedSubview(saveButton)
+            row.addArrangedSubview(cancelButton)
+        }
 
         if isEditable {
             let tag = UUID().uuidString.hashValue
             let refs = InlineWorkspaceDetailFieldRefs(
-                workspaceID: workspaceID, field: field, valueLabel: valueLabel, textField: textField, saveButton: saveButton,
-                cancelButton: cancelButton, originalValue: value, isEditing: false)
+                workspaceID: workspaceID, field: field, valueLabel: valueLabel, editorContainer: editorContainer, textField: textField,
+                textView: textView, saveButton: saveButton, cancelButton: cancelButton, originalValue: value, isEditing: false)
             inlineWorkspaceFieldRefsByTag[tag] = refs
-            inlineWorkspaceFieldTagByObjectID[ObjectIdentifier(textField)] = tag
+            if let textField { inlineWorkspaceFieldTagByObjectID[ObjectIdentifier(textField)] = tag }
             inlineWorkspaceLabelTagByObjectID[ObjectIdentifier(valueLabel)] = tag
             saveButton.tag = tag
             cancelButton.tag = tag
+            if let textView = textView as? InlineWorkspaceEditorTextView {
+                textView.onSave = { [weak self] in self?.saveInlineWorkspaceMetadata(tag: tag) }
+                textView.onCancel = { [weak self] in self?.cancelInlineWorkspaceMetadataEdit(tag: tag) }
+            }
 
             let doubleClick = NSClickGestureRecognizer(target: self, action: #selector(beginInlineWorkspaceMetadataEdit(_:)))
             doubleClick.numberOfClicksRequired = 2
             valueLabel.addGestureRecognizer(doubleClick)
         } else {
-            textField.toolTip = field == .branch ? "Protected branch names main/master cannot be renamed." : "\(labelText) is not editable."
+            editorContainer.toolTip = field == .branch ? "Protected branch names main/master cannot be renamed." : "\(labelText) is not editable."
         }
 
         return row
+    }
+
+    private func inlineWorkspaceEditorValue(_ refs: InlineWorkspaceDetailFieldRefs) -> String {
+        if let textField = refs.textField { return textField.stringValue }
+        if let textView = refs.textView { return textView.string }
+        return ""
+    }
+
+    private func setInlineWorkspaceEditorValue(_ value: String, refs: InlineWorkspaceDetailFieldRefs) {
+        refs.textField?.stringValue = value
+        refs.textView?.string = value
+    }
+
+    private func setInlineWorkspaceEditorHidden(_ isHidden: Bool, refs: InlineWorkspaceDetailFieldRefs) {
+        refs.editorContainer.isHidden = isHidden
+        refs.textField?.isHidden = isHidden
+    }
+
+    private func focusInlineWorkspaceEditor(_ refs: InlineWorkspaceDetailFieldRefs) {
+        if let textField = refs.textField {
+            textField.isEnabled = true
+            textField.becomeFirstResponder()
+            return
+        }
+        if let textView = refs.textView {
+            window?.makeFirstResponder(textView)
+            return
+        }
     }
 
     private func normalizeInlineWorkspaceMetadataValue(_ value: String, for field: InlineWorkspaceDetailField) -> String {
@@ -4046,25 +4159,24 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         guard var refs = inlineWorkspaceFieldRefsByTag[tag] else { return }
         refs.isEditing = true
         refs.valueLabel.isHidden = true
-        refs.textField.stringValue = refs.originalValue
-        refs.textField.isHidden = false
-        refs.textField.isEnabled = true
+        setInlineWorkspaceEditorValue(refs.originalValue, refs: refs)
+        setInlineWorkspaceEditorHidden(false, refs: refs)
         setupInlineWorkspaceOutsideClickMonitorIfNeeded()
-        refs.textField.becomeFirstResponder()
         inlineWorkspaceFieldRefsByTag[tag] = refs
+        focusInlineWorkspaceEditor(refs)
         updateInlineWorkspaceMetadataButtons(tag: tag)
     }
 
     private func endInlineWorkspaceMetadataEdit(tag: Int, keepCurrentValueAsOriginal: Bool) {
         guard var refs = inlineWorkspaceFieldRefsByTag[tag] else { return }
         if keepCurrentValueAsOriginal {
-            refs.originalValue = normalizeInlineWorkspaceMetadataValue(refs.textField.stringValue, for: refs.field)
+            refs.originalValue = normalizeInlineWorkspaceMetadataValue(inlineWorkspaceEditorValue(refs), for: refs.field)
         } else {
-            refs.textField.stringValue = refs.originalValue
+            setInlineWorkspaceEditorValue(refs.originalValue, refs: refs)
         }
         refs.valueLabel.stringValue = inlineWorkspaceFieldDisplayValue(refs.originalValue, field: refs.field)
         refs.valueLabel.isHidden = false
-        refs.textField.isHidden = true
+        setInlineWorkspaceEditorHidden(true, refs: refs)
         refs.isEditing = false
         refs.saveButton.isHidden = true
         refs.cancelButton.isHidden = true
@@ -4077,15 +4189,15 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         do {
             switch refs.field {
             case .title:
-                let title = refs.textField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+                let title = inlineWorkspaceEditorValue(refs).trimmingCharacters(in: .whitespacesAndNewlines)
                 try orchestrator.updateWorkspaceName(workspaceID: refs.workspaceID, name: title)
                 refs.originalValue = title
             case .branch:
-                let branch = refs.textField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+                let branch = inlineWorkspaceEditorValue(refs).trimmingCharacters(in: .whitespacesAndNewlines)
                 try orchestrator.updateWorkspaceMetadata(workspaceID: refs.workspaceID, branch: branch)
                 refs.originalValue = branch
             case .tooltip:
-                let trimmedTooltip = refs.textField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+                let trimmedTooltip = inlineWorkspaceEditorValue(refs).trimmingCharacters(in: .whitespacesAndNewlines)
                 let tooltip = trimmedTooltip.isEmpty ? nil : trimmedTooltip
                 try orchestrator.updateWorkspaceTooltip(workspaceID: refs.workspaceID, tooltip: tooltip)
                 refs.originalValue = tooltip ?? ""
@@ -4792,8 +4904,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         return container
     }
 
-    private func makeEditableTextView() -> NSTextView {
-        let textView = NSTextView()
+    private func makeEditableTextView() -> InlineWorkspaceEditorTextView {
+        let textView = InlineWorkspaceEditorTextView()
         textView.isEditable = true
         textView.isSelectable = true
         textView.isRichText = false
