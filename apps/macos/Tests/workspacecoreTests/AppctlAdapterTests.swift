@@ -92,13 +92,13 @@ final class AppctlAdapterTests: XCTestCase {
             XCTAssertEqual(window.tabIndex, 2)
             let itermTerminalAdapter: any TerminalAdapter = iterm
             let itermLaunch = try itermTerminalAdapter.openWindowAndRun(
-                command: "echo \"hi\"", cwd: "/tmp", environment: ["MUXY_TERMINAL_TRACKING_ID": "tracking-1"], background: false)
+                command: "echo \"hi\"", cwd: "/tmp", environment: ["SPACES_TERMINAL_TRACKING_ID": "tracking-1"], background: false)
             XCTAssertEqual(itermLaunch.fallbackWindowID, 77)
             XCTAssertEqual(itermLaunch.trackingIdentity, .session("session-77"))
             XCTAssertEqual(itermLaunch.containerID, "77")
             XCTAssertEqual(itermLaunch.tabIndex, 2)
             XCTAssertTrue(iterm.launchedCommands.last?.contains("cd '/tmp' &&") == true)
-            XCTAssertTrue(iterm.launchedCommands.last?.contains("export MUXY_TERMINAL_TRACKING_ID='tracking-1'; echo \"hi\"") == true)
+            XCTAssertTrue(iterm.launchedCommands.last?.contains("export SPACES_TERMINAL_TRACKING_ID='tracking-1'; echo \"hi\"") == true)
             XCTAssertTrue(
                 try itermTerminalAdapter.focusTrackedTerminal(
                     TerminalFocusTarget(trackingIdentity: .session("session-77"), windowID: 77, tabIndex: 2)))
@@ -115,7 +115,7 @@ final class AppctlAdapterTests: XCTestCase {
             XCTAssertEqual(ghosttyWindow.terminalID, "ghostty-terminal-1")
             let ghosttyTerminalAdapter: any TerminalAdapter = ghostty
             let ghosttyLaunch = try ghosttyTerminalAdapter.openWindowAndRun(
-                command: "echo hi", cwd: "/tmp", environment: ["MUXY_TERMINAL_TRACKING_ID": "tracking-ghostty-1"], background: false)
+                command: "echo hi", cwd: "/tmp", environment: ["SPACES_TERMINAL_TRACKING_ID": "tracking-ghostty-1"], background: false)
             XCTAssertNil(ghosttyLaunch.fallbackWindowID)
             XCTAssertEqual(ghosttyLaunch.trackingIdentity, .session("ghostty-terminal-1"))
             XCTAssertEqual(ghosttyLaunch.hookSessionID, "tracking-ghostty-1")

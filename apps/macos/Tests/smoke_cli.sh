@@ -9,12 +9,12 @@ if [[ ! -x "$BIN" ]]; then
   (cd "$ROOT_DIR" && swift build >/dev/null)
 fi
 
-TMP_HOME="$(mktemp -d /tmp/muxy-smoke-home.XXXXXX)"
+TMP_HOME="$(mktemp -d /tmp/spaces-smoke-home.XXXXXX)"
 trap 'rm -rf "$TMP_HOME"' EXIT
 export HOME="$TMP_HOME"
 
 # Workspace import + up
-TEST_REPO="$(mktemp -d /tmp/muxy-smoke-repo.XXXXXX)"
+TEST_REPO="$(mktemp -d /tmp/spaces-smoke-repo.XXXXXX)"
 (
   cd "$TEST_REPO"
   git init -q

@@ -11,7 +11,7 @@ from pathlib import Path
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Serve the permanent Muxy e2e demo project.")
+    parser = argparse.ArgumentParser(description="Serve the permanent Spaces e2e demo project.")
     subparsers = parser.add_subparsers(dest="role", required=True)
 
     frontend = subparsers.add_parser("frontend", help="Serve demo browser pages and proxy backend API data.")

@@ -2,7 +2,7 @@ import Foundation
 
 let sharedPathMutationLock = NSLock()
 let sharedEnvironmentMutationLock = NSRecursiveLock()
-let sharedAppleScriptTestOptInEnvVar = "MUXY_ALLOW_TEST_APPLESCRIPT"
+let sharedAppleScriptTestOptInEnvVar = "SPACES_ALLOW_TEST_APPLESCRIPT"
 
 func withTestAppleScriptOptIn(enabled: Bool, run: () throws -> Void) throws {
     guard enabled else {

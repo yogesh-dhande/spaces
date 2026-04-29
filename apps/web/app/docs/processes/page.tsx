@@ -43,7 +43,7 @@ bash -lc "cd frontend && PORT=\$FRONTEND_PORT npm run dev"
 bash -lc "curl -fsS http://localhost:\$API_PORT/ready && npm run dev"`}</code>
         </pre>
         <p className="mt-3 text-sm leading-7 text-foreground-soft">
-          Named ports and <code>MUXY_*</code> vars are substituted by Spaces before the command is parsed, so you can reference <code>$FRONTEND_PORT</code> inside the quoted <code>bash -lc</code> string the same way you would outside it. Keep the whole pipeline inside a single <code>bash -lc</code> call so the <code>on-exit</code> policy applies to the composed command, not just the last step.
+          Named ports and <code>SPACES_*</code> vars are substituted by Spaces before the command is parsed, so you can reference <code>$FRONTEND_PORT</code> inside the quoted <code>bash -lc</code> string the same way you would outside it. Keep the whole pipeline inside a single <code>bash -lc</code> call so the <code>on-exit</code> policy applies to the composed command, not just the last step.
         </p>
       </article>
 
@@ -66,8 +66,8 @@ bash -lc "curl -fsS http://localhost:\$API_PORT/ready && npm run dev"`}</code>
         </p>
         <pre className="mt-3 w-full max-w-full min-w-0 overflow-x-auto whitespace-pre-wrap break-words rounded-lg border border-line/70 bg-background-soft/60 p-3 text-xs leading-6 text-foreground">
           <code>{`FRONTEND_PORT, API_PORT, ...   # your named ports
-MUXY_PROJECT_DIR                # project directory
-MUXY_WORKSPACE_DIR              # this workspace's directory`}</code>
+SPACES_PROJECT_DIR                # project directory
+SPACES_WORKSPACE_DIR              # this workspace's directory`}</code>
         </pre>
         <p className="mt-3 text-sm leading-7 text-foreground-soft">
           Reference them directly in your command, for example <code>PORT=$FRONTEND_PORT npm run dev</code>.

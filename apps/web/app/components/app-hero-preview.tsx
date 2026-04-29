@@ -68,7 +68,7 @@ export function AppHeroPreview() {
               <span className="app-hero-dot app-hero-dot-yellow" />
               <span className="app-hero-dot app-hero-dot-green" />
             </div>
-            <p className="app-hero-title">Muxy</p>
+            <p className="app-hero-title">Spaces</p>
           </div>
           <div className="app-hero-shell">
             <aside className="app-hero-sidebar">
@@ -120,7 +120,7 @@ export function AppHeroPreview() {
       <div className="app-shortcut-hud" aria-hidden>
         <div className="app-shortcut-chip app-shortcut-step-1">
           <p className="app-shortcut-keys">Cmd+Shift+=</p>
-          <p className="app-shortcut-copy">Show Muxy</p>
+          <p className="app-shortcut-copy">Show Spaces</p>
         </div>
         <div className="app-shortcut-chip app-shortcut-step-2">
           <p className="app-shortcut-keys">Cmd+Shift+[</p>

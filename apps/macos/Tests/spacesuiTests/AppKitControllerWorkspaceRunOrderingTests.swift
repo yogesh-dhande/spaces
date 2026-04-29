@@ -148,7 +148,8 @@ import workspacecore
                 terminalTrackingID: "ghostty-web", itermTabIndex: nil, tmuxWindowID: nil, role: "terminal", orderIndex: 200, lastSeenAt: "now"),
             WindowRecord(
                 id: "win-shell", workspaceID: "workspace", app: "Ghostty", title: "shell-1", targetURL: nil, windowID: 202,
-                terminalTrackingID: "muxy-ghostty-token", itermTabIndex: nil, tmuxWindowID: nil, role: "terminal", orderIndex: 201, lastSeenAt: "now"),
+                terminalTrackingID: "spaces-ghostty-token", itermTabIndex: nil, tmuxWindowID: nil, role: "terminal", orderIndex: 201,
+                lastSeenAt: "now"),
         ]
         let processes = [
             RunningProcessRecord(
@@ -158,7 +159,7 @@ import workspacecore
         ]
         let agentWindows = [
             AgentWindowRecord(
-                id: "agent", workspaceID: "workspace", provider: .ghostty, label: "Claude Code CLI", terminalTrackingID: "muxy-ghostty-token",
+                id: "agent", workspaceID: "workspace", provider: .ghostty, label: "Claude Code CLI", terminalTrackingID: "spaces-ghostty-token",
                 tmuxWindowID: nil, codexThreadID: nil, windowID: 202, yabaiWindowID: 202, status: .idle, createdAt: "now", updatedAt: "now")
         ]
 
@@ -179,7 +180,7 @@ import workspacecore
                 orderIndex: 200, lastSeenAt: "now"),
             WindowRecord(
                 id: "win-shell", workspaceID: "workspace", app: "Ghostty", name: "shell-1", detail: nil, targetURL: nil, windowID: 202,
-                terminalTrackingID: "muxy-ghostty-hook", terminalNativeID: nil, itermTabIndex: nil, tmuxWindowID: nil, role: "terminal",
+                terminalTrackingID: "spaces-ghostty-hook", terminalNativeID: nil, itermTabIndex: nil, tmuxWindowID: nil, role: "terminal",
                 orderIndex: 201, lastSeenAt: "now"),
         ]
         let processes = [
@@ -190,7 +191,7 @@ import workspacecore
         ]
         let agentWindows = [
             AgentWindowRecord(
-                id: "agent", workspaceID: "workspace", provider: .ghostty, label: "Claude Code CLI", terminalTrackingID: "muxy-ghostty-hook",
+                id: "agent", workspaceID: "workspace", provider: .ghostty, label: "Claude Code CLI", terminalTrackingID: "spaces-ghostty-hook",
                 terminalNativeID: "ghostty-native-id", tmuxWindowID: nil, codexThreadID: nil, windowID: 202, yabaiWindowID: 202, status: .idle,
                 createdAt: "now", updatedAt: "now")
         ]

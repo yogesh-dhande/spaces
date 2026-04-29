@@ -1,6 +1,6 @@
 import Image from "next/image";
 import Link from "next/link";
-import MuxyLogo from "../muxy.svg";
+import SpacesLogo from "../spaces.svg";
 
 const githubReleasesURL = "https://github.com/yogesh-dhande/spaces/releases/latest";
 
@@ -23,8 +23,8 @@ export function SiteHeader() {
           href="/"
           className="inline-flex items-center gap-2 rounded-full border border-line/80 bg-surface/85 px-3.5 py-2 text-sm font-semibold tracking-tight shadow-[0_6px_22px_-14px_color-mix(in_oklab,var(--ink)_60%,transparent)] backdrop-blur-md transition-colors hover:border-accent/60"
         >
-          <Image src={MuxyLogo} alt="" width={18} height={18} />
-          <span>Muxy</span>
+          <Image src={SpacesLogo} alt="" width={18} height={18} />
+          <span>Spaces</span>
         </Link>
 
         <nav className="hidden items-center gap-1 rounded-full border border-line/80 bg-surface/85 px-1.5 py-1 text-sm font-medium text-foreground-soft shadow-[0_6px_22px_-14px_color-mix(in_oklab,var(--ink)_60%,transparent)] backdrop-blur-md md:flex">

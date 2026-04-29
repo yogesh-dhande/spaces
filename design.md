@@ -1,6 +1,6 @@
-# Muxy UI Design Guide
+# Spaces UI Design Guide
 
-This document defines app-wide visual and interaction guidelines for Muxy.
+This document defines app-wide visual and interaction guidelines for Spaces.
 
 Use it when adding or updating UI anywhere in the app. The goal is consistency: new surfaces should feel like the same product, not isolated one-off screens.
 
@@ -12,7 +12,7 @@ The current macOS redesign in `apps/macos/Sources/gui` and `design-mocks/workspa
 - `apps/macos/docs/architecture.md` remains the source of truth for structure and data flow.
 
 ## Design Intent
-- Muxy should feel compact, modern, and operational.
+- Spaces should feel compact, modern, and operational.
 - The app is a control plane for active coding work, so screens should privilege scanability, direct manipulation, and clear status over decorative chrome.
 - Prefer calm density over sparse layouts. Information should fit without feeling cramped.
 - Use a consistent visual language so different parts of the app feel related even when they solve different problems.
@@ -156,7 +156,7 @@ The current macOS redesign in `apps/macos/Sources/gui` and `design-mocks/workspa
   - Reveal low-emphasis actions.
   - Increase action visibility.
   - Add subtle background feedback.
-- Avoid decorative animation. Muxy is tooling-oriented and should feel responsive rather than ornamental.
+- Avoid decorative animation. Spaces is tooling-oriented and should feel responsive rather than ornamental.
 
 ## Empty, Missing, And Draft States
 - Empty or missing values should use quiet placeholders such as `(none)` or `(unnamed)` rather than large empty-state treatments in dense views.

@@ -11,7 +11,7 @@ func makeTempDirectory() throws -> URL {
 
 func makeTemporaryStore(defaultTerminalHostResolver: @escaping @Sendable () -> TerminalHost = { .iterm2 }) throws -> SQLiteStore {
     let dir = try makeTempDirectory()
-    let dbURL = dir.appendingPathComponent("muxy-test.db")
+    let dbURL = dir.appendingPathComponent("spaces-test.db")
     return try SQLiteStore(path: dbURL.path, defaultTerminalHostResolver: defaultTerminalHostResolver)
 }
 
@@ -55,7 +55,7 @@ class MockIterm2Adapter: Iterm2Adapter, @unchecked Sendable {
         lastCommand = command
         openedCommands.append(command)
         if let pairedTmux, command.contains("tmux new-session -A -s") {
-            let pattern = #"muxy-[A-Za-z0-9_-]+(?:-[A-Za-z0-9_-]+)?"#
+            let pattern = #"spaces-[A-Za-z0-9_-]+(?:-[A-Za-z0-9_-]+)?"#
             if let range = command.range(of: pattern, options: .regularExpression) { pairedTmux.createSession(named: String(command[range])) }
         }
         onOpenWindowAndRun?(command)

@@ -1,9 +1,9 @@
-# Muxy Monorepo
+# Spaces Monorepo
 
-Muxy is a macOS workspace orchestrator with a Swift app and CLI (`muxy`) plus a static Next.js marketing and docs site.
+Spaces is a macOS workspace orchestrator with a Swift app and CLI (`spaces`) plus a static Next.js marketing and docs site.
 
 ## Repo Layout
-- `apps/macos`: macOS app, `muxy` CLI, Swift sources, tests, product docs
+- `apps/macos`: macOS app, `spaces` CLI, Swift sources, tests, product docs
 - `apps/web`: static marketing site and user-facing docs
 - `scripts`: root wrappers for build, test, coverage, release, and deploy workflows
 
@@ -54,13 +54,13 @@ The pre-commit hook currently does three things:
 - runs `scripts/lint.sh`, which also auto-formats the full macOS Swift source and test tree before linting
 - runs `scripts/coverage.sh`
 
-Pull requests are checked in GitHub Actions with [`.github/workflows/pr-checks.yml`](/Users/yogesh/projects/muxy/.github/workflows/pr-checks.yml), which runs the same Swift lint/build/coverage flow plus the static website build.
+Pull requests are checked in GitHub Actions with [`.github/workflows/pr-checks.yml`](/Users/yogesh/projects/spaces/.github/workflows/pr-checks.yml), which runs the same Swift lint/build/coverage flow plus the static website build.
 
 Useful local entry points:
 
 ```bash
-apps/macos/.build/debug/MuxyApp
-apps/macos/.build/debug/muxy --help
+apps/macos/.build/debug/SpacesApp
+apps/macos/.build/debug/spaces --help
 ```
 
 ### Website
@@ -96,7 +96,7 @@ Important environment variables:
 - `GH_TOKEN`
 
 ### Website deploy
-Firebase Hosting deploys from [`.github/workflows/deploy-firebase-hosting.yml`](/Users/yogesh/projects/muxy/.github/workflows/deploy-firebase-hosting.yml:1). It builds `apps/web` and deploys the static export on pushes to `main` that touch the site or on manual dispatch.
+Firebase Hosting deploys from [`.github/workflows/deploy-firebase-hosting.yml`](/Users/yogesh/projects/spaces/.github/workflows/deploy-firebase-hosting.yml:1). It builds `apps/web` and deploys the static export on pushes to `main` that touch the site or on manual dispatch.
 
 The workflow authenticates with GitHub OIDC through Google Workload Identity Federation, then deploys through the Firebase Hosting REST API. This avoids `firebase-tools` service-account-key assumptions while keeping the deploy keyless.
 

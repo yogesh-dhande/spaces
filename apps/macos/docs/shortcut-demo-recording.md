@@ -39,7 +39,7 @@ ffmpeg -f avfoundation -list_devices true -i ''
 Take one still frame from a candidate display:
 
 ```bash
-ffmpeg -y -f avfoundation -pixel_format uyvy422 -i '2:none' -frames:v 1 -update 1 /tmp/muxy-check.jpg
+ffmpeg -y -f avfoundation -pixel_format uyvy422 -i '2:none' -frames:v 1 -update 1 /tmp/spaces-check.jpg
 ```
 
 If needed, repeat with another screen index such as `3:none`.
@@ -111,7 +111,7 @@ APPLESCRIPT
 ### Start Recording
 
 ```bash
-ffmpeg -y -f avfoundation -framerate 15 -pixel_format uyvy422 -i '2:none' -t 20 /tmp/muxy-shortcuts-demo.mp4
+ffmpeg -y -f avfoundation -framerate 15 -pixel_format uyvy422 -i '2:none' -t 20 /tmp/spaces-shortcuts-demo.mp4
 ```
 
 ### Drive Spaces While Recording
@@ -147,16 +147,16 @@ APPLESCRIPT
 Check the file exists and inspect duration:
 
 ```bash
-ls -lh /tmp/muxy-shortcuts-demo.mp4
-ffprobe -v error -show_entries format=duration,size -of default=noprint_wrappers=1 /tmp/muxy-shortcuts-demo.mp4
+ls -lh /tmp/spaces-shortcuts-demo.mp4
+ffprobe -v error -show_entries format=duration,size -of default=noprint_wrappers=1 /tmp/spaces-shortcuts-demo.mp4
 ```
 
 Grab spot-check frames:
 
 ```bash
-ffmpeg -y -ss 1 -i /tmp/muxy-shortcuts-demo.mp4 -frames:v 1 -update 1 /tmp/muxy-frame-a.jpg
-ffmpeg -y -ss 10 -i /tmp/muxy-shortcuts-demo.mp4 -frames:v 1 -update 1 /tmp/muxy-frame-b.jpg
-ffmpeg -y -ss 16 -i /tmp/muxy-shortcuts-demo.mp4 -frames:v 1 -update 1 /tmp/muxy-frame-c.jpg
+ffmpeg -y -ss 1 -i /tmp/spaces-shortcuts-demo.mp4 -frames:v 1 -update 1 /tmp/spaces-frame-a.jpg
+ffmpeg -y -ss 10 -i /tmp/spaces-shortcuts-demo.mp4 -frames:v 1 -update 1 /tmp/spaces-frame-b.jpg
+ffmpeg -y -ss 16 -i /tmp/spaces-shortcuts-demo.mp4 -frames:v 1 -update 1 /tmp/spaces-frame-c.jpg
 ```
 
 Expected sequence:
@@ -200,4 +200,4 @@ If `tell application "Spaces"` fails:
 - Post-focus settle delay: `2` seconds
 - Recorder warm-up buffer: about `6` seconds before sending shortcuts
 - Working capture source: `2:none`
-- Output path used for final successful run: `/tmp/muxy-shortcuts-demo-live.mp4`
+- Output path used for final successful run: `/tmp/spaces-shortcuts-demo-live.mp4`

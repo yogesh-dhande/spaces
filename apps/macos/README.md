@@ -3,9 +3,9 @@
 `Spaces` is the macOS app and `spaces` is the companion CLI for workspace import, metadata updates, idempotent workspace launch, and agent activity.
 
 ## Read This With
-- [spec.md](/Users/yogesh/projects/muxy/apps/macos/spec.md): UX and product behavior
-- [architecture.md](/Users/yogesh/projects/muxy/apps/macos/docs/architecture.md): modules, data model, and runtime structure
-- [../../README.md](/Users/yogesh/projects/muxy/README.md): repo-wide development and deploy workflows
+- [spec.md](/Users/yogesh/projects/spaces/apps/macos/spec.md): UX and product behavior
+- [architecture.md](/Users/yogesh/projects/spaces/apps/macos/docs/architecture.md): modules, data model, and runtime structure
+- [../../README.md](/Users/yogesh/projects/spaces/README.md): repo-wide development and deploy workflows
 - `apps/web/app/docs`: user-facing docs and CLI reference
 
 ## Requirements
@@ -57,7 +57,7 @@ To capture a product-demo video from the same suite, record the run with the nat
 
 ```bash
 apps/macos/Tests/e2e_real_system.sh \
-  --record-video /tmp/muxy-real-e2e.mp4 \
+  --record-video /tmp/spaces-real-e2e.mp4 \
   --pause-transitions
 ```
 

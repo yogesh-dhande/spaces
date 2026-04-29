@@ -1,6 +1,6 @@
-# Muxy Web
+# Spaces Web
 
-Static marketing and docs website for Muxy.
+Static marketing and docs website for Spaces.
 
 ## Stack
 - Next.js App Router

@@ -1,6 +1,6 @@
 # Architecture
 
-This document describes how Spaces is built: module boundaries, storage, runtime flows, and external integrations. User-visible behavior belongs in [spec.md](/Users/yogesh/projects/muxy/apps/macos/spec.md).
+This document describes how Spaces is built: module boundaries, storage, runtime flows, and external integrations. User-visible behavior belongs in [spec.md](../spec.md).
 
 ## System Overview
 Spaces is a macOS Swift app and CLI built around a shared orchestration layer.

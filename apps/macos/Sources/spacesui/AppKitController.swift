@@ -604,7 +604,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
     private static var clickTargetAssocKey: UInt8 = 0
 
-    nonisolated private static func startupProfileEnabled() -> Bool { ProcessInfo.processInfo.environment["MUXY_STARTUP_PROFILE"] == "1" }
+    nonisolated private static func startupProfileEnabled() -> Bool { ProcessInfo.processInfo.environment["SPACES_STARTUP_PROFILE"] == "1" }
 
     nonisolated private static func startupElapsedMS() -> Int { Int((ProcessInfo.processInfo.systemUptime - startupProfileBaselineUptime) * 1000) }
 
@@ -6341,7 +6341,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     }
 
     private func handleWindowFocusFailure(_ error: Error) async {
-        guard let muxyError = error as? WorkspaceError, case .missingTrackedWindow(let context) = muxyError else {
+        guard let spacesError = error as? WorkspaceError, case .missingTrackedWindow(let context) = spacesError else {
             handleWindowFocusError(error)
             return
         }
@@ -6358,7 +6358,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     }
 
     private func handleWindowFocusError(_ error: Error) {
-        guard let muxyError = error as? WorkspaceError, case .missingTrackedWindow(let context) = muxyError else {
+        guard let spacesError = error as? WorkspaceError, case .missingTrackedWindow(let context) = spacesError else {
             showError(error)
             return
         }

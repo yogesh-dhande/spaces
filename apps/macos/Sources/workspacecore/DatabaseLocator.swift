@@ -1,7 +1,7 @@
 import Foundation
 
 public enum DatabaseLocator {
-    public static let databasePathEnvironmentVariable = "MUXY_DB_PATH"
+    public static let databasePathEnvironmentVariable = "SPACES_DB_PATH"
 
     public static func defaultPath() throws -> String {
         if let overridePath = ProcessInfo.processInfo.environment[databasePathEnvironmentVariable]?.trimmingCharacters(in: .whitespacesAndNewlines),

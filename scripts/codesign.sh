@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Code-sign muxy binaries with a Developer ID Application certificate.
+# Code-sign spaces binaries with a Developer ID Application certificate.
 #
 # Usage:
 #   CODESIGN_IDENTITY="Developer ID Application: Your Name (TEAMID)" scripts/codesign.sh <binary> [<binary2> ...]

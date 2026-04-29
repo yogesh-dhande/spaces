@@ -16,8 +16,8 @@ final class DatabaseLocatorTests: XCTestCase {
         tempHomeURL = nil
     }
 
-    // Tests default path uses muxy directory and creates parent by arranging representative inputs and asserting the expected result.
-    func testDefaultPathUsesMuxyDirectoryAndCreatesParent() throws {
+    // Tests default path uses spaces directory and creates parent by arranging representative inputs and asserting the expected result.
+    func testDefaultPathUsesSpacesDirectoryAndCreatesParent() throws {
         let path = try DatabaseLocator.defaultPath(homeDirectoryURL: tempHomeURL)
         let url = URL(fileURLWithPath: path)
 
@@ -43,7 +43,7 @@ final class DatabaseLocatorTests: XCTestCase {
 
     // Tests the public defaultPath() overload honors the explicit DB-path override used by manual E2E runs.
     func testPublicDefaultPathHonorsEnvironmentOverride() throws {
-        let overrideURL = tempHomeURL.appendingPathComponent("isolated/state/muxy-test.db")
+        let overrideURL = tempHomeURL.appendingPathComponent("isolated/state/spaces-test.db")
         let previous = getenv(DatabaseLocator.databasePathEnvironmentVariable).map { String(cString: $0) }
         setenv(DatabaseLocator.databasePathEnvironmentVariable, overrideURL.path, 1)
         defer {

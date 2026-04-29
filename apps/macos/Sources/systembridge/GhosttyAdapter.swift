@@ -94,7 +94,7 @@ open class GhosttyAdapter: @unchecked Sendable {
         let window: GhosttyWindowInfo = try self.openWindowAndRun(
             command: commandApplyingEnvironment(command, environment: environment), cwd: cwd, background: background)
         return TerminalLaunchResult(
-            trackingIdentity: .session(window.terminalID), hookSessionID: environment["MUXY_TERMINAL_TRACKING_ID"], containerID: window.windowID,
+            trackingIdentity: .session(window.terminalID), hookSessionID: environment["SPACES_TERMINAL_TRACKING_ID"], containerID: window.windowID,
             fallbackWindowID: nil)
     }
 }
@@ -107,7 +107,7 @@ extension GhosttyAdapter: TerminalAdapter {
         // Ghostty hook attribution must come from the injected shell token. Falling back to a
         // frontmost terminal or window here misattributes background hooks to whichever Ghostty
         // tab the user happens to be viewing when `spaces agent event` runs.
-        if let trackingID = environment["MUXY_TERMINAL_TRACKING_ID"], !trackingID.isEmpty { return .session(trackingID) }
+        if let trackingID = environment["SPACES_TERMINAL_TRACKING_ID"], !trackingID.isEmpty { return .session(trackingID) }
         return nil
     }
 

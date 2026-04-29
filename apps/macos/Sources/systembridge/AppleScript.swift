@@ -2,7 +2,7 @@ import Foundation
 
 public enum AppleScript {
     @discardableResult public static func run(_ script: String) throws -> String {
-        if NSClassFromString("XCTest") != nil, ProcessInfo.processInfo.environment["MUXY_ALLOW_TEST_APPLESCRIPT"] != "1" {
+        if NSClassFromString("XCTest") != nil, ProcessInfo.processInfo.environment["SPACES_ALLOW_TEST_APPLESCRIPT"] != "1" {
             throw NSError(
                 domain: "spaces.applescript", code: 1,
                 userInfo: [
@@ -16,7 +16,7 @@ public enum AppleScript {
             fputs("spaces: AppleScript failed.\n", stderr)
             fputs("spaces: script begin\n", stderr)
             fputs(script, stderr)
-            fputs("\nmuxy: script end\n", stderr)
+            fputs("\nspaces: script end\n", stderr)
             throw error
         }
     }

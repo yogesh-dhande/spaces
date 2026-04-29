@@ -4,8 +4,8 @@ import Foundation
 import systembridge
 
 public final class WorkspaceOrchestrator {
-    public static let terminalTrackingIDEnvVar = "MUXY_TERMINAL_TRACKING_ID"
-    public static let agentLabelEnvVar = "MUXY_AGENT_LABEL"
+    public static let terminalTrackingIDEnvVar = "SPACES_TERMINAL_TRACKING_ID"
+    public static let agentLabelEnvVar = "SPACES_AGENT_LABEL"
 
     public struct WorkspaceStopOutcome: Sendable {
         public let skippedStopScriptBecauseWorkspaceDirectoryMissing: Bool
@@ -1800,7 +1800,7 @@ public final class WorkspaceOrchestrator {
         try store.upsert(window: updated)
     }
 
-    private func tmuxSessionName(workspaceID: String) -> String { "muxy-\(workspaceID)" }
+    private func tmuxSessionName(workspaceID: String) -> String { "spaces-\(workspaceID)" }
 
     private func terminalTargetID(process: RunningProcessRecord) -> String? { process.terminalTrackingKey }
 
@@ -1933,7 +1933,7 @@ public final class WorkspaceOrchestrator {
     }
 
     private func processTmuxSessionName(workspaceID: String, processName: String) -> String {
-        "muxy-\(workspaceID)-\(safeFilename(processName).lowercased())"
+        "spaces-\(workspaceID)-\(safeFilename(processName).lowercased())"
     }
 
     private func shellSingleQuoted(_ raw: String) -> String { "'\(raw.replacingOccurrences(of: "'", with: "'\\''"))'" }
@@ -1983,7 +1983,7 @@ public final class WorkspaceOrchestrator {
 
     private func terminalLaunchEnvironment(base: [String: String], terminalHost: TerminalHost) -> [String: String] {
         var env = base
-        for key in [DatabaseLocator.databasePathEnvironmentVariable, "MUXY_RUNTIME_DIR", "MUXY_E2E_EVENTS_LOG", "DEBUG"] {
+        for key in [DatabaseLocator.databasePathEnvironmentVariable, "SPACES_RUNTIME_DIR", "SPACES_E2E_EVENTS_LOG", "DEBUG"] {
             if let value = ProcessInfo.processInfo.environment[key]?.trimmingCharacters(in: .whitespacesAndNewlines), !value.isEmpty {
                 env[key] = value
             }
@@ -2546,7 +2546,7 @@ public final class WorkspaceOrchestrator {
 
     private func logPerfMetric(_ metric: String, workspaceID: String, target: String, detail: String = "", elapsedMS: Int, success: Bool) {
         guard debugLoggingEnabled() else { return }
-        // Manual real-system E2E parses these `muxy: perf metric=...` lines for
+        // Manual real-system E2E parses these `spaces: perf metric=...` lines for
         // focus/cycle timing summaries. Treat the prefix and key/value shape as a
         // compatibility surface for the shell harness when changing debug logs.
         let suffix = detail.isEmpty ? "" : " \(detail)"
@@ -3110,8 +3110,8 @@ public final class WorkspaceOrchestrator {
             let key = namedPort.name.isEmpty ? "PORT\(env.count)" : namedPort.name
             env[key] = String(namedPort.port)
         }
-        env["MUXY_WORKSPACE_DIR"] = workspace.dir
-        env["MUXY_PROJECT_DIR"] = project.dir
+        env["SPACES_WORKSPACE_DIR"] = workspace.dir
+        env["SPACES_PROJECT_DIR"] = project.dir
         return env
     }
 
@@ -3607,7 +3607,7 @@ public final class WorkspaceOrchestrator {
 
     private func runtimeDirectory() throws -> String {
         let dir: URL
-        if let override = ProcessInfo.processInfo.environment["MUXY_RUNTIME_DIR"], !override.isEmpty {
+        if let override = ProcessInfo.processInfo.environment["SPACES_RUNTIME_DIR"], !override.isEmpty {
             dir = URL(fileURLWithPath: override, isDirectory: true)
         } else {
             let home = FileManager.default.homeDirectoryForCurrentUser

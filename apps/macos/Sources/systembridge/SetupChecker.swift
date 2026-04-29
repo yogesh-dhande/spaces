@@ -1,6 +1,6 @@
 import Foundation
 
-private let setupProfileEnabled = ProcessInfo.processInfo.environment["MUXY_STARTUP_PROFILE"] == "1"
+private let setupProfileEnabled = ProcessInfo.processInfo.environment["SPACES_STARTUP_PROFILE"] == "1"
 
 /// Identifies each prerequisite check in display order.
 public enum SetupCheckID: String, CaseIterable, Sendable {

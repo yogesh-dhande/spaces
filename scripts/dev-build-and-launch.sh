@@ -5,7 +5,7 @@ repo_root="$(cd "$(dirname "$0")/.." && pwd)"
 APP="$repo_root/apps/macos/.build/debug/SpacesApp"
 LOG_FILE="/tmp/Spaces.log"
 CRASH_DIR="$HOME/Library/Logs/DiagnosticReports"
-POST_LAUNCH_MONITOR_SECONDS="${MUXY_POST_LAUNCH_MONITOR_SECONDS:-45}"
+POST_LAUNCH_MONITOR_SECONDS="${SPACES_POST_LAUNCH_MONITOR_SECONDS:-45}"
 
 print_failure_diagnostics() {
   echo "Spaces exited; last log lines:"

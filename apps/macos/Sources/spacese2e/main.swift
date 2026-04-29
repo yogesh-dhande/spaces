@@ -130,14 +130,14 @@ private struct SeedFixtureCommand: ParsableCommand {
         let project = try orchestrator.project(id: normalizedProjectDir) ?? orchestrator.addProject(dir: normalizedProjectDir)
         let uvExecutable = try resolveExecutablePath(named: "uv")
         let frontendCommand =
-            "\(uvExecutable) run --project .spaces-e2e-demo muxy-e2e-demo frontend --port $MUXY_E2E_APP_PORT --site-dir .spaces-e2e-demo/site --backend-url http://127.0.0.1:$MUXY_E2E_API_PORT"
+            "\(uvExecutable) run --project .spaces-e2e-demo spaces-e2e-demo frontend --port $SPACES_E2E_APP_PORT --site-dir .spaces-e2e-demo/site --backend-url http://127.0.0.1:$SPACES_E2E_API_PORT"
         let backendCommand =
-            "\(uvExecutable) run --project .spaces-e2e-demo muxy-e2e-demo backend --port $MUXY_E2E_API_PORT --data-dir .spaces-e2e-demo/api"
+            "\(uvExecutable) run --project .spaces-e2e-demo spaces-e2e-demo backend --port $SPACES_E2E_API_PORT --data-dir .spaces-e2e-demo/api"
 
         try orchestrator.updateProjectConfig(projectID: project.id) { config in
-            config.ports = [.init(name: "MUXY_E2E_APP_PORT"), .init(name: "MUXY_E2E_API_PORT")]
+            config.ports = [.init(name: "SPACES_E2E_APP_PORT"), .init(name: "SPACES_E2E_API_PORT")]
             config.stopScript =
-                #"bash -lc 'printf "project-stop:%s\n" "${MUXY_WORKSPACE_DIR}" >> "${MUXY_E2E_EVENTS_LOG:-/tmp/muxy-e2e-events.log}"'"#
+                #"bash -lc 'printf "project-stop:%s\n" "${SPACES_WORKSPACE_DIR}" >> "${SPACES_E2E_EVENTS_LOG:-/tmp/spaces-e2e-events.log}"'"#
             config.processes = [.init(name: "frontend", command: frontendCommand), .init(name: "backend", command: backendCommand)]
             config.browserSessions = [.init(name: "docs", url: docsURL), .init(name: "admin", url: adminURL)]
             config.agentLaunchers = []

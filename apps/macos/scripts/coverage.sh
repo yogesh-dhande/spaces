@@ -19,7 +19,7 @@ report_elapsed_time() {
 trap report_elapsed_time EXIT
 
 echo "Running swift test with coverage..."
-workers="${MUXY_TEST_WORKERS:-}"
+workers="${SPACES_TEST_WORKERS:-}"
 if [ -z "$workers" ]; then
     detected_workers="$(sysctl -n hw.logicalcpu 2>/dev/null || echo "")"
     case "$detected_workers" in
@@ -37,8 +37,8 @@ if [ -n "$workers" ]; then
     echo "Using parallel test workers: $workers"
     set -- "$@" --num-workers "$workers"
 fi
-if [ "${MUXY_TEST_SKIP_BUILD:-0}" = "1" ]; then
-    echo "Skipping rebuild before tests (MUXY_TEST_SKIP_BUILD=1)"
+if [ "${SPACES_TEST_SKIP_BUILD:-0}" = "1" ]; then
+    echo "Skipping rebuild before tests (SPACES_TEST_SKIP_BUILD=1)"
     set -- "$@" --skip-build
 fi
 

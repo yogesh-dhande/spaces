@@ -76,8 +76,8 @@ API_PORT=21002`}</code>
         </p>
         <ul className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
           <li>• The workspace&apos;s named ports (for example <code>FRONTEND_PORT=20001</code>, <code>API_PORT=20002</code>).</li>
-          <li>• <code>MUXY_PROJECT_DIR</code> &mdash; the project directory.</li>
-          <li>• <code>MUXY_WORKSPACE_DIR</code> &mdash; this workspace&apos;s directory.</li>
+          <li>• <code>SPACES_PROJECT_DIR</code> &mdash; the project directory.</li>
+          <li>• <code>SPACES_WORKSPACE_DIR</code> &mdash; this workspace&apos;s directory.</li>
         </ul>
       </article>
 

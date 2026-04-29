@@ -6,7 +6,7 @@ import workspacecore
 
 @testable import spacescli
 
-private let testAppleScriptOptInEnvVar = "MUXY_ALLOW_TEST_APPLESCRIPT"
+private let testAppleScriptOptInEnvVar = "SPACES_ALLOW_TEST_APPLESCRIPT"
 
 final class MXCommandTests: XCTestCase {
     private final class VerifyingIterm2Adapter: Iterm2Adapter, @unchecked Sendable {

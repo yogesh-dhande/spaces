@@ -23,13 +23,13 @@ export function ProblemSimulation() {
       <div className="mt-4 grid gap-4 md:grid-cols-2">
         <FlowColumn
           tone="before"
-          title="Without Muxy"
+          title="Without Spaces"
           steps={beforeSteps}
           outcome="Result: context hunt before real progress begins."
         />
         <FlowColumn
           tone="after"
-          title="With Muxy"
+          title="With Spaces"
           steps={afterSteps}
           outcome="Result: stay within context, faster development loop."
         />
