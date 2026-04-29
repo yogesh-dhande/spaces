@@ -5,7 +5,7 @@ import { DocsShell } from "../../components/docs-shell";
 export const metadata: Metadata = {
   title: "Guide: Next.js + Django Monorepo (Docker)",
   description:
-    "Cookbook guide for containerized full-stack monorepo with Muxy workspace settings.",
+    "Cookbook guide for containerized full-stack monorepo with Spaces workspace settings.",
 };
 
 const card = "border-t border-line/70 pt-8 first:border-t-0 first:pt-0";
@@ -23,7 +23,7 @@ export default function NextjsDjangoMonorepoDockerGuidePage() {
       <article className={card}>
         <h2 className="text-2xl font-semibold tracking-tight">Use Case</h2>
         <p className={prose}>
-          You need reproducible containerized frontend+backend environments per workspace, with host ports isolated by Muxy.
+          You need reproducible containerized frontend+backend environments per workspace, with host ports isolated by Spaces.
         </p>
       </article>
 
@@ -36,7 +36,7 @@ export default function NextjsDjangoMonorepoDockerGuidePage() {
 API_PORT`}</code>
         </pre>
         <p className={prose}>
-          Muxy allocates host ports per workspace. Compose maps them to container ports.
+          Spaces allocates host ports per workspace. Compose maps them to container ports.
         </p>
         <h4 className="mt-4 text-sm font-semibold text-foreground">docker-compose.yml example</h4>
         <pre className={code}>
@@ -59,7 +59,7 @@ API_PORT`}</code>
           <code>{`cp .env.example .env`}</code>
         </pre>
         <p className={prose}>
-          Keeps workspace configuration deterministic. Copy vs symlink tradeoff is the same: isolation vs centralized updates. Point <code>cp</code> at whatever seed file your repo keeps — Muxy does not provide a built-in shared env file.
+          Keeps workspace configuration deterministic. Copy vs symlink tradeoff is the same: isolation vs centralized updates. Point <code>cp</code> at whatever seed file your repo keeps — Spaces does not provide a built-in shared env file.
         </p>
 
         <h3 className="mt-4 text-sm font-semibold text-foreground">Process</h3>

@@ -19,7 +19,7 @@ report_elapsed_time() {
 trap report_elapsed_time EXIT
 
 echo "Running swift test with coverage..."
-workers="${MUXY_TEST_WORKERS:-}"
+workers="${SPACES_TEST_WORKERS:-}"
 if [ -z "$workers" ]; then
     detected_workers="$(sysctl -n hw.logicalcpu 2>/dev/null || echo "")"
     case "$detected_workers" in
@@ -37,8 +37,8 @@ if [ -n "$workers" ]; then
     echo "Using parallel test workers: $workers"
     set -- "$@" --num-workers "$workers"
 fi
-if [ "${MUXY_TEST_SKIP_BUILD:-0}" = "1" ]; then
-    echo "Skipping rebuild before tests (MUXY_TEST_SKIP_BUILD=1)"
+if [ "${SPACES_TEST_SKIP_BUILD:-0}" = "1" ]; then
+    echo "Skipping rebuild before tests (SPACES_TEST_SKIP_BUILD=1)"
     set -- "$@" --skip-build
 fi
 
@@ -80,15 +80,15 @@ xcrun llvm-cov report \
 echo "Coverage summary:"
 awk '
 BEGIN {
-    module_order[1] = "streamctl"
-    module_order[2] = "gui"
-    module_order[3] = "appctl"
-    module_order[4] = "muxycli"
+    module_order[1] = "workspacecore"
+    module_order[2] = "spacesui"
+    module_order[3] = "systembridge"
+    module_order[4] = "spaces"
 }
 /^TOTAL[[:space:]]/ {
     overall_lines = $10
 }
-/^(appctl|gui|streamctl|muxycli)\// {
+/^(systembridge|spacesui|workspacecore|spaces)\// {
     split($1, parts, "/")
     module = parts[1]
     regions_total[module] += $2

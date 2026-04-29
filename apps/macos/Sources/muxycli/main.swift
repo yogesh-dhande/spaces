@@ -1,3 +1,0 @@
-import mxcli
-
-MXCommand.main()

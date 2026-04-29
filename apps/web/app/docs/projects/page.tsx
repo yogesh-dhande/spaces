@@ -16,16 +16,16 @@ export default function ProjectsDocsPage() {
       <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
         <h2 className="text-2xl font-semibold tracking-tight">What Is a Project?</h2>
         <p className="mt-2 text-sm leading-7 text-foreground-soft">
-          A project points at a directory on your Mac. If the directory is a Git repo, Muxy treats each workspace as a branch worktree. Otherwise, each workspace points at the project directory directly.
+          A project points at a directory on your Mac. If the directory is a Git repo, Spaces treats each workspace as a branch worktree. Otherwise, each workspace points at the project directory directly.
         </p>
       </article>
 
       <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
         <h2 className="text-2xl font-semibold tracking-tight">Project Settings</h2>
         <ul className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
-          <li>• <strong>Directory</strong> &mdash; the project folder. Muxy uses the folder name as the display name.</li>
+          <li>• <strong>Directory</strong> &mdash; the project folder. Spaces uses the folder name as the display name.</li>
           <li>• <strong>Setup script</strong> &mdash; runs once when a new workspace is created. A good place for <code>npm install</code> or copying a shared <code>.env</code> file into the workspace.</li>
-          <li>• <strong>Stop script</strong> &mdash; runs whenever a workspace is stopped (including on restart and archive), after Muxy shuts its processes down. Use it to tear down any extra services the workspace left behind.</li>
+          <li>• <strong>Stop script</strong> &mdash; runs whenever a workspace is stopped (including on restart and archive), after Spaces shuts its processes down. Use it to tear down any extra services the workspace left behind.</li>
         </ul>
       </article>
 
@@ -35,16 +35,16 @@ export default function ProjectsDocsPage() {
           You configure processes, browser sessions, and named ports once on the project. New workspaces start from those templates. Each workspace can edit its own copy without affecting the project or other workspaces.
         </p>
         <ul className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
-          <li>• <strong>Processes</strong> &mdash; commands Muxy runs alongside the workspace (servers, workers, coding agents).</li>
-          <li>• <strong>Browser Sessions</strong> &mdash; URLs Muxy opens in Chrome when the workspace launches.</li>
-          <li>• <strong>Named Ports</strong> &mdash; placeholder names like <code>FRONTEND_PORT</code> and <code>API_PORT</code>. Muxy assigns each workspace a unique port number per name so two workspaces never clash.</li>
+          <li>• <strong>Processes</strong> &mdash; commands Spaces runs alongside the workspace (servers, workers, coding agents).</li>
+          <li>• <strong>Browser Sessions</strong> &mdash; URLs Spaces opens in Chrome when the workspace launches.</li>
+          <li>• <strong>Named Ports</strong> &mdash; placeholder names like <code>FRONTEND_PORT</code> and <code>API_PORT</code>. Spaces assigns each workspace a unique port number per name so two workspaces never clash.</li>
         </ul>
       </article>
 
       <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
         <h2 className="text-2xl font-semibold tracking-tight">Adding a Project</h2>
         <p className="mt-2 text-sm leading-7 text-foreground-soft">
-          Add a project from the app by pointing at a local directory or pasting a Git URL. For a Git URL, Muxy clones into <code className="rounded bg-background-soft px-1.5 py-0.5 text-xs">~/muxy/repos</code>. Either way, Muxy creates a default workspace for you automatically.
+          Add a project from the app by pointing at a local directory or pasting a Git URL. For a Git URL, Spaces clones into <code className="rounded bg-background-soft px-1.5 py-0.5 text-xs">~/spaces/repos</code>. Either way, Spaces creates a default workspace for you automatically.
         </p>
       </article>
 
@@ -63,9 +63,9 @@ export default function ProjectsDocsPage() {
       <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
         <h2 className="text-2xl font-semibold tracking-tight">Removing a Project</h2>
         <ul className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
-          <li>• Muxy cleans up the project&apos;s workspaces and their worktree directories.</li>
-          <li>• If Muxy cloned the repo (via Git URL), the clone under <code>~/muxy/repos</code> is removed too.</li>
-          <li>• Directories you pointed Muxy at yourself are left alone.</li>
+          <li>• Spaces cleans up the project&apos;s workspaces and their worktree directories.</li>
+          <li>• If Spaces cloned the repo (via Git URL), the clone under <code>~/spaces/repos</code> is removed too.</li>
+          <li>• Directories you pointed Spaces at yourself are left alone.</li>
         </ul>
       </article>
     </DocsShell>

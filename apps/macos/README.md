@@ -1,11 +1,11 @@
-# Muxy macOS App
+# Spaces macOS App
 
-`Muxy` is the macOS app and `muxy` is the companion CLI for workspace import, metadata updates, idempotent workspace launch, and agent activity.
+`Spaces` is the macOS app and `spaces` is the companion CLI for workspace import, metadata updates, idempotent workspace launch, and agent activity.
 
 ## Read This With
-- [spec.md](/Users/yogesh/projects/muxy/apps/macos/spec.md): UX and product behavior
-- [architecture.md](/Users/yogesh/projects/muxy/apps/macos/docs/architecture.md): modules, data model, and runtime structure
-- [../../README.md](/Users/yogesh/projects/muxy/README.md): repo-wide development and deploy workflows
+- [spec.md](/Users/yogesh/projects/spaces/apps/macos/spec.md): UX and product behavior
+- [architecture.md](/Users/yogesh/projects/spaces/apps/macos/docs/architecture.md): modules, data model, and runtime structure
+- [../../README.md](/Users/yogesh/projects/spaces/README.md): repo-wide development and deploy workflows
 - `apps/web/app/docs`: user-facing docs and CLI reference
 
 ## Requirements
@@ -31,18 +31,18 @@ scripts/coverage.sh
 `scripts/lint.sh` auto-formats `apps/macos/Sources` and `apps/macos/Tests` with `swift format` before linting, which keeps formatter noise out of the diagnostics.
 
 Persistence notes:
-- Migration safety backups are written to `~/.muxy/backups/` before any on-disk schema upgrade and retained as a rolling set of the newest 10 snapshots.
-- Any schema change in `streamctl` must ship with an ordered migration step and test coverage for the upgrade path.
+- Migration safety backups are written to `~/.spaces/backups/` before any on-disk schema upgrade and retained as a rolling set of the newest 10 snapshots.
+- Any schema change in `workspacecore` must ship with an ordered migration step and test coverage for the upgrade path.
 
 Useful commands:
 
 ```bash
-apps/macos/.build/debug/MuxyApp
-apps/macos/.build/debug/muxy --help
-apps/macos/.build/debug/muxye2e --help
-apps/macos/.build/debug/muxy workspace import --title "debug" --tooltip "Local debug session"
-apps/macos/.build/debug/muxy workspace update --tooltip "Ready for review"
-apps/macos/.build/debug/muxy workspace up --restart
+apps/macos/.build/debug/SpacesApp
+apps/macos/.build/debug/spaces --help
+apps/macos/.build/debug/spacese2e --help
+apps/macos/.build/debug/spaces workspace import --title "debug" --tooltip "Local debug session"
+apps/macos/.build/debug/spaces workspace update --tooltip "Ready for review"
+apps/macos/.build/debug/spaces workspace up --restart
 apps/macos/Tests/e2e_real_system.sh
 ```
 
@@ -57,7 +57,7 @@ To capture a product-demo video from the same suite, record the run with the nat
 
 ```bash
 apps/macos/Tests/e2e_real_system.sh \
-  --record-video /tmp/muxy-real-e2e.mp4 \
+  --record-video /tmp/spaces-real-e2e.mp4 \
   --pause-transitions
 ```
 
@@ -69,7 +69,7 @@ To prepare the same fixture projects, localhost browser-session servers, and wor
 apps/macos/Tests/e2e_real_system.sh --setup-fixtures-only
 ```
 
-This suite is manual by design. It drives the real app, `muxy`, `yabai`, Chrome, and the configured terminal host in an interactive macOS session instead of XCTest.
+This suite is manual by design. It drives the real app, `spaces`, `yabai`, Chrome, and the configured terminal host in an interactive macOS session instead of XCTest.
 
 Primary coverage includes:
 - adding and archiving a workspace
@@ -84,10 +84,10 @@ Primary coverage includes:
 The suite also emits performance metrics in milliseconds for the main window-focus and cycle paths, using the app's debug timing logs for the same shortcut and cycling flows previously profiled by `scripts/profile-window-focus.sh`. The final summary prints both the pass/fail case list and the collected timing samples, so this suite is the primary replacement for that standalone focus-profiling script during development.
 
 The manual suite depends on a small set of debug-log lines from the app and CLI helpers. Treat these as test contracts when changing debug logging:
-- `muxy: perf metric=...`
-- `muxy: workspace_detail_ipc selecting ...` / `selected ...`
-- `muxy: workspace_run_view workspace=... selected=... agents=... coding_entries=...`
-- `muxy: iterm session_verification_succeeded ...` is used as an optional extra confirmation path for iTerm2 focus checks
+- `spaces: perf metric=...`
+- `spaces: workspace_detail_ipc selecting ...` / `selected ...`
+- `spaces: workspace_run_view workspace=... selected=... agents=... coding_entries=...`
+- `spaces: iterm session_verification_succeeded ...` is used as an optional extra confirmation path for iTerm2 focus checks
 
 ## Scope of This README
 This file intentionally does not duplicate:

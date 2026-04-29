@@ -10,10 +10,10 @@ set -euo pipefail
 #   3 = first process/iTerm row
 #   4 = second process/iTerm row
 # -----------------------------------------------------------------------------
-WORKSPACE_DIR="${WORKSPACE_DIR:-/Users/yogesh/muxy/workspaces/frontend-demo/banana}"
-MUXY_APP="${MUXY_APP:-$(cd "$(dirname "$0")/.." && pwd)/apps/macos/.build/debug/MuxyApp}"
-MX_BIN="${MX_BIN:-$(cd "$(dirname "$0")/.." && pwd)/apps/macos/.build/debug/muxy}"
-PROFILE_LOG="${PROFILE_LOG:-/tmp/muxy-window-focus-profile.log}"
+WORKSPACE_DIR="${WORKSPACE_DIR:-/Users/yogesh/spaces/workspaces/frontend-demo/banana}"
+SPACES_APP="${SPACES_APP:-$(cd "$(dirname "$0")/.." && pwd)/apps/macos/.build/debug/SpacesApp}"
+MX_BIN="${MX_BIN:-$(cd "$(dirname "$0")/.." && pwd)/apps/macos/.build/debug/spaces}"
+PROFILE_LOG="${PROFILE_LOG:-/tmp/spaces-window-focus-profile.log}"
 SAMPLE_COUNT="${SAMPLE_COUNT:-3}"
 STARTUP_SAMPLE_COUNT="${STARTUP_SAMPLE_COUNT:-3}"
 ACTION_TIMEOUT_SECONDS="${ACTION_TIMEOUT_SECONDS:-8}"
@@ -25,9 +25,9 @@ RELAUNCH_DEBUG_APP="${RELAUNCH_DEBUG_APP:-0}"
 KEEP_APP_RUNNING="${KEEP_APP_RUNNING:-1}"
 ENABLE_STARTUP_PROFILE="${ENABLE_STARTUP_PROFILE:-1}"
 
-MUXY_TO_BROWSER_INDEX="${MUXY_TO_BROWSER_INDEX:-1}"
-MUXY_TO_ITERM_INDEX="${MUXY_TO_ITERM_INDEX:-3}"
-STARTUP_SHORTCUT_INDEX="${STARTUP_SHORTCUT_INDEX:-${MUXY_TO_BROWSER_INDEX}}"
+SPACES_TO_BROWSER_INDEX="${SPACES_TO_BROWSER_INDEX:-1}"
+SPACES_TO_ITERM_INDEX="${SPACES_TO_ITERM_INDEX:-3}"
+STARTUP_SHORTCUT_INDEX="${STARTUP_SHORTCUT_INDEX:-${SPACES_TO_BROWSER_INDEX}}"
 SETUP_CHECK_IDS=(iterm2Installed tmuxInstalled yabaiInstalled yabaiServiceRunning yabaiAccessibility)
 
 BROWSER_TO_BROWSER_START_INDEX="${BROWSER_TO_BROWSER_START_INDEX:-1}"
@@ -64,39 +64,39 @@ build_if_needed() {
   fi
 }
 
-close_existing_muxy_instances() {
-  osascript -e 'tell application "Muxy" to quit' >/dev/null 2>&1 || true
-  pkill -x MuxyApp >/dev/null 2>&1 || true
+close_existing_spaces_instances() {
+  osascript -e 'tell application "Spaces" to quit' >/dev/null 2>&1 || true
+  pkill -x SpacesApp >/dev/null 2>&1 || true
   sleep 1
 }
 
-launch_debug_muxy() {
+launch_debug_spaces() {
   : > "${PROFILE_LOG}"
   search_from_line=1
-  env DEBUG=1 MUXY_STARTUP_PROFILE="${ENABLE_STARTUP_PROFILE}" "${MUXY_APP}" >"${PROFILE_LOG}" 2>&1 &
+  env DEBUG=1 SPACES_STARTUP_PROFILE="${ENABLE_STARTUP_PROFILE}" "${SPACES_APP}" >"${PROFILE_LOG}" 2>&1 &
   launched_pid=$!
 
   local deadline=$((SECONDS + ACTION_TIMEOUT_SECONDS))
   while (( SECONDS < deadline )); do
     if kill -0 "${launched_pid}" >/dev/null 2>&1; then
-      focus_muxy_app
+      focus_spaces_app
       sleep_seconds "${POST_LAUNCH_SETTLE_SECONDS}"
       return 0
     fi
     sleep 0.2
   done
 
-  echo "Failed to launch debug Muxy app." >&2
+  echo "Failed to launch debug Spaces app." >&2
   exit 1
 }
 
-focus_muxy_app() {
+focus_spaces_app() {
   local pid="${launched_pid}"
   if [[ -z "${pid}" ]]; then
-    pid="$(pgrep -x MuxyApp | tail -n 1)"
+    pid="$(pgrep -x SpacesApp | tail -n 1)"
   fi
   if [[ -z "${pid}" ]]; then
-    echo "Could not find a running Muxy process." >&2
+    echo "Could not find a running Spaces process." >&2
     exit 1
   fi
 
@@ -108,7 +108,7 @@ focus_muxy_app() {
     fi
     sleep 0.1
   done
-  echo "Timed out waiting for debug Muxy app to become frontmost." >&2
+  echo "Timed out waiting for debug Spaces app to become frontmost." >&2
   exit 1
 }
 
@@ -195,10 +195,10 @@ focus_workspace_window() {
 
 collect_direct_shortcut_sample() {
   local index="$1"
-  focus_muxy_app
+  focus_spaces_app
   send_cmd_number "${index}"
   local line
-  line="$(wait_for_pattern "muxy: window_shortcut stage=total index=${index} elapsed_ms=")"
+  line="$(wait_for_pattern "spaces: window_shortcut stage=total index=${index} elapsed_ms=")"
   sleep_seconds "${POST_ACTION_SETTLE_SECONDS}"
   extract_metric "${line}" "elapsed_ms"
 }
@@ -208,7 +208,7 @@ collect_cycle_sample() {
   focus_workspace_window "${start_index}"
   send_cycle_next
   local line
-  line="$(wait_for_pattern "muxy: cycle workspace=.* direction=next total_ms=[0-9]+ target=.* success=1")"
+  line="$(wait_for_pattern "spaces: cycle workspace=.* direction=next total_ms=[0-9]+ target=.* success=1")"
   sleep_seconds "${POST_ACTION_SETTLE_SECONDS}"
   extract_metric "${line}" "total_ms"
 }
@@ -242,10 +242,10 @@ summarize_samples() {
 collect_startup_first_interaction_sample() {
   local deadline=$((SECONDS + ACTION_TIMEOUT_SECONDS))
   while (( SECONDS < deadline )); do
-    focus_muxy_app
+    focus_spaces_app
     send_cmd_number "${STARTUP_SHORTCUT_INDEX}"
     local line=""
-    line="$(find_new_pattern_once "muxy: startup stage=first_interaction elapsed_ms=" || true)"
+    line="$(find_new_pattern_once "spaces: startup stage=first_interaction elapsed_ms=" || true)"
     if [[ -n "${line}" ]]; then
       sleep_seconds "${POST_ACTION_SETTLE_SECONDS}"
       extract_metric "${line}" "elapsed_ms"
@@ -259,8 +259,8 @@ collect_startup_first_interaction_sample() {
 }
 
 collect_startup_sample() {
-  close_existing_muxy_instances
-  launch_debug_muxy
+  close_existing_spaces_instances
+  launch_debug_spaces
 
   local shell_window_line
   local shortcut_monitor_line
@@ -273,15 +273,15 @@ collect_startup_sample() {
   local apply_selection_line
   local first_interaction_ms
 
-  shell_window_line="$(wait_for_pattern "muxy: startup stage=shell_window_ready elapsed_ms=")"
-  shortcut_monitor_line="$(wait_for_pattern "muxy: startup stage=shortcut_monitor_ready elapsed_ms=")"
-  setup_complete_line="$(wait_for_pattern "muxy: startup stage=setup_complete elapsed_ms=")"
-  main_content_line="$(wait_for_pattern "muxy: startup stage=main_content_ready elapsed_ms=")"
-  workspace_scan_breakdown_line="$(wait_for_pattern "muxy: startup stage=sidebar_snapshot_workspace_scan_breakdown elapsed_ms=")"
-  workspace_scan_line="$(wait_for_pattern "muxy: startup stage=sidebar_snapshot_workspace_scan_ready elapsed_ms=")"
-  dashboard_snapshot_line="$(wait_for_pattern "muxy: startup stage=sidebar_snapshot_dashboard_ready elapsed_ms=")"
-  snapshot_complete_line="$(wait_for_pattern "muxy: startup stage=sidebar_snapshot_complete elapsed_ms=")"
-  apply_selection_line="$(wait_for_pattern "muxy: startup stage=apply_snapshot_selection_ready elapsed_ms=")"
+  shell_window_line="$(wait_for_pattern "spaces: startup stage=shell_window_ready elapsed_ms=")"
+  shortcut_monitor_line="$(wait_for_pattern "spaces: startup stage=shortcut_monitor_ready elapsed_ms=")"
+  setup_complete_line="$(wait_for_pattern "spaces: startup stage=setup_complete elapsed_ms=")"
+  main_content_line="$(wait_for_pattern "spaces: startup stage=main_content_ready elapsed_ms=")"
+  workspace_scan_breakdown_line="$(wait_for_pattern "spaces: startup stage=sidebar_snapshot_workspace_scan_breakdown elapsed_ms=")"
+  workspace_scan_line="$(wait_for_pattern "spaces: startup stage=sidebar_snapshot_workspace_scan_ready elapsed_ms=")"
+  dashboard_snapshot_line="$(wait_for_pattern "spaces: startup stage=sidebar_snapshot_dashboard_ready elapsed_ms=")"
+  snapshot_complete_line="$(wait_for_pattern "spaces: startup stage=sidebar_snapshot_complete elapsed_ms=")"
+  apply_selection_line="$(wait_for_pattern "spaces: startup stage=apply_snapshot_selection_ready elapsed_ms=")"
   first_interaction_ms="$(collect_startup_first_interaction_sample)"
 
   local setup_check_metrics
@@ -380,7 +380,7 @@ summarize_startup_samples() {
 
 collect_git_activity_sample() {
   awk '
-    /muxy: git_activity workspace=/ {
+    /spaces: git_activity workspace=/ {
       count += 1
       for (i = 1; i <= NF; i += 1) {
         if ($i ~ /^repo_check_ms=/) repo += substr($i, 15) + 0
@@ -408,12 +408,12 @@ collect_setup_check_sample() {
   local check_lines=()
   local check_id
   for check_id in "${SETUP_CHECK_IDS[@]}"; do
-    check_lines+=("$(find_pattern_anywhere "muxy: setup_check id=${check_id} elapsed_ms=[0-9]+ passed=[01]" || true)")
+    check_lines+=("$(find_pattern_anywhere "spaces: setup_check id=${check_id} elapsed_ms=[0-9]+ passed=[01]" || true)")
   done
   local startup_blocking_line
   local run_all_line
-  startup_blocking_line="$(find_pattern_anywhere "muxy: setup_check stage=startup_blocking elapsed_ms=" || true)"
-  run_all_line="$(find_pattern_anywhere "muxy: setup_check stage=run_all elapsed_ms=" || true)"
+  startup_blocking_line="$(find_pattern_anywhere "spaces: setup_check stage=startup_blocking elapsed_ms=" || true)"
+  run_all_line="$(find_pattern_anywhere "spaces: setup_check stage=run_all elapsed_ms=" || true)"
 
   for line in "${check_lines[@]}"; do
     if [[ -n "${line}" ]]; then
@@ -466,7 +466,7 @@ summarize_setup_check_samples() {
 }
 
 main() {
-  require_file "${MUXY_APP}"
+  require_file "${SPACES_APP}"
   require_file "${MX_BIN}"
   build_if_needed
   ensure_workspace_exists
@@ -480,8 +480,8 @@ main() {
     done
   fi
 
-  local muxy_to_browser_samples=""
-  local muxy_to_iterm_samples=""
+  local spaces_to_browser_samples=""
+  local spaces_to_iterm_samples=""
   local browser_to_browser_samples=""
   local browser_to_iterm_samples=""
   local iterm_to_iterm_samples=""
@@ -489,22 +489,22 @@ main() {
 
   if [[ "${SAMPLE_COUNT}" -gt 0 ]]; then
     if [[ "${RELAUNCH_DEBUG_APP}" == "1" ]]; then
-      close_existing_muxy_instances
-      launch_debug_muxy
+      close_existing_spaces_instances
+      launch_debug_spaces
     else
-      focus_muxy_app
+      focus_spaces_app
       : > "${PROFILE_LOG}"
     fi
 
-    muxy_to_browser_samples="$(mktemp)"
-    muxy_to_iterm_samples="$(mktemp)"
+    spaces_to_browser_samples="$(mktemp)"
+    spaces_to_iterm_samples="$(mktemp)"
     browser_to_browser_samples="$(mktemp)"
     browser_to_iterm_samples="$(mktemp)"
     iterm_to_iterm_samples="$(mktemp)"
     iterm_to_browser_samples="$(mktemp)"
 
-    for _ in $(seq 1 "${SAMPLE_COUNT}"); do collect_direct_shortcut_sample "${MUXY_TO_BROWSER_INDEX}" >>"${muxy_to_browser_samples}"; done
-    for _ in $(seq 1 "${SAMPLE_COUNT}"); do collect_direct_shortcut_sample "${MUXY_TO_ITERM_INDEX}" >>"${muxy_to_iterm_samples}"; done
+    for _ in $(seq 1 "${SAMPLE_COUNT}"); do collect_direct_shortcut_sample "${SPACES_TO_BROWSER_INDEX}" >>"${spaces_to_browser_samples}"; done
+    for _ in $(seq 1 "${SAMPLE_COUNT}"); do collect_direct_shortcut_sample "${SPACES_TO_ITERM_INDEX}" >>"${spaces_to_iterm_samples}"; done
     for _ in $(seq 1 "${SAMPLE_COUNT}"); do collect_cycle_sample "${BROWSER_TO_BROWSER_START_INDEX}" >>"${browser_to_browser_samples}"; done
     for _ in $(seq 1 "${SAMPLE_COUNT}"); do collect_cycle_sample "${BROWSER_TO_ITERM_START_INDEX}" >>"${browser_to_iterm_samples}"; done
     for _ in $(seq 1 "${SAMPLE_COUNT}"); do collect_cycle_sample "${ITERM_TO_ITERM_START_INDEX}" >>"${iterm_to_iterm_samples}"; done
@@ -529,8 +529,8 @@ main() {
     echo "samples per action: ${SAMPLE_COUNT}"
     echo "log file: ${PROFILE_LOG}"
     echo
-    summarize_samples "muxy_to_browser" "${muxy_to_browser_samples}"
-    summarize_samples "muxy_to_iterm" "${muxy_to_iterm_samples}"
+    summarize_samples "spaces_to_browser" "${spaces_to_browser_samples}"
+    summarize_samples "spaces_to_iterm" "${spaces_to_iterm_samples}"
     summarize_samples "browser_to_browser" "${browser_to_browser_samples}"
     summarize_samples "browser_to_iterm" "${browser_to_iterm_samples}"
     summarize_samples "iterm_to_iterm" "${iterm_to_iterm_samples}"

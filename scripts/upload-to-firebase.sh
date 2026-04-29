@@ -8,7 +8,7 @@ fi
 
 DMG_FILE="$1"
 VERSION="$2"
-BUCKET="muxy-dev"
+BUCKET="spaces-dev"
 
 # Authenticate with Firebase (use service account if provided, otherwise use local gcloud auth)
 if [ -n "${FIREBASE_SERVICE_ACCOUNT:-}" ]; then

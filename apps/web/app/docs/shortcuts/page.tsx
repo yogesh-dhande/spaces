@@ -7,9 +7,9 @@ export const metadata: Metadata = {
 };
 
 const shortcutRows = [
-  { shortcut: "cmd+alt+=", action: "Show or hide Muxy", scope: "Global" },
-  { shortcut: "cmd+alt+]", action: "Next window in the current workspace (cycles workspaces when Muxy is frontmost)", scope: "Global + App" },
-  { shortcut: "cmd+alt+[", action: "Previous window in the current workspace (cycles workspaces when Muxy is frontmost)", scope: "Global + App" },
+  { shortcut: "cmd+alt+=", action: "Show or hide Spaces", scope: "Global" },
+  { shortcut: "cmd+alt+]", action: "Next window in the current workspace (cycles workspaces when Spaces is frontmost)", scope: "Global + App" },
+  { shortcut: "cmd+alt+[", action: "Previous window in the current workspace (cycles workspaces when Spaces is frontmost)", scope: "Global + App" },
   { shortcut: "cmd+alt+g", action: "Open the dashboard", scope: "App" },
   { shortcut: "cmd+n", action: "New workspace for the selected project", scope: "App" },
   { shortcut: "cmd+alt+e", action: "Open the selected workspace in your configured editor", scope: "Global + App" },
@@ -23,7 +23,7 @@ export default function ShortcutsDocsPage() {
   return (
     <DocsShell
       title="Keyboard Shortcuts"
-      description="Muxy is designed for keyboard-first context switching between running workspaces and captured windows."
+      description="Spaces is designed for keyboard-first context switching between running workspaces and captured windows."
       pagePath="/docs/shortcuts"
     >
       <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">

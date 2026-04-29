@@ -2,52 +2,52 @@
 import PackageDescription
 
 let package = Package(
-    name: "muxy",
+    name: "spaces",
     platforms: [
         .macOS(.v14)
     ],
     products: [
-        .library(name: "appctl", targets: ["appctl"]),
-        .library(name: "streamctl", targets: ["streamctl"]),
-        .library(name: "gui", targets: ["gui"]),
-        .library(name: "mxcli", targets: ["mxcli"]),
-        .executable(name: "muxye2e", targets: ["muxye2e"]),
-        .executable(name: "muxy", targets: ["muxycli"]),
-        .executable(name: "MuxyApp", targets: ["MuxyApp"])
+        .library(name: "systembridge", targets: ["systembridge"]),
+        .library(name: "workspacecore", targets: ["workspacecore"]),
+        .library(name: "spacesui", targets: ["spacesui"]),
+        .library(name: "spacescli", targets: ["spacescli"]),
+        .executable(name: "spacese2e", targets: ["spacese2e"]),
+        .executable(name: "spaces", targets: ["spaces"]),
+        .executable(name: "SpacesApp", targets: ["SpacesApp"])
     ],
     dependencies: [
         .package(url: "https://github.com/apple/swift-argument-parser.git", from: "1.5.0")
     ],
     targets: [
-        .target(name: "appctl"),
+        .target(name: "systembridge"),
         .target(
-            name: "streamctl",
-            dependencies: ["appctl"],
+            name: "workspacecore",
+            dependencies: ["systembridge"],
             linkerSettings: [.linkedLibrary("sqlite3")]
         ),
-        .target(name: "gui", dependencies: ["streamctl", "appctl"]),
+        .target(name: "spacesui", dependencies: ["workspacecore", "systembridge"]),
         .target(
-            name: "mxcli",
+            name: "spacescli",
             dependencies: [
-                "streamctl",
-                "appctl",
+                "workspacecore",
+                "systembridge",
                 .product(name: "ArgumentParser", package: "swift-argument-parser")
             ]
         ),
         .executableTarget(
-            name: "muxye2e",
+            name: "spacese2e",
             dependencies: [
-                "streamctl",
-                "appctl",
+                "workspacecore",
+                "systembridge",
                 .product(name: "ArgumentParser", package: "swift-argument-parser")
             ],
-            path: "Sources/muxye2e"
+            path: "Sources/spacese2e"
         ),
-        .executableTarget(name: "muxycli", dependencies: ["mxcli"], path: "Sources/muxycli"),
+        .executableTarget(name: "spaces", dependencies: ["spacescli"], path: "Sources/spaces"),
         .executableTarget(
-            name: "MuxyApp",
-            dependencies: ["gui"],
-            path: "Sources/MuxyApp",
+            name: "SpacesApp",
+            dependencies: ["spacesui"],
+            path: "Sources/SpacesApp",
             exclude: ["Info.plist"],
             resources: [.copy("AppIcon.icns")],
             linkerSettings: [
@@ -55,18 +55,18 @@ let package = Package(
                     "-Xlinker", "-sectcreate",
                     "-Xlinker", "__TEXT",
                     "-Xlinker", "__info_plist",
-                    "-Xlinker", "Sources/MuxyApp/Info.plist",
+                    "-Xlinker", "Sources/SpacesApp/Info.plist",
                     "-Xlinker", "-rpath",
                     "-Xlinker", "@executable_path/../Frameworks"
                 ])
             ]
         ),
-        .testTarget(name: "streamctlTests", dependencies: ["streamctl", "appctl"]),
-        .testTarget(name: "guiTests", dependencies: ["gui"]),
+        .testTarget(name: "workspacecoreTests", dependencies: ["workspacecore", "systembridge"]),
+        .testTarget(name: "spacesuiTests", dependencies: ["spacesui"]),
         .testTarget(
-            name: "mxcliTests",
+            name: "spacescliTests",
             dependencies: [
-                "mxcli",
+                "spacescli",
                 .product(name: "ArgumentParser", package: "swift-argument-parser")
             ]
         )

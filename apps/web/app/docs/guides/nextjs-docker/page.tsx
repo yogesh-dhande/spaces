@@ -5,7 +5,7 @@ import { DocsShell } from "../../components/docs-shell";
 export const metadata: Metadata = {
   title: "Guide: Next.js (Docker Compose)",
   description:
-    "Cookbook guide for running a single Next.js service in Docker Compose with Muxy settings.",
+    "Cookbook guide for running a single Next.js service in Docker Compose with Spaces settings.",
 };
 
 const card = "border-t border-line/70 pt-8 first:border-t-0 first:pt-0";
@@ -37,7 +37,7 @@ export default function NextjsDockerGuidePage() {
           <code>{`FRONTEND_PORT`}</code>
         </pre>
         <p className={prose}>
-          Muxy assigns one host port per workspace. Compose maps host <code>$FRONTEND_PORT</code> to container port <code>3000</code>.
+          Spaces assigns one host port per workspace. Compose maps host <code>$FRONTEND_PORT</code> to container port <code>3000</code>.
         </p>
         <h4 className="mt-4 text-sm font-semibold text-foreground">docker-compose.yml example</h4>
         <pre className={code}>
@@ -57,7 +57,7 @@ export default function NextjsDockerGuidePage() {
         <p className={prose}>
           Copying <code>.env</code> gives each workspace an isolated env file.
           Symlink can reduce duplication, but one edit impacts all linked workspaces.
-          Point <code>cp</code> at whatever seed file your repo keeps — Muxy does not provide a built-in shared env file.
+          Point <code>cp</code> at whatever seed file your repo keeps — Spaces does not provide a built-in shared env file.
         </p>
 
         <h3 className="mt-4 text-sm font-semibold text-foreground">Processes</h3>
@@ -103,7 +103,7 @@ docker compose down`}</code>
           <li>• Key use case: one service in multi-service Compose goes down, but you do not want Compose auto-restart; you still want an immediate notification.</li>
           <li>• Detect partial outage where frontend is up but backend/cache/worker has failed.</li>
           <li>• Alert when a container exists but endpoint is unhealthy (liveness differs from readiness).</li>
-          <li>• Trigger controlled restart in Muxy rather than always-on container restart loops.</li>
+          <li>• Trigger controlled restart in Spaces rather than always-on container restart loops.</li>
         </ul>
       </article>
 
