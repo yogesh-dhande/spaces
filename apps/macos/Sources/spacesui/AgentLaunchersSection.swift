@@ -120,10 +120,24 @@ import workspacecore
     }
 
     private func displayEntries() -> [DisplayEntry] {
-        AppKitController.resolvedCodingAgentRunEntries(configuredAgentLaunchers: launchers, agentWindows: agentWindows).map {
-            DisplayEntry(
-                launcher: $0.launcher, agentWindow: $0.agentWindow, runtimeWindowTitle: $0.agentWindow.flatMap { runtimeWindowTitleByAgentID[$0.id] })
+        let configuredAgentNames = Set(launchers.map(\.name).map(AppKitController.normalizedRunRowName).filter { !$0.isEmpty })
+        var entries: [DisplayEntry] = []
+
+        for launcher in launchers {
+            let normalizedName = AppKitController.normalizedRunRowName(launcher.name)
+            let matchedAgent =
+                normalizedName.isEmpty ? nil : agentWindows.first(where: { AppKitController.normalizedRunRowName($0.label ?? "") == normalizedName })
+            entries.append(
+                DisplayEntry(
+                    launcher: launcher, agentWindow: matchedAgent, runtimeWindowTitle: matchedAgent.flatMap { runtimeWindowTitleByAgentID[$0.id] }))
         }
+
+        for agentWindow in agentWindows {
+            guard !configuredAgentNames.contains(AppKitController.normalizedRunRowName(agentWindow.label ?? "")) else { continue }
+            entries.append(DisplayEntry(launcher: nil, agentWindow: agentWindow, runtimeWindowTitle: runtimeWindowTitleByAgentID[agentWindow.id]))
+        }
+
+        return entries
     }
 
     // MARK: Header

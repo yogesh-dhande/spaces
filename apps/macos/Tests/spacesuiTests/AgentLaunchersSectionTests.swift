@@ -5,6 +5,17 @@ import workspacecore
 @testable import spacesui
 
 @MainActor @Suite struct AgentLaunchersSectionTests {
+    @Test func addFromEmptySectionShowsEditableDraftRow() {
+        let section = AgentLaunchersSection()
+
+        #expect(section.rowCount == 0)
+
+        section.performAdd()
+
+        #expect(section.rowCount == 1)
+        #expect(section.isEditing(at: 0))
+    }
+
     @Test func codingAgentsSectionRendersMatchedAndAdHocRuntimeRows() {
         let section = AgentLaunchersSection(launchers: [
             AgentLauncher(name: "claude", command: "claude"), AgentLauncher(name: "codex", command: "codex"),
@@ -42,6 +53,8 @@ import workspacecore
 }
 
 extension AgentLaunchersSection {
+    func performAdd() { handleAdd(NSButton()) }
+
     func row(at index: Int) -> AgentLauncherRowView? {
         guard index >= 0, index < rowCount else { return nil }
         return rowsStackForTesting.arrangedSubviews.compactMap { $0 as? AgentLauncherRowView }[agentTestsSafe: index]

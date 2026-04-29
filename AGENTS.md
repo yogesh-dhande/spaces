@@ -17,6 +17,7 @@
 - Anything configurable in the GUI must also be configurable via `muxy`.
 
 ## Coding Agent Workflow
+- If on the `main` branch, switch to a new branch before committing changes. When asked to push, commit, push, and create a PR if there isn't one already. Do not add a coding agent name as a prefix to the branch name or the PR title.
 - Always start by ensuring a Muxy workspace exists by running `~/projects/muxy/apps/macos/.build/debug/muxy workspace import --title [text] --tooltip [text]` from the project root.
 - Before manually launching a new Muxy app instance for debugging or profiling, close any existing Muxy instances so only one global hotkey listener is active.
 - When blocked on user input or permissions, run `~/projects/muxy/apps/macos/.build/debug/muxy agent event --type waiting` before asking.
