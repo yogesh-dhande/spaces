@@ -35,8 +35,7 @@ jobs:
         run: npm ci
 
       - name: Resolve SwiftPM dependencies
-        working-directory: apps/macos
-        run: swift package resolve
+        run: scripts/swiftpm.sh package resolve
 
       - name: Lint Swift sources
         run: scripts/lint.sh
