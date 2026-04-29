@@ -81,7 +81,7 @@ Primary coverage includes:
 - forward/back workspace window cycling
 - multi-workspace focus and cycling isolation
 
-The suite also emits performance metrics in milliseconds for the main window-focus and cycle paths, using the app's debug timing logs for the same shortcut and cycling flows previously profiled by `scripts/profile-window-focus.sh`. The final summary prints both the pass/fail case list and the collected timing samples, so this suite is the primary replacement for that standalone focus-profiling script during development.
+The suite also emits performance metrics in milliseconds for the main window-focus and cycle paths, using the app's debug timing logs for the same shortcut and cycling flows covered by the standalone focus-profiling workflow. The final summary prints both the pass/fail case list and the collected timing samples, so this suite is the primary path for focus profiling during development.
 
 The manual suite depends on a small set of debug-log lines from the app and CLI helpers. Treat these as test contracts when changing debug logging:
 - `spaces: perf metric=...`
