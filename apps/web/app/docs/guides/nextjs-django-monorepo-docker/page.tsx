@@ -99,21 +99,6 @@ docker compose down`}</code>
           Use <code>down</code> when you need to tear down network and container state.
         </p>
 
-        <h3 className="mt-4 text-sm font-semibold text-foreground">Status Checks</h3>
-        <p className={prose}>
-          Add two status checks — one per service — so partial failure surfaces distinctly. HTTP probes against the reserved host ports are more reliable than matching container names, which depend on the Compose project prefix and instance suffix and vary across setups.
-        </p>
-        <pre className={code}>
-          <code>{`# frontend status check
-curl -fsS http://localhost:$FRONTEND_PORT`}</code>
-        </pre>
-        <pre className={code}>
-          <code>{`# backend status check
-curl -fsS http://localhost:$API_PORT/health`}</code>
-        </pre>
-        <p className={prose}>
-          Per-service checks reveal partial failure that is otherwise hidden when only the parent Compose process appears alive.
-        </p>
       </article>
 
       <Link

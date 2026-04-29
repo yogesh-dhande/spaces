@@ -32,20 +32,26 @@ final class StoreTests: XCTestCase {
         let workspaceSettingsColumns = try readTableColumns(dbURL: dbURL, table: "workspace_settings")
         let workspaceStatusColumns = try readTableColumns(dbURL: dbURL, table: "workspace_status_checks")
         let windowColumns = try readTableColumns(dbURL: dbURL, table: "windows")
-        XCTAssertEqual(version, 1)
+        let workspacePortColumns = try readTableColumns(dbURL: dbURL, table: "workspace_ports")
+        let workspacePortDefinitionColumns = try readTableColumns(dbURL: dbURL, table: "workspace_port_definitions")
+        let projectPortDefinitionColumns = try readTableColumns(dbURL: dbURL, table: "project_port_definitions")
+        XCTAssertEqual(version, 2)
         XCTAssertTrue(workspaceColumns.contains("title"))
-        XCTAssertTrue(workspaceColumns.contains("is_active"))
+        XCTAssertTrue(workspaceColumns.contains("is_hidden"))
         XCTAssertTrue(projectColumns.contains("is_collapsed"))
         XCTAssertFalse(workspaceSettingsColumns.contains("updated_at"))
         XCTAssertFalse(workspaceStatusColumns.contains("on_exit"))
         XCTAssertTrue(windowColumns.contains("name"))
         XCTAssertTrue(windowColumns.contains("detail"))
+        XCTAssertTrue(workspacePortColumns.contains("definition_id"))
+        XCTAssertTrue(workspacePortDefinitionColumns.contains("id"))
+        XCTAssertTrue(projectPortDefinitionColumns.contains("id"))
         XCTAssertTrue(try readTableColumns(dbURL: dbURL, table: "project_terminal_windows").isEmpty)
         XCTAssertTrue(try readTableColumns(dbURL: dbURL, table: "workspace_terminal_windows").isEmpty)
     }
 
-    // Tests v6 migration preserves live data while removing dead schema by arranging a representative v6 DB and asserting the current v1 result.
-    func testSchemaMigrationFromV6ToCurrentSchemaPreservesData() throws {
+    // Tests older schemas are rejected with a reset instruction by arranging a representative v6 DB and asserting initialization fails clearly.
+    func testOlderSchemaIsRejectedWithResetInstruction() throws {
         let root = try makeTempDirectory()
         let dbURL = root.appendingPathComponent("v6.db")
         try runSQLiteExec(
@@ -128,27 +134,9 @@ final class StoreTests: XCTestCase {
                 INSERT INTO schema_version(version) VALUES (6);
                 """)
 
-        let store = try SQLiteStore(path: dbURL.path)
-        let workspaceStatusColumns = try readTableColumns(dbURL: dbURL, table: "workspace_status_checks")
-        let workspaceSettingsColumns = try readTableColumns(dbURL: dbURL, table: "workspace_settings")
-        let version = try readSingleInteger(dbURL: dbURL, sql: "SELECT version FROM schema_version")
-
-        XCTAssertEqual(version, 1)
-        XCTAssertTrue(workspaceStatusColumns.contains("on_fail"))
-        XCTAssertFalse(workspaceStatusColumns.contains("on_exit"))
-        XCTAssertFalse(workspaceSettingsColumns.contains("updated_at"))
-        XCTAssertTrue(try readTableColumns(dbURL: dbURL, table: "project_terminal_windows").isEmpty)
-        XCTAssertTrue(try readTableColumns(dbURL: dbURL, table: "workspace_terminal_windows").isEmpty)
-
-        XCTAssertEqual(try store.workspaceStopScript(workspaceID: "workspace-1"), "echo stop")
-        let setupState = try store.workspaceSetupState(workspaceID: "workspace-1")
-        XCTAssertEqual(setupState?.status, .failed)
-        XCTAssertEqual(setupState?.errorMessage, "boom")
-        XCTAssertEqual(setupState?.startedAt, "start")
-        XCTAssertEqual(setupState?.finishedAt, "end")
-        let workspaceChecks = try store.workspaceStatusChecks(workspaceID: "workspace-1")
-        XCTAssertEqual(workspaceChecks.count, 1)
-        XCTAssertEqual(workspaceChecks.first?.onFail, .restart)
+        XCTAssertThrowsError(try SQLiteStore(path: dbURL.path)) { error in
+            XCTAssertEqual(error.localizedDescription, "Unsupported database schema version 6. Remove ~/.muxy/muxy.db and recreate your workspaces.")
+        }
     }
 
     // Tests unsupported schema versions fail fast by arranging an older DB version and asserting initialization rejects it.
@@ -180,7 +168,7 @@ final class StoreTests: XCTestCase {
                 """)
 
         XCTAssertThrowsError(try SQLiteStore(path: dbURL.path)) { error in
-            XCTAssertTrue(error.localizedDescription.contains("Unsupported database schema version 5"))
+            XCTAssertEqual(error.localizedDescription, "Unsupported database schema version 5. Remove ~/.muxy/muxy.db and recreate your workspaces.")
         }
     }
 
@@ -209,17 +197,6 @@ final class StoreTests: XCTestCase {
         XCTAssertEqual(storedProcesses.count, 2)
         XCTAssertEqual(storedProcesses[0].name, "api")
         XCTAssertEqual(storedProcesses[1].name, nil)
-
-        let checks = [
-            StatusCheckDefinition(
-                name: "api health", process: "api", command: "curl -f http://localhost:$PORT0/health", interval: 10, timeout: 3, onFail: .notify),
-            StatusCheckDefinition(process: "worker", command: "echo ok", interval: 60, timeout: 5, onFail: .restart),
-        ]
-        try store.setWorkspaceStatusChecks(workspaceID: workspace.id, checks: checks)
-        let storedChecks = try store.workspaceStatusChecks(workspaceID: workspace.id)
-        XCTAssertEqual(storedChecks.count, 2)
-        XCTAssertEqual(storedChecks[0].onFail, .notify)
-        XCTAssertEqual(storedChecks[1].onFail, .restart)
 
         try store.setWorkspaceBrowserSessions(
             workspaceID: workspace.id,
@@ -311,8 +288,8 @@ final class StoreTests: XCTestCase {
         XCTAssertEqual(try store.setting(key: "lock-test"), "ok")
     }
 
-    // Tests running processes status results and windows round trip by arranging representative inputs and asserting the expected result.
-    func testRunningProcessesStatusResultsAndWindowsRoundTrip() throws {
+    // Tests running processes and windows round trip by arranging representative inputs and asserting the expected result.
+    func testRunningProcessesAndWindowsRoundTrip() throws {
         let store = try makeTemporaryStore()
         let project = makeProjectRecord(dir: try makeTempDirectory().path)
         let workspace = makeWorkspaceRecord(projectID: project.id, title: "feature", dir: project.dir)
@@ -340,16 +317,6 @@ final class StoreTests: XCTestCase {
         processes = try store.runningProcesses(workspaceID: workspace.id)
         XCTAssertEqual(processes[0].status, .exited)
         XCTAssertNil(processes[0].windowID)
-
-        try store.upsert(
-            statusResult: StatusResult(processID: processID, checkName: "health", status: .passed, message: "ok", lastRunAt: "2026-01-01T00:00:00Z"))
-        try store.upsert(
-            statusResult: StatusResult(
-                processID: processID, checkName: "health", status: .failed, message: "failed", lastRunAt: "2026-01-01T00:02:00Z"))
-        let results = try store.statusResults(processID: processID)
-        XCTAssertEqual(results.count, 1)
-        XCTAssertEqual(results[0].status, .failed)
-        XCTAssertEqual(results[0].message, "failed")
 
         let firstWindow = WindowRecord(
             id: UUID().uuidString, workspaceID: workspace.id, app: "Google Chrome", title: "Browser", windowID: 42, role: "browser", orderIndex: 0,
@@ -402,14 +369,11 @@ final class StoreTests: XCTestCase {
         try store.setWorkspacePorts(workspaceID: workspace.id, ports: [3000])
         try store.setWorkspacePortDefinitions(workspaceID: workspace.id, definitions: [PortDefinition(name: "API_PORT")])
         try store.setWorkspaceProcesses(workspaceID: workspace.id, processes: [ProcessTemplate(command: "echo one")])
-        try store.setWorkspaceStatusChecks(
-            workspaceID: workspace.id, checks: [StatusCheckDefinition(process: "one", command: "echo ok", interval: 10, timeout: 2)])
         try store.setWorkspaceBrowserSessions(workspaceID: workspace.id, sessions: [BrowserSession(url: "https://example.com")])
         try store.upsert(
             runningProcess: RunningProcessRecord(
                 id: processID, workspaceID: workspace.id, templateName: "one", command: "echo one", terminalApp: nil, windowID: nil, pid: nil,
                 status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil))
-        try store.upsert(statusResult: StatusResult(processID: processID, checkName: "health", status: .passed, message: nil, lastRunAt: "now"))
         try store.upsert(
             window: WindowRecord(
                 id: UUID().uuidString, workspaceID: workspace.id, app: "iTerm2", title: "term", windowID: 77, role: "terminal", orderIndex: 0,
@@ -421,10 +385,8 @@ final class StoreTests: XCTestCase {
         XCTAssertTrue(try store.workspacePorts(workspaceID: workspace.id).isEmpty)
         XCTAssertTrue(try store.workspacePortDefinitions(workspaceID: workspace.id).isEmpty)
         XCTAssertTrue(try store.workspaceProcesses(workspaceID: workspace.id).isEmpty)
-        XCTAssertTrue(try store.workspaceStatusChecks(workspaceID: workspace.id).isEmpty)
         XCTAssertTrue(try store.workspaceBrowserSessions(workspaceID: workspace.id).isEmpty)
         XCTAssertTrue(try store.runningProcesses(workspaceID: workspace.id).isEmpty)
-        XCTAssertTrue(try store.statusResults(processID: processID).isEmpty)
         XCTAssertTrue(try store.windows(workspaceID: workspace.id).isEmpty)
         XCTAssertTrue(try store.isIgnoredWorktree(path: workspace.dir))
     }
@@ -547,10 +509,7 @@ final class StoreTests: XCTestCase {
             runningProcess: RunningProcessRecord(
                 id: secondID, workspaceID: workspace.id, templateName: "second", command: "echo second", terminalApp: nil, windowID: nil, pid: nil,
                 status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil))
-        try store.upsert(statusResult: StatusResult(processID: firstID, checkName: "first", status: .passed, message: nil, lastRunAt: nil))
-
         try store.deleteRunningProcess(id: firstID)
-        XCTAssertTrue(try store.statusResults(processID: firstID).isEmpty)
         XCTAssertEqual(try store.runningProcesses(workspaceID: workspace.id).map(\.id), [secondID])
 
         try store.deleteRunningProcesses(workspaceID: workspace.id)
@@ -565,7 +524,6 @@ final class StoreTests: XCTestCase {
             id: dir, name: "myproject", dir: dir, isGitRepo: false, defaultBranch: nil, setupScript: "echo setup", stopScript: "echo stop",
             ports: [PortDefinition(name: "API_PORT"), PortDefinition(name: "WEB_PORT")],
             processes: [ProcessTemplate(name: "api", command: "npm run api"), ProcessTemplate(command: "npm run worker")],
-            statusChecks: [StatusCheckDefinition(name: "health", process: "api", command: "curl /health", interval: 10, timeout: 3, onFail: .notify)],
             browserSessions: [BrowserSession(name: "frontend", url: "https://localhost:3000")])
 
         try store.upsert(project: project)
@@ -580,9 +538,6 @@ final class StoreTests: XCTestCase {
         XCTAssertEqual(loaded?.processes.count, 2)
         XCTAssertEqual(loaded?.processes[0].name, "api")
         XCTAssertEqual(loaded?.processes[1].name, nil)
-        XCTAssertEqual(loaded?.statusChecks.count, 1)
-        XCTAssertEqual(loaded?.statusChecks[0].name, "health")
-        XCTAssertEqual(loaded?.statusChecks[0].onFail, .notify)
         XCTAssertEqual(loaded?.browserSessions.count, 1)
         XCTAssertEqual(loaded?.browserSessions[0].name, "frontend")
         XCTAssertEqual(loaded?.browserSessions[0].url, "https://localhost:3000")
@@ -833,24 +788,6 @@ final class StoreTests: XCTestCase {
         XCTAssertEqual(failed?.status, .failed)
         XCTAssertEqual(failed?.errorMessage, "setup failed")
         XCTAssertEqual(failed?.finishedAt, "2026-01-01T00:00:05Z")
-    }
-
-    // Tests markStatusResultsAsFailed updates all results for a process by arranging representative inputs and asserting the expected result.
-    func testMarkStatusResultsAsFailedUpdatesAllResults() throws {
-        let store = try makeTemporaryStore()
-        let project = makeProjectRecord(dir: try makeTempDirectory().path)
-        let workspace = makeWorkspaceRecord(projectID: project.id, title: "feature", dir: project.dir)
-        try store.upsert(project: project)
-        try store.upsert(workspace: workspace)
-
-        let processID = UUID().uuidString
-        try store.upsert(statusResult: StatusResult(processID: processID, checkName: "health", status: .passed, message: "ok", lastRunAt: "now"))
-        try store.upsert(statusResult: StatusResult(processID: processID, checkName: "ready", status: .passed, message: "ready", lastRunAt: "now"))
-
-        try store.markStatusResultsAsFailed(processID: processID)
-        let results = try store.statusResults(processID: processID)
-        XCTAssertTrue(results.allSatisfy { $0.status == .failed })
-        XCTAssertTrue(results.allSatisfy { $0.message == "Process exited" })
     }
 
     // Tests workspace lookup by directory by arranging representative inputs and asserting the expected result.

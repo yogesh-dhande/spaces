@@ -1,9 +1,9 @@
 # Muxy Monorepo
 
-Muxy is a macOS workspace orchestrator with a Swift app and CLI (`mx`) plus a static Next.js marketing and docs site.
+Muxy is a macOS workspace orchestrator with a Swift app and CLI (`muxy`) plus a static Next.js marketing and docs site.
 
 ## Repo Layout
-- `apps/macos`: macOS app, `mx` CLI, Swift sources, tests, product docs
+- `apps/macos`: macOS app, `muxy` CLI, Swift sources, tests, product docs
 - `apps/web`: static marketing site and user-facing docs
 - `scripts`: root wrappers for build, test, coverage, release, and deploy workflows
 
@@ -27,6 +27,8 @@ scripts/lint.sh
 scripts/coverage.sh
 ```
 
+`scripts/lint.sh` auto-formats `apps/macos/Sources` and `apps/macos/Tests` with `swift format` before running lint so formatter-driven warnings do not drown out real issues.
+
 Git commits can use the repo hook in `.githooks/pre-commit`, which auto-formats staged Swift files under `apps/macos/Sources` and `apps/macos/Tests` before running lint and coverage.
 
 Enable the repo-managed hooks once per clone:
@@ -49,14 +51,16 @@ Expected output:
 
 The pre-commit hook currently does three things:
 - formats staged macOS Swift source and test files with `swift format`
-- runs `scripts/lint.sh`
+- runs `scripts/lint.sh`, which also auto-formats the full macOS Swift source and test tree before linting
 - runs `scripts/coverage.sh`
+
+Pull requests are checked in GitHub Actions with [`.github/workflows/pr-checks.yml`](/Users/yogesh/projects/muxy/.github/workflows/pr-checks.yml), which runs the same Swift lint/build/coverage flow plus the static website build.
 
 Useful local entry points:
 
 ```bash
-apps/macos/.build/debug/Muxy
-apps/macos/.build/debug/mx --help
+apps/macos/.build/debug/MuxyApp
+apps/macos/.build/debug/muxy --help
 ```
 
 ### Website
@@ -70,7 +74,7 @@ npm run build
 ## Deploys
 
 ### macOS release
-Use the single release workflow:
+Publish macOS releases to GitHub Releases with:
 
 ```bash
 scripts/release-and-deploy.sh <version>
@@ -81,8 +85,7 @@ This workflow:
 - code-signs the app and CLI
 - creates the DMG
 - optionally notarizes it when `NOTARIZE=1`
-- builds the website
-- deploys the website and appcast assets
+- publishes the DMG to GitHub Releases
 
 Important environment variables:
 - `CODESIGN_IDENTITY`
@@ -90,14 +93,15 @@ Important environment variables:
 - `APPLE_ID`
 - `TEAM_ID`
 - `APP_PASSWORD`
-- `FIREBASE_TOKEN` or `FIREBASE_SERVICE_ACCOUNT`
+- `GH_TOKEN`
 
-### Website-only deploy
-If the DMG and release assets already exist, build the site in `apps/web` and deploy with:
+### Website deploy
+Firebase Hosting deploys from [`.github/workflows/deploy-firebase-hosting.yml`](/Users/yogesh/projects/muxy/.github/workflows/deploy-firebase-hosting.yml:1). It builds `apps/web` and deploys the static export on pushes to `main` that touch the site or on manual dispatch.
 
-```bash
-scripts/deploy-to-firebase.sh <dmg-path> <version>
-```
+Required GitHub secret:
+- `FIREBASE_PROJECT_ID`
+- `GCP_WORKLOAD_IDENTITY_PROVIDER`
+- `GCP_SERVICE_ACCOUNT_EMAIL`
 
 ## Additional Readmes
 - `apps/macos/README.md` covers day-to-day development for the macOS app and CLI.

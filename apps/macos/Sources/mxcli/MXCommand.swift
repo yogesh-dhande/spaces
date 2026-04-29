@@ -5,7 +5,7 @@ import streamctl
 
 public struct MXCommand: ParsableCommand {
     public static let configuration = CommandConfiguration(
-        commandName: "mx", abstract: "Workspace registration, runtime, and coding-agent lifecycle commands for Muxy.",
+        commandName: "muxy", abstract: "Workspace registration, runtime, and coding-agent lifecycle commands for Muxy.",
         discussion: """
             Notes:
               - All settings are stored in ~/.muxy/muxy.db.
@@ -13,6 +13,7 @@ public struct MXCommand: ParsableCommand {
               - Paths default to the current directory when omitted.
               - `workspace import` registers the current directory by default and can apply `--title` or `--tooltip` when creating or re-importing a workspace.
               - `workspace update` mutates workspace metadata after creation.
+              - `workspace path` prints the absolute directory of the workspace so shells can copy or `cd` into it.
               - `workspace up` waits for pending/running setup to complete and fails with the setup error if setup failed. It ensures a workspace and all its processes are running: launches when stopped; when already running, restarts any exited processes. Windows open without activating the app. Add `--restart` to force a full stop+launch. Add `--focus <name>` to bring one named workspace window to the foreground after launch.
               - `agent launch --name <name>` launches one configured coding agent in a dedicated terminal window without tmux.
               - Agent events stay explicit. `workspace import` and `workspace up` do not imply agent lifecycle. Events from unsupported terminal hosts are dropped. Agent events fired from tmux are rejected because Muxy does not support coding agents running inside tmux.
@@ -24,7 +25,26 @@ public struct MXCommand: ParsableCommand {
 struct WorkspaceCommand: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "workspace", abstract: "Import, update, and launch workspaces.",
-        subcommands: [WorkspaceImportCommand.self, WorkspaceUpdateCommand.self, WorkspaceUpCommand.self])
+        subcommands: [WorkspaceImportCommand.self, WorkspaceUpdateCommand.self, WorkspaceUpCommand.self, WorkspacePathCommand.self])
+}
+
+struct WorkspacePathCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "path", abstract: "Print the absolute directory path for a workspace.")
+
+    @Argument(help: "Workspace directory. Defaults to the current directory.") var path: String?
+
+    func run() throws {
+        let context = CLIContext()
+        let orchestrator = try context.makeOrchestrator()
+        let workspace = try requireWorkspace(path: path, orchestrator: orchestrator, context: context)
+        try context.output.emit(text: workspace.dir, json: WorkspacePathPayload(dir: workspace.dir, id: workspace.id, title: workspace.title))
+    }
+}
+
+struct WorkspacePathPayload: Encodable {
+    let dir: String
+    let id: String
+    let title: String
 }
 
 struct WorkspaceImportCommand: ParsableCommand {
@@ -265,7 +285,7 @@ private func requireWorkspace(path: String?, orchestrator: MuxyOrchestrator, con
     let directory = path ?? context.currentDirectoryPath()
     let normalizedDirectory = context.normalizePath(directory)
     guard let workspace = try orchestrator.store.workspace(dir: normalizedDirectory) else {
-        throw ValidationError("Workspace not found at: \(normalizedDirectory). Run `mx workspace import [path]` first.")
+        throw ValidationError("Workspace not found at: \(normalizedDirectory). Run `muxy workspace import [path]` first.")
     }
 
     return workspace

@@ -165,7 +165,7 @@ public final class MuxyOrchestrator {
         return records.map {
             WorkspaceSummary(
                 id: $0.id, title: $0.title, branch: $0.branch, targetBranch: $0.targetBranch, dir: $0.dir, isRunning: $0.isRunning,
-                isArchived: $0.isArchived, isActive: $0.isActive, isDefault: $0.isDefault, tooltip: $0.tooltip)
+                isArchived: $0.isArchived, isHidden: $0.isHidden, isDefault: $0.isDefault, tooltip: $0.tooltip)
         }
     }
 
@@ -216,19 +216,41 @@ public final class MuxyOrchestrator {
         guard var existing = try loadWorkspaceSettings(project: project, workspace: workspace) else {
             throw MuxyError.missingProject(dir: project.dir)
         }
-        let previous = existing
+        let previousPorts = existing.ports
+        let previousProcesses = existing.processes
         update(&existing)
+        existing.ports = normalizePortDefinitionIDs(previous: previousPorts, updated: existing.ports)
+        existing.processes = normalizeProcessTemplateIDs(previous: previousProcesses, updated: existing.processes)
         try validateWorkspaceFocusNames(
             workspaceID: workspace.id, processes: existing.processes, browserSessions: existing.browserSessions,
             agentLaunchers: existing.agentLaunchers, agentWindows: try store.agentWindows(workspaceID: workspace.id))
         try store.setWorkspaceStopScript(workspaceID: workspace.id, stopScript: existing.stopScript)
         try store.setWorkspacePortDefinitions(workspaceID: workspace.id, definitions: existing.ports)
         try store.setWorkspaceProcesses(workspaceID: workspace.id, processes: existing.processes)
-        try store.setWorkspaceStatusChecks(workspaceID: workspace.id, checks: existing.statusChecks)
         try store.setWorkspaceBrowserSessions(workspaceID: workspace.id, sessions: existing.browserSessions)
         try store.setWorkspaceAgentLaunchers(workspaceID: workspace.id, launchers: existing.agentLaunchers)
         try store.touchWorkspaceSettings(workspaceID: workspace.id, updatedAt: nowISO8601())
-        if workspace.isRunning { try applyWorkspaceSettingsUpdate(project: project, workspace: workspace, previous: previous, updated: existing) }
+        let appConfig = try store.appConfig()
+        _ = try PortAllocator(store: store).syncPorts(workspaceID: workspace.id, definitions: existing.ports, range: appConfig.portRange)
+    }
+
+    public func updateRunningWorkspaceProcesses(workspaceID: String, processes: [ProcessTemplate], restartChangedCommands: Bool) throws {
+        let (project, workspace) = try resolveWorkspace(id: workspaceID)
+        guard var existing = try loadWorkspaceSettings(project: project, workspace: workspace) else {
+            throw MuxyError.missingProject(dir: project.dir)
+        }
+        let normalizedProcesses = normalizeProcessTemplateIDs(previous: existing.processes, updated: processes)
+        try validateWorkspaceFocusNames(
+            workspaceID: workspace.id, processes: normalizedProcesses, browserSessions: existing.browserSessions,
+            agentLaunchers: existing.agentLaunchers, agentWindows: try store.agentWindows(workspaceID: workspace.id))
+        if workspace.isRunning {
+            try applyRunningWorkspaceProcessEdits(
+                project: project, workspace: workspace, previous: existing.processes, updated: normalizedProcesses,
+                restartChangedCommands: restartChangedCommands)
+        }
+        existing.processes = normalizedProcesses
+        try store.setWorkspaceProcesses(workspaceID: workspace.id, processes: existing.processes)
+        try store.touchWorkspaceSettings(workspaceID: workspace.id, updatedAt: nowISO8601())
     }
 
     public func updateWorkspaceTooltip(workspaceID: String, tooltip: String?) throws {
@@ -236,10 +258,10 @@ public final class MuxyOrchestrator {
         try store.updateWorkspaceTooltip(id: workspace.id, tooltip: tooltip)
     }
 
-    public func updateWorkspaceActive(workspaceID: String, isActive: Bool) throws {
+    public func updateWorkspaceHidden(workspaceID: String, isHidden: Bool) throws {
         let (_, workspace) = try resolveWorkspace(id: workspaceID)
-        guard workspace.isActive != isActive else { return }
-        try store.updateWorkspaceActive(id: workspace.id, isActive: isActive)
+        guard workspace.isHidden != isHidden else { return }
+        try store.updateWorkspaceHidden(id: workspace.id, isHidden: isHidden)
     }
 
     public func updateWorkspaceName(workspaceID: String, name: String) throws {
@@ -325,7 +347,7 @@ public final class MuxyOrchestrator {
         }
         let updatedWorkspace = WorkspaceRecord(
             id: workspace.id, projectID: workspace.projectID, title: updatedTitle, dir: workspace.dir, dirname: updatedDirname, branch: updatedBranch,
-            targetBranch: workspace.targetBranch, isDefault: workspace.isDefault, isArchived: workspace.isArchived, isActive: workspace.isActive,
+            targetBranch: workspace.targetBranch, isDefault: workspace.isDefault, isArchived: workspace.isArchived, isHidden: workspace.isHidden,
             isRunning: workspace.isRunning, lastLaunchedAt: workspace.lastLaunchedAt, tooltip: updatedTooltip)
         try store.upsert(workspace: updatedWorkspace)
     }
@@ -374,7 +396,7 @@ public final class MuxyOrchestrator {
         record = ProjectRecord(
             id: normalizedID, name: record.name, dir: record.dir, isGitRepo: record.isGitRepo, defaultBranch: record.defaultBranch,
             setupScript: record.setupScript, stopScript: record.stopScript, ports: record.ports, processes: record.processes,
-            statusChecks: record.statusChecks, browserSessions: record.browserSessions, agentLaunchers: record.agentLaunchers)
+            browserSessions: record.browserSessions, agentLaunchers: record.agentLaunchers)
         try validateUniqueConfiguredFocusNames(
             processes: record.processes, browserSessions: record.browserSessions, agentLaunchers: record.agentLaunchers)
         try store.upsert(project: record)
@@ -442,7 +464,7 @@ public final class MuxyOrchestrator {
             }
             let revived = WorkspaceRecord(
                 id: existing.id, projectID: project.id, title: trimmedName, dir: revivedDir, dirname: revivedDirname, branch: revivedBranch,
-                targetBranch: existing.targetBranch ?? resolvedTargetBranch, isDefault: false, isArchived: false, isActive: existing.isActive,
+                targetBranch: existing.targetBranch ?? resolvedTargetBranch, isDefault: false, isArchived: false, isHidden: existing.isHidden,
                 isRunning: false, lastLaunchedAt: nil)
             try store.upsert(workspace: revived)
             try seedWorkspaceSettings(project: project, workspace: revived)
@@ -556,7 +578,7 @@ public final class MuxyOrchestrator {
                     let updatedWorkspace = WorkspaceRecord(
                         id: workspace.id, projectID: workspace.projectID, title: workspace.title, dir: workspace.dir, dirname: workspace.dirname,
                         branch: worktree.branchName, targetBranch: workspace.targetBranch, isDefault: workspace.isDefault,
-                        isArchived: workspace.isArchived, isActive: workspace.isActive, isRunning: workspace.isRunning,
+                        isArchived: workspace.isArchived, isHidden: workspace.isHidden, isRunning: workspace.isRunning,
                         lastLaunchedAt: workspace.lastLaunchedAt, tooltip: workspace.tooltip)
                     try store.upsert(workspace: updatedWorkspace)
                 }
@@ -657,6 +679,15 @@ public final class MuxyOrchestrator {
         }
 
         let env = buildWorkspaceEnv(project: project, workspace: workspace, namedPorts: try store.workspacePortsNamed(workspaceID: workspace.id))
+        let shouldReleaseReservedPortsForLaunch = !(config?.processes.isEmpty ?? true)
+        if shouldReleaseReservedPortsForLaunch {
+            // Workspace port assignments remain pinned in the store until archive, but
+            // the placeholder reservation sockets must step aside while a real process
+            // binds the port during launch.
+            PortReserver.shared.releasePorts(workspaceID: workspace.id)
+        }
+        var shouldRestoreReservedPorts = shouldReleaseReservedPortsForLaunch
+        defer { if shouldRestoreReservedPorts { try? PortAllocator(store: store).reserveExistingPorts(workspaceID: workspace.id) } }
 
         var newWindows: [WindowRecord] = []
 
@@ -701,6 +732,7 @@ public final class MuxyOrchestrator {
         }
 
         try store.updateWorkspaceRunning(id: workspace.id, isRunning: true, launchedAt: nowISO8601())
+        shouldRestoreReservedPorts = false
     }
 
     @discardableResult public func stopWorkspace(workspaceID: String) throws -> WorkspaceStopOutcome {
@@ -714,10 +746,16 @@ public final class MuxyOrchestrator {
         let env = buildWorkspaceEnv(project: project, workspace: workspace, namedPorts: namedPorts)
         let settings = try loadWorkspaceSettings(project: project, workspace: workspace)
         let processes = try store.runningProcesses(workspaceID: workspace.id)
+        var closedManagedTerminalWindowIDs = Set<Int>()
         var skippedStopScriptBecauseWorkspaceDirectoryMissing = false
         for process in processes {
-            if let pid = resolvedRuntimePID(for: process) { terminateProcessGroup(pid: pid) }
-            if isManagedTerminalApp(process.terminalApp) { _ = try? closeTrackedItermTerminalContainer(process) }
+            if isManagedTerminalApp(process.terminalApp) {
+                _ = try? closeTrackedItermTerminalContainer(process)
+                if let windowID = process.windowID { closedManagedTerminalWindowIDs.insert(windowID) }
+                if let pid = resolvedRuntimePID(for: process) { terminateProcessGroup(pid: pid) }
+            } else if let pid = resolvedRuntimePID(for: process) {
+                terminateProcessGroup(pid: pid)
+            }
             let sessionName = processTmuxSessionName(workspaceID: workspace.id, processName: process.templateName)
             if tmux.hasSession(named: sessionName) { try? tmux.killSession(named: sessionName) }
         }
@@ -736,6 +774,7 @@ public final class MuxyOrchestrator {
                 continue
             }
             if window.role == "terminal", isManagedTerminalApp(window.app) {
+                if let windowID = window.windowID, closedManagedTerminalWindowIDs.contains(windowID) { continue }
                 _ = try? closeTrackedItermTerminalWindow(window)
                 continue
             }
@@ -747,6 +786,7 @@ public final class MuxyOrchestrator {
         try store.deleteAgentWindows(workspaceID: workspace.id)
         clearItermTerminalSessionMetadata(workspaceID: workspace.id)
         try store.updateWorkspaceRunning(id: workspace.id, isRunning: false, launchedAt: workspace.lastLaunchedAt)
+        try PortAllocator(store: store).reserveExistingPorts(workspaceID: workspace.id)
         return WorkspaceStopOutcome(skippedStopScriptBecauseWorkspaceDirectoryMissing: skippedStopScriptBecauseWorkspaceDirectoryMissing)
     }
 
@@ -785,12 +825,6 @@ public final class MuxyOrchestrator {
         let exitedProcessCount = runningProcesses.filter { $0.status == .exited }.count
         let waitingAgentWindowCount = agentWindows.filter { $0.status == .waiting }.count
 
-        var failedCheckCount = 0
-        for process in runningProcesses {
-            let failedChecks = try statusResults(processID: process.id).filter { $0.status == .failed }.count
-            failedCheckCount += failedChecks
-        }
-
         let settings = try loadWorkspaceSettings(project: project, workspace: workspace)
         let expectedProcessKeys = (settings?.processes ?? []).map { configuredProcessMatchKey(name: $0.name) }
         let trackedProcessKeys = runningProcesses.map { runningProcessMatchKey(name: $0.templateName) }
@@ -807,7 +841,7 @@ public final class MuxyOrchestrator {
             case .running:
                 if !hasTrackedRuntimeIndicators {
                     expectsManagedRuntime ? .missing : .healthy
-                } else if exitedProcessCount > 0 || failedCheckCount > 0 || waitingAgentWindowCount > 0 || missingConfiguredProcessCount > 0 {
+                } else if exitedProcessCount > 0 || waitingAgentWindowCount > 0 || missingConfiguredProcessCount > 0 {
                     .partial
                 } else {
                     .healthy
@@ -817,7 +851,7 @@ public final class MuxyOrchestrator {
         return WorkspaceRuntimeStatus(
             workspaceID: workspaceID, lifecycleState: lifecycleState, runtimeHealth: runtimeHealth,
             hasTrackedRuntimeIndicators: hasTrackedRuntimeIndicators, runningProcessCount: runningProcessCount,
-            exitedProcessCount: exitedProcessCount, failedCheckCount: failedCheckCount, waitingAgentWindowCount: waitingAgentWindowCount,
+            exitedProcessCount: exitedProcessCount, waitingAgentWindowCount: waitingAgentWindowCount,
             missingConfiguredProcessCount: missingConfiguredProcessCount, missingConfiguredBrowserSessionCount: missingConfiguredBrowserSessionCount)
     }
 
@@ -900,61 +934,11 @@ public final class MuxyOrchestrator {
                     pid: process.pid, status: .exited, logPath: process.logPath, lastOutputAt: process.lastOutputAt, startedAt: process.startedAt,
                     exitedAt: nowISO8601())
                 try store.upsert(runningProcess: updatedProcess)
-                try store.markStatusResultsAsFailed(processID: process.id)
                 didUpdate = true
                 try handleProcessExit(workspaceID: workspace.id, process: updatedProcess, project: project, workspace: workspace)
             }
         }
         return didUpdate
-    }
-
-    public func runStatusChecks(workspaceID: String, dueOnly: Bool = false, now: Date = Date()) throws -> [StatusResult] {
-        let (project, workspace) = try resolveWorkspace(id: workspaceID)
-        guard let config = try loadWorkspaceSettings(project: project, workspace: workspace) else { return [] }
-        let processes = try store.runningProcesses(workspaceID: workspaceID)
-        let checksByProcessID = Dictionary(grouping: config.statusChecks, by: \.process)
-        let namedPorts = try store.workspacePortsNamed(workspaceID: workspaceID)
-        let env = buildWorkspaceEnv(project: project, workspace: workspace, namedPorts: namedPorts)
-        var results: [StatusResult] = []
-        let iso8601 = ISO8601DateFormatter()
-        for process in processes where process.status == .running {
-            guard let checks = checksByProcessID[process.templateName], !checks.isEmpty else { continue }
-            let existingResults = Dictionary(uniqueKeysWithValues: try store.statusResults(processID: process.id).map { ($0.checkName, $0) })
-            for check in checks {
-                let checkName = check.name ?? check.process
-                if dueOnly, let existing = existingResults[checkName], let lastRunAt = existing.lastRunAt,
-                    let lastRunDate = iso8601.date(from: lastRunAt), now.timeIntervalSince(lastRunDate) < TimeInterval(max(check.interval, 1))
-                {
-                    continue
-                }
-
-                let resolvedCommand = applyEnvVars(check.command, env: env)
-                let outcome = try runCommandWithTimeout(command: resolvedCommand, cwd: workspace.dir, timeout: check.timeout, env: env)
-                let status: StatusCheckStatus = outcome.exitCode == 0 ? .passed : .failed
-                let result = StatusResult(
-                    processID: process.id, checkName: checkName, status: status, message: outcome.output.isEmpty ? nil : outcome.output,
-                    lastRunAt: nowISO8601())
-                try store.upsert(statusResult: result)
-                results.append(result)
-
-                // Handle onFail behavior for failed status checks
-                if outcome.exitCode != 0 { try handleStatusCheckFailure(workspaceID: workspaceID, process: process, check: check, result: result) }
-            }
-        }
-        return results
-    }
-
-    public func runDueStatusChecksForRunningWorkspaces(now: Date = Date()) throws -> Bool {
-        var didRunChecks = false
-        let allProjects = try store.projects()
-        for project in allProjects {
-            let workspaces = try store.workspaces(projectID: project.id, includeArchived: false)
-            for workspace in workspaces where workspace.isRunning {
-                let results = try runStatusChecks(workspaceID: workspace.id, dueOnly: true, now: now)
-                if !results.isEmpty { didRunChecks = true }
-            }
-        }
-        return didRunChecks
     }
     private func deliverNotification(title: String, body: String, subtitle: String? = nil) {
         guard NSClassFromString("XCTest") == nil else { return }
@@ -970,39 +954,6 @@ public final class MuxyOrchestrator {
                 }
             }
         }
-    }
-    private func handleStatusCheckFailure(workspaceID: String, process: RunningProcessRecord, check: StatusCheckDefinition, result: StatusResult)
-        throws
-    {
-        switch check.onFail {
-        case .none:
-            // Do nothing - just log the failure
-            break
-        case .notify:
-            deliverNotification(
-                title: "Status Check Failed", body: "Process '\(process.templateName)' check '\(result.checkName)' failed", subtitle: result.message)
-        case .restart:
-            // Restart the process
-            try restartFailedProcess(workspaceID: workspaceID, process: process, check: check, result: result)
-        }
-    }
-    private func restartFailedProcess(workspaceID: String, process: RunningProcessRecord, check: StatusCheckDefinition, result: StatusResult) throws {
-        // Log the restart attempt
-        fputs("muxy: Restarting process '\(process.templateName)' due to failed status check '\(result.checkName)'\n", stderr)
-        // Show notification about restart
-        deliverNotification(
-            title: "Process Restarting", body: "Process '\(process.templateName)' is being restarted due to failed status check",
-            subtitle: result.message.map { "Reason: \($0)" })
-
-        // Mark the process as exited in the database
-        let updatedProcess = RunningProcessRecord(
-            id: process.id, workspaceID: process.workspaceID, templateName: process.templateName, command: process.command,
-            terminalApp: process.terminalApp, windowID: process.windowID, terminalTrackingID: process.terminalTrackingID,
-            terminalNativeID: process.terminalNativeID, itermTabIndex: process.itermTabIndex, tmuxWindowID: process.tmuxWindowID, pid: process.pid,
-            status: .exited, logPath: process.logPath, lastOutputAt: process.lastOutputAt, startedAt: process.startedAt, exitedAt: nowISO8601())
-        try store.upsert(runningProcess: updatedProcess)
-        // Restart the process in a new terminal
-        try restartProcessInTerminal(workspaceID: workspaceID, process: process)
     }
     private func handleProcessExit(workspaceID: String, process: RunningProcessRecord, project: ProjectRecord, workspace: WorkspaceRecord) throws {
         // Find the process template to get the on-exit behavior
@@ -1043,8 +994,8 @@ public final class MuxyOrchestrator {
         }
         let snapshot = bestEffortYabaiWindowSnapshot()
         let terminalHandle = try launchProcessInTmux(
-            workspace: workspace, processName: process.templateName, command: command, env: env, terminalHost: terminalHost, background: background,
-            replaceExistingSession: true)
+            workspace: workspace, processName: process.templateName, rawCommand: process.command, command: command, env: env,
+            terminalHost: terminalHost, background: background, replaceExistingSession: true)
         let capturedWindowID =
             bestEffortCaptureNewAppWindowID(snapshot: snapshot, appName: terminalAppName(for: terminalHost)) ?? terminalHandle.fallbackWindowID
             ?? process.windowID
@@ -1079,8 +1030,6 @@ public final class MuxyOrchestrator {
         fputs("muxy: Process '\(process.templateName)' with pid \(pid) did not exit in time; restart will use a new tmux window\n", stderr)
         return false
     }
-
-    public func statusResults(processID: String) throws -> [StatusResult] { try store.statusResults(processID: processID) }
 
     public func windows(workspaceID: String) throws -> [WindowRecord] { try indexedWorkspaceWindows(workspaceID: workspaceID) }
 
@@ -1617,7 +1566,7 @@ public final class MuxyOrchestrator {
         guard let baseLabel = sanitizedFocusName(preferredLabel) else { return nil }
         // Configured coding-agent slots reserve their exact names even before a live agent
         // reports in. Ad-hoc agents that choose the same label get suffixed so the Run tab
-        // and `mx workspace focus --name ...` keep a stable one-name-to-one-row mapping.
+        // and `muxy workspace focus --name ...` keep a stable one-name-to-one-row mapping.
         let usedNames = Set(
             try focusableWorkspaceTargets(workspaceID: workspaceID).filter { entry in
                 guard case .agent(let record) = entry.target, let excludingAgentWindowID else { return true }
@@ -1991,21 +1940,21 @@ public final class MuxyOrchestrator {
     }
 
     @discardableResult private func attachProcessTmuxSession(
-        workspace: WorkspaceRecord, processName: String, terminalHost: TerminalHost, background: Bool = false
+        workspace: WorkspaceRecord, processName: String, commandDescription: String? = nil, terminalHost: TerminalHost, background: Bool = false
     ) throws -> ManagedTerminalHandle {
         let sessionName = processTmuxSessionName(workspaceID: workspace.id, processName: processName)
         let windowInfo = try openManagedTerminalWindow(
             terminalHost: terminalHost, command: tmuxAttachCommand(sessionName: sessionName, cwd: workspace.dir), cwd: workspace.dir,
             background: background)
         guard waitForTmuxSession(named: sessionName) else {
-            throw MuxyError.invalidArgument(message: "Timed out waiting for tmux session to become available.")
+            throw MuxyError.invalidArgument(message: tmuxSessionTimeoutMessage(processName: processName, commandDescription: commandDescription))
         }
         return windowInfo
     }
 
     private func launchProcessInTmux(
-        workspace: WorkspaceRecord, processName: String, command: DirectProcessCommand, env: [String: String], terminalHost: TerminalHost,
-        background: Bool = false, replaceExistingSession: Bool
+        workspace: WorkspaceRecord, processName: String, rawCommand: String, command: DirectProcessCommand, env: [String: String],
+        terminalHost: TerminalHost, background: Bool = false, replaceExistingSession: Bool
     ) throws -> ManagedTerminalHandle {
         let sessionName = processTmuxSessionName(workspaceID: workspace.id, processName: processName)
         if replaceExistingSession, tmux.hasSession(named: sessionName) { try? tmux.killSession(named: sessionName) }
@@ -2013,9 +1962,9 @@ public final class MuxyOrchestrator {
             named: sessionName, windowName: processName, cwd: workspace.dir, env: env.merging(command.environment) { _, new in new },
             command: [command.executable] + command.arguments)
         let windowInfo = try attachProcessTmuxSession(
-            workspace: workspace, processName: processName, terminalHost: terminalHost, background: background)
+            workspace: workspace, processName: processName, commandDescription: rawCommand, terminalHost: terminalHost, background: background)
         guard waitForTmuxSession(named: sessionName) else {
-            throw MuxyError.invalidArgument(message: "Timed out waiting for tmux session to become available.")
+            throw MuxyError.invalidArgument(message: tmuxSessionTimeoutMessage(processName: processName, commandDescription: rawCommand))
         }
         return windowInfo
     }
@@ -2130,6 +2079,19 @@ public final class MuxyOrchestrator {
         let resolved = applyEnvVars(raw, env: env)
         return
             "Process commands must be direct executable invocations without shell syntax: \(resolved). For composite commands, wrap them explicitly, for example: bash -lc \"\(resolved)\""
+    }
+
+    private func tmuxSessionTimeoutMessage(processName: String, commandDescription: String?) -> String {
+        let trimmedProcessName = processName.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedCommand = commandDescription?.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let trimmedCommand, !trimmedCommand.isEmpty, !trimmedProcessName.isEmpty {
+            return "Timed out waiting for tmux session to become available for process '\(trimmedProcessName)' (\(trimmedCommand))."
+        }
+        if let trimmedCommand, !trimmedCommand.isEmpty {
+            return "Timed out waiting for tmux session to become available for command '\(trimmedCommand)'."
+        }
+        if !trimmedProcessName.isEmpty { return "Timed out waiting for tmux session to become available for process '\(trimmedProcessName)'." }
+        return "Timed out waiting for tmux session to become available."
     }
 
     @discardableResult private func ensureWorkspaceTerminalAttached(workspace: WorkspaceRecord, background: Bool = false) throws -> ItermWindowInfo {
@@ -2282,7 +2244,7 @@ public final class MuxyOrchestrator {
             guard liveTmuxWindowIDs.contains(tmuxWindowID) else {
                 guard process.status != .exited else { continue }
                 // Preserve configured process rows when their tmux window vanishes so an
-                // explicit `mx workspace up` can still restart just the dead process.
+                // explicit `muxy workspace up` can still restart just the dead process.
                 try store.upsert(
                     runningProcess: RunningProcessRecord(
                         id: process.id, workspaceID: process.workspaceID, templateName: process.templateName, command: process.command,
@@ -2290,7 +2252,6 @@ public final class MuxyOrchestrator {
                         terminalNativeID: process.terminalNativeID, itermTabIndex: process.itermTabIndex, tmuxWindowID: process.tmuxWindowID,
                         pid: process.pid, status: .exited, logPath: process.logPath, lastOutputAt: process.lastOutputAt, startedAt: process.startedAt,
                         exitedAt: process.exitedAt ?? now))
-                try store.markStatusResultsAsFailed(processID: process.id)
                 didMutate = true
                 continue
             }
@@ -2707,10 +2668,12 @@ public final class MuxyOrchestrator {
     }
 
     public func guiOpenTerminalShortcut() throws -> String {
-        try store.setting(key: SettingsKey.guiOpenTerminalShortcut) ?? SettingsKey.defaultGUIOpenTerminalShortcut
+        try effectiveLeaderBackedShortcut(settingKey: SettingsKey.guiOpenTerminalShortcut, defaultValue: SettingsKey.defaultGUIOpenTerminalShortcut)
     }
 
-    public func setGUIOpenTerminalShortcut(_ raw: String?) throws { try store.setSetting(key: SettingsKey.guiOpenTerminalShortcut, value: raw) }
+    public func setGUIOpenTerminalShortcut(_ raw: String?) throws {
+        try store.setSetting(key: SettingsKey.guiOpenTerminalShortcut, value: try normalizeLeaderBackedShortcut(raw))
+    }
 
     public func guiOpenFinderShortcut() throws -> String {
         try effectiveLeaderBackedShortcut(settingKey: SettingsKey.guiOpenFinderShortcut, defaultValue: SettingsKey.defaultGUIOpenFinderShortcut)
@@ -2854,7 +2817,7 @@ public final class MuxyOrchestrator {
             if existing.isArchived {
                 let revived = WorkspaceRecord(
                     id: existing.id, projectID: project.id, title: existing.title, dir: existing.dir, dirname: existing.dirname,
-                    branch: existing.branch, targetBranch: existing.targetBranch, isDefault: true, isArchived: false, isActive: existing.isActive,
+                    branch: existing.branch, targetBranch: existing.targetBranch, isDefault: true, isArchived: false, isHidden: existing.isHidden,
                     isRunning: existing.isRunning, lastLaunchedAt: existing.lastLaunchedAt)
                 try store.upsert(workspace: revived)
             }
@@ -2875,7 +2838,7 @@ public final class MuxyOrchestrator {
             if existing.isArchived {
                 let revived = WorkspaceRecord(
                     id: existing.id, projectID: project.id, title: existing.title, dir: existing.dir, dirname: existing.dirname,
-                    branch: existing.branch, targetBranch: existing.targetBranch, isDefault: true, isArchived: false, isActive: existing.isActive,
+                    branch: existing.branch, targetBranch: existing.targetBranch, isDefault: true, isArchived: false, isHidden: existing.isHidden,
                     isRunning: existing.isRunning, lastLaunchedAt: existing.lastLaunchedAt)
                 try store.upsert(workspace: revived)
             }
@@ -2926,13 +2889,12 @@ public final class MuxyOrchestrator {
             stopScript: try store.workspaceStopScript(workspaceID: defaultWorkspace.id),
             ports: try store.workspacePortDefinitions(workspaceID: defaultWorkspace.id),
             processes: try store.workspaceProcesses(workspaceID: defaultWorkspace.id),
-            statusChecks: try store.workspaceStatusChecks(workspaceID: defaultWorkspace.id),
             browserSessions: try store.workspaceBrowserSessions(workspaceID: defaultWorkspace.id),
             agentLaunchers: try store.workspaceAgentLaunchers(workspaceID: defaultWorkspace.id))
 
         let previousTemplate = WorkspaceSettings(
             stopScript: previousRecord.stopScript, ports: previousRecord.ports, processes: previousRecord.processes,
-            statusChecks: previousRecord.statusChecks, browserSessions: previousRecord.browserSessions, agentLaunchers: previousRecord.agentLaunchers)
+            browserSessions: previousRecord.browserSessions, agentLaunchers: previousRecord.agentLaunchers)
 
         guard workspaceSettingsMatch(currentSettings, previousTemplate) else { return }
 
@@ -2943,26 +2905,74 @@ public final class MuxyOrchestrator {
         guard lhs.stopScript == rhs.stopScript else { return false }
         guard lhs.ports == rhs.ports else { return false }
         guard processTemplatesMatch(lhs.processes, rhs.processes) else { return false }
-        guard statusChecksMatch(lhs.statusChecks, rhs.statusChecks) else { return false }
         guard browserSessionsMatch(lhs.browserSessions, rhs.browserSessions) else { return false }
         guard lhs.agentLaunchers == rhs.agentLaunchers else { return false }
         return true
     }
 
-    private func processTemplatesMatch(_ lhs: [ProcessTemplate], _ rhs: [ProcessTemplate]) -> Bool {
-        guard lhs.count == rhs.count else { return false }
-        for (left, right) in zip(lhs, rhs) { if left.name != right.name || left.command != right.command || left.kind != right.kind { return false } }
-        return true
+    private func normalizePortDefinitionIDs(previous: [PortDefinition], updated: [PortDefinition]) -> [PortDefinition] {
+        let previousByID = Dictionary(uniqueKeysWithValues: previous.map { ($0.id, $0) })
+        let previousNameCounts = Dictionary(previous.map { ($0.name, 1) }, uniquingKeysWith: +)
+        var usedIDs = Set<String>()
+
+        return updated.map { definition in
+            if previousByID[definition.id] != nil {
+                usedIDs.insert(definition.id)
+                return definition
+            }
+            guard previousNameCounts[definition.name] == 1,
+                let match = previous.first(where: { $0.name == definition.name && !usedIDs.contains($0.id) })
+            else { return definition }
+            usedIDs.insert(match.id)
+            return PortDefinition(id: match.id, name: definition.name)
+        }
     }
 
-    private func statusChecksMatch(_ lhs: [StatusCheckDefinition], _ rhs: [StatusCheckDefinition]) -> Bool {
+    private func normalizeProcessTemplateIDs(previous: [ProcessTemplate], updated: [ProcessTemplate]) -> [ProcessTemplate] {
+        let previousByID = Dictionary(uniqueKeysWithValues: previous.map { ($0.id, $0) })
+        let previousNames = previous.compactMap { template -> String? in
+            let trimmed = template.name?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            return trimmed.isEmpty ? nil : trimmed
+        }
+        let previousCommands = previous.map { $0.command.trimmingCharacters(in: .whitespacesAndNewlines) }
+        let nameCounts = Dictionary(previousNames.map { ($0, 1) }, uniquingKeysWith: +)
+        let commandCounts = Dictionary(previousCommands.map { ($0, 1) }, uniquingKeysWith: +)
+        var usedIDs = Set<String>()
+
+        return updated.map { template in
+            if previousByID[template.id] != nil {
+                usedIDs.insert(template.id)
+                return template
+            }
+
+            let trimmedName = template.name?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            if !trimmedName.isEmpty, nameCounts[trimmedName] == 1,
+                let match = previous.first(where: {
+                    ($0.name?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "") == trimmedName && !usedIDs.contains($0.id)
+                })
+            {
+                usedIDs.insert(match.id)
+                return ProcessTemplate(id: match.id, name: template.name, command: template.command, kind: template.kind, onExit: template.onExit)
+            }
+
+            let trimmedCommand = template.command.trimmingCharacters(in: .whitespacesAndNewlines)
+            if trimmedName.isEmpty, commandCounts[trimmedCommand] == 1,
+                let match = previous.first(where: {
+                    $0.command.trimmingCharacters(in: .whitespacesAndNewlines) == trimmedCommand && !usedIDs.contains($0.id)
+                })
+            {
+                usedIDs.insert(match.id)
+                return ProcessTemplate(id: match.id, name: template.name, command: template.command, kind: template.kind, onExit: template.onExit)
+            }
+
+            return template
+        }
+    }
+
+    private func processTemplatesMatch(_ lhs: [ProcessTemplate], _ rhs: [ProcessTemplate]) -> Bool {
         guard lhs.count == rhs.count else { return false }
         for (left, right) in zip(lhs, rhs) {
-            if left.name != right.name || left.process != right.process || left.command != right.command || left.interval != right.interval
-                || left.timeout != right.timeout || left.onFail != right.onFail
-            {
-                return false
-            }
+            if left.name != right.name || left.command != right.command || left.kind != right.kind || left.onExit != right.onExit { return false }
         }
         return true
     }
@@ -2979,11 +2989,16 @@ public final class MuxyOrchestrator {
             agentWindows: try store.agentWindows(workspaceID: workspace.id))
         try store.setWorkspaceStopScript(workspaceID: workspace.id, stopScript: project.stopScript)
         try store.setWorkspacePortDefinitions(workspaceID: workspace.id, definitions: project.ports)
-        try store.setWorkspaceProcesses(workspaceID: workspace.id, processes: project.processes)
-        try store.setWorkspaceStatusChecks(workspaceID: workspace.id, checks: project.statusChecks)
+        try store.setWorkspaceProcesses(workspaceID: workspace.id, processes: seededWorkspaceProcesses(from: project.processes))
         try store.setWorkspaceBrowserSessions(workspaceID: workspace.id, sessions: project.browserSessions)
         try store.setWorkspaceAgentLaunchers(workspaceID: workspace.id, launchers: project.agentLaunchers)
         try store.touchWorkspaceSettings(workspaceID: workspace.id, updatedAt: nowISO8601())
+    }
+
+    private func seededWorkspaceProcesses(from templates: [ProcessTemplate]) -> [ProcessTemplate] {
+        templates.map { template in
+            ProcessTemplate(id: UUID().uuidString, name: template.name, command: template.command, kind: template.kind, onExit: template.onExit)
+        }
     }
 
     public func workspaceSetupState(workspaceID: String) throws -> WorkspaceSetupState {
@@ -3005,12 +3020,10 @@ public final class MuxyOrchestrator {
         let stopScript = try store.workspaceStopScript(workspaceID: workspace.id)
         let ports = try store.workspacePortDefinitions(workspaceID: workspace.id)
         let processes = try store.workspaceProcesses(workspaceID: workspace.id)
-        let statusChecks = try store.workspaceStatusChecks(workspaceID: workspace.id)
         let browserSessions = try store.workspaceBrowserSessions(workspaceID: workspace.id)
         let agentLaunchers = try store.workspaceAgentLaunchers(workspaceID: workspace.id)
         return WorkspaceSettings(
-            stopScript: stopScript, ports: ports, processes: processes, statusChecks: statusChecks, browserSessions: browserSessions,
-            agentLaunchers: agentLaunchers)
+            stopScript: stopScript, ports: ports, processes: processes, browserSessions: browserSessions, agentLaunchers: agentLaunchers)
     }
 
     private func runScript(_ script: String, cwd: String) throws { _ = try Shell.run(["/bin/bash", "-lc", script], cwd: cwd) }
@@ -3062,7 +3075,7 @@ public final class MuxyOrchestrator {
                 if currentDate().timeIntervalSince(waitStartedAt) > 900 {
                     throw MuxyError.invalidArgument(
                         message:
-                            "Timed out waiting for workspace setup to finish. Retry launch after setup completes or run mx workspace up --restart.")
+                            "Timed out waiting for workspace setup to finish. Retry launch after setup completes or run muxy workspace up --restart.")
                 }
                 Thread.sleep(forTimeInterval: 0.2)
             }
@@ -3097,20 +3110,106 @@ public final class MuxyOrchestrator {
         return env
     }
 
-    private func applyWorkspaceSettingsUpdate(
-        project: ProjectRecord, workspace: WorkspaceRecord, previous: WorkspaceSettings, updated: WorkspaceSettings
-    ) throws {
-        let namedPorts = try store.workspacePortsNamed(workspaceID: workspace.id)
-        let env = buildWorkspaceEnv(project: project, workspace: workspace, namedPorts: namedPorts)
-        try reconcileProcesses(workspace: workspace, previous: previous.processes, updated: updated.processes, env: env)
-        try reconcileBrowserSessions(project: project, workspace: workspace, sessions: updated.browserSessions, env: env)
-        try pruneMissingWindows(workspaceID: workspace.id)
-    }
-
     private func processKey(for template: ProcessTemplate) -> String {
         let name = template.name?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         let command = template.command.trimmingCharacters(in: .whitespacesAndNewlines)
         return name.isEmpty ? command : name
+    }
+
+    private struct RunningWorkspaceProcessEdit {
+        let previous: ProcessTemplate
+        let updated: ProcessTemplate
+        let previousKey: String
+        let updatedKey: String
+
+        var commandChanged: Bool { previous.command != updated.command }
+        var keyChanged: Bool { previousKey != updatedKey }
+    }
+
+    private func runningWorkspaceProcessEdits(previous: [ProcessTemplate], updated: [ProcessTemplate]) -> [RunningWorkspaceProcessEdit] {
+        let previousByID = Dictionary(uniqueKeysWithValues: previous.map { ($0.id, $0) })
+        return updated.compactMap { updatedTemplate in
+            guard let previousTemplate = previousByID[updatedTemplate.id] else { return nil }
+            let previousKey = processKey(for: previousTemplate)
+            let updatedKey = processKey(for: updatedTemplate)
+            let edit = RunningWorkspaceProcessEdit(
+                previous: previousTemplate, updated: updatedTemplate, previousKey: previousKey, updatedKey: updatedKey)
+            guard edit.commandChanged || edit.keyChanged else { return nil }
+            return edit
+        }
+    }
+
+    private func applyRunningWorkspaceProcessEdits(
+        project: ProjectRecord, workspace: WorkspaceRecord, previous: [ProcessTemplate], updated: [ProcessTemplate], restartChangedCommands: Bool
+    ) throws {
+        let edits = runningWorkspaceProcessEdits(previous: previous, updated: updated)
+        let commandChangedEdits = edits.filter(\.commandChanged)
+        if !commandChangedEdits.isEmpty, !restartChangedCommands {
+            throw MuxyError.invalidArgument(message: "Changing a running process command requires restart confirmation.")
+        }
+
+        let runningProcesses = try store.runningProcesses(workspaceID: workspace.id)
+        let runningByKey = Dictionary(uniqueKeysWithValues: runningProcesses.map { ($0.templateName, $0) })
+
+        if !commandChangedEdits.isEmpty {
+            for edit in commandChangedEdits {
+                guard let runningProcess = runningByKey[edit.previousKey] else { continue }
+                try validateRunningProcessRestart(project: project, workspace: workspace, process: runningProcess, updatedTemplate: edit.updated)
+            }
+        }
+
+        for edit in edits {
+            guard let runningProcess = runningByKey[edit.previousKey] else { continue }
+            if edit.commandChanged {
+                let restartedProcess = RunningProcessRecord(
+                    id: runningProcess.id, workspaceID: runningProcess.workspaceID, templateName: edit.updatedKey, command: edit.updated.command,
+                    terminalApp: runningProcess.terminalApp, windowID: runningProcess.windowID, terminalTrackingID: runningProcess.terminalTrackingID,
+                    terminalNativeID: runningProcess.terminalNativeID, itermTabIndex: runningProcess.itermTabIndex,
+                    tmuxWindowID: runningProcess.tmuxWindowID, pid: runningProcess.pid, status: runningProcess.status,
+                    logPath: runningProcess.logPath, lastOutputAt: runningProcess.lastOutputAt, startedAt: runningProcess.startedAt,
+                    exitedAt: runningProcess.exitedAt)
+                try restartProcessInTerminal(workspaceID: workspace.id, process: restartedProcess)
+            } else if edit.keyChanged {
+                try relabelRunningProcess(
+                    workspaceID: workspace.id, process: runningProcess, templateName: edit.updatedKey, command: runningProcess.command)
+            }
+        }
+    }
+
+    private func validateRunningProcessRestart(
+        project: ProjectRecord, workspace: WorkspaceRecord, process: RunningProcessRecord, updatedTemplate: ProcessTemplate
+    ) throws {
+        let terminalHost = try terminalHost(for: process.terminalApp) ?? configuredTerminalHost()
+        guard terminalAdapterAvailable(terminalHost) else {
+            throw MuxyError.dependencyMissing(message: missingTerminalDependencyMessage(for: terminalHost, operation: "launch processes"))
+        }
+        guard tmux.isAvailable() else { throw MuxyError.dependencyMissing(message: "tmux is required to launch processes.") }
+        let namedPorts = try store.workspacePortsNamed(workspaceID: workspace.id)
+        let env = buildWorkspaceEnv(project: project, workspace: workspace, namedPorts: namedPorts)
+        guard parseDirectProcessCommand(updatedTemplate.command, env: env) != nil else {
+            throw MuxyError.invalidArgument(message: invalidDirectProcessCommandMessage(updatedTemplate.command, env: env))
+        }
+    }
+
+    private func relabelRunningProcess(workspaceID: String, process: RunningProcessRecord, templateName: String, command: String) throws {
+        let updatedProcess = RunningProcessRecord(
+            id: process.id, workspaceID: process.workspaceID, templateName: templateName, command: command, terminalApp: process.terminalApp,
+            windowID: process.windowID, terminalTrackingID: process.terminalTrackingID, terminalNativeID: process.terminalNativeID,
+            itermTabIndex: process.itermTabIndex, tmuxWindowID: process.tmuxWindowID, pid: process.pid, status: process.status,
+            logPath: process.logPath, lastOutputAt: process.lastOutputAt, startedAt: process.startedAt, exitedAt: process.exitedAt)
+        try store.upsert(runningProcess: updatedProcess)
+        if let terminalWindow = try store.windows(workspaceID: workspaceID).first(where: {
+            $0.role == "terminal"
+                && (($0.windowID != nil && $0.windowID == process.windowID) || ($0.tmuxWindowID != nil && $0.tmuxWindowID == process.tmuxWindowID))
+        }) {
+            try store.upsert(
+                window: WindowRecord(
+                    id: terminalWindow.id, workspaceID: terminalWindow.workspaceID, app: terminalWindow.app, name: templateName, detail: command,
+                    targetURL: terminalWindow.targetURL, windowID: terminalWindow.windowID, terminalTrackingID: terminalWindow.terminalTrackingID,
+                    terminalNativeID: terminalWindow.terminalNativeID, itermTabIndex: terminalWindow.itermTabIndex,
+                    tmuxWindowID: terminalWindow.tmuxWindowID, role: terminalWindow.role, orderIndex: terminalWindow.orderIndex,
+                    lastSeenAt: nowISO8601()))
+        }
     }
 
     private func processRuntimePaths(workspaceID: String, name: String) throws -> (logFile: String, pidFile: String) {
@@ -3133,16 +3232,12 @@ public final class MuxyOrchestrator {
 
         let running = try store.runningProcesses(workspaceID: workspace.id)
         let runningByKey = Dictionary(uniqueKeysWithValues: running.map { ($0.templateName, $0) })
+        let previousByID = Dictionary(uniqueKeysWithValues: previous.map { ($0.id, $0) })
 
         var desiredByMatch: [String: DesiredProcess] = [:]
-        for (idx, template) in updated.enumerated() {
+        for template in updated {
             let desiredKey = processKey(for: template)
-            let hasName = !(template.name?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "").isEmpty
-            var matchKey = desiredKey
-            if !hasName, idx < previous.count {
-                let previousKey = processKey(for: previous[idx])
-                if desiredKey == template.command && !previousKey.isEmpty { matchKey = previousKey }
-            }
+            let matchKey = previousByID[template.id].map(processKey(for:)) ?? desiredKey
             if desiredByMatch[matchKey] == nil {
                 desiredByMatch[matchKey] = DesiredProcess(matchKey: matchKey, desiredKey: desiredKey, template: template)
             }
@@ -3404,8 +3499,8 @@ public final class MuxyOrchestrator {
             }
             let snapshot = bestEffortYabaiWindowSnapshot()
             let terminalHandle = try launchProcessInTmux(
-                workspace: workspace, processName: name, command: command, env: env, terminalHost: terminalHost, background: background,
-                replaceExistingSession: true)
+                workspace: workspace, processName: name, rawCommand: template.command, command: command, env: env, terminalHost: terminalHost,
+                background: background, replaceExistingSession: true)
             let windowID =
                 bestEffortCaptureNewAppWindowID(snapshot: snapshot, appName: terminalAppName(for: terminalHost)) ?? terminalHandle.fallbackWindowID
             let tmuxWindow = try currentTmuxWindowInfo(workspaceID: workspace.id, processName: name)
@@ -4109,8 +4204,14 @@ public final class MuxyOrchestrator {
 
     public func restartWorkspaceProcess(workspaceID: String, processID: String) throws {
         guard let process = try store.runningProcesses(workspaceID: workspaceID).first(where: { $0.id == processID }) else { return }
-        if try recoverRunningProcessTerminalIfPossible(workspaceID: workspaceID, process: process) { return }
         try restartProcessInTerminal(workspaceID: workspaceID, process: process)
+    }
+
+    public func stopWorkspaceProcess(workspaceID: String, processID: String) throws {
+        try withWorkspaceLifecycleLock(workspaceID: workspaceID) {
+            guard let process = try store.runningProcesses(workspaceID: workspaceID).first(where: { $0.id == processID }) else { return }
+            try stopRunningProcess(process, workspaceID: workspaceID)
+        }
     }
 
     public func recoverMissingConfiguredProcess(workspaceID: String, processKey: String) throws {
@@ -4252,6 +4353,37 @@ public final class MuxyOrchestrator {
         try markWorkspaceRunningIfNeeded(workspace)
     }
 
+    private func stopRunningProcess(_ process: RunningProcessRecord, workspaceID: String) throws {
+        let closedManagedTerminalWindowID: Int?
+        if isManagedTerminalApp(process.terminalApp) {
+            _ = try? closeTrackedItermTerminalContainer(process)
+            closedManagedTerminalWindowID = process.windowID
+            if let pid = resolvedRuntimePID(for: process) { terminateProcessGroup(pid: pid) }
+        } else {
+            closedManagedTerminalWindowID = nil
+            if let pid = resolvedRuntimePID(for: process) { terminateProcessGroup(pid: pid) }
+        }
+        let sessionName = processTmuxSessionName(workspaceID: workspaceID, processName: process.templateName)
+        if tmux.hasSession(named: sessionName) { try? tmux.killSession(named: sessionName) }
+
+        if let terminalWindow = try store.windows(workspaceID: workspaceID).first(where: {
+            ($0.windowID != nil && $0.windowID == process.windowID) || ($0.tmuxWindowID != nil && $0.tmuxWindowID == process.tmuxWindowID)
+        }) {
+            if terminalWindow.role == "terminal", isManagedTerminalApp(terminalWindow.app) {
+                if terminalWindow.windowID != closedManagedTerminalWindowID { _ = try? closeTrackedItermTerminalWindow(terminalWindow) }
+            } else if let windowID = terminalWindow.windowID {
+                _ = try? yabai.closeWindow(id: windowID)
+            }
+            try store.deleteWindow(id: terminalWindow.id)
+        }
+
+        try store.deleteRunningProcess(id: process.id)
+
+        if try !hasTrackedRuntimeIndicators(workspaceID: workspaceID), let workspace = try store.workspace(id: workspaceID) {
+            try store.updateWorkspaceRunning(id: workspace.id, isRunning: false, launchedAt: workspace.lastLaunchedAt)
+        }
+    }
+
     private func recoverRunningProcessTerminalIfPossible(workspaceID: String, process: RunningProcessRecord) throws -> Bool {
         guard let terminalHost = terminalHost(for: process.terminalApp) else { return false }
         guard tmux.isAvailable() else { return false }
@@ -4262,7 +4394,8 @@ public final class MuxyOrchestrator {
 
         let snapshot = bestEffortYabaiWindowSnapshot()
         let terminalHandle = try attachProcessTmuxSession(
-            workspace: workspace, processName: process.templateName, terminalHost: terminalHost, background: false)
+            workspace: workspace, processName: process.templateName, commandDescription: process.command, terminalHost: terminalHost,
+            background: false)
         let capturedWindowID =
             bestEffortCaptureNewAppWindowID(snapshot: snapshot, appName: terminalAppName(for: terminalHost)) ?? terminalHandle.fallbackWindowID
         let now = nowISO8601()
@@ -4299,8 +4432,8 @@ public final class MuxyOrchestrator {
         }
         let snapshot = try yabai.listWindows()
         let terminalHandle = try launchProcessInTmux(
-            workspace: workspace, processName: name, command: command, env: env, terminalHost: terminalHost, background: background,
-            replaceExistingSession: true)
+            workspace: workspace, processName: name, rawCommand: template.command, command: command, env: env, terminalHost: terminalHost,
+            background: background, replaceExistingSession: true)
         let capturedWindowID =
             bestEffortCaptureNewAppWindowID(snapshot: snapshot, appName: terminalAppName(for: terminalHost)) ?? terminalHandle.fallbackWindowID
         let tmuxWindow = try currentTmuxWindowInfo(workspaceID: workspace.id, processName: name)

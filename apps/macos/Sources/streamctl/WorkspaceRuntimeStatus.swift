@@ -7,14 +7,13 @@ public struct WorkspaceRuntimeStatus: Sendable {
     public let hasTrackedRuntimeIndicators: Bool
     public let runningProcessCount: Int
     public let exitedProcessCount: Int
-    public let failedCheckCount: Int
     public let waitingAgentWindowCount: Int
     public let missingConfiguredProcessCount: Int
     public let missingConfiguredBrowserSessionCount: Int
 
     public init(
         workspaceID: String, lifecycleState: WorkspaceLifecycleState, runtimeHealth: WorkspaceRuntimeHealth, hasTrackedRuntimeIndicators: Bool,
-        runningProcessCount: Int, exitedProcessCount: Int, failedCheckCount: Int, waitingAgentWindowCount: Int, missingConfiguredProcessCount: Int,
+        runningProcessCount: Int, exitedProcessCount: Int, waitingAgentWindowCount: Int, missingConfiguredProcessCount: Int,
         missingConfiguredBrowserSessionCount: Int
     ) {
         self.workspaceID = workspaceID
@@ -23,7 +22,6 @@ public struct WorkspaceRuntimeStatus: Sendable {
         self.hasTrackedRuntimeIndicators = hasTrackedRuntimeIndicators
         self.runningProcessCount = runningProcessCount
         self.exitedProcessCount = exitedProcessCount
-        self.failedCheckCount = failedCheckCount
         self.waitingAgentWindowCount = waitingAgentWindowCount
         self.missingConfiguredProcessCount = missingConfiguredProcessCount
         self.missingConfiguredBrowserSessionCount = missingConfiguredBrowserSessionCount
@@ -50,7 +48,6 @@ public struct WorkspaceRuntimeStatus: Sendable {
                     parts.append(summaryCount(missingConfiguredProcessCount, singular: "missing process", plural: "missing processes"))
                 }
                 if exitedProcessCount > 0 { parts.append(summaryCount(exitedProcessCount, singular: "exited process", plural: "exited processes")) }
-                if failedCheckCount > 0 { parts.append(summaryCount(failedCheckCount, singular: "failed check", plural: "failed checks")) }
                 if waitingAgentWindowCount > 0 {
                     parts.append(summaryCount(waitingAgentWindowCount, singular: "waiting agent", plural: "waiting agents"))
                 }

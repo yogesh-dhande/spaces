@@ -11,7 +11,7 @@ scripts/release-and-deploy.sh 0.2.0
 
 This script will:
 1. ✅ Build macOS app in release mode
-2. ✅ Code sign `Muxy` and `mx` binaries
+2. ✅ Code sign `Muxy` and `muxy` binaries
 3. ✅ Create DMG installer
 4. ✅ Optionally notarize (if `NOTARIZE=1`)
 5. ✅ Build Next.js website
@@ -67,4 +67,3 @@ apps/web/public/
 - **Appcast**: `https://muxy-dev.web.app/releases/appcast.xml`
 - **Direct DMG**: `https://muxy-dev.web.app/releases/0.2.0/Muxy-0.2.0.dmg`
 - **Website**: `https://muxy-dev.web.app/`
-

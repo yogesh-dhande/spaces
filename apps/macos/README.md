@@ -1,6 +1,6 @@
 # Muxy macOS App
 
-`Muxy` is the macOS app and `mx` is the companion CLI for workspace import, metadata updates, idempotent workspace launch, and agent activity.
+`Muxy` is the macOS app and `muxy` is the companion CLI for workspace import, metadata updates, idempotent workspace launch, and agent activity.
 
 ## Read This With
 - [spec.md](/Users/yogesh/projects/muxy/apps/macos/spec.md): UX and product behavior
@@ -28,15 +28,17 @@ scripts/lint.sh
 scripts/coverage.sh
 ```
 
+`scripts/lint.sh` auto-formats `apps/macos/Sources` and `apps/macos/Tests` with `swift format` before linting, which keeps formatter noise out of the diagnostics.
+
 Useful commands:
 
 ```bash
-apps/macos/.build/debug/Muxy
-apps/macos/.build/debug/mx --help
-apps/macos/.build/debug/mxe2e --help
-apps/macos/.build/debug/mx workspace import --title "debug" --tooltip "Local debug session"
-apps/macos/.build/debug/mx workspace update --tooltip "Ready for review"
-apps/macos/.build/debug/mx workspace up --restart
+apps/macos/.build/debug/MuxyApp
+apps/macos/.build/debug/muxy --help
+apps/macos/.build/debug/muxye2e --help
+apps/macos/.build/debug/muxy workspace import --title "debug" --tooltip "Local debug session"
+apps/macos/.build/debug/muxy workspace update --tooltip "Ready for review"
+apps/macos/.build/debug/muxy workspace up --restart
 apps/macos/Tests/e2e_real_system.sh
 ```
 
@@ -47,7 +49,23 @@ Run the real-system GUI/CLI suite from the repository root with:
 apps/macos/Tests/e2e_real_system.sh
 ```
 
-This suite is manual by design. It drives the real app, `mx`, `yabai`, Chrome, and the configured terminal host in an interactive macOS session instead of XCTest.
+To capture a product-demo video from the same suite, record the run with the native `ScreenCaptureKit` helper and optionally add short editing-friendly pauses between visible transitions:
+
+```bash
+apps/macos/Tests/e2e_real_system.sh \
+  --record-video /tmp/muxy-real-e2e.mp4 \
+  --pause-transitions
+```
+
+The recorder follows the current main display. `--capture-device` remains accepted as a no-op compatibility flag for older invocations.
+
+To prepare the same fixture projects, localhost browser-session servers, and workspace records for manual exploration without running the assertions, use:
+
+```bash
+apps/macos/Tests/e2e_real_system.sh --setup-fixtures-only
+```
+
+This suite is manual by design. It drives the real app, `muxy`, `yabai`, Chrome, and the configured terminal host in an interactive macOS session instead of XCTest.
 
 Primary coverage includes:
 - adding and archiving a workspace
@@ -84,4 +102,4 @@ Build and deploy a release from the repository root with:
 scripts/release-and-deploy.sh <version>
 ```
 
-That script builds the release binaries, signs them, creates the DMG, optionally notarizes it, builds the website, and publishes the release assets.
+That script builds the release binaries, signs them, creates the DMG, optionally notarizes it, and publishes the installer to GitHub Releases.

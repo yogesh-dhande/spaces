@@ -4,7 +4,7 @@ import appctl
 
 public final class SQLiteStore {
     private let db: OpaquePointer
-    private let schemaVersion = 1
+    private let schemaVersion = 2
     private let busyTimeoutMS: Int32 = 5000
     private let busyRetryAttempts = 10
     private let busyRetryDelaySeconds: TimeInterval = 0.02
@@ -50,26 +50,14 @@ public final class SQLiteStore {
         try execute(sql: "DELETE FROM project_port_definitions WHERE project_id = ?", bindings: [project.id])
         for (index, definition) in project.ports.enumerated() {
             try execute(
-                sql: "INSERT INTO project_port_definitions(project_id, name, order_index) VALUES (?, ?, ?)",
-                bindings: [project.id, definition.name, String(index)])
+                sql: "INSERT INTO project_port_definitions(id, project_id, name, order_index) VALUES (?, ?, ?, ?)",
+                bindings: [definition.id, project.id, definition.name, String(index)])
         }
         try execute(sql: "DELETE FROM project_processes WHERE project_id = ?", bindings: [project.id])
         for (index, process) in project.processes.enumerated() {
             try execute(
                 sql: "INSERT INTO project_processes(id, project_id, name, command, on_exit, order_index) VALUES (?, ?, ?, ?, ?, ?)",
-                bindings: [UUID().uuidString, project.id, process.name ?? "", process.command, process.onExit.rawValue, String(index)])
-        }
-        try execute(sql: "DELETE FROM project_status_checks WHERE project_id = ?", bindings: [project.id])
-        for (index, check) in project.statusChecks.enumerated() {
-            try execute(
-                sql: """
-                    INSERT INTO project_status_checks(id, project_id, name, process, command, interval, timeout, on_fail, order_index)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                bindings: [
-                    UUID().uuidString, project.id, check.name ?? "", check.process, check.command, String(check.interval), String(check.timeout),
-                    check.onFail.rawValue, String(index),
-                ])
+                bindings: [process.id, project.id, process.name ?? "", process.command, process.onExit.rawValue, String(index)])
         }
         try execute(sql: "DELETE FROM project_browser_sessions WHERE project_id = ?", bindings: [project.id])
         for (index, session) in project.browserSessions.enumerated() {
@@ -139,7 +127,7 @@ public final class SQLiteStore {
     public func upsert(workspace: WorkspaceRecord) throws {
         try execute(
             sql: """
-                INSERT INTO workspaces(id, project_id, title, dir, dirname, branch, target_branch, is_default, is_archived, is_active, is_running, last_launched_at, tooltip)
+                INSERT INTO workspaces(id, project_id, title, dir, dirname, branch, target_branch, is_default, is_archived, is_hidden, is_running, last_launched_at, tooltip)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(id) DO UPDATE SET
                   title = excluded.title,
@@ -149,14 +137,14 @@ public final class SQLiteStore {
                   target_branch = excluded.target_branch,
                   is_default = excluded.is_default,
                   is_archived = excluded.is_archived,
-                  is_active = excluded.is_active,
+                  is_hidden = excluded.is_hidden,
                   is_running = excluded.is_running,
                   last_launched_at = excluded.last_launched_at,
                   tooltip = excluded.tooltip
                 """,
             bindings: [
                 workspace.id, workspace.projectID, workspace.title, workspace.dir, workspace.dirname ?? "", workspace.branch ?? "",
-                workspace.targetBranch ?? "", workspace.isDefault ? "1" : "0", workspace.isArchived ? "1" : "0", workspace.isActive ? "1" : "0",
+                workspace.targetBranch ?? "", workspace.isDefault ? "1" : "0", workspace.isArchived ? "1" : "0", workspace.isHidden ? "1" : "0",
                 workspace.isRunning ? "1" : "0", workspace.lastLaunchedAt ?? "", workspace.tooltip ?? "",
             ])
         try execute(sql: "DELETE FROM ignored_worktrees WHERE worktree_dir = ?", bindings: [workspace.dir])
@@ -166,7 +154,7 @@ public final class SQLiteStore {
         guard
             let row = try queryRow(
                 sql: """
-                    SELECT id, project_id, title, dir, dirname, branch, target_branch, is_default, is_archived, is_active, is_running, last_launched_at, tooltip
+                    SELECT id, project_id, title, dir, dirname, branch, target_branch, is_default, is_archived, is_hidden, is_running, last_launched_at, tooltip
                     FROM workspaces WHERE id = ?
                     """, bindings: [id])
         else { return nil }
@@ -179,7 +167,7 @@ public final class SQLiteStore {
         guard
             let row = try queryRow(
                 sql: """
-                    SELECT id, project_id, title, dir, dirname, branch, target_branch, is_default, is_archived, is_active, is_running, last_launched_at, tooltip
+                    SELECT id, project_id, title, dir, dirname, branch, target_branch, is_default, is_archived, is_hidden, is_running, last_launched_at, tooltip
                     FROM workspaces WHERE project_id = ? AND title = ?
                     """, bindings: [projectID, title])
         else { return nil }
@@ -190,7 +178,7 @@ public final class SQLiteStore {
         guard
             let row = try queryRow(
                 sql: """
-                    SELECT id, project_id, title, dir, dirname, branch, target_branch, is_default, is_archived, is_active, is_running, last_launched_at, tooltip
+                    SELECT id, project_id, title, dir, dirname, branch, target_branch, is_default, is_archived, is_hidden, is_running, last_launched_at, tooltip
                     FROM workspaces WHERE dir = ?
                     """, bindings: [dir])
         else { return nil }
@@ -200,7 +188,7 @@ public final class SQLiteStore {
     public func workspaces(projectID: String, includeArchived: Bool = false) throws -> [WorkspaceRecord] {
         let rows = try queryRows(
             sql: """
-                SELECT id, project_id, title, dir, dirname, branch, target_branch, is_default, is_archived, is_active, is_running, last_launched_at, tooltip
+                SELECT id, project_id, title, dir, dirname, branch, target_branch, is_default, is_archived, is_hidden, is_running, last_launched_at, tooltip
                 FROM workspaces
                 WHERE project_id = ? AND (? = '1' OR is_archived = 0)
                 ORDER BY is_default DESC, title
@@ -251,8 +239,8 @@ public final class SQLiteStore {
         try execute(sql: "UPDATE workspaces SET is_archived = ? WHERE id = ?", bindings: [isArchived ? "1" : "0", id])
     }
 
-    public func updateWorkspaceActive(id: String, isActive: Bool) throws {
-        try execute(sql: "UPDATE workspaces SET is_active = ? WHERE id = ?", bindings: [isActive ? "1" : "0", id])
+    public func updateWorkspaceHidden(id: String, isHidden: Bool) throws {
+        try execute(sql: "UPDATE workspaces SET is_hidden = ? WHERE id = ?", bindings: [isHidden ? "1" : "0", id])
     }
 
     public func updateWorkspaceTooltip(id: String, tooltip: String?) throws {
@@ -279,13 +267,14 @@ public final class SQLiteStore {
         try execute(sql: "UPDATE workspaces SET title = ? WHERE id = ?", bindings: [name, id])
     }
 
-    public func setWorkspacePorts(workspaceID: String, ports: [Int], names: [String] = []) throws {
+    public func setWorkspacePorts(workspaceID: String, ports: [Int], names: [String] = [], definitionIDs: [String] = []) throws {
         try execute(sql: "DELETE FROM workspace_ports WHERE workspace_id = ?", bindings: [workspaceID])
         for (index, port) in ports.enumerated() {
             let name = index < names.count ? names[index] : ""
+            let definitionID = index < definitionIDs.count ? definitionIDs[index] : ""
             try execute(
-                sql: "INSERT INTO workspace_ports(workspace_id, port_index, port_number, port_name) VALUES (?, ?, ?, ?)",
-                bindings: [workspaceID, String(index), String(port), name])
+                sql: "INSERT INTO workspace_ports(workspace_id, port_index, port_number, port_name, definition_id) VALUES (?, ?, ?, ?, ?)",
+                bindings: [workspaceID, String(index), String(port), name, definitionID])
         }
     }
 
@@ -303,19 +292,32 @@ public final class SQLiteStore {
         }
     }
 
+    public func workspacePortsAssigned(workspaceID: String) throws -> [(definitionID: String, port: Int, name: String)] {
+        let rows = try queryRows(
+            sql: "SELECT definition_id, port_number, port_name FROM workspace_ports WHERE workspace_id = ? ORDER BY port_index",
+            bindings: [workspaceID])
+        return rows.compactMap { row in
+            guard row.count >= 3, let port = Int(row[1]) else { return nil }
+            return (definitionID: row[0], port: port, name: row[2])
+        }
+    }
+
     public func setWorkspacePortDefinitions(workspaceID: String, definitions: [PortDefinition]) throws {
         try execute(sql: "DELETE FROM workspace_port_definitions WHERE workspace_id = ?", bindings: [workspaceID])
         for (index, definition) in definitions.enumerated() {
             try execute(
-                sql: "INSERT INTO workspace_port_definitions(workspace_id, name, order_index) VALUES (?, ?, ?)",
-                bindings: [workspaceID, definition.name, String(index)])
+                sql: "INSERT INTO workspace_port_definitions(id, workspace_id, name, order_index) VALUES (?, ?, ?, ?)",
+                bindings: [definition.id, workspaceID, definition.name, String(index)])
         }
     }
 
     public func workspacePortDefinitions(workspaceID: String) throws -> [PortDefinition] {
         let rows = try queryRows(
-            sql: "SELECT name FROM workspace_port_definitions WHERE workspace_id = ? ORDER BY order_index", bindings: [workspaceID])
-        return rows.map { PortDefinition(name: $0[0]) }
+            sql: "SELECT id, name FROM workspace_port_definitions WHERE workspace_id = ? ORDER BY order_index", bindings: [workspaceID])
+        return rows.compactMap { row in
+            guard row.count >= 2 else { return nil }
+            return PortDefinition(id: row[0].isEmpty ? UUID().uuidString : row[0], name: row[1])
+        }
     }
 
     public func setWorkspaceProcesses(workspaceID: String, processes: [ProcessTemplate]) throws {
@@ -325,52 +327,22 @@ public final class SQLiteStore {
                 sql: """
                     INSERT INTO workspace_processes(id, workspace_id, name, command, on_exit, order_index)
                     VALUES (?, ?, ?, ?, ?, ?)
-                    """, bindings: [UUID().uuidString, workspaceID, process.name ?? "", process.command, process.onExit.rawValue, String(index)])
+                    """, bindings: [process.id, workspaceID, process.name ?? "", process.command, process.onExit.rawValue, String(index)])
         }
     }
 
     public func workspaceProcesses(workspaceID: String) throws -> [ProcessTemplate] {
         let rows = try queryRows(
             sql: """
-                SELECT name, command, on_exit
+                SELECT id, name, command, on_exit
                 FROM workspace_processes
                 WHERE workspace_id = ?
                 ORDER BY order_index
                 """, bindings: [workspaceID])
         return rows.map { row in
-            let name = row[0].isEmpty ? nil : row[0]
-            return ProcessTemplate(name: name, command: row[1], onExit: ProcessExitAction(rawValue: row[2]) ?? .none)
-        }
-    }
-
-    public func setWorkspaceStatusChecks(workspaceID: String, checks: [StatusCheckDefinition]) throws {
-        try execute(sql: "DELETE FROM workspace_status_checks WHERE workspace_id = ?", bindings: [workspaceID])
-        for (index, check) in checks.enumerated() {
-            try execute(
-                sql: """
-                    INSERT INTO workspace_status_checks(id, workspace_id, name, process, command, interval, timeout, on_fail, order_index)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                bindings: [
-                    UUID().uuidString, workspaceID, check.name ?? "", check.process, check.command, String(check.interval), String(check.timeout),
-                    check.onFail.rawValue, String(index),
-                ])
-        }
-    }
-
-    public func workspaceStatusChecks(workspaceID: String) throws -> [StatusCheckDefinition] {
-        let rows = try queryRows(
-            sql: """
-                SELECT name, process, command, interval, timeout, on_fail
-                FROM workspace_status_checks
-                WHERE workspace_id = ?
-                ORDER BY order_index
-                """, bindings: [workspaceID])
-        return rows.map { row in
-            StatusCheckDefinition(
-                name: row[0].isEmpty ? nil : row[0], process: row[1], command: row[2],
-                interval: Int(row[3]) ?? PollingConstants.statusCheckDefaultInterval,
-                timeout: Int(row[4]) ?? PollingConstants.statusCheckDefaultTimeout, onFail: OnFailAction(rawValue: row[5]) ?? .none)
+            let id = row[0].isEmpty ? UUID().uuidString : row[0]
+            let name = row[1].isEmpty ? nil : row[1]
+            return ProcessTemplate(id: id, name: name, command: row[2], onExit: ProcessExitAction(rawValue: row[3]) ?? .none)
         }
     }
 
@@ -551,38 +523,6 @@ public final class SQLiteStore {
 
     public func deleteRunningProcesses(workspaceID: String) throws {
         try execute(sql: "DELETE FROM running_processes WHERE workspace_id = ?", bindings: [workspaceID])
-    }
-
-    public func upsert(statusResult: StatusResult) throws {
-        try execute(
-            sql: """
-                INSERT INTO status_results(process_id, check_name, status, message, last_run_at)
-                VALUES (?, ?, ?, ?, ?)
-                ON CONFLICT(process_id, check_name) DO UPDATE SET
-                  status = excluded.status,
-                  message = excluded.message,
-                  last_run_at = excluded.last_run_at
-                """,
-            bindings: [
-                statusResult.processID, statusResult.checkName, statusResult.status.rawValue, statusResult.message ?? "",
-                statusResult.lastRunAt ?? "",
-            ])
-    }
-
-    public func markStatusResultsAsFailed(processID: String) throws {
-        try execute(
-            sql: "UPDATE status_results SET status = '\(StatusCheckStatus.failed.rawValue)', message = 'Process exited' WHERE process_id = ?",
-            bindings: [processID])
-    }
-
-    public func statusResults(processID: String) throws -> [StatusResult] {
-        let rows = try queryRows(
-            sql: "SELECT process_id, check_name, status, message, last_run_at FROM status_results WHERE process_id = ?", bindings: [processID])
-        return rows.map { row in
-            StatusResult(
-                processID: row[0], checkName: row[1], status: StatusCheckStatus(rawValue: row[2]) ?? .failed, message: row[3].isEmpty ? nil : row[3],
-                lastRunAt: row[4].isEmpty ? nil : row[4])
-        }
     }
 
     public func upsert(window: WindowRecord) throws {
@@ -807,6 +747,7 @@ public final class SQLiteStore {
                 );
 
                 CREATE TABLE IF NOT EXISTS project_port_definitions (
+                  id TEXT NOT NULL,
                   project_id TEXT NOT NULL,
                   name TEXT NOT NULL,
                   order_index INTEGER NOT NULL,
@@ -860,7 +801,7 @@ public final class SQLiteStore {
                   target_branch TEXT,
                   is_default INTEGER NOT NULL,
                   is_archived INTEGER NOT NULL,
-                  is_active INTEGER NOT NULL DEFAULT 1,
+                  is_hidden INTEGER NOT NULL DEFAULT 0,
                   is_running INTEGER NOT NULL,
                   last_launched_at TEXT,
                   tooltip TEXT,
@@ -872,10 +813,12 @@ public final class SQLiteStore {
                   port_index INTEGER NOT NULL,
                   port_number INTEGER NOT NULL,
                   port_name TEXT NOT NULL DEFAULT '',
+                  definition_id TEXT NOT NULL DEFAULT '',
                   PRIMARY KEY (workspace_id, port_index)
                 );
 
                 CREATE TABLE IF NOT EXISTS workspace_port_definitions (
+                  id TEXT NOT NULL,
                   workspace_id TEXT NOT NULL,
                   name TEXT NOT NULL,
                   order_index INTEGER NOT NULL,
@@ -1015,6 +958,7 @@ public final class SQLiteStore {
             try createSchema()
             try ensureWindowsTableColumns()
             try ensureTerminalTrackingAndNativeIDColumns()
+            try ensureConfiguredTemplateIDColumns()
             try setSchemaVersion(schemaVersion)
             return
         }
@@ -1029,16 +973,15 @@ public final class SQLiteStore {
             try createSchema()
             try ensureWindowsTableColumns()
             try ensureTerminalTrackingAndNativeIDColumns()
+            try ensureConfiguredTemplateIDColumns()
             return
-        case 6:
-            try migrateSchemaFromV6ToV7()
-            try createSchema()
-            try ensureWindowsTableColumns()
-            try ensureTerminalTrackingAndNativeIDColumns()
-            try setSchemaVersion(schemaVersion)
         default:
             throw NSError(
-                domain: "muxy.store", code: 10, userInfo: [NSLocalizedDescriptionKey: "Unsupported database schema version \(currentVersion)."])
+                domain: "muxy.store", code: 10,
+                userInfo: [
+                    NSLocalizedDescriptionKey:
+                        "Unsupported database schema version \(currentVersion). Remove ~/.muxy/muxy.db and recreate your workspaces."
+                ])
         }
     }
 
@@ -1197,23 +1140,47 @@ public final class SQLiteStore {
         }
     }
 
+    private func ensureConfiguredTemplateIDColumns() throws {
+        if try tableExists("project_port_definitions") {
+            let columns = try tableColumnNames("project_port_definitions")
+            if !columns.contains("id") { try execute(sql: "ALTER TABLE project_port_definitions ADD COLUMN id TEXT", bindings: []) }
+            try execute(sql: "UPDATE project_port_definitions SET id = lower(hex(randomblob(16))) WHERE COALESCE(id, '') = ''", bindings: [])
+        }
+        if try tableExists("workspace_port_definitions") {
+            let columns = try tableColumnNames("workspace_port_definitions")
+            if !columns.contains("id") { try execute(sql: "ALTER TABLE workspace_port_definitions ADD COLUMN id TEXT", bindings: []) }
+            try execute(sql: "UPDATE workspace_port_definitions SET id = lower(hex(randomblob(16))) WHERE COALESCE(id, '') = ''", bindings: [])
+        }
+        if try tableExists("workspace_ports") {
+            let columns = try tableColumnNames("workspace_ports")
+            if !columns.contains("definition_id") {
+                try execute(sql: "ALTER TABLE workspace_ports ADD COLUMN definition_id TEXT NOT NULL DEFAULT ''", bindings: [])
+            }
+            try execute(
+                sql: """
+                    UPDATE workspace_ports
+                    SET definition_id = COALESCE((
+                        SELECT workspace_port_definitions.id
+                        FROM workspace_port_definitions
+                        WHERE workspace_port_definitions.workspace_id = workspace_ports.workspace_id
+                          AND workspace_port_definitions.order_index = workspace_ports.port_index
+                    ), '')
+                    WHERE COALESCE(definition_id, '') = ''
+                    """, bindings: [])
+        }
+    }
+
     private func decodeProjectWithTemplates(row: [String]) throws -> ProjectRecord? {
         guard row.count >= 8 else { return nil }
         let id = row[0]
-        let ports = try queryRows(sql: "SELECT name FROM project_port_definitions WHERE project_id = ? ORDER BY order_index", bindings: [id]).map {
-            PortDefinition(name: $0[0])
-        }
+        let portRows = try queryRows(sql: "SELECT id, name FROM project_port_definitions WHERE project_id = ? ORDER BY order_index", bindings: [id])
+        let ports = portRows.map { row in PortDefinition(id: row[0].isEmpty ? UUID().uuidString : row[0], name: row[1]) }
         let processes = try queryRows(
-            sql: "SELECT name, command, on_exit FROM project_processes WHERE project_id = ? ORDER BY order_index", bindings: [id]
-        ).map { row in ProcessTemplate(name: row[0].isEmpty ? nil : row[0], command: row[1], onExit: ProcessExitAction(rawValue: row[2]) ?? .none) }
-        let statusChecks = try queryRows(
-            sql: "SELECT name, process, command, interval, timeout, on_fail FROM project_status_checks WHERE project_id = ? ORDER BY order_index",
-            bindings: [id]
+            sql: "SELECT id, name, command, on_exit FROM project_processes WHERE project_id = ? ORDER BY order_index", bindings: [id]
         ).map { row in
-            StatusCheckDefinition(
-                name: row[0].isEmpty ? nil : row[0], process: row[1], command: row[2],
-                interval: Int(row[3]) ?? PollingConstants.statusCheckDefaultInterval,
-                timeout: Int(row[4]) ?? PollingConstants.statusCheckDefaultTimeout, onFail: OnFailAction(rawValue: row[5]) ?? .none)
+            ProcessTemplate(
+                id: row[0].isEmpty ? UUID().uuidString : row[0], name: row[1].isEmpty ? nil : row[1], command: row[2],
+                onExit: ProcessExitAction(rawValue: row[3]) ?? .none)
         }
         let browserSessions = try queryRows(
             sql: "SELECT name, url FROM project_browser_sessions WHERE project_id = ? ORDER BY order_index", bindings: [id]
@@ -1224,14 +1191,14 @@ public final class SQLiteStore {
         return ProjectRecord(
             id: id, name: row[1], dir: row[2], isGitRepo: row[3] == "1", defaultBranch: row[4].isEmpty ? nil : row[4], isCollapsed: row[5] == "1",
             setupScript: row[6].isEmpty ? nil : row[6], stopScript: row[7].isEmpty ? nil : row[7], ports: ports, processes: processes,
-            statusChecks: statusChecks, browserSessions: browserSessions, agentLaunchers: agentLaunchers)
+            browserSessions: browserSessions, agentLaunchers: agentLaunchers)
     }
 
     private func decodeWorkspace(row: [String]) -> WorkspaceRecord? {
         guard row.count >= 13 else { return nil }
         return WorkspaceRecord(
             id: row[0], projectID: row[1], title: row[2], dir: row[3], dirname: row[4].isEmpty ? nil : row[4], branch: row[5].isEmpty ? nil : row[5],
-            targetBranch: row[6].isEmpty ? nil : row[6], isDefault: row[7] == "1", isArchived: row[8] == "1", isActive: row[9] != "0",
+            targetBranch: row[6].isEmpty ? nil : row[6], isDefault: row[7] == "1", isArchived: row[8] == "1", isHidden: row[9] != "0",
             isRunning: row[10] == "1", lastLaunchedAt: row[11].isEmpty ? nil : row[11], tooltip: row[12].isEmpty ? nil : row[12])
     }
 

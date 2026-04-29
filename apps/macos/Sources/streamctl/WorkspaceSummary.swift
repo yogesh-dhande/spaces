@@ -8,13 +8,13 @@ public struct WorkspaceSummary: Sendable {
     public let dir: String
     public let isRunning: Bool
     public let isArchived: Bool
-    public let isActive: Bool
+    public let isHidden: Bool
     public let isDefault: Bool
     public let tooltip: String?
 
     public init(
         id: String, title: String, branch: String?, targetBranch: String? = nil, dir: String, isRunning: Bool, isArchived: Bool,
-        isActive: Bool = true, isDefault: Bool, tooltip: String? = nil
+        isHidden: Bool = false, isDefault: Bool, tooltip: String? = nil
     ) {
         self.id = id
         self.title = title
@@ -23,7 +23,7 @@ public struct WorkspaceSummary: Sendable {
         self.dir = dir
         self.isRunning = isRunning
         self.isArchived = isArchived
-        self.isActive = isActive
+        self.isHidden = isHidden
         self.isDefault = isDefault
         self.tooltip = tooltip
     }

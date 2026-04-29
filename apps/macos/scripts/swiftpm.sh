@@ -28,7 +28,7 @@ if [ "$disable_automatic_resolution" -eq 1 ]; then
   set -- "$@" --disable-automatic-resolution
 fi
 
-exec swift "$@" \
+exec xcrun swift "$@" \
   --cache-path "$cache_dir" \
   --config-path "$config_dir" \
   --security-path "$security_dir"

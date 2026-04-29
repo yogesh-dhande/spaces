@@ -5,7 +5,7 @@
     <key>CFBundleName</key>
     <string>Muxy</string>
     <key>CFBundleExecutable</key>
-    <string>Muxy</string>
+    <string>MuxyApp</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleIdentifier</key>

@@ -10,7 +10,7 @@ export default function ProjectsDocsPage() {
   return (
     <DocsShell
       title="Projects"
-      description="A project is a directory-based unit of configuration that defines templates for processes, status checks, browser sessions, and port definitions."
+      description="A project is a directory-based unit of configuration that defines templates for processes, browser sessions, and port definitions."
       pagePath="/docs/projects"
     >
       <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
@@ -32,11 +32,10 @@ export default function ProjectsDocsPage() {
       <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
         <h2 className="text-2xl font-semibold tracking-tight">Project Templates</h2>
         <p className="mt-2 text-sm leading-7 text-foreground-soft">
-          You configure processes, status checks, browser sessions, and named ports once on the project. New workspaces start from those templates. Each workspace can edit its own copy without affecting the project or other workspaces.
+          You configure processes, browser sessions, and named ports once on the project. New workspaces start from those templates. Each workspace can edit its own copy without affecting the project or other workspaces.
         </p>
         <ul className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
           <li>• <strong>Processes</strong> &mdash; commands Muxy runs alongside the workspace (servers, workers, coding agents).</li>
-          <li>• <strong>Status Checks</strong> &mdash; shell commands that run on a schedule and show passed/failed next to a process.</li>
           <li>• <strong>Browser Sessions</strong> &mdash; URLs Muxy opens in Chrome when the workspace launches.</li>
           <li>• <strong>Named Ports</strong> &mdash; placeholder names like <code>FRONTEND_PORT</code> and <code>API_PORT</code>. Muxy assigns each workspace a unique port number per name so two workspaces never clash.</li>
         </ul>

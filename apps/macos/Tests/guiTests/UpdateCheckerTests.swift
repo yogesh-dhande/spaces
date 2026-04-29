@@ -1,3 +1,4 @@
+import Foundation
 import Testing
 
 @testable import gui
@@ -24,5 +25,22 @@ struct UpdateCheckerTests {
     @Test func differentLengthVersions() {
         #expect(checker.isNewerVersion("1.0.0.1", than: "1.0.0"))
         #expect(!checker.isNewerVersion("1.0", than: "1.0.0"))
+    }
+
+    @Test func stripsLeadingVFromGitHubTags() {
+        #expect(checker.normalizedVersion(from: "v0.2.0") == "0.2.0")
+        #expect(checker.normalizedVersion(from: "V0.2.0") == "0.2.0")
+        #expect(checker.normalizedVersion(from: "0.2.0") == "0.2.0")
+    }
+
+    @Test func selectsDMGAssetFromGitHubRelease() throws {
+        let zipURL = try #require(URL(string: "https://example.com/Muxy.zip"))
+        let dmgURL = try #require(URL(string: "https://example.com/Muxy-0.2.0.dmg"))
+        let assets = [
+            UpdateChecker.GitHubAsset(name: "Muxy.zip", browserDownloadURL: zipURL),
+            UpdateChecker.GitHubAsset(name: "Muxy-0.2.0.dmg", browserDownloadURL: dmgURL),
+        ]
+
+        #expect(checker.downloadURL(from: assets) == dmgURL)
     }
 }

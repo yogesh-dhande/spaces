@@ -440,7 +440,7 @@ final class AgentHookTests: XCTestCase {
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString).path
         let project = ProjectRecord(
             id: dir, name: projectName, dir: dir, isGitRepo: false, defaultBranch: nil, setupScript: nil, stopScript: nil, ports: [], processes: [],
-            statusChecks: [], browserSessions: [])
+            browserSessions: [])
         try store.upsert(project: project)
         let workspace = WorkspaceRecord(
             id: UUID().uuidString, projectID: project.id, title: workspaceName, dir: dir + "/\(workspaceName)", dirname: nil, branch: nil,

@@ -39,6 +39,21 @@ final class MXCommandTests: XCTestCase {
         XCTAssertEqual(command.tooltip, "Summary")
     }
 
+    func testWorkspacePathParsesExplicitPath() throws {
+        let command = try WorkspacePathCommand.parse(["/tmp/worktree"])
+        XCTAssertEqual(command.path, "/tmp/worktree")
+    }
+
+    func testWorkspacePathDefaultsToCurrentDirectory() throws {
+        let command = try WorkspacePathCommand.parse([])
+        XCTAssertNil(command.path)
+    }
+
+    func testWorkspacePathIsListedAsASubcommand() {
+        let subcommands = WorkspaceCommand.configuration.subcommands.map { String(describing: $0) }
+        XCTAssertTrue(subcommands.contains("WorkspacePathCommand"), "Expected `workspace path` to be wired into WorkspaceCommand; got \(subcommands)")
+    }
+
     func testAgentEventParsesTypedEnums() throws {
         let command = try AgentEventCommand.parse(["--type", "waiting", "/tmp/worktree"])
 
@@ -248,7 +263,7 @@ final class MXCommandTests: XCTestCase {
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
         let project = ProjectRecord(
             id: UUID().uuidString, name: "TestProject", dir: projectDir.path, isGitRepo: false, defaultBranch: nil, setupScript: nil, stopScript: nil,
-            ports: [], processes: [], statusChecks: [], browserSessions: [])
+            ports: [], processes: [], browserSessions: [])
         try store.upsert(project: project)
         let workspace = WorkspaceRecord(
             id: UUID().uuidString, projectID: project.id, title: "default", dir: projectDir.appendingPathComponent("default", isDirectory: true).path,

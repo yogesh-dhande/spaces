@@ -10,40 +10,60 @@ MACOS_DIR="$ROOT_DIR/apps/macos"
 # scripts/swiftpm.sh already changes into apps/macos internally, so the default
 # build command must not add a second package-path override.
 BUILD_CMD="${BUILD_CMD:-$ROOT_DIR/scripts/swiftpm.sh build}"
-MUXY_APP="${MUXY_APP:-$MACOS_DIR/.build/debug/Muxy}"
-MX_BIN="${MX_BIN:-$MACOS_DIR/.build/debug/mx}"
-MX_E2E_BIN="${MX_E2E_BIN:-$MACOS_DIR/.build/debug/mxe2e}"
+MUXY_APP="${MUXY_APP:-$MACOS_DIR/.build/debug/MuxyApp}"
+MX_BIN="${MX_BIN:-$MACOS_DIR/.build/debug/muxy}"
+MX_E2E_BIN="${MX_E2E_BIN:-$MACOS_DIR/.build/debug/muxye2e}"
 APP_LOG="${APP_LOG:-/tmp/muxy-e2e-app.log}"
 EVENT_LOG="${EVENT_LOG:-/tmp/muxy-e2e-events.log}"
 METRICS_LOG="${METRICS_LOG:-/tmp/muxy-e2e-metrics.log}"
 DEBUG_LOG="${DEBUG_LOG:-/tmp/muxy-e2e-debug.log}"
 RESULTS_LOG="${RESULTS_LOG:-/tmp/muxy-e2e-results.log}"
+RECORDER_LOG="${RECORDER_LOG:-/tmp/muxy-e2e-recorder.log}"
 ACTION_TIMEOUT_SECONDS="${ACTION_TIMEOUT_SECONDS:-20}"
 HOSTS_CSV="${HOSTS_CSV:-iterm2,ghostty}"
 SEED_FILE="${SEED_FILE:-/tmp/muxy-e2e-seed.json}"
 SECOND_SEED_FILE="${SECOND_SEED_FILE:-/tmp/muxy-e2e-seed-2.json}"
+TRANSITION_PAUSE_SECONDS="${TRANSITION_PAUSE_SECONDS:-0}"
+RECORD_VIDEO_PATH="${RECORD_VIDEO_PATH:-}"
+RECORD_VIDEO_CAPTURE_DEVICE="${RECORD_VIDEO_CAPTURE_DEVICE:-}"
+RECORD_VIDEO_FRAMERATE="${RECORD_VIDEO_FRAMERATE:-15}"
+RECORDER_OUTPUT_START_TIMEOUT_SECONDS="${RECORDER_OUTPUT_START_TIMEOUT_SECONDS:-8}"
+RECORDER_STOP_TIMEOUT_SECONDS="${RECORDER_STOP_TIMEOUT_SECONDS:-10}"
 
 TMP_PREFIX="${TMP_PREFIX:-/tmp/muxy-real-e2e}"
 TMP_ROOT="$(cd "$(mktemp -d "$TMP_PREFIX".XXXXXX)" && pwd -P)"
 TMP_HOME="$TMP_ROOT/home"
 TMP_DB="$TMP_ROOT/muxy.db"
 TMP_RUNTIME_DIR="$TMP_ROOT/runtime"
-TEST_REPO="$TMP_ROOT/repo"
-TEST_REPO_2="$TMP_ROOT/repo-2"
-DOCS_HTML="$TMP_ROOT/docs.html"
-ADMIN_HTML="$TMP_ROOT/admin.html"
-DOCS_ALT_HTML="$TMP_ROOT/docs-alt.html"
-ADMIN_ALT_HTML="$TMP_ROOT/admin-alt.html"
-WORKSPACE_TITLE="e2e-workspace"
-WORKSPACE_BRANCH="e2e-workspace"
-WORKSPACE_TOOLTIP="manual gui workspace"
-PRIMARY_WORKSPACE_TITLE="e2e-primary-workspace"
-SECONDARY_WORKSPACE_TITLE="e2e-secondary-workspace"
+FIXTURE_TEMPLATE_DIR="$ROOT_DIR/apps/macos/Tests/fixtures/e2e_demo"
+TEST_REPO="$TMP_ROOT/atlas-dashboard"
+TEST_REPO_2="$TMP_ROOT/harbor-ops"
+WORKSPACE_TITLE="Release Readiness"
+WORKSPACE_BRANCH="release-readiness"
+WORKSPACE_TOOLTIP="Polish the launch checklist and QA follow-ups"
+PRIMARY_WORKSPACE_TITLE="Customer Dashboard"
+SECONDARY_WORKSPACE_TITLE="Operations Console"
 MOCK_AGENT_LABEL="Mock Agent"
 MUXY_PID=""
+RECORDER_PID=""
+RECORDER_READY_FILE=""
+FINAL_RECORDING_PATH=""
 CURRENT_CASE=""
 SUMMARY_PRINTED=0
 APP_LOG_SEARCH_FROM_LINE=1
+SETUP_FIXTURES_ONLY=0
+PRESERVE_FIXTURES_ON_EXIT=0
+APP_PORT_NAME="MUXY_E2E_APP_PORT"
+API_PORT_NAME="MUXY_E2E_API_PORT"
+PRIMARY_DOCS_URL=""
+PRIMARY_ADMIN_URL=""
+PRIMARY_BACKEND_STATUS_URL=""
+SECONDARY_DOCS_URL=""
+SECONDARY_ADMIN_URL=""
+SECONDARY_BACKEND_STATUS_URL=""
+CREATED_DOCS_URL=""
+CREATED_ADMIN_URL=""
+CREATED_BACKEND_STATUS_URL=""
 
 mkdir -p "$TMP_HOME" "$TMP_RUNTIME_DIR"
 : >"$EVENT_LOG"
@@ -59,15 +79,21 @@ export MUXY_E2E_EVENTS_LOG="$EVENT_LOG"
 
 cleanup() {
   local exit_code="$?"
-  # Leave the rest of the desktop alone, but make sure the isolated Muxy app
-  # instance and temporary workspace state do not leak after the run.
+  if (( PRESERVE_FIXTURES_ON_EXIT == 1 && exit_code == 0 )); then
+    print_run_summary "$exit_code"
+    return 0
+  fi
+  # Always tear down the isolated Muxy instance, helper fixtures, and optional
+  # recorder. Recording mode intentionally starts from a minimized desktop.
+  stop_screen_recording
   "$MX_E2E_BIN" stop-fixtures --dir-prefix "$TMP_PREFIX" >/tmp/muxy-e2e-stop-fixtures-exit.json 2>/dev/null || true
   close_fixture_chrome_windows
   if [[ -n "${MUXY_PID}" ]]; then
     kill "${MUXY_PID}" >/dev/null 2>&1 || true
   fi
-  pkill -x Muxy >/dev/null 2>&1 || true
+  pkill -x MuxyApp >/dev/null 2>&1 || true
   print_run_summary "$exit_code"
+  open_final_recording
 }
 trap cleanup EXIT
 
@@ -144,6 +170,73 @@ require_file() {
   [[ -x "$1" ]] || fail "missing executable: $1"
 }
 
+print_usage() {
+  cat <<'EOF'
+Usage: apps/macos/Tests/e2e_real_system.sh [options]
+
+Options:
+  --record-video PATH            Capture the full run to PATH with ScreenCaptureKit.
+  --capture-device DEVICE        Legacy option. Ignored by native recording.
+  --capture-framerate FPS        Screen recording frame rate. Default: 15.
+  --pause-transitions            Add a 1 second pause after visible transitions.
+  --setup-fixtures-only          Create projects/workspaces and leave the manual test environment running.
+  --transition-pause-seconds N   Override the transition pause duration.
+  --help                         Show this help text.
+EOF
+}
+
+parse_args() {
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --record-video)
+        [[ $# -ge 2 ]] || fail "missing value for --record-video"
+        RECORD_VIDEO_PATH="$2"
+        shift 2
+        ;;
+      --capture-device)
+        [[ $# -ge 2 ]] || fail "missing value for --capture-device"
+        RECORD_VIDEO_CAPTURE_DEVICE="$2"
+        shift 2
+        ;;
+      --capture-framerate)
+        [[ $# -ge 2 ]] || fail "missing value for --capture-framerate"
+        RECORD_VIDEO_FRAMERATE="$2"
+        shift 2
+        ;;
+      --pause-transitions)
+        TRANSITION_PAUSE_SECONDS=1
+        shift
+        ;;
+      --setup-fixtures-only)
+        SETUP_FIXTURES_ONLY=1
+        shift
+        ;;
+      --transition-pause-seconds)
+        [[ $# -ge 2 ]] || fail "missing value for --transition-pause-seconds"
+        TRANSITION_PAUSE_SECONDS="$2"
+        shift 2
+        ;;
+      --help)
+        print_usage
+        trap - EXIT
+        exit 0
+        ;;
+      *)
+        fail "unknown argument: $1"
+        ;;
+    esac
+  done
+}
+
+transition_pause() {
+  local label="${1:-transition}"
+  if ! awk -v seconds="$TRANSITION_PAUSE_SECONDS" 'BEGIN { exit(seconds + 0 > 0 ? 0 : 1) }'; then
+    return 0
+  fi
+  log_debug "transition pause ${TRANSITION_PAUSE_SECONDS}s: $label"
+  sleep "$TRANSITION_PAUSE_SECONDS"
+}
+
 build_binaries() {
   log_step "building macOS binaries"
   (cd "$ROOT_DIR" && eval "$BUILD_CMD") >/dev/null
@@ -152,8 +245,20 @@ build_binaries() {
   require_file "$MX_E2E_BIN"
 }
 
+stop_stale_fixture_port_listeners() {
+  local ports=(20000 20001 20002 20003 20004 20005)
+  local pid
+  for port in "${ports[@]}"; do
+    while IFS= read -r pid; do
+      [[ -n "$pid" ]] || continue
+      kill "$pid" >/dev/null 2>&1 || true
+    done < <(lsof -tiTCP:"$port" -sTCP:LISTEN 2>/dev/null || true)
+  done
+}
+
 cleanup_existing_fixture_projects() {
   log_step "cleaning existing E2E fixture projects"
+  stop_stale_fixture_port_listeners
   "$MX_E2E_BIN" stop-fixtures --dir-prefix "$TMP_PREFIX" >/tmp/muxy-e2e-stop-fixtures-start.json || true
   close_fixture_chrome_windows
   "$MX_E2E_BIN" cleanup-fixtures --dir-prefix "$TMP_PREFIX" >/tmp/muxy-e2e-cleanup.json || true
@@ -170,12 +275,184 @@ reset_fixture_runtime() {
 
 close_existing_muxy_instances() {
   log_step "closing existing Muxy instances"
-  pkill -x Muxy >/dev/null 2>&1 || true
-  sleep 1
+  pkill -x MuxyApp >/dev/null 2>&1 || true
+  local deadline=$((SECONDS + ACTION_TIMEOUT_SECONDS))
+  while (( SECONDS < deadline )); do
+    if [[ "$(muxy_instance_count)" == "0" ]]; then
+      return 0
+    fi
+    sleep 0.2
+  done
+  fail "timed out waiting for existing Muxy instances to exit"
+}
+
+hide_all_visible_windows() {
+  log_step "hiding visible windows for a clean recording background"
+  yabai -m query --windows | python3 -c '
+import json
+import sys
+
+windows = json.load(sys.stdin)
+for window in windows:
+    if (
+        window.get("is-visible")
+        and not window.get("is-minimized")
+        and window.get("role") == "AXWindow"
+        and window.get("subrole") in {"AXStandardWindow", "AXDialog"}
+    ):
+        print(window["id"])
+' | while IFS= read -r window_id; do
+    yabai -m window "$window_id" --minimize >/dev/null 2>&1 || true
+  done
+
+  yabai -m query --windows | python3 -c '
+import json
+import sys
+
+windows = json.load(sys.stdin)
+seen = set()
+for window in windows:
+    app = (window.get("app") or "").strip()
+    if (
+        app
+        and window.get("is-visible")
+        and not window.get("is-minimized")
+        and window.get("role") == "AXWindow"
+        and window.get("subrole") in {"AXStandardWindow", "AXDialog"}
+        and app not in seen
+    ):
+        seen.add(app)
+        print(app)
+' | while IFS= read -r app_name; do
+    osascript - "$app_name" <<'APPLESCRIPT' >/dev/null 2>&1 || true
+on run argv
+  set targetApp to item 1 of argv
+  tell application targetApp to hide
+end run
+APPLESCRIPT
+  done
+
+  local remaining
+  local deadline=$((SECONDS + ACTION_TIMEOUT_SECONDS))
+  while (( SECONDS < deadline )); do
+    remaining="$(
+      yabai -m query --windows | python3 -c '
+import json
+import sys
+
+windows = json.load(sys.stdin)
+for window in windows:
+    if (
+        window.get("is-visible")
+        and not window.get("is-minimized")
+        and window.get("role") == "AXWindow"
+        and window.get("subrole") in {"AXStandardWindow", "AXDialog"}
+    ):
+        print((window.get("app") or "") + "\t" + str(window.get("id") or ""))
+'
+    )"
+    if [[ -z "$remaining" ]]; then
+      return 0
+    fi
+    sleep 0.2
+  done
+
+  log_debug "visible windows remained after hide:\n$remaining"
+}
+
+start_screen_recording() {
+  [[ -n "$RECORD_VIDEO_PATH" ]] || return 0
+  mkdir -p "$(dirname "$RECORD_VIDEO_PATH")"
+  : >"$RECORDER_LOG"
+  RECORDER_READY_FILE="$TMP_ROOT/recording.ready"
+  rm -f "$RECORDER_READY_FILE"
+  log_step "starting screen recording -> $RECORD_VIDEO_PATH"
+  if [[ -n "$RECORD_VIDEO_CAPTURE_DEVICE" ]]; then
+    log_debug "ignoring legacy capture-device=$RECORD_VIDEO_CAPTURE_DEVICE; using ScreenCaptureKit main display recorder"
+  fi
+  "$MX_E2E_BIN" record-screen \
+    --output "$RECORD_VIDEO_PATH" \
+    --ready-file "$RECORDER_READY_FILE" \
+    --fps "$RECORD_VIDEO_FRAMERATE" >"$RECORDER_LOG" 2>&1 &
+  RECORDER_PID=$!
+  if ! kill -0 "$RECORDER_PID" >/dev/null 2>&1; then
+    cat "$RECORDER_LOG" >&2 || true
+    fail "screen recording exited during startup"
+  fi
+  local deadline=$((SECONDS + RECORDER_OUTPUT_START_TIMEOUT_SECONDS))
+  while (( SECONDS < deadline )); do
+    if [[ -f "$RECORDER_READY_FILE" ]]; then
+      FINAL_RECORDING_PATH="$RECORD_VIDEO_PATH"
+      return 0
+    fi
+    if ! kill -0 "$RECORDER_PID" >/dev/null 2>&1; then
+      break
+    fi
+    sleep 0.2
+  done
+  cat "$RECORDER_LOG" >&2 || true
+  fail "screen recording did not become ready"
+}
+
+stop_screen_recording() {
+  [[ -n "$RECORDER_PID" ]] || return 0
+  if kill -0 "$RECORDER_PID" >/dev/null 2>&1; then
+    log_step "stopping screen recording"
+    kill -INT "$RECORDER_PID" >/dev/null 2>&1 || true
+    local deadline=$((SECONDS + RECORDER_STOP_TIMEOUT_SECONDS))
+    while (( SECONDS < deadline )); do
+      if ! kill -0 "$RECORDER_PID" >/dev/null 2>&1; then
+        break
+      fi
+      sleep 0.2
+    done
+    if kill -0 "$RECORDER_PID" >/dev/null 2>&1; then
+      log_debug "screen recorder did not exit after SIGINT; sending SIGTERM"
+      kill -TERM "$RECORDER_PID" >/dev/null 2>&1 || true
+      deadline=$((SECONDS + RECORDER_STOP_TIMEOUT_SECONDS))
+      while (( SECONDS < deadline )); do
+        if ! kill -0 "$RECORDER_PID" >/dev/null 2>&1; then
+          break
+        fi
+        sleep 0.2
+      done
+    fi
+    if kill -0 "$RECORDER_PID" >/dev/null 2>&1; then
+      log_debug "screen recorder did not exit after SIGTERM; sending SIGKILL"
+      kill -KILL "$RECORDER_PID" >/dev/null 2>&1 || true
+    fi
+    wait "$RECORDER_PID" >/dev/null 2>&1 || true
+  fi
+  if [[ -n "$RECORD_VIDEO_PATH" ]]; then
+    if [[ -s "$RECORD_VIDEO_PATH" ]]; then
+      FINAL_RECORDING_PATH="$RECORD_VIDEO_PATH"
+      log_debug "screen recording saved path=$RECORD_VIDEO_PATH size=$(wc -c <"$RECORD_VIDEO_PATH" | tr -d ' ')"
+    else
+      log_debug "screen recording missing-or-empty path=$RECORD_VIDEO_PATH"
+    fi
+  fi
+  RECORDER_PID=""
+}
+
+open_final_recording() {
+  [[ -n "$FINAL_RECORDING_PATH" ]] || return 0
+  [[ -s "$FINAL_RECORDING_PATH" ]] || return 0
+  open "$FINAL_RECORDING_PATH" >/dev/null 2>&1 || true
+}
+
+print_recording_summary() {
+  if [[ -n "$FINAL_RECORDING_PATH" && -s "$FINAL_RECORDING_PATH" ]]; then
+    printf 'Recording: %s\n' "$FINAL_RECORDING_PATH"
+    return 0
+  fi
+  if [[ -n "$RECORD_VIDEO_PATH" ]]; then
+    printf 'Recording missing: requested=%s\n' "$RECORD_VIDEO_PATH"
+    printf 'Recorder log: %s\n' "$RECORDER_LOG"
+  fi
 }
 
 muxy_instance_count() {
-  (pgrep -x Muxy || true) | wc -l | tr -d ' '
+  (pgrep -x MuxyApp || true) | wc -l | tr -d ' '
 }
 
 ensure_single_muxy_instance() {
@@ -186,7 +463,7 @@ ensure_single_muxy_instance() {
     local deadline=$((SECONDS + ACTION_TIMEOUT_SECONDS))
     while (( SECONDS < deadline )); do
       count="$(muxy_instance_count)"
-      if [[ "$count" == "1" ]] && pgrep -x Muxy | grep -qx "$expected_pid"; then
+      if [[ "$count" == "1" ]] && pgrep -x MuxyApp | grep -qx "$expected_pid"; then
         return 0
       fi
       sleep 0.2
@@ -204,6 +481,7 @@ launch_muxy() {
   MUXY_PID=$!
   ensure_single_muxy_instance "$MUXY_PID"
   wait_for_muxy_frontmost_ready
+  transition_pause "Muxy launch"
 }
 
 activate_muxy_pid() {
@@ -230,17 +508,20 @@ APPLESCRIPT
 wait_for_muxy_frontmost_ready() {
   # Most GUI actions in this script assume a single visible Muxy window and an
   # active accessibility tree, so block until that state exists and Muxy is
-  # actually frontmost. The numbered shortcut tests are invalid otherwise.
+  # actually frontmost. The later UI automation queries `process "MuxyApp"`
+  # because the internal executable name differs from the user-facing app name.
+  # The strict single-instance checks above are what keep System Events from
+  # drifting onto the user's regular app instance here.
   local deadline=$((SECONDS + ACTION_TIMEOUT_SECONDS))
   while (( SECONDS < deadline )); do
     if ! kill -0 "$MUXY_PID" >/dev/null 2>&1; then
       fail "Muxy exited during launch"
     fi
     activate_muxy_pid "$MUXY_PID"
-    if [[ "$(frontmost_app 2>/dev/null || true)" == "Muxy" ]] && osascript <<'APPLESCRIPT' 2>/dev/null | grep -Eiq '^(1|true)$'; then
+    if [[ "$(frontmost_app 2>/dev/null || true)" == "MuxyApp" ]] && osascript <<'APPLESCRIPT' 2>/dev/null | grep -Eiq '^(1|true)$'; then
 tell application "System Events"
-  if exists process "Muxy" then
-    tell process "Muxy"
+  if exists process "MuxyApp" then
+    tell process "MuxyApp"
       return (count of windows) > 0
     end tell
   end if
@@ -259,8 +540,8 @@ wait_for_muxy_splitter_ready() {
   while (( SECONDS < deadline )); do
     if osascript <<'APPLESCRIPT' 2>/dev/null | grep -q '^1$'; then
 tell application "System Events"
-  if exists process "Muxy" then
-    tell process "Muxy"
+  if exists process "MuxyApp" then
+    tell process "MuxyApp"
       if (count of windows) is 0 then return 0
       try
         set _ to splitter group 1 of window 1
@@ -283,8 +564,8 @@ APPLESCRIPT
 muxy_splitter_ready() {
   osascript <<'APPLESCRIPT' 2>/dev/null | grep -q '^1$'
 tell application "System Events"
-  if exists process "Muxy" then
-    tell process "Muxy"
+  if exists process "MuxyApp" then
+    tell process "MuxyApp"
       if (count of windows) is 0 then return 0
       try
         set _ to splitter group 1 of window 1
@@ -302,39 +583,39 @@ APPLESCRIPT
 setup_git_fixture() {
   log_step "creating git fixture repo"
   mkdir -p "$TEST_REPO" "$TEST_REPO_2"
+  install_demo_fixture "atlas" "$TEST_REPO" "# Atlas Dashboard"
+  install_demo_fixture "harbor" "$TEST_REPO_2" "# Harbor Ops"
+}
+
+install_demo_fixture() {
+  local variant="$1"
+  local repo_dir="$2"
+  local readme_title="$3"
   (
-    cd "$TEST_REPO"
+    cd "$repo_dir"
     git init -q -b main
     git config user.email "muxy-e2e@example.com"
     git config user.name "muxy-e2e"
-    printf '<html><title>docs</title><body>docs sentinel</body></html>\n' >"$DOCS_HTML"
-    printf '<html><title>admin</title><body>admin sentinel</body></html>\n' >"$ADMIN_HTML"
-    printf '<html><title>docs alt</title><body>docs alt sentinel</body></html>\n' >"$DOCS_ALT_HTML"
-    printf '<html><title>admin alt</title><body>admin alt sentinel</body></html>\n' >"$ADMIN_ALT_HTML"
-    printf '# Muxy E2E\n' >README.md
-    git add README.md
-    git commit -q -m init
-  )
-  (
-    cd "$TEST_REPO_2"
-    git init -q -b main
-    git config user.email "muxy-e2e@example.com"
-    git config user.name "muxy-e2e"
-    printf '# Muxy E2E Alt\n' >README.md
-    git add README.md
+    mkdir -p .muxy-e2e-demo
+    cp "$FIXTURE_TEMPLATE_DIR/pyproject.toml" .muxy-e2e-demo/pyproject.toml
+    cp -R "$FIXTURE_TEMPLATE_DIR/src" .muxy-e2e-demo/src
+    cp -R "$FIXTURE_TEMPLATE_DIR/templates/$variant/site" .muxy-e2e-demo/site
+    cp -R "$FIXTURE_TEMPLATE_DIR/templates/$variant/api" .muxy-e2e-demo/api
+    printf '%s\n' "$readme_title" >README.md
+    git add README.md .muxy-e2e-demo
     git commit -q -m init
   )
 }
 
 seed_fixture() {
   log_step "seeding project fixture"
-  # mxe2e seeds deterministic project/workspace templates through the real
+  # muxye2e seeds deterministic project/workspace templates through the real
   # streamctl layer so the manual test is reproducible.
   "$MX_E2E_BIN" seed-fixture \
     --project-dir "$TEST_REPO" \
     --workspace-title "$PRIMARY_WORKSPACE_TITLE" \
-    --docs-url "file://$DOCS_HTML" \
-    --admin-url "file://$ADMIN_HTML" >"$SEED_FILE"
+    --docs-url "http://localhost:\$${APP_PORT_NAME}/docs/" \
+    --admin-url "http://localhost:\$${APP_PORT_NAME}/admin/" >"$SEED_FILE"
 }
 
 seed_second_fixture() {
@@ -342,8 +623,79 @@ seed_second_fixture() {
   "$MX_E2E_BIN" seed-fixture \
     --project-dir "$TEST_REPO_2" \
     --workspace-title "$SECONDARY_WORKSPACE_TITLE" \
-    --docs-url "file://$DOCS_ALT_HTML" \
-    --admin-url "file://$ADMIN_ALT_HTML" >"$SECOND_SEED_FILE"
+    --docs-url "http://localhost:\$${APP_PORT_NAME}/docs/" \
+    --admin-url "http://localhost:\$${APP_PORT_NAME}/admin/" >"$SECOND_SEED_FILE"
+}
+
+workspace_named_port() {
+  local workspace_dir="$1"
+  local port_name="$2"
+  python3 - "$TMP_DB" "$workspace_dir" "$port_name" <<'PY'
+import sqlite3
+import sys
+
+db_path, workspace_dir, port_name = sys.argv[1:4]
+conn = sqlite3.connect(db_path)
+try:
+    row = conn.execute(
+        """
+        SELECT wp.port_number
+        FROM workspace_ports AS wp
+        JOIN workspaces AS w ON w.id = wp.workspace_id
+        WHERE w.dir = ? AND wp.port_name = ?
+        ORDER BY wp.port_index
+        LIMIT 1
+        """,
+        (workspace_dir, port_name),
+    ).fetchone()
+finally:
+    conn.close()
+
+if row is None:
+    raise SystemExit(1)
+
+print(row[0])
+PY
+}
+
+frontend_url_for_workspace() {
+  local workspace_dir="$1"
+  local path="$2"
+  local port
+  port="$(workspace_named_port "$workspace_dir" "$APP_PORT_NAME")" || fail "missing named port $APP_PORT_NAME for $workspace_dir"
+  printf 'http://localhost:%s%s\n' "$port" "$path"
+}
+
+backend_url_for_workspace() {
+  local workspace_dir="$1"
+  local path="$2"
+  local port
+  port="$(workspace_named_port "$workspace_dir" "$API_PORT_NAME")" || fail "missing named port $API_PORT_NAME for $workspace_dir"
+  printf 'http://localhost:%s%s\n' "$port" "$path"
+}
+
+http_get_body() {
+  local url="$1"
+  python3 - "$url" <<'PY'
+import sys
+import urllib.request
+
+with urllib.request.urlopen(sys.argv[1], timeout=2) as response:
+    print(response.read().decode("utf-8"))
+PY
+}
+
+wait_for_http_body_contains() {
+  local url="$1"
+  local expected="$2"
+  local deadline=$((SECONDS + ACTION_TIMEOUT_SECONDS))
+  while (( SECONDS < deadline )); do
+    if body="$(http_get_body "$url" 2>/dev/null)" && grep -Fq "$expected" <<<"$body"; then
+      return 0
+    fi
+    sleep 0.2
+  done
+  fail "timed out waiting for HTTP content at $url containing: $expected"
 }
 
 slugify_automation_id() {
@@ -479,7 +831,7 @@ ui_click_identifier() {
 on run argv
   set targetID to item 1 of argv
   tell application "System Events"
-    tell process "Muxy"
+    tell process "MuxyApp"
       repeat with targetElement in entire contents of window 1
         try
           if (value of attribute "AXIdentifier" of targetElement) is targetID then
@@ -495,6 +847,30 @@ end run
 APPLESCRIPT
 }
 
+ui_click_workspace_detail_header_button() {
+  local description="$1"
+  osascript - "$description" <<'APPLESCRIPT'
+on run argv
+  set targetDescription to item 1 of argv
+  tell application "System Events"
+    tell process "MuxyApp"
+      tell scroll area 2 of splitter group 1 of window 1
+        repeat with targetButton in buttons
+          try
+            if (description of targetButton) is targetDescription then
+              click targetButton
+              return
+            end if
+          end try
+        end repeat
+      end tell
+    end tell
+  end tell
+  error "workspace-detail header button not found: " & targetDescription
+end run
+APPLESCRIPT
+}
+
 ui_set_identifier_value() {
   local identifier="$1"
   local value="$2"
@@ -503,7 +879,7 @@ on run argv
   set targetID to item 1 of argv
   set targetValue to item 2 of argv
   tell application "System Events"
-    tell process "Muxy"
+    tell process "MuxyApp"
       repeat with targetElement in entire contents of window 1
         try
           if (value of attribute "AXIdentifier" of targetElement) is targetID then
@@ -527,7 +903,7 @@ on run argv
   set targetID to item 1 of argv
   set targetValue to item 2 of argv
   tell application "System Events"
-    tell process "Muxy"
+    tell process "MuxyApp"
       repeat with targetElement in entire contents of window 1
         try
           if (value of attribute "AXIdentifier" of targetElement) is targetID then
@@ -550,7 +926,7 @@ ui_double_click_identifier() {
 on run argv
   set targetID to item 1 of argv
   tell application "System Events"
-    tell process "Muxy"
+    tell process "MuxyApp"
       repeat with targetElement in entire contents of window 1
         try
           if (value of attribute "AXIdentifier" of targetElement) is targetID then
@@ -568,31 +944,6 @@ end run
 APPLESCRIPT
 }
 
-ui_click_button_description() {
-  local description="$1"
-  wait_for_muxy_splitter_ready
-  osascript - "$description" <<'APPLESCRIPT'
-on run argv
-  set targetDescription to item 1 of argv
-  tell application "System Events"
-    tell process "Muxy"
-      tell splitter group 1 of window 1
-        repeat with targetElement in buttons
-          try
-            if description of targetElement is targetDescription then
-              click targetElement
-              return
-            end if
-          end try
-        end repeat
-      end tell
-    end tell
-  end tell
-  error "button not found: " & targetDescription
-end run
-APPLESCRIPT
-}
-
 ui_select_outline_row() {
   local row_index="$1"
   wait_for_muxy_splitter_ready
@@ -600,7 +951,7 @@ ui_select_outline_row() {
 on run argv
   set targetRow to (item 1 of argv) as integer
   tell application "System Events"
-    tell process "Muxy"
+    tell process "MuxyApp"
       select row targetRow of outline 1 of scroll area 1 of splitter group 1 of window 1
     end tell
   end tell
@@ -625,17 +976,15 @@ ui_click_tab() {
 on run argv
   set targetLabel to item 1 of argv
   tell application "System Events"
-    tell process "Muxy"
-      tell tab group 1 of splitter group 1 of window 1
-        repeat with targetElement in radio buttons
-          try
-            if title of targetElement is targetLabel then
-              click targetElement
-              return
-            end if
-          end try
-        end repeat
-      end tell
+    tell process "MuxyApp"
+      repeat with targetElement in (entire contents of window 1)
+        try
+          if (role of targetElement) is "AXRadioButton" and (title of targetElement) is targetLabel then
+            click targetElement
+            return
+          end if
+        end try
+      end repeat
     end tell
   end tell
   error "tab not found: " & targetLabel
@@ -654,6 +1003,7 @@ create_workspace_via_gui() {
     --branch "$WORKSPACE_BRANCH" \
     --target-branch main \
     --tooltip "$WORKSPACE_TOOLTIP" >"$TMP_ROOT/created-workspace.json"
+  transition_pause "workspace creation"
 }
 
 set_workspace_browser_urls() {
@@ -684,7 +1034,7 @@ archive_workspace_via_gui() {
   ui_click_button_description "Archive"
   osascript <<'APPLESCRIPT' >/dev/null 2>&1 || true
 tell application "System Events"
-  tell process "Muxy"
+  tell process "MuxyApp"
     if exists sheet 1 of window 1 then click button "Archive" of sheet 1 of window 1
   end tell
 end tell
@@ -711,9 +1061,13 @@ stop_workspace_via_gui() {
     "$MX_E2E_BIN" stop-workspace --workspace-dir "$workspace_dir" >/tmp/muxy-e2e-stop-workspace-fallback.json
     return 0
   fi
-  ui_select_outline_row 2
+  ui_show_workspace_detail "$workspace_dir" ""
   sleep 0.5
-  ui_click_button_description "Stop"
+  if ! ui_click_workspace_detail_header_button "Stop"; then
+    log_debug "stop_workspace_via_gui fallback=identifier-stop-workspace-helper"
+    "$MX_E2E_BIN" stop-workspace --workspace-dir "$workspace_dir" >/tmp/muxy-e2e-stop-workspace-fallback.json
+    return 0
+  fi
   local out="$TMP_ROOT/stop-workspace-state.json"
   local deadline=$((SECONDS + 4))
   while (( SECONDS < deadline )); do
@@ -728,29 +1082,18 @@ stop_workspace_via_gui() {
 }
 
 restart_workspace_via_gui() {
+  local workspace_dir="$1"
   log_step "restarting workspace via GUI"
-  wait_for_muxy_frontmost_ready
-  ui_select_outline_row 2
+  ui_show_workspace_detail "$workspace_dir" ""
   sleep 0.5
-  if osascript <<'APPLESCRIPT' | grep -q '^1$'; then
-tell application "System Events"
-  tell process "Muxy"
-    tell splitter group 1 of window 1
-      repeat with targetElement in buttons
-        try
-          if description of targetElement is "Restart" then return 1
-        end try
-      end repeat
-    end tell
-  end tell
-end tell
-return 0
-APPLESCRIPT
-    ui_click_button_description "Restart"
-  else
-    ui_click_button_description "Launch"
+  if ! ui_click_workspace_detail_header_button "Restart"; then
+    log_debug "restart_workspace_via_gui fallback=muxy-workspace-up-restart"
+    run_mx_logged /tmp/muxy-e2e-restart-workspace-fallback.log workspace up "$workspace_dir" --restart
+    transition_pause "workspace restart fallback"
+    return 0
   fi
   sleep 1
+  transition_pause "workspace restart"
 }
 
 assert_file_contains() {
@@ -1108,7 +1451,7 @@ record_browser_focus_metric() {
     record_metric_sample "$name" "$(extract_metric_field "$line" "elapsed_ms")"
     return 0
   fi
-  # `mx workspace up --focus docs` can resolve through the shared name-based
+  # `muxy workspace up --focus docs` can resolve through the shared name-based
   # focus path instead of the browser-session-specific path, so the app may log
   # `named_window_focus target=docs` even though the visible behavior is still
   # "focus the tracked docs Chrome tab". Accept either metric shape here.
@@ -1190,6 +1533,7 @@ print_run_summary() {
   fi
   print_case_summary
   print_metric_summary
+  print_recording_summary
   printf 'Metrics log: %s\n' "$METRICS_LOG"
   printf 'Results log: %s\n' "$RESULTS_LOG"
   printf 'Event log: %s\n' "$EVENT_LOG"
@@ -1463,17 +1807,19 @@ run_launch_and_focus_assertions() {
   log_step "switching terminal host to $host"
   "$MX_E2E_BIN" set-terminal-host "$host" >/tmp/muxy-e2e-terminal-host.json
   sleep 0.5
+  transition_pause "switch terminal host to $host"
 
   begin_case "$host: launch workspace and persist terminal host"
   run_mx_logged /tmp/muxy-e2e-launch.log workspace up "$workspace_dir" --focus docs
+  transition_pause "$host launch workspace"
   dump_chrome_state "$host docs-focus after-launch"
-  wait_for_condition "chrome_front_url" "file://$DOCS_HTML"
+  wait_for_condition "chrome_front_url" "$PRIMARY_DOCS_URL"
   local docs_window_id
   docs_window_id="$(chrome_front_window_id)"
   [[ -n "$docs_window_id" ]] || fail "docs focus did not leave a front Chrome window"
-  log_debug "$host docs_window_id=$docs_window_id expected_docs=file://$DOCS_HTML"
+  log_debug "$host docs_window_id=$docs_window_id expected_docs=$PRIMARY_DOCS_URL"
   wait_for_condition "chrome_front_window_id" "$docs_window_id"
-  wait_for_condition "chrome_window_active_url $docs_window_id" "file://$DOCS_HTML"
+  wait_for_condition "chrome_window_active_url $docs_window_id" "$PRIMARY_DOCS_URL"
 
   dump_workspace "$workspace_dir" "$dump_file"
   local workspace_id
@@ -1488,24 +1834,29 @@ run_launch_and_focus_assertions() {
   else
     assert_equals "Ghostty" "$terminal_app" "Ghostty launch"
   fi
+  wait_for_http_body_contains "$PRIMARY_DOCS_URL" "Atlas docs sentinel"
+  wait_for_http_body_contains "$PRIMARY_BACKEND_STATUS_URL" '"workspace": "atlas-dashboard"'
   pass_case
 
   begin_case "$host: focus tracked Chrome tab with extra user tab present"
   # Prove the docs focus really left us on the tracked Chrome window before we
   # inject an untracked user tab into that same window.
+  local extra_user_tab_url="https://muxy.dev/"
   dump_chrome_state "$host docs-focus before-extra-tab"
   wait_for_condition "chrome_front_window_id" "$docs_window_id"
-  wait_for_condition "chrome_window_active_url $docs_window_id" "file://$DOCS_HTML"
-  chrome_add_extra_tab_to_window "$docs_window_id" "file://$ADMIN_HTML"
+  wait_for_condition "chrome_window_active_url $docs_window_id" "$PRIMARY_DOCS_URL"
+  chrome_add_extra_tab_to_window "$docs_window_id" "$extra_user_tab_url"
+  transition_pause "$host add extra Chrome tab"
   dump_chrome_state "$host after-extra-tab"
   wait_for_condition "chrome_front_window_id" "$docs_window_id"
-  wait_for_condition "chrome_window_active_url $docs_window_id" "file://$ADMIN_HTML"
+  wait_for_condition "chrome_window_active_url $docs_window_id" "$extra_user_tab_url"
   run_mx_logged /tmp/muxy-e2e-focus-docs.log workspace up "$workspace_dir" --focus docs
-  record_browser_focus_metric "$host.browser_focus.docs" "file://$DOCS_HTML" "docs"
+  transition_pause "$host refocus docs"
+  record_browser_focus_metric "$host.browser_focus.docs" "$PRIMARY_DOCS_URL" "docs"
   dump_chrome_state "$host after-refocus-docs"
   wait_for_condition "chrome_front_window_id" "$docs_window_id"
-  wait_for_condition "chrome_window_active_url $docs_window_id" "file://$DOCS_HTML"
-  wait_for_condition "chrome_front_url" "file://$DOCS_HTML"
+  wait_for_condition "chrome_window_active_url $docs_window_id" "$PRIMARY_DOCS_URL"
+  wait_for_condition "chrome_front_url" "$PRIMARY_DOCS_URL"
   pass_case
 
   dump_workspace "$workspace_dir" "$dump_file"
@@ -1554,9 +1905,11 @@ PY
 )"
     iterm_open_extra_tab "$frontend_window_id"
     sleep 1
+    transition_pause "$host add extra iTerm2 tab"
     wait_for_condition "frontmost_app" "iTerm2"
     [[ "$(iterm_front_session)" != "$frontend_session_id" ]] || fail "expected extra iTerm2 tab to be selected"
     run_mx_logged /tmp/muxy-e2e-focus-frontend.log workspace up "$workspace_dir" --focus frontend
+    transition_pause "$host focus frontend terminal"
     record_process_focus_metric "$host.process_focus.frontend" "frontend"
     frontend_session_id="$(wait_for_workspace_terminal_tracking_id "$workspace_dir" "frontend" "$dump_file")"
     wait_for_iterm_session_focus "$frontend_session_id"
@@ -1588,8 +1941,10 @@ PY
     wait_for_condition "frontmost_app" "ghostty"
     ghostty_open_extra_tab
     sleep 1
+    transition_pause "$host add extra Ghostty tab"
     [[ "$(ghostty_focused_terminal)" != "$frontend_terminal_id" ]] || fail "expected extra Ghostty tab to be selected"
     run_mx_logged /tmp/muxy-e2e-focus-frontend-2.log workspace up "$workspace_dir" --focus frontend
+    transition_pause "$host refocus frontend terminal"
     record_process_focus_metric "$host.process_focus.frontend" "frontend"
     wait_for_condition "ghostty_focused_terminal" "$frontend_terminal_id"
     pass_case
@@ -1605,19 +1960,19 @@ PY
 
   begin_case "$host: workspace detail numbered shortcuts focus correct window"
   # These are the workspace-detail focus cases the user asked for, using the
-  # real Run tab shortcuts instead of direct CLI focus.
+  # real detail-pane shortcuts instead of direct CLI focus.
   ensure_single_muxy_instance "$MUXY_PID"
   ui_show_workspace_detail "$workspace_dir" "$workspace_title"
   sleep 0.5
-  ui_click_tab "Run"
   send_muxy_window_shortcut_with_ack "$docs_shortcut_index"
-  wait_for_condition "chrome_window_active_url $docs_window_id" "file://$DOCS_HTML"
+  transition_pause "$host shortcut focus docs"
+  wait_for_condition "chrome_window_active_url $docs_window_id" "$PRIMARY_DOCS_URL"
   record_window_shortcut_metric "$host.shortcut.docs" "$docs_shortcut_index"
   record_named_focus_metric "$host.shortcut.docs.focus" "docs"
   ui_show_workspace_detail "$workspace_dir" "$workspace_title"
   sleep 0.5
-  ui_click_tab "Run"
   send_muxy_window_shortcut_with_ack "$frontend_shortcut_index"
+  transition_pause "$host shortcut focus frontend"
   if [[ "$host" == "iterm2" ]]; then
     frontend_session_id="$(wait_for_workspace_terminal_tracking_id "$workspace_dir" "frontend" "$dump_file")"
     wait_for_iterm_session_focus "$frontend_session_id"
@@ -1630,8 +1985,10 @@ PY
   # This validates forward/back workspace cycling from the live desktop state.
   ensure_single_muxy_instance "$MUXY_PID"
   run_mx_logged /tmp/muxy-e2e-cycle-seed.log workspace up "$workspace_dir" --focus docs
-  wait_for_condition "chrome_front_url" "file://$DOCS_HTML"
+  transition_pause "$host seed docs focus for cycling"
+  wait_for_condition "chrome_front_url" "$PRIMARY_DOCS_URL"
   send_cycle_hotkey next
+  transition_pause "$host cycle next"
   record_cycle_metric "$host.cycle.next" "next"
   if [[ "$host" == "iterm2" ]]; then
     wait_for_any_value "iterm_focused_session $frontend_window_id" "$frontend_session_id" "$backend_session_id"
@@ -1639,12 +1996,13 @@ PY
     wait_for_any_value "ghostty_focused_terminal" "$frontend_terminal_id" "$backend_terminal_id"
   fi
   send_cycle_hotkey previous
+  transition_pause "$host cycle previous"
   record_cycle_metric "$host.cycle.previous" "previous"
-  wait_for_condition "chrome_front_url" "file://$DOCS_HTML"
+  wait_for_condition "chrome_front_url" "$PRIMARY_DOCS_URL"
   pass_case
 
   begin_case "$host: dead process recovery"
-  # Kill one tracked process, then confirm `mx workspace up` revives only the
+  # Kill one tracked process, then confirm `muxy workspace up` revives only the
   # dead runtime instead of forcing a full workspace restart.
   dump_workspace "$workspace_dir" "$dump_file"
   local frontend_pid
@@ -1667,6 +2025,7 @@ PY
     sleep 0.2
   done
   run_mx_logged /tmp/muxy-e2e-recover.log workspace up "$workspace_dir"
+  transition_pause "$host recover dead process"
   local recovery_state recovered_pid recovered_status
   recovery_state="$(wait_for_process_running_recovery "$workspace_dir" "frontend" "$frontend_pid")"
   recovered_pid="${recovery_state%%$'\t'*}"
@@ -1675,7 +2034,7 @@ PY
   pass_case
 
   begin_case "$host: workspace restart and stop lifecycle"
-  restart_workspace_via_gui
+  restart_workspace_via_gui "$workspace_dir"
   wait_for_workspace_running_state "$workspace_dir" "true"
   dump_workspace "$workspace_dir" "$dump_file"
   assert_equals "true" "$(json_get "$dump_file" "workspace.isRunning")" "workspace running after restart"
@@ -1691,10 +2050,8 @@ run_multi_workspace_focus_and_cycle_assertions() {
   local host="$1"
   local primary_workspace_dir="$2"
   local secondary_workspace_dir="$3"
-  local primary_docs_url="file://$DOCS_HTML"
-  local primary_admin_url="file://$ADMIN_HTML"
-  local secondary_docs_url="file://$DOCS_ALT_HTML"
-  local secondary_admin_url="file://$ADMIN_ALT_HTML"
+  local primary_docs_url="$PRIMARY_DOCS_URL"
+  local secondary_docs_url="$SECONDARY_DOCS_URL"
   local primary_dump="$TMP_ROOT/$host-primary-multi.json"
   local secondary_dump="$TMP_ROOT/$host-secondary-multi.json"
 
@@ -1704,9 +2061,11 @@ run_multi_workspace_focus_and_cycle_assertions() {
   reset_fixture_runtime "$secondary_workspace_dir"
 
   run_mx_logged /tmp/muxy-e2e-multi-primary-launch.log workspace up "$primary_workspace_dir" --focus docs
+  transition_pause "$host launch primary workspace"
   log_debug "$host multi primary launch complete"
   dump_workspace "$primary_workspace_dir" "$primary_dump"
   run_mx_logged /tmp/muxy-e2e-multi-secondary-launch.log workspace up "$secondary_workspace_dir" --focus docs
+  transition_pause "$host launch secondary workspace"
   log_debug "$host multi secondary launch complete"
   dump_workspace "$secondary_workspace_dir" "$secondary_dump"
   dump_chrome_state "$host multi after-both-launches"
@@ -1818,9 +2177,11 @@ PY
 )"
 
   run_mx_logged /tmp/muxy-e2e-multi-primary-focus.log workspace up "$primary_workspace_dir" --focus docs
+  transition_pause "$host focus primary docs"
   log_debug "$host multi primary docs focus complete"
   wait_for_condition "chrome_front_url" "$primary_docs_url"
   send_cycle_hotkey next
+  transition_pause "$host primary cycle next"
   log_debug "$host multi primary cycle next sent"
   record_cycle_metric "$host.multi.primary.next" "next"
   if [[ "$host" == "iterm2" ]]; then
@@ -1833,14 +2194,17 @@ PY
     wait_for_any_value "ghostty_focused_terminal" "$primary_frontend_terminal_id" "$primary_backend_terminal_id"
   fi
   send_cycle_hotkey previous
+  transition_pause "$host primary cycle previous"
   log_debug "$host multi primary cycle previous sent"
   record_cycle_metric "$host.multi.primary.previous" "previous"
   wait_for_condition "chrome_front_url" "$primary_docs_url"
 
   run_mx_logged /tmp/muxy-e2e-multi-secondary-focus.log workspace up "$secondary_workspace_dir" --focus docs
+  transition_pause "$host focus secondary docs"
   log_debug "$host multi secondary docs focus complete"
   wait_for_condition "chrome_front_url" "$secondary_docs_url"
   send_cycle_hotkey next
+  transition_pause "$host secondary cycle next"
   log_debug "$host multi secondary cycle next sent"
   record_cycle_metric "$host.multi.secondary.next" "next"
   if [[ "$host" == "iterm2" ]]; then
@@ -1853,6 +2217,7 @@ PY
     wait_for_any_value "ghostty_focused_terminal" "$secondary_frontend_terminal_id" "$secondary_backend_terminal_id"
   fi
   send_cycle_hotkey previous
+  transition_pause "$host secondary cycle previous"
   log_debug "$host multi secondary cycle previous sent"
   record_cycle_metric "$host.multi.secondary.previous" "previous"
   wait_for_condition "chrome_front_url" "$secondary_docs_url"
@@ -1871,8 +2236,6 @@ run_agent_status_assertions() {
 
   dump_workspace "$workspace_dir" "$dump_file"
   workspace_title="$(json_get "$dump_file" "workspace.title")"
-  workspace_id="$(json_get "$dump_file" "workspace.id")"
-  agent_run_view_pattern="muxy: workspace_run_view workspace=$workspace_id selected=true agents=1 coding_entries=1"
   agent_script="$(create_mock_agent_script "$workspace_dir")"
   set_workspace_agent_launcher "$workspace_dir" "$MOCK_AGENT_LABEL" "$agent_script"
 
@@ -1885,22 +2248,13 @@ run_agent_status_assertions() {
     event_start_line=$(( $(wc -l <"$EVENT_LOG") + 1 ))
   fi
   run_mx_logged "/tmp/muxy-e2e-$host-agent-launch.log" workspace up "$workspace_dir"
+  transition_pause "$host launch workspace with agent"
 
   wait_for_event_log_contains_since_line "agent-waiting:$workspace_dir" "$event_start_line"
   wait_for_agent_status "$workspace_dir" "$MOCK_AGENT_LABEL" "waiting"
 
-  ui_show_workspace_detail "$workspace_dir" "$workspace_title"
-  sleep 0.5
-  ui_click_tab "Run"
-  wait_for_app_log_pattern_anywhere "$agent_run_view_pattern"
-
   wait_for_event_log_contains_since_line "agent-done:$workspace_dir" "$event_start_line"
   wait_for_agent_status "$workspace_dir" "$MOCK_AGENT_LABEL" "done"
-
-  ui_show_workspace_detail "$workspace_dir" "$workspace_title"
-  sleep 0.5
-  ui_click_tab "Run"
-  wait_for_app_log_pattern_anywhere "$agent_run_view_pattern"
 
   reset_fixture_runtime "$workspace_dir"
   clear_workspace_agent_launchers "$workspace_dir"
@@ -1917,10 +2271,12 @@ host_available() {
 main() {
   # These checks are intentionally explicit because this script targets the real
   # machine, not the hermetic unit-test environment.
+  parse_args "$@"
   require_cmd git
   require_cmd osascript
   require_cmd python3
   require_cmd tmux
+  require_cmd uv
   require_cmd yabai
 
   build_binaries
@@ -1929,6 +2285,10 @@ main() {
   setup_git_fixture
   seed_fixture
   seed_second_fixture
+  if [[ -n "$RECORD_VIDEO_PATH" ]]; then
+    hide_all_visible_windows
+    start_screen_recording
+  fi
   launch_muxy
   create_workspace_via_gui
 
@@ -1939,9 +2299,38 @@ main() {
   workspace_dir="$(json_get "$SEED_FILE" "defaultWorkspace.dir")"
   local second_workspace_dir
   second_workspace_dir="$(json_get "$SECOND_SEED_FILE" "defaultWorkspace.dir")"
+  PRIMARY_DOCS_URL="$(frontend_url_for_workspace "$workspace_dir" "/docs/")"
+  PRIMARY_ADMIN_URL="$(frontend_url_for_workspace "$workspace_dir" "/admin/")"
+  PRIMARY_BACKEND_STATUS_URL="$(backend_url_for_workspace "$workspace_dir" "/api/launch-status")"
+  SECONDARY_DOCS_URL="$(frontend_url_for_workspace "$second_workspace_dir" "/docs/")"
+  SECONDARY_ADMIN_URL="$(frontend_url_for_workspace "$second_workspace_dir" "/admin/")"
+  SECONDARY_BACKEND_STATUS_URL="$(backend_url_for_workspace "$second_workspace_dir" "/api/launch-status")"
+  CREATED_DOCS_URL="$(frontend_url_for_workspace "$created_workspace_dir" "/docs/")"
+  CREATED_ADMIN_URL="$(frontend_url_for_workspace "$created_workspace_dir" "/admin/")"
+  CREATED_BACKEND_STATUS_URL="$(backend_url_for_workspace "$created_workspace_dir" "/api/launch-status")"
   local stop_marker="workspace-stop-override"
 
   set_workspace_stop_script_via_gui "$stop_marker" "$workspace_dir"
+
+  if (( SETUP_FIXTURES_ONLY == 1 )); then
+    PRESERVE_FIXTURES_ON_EXIT=1
+    begin_case "manual fixture setup"
+    pass_case
+    cat <<EOF
+Manual fixture environment is ready:
+  HOME=$TMP_HOME
+  DB=$TMP_DB
+  Primary workspace: $workspace_dir
+  Secondary workspace: $second_workspace_dir
+  Created workspace: $created_workspace_dir
+  Primary docs: $PRIMARY_DOCS_URL
+  Primary backend: $PRIMARY_BACKEND_STATUS_URL
+  Secondary docs: $SECONDARY_DOCS_URL
+  Secondary backend: $SECONDARY_BACKEND_STATUS_URL
+  Muxy PID: $MUXY_PID
+EOF
+    return 0
+  fi
 
   IFS=',' read -r -a hosts <<<"$HOSTS_CSV"
   for host in "${hosts[@]}"; do

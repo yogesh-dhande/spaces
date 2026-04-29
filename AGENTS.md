@@ -4,22 +4,23 @@
 - Use this file for coding workflow, verification, and implementation guardrails.
 - Put product behavior in `apps/macos/spec.md`.
 - Put data flow, persistence, and module structure in `apps/macos/docs/architecture.md`.
+- Put UI design and interaction guidelines in `design.md`.
 - Put repository development and deploy commands in `README.md`.
 
 ## Product Constraints
 - `Muxy` is a macOS Swift app for orchestration of coding tools
-- The CLI is named `mx`.
+- The CLI is named `muxy`.
 - Workspaces map to captured window sets managed via yabai.
 - Use yabai as the single source of truth for window IDs.
 - Avoid window-level automation outside yabai
 - Any project setting used during workspace creation or launch must be overridable per workspace after creation.
-- Anything configurable in the GUI must also be configurable via `mx`.
+- Anything configurable in the GUI must also be configurable via `muxy`.
 
 ## Coding Agent Workflow
-- Always start by ensuring a Muxy workspace exists by running `~/projects/muxy/apps/macos/.build/debug/mx workspace import --title [text] --tooltip [text]` from the project root.
+- Always start by ensuring a Muxy workspace exists by running `~/projects/muxy/apps/macos/.build/debug/muxy workspace import --title [text] --tooltip [text]` from the project root.
 - Before manually launching a new Muxy app instance for debugging or profiling, close any existing Muxy instances so only one global hotkey listener is active.
-- When blocked on user input or permissions, run `~/projects/muxy/apps/macos/.build/debug/mx agent event --type waiting` before asking.
-- When changes are ready for review, first run `~/projects/muxy/apps/macos/.build/debug/mx workspace update --tooltip [text]`, then run `~/projects/muxy/apps/macos/.build/debug/mx workspace up --restart`.
+- When blocked on user input or permissions, run `~/projects/muxy/apps/macos/.build/debug/muxy agent event --type waiting` before asking.
+- When changes are ready for review, first run `~/projects/muxy/apps/macos/.build/debug/muxy workspace update --tooltip [text]`, then run `~/projects/muxy/apps/macos/.build/debug/muxy workspace up --restart`.
 
 ## Verification Rules
 - Always run lint and build before finalizing macOS app changes.
@@ -27,13 +28,15 @@
 - Whenever `scripts/coverage.sh` is run, report the overall coverage percentage.
 - Whenever `scripts/coverage.sh` is run, also report module-level coverage percentages for major modules such as `streamctl`, `gui`, and `appctl`.
 - Always consider adding or expanding tests before finalizing code changes.
-- When fixing a bug, reproduce it first using the real system, `~/projects/muxy/apps/macos/.build/debug/mx` cli, and/or database inspection when practical, then add a test, implement the fix, and confirm both the test and the real workflow.
+- When fixing a bug, reproduce it first using the real system, `~/projects/muxy/apps/macos/.build/debug/muxy` cli, and/or database inspection when practical, then add a test, implement the fix, and confirm both the test and the real workflow.
 - When running `git commit` via Codex, allow at least a 10-minute timeout so pre-commit checks can finish.
 
 ## Documentation Rules
 - Keep docs short and non-overlapping.
+- Treat `README.md`, `apps/macos/spec.md`, `apps/macos/docs/architecture.md`, and `design.md` as current-state references, not changelogs; avoid temporal wording like "now", "previously", "new", or "changed" when describing the intended steady state.
 - Update `apps/macos/spec.md` when UX or user-visible behavior changes.
 - Update `apps/macos/docs/architecture.md` when data flow, persistence, or implementation structure changes.
+- Update `design.md` when the visual system, reusable interaction patterns, or UI styling guidance changes.
 - Update `apps/macos/README.md` when development or release workflow changes.
 - Update `apps/web/app/docs/content.ts` when docs navigation or summaries need to reflect new product docs.
 - When behavior is added through the CLI, update CLI help and architecture docs in the same change.
@@ -46,6 +49,7 @@
 
 ## GUI Rules
 - UI should feel modern and compact.
+- Follow `design.md` when adding or updating UI.
 - Use icons for obvious actions such as add or remove.
 - Use text labels for actions that are not obvious.
 - Use icons instead of text for status where practical.

@@ -1,0 +1,6 @@
+{
+  "workspace": "harbor-ops",
+  "status": "watching",
+  "queue_latency_ms": 128,
+  "next_action": "Hold rollback notes ready while triaging retry spikes."
+}

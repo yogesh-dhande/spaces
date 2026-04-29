@@ -79,18 +79,6 @@ http://localhost:$FRONTEND_PORT`}</code>
 http://localhost:$API_PORT/admin`}</code>
         </pre>
 
-        <h3 className="mt-4 text-sm font-semibold text-foreground">Status Checks</h3>
-        <p className={prose}>
-          Add two status checks. Muxy treats one entry as one command, so separate entries let you tell frontend, backend, and integration failures apart.
-        </p>
-        <pre className={code}>
-          <code>{`# frontend status check
-curl -fsS http://localhost:$FRONTEND_PORT`}</code>
-        </pre>
-        <pre className={code}>
-          <code>{`# backend status check
-curl -fsS http://localhost:$API_PORT/health`}</code>
-        </pre>
       </article>
 
       <Link

@@ -2,6 +2,8 @@ import type { Metadata } from "next";
 import { DocsShell } from "../components/docs-shell";
 import Link from "next/link";
 
+const githubReleasesURL = "https://github.com/yogesh-dhande/spaces/releases/latest";
+
 export const metadata: Metadata = {
   title: "Installation & Setup",
   description:
@@ -22,8 +24,10 @@ export default function InstallationDocsPage() {
         </p>
         <p className="mt-3">
           <Link
-            href="/releases/latest"
+            href={githubReleasesURL}
             className="inline-flex rounded-full border border-line px-4 py-2 text-sm font-semibold transition-colors hover:border-accent hover:text-accent"
+            target="_blank"
+            rel="noopener noreferrer"
           >
             Download Latest Release
           </Link>
@@ -43,7 +47,7 @@ export default function InstallationDocsPage() {
             3. Drag <code className="rounded bg-background-soft px-1.5 py-0.5 text-xs">Muxy.app</code> to your <strong>Applications</strong> folder.
           </li>
           <li>
-            4. Double-click <code className="rounded bg-background-soft px-1.5 py-0.5 text-xs">Install mx CLI</code> in the DMG to install the <code className="rounded bg-background-soft px-1.5 py-0.5 text-xs">mx</code> command.
+            4. Double-click <code className="rounded bg-background-soft px-1.5 py-0.5 text-xs">Install muxy CLI</code> in the DMG to install the <code className="rounded bg-background-soft px-1.5 py-0.5 text-xs">muxy</code> command.
           </li>
           <li>
             5. Eject the DMG.
@@ -87,7 +91,7 @@ export default function InstallationDocsPage() {
           Confirm the CLI and GUI are working:
         </p>
         <pre className="mt-3 rounded-lg bg-background-soft p-3 text-xs leading-6">
-{`mx --version
+{`muxy --version
 open -a Muxy`}
         </pre>
         <p className="mt-2 text-sm leading-7 text-foreground-soft">
@@ -98,7 +102,7 @@ open -a Muxy`}
       <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
         <h2 className="text-2xl font-semibold tracking-tight">Updates</h2>
         <p className="mt-2 text-sm leading-7 text-foreground-soft">
-          Muxy checks for updates on its own. When a new version is available, you can install it from inside the app.
+          Muxy checks GitHub Releases on its own. When a new version is available, you can install it from inside the app or open the release page directly.
         </p>
       </article>
 
@@ -109,7 +113,7 @@ open -a Muxy`}
         </p>
         <pre className="mt-3 rounded-lg bg-background-soft p-3 text-xs leading-6">
 {`rm -rf /Applications/Muxy.app
-rm -f /usr/local/bin/mx ~/.local/bin/mx
+rm -f /usr/local/bin/muxy ~/.local/bin/muxy
 rm -rf ~/.muxy ~/muxy`}
         </pre>
         <p className="mt-2 text-sm leading-7 text-foreground-soft">

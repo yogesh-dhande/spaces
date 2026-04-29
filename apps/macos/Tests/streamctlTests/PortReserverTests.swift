@@ -1,3 +1,4 @@
+import Darwin
 import XCTest
 
 @testable import streamctl
@@ -80,5 +81,64 @@ final class PortReserverTests: XCTestCase {
         // Even when bind fails, the workspace is still tracked (with an empty fd list).
         XCTAssertTrue(PortReserver.shared.reservedWorkspaceIDs().contains(wsID))
         PortReserver.shared.releasePorts(workspaceID: wsID)
+    }
+
+    func testReleasePortsLetsAnotherSocketBindPreviouslyReservedPort() throws {
+        let wsID = "\(prefix)-handoff"
+        let port = try temporaryBoundPort()
+        PortReserver.shared.reservePorts(workspaceID: wsID, ports: [port])
+
+        XCTAssertEqual(bindSocket(to: port), -1)
+
+        PortReserver.shared.releasePorts(workspaceID: wsID)
+
+        let fd = bindSocket(to: port)
+        XCTAssertGreaterThanOrEqual(fd, 0)
+        if fd >= 0 { Darwin.close(fd) }
+    }
+
+    private func temporaryBoundPort() throws -> Int {
+        let fd = socket(AF_INET, SOCK_STREAM, 0)
+        XCTAssertGreaterThanOrEqual(fd, 0)
+        guard fd >= 0 else { throw XCTSkip("Failed to allocate socket.") }
+        defer { Darwin.close(fd) }
+
+        var addr = sockaddr_in()
+        addr.sin_family = sa_family_t(AF_INET)
+        addr.sin_port = in_port_t(0).bigEndian
+        addr.sin_addr.s_addr = INADDR_ANY
+        let bindResult = withUnsafePointer(to: &addr) { addrPtr in
+            addrPtr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockaddrPtr in
+                Darwin.bind(fd, sockaddrPtr, socklen_t(MemoryLayout<sockaddr_in>.size))
+            }
+        }
+        XCTAssertEqual(bindResult, 0)
+
+        var boundAddress = sockaddr_in()
+        var length = socklen_t(MemoryLayout<sockaddr_in>.size)
+        let nameResult = withUnsafeMutablePointer(to: &boundAddress) { addrPtr in
+            addrPtr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockaddrPtr in getsockname(fd, sockaddrPtr, &length) }
+        }
+        XCTAssertEqual(nameResult, 0)
+        return Int(UInt16(bigEndian: boundAddress.sin_port))
+    }
+
+    private func bindSocket(to port: Int) -> Int32 {
+        let fd = socket(AF_INET, SOCK_STREAM, 0)
+        guard fd >= 0 else { return -1 }
+        var addr = sockaddr_in()
+        addr.sin_family = sa_family_t(AF_INET)
+        addr.sin_port = in_port_t(port).bigEndian
+        addr.sin_addr.s_addr = INADDR_ANY
+        let result = withUnsafePointer(to: &addr) { addrPtr in
+            addrPtr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockaddrPtr in
+                Darwin.bind(fd, sockaddrPtr, socklen_t(MemoryLayout<sockaddr_in>.size))
+            }
+        }
+        if result != 0 {
+            Darwin.close(fd)
+            return -1
+        }
+        return fd
     }
 }

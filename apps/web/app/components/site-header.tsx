@@ -2,6 +2,8 @@ import Image from "next/image";
 import Link from "next/link";
 import MuxyLogo from "../muxy.svg";
 
+const githubReleasesURL = "https://github.com/yogesh-dhande/spaces/releases/latest";
+
 const navItems = [
   { href: "/#features", label: "Features" },
   { href: "/#faq", label: "FAQ" },
@@ -52,7 +54,7 @@ export function SiteHeader() {
             Docs
           </Link>
           <a
-            href="/releases/latest"
+            href={githubReleasesURL}
             target="_blank"
             rel="noopener noreferrer"
             className="btn-primary inline-flex items-center gap-1.5 rounded-full px-4 py-2 text-sm font-semibold shadow-[0_6px_22px_-14px_color-mix(in_oklab,var(--ink)_60%,transparent)]"

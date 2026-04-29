@@ -47,7 +47,7 @@ import streamctl
         rows.compactMap { row in
             let name = row.nameField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !name.isEmpty else { return nil }
-            return PortDefinition(name: name)
+            return PortDefinition(id: row.definitionID, name: name)
         }
     }
 
@@ -55,7 +55,10 @@ import streamctl
         let row = PortRowRefs()
         rows.append(row)
         rowsStack.addArrangedSubview(row.container)
-        if let definition { row.nameField.stringValue = definition.name }
+        if let definition {
+            row.definitionID = definition.id
+            row.nameField.stringValue = definition.name
+        }
         row.onChange = { [weak self] in self?.onDirty?() }
         row.onRemove = { [weak self, weak row] in
             guard let self, let row else { return }
@@ -83,6 +86,7 @@ import streamctl
         let container = NSStackView()
         let nameField = NSTextField(string: "")
         let removeButton: NSButton
+        var definitionID = UUID().uuidString
         var onRemove: (() -> Void)?
         var onChange: (() -> Void)?
 

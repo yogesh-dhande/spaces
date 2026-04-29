@@ -1,5 +1,6 @@
 import AppKit
 import Testing
+import streamctl
 
 @testable import gui
 
@@ -43,39 +44,63 @@ import Testing
                 selectedWorkspaceID: "workspace-1", showingDashboard: false, showingSettings: true, workspaceExists: true))
     }
 
-    @Test func restoredWorkspaceDetailTabIdentifierDefaultsToRunForUnknownSelection() {
-        #expect(AppKitController.restoredWorkspaceDetailTabIdentifier(savedIdentifier: nil) == "run")
-        #expect(AppKitController.restoredWorkspaceDetailTabIdentifier(savedIdentifier: "run") == "run")
-        #expect(AppKitController.restoredWorkspaceDetailTabIdentifier(savedIdentifier: "unknown") == "run")
-    }
-
-    @Test func restoredWorkspaceDetailTabIdentifierKeepsEnvAndSettingsTabs() {
-        #expect(AppKitController.restoredWorkspaceDetailTabIdentifier(savedIdentifier: "env") == "env")
-        #expect(AppKitController.restoredWorkspaceDetailTabIdentifier(savedIdentifier: "settings") == "settings")
-    }
-
     @Test func configuredBrowserSessionsAlsoShowForStoppedWorkspaces() {
         #expect(AppKitController.shouldShowConfiguredBrowserSessions(workspaceIsRunning: true))
         #expect(AppKitController.shouldShowConfiguredBrowserSessions(workspaceIsRunning: false))
     }
 
-    @MainActor @Test func selectedWorkspaceDetailTabIdentifierFindsNestedSelectedTab() {
-        let container = NSView()
-        let nested = NSView()
-        let tabs = NSTabView()
-        let runTab = NSTabViewItem(identifier: "run")
-        runTab.label = "Run"
-        runTab.view = NSView()
-        let settingsTab = NSTabViewItem(identifier: "settings")
-        settingsTab.label = "Settings"
-        settingsTab.view = NSView()
-        tabs.addTabViewItem(runTab)
-        tabs.addTabViewItem(settingsTab)
-        tabs.selectTabViewItem(settingsTab)
-        nested.addSubview(tabs)
-        container.addSubview(nested)
+    @MainActor @Test func browserSessionShortcutMatchingFallsBackToResolvedURLForTemplatedSession() {
+        var resolvedCursor = 0
+        let matchedURL = AppKitController.matchedBrowserSessionShortcutURL(
+            configuredSession: BrowserSession(name: "frontend url", url: "http://localhost:$FRONTEND_PORT"),
+            rawURL: "http://localhost:$FRONTEND_PORT", resolvedSessions: [BrowserSession(name: "frontend url", url: "http://localhost:3000")],
+            resolvedSessionCursor: &resolvedCursor, shortcutIndicesByURL: ["http://localhost:3000": 1])
 
-        #expect(AppKitController.selectedWorkspaceDetailTabIdentifier(in: container) == "settings")
+        #expect(matchedURL == "http://localhost:3000")
+        #expect(resolvedCursor == 0, "Named match should not consume the sequential fallback cursor")
+    }
+
+    @MainActor @Test func browserSessionDisplayURLsPreferResolvedValues() {
+        let displayURLs = AppKitController.browserSessionDisplayURLs(
+            configuredSessions: [BrowserSession(name: "frontend url", url: "http://localhost:$FRONTEND_PORT")],
+            resolvedSessions: [BrowserSession(name: "frontend url", url: "http://localhost:3000")])
+
+        #expect(displayURLs == ["http://localhost:3000"])
+    }
+
+    @MainActor @Test func workspaceDetailSectionsKeepBrowserSessionsAheadOfCodingAgents() {
+        let processes = NSView()
+        let browserSessions = NSView()
+        let agentLaunchers = NSView()
+        let ports = NSView()
+        let stopScript = NSView()
+
+        let sections = AppKitController.orderedWorkspaceDetailSections(
+            processesSection: processes, browserSessionsSection: browserSessions, agentLaunchersSection: agentLaunchers, portsSection: ports,
+            stopScriptSection: stopScript)
+
+        #expect(sections.count == 5)
+        #expect(sections[0] === browserSessions)
+        #expect(sections[1] === processes)
+        #expect(sections[2] === agentLaunchers)
+        #expect(sections[3] === ports)
+        #expect(sections[4] === stopScript)
+    }
+
+    @Test func workspaceProcessStatusByNameReflectsRuntimeState() {
+        let statuses = AppKitController.workspaceProcessStatusByName([
+            RunningProcessRecord(
+                id: "running", workspaceID: "workspace", templateName: "web", command: "npm run dev", terminalApp: "iTerm2", windowID: 101,
+                terminalTrackingID: "session-web", itermTabIndex: nil, tmuxWindowID: nil, pid: 1, status: .running, logPath: nil, lastOutputAt: nil,
+                startedAt: nil, exitedAt: nil),
+            RunningProcessRecord(
+                id: "exited", workspaceID: "workspace", templateName: "worker", command: "npm run worker", terminalApp: "iTerm2", windowID: 102,
+                terminalTrackingID: "session-worker", itermTabIndex: nil, tmuxWindowID: nil, pid: nil, status: .exited, logPath: nil,
+                lastOutputAt: nil, startedAt: nil, exitedAt: nil),
+        ])
+
+        #expect(statuses["web"] == RowPrimitives.StatusKind.running)
+        #expect(statuses["worker"] == RowPrimitives.StatusKind.exited)
     }
 
 }

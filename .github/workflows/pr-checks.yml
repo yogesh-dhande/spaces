@@ -1,0 +1,57 @@
+name: PR Checks
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pr-checks-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: macos-15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Select Xcode
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: latest-stable
+
+      - name: Print Swift toolchain
+        run: |
+          xcode-select -p
+          xcrun swift --version
+          swift --version
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: apps/web/package-lock.json
+
+      - name: Install website dependencies
+        working-directory: apps/web
+        run: npm ci
+
+      - name: Resolve SwiftPM dependencies
+        run: scripts/swiftpm.sh package resolve
+
+      - name: Lint Swift sources
+        run: scripts/lint.sh
+
+      - name: Build macOS app and CLI
+        run: scripts/swiftpm.sh build
+
+      - name: Run Swift coverage suite
+        run: scripts/coverage.sh
+
+      - name: Build static website
+        working-directory: apps/web
+        run: npm run build

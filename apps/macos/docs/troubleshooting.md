@@ -28,12 +28,12 @@ yabai -m query --windows --window
 
 Register the current directory as a workspace:
 ```bash
-mx workspace import --title "debug" --tooltip "Local troubleshooting session"
+muxy workspace import --title "debug" --tooltip "Local troubleshooting session"
 ```
 
 Force a clean runtime restart:
 ```bash
-mx workspace up --restart
+muxy workspace up --restart
 ```
 
 ## Runtime Logs

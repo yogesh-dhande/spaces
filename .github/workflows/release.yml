@@ -24,15 +24,24 @@ jobs:
     runs-on: macos-15
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
+
+      - name: Select Xcode
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: latest-stable
+
+      - name: Print Swift toolchain
+        run: |
+          xcode-select -p
+          xcrun swift --version
+          swift --version
 
       - name: Resolve SwiftPM dependencies
-        working-directory: apps/macos
-        run: swift package resolve
+        run: scripts/swiftpm.sh package resolve
 
       - name: Build release
-        working-directory: apps/macos
-        run: swift build -c release
+        run: scripts/swiftpm.sh build -c release
 
       - name: Extract version from tag
         id: version
@@ -43,17 +52,18 @@ jobs:
           CODESIGN_IDENTITY: ${{ secrets.CODESIGN_IDENTITY }}
         run: |
           scripts/codesign.sh \
-            apps/macos/.build/release/Muxy \
-            apps/macos/.build/release/mx
+            apps/macos/.build/release/MuxyApp \
+            apps/macos/.build/release/muxy
 
       - name: Package DMG
         run: |
           scripts/create-dmg.sh \
-            apps/macos/.build/release/Muxy \
-            apps/macos/.build/release/mx \
+            apps/macos/.build/release/MuxyApp \
+            apps/macos/.build/release/muxy \
             ${{ steps.version.outputs.version }}
           dmg_name="Muxy-${{ steps.version.outputs.version }}.dmg"
           echo "DMG_NAME=$dmg_name" >> "$GITHUB_ENV"
+          echo "DMG_PATH=dist/releases/${{ steps.version.outputs.version }}/$dmg_name" >> "$GITHUB_ENV"
 
       - name: Notarize (optional)
         env:
@@ -62,28 +72,17 @@ jobs:
           APP_PASSWORD: ${{ secrets.APP_PASSWORD }}
         if: ${{ env.APPLE_ID != '' && env.TEAM_ID != '' && env.APP_PASSWORD != '' }}
         run: |
-          xcrun notarytool submit "$DMG_NAME" \
+          xcrun notarytool submit "$DMG_PATH" \
             --apple-id "$APPLE_ID" \
             --team-id "$TEAM_ID" \
             --password "$APP_PASSWORD" \
             --wait
-          xcrun stapler staple "$DMG_NAME"
-
-      - name: Install Firebase CLI
-        run: npm install -g firebase-tools
-
-      - name: Deploy to Firebase Hosting
-        env:
-          FIREBASE_TOKEN: ${{ secrets.FIREBASE_TOKEN }}
-        run: |
-          scripts/deploy-to-firebase.sh \
-            "$DMG_NAME" \
-            "${{ steps.version.outputs.version }}"
+          xcrun stapler staple "$DMG_PATH"
 
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "$GITHUB_REF_NAME" "$DMG_NAME" \
+          gh release create "$GITHUB_REF_NAME" "$DMG_PATH" \
             --title "Muxy ${{ steps.version.outputs.version }}" \
             --generate-notes

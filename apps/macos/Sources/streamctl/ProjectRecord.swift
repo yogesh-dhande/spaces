@@ -11,14 +11,13 @@ public struct ProjectRecord: Codable, Sendable {
     public var stopScript: String?
     public var ports: [PortDefinition]
     public var processes: [ProcessTemplate]
-    public var statusChecks: [StatusCheckDefinition]
     public var browserSessions: [BrowserSession]
     public var agentLaunchers: [AgentLauncher]
 
     public init(
         id: String, name: String, dir: String, isGitRepo: Bool, defaultBranch: String?, isCollapsed: Bool = false, setupScript: String? = nil,
-        stopScript: String? = nil, ports: [PortDefinition] = [], processes: [ProcessTemplate] = [], statusChecks: [StatusCheckDefinition] = [],
-        browserSessions: [BrowserSession] = [], agentLaunchers: [AgentLauncher] = []
+        stopScript: String? = nil, ports: [PortDefinition] = [], processes: [ProcessTemplate] = [], browserSessions: [BrowserSession] = [],
+        agentLaunchers: [AgentLauncher] = []
     ) {
         self.id = id
         self.name = name
@@ -30,7 +29,6 @@ public struct ProjectRecord: Codable, Sendable {
         self.stopScript = stopScript
         self.ports = ports
         self.processes = processes
-        self.statusChecks = statusChecks
         self.browserSessions = browserSessions
         self.agentLaunchers = agentLaunchers
     }

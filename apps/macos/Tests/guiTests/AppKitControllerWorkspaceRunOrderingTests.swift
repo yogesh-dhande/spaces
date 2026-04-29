@@ -274,6 +274,36 @@ import streamctl
         #expect(shortcutTargets.map { $0.agentWindow?.id } == ["configured", "adhoc"])
     }
 
+    @Test func workspaceDetailShortcutIndicesFollowLiveRuntimeOrder() {
+        let browserSessions = [BrowserSession(name: "docs", url: "http://localhost:3000")]
+        let configuredProcesses = [ProcessTemplate(name: "web", command: "npm run dev")]
+        let configuredAgentLaunchers = [AgentLauncher(name: "claude", command: "claude")]
+        let windows = [
+            WindowRecord(
+                id: "win-web", workspaceID: "workspace", app: "iTerm2", name: "web", detail: "npm run dev", targetURL: nil, windowID: 101,
+                terminalTrackingID: "session-web", itermTabIndex: nil, tmuxWindowID: nil, role: "terminal", orderIndex: 200, lastSeenAt: "now"),
+            WindowRecord(
+                id: "win-shell", workspaceID: "workspace", app: "iTerm2", name: nil, detail: "* zsh", targetURL: nil, windowID: 102,
+                terminalTrackingID: "session-shell", itermTabIndex: nil, tmuxWindowID: nil, role: "terminal", orderIndex: 201, lastSeenAt: "now"),
+        ]
+        let processes = [
+            RunningProcessRecord(
+                id: "process-web", workspaceID: "workspace", templateName: "web", command: "npm run dev", terminalApp: "iTerm2", windowID: 101,
+                terminalTrackingID: "session-web", itermTabIndex: nil, tmuxWindowID: nil, pid: 1, status: .running, logPath: nil, lastOutputAt: nil,
+                startedAt: nil, exitedAt: nil)
+        ]
+        let processEntries = AppKitController.orderedWorkspaceRunProcessEntries(
+            configuredProcesses: configuredProcesses, windows: windows, processes: processes, agentWindows: [])
+        let shortcutIndices = AppKitController.workspaceDetailShortcutIndices(
+            browserSessions: browserSessions, processEntries: processEntries,
+            processesByID: Dictionary(uniqueKeysWithValues: processes.map { ($0.id, $0) }), configuredAgentLaunchers: configuredAgentLaunchers,
+            agentWindows: [])
+
+        #expect(shortcutIndices.browserSessionsByURL["http://localhost:3000"] == 1)
+        #expect(shortcutIndices.processesByName["web"] == 2)
+        #expect(shortcutIndices.codingAgentsByName["claude"] == 4)
+    }
+
     @Test func resolvedCodingAgentEntriesKeepConfiguredSlotsBeforeAdHocAgents() {
         let configuredAgentLaunchers = [AgentLauncher(name: "claude", command: "claude"), AgentLauncher(name: "codex", command: "codex")]
         let agentWindows = [

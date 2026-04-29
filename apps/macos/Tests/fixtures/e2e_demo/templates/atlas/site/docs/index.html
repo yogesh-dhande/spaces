@@ -1,0 +1,176 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Atlas Docs</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #f4f1ea;
+      --panel: rgba(255, 255, 255, 0.9);
+      --ink: #1c242b;
+      --muted: #62717d;
+      --line: rgba(28, 36, 43, 0.1);
+      --accent: #0f766e;
+      --accent-soft: rgba(15, 118, 110, 0.12);
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: "SF Pro Text", "Inter", sans-serif;
+      color: var(--ink);
+      background:
+        radial-gradient(circle at top left, rgba(15, 118, 110, 0.16), transparent 32rem),
+        linear-gradient(180deg, #fbfaf7 0%, var(--bg) 100%);
+    }
+    .shell { max-width: 1180px; margin: 0 auto; padding: 40px 32px 56px; }
+    .topbar {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 28px;
+      color: var(--muted);
+      font-size: 14px;
+    }
+    .badge {
+      padding: 8px 12px;
+      border-radius: 999px;
+      background: var(--accent-soft);
+      color: var(--accent);
+      font-weight: 600;
+    }
+    .hero {
+      display: grid;
+      grid-template-columns: 1.2fr 0.8fr;
+      gap: 24px;
+      margin-bottom: 24px;
+    }
+    .card {
+      border: 1px solid var(--line);
+      border-radius: 24px;
+      background: var(--panel);
+      backdrop-filter: blur(16px);
+      box-shadow: 0 18px 40px rgba(28, 36, 43, 0.08);
+    }
+    .hero-copy { padding: 32px; }
+    h1 {
+      margin: 0 0 12px;
+      font-size: 44px;
+      line-height: 1.02;
+      letter-spacing: -0.04em;
+    }
+    p {
+      margin: 0;
+      font-size: 17px;
+      line-height: 1.6;
+      color: var(--muted);
+    }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 18px;
+      margin-top: 28px;
+    }
+    .tile {
+      padding: 18px;
+      border-radius: 18px;
+      background: rgba(255, 255, 255, 0.72);
+      border: 1px solid var(--line);
+    }
+    .tile strong {
+      display: block;
+      margin-bottom: 8px;
+      font-size: 14px;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: var(--accent);
+    }
+    .hero-side {
+      padding: 24px;
+      display: grid;
+      gap: 14px;
+      align-content: start;
+    }
+    .stat {
+      padding: 16px 18px;
+      border-radius: 18px;
+      background: rgba(15, 118, 110, 0.08);
+    }
+    .stat span {
+      display: block;
+      color: var(--muted);
+      font-size: 13px;
+      margin-bottom: 4px;
+    }
+    .stat strong {
+      font-size: 28px;
+      letter-spacing: -0.03em;
+    }
+    .docs-list { padding: 28px 32px; }
+    .docs-list h2 {
+      margin: 0 0 18px;
+      font-size: 22px;
+      letter-spacing: -0.03em;
+    }
+    .row {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 16px 0;
+      border-top: 1px solid var(--line);
+    }
+    .row:first-of-type { border-top: 0; }
+    .row b { display: block; margin-bottom: 4px; }
+    .row small { color: var(--muted); font-size: 13px; }
+    .pill {
+      padding: 6px 10px;
+      border-radius: 999px;
+      background: #ffffff;
+      border: 1px solid var(--line);
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 600;
+    }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <div class="topbar">
+      <div>Atlas Platform · Product docs</div>
+      <div class="badge">Atlas docs sentinel</div>
+    </div>
+    <section class="hero">
+      <div class="card hero-copy">
+        <h1>Launch the Customer Dashboard without losing the operator context.</h1>
+        <p>Atlas Docs centralizes release checklists, environment conventions, workspace recipes, and incident handoff notes for the launch team.</p>
+        <div class="grid">
+          <div class="tile"><strong>Quickstart</strong>Workspace launch presets, browser sessions, and terminal mappings.</div>
+          <div class="tile"><strong>Operations</strong>Runbooks for handoff, rollback, and on-call escalations.</div>
+          <div class="tile"><strong>Release</strong>Ship-room checklist for dashboard cutovers and smoke tests.</div>
+        </div>
+      </div>
+      <div class="card hero-side">
+        <div class="stat"><span>Active workspaces</span><strong>12</strong></div>
+        <div class="stat"><span>Median launch time</span><strong>18s</strong></div>
+        <div class="stat"><span>Docs freshness</span><strong>Updated today</strong></div>
+      </div>
+    </section>
+    <section class="card docs-list">
+      <h2>Popular guides</h2>
+      <div class="row">
+        <div><b>Workspace templates for customer launch</b><small>Focus docs, frontend, and incident command windows in one flow.</small></div>
+        <div class="pill">7 min</div>
+      </div>
+      <div class="row">
+        <div><b>Browser session naming conventions</b><small>Use durable labels that map cleanly to `muxy workspace up --focus`.</small></div>
+        <div class="pill">4 min</div>
+      </div>
+      <div class="row">
+        <div><b>Operator handoff checklist</b><small>Capture release context before switching to the Harbor Ops workspace.</small></div>
+        <div class="pill">9 min</div>
+      </div>
+    </section>
+  </div>
+</body>
+</html>
