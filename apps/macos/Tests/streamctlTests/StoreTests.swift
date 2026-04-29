@@ -26,7 +26,7 @@ final class StoreTests: XCTestCase {
 
         _ = try SQLiteStore(path: dbURL.path)
 
-        let version = try readSingleInteger(dbURL: dbURL, sql: "SELECT version FROM schema_version")
+        let version = try readSingleInteger(dbURL: dbURL, sql: "SELECT current_version FROM migration_state")
         let workspaceColumns = try readTableColumns(dbURL: dbURL, table: "workspaces")
         let projectColumns = try readTableColumns(dbURL: dbURL, table: "projects")
         let workspaceSettingsColumns = try readTableColumns(dbURL: dbURL, table: "workspace_settings")
@@ -35,6 +35,7 @@ final class StoreTests: XCTestCase {
         let workspacePortColumns = try readTableColumns(dbURL: dbURL, table: "workspace_ports")
         let workspacePortDefinitionColumns = try readTableColumns(dbURL: dbURL, table: "workspace_port_definitions")
         let projectPortDefinitionColumns = try readTableColumns(dbURL: dbURL, table: "project_port_definitions")
+        let workspaceForeignKeys = try readSingleInteger(dbURL: dbURL, sql: "SELECT COUNT(*) FROM pragma_foreign_key_list('workspaces')")
         XCTAssertEqual(version, 2)
         XCTAssertTrue(workspaceColumns.contains("title"))
         XCTAssertTrue(workspaceColumns.contains("is_hidden"))
@@ -46,101 +47,48 @@ final class StoreTests: XCTestCase {
         XCTAssertTrue(workspacePortColumns.contains("definition_id"))
         XCTAssertTrue(workspacePortDefinitionColumns.contains("id"))
         XCTAssertTrue(projectPortDefinitionColumns.contains("id"))
-        XCTAssertTrue(try readTableColumns(dbURL: dbURL, table: "project_terminal_windows").isEmpty)
-        XCTAssertTrue(try readTableColumns(dbURL: dbURL, table: "workspace_terminal_windows").isEmpty)
+        XCTAssertEqual(workspaceForeignKeys, 1)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent("backups").path))
     }
 
-    // Tests older schemas are rejected with a reset instruction by arranging a representative v6 DB and asserting initialization fails clearly.
-    func testOlderSchemaIsRejectedWithResetInstruction() throws {
+    // Tests opening a current-version database is a no-op by arranging a fresh current DB and asserting no migration backup is created on reopen.
+    func testOpeningCurrentVersionDoesNotCreateMigrationBackup() throws {
         let root = try makeTempDirectory()
-        let dbURL = root.appendingPathComponent("v6.db")
-        try runSQLiteExec(
-            dbURL: dbURL,
-            sql: """
-                CREATE TABLE projects (
-                  id TEXT PRIMARY KEY,
-                  name TEXT NOT NULL,
-                  dir TEXT NOT NULL UNIQUE,
-                  is_git INTEGER NOT NULL,
-                  default_branch TEXT,
-                  is_collapsed INTEGER NOT NULL DEFAULT 0,
-                  setup_script TEXT,
-                  stop_script TEXT
-                );
-                CREATE TABLE project_terminal_windows (
-                  id TEXT PRIMARY KEY,
-                  project_id TEXT NOT NULL,
-                  name TEXT NOT NULL,
-                  command TEXT,
-                  order_index INTEGER NOT NULL
-                );
-                CREATE TABLE workspaces (
-                  id TEXT PRIMARY KEY,
-                  project_id TEXT NOT NULL,
-                  title TEXT NOT NULL,
-                  dir TEXT NOT NULL,
-                  dirname TEXT,
-                  branch TEXT,
-                  target_branch TEXT,
-                  is_default INTEGER NOT NULL,
-                  is_archived INTEGER NOT NULL,
-                  is_active INTEGER NOT NULL DEFAULT 1,
-                  is_running INTEGER NOT NULL,
-                  last_launched_at TEXT,
-                  tooltip TEXT,
-                  UNIQUE(project_id, title)
-                );
-                CREATE TABLE workspace_settings (
-                  workspace_id TEXT PRIMARY KEY,
-                  updated_at TEXT NOT NULL,
-                  stop_script TEXT,
-                  setup_status TEXT NOT NULL DEFAULT 'succeeded',
-                  setup_error TEXT,
-                  setup_started_at TEXT,
-                  setup_finished_at TEXT
-                );
-                CREATE TABLE workspace_status_checks (
-                  id TEXT PRIMARY KEY,
-                  workspace_id TEXT NOT NULL,
-                  name TEXT,
-                  process TEXT NOT NULL,
-                  command TEXT NOT NULL,
-                  interval INTEGER NOT NULL,
-                  timeout INTEGER NOT NULL,
-                  on_exit TEXT NOT NULL DEFAULT 'none',
-                  on_fail TEXT NOT NULL DEFAULT 'none',
-                  order_index INTEGER NOT NULL
-                );
-                CREATE TABLE workspace_terminal_windows (
-                  id TEXT PRIMARY KEY,
-                  workspace_id TEXT NOT NULL,
-                  name TEXT NOT NULL,
-                  command TEXT,
-                  order_index INTEGER NOT NULL
-                );
-                CREATE TABLE schema_version (version INTEGER NOT NULL);
-                INSERT INTO projects(id, name, dir, is_git, default_branch, is_collapsed, setup_script, stop_script)
-                VALUES ('project-1', 'Project', '/tmp/project', 0, '', 0, '', '');
-                INSERT INTO workspaces(id, project_id, title, dir, dirname, branch, target_branch, is_default, is_archived, is_active, is_running, last_launched_at, tooltip)
-                VALUES ('workspace-1', 'project-1', 'feature', '/tmp/project/feature', 'feature', 'feature', 'main', 0, 0, 1, 0, '', '');
-                INSERT INTO workspace_settings(workspace_id, updated_at, stop_script, setup_status, setup_error, setup_started_at, setup_finished_at)
-                VALUES ('workspace-1', '2026-01-01T00:00:00Z', 'echo stop', 'failed', 'boom', 'start', 'end');
-                INSERT INTO workspace_status_checks(id, workspace_id, name, process, command, interval, timeout, on_exit, on_fail, order_index)
-                VALUES ('workspace-check', 'workspace-1', 'api health', 'api', 'echo ok', 10, 3, 'none', 'restart', 0);
-                INSERT INTO project_terminal_windows(id, project_id, name, command, order_index)
-                VALUES ('project-term', 'project-1', 'dev', 'echo dev', 0);
-                INSERT INTO workspace_terminal_windows(id, workspace_id, name, command, order_index)
-                VALUES ('workspace-term', 'workspace-1', 'dev', 'echo dev', 0);
-                INSERT INTO schema_version(version) VALUES (6);
-                """)
+        let dbURL = root.appendingPathComponent("current.db")
 
-        XCTAssertThrowsError(try SQLiteStore(path: dbURL.path)) { error in
-            XCTAssertEqual(error.localizedDescription, "Unsupported database schema version 6. Remove ~/.muxy/muxy.db and recreate your workspaces.")
-        }
+        _ = try SQLiteStore(path: dbURL.path)
+        _ = try SQLiteStore(path: dbURL.path)
+
+        XCTAssertEqual(try readSingleInteger(dbURL: dbURL, sql: "SELECT current_version FROM migration_state"), 2)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent("backups").path))
     }
 
-    // Tests unsupported schema versions fail fast by arranging an older DB version and asserting initialization rejects it.
-    func testUnsupportedSchemaVersionFailsFast() throws {
+    // Tests a released v1 database migrates in place by arranging representative data and asserting v2 state, backup creation, and integrity validation.
+    func testSchemaV1MigratesToV2AndPreservesData() throws {
+        let root = try makeTempDirectory()
+        let dbURL = root.appendingPathComponent("migrating.db")
+        try createSchemaV1Fixture(dbURL: dbURL)
+
+        let store = try SQLiteStore(path: dbURL.path)
+
+        XCTAssertEqual(try readSingleInteger(dbURL: dbURL, sql: "SELECT current_version FROM migration_state"), 2)
+        XCTAssertEqual(try readSingleText(dbURL: dbURL, sql: "PRAGMA integrity_check"), "ok")
+        XCTAssertEqual(try readSingleInteger(dbURL: dbURL, sql: "SELECT COUNT(*) FROM pragma_foreign_key_list('workspace_processes')"), 1)
+        XCTAssertEqual(try store.projects().count, 1)
+        XCTAssertEqual(try store.project(id: "project-1")?.ports.first?.name, "API_PORT")
+        XCTAssertEqual(try store.workspace(id: "workspace-1")?.tooltip, "Feature tooltip")
+        XCTAssertEqual(try store.workspaceProcesses(workspaceID: "workspace-1").first?.name, "api")
+        XCTAssertEqual(try store.workspaceBrowserSessions(workspaceID: "workspace-1").first?.url, "https://example.com")
+        XCTAssertEqual(try store.agentWindows(workspaceID: "workspace-1").first?.label, "Codex")
+        XCTAssertEqual(try store.runningProcesses(workspaceID: "workspace-1").first?.terminalTrackingID, "session-1")
+
+        let backups = try FileManager.default.contentsOfDirectory(at: root.appendingPathComponent("backups"), includingPropertiesForKeys: nil)
+        XCTAssertEqual(backups.count, 1)
+        XCTAssertTrue(backups[0].lastPathComponent.contains("-v1-to-v2.sqlite3"))
+    }
+
+    // Tests unsupported future schemas fail closed by arranging a DB ahead of the current code and asserting the startup error avoids reset instructions.
+    func testUnsupportedSchemaVersionFailsClosed() throws {
         let root = try makeTempDirectory()
         let dbURL = root.appendingPathComponent("unsupported.db")
         try runSQLiteExec(
@@ -153,23 +101,147 @@ final class StoreTests: XCTestCase {
                   is_git INTEGER NOT NULL,
                   default_branch TEXT
                 );
-                CREATE TABLE workspaces (
-                  id TEXT PRIMARY KEY,
-                  project_id TEXT NOT NULL,
-                  title TEXT NOT NULL,
-                  dir TEXT NOT NULL,
-                  is_default INTEGER NOT NULL,
-                  is_archived INTEGER NOT NULL,
-                  is_running INTEGER NOT NULL,
-                  UNIQUE(project_id, title)
-                );
-                CREATE TABLE schema_version (version INTEGER NOT NULL);
-                INSERT INTO schema_version(version) VALUES (5);
+                CREATE TABLE migration_state (current_version INTEGER NOT NULL);
+                INSERT INTO migration_state(current_version) VALUES (99);
                 """)
 
         XCTAssertThrowsError(try SQLiteStore(path: dbURL.path)) { error in
-            XCTAssertEqual(error.localizedDescription, "Unsupported database schema version 5. Remove ~/.muxy/muxy.db and recreate your workspaces.")
+            XCTAssertEqual(error.localizedDescription, "Unsupported database schema version 99 at \(dbURL.path).")
         }
+    }
+
+    // Tests the migrator executes every intermediate step by arranging a direct migrator with two ordered steps and asserting each step runs in sequence.
+    func testMigratorRunsIntermediateStepsInOrder() throws {
+        let root = try makeTempDirectory()
+        let dbURL = root.appendingPathComponent("ordered.db")
+        try runSQLiteExec(
+            dbURL: dbURL,
+            sql: """
+                CREATE TABLE migration_state (current_version INTEGER NOT NULL);
+                CREATE TABLE migration_log (entry TEXT NOT NULL);
+                INSERT INTO migration_state(current_version) VALUES (1);
+                """)
+        let handle = try openSQLiteHandle(dbURL: dbURL)
+        defer { sqlite3_close(handle) }
+
+        let migrator = DatabaseMigrator(
+            currentSchemaVersion: 3,
+            steps: [
+                DatabaseMigrationStep(fromVersion: 1, toVersion: 2, description: "one", requiresBackup: true) { db in
+                    _ = sqlite3_exec(db, "INSERT INTO migration_log(entry) VALUES ('1-2');", nil, nil, nil)
+                },
+                DatabaseMigrationStep(fromVersion: 2, toVersion: 3, description: "two", requiresBackup: true) { db in
+                    _ = sqlite3_exec(db, "INSERT INTO migration_log(entry) VALUES ('2-3');", nil, nil, nil)
+                },
+            ],
+            backupManager: DatabaseBackupManager(
+                databaseURL: dbURL, backupDirectory: root.appendingPathComponent("backups"), retentionLimit: 10,
+                dateProvider: { Date(timeIntervalSince1970: 1_000) }))
+
+        try migrator.migrateIfNeeded(
+            existingTables: ["migration_state", "migration_log"], schemaVersion: 1, databasePath: dbURL.path, databaseHandle: handle,
+            createFreshSchema: {},
+            setSchemaVersion: { version in
+                XCTAssertEqual(sqlite3_exec(handle, "DELETE FROM migration_state;", nil, nil, nil), SQLITE_OK)
+                XCTAssertEqual(sqlite3_exec(handle, "INSERT INTO migration_state(current_version) VALUES (\(version));", nil, nil, nil), SQLITE_OK)
+            },
+            withTransaction: { body in
+                _ = sqlite3_exec(handle, "BEGIN IMMEDIATE;", nil, nil, nil)
+                do {
+                    try body()
+                    _ = sqlite3_exec(handle, "COMMIT;", nil, nil, nil)
+                } catch {
+                    _ = sqlite3_exec(handle, "ROLLBACK;", nil, nil, nil)
+                    throw error
+                }
+            }, validateIntegrity: { XCTAssertEqual(try self.readSingleText(dbURL: dbURL, sql: "PRAGMA integrity_check"), "ok") })
+
+        XCTAssertEqual(try readSingleInteger(dbURL: dbURL, sql: "SELECT current_version FROM migration_state"), 3)
+        XCTAssertEqual(
+            try readRows(dbURL: dbURL, sql: "SELECT entry FROM migration_log ORDER BY rowid").compactMap { $0.first ?? nil }, ["1-2", "2-3"])
+    }
+
+    // Tests migration failure rolls back the in-flight step by arranging a failing step and asserting schema state and pre-migration backup both remain.
+    func testMigrationFailureRollsBackAndPreservesBackup() throws {
+        let root = try makeTempDirectory()
+        let dbURL = root.appendingPathComponent("failure.db")
+        try runSQLiteExec(
+            dbURL: dbURL,
+            sql: """
+                CREATE TABLE migration_state (current_version INTEGER NOT NULL);
+                CREATE TABLE widgets (id TEXT PRIMARY KEY, name TEXT NOT NULL);
+                INSERT INTO migration_state(current_version) VALUES (1);
+                INSERT INTO widgets(id, name) VALUES ('widget-1', 'Before');
+                """)
+        let handle = try openSQLiteHandle(dbURL: dbURL)
+        defer { sqlite3_close(handle) }
+
+        let migrator = DatabaseMigrator(
+            currentSchemaVersion: 2,
+            steps: [
+                DatabaseMigrationStep(fromVersion: 1, toVersion: 2, description: "failing", requiresBackup: true) { db in
+                    _ = sqlite3_exec(db, "ALTER TABLE widgets ADD COLUMN detail TEXT;", nil, nil, nil)
+                    throw NSError(domain: "muxy.tests", code: 99, userInfo: [NSLocalizedDescriptionKey: "Injected failure"])
+                }
+            ],
+            backupManager: DatabaseBackupManager(
+                databaseURL: dbURL, backupDirectory: root.appendingPathComponent("backups"), retentionLimit: 10,
+                dateProvider: { Date(timeIntervalSince1970: 2_000) }))
+
+        XCTAssertThrowsError(
+            try migrator.migrateIfNeeded(
+                existingTables: ["migration_state", "widgets"], schemaVersion: 1, databasePath: dbURL.path, databaseHandle: handle,
+                createFreshSchema: {},
+                setSchemaVersion: { version in
+                    XCTAssertEqual(sqlite3_exec(handle, "DELETE FROM migration_state;", nil, nil, nil), SQLITE_OK)
+                    XCTAssertEqual(
+                        sqlite3_exec(handle, "INSERT INTO migration_state(current_version) VALUES (\(version));", nil, nil, nil), SQLITE_OK)
+                },
+                withTransaction: { body in
+                    _ = sqlite3_exec(handle, "BEGIN IMMEDIATE;", nil, nil, nil)
+                    do {
+                        try body()
+                        _ = sqlite3_exec(handle, "COMMIT;", nil, nil, nil)
+                    } catch {
+                        _ = sqlite3_exec(handle, "ROLLBACK;", nil, nil, nil)
+                        throw error
+                    }
+                }, validateIntegrity: {})
+        ) { error in XCTAssertTrue(error.localizedDescription.contains("Injected failure")) }
+
+        XCTAssertEqual(try readSingleInteger(dbURL: dbURL, sql: "SELECT current_version FROM migration_state"), 1)
+        XCTAssertFalse(try readTableColumns(dbURL: dbURL, table: "widgets").contains("detail"))
+        XCTAssertEqual(
+            try FileManager.default.contentsOfDirectory(at: root.appendingPathComponent("backups"), includingPropertiesForKeys: nil).count, 1)
+    }
+
+    // Tests backup retention keeps the newest snapshots by arranging repeated backups and asserting only the latest ten remain.
+    func testMigrationBackupRetentionKeepsNewestTenSnapshots() throws {
+        let root = try makeTempDirectory()
+        let dbURL = root.appendingPathComponent("retention.db")
+        try runSQLiteExec(
+            dbURL: dbURL,
+            sql: """
+                CREATE TABLE migration_state (current_version INTEGER NOT NULL);
+                INSERT INTO migration_state(current_version) VALUES (1);
+                """)
+        let handle = try openSQLiteHandle(dbURL: dbURL)
+        defer { sqlite3_close(handle) }
+        let backupDirectory = root.appendingPathComponent("backups")
+
+        for index in 0..<12 {
+            let manager = DatabaseBackupManager(
+                databaseURL: dbURL, backupDirectory: backupDirectory, retentionLimit: 10,
+                dateProvider: { Date(timeIntervalSince1970: TimeInterval(index)) })
+            _ = try manager.createMigrationBackup(sourceHandle: handle, fromVersion: 1, toVersion: 2)
+        }
+
+        let backups = try FileManager.default.contentsOfDirectory(at: backupDirectory, includingPropertiesForKeys: nil).map(\.lastPathComponent)
+            .sorted()
+        XCTAssertEqual(backups.count, 10)
+        XCTAssertFalse(backups.contains { $0.hasPrefix("1970-01-01T00-00-00Z") })
+        XCTAssertFalse(backups.contains { $0.hasPrefix("1970-01-01T00-00-01Z") })
+        XCTAssertTrue(backups.contains { $0.hasPrefix("1970-01-01T00-00-11Z") })
     }
 
     // Tests workspace collections round trip and replacement by arranging representative inputs and asserting the expected result.
@@ -250,6 +322,32 @@ final class StoreTests: XCTestCase {
         try store.setWorkspacePortDefinitions(workspaceID: workspace.id, definitions: [PortDefinition(name: "DB_PORT")])
         XCTAssertEqual(try store.workspacePortDefinitions(workspaceID: workspace.id).count, 1)
         XCTAssertEqual(try store.workspacePortDefinitions(workspaceID: workspace.id)[0].name, "DB_PORT")
+    }
+
+    // Tests a delete-and-reinsert logical write is atomic by arranging a duplicate-ID failure and asserting the original child rows survive unchanged.
+    func testSetWorkspaceProcessesRollsBackReplacementOnFailure() throws {
+        let store = try makeTemporaryStore()
+        let project = makeProjectRecord(dir: try makeTempDirectory().path)
+        let workspace = makeWorkspaceRecord(projectID: project.id, title: "feature", dir: project.dir)
+        try store.upsert(project: project)
+        try store.upsert(workspace: workspace)
+        try store.setWorkspaceProcesses(
+            workspaceID: workspace.id,
+            processes: [
+                ProcessTemplate(id: "original-1", name: "api", command: "npm run api"),
+                ProcessTemplate(id: "original-2", name: "web", command: "npm run web"),
+            ])
+
+        XCTAssertThrowsError(
+            try store.setWorkspaceProcesses(
+                workspaceID: workspace.id,
+                processes: [
+                    ProcessTemplate(id: "dup", name: "api", command: "npm run api"), ProcessTemplate(id: "dup", name: "web", command: "npm run web"),
+                ]))
+
+        let persisted = try store.workspaceProcesses(workspaceID: workspace.id)
+        XCTAssertEqual(persisted.map(\.id), ["original-1", "original-2"])
+        XCTAssertEqual(persisted.map(\.command), ["npm run api", "npm run web"])
     }
 
     // Tests project collapsed state persists on the current schema by arranging a current-store project and asserting round-trip behavior.
@@ -878,6 +976,16 @@ final class StoreTests: XCTestCase {
         }
     }
 
+    private func openSQLiteHandle(dbURL: URL) throws -> OpaquePointer {
+        var db: OpaquePointer?
+        guard sqlite3_open_v2(dbURL.path, &db, SQLITE_OPEN_READWRITE | SQLITE_OPEN_FULLMUTEX, nil) == SQLITE_OK, let db else {
+            let message = db.map { String(cString: sqlite3_errmsg($0)) } ?? "Failed opening test sqlite db"
+            if let db { sqlite3_close(db) }
+            throw NSError(domain: "muxy.tests", code: 11, userInfo: [NSLocalizedDescriptionKey: message])
+        }
+        return db
+    }
+
     private func readSingleInteger(dbURL: URL, sql: String) throws -> Int {
         var db: OpaquePointer?
         guard sqlite3_open(dbURL.path, &db) == SQLITE_OK, let db else {
@@ -934,5 +1042,268 @@ final class StoreTests: XCTestCase {
             columns.append(String(cString: namePtr))
         }
         return columns
+    }
+
+    private func readRows(dbURL: URL, sql: String) throws -> [[String?]] {
+        var db: OpaquePointer?
+        guard sqlite3_open(dbURL.path, &db) == SQLITE_OK, let db else {
+            throw NSError(domain: "muxy.tests", code: 12, userInfo: [NSLocalizedDescriptionKey: "Failed opening test sqlite db"])
+        }
+        defer { sqlite3_close(db) }
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK, let statement else {
+            let message = String(cString: sqlite3_errmsg(db))
+            throw NSError(domain: "muxy.tests", code: 13, userInfo: [NSLocalizedDescriptionKey: message])
+        }
+        defer { sqlite3_finalize(statement) }
+
+        var rows: [[String?]] = []
+        while sqlite3_step(statement) == SQLITE_ROW {
+            var row: [String?] = []
+            for index in 0..<Int(sqlite3_column_count(statement)) {
+                if let value = sqlite3_column_text(statement, Int32(index)) { row.append(String(cString: value)) } else { row.append(nil) }
+            }
+            rows.append(row)
+        }
+        return rows
+    }
+
+    private func createSchemaV1Fixture(dbURL: URL) throws {
+        try runSQLiteExec(
+            dbURL: dbURL,
+            sql: """
+                CREATE TABLE projects (
+                  id TEXT PRIMARY KEY,
+                  name TEXT NOT NULL,
+                  dir TEXT NOT NULL UNIQUE,
+                  is_git INTEGER NOT NULL,
+                  default_branch TEXT,
+                  is_collapsed INTEGER NOT NULL DEFAULT 0,
+                  setup_script TEXT,
+                  stop_script TEXT
+                );
+                CREATE TABLE project_port_definitions (
+                  id TEXT NOT NULL,
+                  project_id TEXT NOT NULL,
+                  name TEXT NOT NULL,
+                  order_index INTEGER NOT NULL,
+                  PRIMARY KEY (project_id, order_index)
+                );
+                CREATE TABLE project_processes (
+                  id TEXT PRIMARY KEY,
+                  project_id TEXT NOT NULL,
+                  name TEXT,
+                  command TEXT NOT NULL,
+                  on_exit TEXT NOT NULL DEFAULT 'none',
+                  order_index INTEGER NOT NULL
+                );
+                CREATE TABLE project_status_checks (
+                  id TEXT PRIMARY KEY,
+                  project_id TEXT NOT NULL,
+                  name TEXT,
+                  process TEXT NOT NULL,
+                  command TEXT NOT NULL,
+                  interval INTEGER NOT NULL,
+                  timeout INTEGER NOT NULL,
+                  on_fail TEXT NOT NULL,
+                  order_index INTEGER NOT NULL
+                );
+                CREATE TABLE project_browser_sessions (
+                  id TEXT PRIMARY KEY,
+                  project_id TEXT NOT NULL,
+                  name TEXT,
+                  url TEXT,
+                  order_index INTEGER NOT NULL
+                );
+                CREATE TABLE project_agent_launchers (
+                  id TEXT PRIMARY KEY,
+                  project_id TEXT NOT NULL,
+                  name TEXT NOT NULL,
+                  command TEXT NOT NULL,
+                  order_index INTEGER NOT NULL
+                );
+                CREATE TABLE workspaces (
+                  id TEXT PRIMARY KEY,
+                  project_id TEXT NOT NULL,
+                  title TEXT NOT NULL,
+                  dir TEXT NOT NULL,
+                  dirname TEXT,
+                  branch TEXT,
+                  target_branch TEXT,
+                  is_default INTEGER NOT NULL,
+                  is_archived INTEGER NOT NULL,
+                  is_hidden INTEGER NOT NULL DEFAULT 0,
+                  is_running INTEGER NOT NULL,
+                  last_launched_at TEXT,
+                  tooltip TEXT,
+                  UNIQUE(project_id, title)
+                );
+                CREATE TABLE workspace_ports (
+                  workspace_id TEXT NOT NULL,
+                  port_index INTEGER NOT NULL,
+                  port_number INTEGER NOT NULL,
+                  port_name TEXT NOT NULL DEFAULT '',
+                  definition_id TEXT NOT NULL DEFAULT '',
+                  PRIMARY KEY (workspace_id, port_index)
+                );
+                CREATE TABLE workspace_port_definitions (
+                  id TEXT NOT NULL,
+                  workspace_id TEXT NOT NULL,
+                  name TEXT NOT NULL,
+                  order_index INTEGER NOT NULL,
+                  PRIMARY KEY (workspace_id, order_index)
+                );
+                CREATE TABLE workspace_settings (
+                  workspace_id TEXT PRIMARY KEY,
+                  stop_script TEXT,
+                  setup_status TEXT NOT NULL DEFAULT 'succeeded',
+                  setup_error TEXT,
+                  setup_started_at TEXT,
+                  setup_finished_at TEXT
+                );
+                CREATE TABLE workspace_processes (
+                  id TEXT PRIMARY KEY,
+                  workspace_id TEXT NOT NULL,
+                  name TEXT,
+                  command TEXT NOT NULL,
+                  on_exit TEXT NOT NULL DEFAULT 'none',
+                  order_index INTEGER NOT NULL
+                );
+                CREATE TABLE workspace_status_checks (
+                  id TEXT PRIMARY KEY,
+                  workspace_id TEXT NOT NULL,
+                  name TEXT,
+                  process TEXT NOT NULL,
+                  command TEXT NOT NULL,
+                  interval INTEGER NOT NULL,
+                  timeout INTEGER NOT NULL,
+                  on_fail TEXT NOT NULL DEFAULT 'none',
+                  order_index INTEGER NOT NULL
+                );
+                CREATE TABLE workspace_browser_sessions (
+                  id TEXT PRIMARY KEY,
+                  workspace_id TEXT NOT NULL,
+                  name TEXT,
+                  url TEXT,
+                  extracted_target_url TEXT,
+                  extracted_window_id INTEGER,
+                  extracted_window_valid INTEGER NOT NULL DEFAULT 0,
+                  order_index INTEGER NOT NULL
+                );
+                CREATE TABLE workspace_agent_launchers (
+                  id TEXT PRIMARY KEY,
+                  workspace_id TEXT NOT NULL,
+                  name TEXT NOT NULL,
+                  command TEXT NOT NULL,
+                  order_index INTEGER NOT NULL
+                );
+                CREATE TABLE running_processes (
+                  id TEXT PRIMARY KEY,
+                  workspace_id TEXT NOT NULL,
+                  template_name TEXT NOT NULL,
+                  command TEXT NOT NULL,
+                  terminal_app TEXT,
+                  window_id INTEGER,
+                  terminal_tracking_id TEXT,
+                  terminal_native_id TEXT,
+                  iterm_tab_index INTEGER,
+                  tmux_window_id TEXT,
+                  pid INTEGER,
+                  status TEXT NOT NULL,
+                  log_path TEXT,
+                  last_output_at TEXT,
+                  started_at TEXT,
+                  exited_at TEXT
+                );
+                CREATE TABLE status_results (
+                  process_id TEXT NOT NULL,
+                  check_name TEXT NOT NULL,
+                  status TEXT NOT NULL,
+                  message TEXT,
+                  last_run_at TEXT,
+                  PRIMARY KEY (process_id, check_name)
+                );
+                CREATE TABLE windows (
+                  id TEXT PRIMARY KEY,
+                  workspace_id TEXT NOT NULL,
+                  app TEXT NOT NULL,
+                  name TEXT,
+                  detail TEXT,
+                  target_url TEXT,
+                  window_id INTEGER,
+                  terminal_tracking_id TEXT,
+                  terminal_native_id TEXT,
+                  iterm_tab_index INTEGER,
+                  tmux_window_id TEXT,
+                  role TEXT NOT NULL,
+                  order_index INTEGER,
+                  last_seen_at TEXT
+                );
+                CREATE TABLE settings (
+                  key TEXT PRIMARY KEY,
+                  value TEXT NOT NULL
+                );
+                CREATE TABLE ignored_worktrees (
+                  worktree_dir TEXT PRIMARY KEY,
+                  project_id TEXT NOT NULL
+                );
+                CREATE TABLE agent_windows (
+                  id TEXT PRIMARY KEY,
+                  workspace_id TEXT NOT NULL,
+                  provider TEXT NOT NULL,
+                  label TEXT,
+                  terminal_tracking_id TEXT,
+                  terminal_native_id TEXT,
+                  tmux_window_id TEXT,
+                  codex_thread_id TEXT,
+                  window_id INTEGER,
+                  status TEXT NOT NULL DEFAULT 'idle',
+                  created_at TEXT NOT NULL,
+                  updated_at TEXT NOT NULL,
+                  yabai_window_id INTEGER
+                );
+                CREATE TABLE migration_state (
+                  current_version INTEGER NOT NULL
+                );
+                INSERT INTO projects(id, name, dir, is_git, default_branch, is_collapsed, setup_script, stop_script)
+                VALUES ('project-1', 'Project', '/tmp/project', 1, 'main', 1, 'echo setup', 'echo stop');
+                INSERT INTO project_port_definitions(id, project_id, name, order_index)
+                VALUES ('project-port-1', 'project-1', 'API_PORT', 0);
+                INSERT INTO project_processes(id, project_id, name, command, on_exit, order_index)
+                VALUES ('project-process-1', 'project-1', 'api', 'npm run api', 'none', 0);
+                INSERT INTO project_status_checks(id, project_id, name, process, command, interval, timeout, on_fail, order_index)
+                VALUES ('project-check-1', 'project-1', 'API Health', 'api', 'curl localhost', 10, 5, 'restart', 0);
+                INSERT INTO project_browser_sessions(id, project_id, name, url, order_index)
+                VALUES ('project-browser-1', 'project-1', 'Docs', 'https://example.com/docs', 0);
+                INSERT INTO project_agent_launchers(id, project_id, name, command, order_index)
+                VALUES ('project-agent-1', 'project-1', 'Codex', 'codex', 0);
+                INSERT INTO workspaces(id, project_id, title, dir, dirname, branch, target_branch, is_default, is_archived, is_hidden, is_running, last_launched_at, tooltip)
+                VALUES ('workspace-1', 'project-1', 'feature', '/tmp/project/feature', 'feature', 'feature', 'main', 0, 0, 0, 1, '2026-01-01T00:00:00Z', 'Feature tooltip');
+                INSERT INTO workspace_ports(workspace_id, port_index, port_number, port_name, definition_id)
+                VALUES ('workspace-1', 0, 3000, 'API_PORT', 'workspace-port-definition-1');
+                INSERT INTO workspace_port_definitions(id, workspace_id, name, order_index)
+                VALUES ('workspace-port-definition-1', 'workspace-1', 'API_PORT', 0);
+                INSERT INTO workspace_settings(workspace_id, stop_script, setup_status, setup_error, setup_started_at, setup_finished_at)
+                VALUES ('workspace-1', 'echo stop', 'failed', 'boom', 'start', 'end');
+                INSERT INTO workspace_processes(id, workspace_id, name, command, on_exit, order_index)
+                VALUES ('workspace-process-1', 'workspace-1', 'api', 'npm run api', 'none', 0);
+                INSERT INTO workspace_status_checks(id, workspace_id, name, process, command, interval, timeout, on_fail, order_index)
+                VALUES ('workspace-check-1', 'workspace-1', 'API Health', 'api', 'curl localhost', 10, 5, 'restart', 0);
+                INSERT INTO workspace_browser_sessions(id, workspace_id, name, url, extracted_target_url, extracted_window_id, extracted_window_valid, order_index)
+                VALUES ('workspace-browser-1', 'workspace-1', 'Docs', 'https://example.com', 'https://example.com', 303, 1, 0);
+                INSERT INTO workspace_agent_launchers(id, workspace_id, name, command, order_index)
+                VALUES ('workspace-agent-1', 'workspace-1', 'Codex', 'codex', 0);
+                INSERT INTO running_processes(id, workspace_id, template_name, command, terminal_app, window_id, terminal_tracking_id, terminal_native_id, iterm_tab_index, tmux_window_id, pid, status, log_path, last_output_at, started_at, exited_at)
+                VALUES ('running-process-1', 'workspace-1', 'api', 'npm run api', 'iTerm2', 101, 'session-1', 'native-1', 1, '@1', 12345, 'running', '/tmp/api.log', '2026-01-01T00:00:01Z', '2026-01-01T00:00:00Z', '');
+                INSERT INTO status_results(process_id, check_name, status, message, last_run_at)
+                VALUES ('running-process-1', 'API Health', 'passing', 'ok', '2026-01-01T00:00:02Z');
+                INSERT INTO windows(id, workspace_id, app, name, detail, target_url, window_id, terminal_tracking_id, terminal_native_id, iterm_tab_index, tmux_window_id, role, order_index, last_seen_at)
+                VALUES ('window-1', 'workspace-1', 'Google Chrome', 'Docs', 'docs', 'https://example.com', 303, '', '', NULL, '', 'browser', 0, '2026-01-01T00:00:03Z');
+                INSERT INTO settings(key, value) VALUES ('terminalHost', 'iterm2');
+                INSERT INTO ignored_worktrees(worktree_dir, project_id) VALUES ('/tmp/project/ignored', 'project-1');
+                INSERT INTO agent_windows(id, workspace_id, provider, label, terminal_tracking_id, terminal_native_id, tmux_window_id, codex_thread_id, window_id, status, created_at, updated_at, yabai_window_id)
+                VALUES ('agent-window-1', 'workspace-1', 'iterm2', 'Codex', 'session-1', 'native-1', '', 'thread-1', 101, 'running', '2026-01-01T00:00:00Z', '2026-01-01T00:00:03Z', 101);
+                INSERT INTO migration_state(current_version) VALUES (1);
+                """)
     }
 }

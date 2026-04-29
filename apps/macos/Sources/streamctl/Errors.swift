@@ -38,6 +38,7 @@ public enum MuxyError: LocalizedError {
     case yabaiUnavailable(message: String)
     case dependencyMissing(message: String)
     case configError(message: String)
+    case databaseMigrationFailed(message: String)
     case missingTrackedWindow(MissingTrackedWindowContext)
 
     public var errorDescription: String? {
@@ -52,6 +53,7 @@ public enum MuxyError: LocalizedError {
         case .yabaiUnavailable(let message): return "yabai not available: \(message)"
         case .dependencyMissing(let message): return "Missing dependency: \(message)"
         case .configError(let message): return "Configuration error: \(message)"
+        case .databaseMigrationFailed(let message): return message
         case .missingTrackedWindow(let context):
             switch context.kind {
             case .browserSession: return "Window missing: Browser session '\(context.title)' is no longer available."

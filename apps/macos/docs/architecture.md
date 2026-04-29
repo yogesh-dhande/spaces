@@ -45,11 +45,18 @@ flowchart LR
 - Path: `~/.muxy/muxy.db`
 - SQLite stores projects, workspaces, runtime state, and global settings.
 - SQLite should run in WAL mode with a busy timeout so overlapping GUI, CLI, and background work does not produce avoidable lock failures.
+- `migration_state.current_version` is the authoritative forward-only schema marker.
+- Migration safety snapshots are stored in `~/.muxy/backups/` and retained as a rolling set of the newest 10 migration backups.
 
 ### Migration Rules
 - Migrations must preserve existing user data.
-- Additive schema changes should use `CREATE TABLE IF NOT EXISTS`, `ALTER TABLE`, and backfills.
-- Compatible changes must not require destructive resets.
+- Fresh installs create the latest schema directly and record the current schema version.
+- Existing installs migrate in ordered `N -> N+1` steps until they reach the current schema version.
+- Each migration step runs inside `BEGIN IMMEDIATE ... COMMIT`, updates `migration_state` in the same transaction, and rolls back on failure.
+- Additive and compatible schema changes should use `CREATE TABLE IF NOT EXISTS`, `ALTER TABLE`, backfills, indexes, and table rebuilds with copy when SQLite requires them.
+- Before the first migration step for an open, Muxy creates a SQLite-safe backup snapshot in `~/.muxy/backups/`.
+- After migrations finish, Muxy runs `PRAGMA integrity_check` and fails startup if validation does not return `ok`.
+- Compatible changes must not require destructive resets, and startup errors must not instruct users to delete `~/.muxy/muxy.db`.
 
 ## Data Model
 
@@ -80,6 +87,10 @@ Runtime state persists separately from project and workspace templates:
 
 This separation lets template edits coexist with current runtime state and per-workspace overrides.
 It also lets lifecycle state stay explicit while runtime health is derived from the current runtime records.
+
+### Referential Integrity
+- SQLite foreign keys stay enabled for persisted parent-child relationships.
+- Store-level delete-and-reinsert updates run inside immediate transactions so partial child-table replacements cannot persist if one statement fails.
 
 ## Core Flows
 

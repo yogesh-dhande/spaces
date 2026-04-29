@@ -4,13 +4,14 @@ import appctl
 
 public final class SQLiteStore {
     private let db: OpaquePointer
-    private let schemaVersion = 2
+    private let databasePath: String
     private let busyTimeoutMS: Int32 = 5000
     private let busyRetryAttempts = 10
     private let busyRetryDelaySeconds: TimeInterval = 0.02
     private let defaultTerminalHostResolver: @Sendable () -> TerminalHost
 
     public init(path: String, defaultTerminalHostResolver: (@Sendable () -> TerminalHost)? = nil) throws {
+        databasePath = path
         var handle: OpaquePointer?
         let openFlags = SQLITE_OPEN_CREATE | SQLITE_OPEN_READWRITE | SQLITE_OPEN_FULLMUTEX
         if sqlite3_open_v2(path, &handle, openFlags, nil) != SQLITE_OK {
@@ -29,47 +30,61 @@ public final class SQLiteStore {
 
     deinit { sqlite3_close(db) }
 
+    func withImmediateTransaction<T>(_ body: () throws -> T) throws -> T {
+        try executeBatch(sql: "BEGIN IMMEDIATE;")
+        do {
+            let value = try body()
+            try executeBatch(sql: "COMMIT;")
+            return value
+        } catch {
+            try? executeBatch(sql: "ROLLBACK;")
+            throw error
+        }
+    }
+
     public func upsert(project: ProjectRecord) throws {
-        try execute(
-            sql: """
-                INSERT INTO projects(id, name, dir, is_git, default_branch, is_collapsed, setup_script, stop_script)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(id) DO UPDATE SET
-                  name = excluded.name,
-                  dir = excluded.dir,
-                  is_git = excluded.is_git,
-                  default_branch = excluded.default_branch,
-                  is_collapsed = excluded.is_collapsed,
-                  setup_script = excluded.setup_script,
-                  stop_script = excluded.stop_script
-                """,
-            bindings: [
-                project.id, project.name, project.dir, project.isGitRepo ? "1" : "0", project.defaultBranch ?? "", project.isCollapsed ? "1" : "0",
-                project.setupScript ?? "", project.stopScript ?? "",
-            ])
-        try execute(sql: "DELETE FROM project_port_definitions WHERE project_id = ?", bindings: [project.id])
-        for (index, definition) in project.ports.enumerated() {
+        try withImmediateTransaction {
             try execute(
-                sql: "INSERT INTO project_port_definitions(id, project_id, name, order_index) VALUES (?, ?, ?, ?)",
-                bindings: [definition.id, project.id, definition.name, String(index)])
-        }
-        try execute(sql: "DELETE FROM project_processes WHERE project_id = ?", bindings: [project.id])
-        for (index, process) in project.processes.enumerated() {
-            try execute(
-                sql: "INSERT INTO project_processes(id, project_id, name, command, on_exit, order_index) VALUES (?, ?, ?, ?, ?, ?)",
-                bindings: [process.id, project.id, process.name ?? "", process.command, process.onExit.rawValue, String(index)])
-        }
-        try execute(sql: "DELETE FROM project_browser_sessions WHERE project_id = ?", bindings: [project.id])
-        for (index, session) in project.browserSessions.enumerated() {
-            try execute(
-                sql: "INSERT INTO project_browser_sessions(id, project_id, name, url, order_index) VALUES (?, ?, ?, ?, ?)",
-                bindings: [UUID().uuidString, project.id, session.name ?? "", session.url ?? "", String(index)])
-        }
-        try execute(sql: "DELETE FROM project_agent_launchers WHERE project_id = ?", bindings: [project.id])
-        for (index, launcher) in project.agentLaunchers.enumerated() {
-            try execute(
-                sql: "INSERT INTO project_agent_launchers(id, project_id, name, command, order_index) VALUES (?, ?, ?, ?, ?)",
-                bindings: [UUID().uuidString, project.id, launcher.name, launcher.command, String(index)])
+                sql: """
+                    INSERT INTO projects(id, name, dir, is_git, default_branch, is_collapsed, setup_script, stop_script)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(id) DO UPDATE SET
+                      name = excluded.name,
+                      dir = excluded.dir,
+                      is_git = excluded.is_git,
+                      default_branch = excluded.default_branch,
+                      is_collapsed = excluded.is_collapsed,
+                      setup_script = excluded.setup_script,
+                      stop_script = excluded.stop_script
+                    """,
+                bindings: [
+                    project.id, project.name, project.dir, project.isGitRepo ? "1" : "0", project.defaultBranch ?? "",
+                    project.isCollapsed ? "1" : "0", project.setupScript ?? "", project.stopScript ?? "",
+                ])
+            try execute(sql: "DELETE FROM project_port_definitions WHERE project_id = ?", bindings: [project.id])
+            for (index, definition) in project.ports.enumerated() {
+                try execute(
+                    sql: "INSERT INTO project_port_definitions(id, project_id, name, order_index) VALUES (?, ?, ?, ?)",
+                    bindings: [definition.id, project.id, definition.name, String(index)])
+            }
+            try execute(sql: "DELETE FROM project_processes WHERE project_id = ?", bindings: [project.id])
+            for (index, process) in project.processes.enumerated() {
+                try execute(
+                    sql: "INSERT INTO project_processes(id, project_id, name, command, on_exit, order_index) VALUES (?, ?, ?, ?, ?, ?)",
+                    bindings: [process.id, project.id, process.name ?? "", process.command, process.onExit.rawValue, String(index)])
+            }
+            try execute(sql: "DELETE FROM project_browser_sessions WHERE project_id = ?", bindings: [project.id])
+            for (index, session) in project.browserSessions.enumerated() {
+                try execute(
+                    sql: "INSERT INTO project_browser_sessions(id, project_id, name, url, order_index) VALUES (?, ?, ?, ?, ?)",
+                    bindings: [UUID().uuidString, project.id, session.name ?? "", session.url ?? "", String(index)])
+            }
+            try execute(sql: "DELETE FROM project_agent_launchers WHERE project_id = ?", bindings: [project.id])
+            for (index, launcher) in project.agentLaunchers.enumerated() {
+                try execute(
+                    sql: "INSERT INTO project_agent_launchers(id, project_id, name, command, order_index) VALUES (?, ?, ?, ?, ?)",
+                    bindings: [UUID().uuidString, project.id, launcher.name, launcher.command, String(index)])
+            }
         }
     }
 
@@ -98,56 +113,61 @@ public final class SQLiteStore {
     }
 
     public func deleteProject(id: String) throws {
-        try execute(sql: "DELETE FROM windows WHERE workspace_id IN (SELECT id FROM workspaces WHERE project_id = ?)", bindings: [id])
-        try execute(sql: "DELETE FROM workspace_settings WHERE workspace_id IN (SELECT id FROM workspaces WHERE project_id = ?)", bindings: [id])
-        try execute(sql: "DELETE FROM workspace_processes WHERE workspace_id IN (SELECT id FROM workspaces WHERE project_id = ?)", bindings: [id])
-        try execute(sql: "DELETE FROM workspace_status_checks WHERE workspace_id IN (SELECT id FROM workspaces WHERE project_id = ?)", bindings: [id])
-        try execute(
-            sql: "DELETE FROM workspace_browser_sessions WHERE workspace_id IN (SELECT id FROM workspaces WHERE project_id = ?)", bindings: [id])
-        try execute(
-            sql: "DELETE FROM workspace_agent_launchers WHERE workspace_id IN (SELECT id FROM workspaces WHERE project_id = ?)", bindings: [id])
-        try execute(
-            sql:
-                "DELETE FROM status_results WHERE process_id IN (SELECT id FROM running_processes WHERE workspace_id IN (SELECT id FROM workspaces WHERE project_id = ?))",
-            bindings: [id])
-        try execute(sql: "DELETE FROM running_processes WHERE workspace_id IN (SELECT id FROM workspaces WHERE project_id = ?)", bindings: [id])
-        try execute(sql: "DELETE FROM workspace_ports WHERE workspace_id IN (SELECT id FROM workspaces WHERE project_id = ?)", bindings: [id])
-        try execute(
-            sql: "DELETE FROM workspace_port_definitions WHERE workspace_id IN (SELECT id FROM workspaces WHERE project_id = ?)", bindings: [id])
-        try execute(sql: "DELETE FROM workspaces WHERE project_id = ?", bindings: [id])
-        try execute(sql: "DELETE FROM project_port_definitions WHERE project_id = ?", bindings: [id])
-        try execute(sql: "DELETE FROM project_processes WHERE project_id = ?", bindings: [id])
-        try execute(sql: "DELETE FROM project_status_checks WHERE project_id = ?", bindings: [id])
-        try execute(sql: "DELETE FROM project_browser_sessions WHERE project_id = ?", bindings: [id])
-        try execute(sql: "DELETE FROM project_agent_launchers WHERE project_id = ?", bindings: [id])
-        try execute(sql: "DELETE FROM ignored_worktrees WHERE project_id = ?", bindings: [id])
-        try execute(sql: "DELETE FROM projects WHERE id = ?", bindings: [id])
+        try withImmediateTransaction {
+            try execute(sql: "DELETE FROM windows WHERE workspace_id IN (SELECT id FROM workspaces WHERE project_id = ?)", bindings: [id])
+            try execute(sql: "DELETE FROM workspace_settings WHERE workspace_id IN (SELECT id FROM workspaces WHERE project_id = ?)", bindings: [id])
+            try execute(sql: "DELETE FROM workspace_processes WHERE workspace_id IN (SELECT id FROM workspaces WHERE project_id = ?)", bindings: [id])
+            try execute(
+                sql: "DELETE FROM workspace_status_checks WHERE workspace_id IN (SELECT id FROM workspaces WHERE project_id = ?)", bindings: [id])
+            try execute(
+                sql: "DELETE FROM workspace_browser_sessions WHERE workspace_id IN (SELECT id FROM workspaces WHERE project_id = ?)", bindings: [id])
+            try execute(
+                sql: "DELETE FROM workspace_agent_launchers WHERE workspace_id IN (SELECT id FROM workspaces WHERE project_id = ?)", bindings: [id])
+            try execute(
+                sql:
+                    "DELETE FROM status_results WHERE process_id IN (SELECT id FROM running_processes WHERE workspace_id IN (SELECT id FROM workspaces WHERE project_id = ?))",
+                bindings: [id])
+            try execute(sql: "DELETE FROM running_processes WHERE workspace_id IN (SELECT id FROM workspaces WHERE project_id = ?)", bindings: [id])
+            try execute(sql: "DELETE FROM workspace_ports WHERE workspace_id IN (SELECT id FROM workspaces WHERE project_id = ?)", bindings: [id])
+            try execute(
+                sql: "DELETE FROM workspace_port_definitions WHERE workspace_id IN (SELECT id FROM workspaces WHERE project_id = ?)", bindings: [id])
+            try execute(sql: "DELETE FROM workspaces WHERE project_id = ?", bindings: [id])
+            try execute(sql: "DELETE FROM project_port_definitions WHERE project_id = ?", bindings: [id])
+            try execute(sql: "DELETE FROM project_processes WHERE project_id = ?", bindings: [id])
+            try execute(sql: "DELETE FROM project_status_checks WHERE project_id = ?", bindings: [id])
+            try execute(sql: "DELETE FROM project_browser_sessions WHERE project_id = ?", bindings: [id])
+            try execute(sql: "DELETE FROM project_agent_launchers WHERE project_id = ?", bindings: [id])
+            try execute(sql: "DELETE FROM ignored_worktrees WHERE project_id = ?", bindings: [id])
+            try execute(sql: "DELETE FROM projects WHERE id = ?", bindings: [id])
+        }
     }
 
     public func upsert(workspace: WorkspaceRecord) throws {
-        try execute(
-            sql: """
-                INSERT INTO workspaces(id, project_id, title, dir, dirname, branch, target_branch, is_default, is_archived, is_hidden, is_running, last_launched_at, tooltip)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(id) DO UPDATE SET
-                  title = excluded.title,
-                  dir = excluded.dir,
-                  dirname = excluded.dirname,
-                  branch = excluded.branch,
-                  target_branch = excluded.target_branch,
-                  is_default = excluded.is_default,
-                  is_archived = excluded.is_archived,
-                  is_hidden = excluded.is_hidden,
-                  is_running = excluded.is_running,
-                  last_launched_at = excluded.last_launched_at,
-                  tooltip = excluded.tooltip
-                """,
-            bindings: [
-                workspace.id, workspace.projectID, workspace.title, workspace.dir, workspace.dirname ?? "", workspace.branch ?? "",
-                workspace.targetBranch ?? "", workspace.isDefault ? "1" : "0", workspace.isArchived ? "1" : "0", workspace.isHidden ? "1" : "0",
-                workspace.isRunning ? "1" : "0", workspace.lastLaunchedAt ?? "", workspace.tooltip ?? "",
-            ])
-        try execute(sql: "DELETE FROM ignored_worktrees WHERE worktree_dir = ?", bindings: [workspace.dir])
+        try withImmediateTransaction {
+            try execute(
+                sql: """
+                    INSERT INTO workspaces(id, project_id, title, dir, dirname, branch, target_branch, is_default, is_archived, is_hidden, is_running, last_launched_at, tooltip)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(id) DO UPDATE SET
+                      title = excluded.title,
+                      dir = excluded.dir,
+                      dirname = excluded.dirname,
+                      branch = excluded.branch,
+                      target_branch = excluded.target_branch,
+                      is_default = excluded.is_default,
+                      is_archived = excluded.is_archived,
+                      is_hidden = excluded.is_hidden,
+                      is_running = excluded.is_running,
+                      last_launched_at = excluded.last_launched_at,
+                      tooltip = excluded.tooltip
+                    """,
+                bindings: [
+                    workspace.id, workspace.projectID, workspace.title, workspace.dir, workspace.dirname ?? "", workspace.branch ?? "",
+                    workspace.targetBranch ?? "", workspace.isDefault ? "1" : "0", workspace.isArchived ? "1" : "0", workspace.isHidden ? "1" : "0",
+                    workspace.isRunning ? "1" : "0", workspace.lastLaunchedAt ?? "", workspace.tooltip ?? "",
+                ])
+            try execute(sql: "DELETE FROM ignored_worktrees WHERE worktree_dir = ?", bindings: [workspace.dir])
+        }
     }
 
     public func workspace(id: String) throws -> WorkspaceRecord? {
@@ -198,18 +218,21 @@ public final class SQLiteStore {
 
     public func deleteWorkspace(id: String) throws {
         let deletedWorkspace = try workspace(id: id)
-        try execute(sql: "DELETE FROM windows WHERE workspace_id = ?", bindings: [id])
-        try execute(sql: "DELETE FROM workspace_settings WHERE workspace_id = ?", bindings: [id])
-        try execute(sql: "DELETE FROM workspace_processes WHERE workspace_id = ?", bindings: [id])
-        try execute(sql: "DELETE FROM workspace_status_checks WHERE workspace_id = ?", bindings: [id])
-        try execute(sql: "DELETE FROM workspace_browser_sessions WHERE workspace_id = ?", bindings: [id])
-        try execute(sql: "DELETE FROM workspace_agent_launchers WHERE workspace_id = ?", bindings: [id])
-        try execute(sql: "DELETE FROM status_results WHERE process_id IN (SELECT id FROM running_processes WHERE workspace_id = ?)", bindings: [id])
-        try execute(sql: "DELETE FROM running_processes WHERE workspace_id = ?", bindings: [id])
-        try execute(sql: "DELETE FROM workspace_ports WHERE workspace_id = ?", bindings: [id])
-        try execute(sql: "DELETE FROM workspace_port_definitions WHERE workspace_id = ?", bindings: [id])
-        try execute(sql: "DELETE FROM workspaces WHERE id = ?", bindings: [id])
-        if let deletedWorkspace { try markIgnoredWorktree(path: deletedWorkspace.dir, projectID: deletedWorkspace.projectID) }
+        try withImmediateTransaction {
+            try execute(sql: "DELETE FROM windows WHERE workspace_id = ?", bindings: [id])
+            try execute(sql: "DELETE FROM workspace_settings WHERE workspace_id = ?", bindings: [id])
+            try execute(sql: "DELETE FROM workspace_processes WHERE workspace_id = ?", bindings: [id])
+            try execute(sql: "DELETE FROM workspace_status_checks WHERE workspace_id = ?", bindings: [id])
+            try execute(sql: "DELETE FROM workspace_browser_sessions WHERE workspace_id = ?", bindings: [id])
+            try execute(sql: "DELETE FROM workspace_agent_launchers WHERE workspace_id = ?", bindings: [id])
+            try execute(
+                sql: "DELETE FROM status_results WHERE process_id IN (SELECT id FROM running_processes WHERE workspace_id = ?)", bindings: [id])
+            try execute(sql: "DELETE FROM running_processes WHERE workspace_id = ?", bindings: [id])
+            try execute(sql: "DELETE FROM workspace_ports WHERE workspace_id = ?", bindings: [id])
+            try execute(sql: "DELETE FROM workspace_port_definitions WHERE workspace_id = ?", bindings: [id])
+            try execute(sql: "DELETE FROM workspaces WHERE id = ?", bindings: [id])
+            if let deletedWorkspace { try markIgnoredWorktree(path: deletedWorkspace.dir, projectID: deletedWorkspace.projectID) }
+        }
     }
 
     public func markIgnoredWorktree(path: String, projectID: String) throws {
@@ -268,13 +291,15 @@ public final class SQLiteStore {
     }
 
     public func setWorkspacePorts(workspaceID: String, ports: [Int], names: [String] = [], definitionIDs: [String] = []) throws {
-        try execute(sql: "DELETE FROM workspace_ports WHERE workspace_id = ?", bindings: [workspaceID])
-        for (index, port) in ports.enumerated() {
-            let name = index < names.count ? names[index] : ""
-            let definitionID = index < definitionIDs.count ? definitionIDs[index] : ""
-            try execute(
-                sql: "INSERT INTO workspace_ports(workspace_id, port_index, port_number, port_name, definition_id) VALUES (?, ?, ?, ?, ?)",
-                bindings: [workspaceID, String(index), String(port), name, definitionID])
+        try withImmediateTransaction {
+            try execute(sql: "DELETE FROM workspace_ports WHERE workspace_id = ?", bindings: [workspaceID])
+            for (index, port) in ports.enumerated() {
+                let name = index < names.count ? names[index] : ""
+                let definitionID = index < definitionIDs.count ? definitionIDs[index] : ""
+                try execute(
+                    sql: "INSERT INTO workspace_ports(workspace_id, port_index, port_number, port_name, definition_id) VALUES (?, ?, ?, ?, ?)",
+                    bindings: [workspaceID, String(index), String(port), name, definitionID])
+            }
         }
     }
 
@@ -303,11 +328,13 @@ public final class SQLiteStore {
     }
 
     public func setWorkspacePortDefinitions(workspaceID: String, definitions: [PortDefinition]) throws {
-        try execute(sql: "DELETE FROM workspace_port_definitions WHERE workspace_id = ?", bindings: [workspaceID])
-        for (index, definition) in definitions.enumerated() {
-            try execute(
-                sql: "INSERT INTO workspace_port_definitions(id, workspace_id, name, order_index) VALUES (?, ?, ?, ?)",
-                bindings: [definition.id, workspaceID, definition.name, String(index)])
+        try withImmediateTransaction {
+            try execute(sql: "DELETE FROM workspace_port_definitions WHERE workspace_id = ?", bindings: [workspaceID])
+            for (index, definition) in definitions.enumerated() {
+                try execute(
+                    sql: "INSERT INTO workspace_port_definitions(id, workspace_id, name, order_index) VALUES (?, ?, ?, ?)",
+                    bindings: [definition.id, workspaceID, definition.name, String(index)])
+            }
         }
     }
 
@@ -321,13 +348,15 @@ public final class SQLiteStore {
     }
 
     public func setWorkspaceProcesses(workspaceID: String, processes: [ProcessTemplate]) throws {
-        try execute(sql: "DELETE FROM workspace_processes WHERE workspace_id = ?", bindings: [workspaceID])
-        for (index, process) in processes.enumerated() {
-            try execute(
-                sql: """
-                    INSERT INTO workspace_processes(id, workspace_id, name, command, on_exit, order_index)
-                    VALUES (?, ?, ?, ?, ?, ?)
-                    """, bindings: [process.id, workspaceID, process.name ?? "", process.command, process.onExit.rawValue, String(index)])
+        try withImmediateTransaction {
+            try execute(sql: "DELETE FROM workspace_processes WHERE workspace_id = ?", bindings: [workspaceID])
+            for (index, process) in processes.enumerated() {
+                try execute(
+                    sql: """
+                        INSERT INTO workspace_processes(id, workspace_id, name, command, on_exit, order_index)
+                        VALUES (?, ?, ?, ?, ?, ?)
+                        """, bindings: [process.id, workspaceID, process.name ?? "", process.command, process.onExit.rawValue, String(index)])
+            }
         }
     }
 
@@ -347,31 +376,35 @@ public final class SQLiteStore {
     }
 
     public func setWorkspaceBrowserSessions(workspaceID: String, sessions: [BrowserSession]) throws {
-        try execute(sql: "DELETE FROM workspace_browser_sessions WHERE workspace_id = ?", bindings: [workspaceID])
-        for (index, session) in sessions.enumerated() {
-            let extractedWindowID = session.extractedWindow.map { String($0.windowID) } ?? ""
-            let extractedWindowValid = (session.extractedWindow?.isValid ?? false) ? "1" : "0"
-            let extractedTargetURL = session.extractedWindow?.targetURL ?? ""
-            try execute(
-                sql: """
-                    INSERT INTO workspace_browser_sessions(id, workspace_id, name, url, extracted_target_url, extracted_window_id, extracted_window_valid, order_index)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                bindings: [
-                    UUID().uuidString, workspaceID, session.name ?? "", session.url ?? "", extractedTargetURL, extractedWindowID,
-                    extractedWindowValid, String(index),
-                ])
+        try withImmediateTransaction {
+            try execute(sql: "DELETE FROM workspace_browser_sessions WHERE workspace_id = ?", bindings: [workspaceID])
+            for (index, session) in sessions.enumerated() {
+                let extractedWindowID = session.extractedWindow.map { String($0.windowID) } ?? ""
+                let extractedWindowValid = (session.extractedWindow?.isValid ?? false) ? "1" : "0"
+                let extractedTargetURL = session.extractedWindow?.targetURL ?? ""
+                try execute(
+                    sql: """
+                        INSERT INTO workspace_browser_sessions(id, workspace_id, name, url, extracted_target_url, extracted_window_id, extracted_window_valid, order_index)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                    bindings: [
+                        UUID().uuidString, workspaceID, session.name ?? "", session.url ?? "", extractedTargetURL, extractedWindowID,
+                        extractedWindowValid, String(index),
+                    ])
+            }
         }
     }
 
     public func setWorkspaceAgentLaunchers(workspaceID: String, launchers: [AgentLauncher]) throws {
-        try execute(sql: "DELETE FROM workspace_agent_launchers WHERE workspace_id = ?", bindings: [workspaceID])
-        for (index, launcher) in launchers.enumerated() {
-            try execute(
-                sql: """
-                    INSERT INTO workspace_agent_launchers(id, workspace_id, name, command, order_index)
-                    VALUES (?, ?, ?, ?, ?)
-                    """, bindings: [UUID().uuidString, workspaceID, launcher.name, launcher.command, String(index)])
+        try withImmediateTransaction {
+            try execute(sql: "DELETE FROM workspace_agent_launchers WHERE workspace_id = ?", bindings: [workspaceID])
+            for (index, launcher) in launchers.enumerated() {
+                try execute(
+                    sql: """
+                        INSERT INTO workspace_agent_launchers(id, workspace_id, name, command, order_index)
+                        VALUES (?, ?, ?, ?, ?)
+                        """, bindings: [UUID().uuidString, workspaceID, launcher.name, launcher.command, String(index)])
+            }
         }
     }
 
@@ -517,8 +550,10 @@ public final class SQLiteStore {
     }
 
     public func deleteRunningProcess(id: String) throws {
-        try execute(sql: "DELETE FROM status_results WHERE process_id = ?", bindings: [id])
-        try execute(sql: "DELETE FROM running_processes WHERE id = ?", bindings: [id])
+        try withImmediateTransaction {
+            try execute(sql: "DELETE FROM status_results WHERE process_id = ?", bindings: [id])
+            try execute(sql: "DELETE FROM running_processes WHERE id = ?", bindings: [id])
+        }
     }
 
     public func deleteRunningProcesses(workspaceID: String) throws {
@@ -733,345 +768,29 @@ public final class SQLiteStore {
             yabaiWindowID: yabaiWindowID, status: status, createdAt: row[10], updatedAt: row[11])
     }
 
-    private func createSchema() throws {
-        let sql = """
-                CREATE TABLE IF NOT EXISTS projects (
-                  id TEXT PRIMARY KEY,
-                  name TEXT NOT NULL,
-                  dir TEXT NOT NULL UNIQUE,
-                  is_git INTEGER NOT NULL,
-                  default_branch TEXT,
-                  is_collapsed INTEGER NOT NULL DEFAULT 0,
-                  setup_script TEXT,
-                  stop_script TEXT
-                );
-
-                CREATE TABLE IF NOT EXISTS project_port_definitions (
-                  id TEXT NOT NULL,
-                  project_id TEXT NOT NULL,
-                  name TEXT NOT NULL,
-                  order_index INTEGER NOT NULL,
-                  PRIMARY KEY (project_id, order_index)
-                );
-
-                CREATE TABLE IF NOT EXISTS project_processes (
-                  id TEXT PRIMARY KEY,
-                  project_id TEXT NOT NULL,
-                  name TEXT,
-                  command TEXT NOT NULL,
-                  on_exit TEXT NOT NULL DEFAULT 'none',
-                  order_index INTEGER NOT NULL
-                );
-
-                CREATE TABLE IF NOT EXISTS project_status_checks (
-                  id TEXT PRIMARY KEY,
-                  project_id TEXT NOT NULL,
-                  name TEXT,
-                  process TEXT NOT NULL,
-                  command TEXT NOT NULL,
-                  interval INTEGER NOT NULL,
-                  timeout INTEGER NOT NULL,
-                  on_fail TEXT NOT NULL,
-                  order_index INTEGER NOT NULL
-                );
-
-                CREATE TABLE IF NOT EXISTS project_browser_sessions (
-                  id TEXT PRIMARY KEY,
-                  project_id TEXT NOT NULL,
-                  name TEXT,
-                  url TEXT,
-                  order_index INTEGER NOT NULL
-                );
-
-                CREATE TABLE IF NOT EXISTS project_agent_launchers (
-                  id TEXT PRIMARY KEY,
-                  project_id TEXT NOT NULL,
-                  name TEXT NOT NULL,
-                  command TEXT NOT NULL,
-                  order_index INTEGER NOT NULL
-                );
-
-                CREATE TABLE IF NOT EXISTS workspaces (
-                  id TEXT PRIMARY KEY,
-                  project_id TEXT NOT NULL,
-                  title TEXT NOT NULL,
-                  dir TEXT NOT NULL,
-                  dirname TEXT,
-                  branch TEXT,
-                  target_branch TEXT,
-                  is_default INTEGER NOT NULL,
-                  is_archived INTEGER NOT NULL,
-                  is_hidden INTEGER NOT NULL DEFAULT 0,
-                  is_running INTEGER NOT NULL,
-                  last_launched_at TEXT,
-                  tooltip TEXT,
-                  UNIQUE(project_id, title)
-                );
-
-                CREATE TABLE IF NOT EXISTS workspace_ports (
-                  workspace_id TEXT NOT NULL,
-                  port_index INTEGER NOT NULL,
-                  port_number INTEGER NOT NULL,
-                  port_name TEXT NOT NULL DEFAULT '',
-                  definition_id TEXT NOT NULL DEFAULT '',
-                  PRIMARY KEY (workspace_id, port_index)
-                );
-
-                CREATE TABLE IF NOT EXISTS workspace_port_definitions (
-                  id TEXT NOT NULL,
-                  workspace_id TEXT NOT NULL,
-                  name TEXT NOT NULL,
-                  order_index INTEGER NOT NULL,
-                  PRIMARY KEY (workspace_id, order_index)
-                );
-
-                CREATE TABLE IF NOT EXISTS workspace_settings (
-                  workspace_id TEXT PRIMARY KEY,
-                  stop_script TEXT,
-                  setup_status TEXT NOT NULL DEFAULT 'succeeded',
-                  setup_error TEXT,
-                  setup_started_at TEXT,
-                  setup_finished_at TEXT
-                );
-
-                CREATE TABLE IF NOT EXISTS workspace_processes (
-                  id TEXT PRIMARY KEY,
-                  workspace_id TEXT NOT NULL,
-                  name TEXT,
-                  command TEXT NOT NULL,
-                  on_exit TEXT NOT NULL DEFAULT 'none',
-                  order_index INTEGER NOT NULL
-                );
-
-                CREATE TABLE IF NOT EXISTS workspace_status_checks (
-                  id TEXT PRIMARY KEY,
-                  workspace_id TEXT NOT NULL,
-                  name TEXT,
-                  process TEXT NOT NULL,
-                  command TEXT NOT NULL,
-                  interval INTEGER NOT NULL,
-                  timeout INTEGER NOT NULL,
-                  on_fail TEXT NOT NULL DEFAULT 'none',
-                  order_index INTEGER NOT NULL
-                );
-
-                CREATE TABLE IF NOT EXISTS workspace_browser_sessions (
-                  id TEXT PRIMARY KEY,
-                  workspace_id TEXT NOT NULL,
-                  name TEXT,
-                  url TEXT,
-                  extracted_target_url TEXT,
-                  extracted_window_id INTEGER,
-                  extracted_window_valid INTEGER NOT NULL DEFAULT 0,
-                  order_index INTEGER NOT NULL
-                );
-
-                CREATE TABLE IF NOT EXISTS workspace_agent_launchers (
-                  id TEXT PRIMARY KEY,
-                  workspace_id TEXT NOT NULL,
-                  name TEXT NOT NULL,
-                  command TEXT NOT NULL,
-                  order_index INTEGER NOT NULL
-                );
-
-                CREATE TABLE IF NOT EXISTS running_processes (
-                  id TEXT PRIMARY KEY,
-                  workspace_id TEXT NOT NULL,
-                  template_name TEXT NOT NULL,
-                  command TEXT NOT NULL,
-                  terminal_app TEXT,
-                  window_id INTEGER,
-                  terminal_tracking_id TEXT,
-                  terminal_native_id TEXT,
-                  iterm_tab_index INTEGER,
-                  tmux_window_id TEXT,
-                  pid INTEGER,
-                  status TEXT NOT NULL,
-                  log_path TEXT,
-                  last_output_at TEXT,
-                  started_at TEXT,
-                  exited_at TEXT
-                );
-
-                CREATE TABLE IF NOT EXISTS status_results (
-                  process_id TEXT NOT NULL,
-                  check_name TEXT NOT NULL,
-                  status TEXT NOT NULL,
-                  message TEXT,
-                  last_run_at TEXT,
-                  PRIMARY KEY (process_id, check_name)
-                );
-
-                CREATE TABLE IF NOT EXISTS windows (
-                  id TEXT PRIMARY KEY,
-                  workspace_id TEXT NOT NULL,
-                  app TEXT NOT NULL,
-                  name TEXT,
-                  detail TEXT,
-                  target_url TEXT,
-                  window_id INTEGER,
-                  terminal_tracking_id TEXT,
-                  terminal_native_id TEXT,
-                  iterm_tab_index INTEGER,
-                  tmux_window_id TEXT,
-                  role TEXT NOT NULL,
-                  order_index INTEGER,
-                  last_seen_at TEXT
-                );
-
-                CREATE TABLE IF NOT EXISTS settings (
-                  key TEXT PRIMARY KEY,
-                  value TEXT NOT NULL
-                );
-
-                CREATE TABLE IF NOT EXISTS ignored_worktrees (
-                  worktree_dir TEXT PRIMARY KEY,
-                  project_id TEXT NOT NULL
-                );
-
-                CREATE TABLE IF NOT EXISTS agent_windows (
-                  id TEXT PRIMARY KEY,
-                  workspace_id TEXT NOT NULL,
-                  provider TEXT NOT NULL,
-                  label TEXT,
-                  terminal_tracking_id TEXT,
-                  terminal_native_id TEXT,
-                  tmux_window_id TEXT,
-                  codex_thread_id TEXT,
-                  window_id INTEGER,
-                  status TEXT NOT NULL DEFAULT 'idle',
-                  created_at TEXT NOT NULL,
-                  updated_at TEXT NOT NULL,
-                  yabai_window_id INTEGER
-                );
-
-                CREATE TABLE IF NOT EXISTS schema_version (
-                  version INTEGER NOT NULL
-                );
-            """
-        try executeBatch(sql: sql)
-    }
+    private func createSchema() throws { try executeBatch(sql: DatabaseSchema.latestSchemaSQL) }
 
     private func initializeSchema() throws {
-        let existingTables = try userTableNames()
-        if existingTables.isEmpty {
-            try createSchema()
-            try ensureWindowsTableColumns()
-            try ensureTerminalTrackingAndNativeIDColumns()
-            try ensureConfiguredTemplateIDColumns()
-            try setSchemaVersion(schemaVersion)
-            return
-        }
-
-        guard let currentVersion = try schemaVersionValue() else {
-            throw NSError(
-                domain: "muxy.store", code: 9, userInfo: [NSLocalizedDescriptionKey: "Unsupported database schema: missing schema version."])
-        }
-
-        switch currentVersion {
-        case schemaVersion:
-            try createSchema()
-            try ensureWindowsTableColumns()
-            try ensureTerminalTrackingAndNativeIDColumns()
-            try ensureConfiguredTemplateIDColumns()
-            return
-        default:
-            throw NSError(
-                domain: "muxy.store", code: 10,
-                userInfo: [
-                    NSLocalizedDescriptionKey:
-                        "Unsupported database schema version \(currentVersion). Remove ~/.muxy/muxy.db and recreate your workspaces."
-                ])
-        }
+        let migrator = DatabaseMigrator(
+            currentSchemaVersion: DatabaseSchema.currentVersion, steps: DatabaseSchema.migrationSteps,
+            backupManager: DatabaseBackupManager(databaseURL: URL(fileURLWithPath: databasePath)))
+        try migrator.migrateIfNeeded(
+            existingTables: try userTableNames(), schemaVersion: try schemaVersionValue(), databasePath: databasePath, databaseHandle: db,
+            createFreshSchema: { try self.createSchema() }, setSchemaVersion: { try self.setSchemaVersion($0) },
+            withTransaction: { try self.withImmediateTransaction($0) }, validateIntegrity: { try self.validateIntegrity() })
     }
 
     private func schemaVersionValue() throws -> Int? {
         do {
-            let rows = try queryRows(sql: "SELECT version FROM schema_version")
+            let rows = try queryRows(sql: "SELECT current_version FROM migration_state")
             guard let raw = rows.first?.first, let value = Int(raw) else { return nil }
             return value
         } catch { return nil }
     }
 
     private func setSchemaVersion(_ version: Int) throws {
-        try execute(sql: "DELETE FROM schema_version", bindings: [])
-        try execute(sql: "INSERT INTO schema_version(version) VALUES (?)", bindings: [String(version)])
-    }
-
-    private func migrateSchemaFromV6ToV7() throws {
-        try executeBatch(sql: "BEGIN IMMEDIATE;")
-        do {
-            try execute(sql: "DROP TABLE IF EXISTS project_terminal_windows", bindings: [])
-            try execute(sql: "DROP TABLE IF EXISTS workspace_terminal_windows", bindings: [])
-            if try tableExists("workspace_settings") { try migrateWorkspaceSettingsFromV6ToV7() }
-            if try tableExists("workspace_status_checks") { try migrateWorkspaceStatusChecksFromV6ToV7() }
-            try executeBatch(sql: "COMMIT;")
-        } catch {
-            try? executeBatch(sql: "ROLLBACK;")
-            throw error
-        }
-    }
-
-    private func migrateWorkspaceSettingsFromV6ToV7() throws {
-        try execute(sql: "ALTER TABLE workspace_settings RENAME TO workspace_settings_v6", bindings: [])
-        try execute(
-            sql: """
-                CREATE TABLE workspace_settings (
-                  workspace_id TEXT PRIMARY KEY,
-                  stop_script TEXT,
-                  setup_status TEXT NOT NULL DEFAULT 'succeeded',
-                  setup_error TEXT,
-                  setup_started_at TEXT,
-                  setup_finished_at TEXT
-                )
-                """, bindings: [])
-        try execute(
-            sql: """
-                INSERT INTO workspace_settings(workspace_id, stop_script, setup_status, setup_error, setup_started_at, setup_finished_at)
-                SELECT
-                  workspace_id,
-                  stop_script,
-                  CASE WHEN COALESCE(setup_status, '') = '' THEN 'succeeded' ELSE setup_status END,
-                  setup_error,
-                  setup_started_at,
-                  setup_finished_at
-                FROM workspace_settings_v6
-                """, bindings: [])
-        try execute(sql: "DROP TABLE workspace_settings_v6", bindings: [])
-    }
-
-    private func migrateWorkspaceStatusChecksFromV6ToV7() throws {
-        try execute(sql: "ALTER TABLE workspace_status_checks RENAME TO workspace_status_checks_v6", bindings: [])
-        try execute(
-            sql: """
-                CREATE TABLE workspace_status_checks (
-                  id TEXT PRIMARY KEY,
-                  workspace_id TEXT NOT NULL,
-                  name TEXT,
-                  process TEXT NOT NULL,
-                  command TEXT NOT NULL,
-                  interval INTEGER NOT NULL,
-                  timeout INTEGER NOT NULL,
-                  on_fail TEXT NOT NULL DEFAULT 'none',
-                  order_index INTEGER NOT NULL
-                )
-                """, bindings: [])
-        try execute(
-            sql: """
-                INSERT INTO workspace_status_checks(id, workspace_id, name, process, command, interval, timeout, on_fail, order_index)
-                SELECT
-                  id,
-                  workspace_id,
-                  name,
-                  process,
-                  command,
-                  interval,
-                  timeout,
-                  CASE WHEN COALESCE(on_fail, '') = '' THEN 'none' ELSE on_fail END,
-                  order_index
-                FROM workspace_status_checks_v6
-                """, bindings: [])
-        try execute(sql: "DROP TABLE workspace_status_checks_v6", bindings: [])
+        try execute(sql: "DELETE FROM migration_state", bindings: [])
+        try execute(sql: "INSERT INTO migration_state(current_version) VALUES (?)", bindings: [String(version)])
     }
 
     private func userTableNames() throws -> [String] {
@@ -1086,87 +805,9 @@ public final class SQLiteStore {
         ).compactMap(\.first)
     }
 
-    private func tableExists(_ name: String) throws -> Bool {
-        try queryRow(
-            sql: """
-                SELECT 1
-                FROM sqlite_master
-                WHERE type = 'table' AND name = ?
-                LIMIT 1
-                """, bindings: [name]) != nil
-    }
-
-    private func tableColumnNames(_ name: String) throws -> Set<String> {
-        let escapedName = name.replacingOccurrences(of: "\"", with: "\"\"")
-        return Set(
-            try queryRows(sql: "PRAGMA table_info(\"\(escapedName)\")").compactMap { row in
-                guard row.count >= 2 else { return nil }
-                return row[1]
-            })
-    }
-
-    private func ensureWindowsTableColumns() throws {
-        guard try tableExists("windows") else { return }
-        let columns = try tableColumnNames("windows")
-        if !columns.contains("name") { try execute(sql: "ALTER TABLE windows ADD COLUMN name TEXT", bindings: []) }
-        if !columns.contains("detail") { try execute(sql: "ALTER TABLE windows ADD COLUMN detail TEXT", bindings: []) }
-    }
-
-    private func ensureTerminalTrackingAndNativeIDColumns() throws {
-        if try tableExists("running_processes") {
-            let columns = try tableColumnNames("running_processes")
-            if !columns.contains("terminal_tracking_id") {
-                try execute(sql: "ALTER TABLE running_processes ADD COLUMN terminal_tracking_id TEXT", bindings: [])
-            }
-            if !columns.contains("terminal_native_id") {
-                try execute(sql: "ALTER TABLE running_processes ADD COLUMN terminal_native_id TEXT", bindings: [])
-            }
-        }
-        if try tableExists("windows") {
-            let columns = try tableColumnNames("windows")
-            if !columns.contains("terminal_tracking_id") {
-                try execute(sql: "ALTER TABLE windows ADD COLUMN terminal_tracking_id TEXT", bindings: [])
-            }
-            if !columns.contains("terminal_native_id") { try execute(sql: "ALTER TABLE windows ADD COLUMN terminal_native_id TEXT", bindings: []) }
-        }
-        if try tableExists("agent_windows") {
-            let columns = try tableColumnNames("agent_windows")
-            if !columns.contains("terminal_tracking_id") {
-                try execute(sql: "ALTER TABLE agent_windows ADD COLUMN terminal_tracking_id TEXT", bindings: [])
-            }
-            if !columns.contains("terminal_native_id") {
-                try execute(sql: "ALTER TABLE agent_windows ADD COLUMN terminal_native_id TEXT", bindings: [])
-            }
-        }
-    }
-
-    private func ensureConfiguredTemplateIDColumns() throws {
-        if try tableExists("project_port_definitions") {
-            let columns = try tableColumnNames("project_port_definitions")
-            if !columns.contains("id") { try execute(sql: "ALTER TABLE project_port_definitions ADD COLUMN id TEXT", bindings: []) }
-            try execute(sql: "UPDATE project_port_definitions SET id = lower(hex(randomblob(16))) WHERE COALESCE(id, '') = ''", bindings: [])
-        }
-        if try tableExists("workspace_port_definitions") {
-            let columns = try tableColumnNames("workspace_port_definitions")
-            if !columns.contains("id") { try execute(sql: "ALTER TABLE workspace_port_definitions ADD COLUMN id TEXT", bindings: []) }
-            try execute(sql: "UPDATE workspace_port_definitions SET id = lower(hex(randomblob(16))) WHERE COALESCE(id, '') = ''", bindings: [])
-        }
-        if try tableExists("workspace_ports") {
-            let columns = try tableColumnNames("workspace_ports")
-            if !columns.contains("definition_id") {
-                try execute(sql: "ALTER TABLE workspace_ports ADD COLUMN definition_id TEXT NOT NULL DEFAULT ''", bindings: [])
-            }
-            try execute(
-                sql: """
-                    UPDATE workspace_ports
-                    SET definition_id = COALESCE((
-                        SELECT workspace_port_definitions.id
-                        FROM workspace_port_definitions
-                        WHERE workspace_port_definitions.workspace_id = workspace_ports.workspace_id
-                          AND workspace_port_definitions.order_index = workspace_ports.port_index
-                    ), '')
-                    WHERE COALESCE(definition_id, '') = ''
-                    """, bindings: [])
+    private func validateIntegrity() throws {
+        guard let row = try queryRow(sql: "PRAGMA integrity_check"), row.first == "ok" else {
+            throw NSError(domain: "muxy.store", code: 45, userInfo: [NSLocalizedDescriptionKey: "PRAGMA integrity_check failed"])
         }
     }
 

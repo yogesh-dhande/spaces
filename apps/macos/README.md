@@ -30,6 +30,10 @@ scripts/coverage.sh
 
 `scripts/lint.sh` auto-formats `apps/macos/Sources` and `apps/macos/Tests` with `swift format` before linting, which keeps formatter noise out of the diagnostics.
 
+Persistence notes:
+- Migration safety backups are written to `~/.muxy/backups/` before any on-disk schema upgrade and retained as a rolling set of the newest 10 snapshots.
+- Any schema change in `streamctl` must ship with an ordered migration step and test coverage for the upgrade path.
+
 Useful commands:
 
 ```bash

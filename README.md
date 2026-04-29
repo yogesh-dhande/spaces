@@ -98,6 +98,8 @@ Important environment variables:
 ### Website deploy
 Firebase Hosting deploys from [`.github/workflows/deploy-firebase-hosting.yml`](/Users/yogesh/projects/muxy/.github/workflows/deploy-firebase-hosting.yml:1). It builds `apps/web` and deploys the static export on pushes to `main` that touch the site or on manual dispatch.
 
+The workflow authenticates with GitHub OIDC through Google Workload Identity Federation, then deploys through the Firebase Hosting REST API. This avoids `firebase-tools` service-account-key assumptions while keeping the deploy keyless.
+
 Required GitHub secret:
 - `FIREBASE_PROJECT_ID`
 - `GCP_WORKLOAD_IDENTITY_PROVIDER`
