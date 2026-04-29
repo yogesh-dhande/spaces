@@ -2,7 +2,7 @@
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "$0")/.." && pwd)"
-APP="$repo_root/apps/macos/.build/debug/Muxy"
+APP="$repo_root/apps/macos/.build/debug/MuxyApp"
 LOG_FILE="/tmp/Muxy.log"
 CRASH_DIR="$HOME/Library/Logs/DiagnosticReports"
 POST_LAUNCH_MONITOR_SECONDS="${MUXY_POST_LAUNCH_MONITOR_SECONDS:-45}"
@@ -11,7 +11,7 @@ print_failure_diagnostics() {
   echo "Muxy exited; last log lines:"
   tail -n 80 "$LOG_FILE" || true
   if [ -d "$CRASH_DIR" ]; then
-    latest_crash="$(ls -1t "$CRASH_DIR"/Muxy-*.ips "$CRASH_DIR"/Muxy-*.crash 2>/dev/null | head -n 1 || true)"
+    latest_crash="$(ls -1t "$CRASH_DIR"/MuxyApp-*.ips "$CRASH_DIR"/MuxyApp-*.crash "$CRASH_DIR"/Muxy-*.ips "$CRASH_DIR"/Muxy-*.crash 2>/dev/null | head -n 1 || true)"
     if [ -n "$latest_crash" ]; then
       echo
       echo "Most recent crash report: $latest_crash"
@@ -20,7 +20,7 @@ print_failure_diagnostics() {
   fi
   echo
   echo "Recent unified logs:"
-  /usr/bin/log show --style compact --last 2m --predicate 'process == "Muxy"' | tail -n 120 || true
+  /usr/bin/log show --style compact --last 2m --predicate 'process == "MuxyApp" OR process == "Muxy"' | tail -n 120 || true
 }
 
 # Kill any running instance before relaunching.

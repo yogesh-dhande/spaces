@@ -1,6 +1,6 @@
 # Muxy macOS App
 
-`Muxy` is the macOS app and `mx` is the companion CLI for workspace import, metadata updates, idempotent workspace launch, and agent activity.
+`Muxy` is the macOS app and `muxy` is the companion CLI for workspace import, metadata updates, idempotent workspace launch, and agent activity.
 
 ## Read This With
 - [spec.md](/Users/yogesh/projects/muxy/apps/macos/spec.md): UX and product behavior
@@ -33,12 +33,12 @@ scripts/coverage.sh
 Useful commands:
 
 ```bash
-apps/macos/.build/debug/Muxy
-apps/macos/.build/debug/mx --help
-apps/macos/.build/debug/mxe2e --help
-apps/macos/.build/debug/mx workspace import --title "debug" --tooltip "Local debug session"
-apps/macos/.build/debug/mx workspace update --tooltip "Ready for review"
-apps/macos/.build/debug/mx workspace up --restart
+apps/macos/.build/debug/MuxyApp
+apps/macos/.build/debug/muxy --help
+apps/macos/.build/debug/muxye2e --help
+apps/macos/.build/debug/muxy workspace import --title "debug" --tooltip "Local debug session"
+apps/macos/.build/debug/muxy workspace update --tooltip "Ready for review"
+apps/macos/.build/debug/muxy workspace up --restart
 apps/macos/Tests/e2e_real_system.sh
 ```
 
@@ -65,7 +65,7 @@ To prepare the same fixture projects, localhost browser-session servers, and wor
 apps/macos/Tests/e2e_real_system.sh --setup-fixtures-only
 ```
 
-This suite is manual by design. It drives the real app, `mx`, `yabai`, Chrome, and the configured terminal host in an interactive macOS session instead of XCTest.
+This suite is manual by design. It drives the real app, `muxy`, `yabai`, Chrome, and the configured terminal host in an interactive macOS session instead of XCTest.
 
 Primary coverage includes:
 - adding and archiving a workspace

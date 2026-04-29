@@ -83,12 +83,12 @@ BEGIN {
     module_order[1] = "streamctl"
     module_order[2] = "gui"
     module_order[3] = "appctl"
-    module_order[4] = "mx"
+    module_order[4] = "muxycli"
 }
 /^TOTAL[[:space:]]/ {
     overall_lines = $10
 }
-/^(appctl|gui|streamctl|mx)\// {
+/^(appctl|gui|streamctl|muxycli)\// {
     split($1, parts, "/")
     module = parts[1]
     regions_total[module] += $2

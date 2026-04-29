@@ -16,7 +16,7 @@ Core invariants:
 
 ```mermaid
 flowchart LR
-  cli["mx"] --> mxcli["mxcli"]
+  cli["muxy"] --> mxcli["mxcli"]
   mxcli --> stream["streamctl"]
   app["MuxyApp"] --> gui["gui"]
   gui --> stream
@@ -34,8 +34,8 @@ flowchart LR
 ## Module Responsibilities
 - `MuxyApp`: minimal app entry point that boots AppKit.
 - `gui`: AppKit UI layer that renders state and dispatches actions into `streamctl`. Shared visual language lives in `Theme.swift` (brand color tokens mirroring `apps/web/app/globals.css`) and `RowPrimitives.swift` (status dot, type icon tile, shortcut/project/branch chips, `ColoredBackgroundView` helper). The workspace detail pane is a single scrollable `NSStackView`; it stacks the header, directory meta row, inline tooltip editor, and five configuration sections (Processes, Browser sessions, Coding agents, Named ports, Stop script) in order. Each section is a self-contained class (e.g. `ProcessesSection.swift`) that owns its transient form state, swaps each row between collapsed and editing subviews via `NSAnimationContext`, and publishes commits through an `onCommit` closure that the host bridges to `orchestrator.updateWorkspaceSettings`. Named-port rows render the configured env-var name plus the currently reserved port number from `workspace_ports`, mirroring how browser-session rows separate configured input from resolved display output. The `⋯` overflow menu is built by the static `AppKitController.makeWorkspaceOverflowMenu(workspaceID:path:target:)`, which emits a stock `NSMenu` whose path-based items forward to `copyDirectoryPath(_:)` and `revealDirectoryInFinder(_:)`, while workspace actions use the same shared `senderIdentifier(_:)` helper for `NSMenuItem` and `NSControl` senders.
-- `mx`: executable shim that boots the declarative CLI parser.
-- `mxcli`: declarative `swift-argument-parser` command tree for `mx`, including command help, leaf validation, and translation from CLI inputs into orchestration calls.
+- `muxy`: executable shim that boots the declarative CLI parser.
+- `mxcli`: declarative `swift-argument-parser` command tree for `muxy`, including command help, leaf validation, and translation from CLI inputs into orchestration calls.
 - `streamctl`: core orchestration, lifecycle, validation, persistence coordination, and environment building.
 - `appctl`: system adapters for shell commands, yabai, iTerm2, Ghostty, Chrome, and related OS integrations.
 
@@ -203,7 +203,7 @@ Identity rules:
 Operational requirements:
 - Workspace shell launch and process launch must both work through the same adapter surface.
 - Process sessions must still run under tmux so terminal closure does not kill the underlying process.
-- The adapter must tolerate background launch (`background: true`) because `mx workspace up` and recovery flows may avoid stealing focus.
+- The adapter must tolerate background launch (`background: true`) because `muxy workspace up` and recovery flows may avoid stealing focus.
 - The integration must not introduce window management outside yabai; any native terminal APIs are only for terminal-local actions such as opening, closing, or selecting a terminal target.
 
 Implementation note:
@@ -214,10 +214,10 @@ Implementation note:
 
 ## Agent Integration
 - Agent events are explicit CLI inputs that attach status to tracked workspace agent windows.
-- `mx agent event` only resolves direct terminal environments. If the command is run from tmux, the CLI rejects it explicitly because Muxy does not support coding agents running inside tmux.
+- `muxy agent event` only resolves direct terminal environments. If the command is run from tmux, the CLI rejects it explicitly because Muxy does not support coding agents running inside tmux.
 - Agent windows are stored separately from regular process windows because they carry provider and lifecycle metadata, but `init` also reconciles them against tracked terminal windows so ad-hoc agent terminals become focusable tracked rows.
 - Configured agent-launcher names are treated as reserved focus labels. The launcher-owned agent instance may keep that exact label, while unrelated ad-hoc agents that report the same label are suffixed during registration so GUI rows and CLI focus targets stay unambiguous.
-- Workspace launch now opens configured coding agents through the same direct-terminal path as manual agent launch. That creates the tracked agent rows eagerly, while later `mx agent event` calls still supply the actual lifecycle status.
+- Workspace launch now opens configured coding agents through the same direct-terminal path as manual agent launch. That creates the tracked agent rows eagerly, while later `muxy agent event` calls still supply the actual lifecycle status.
 - The dashboard and numbered window shortcuts keep configured and ad-hoc agent rows in one `Coding Agents` section. Configured rows occupy their stable slots first, then unmatched ad-hoc agent rows append after them so shortcut ordering remains deterministic.
 - Configured-agent relaunch is conservative: if a reserved row still points at a live tracked terminal, Muxy keeps that row and treats launch as a no-op. Only clearly stale rows are evicted and replaced.
 - Agent reconciliation prefers terminal identity first:
@@ -240,7 +240,7 @@ Ghostty-specific reconciliation:
 Terminal host notes:
 - iTerm2 exposes a usable shell session ID directly (`ITERM_SESSION_ID`), so Muxy can rely on that same host-native identifier for launch tracking, hook attribution, liveness checks, and refocus.
 - Ghostty does not expose an equivalent shell-local native terminal ID to the running shell on this machine. That is why Ghostty needs the split between `terminalTrackingID` and `terminalNativeID`.
-- Ghostty AppleScript can enumerate the real terminal graph and focus a terminal by Ghostty terminal ID, but it cannot safely tell Muxy which background shell emitted an `mx agent event`. That attribution must come from the Muxy-issued hook token.
+- Ghostty AppleScript can enumerate the real terminal graph and focus a terminal by Ghostty terminal ID, but it cannot safely tell Muxy which background shell emitted an `muxy agent event`. That attribution must come from the Muxy-issued hook token.
 - Ghostty direct-property or environment-variable AppleScript access has proven unreliable enough that Muxy should avoid new designs that depend on reading live terminal env vars back out of Ghostty.
 
 ## Lifecycle and Health

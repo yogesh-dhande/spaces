@@ -4,7 +4,7 @@ import { DocsShell } from "../components/docs-shell";
 export const metadata: Metadata = {
   title: "CLI Reference",
   description:
-    "Reference for the minimal mx command-line interface used by coding agents and terminal workflows.",
+    "Reference for the minimal muxy command-line interface used by coding agents and terminal workflows.",
 };
 
 function CodeBlock({ children }: { children: string }) {
@@ -36,24 +36,24 @@ export default function CliReferencePage() {
   return (
     <DocsShell
       title="CLI Reference"
-      description="The mx CLI is intentionally minimal. It exists for workspace import, workspace metadata updates, idempotent workspace launch, and explicit coding-agent lifecycle events."
+      description="The muxy CLI is intentionally minimal. It exists for workspace import, workspace metadata updates, idempotent workspace launch, and explicit coding-agent lifecycle events."
       pagePath="/docs/cli"
     >
       <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
         <h2 className="text-2xl font-semibold tracking-tight">Overview</h2>
         <p className="mt-3 text-sm leading-7 text-foreground-soft">
-          Use <Cmd>mx</Cmd> when you are already in a terminal or when a coding agent needs to register a workspace, update its visible metadata, make sure it is running, or report its lifecycle state back to Muxy.
+          Use <Cmd>muxy</Cmd> when you are already in a terminal or when a coding agent needs to register a workspace, update its visible metadata, make sure it is running, or report its lifecycle state back to Muxy.
         </p>
-        <CodeBlock>{`mx --version
-mx workspace import
-mx workspace update --tooltip "Ready for review"
-mx workspace up
-mx agent event --type waiting`}</CodeBlock>
+        <CodeBlock>{`muxy --version
+muxy workspace import
+muxy workspace update --tooltip "Ready for review"
+muxy workspace up
+muxy agent event --type waiting`}</CodeBlock>
       </article>
 
       <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
         <h2 className="text-2xl font-semibold tracking-tight">Version</h2>
-        <CodeBlock>{`mx --version`}</CodeBlock>
+        <CodeBlock>{`muxy --version`}</CodeBlock>
         <p className="mt-2 text-sm leading-7 text-foreground-soft">
           Prints the installed Muxy CLI version.
         </p>
@@ -65,13 +65,13 @@ mx agent event --type waiting`}</CodeBlock>
           Registers the current directory as a Muxy workspace by default. This is the normal bootstrap step for coding agents and terminal-first workflows.
         </p>
         <CodeBlock>{`# Import the current directory
-mx workspace import
+muxy workspace import
 
 # Import another directory
-mx workspace import /path/to/worktree
+muxy workspace import /path/to/worktree
 
 # Create or update visible metadata during import
-mx workspace import --title "OAuth rollout" --tooltip "Waiting on staging verification"`}</CodeBlock>
+muxy workspace import --title "OAuth rollout" --tooltip "Waiting on staging verification"`}</CodeBlock>
         <ul className="mt-3 space-y-1">
           <Flag name="[path]" description="Workspace directory to register. Defaults to the current working directory." />
           <Flag name="--title <title>" description="Optional workspace title. If the workspace already exists, the title is updated." />
@@ -82,13 +82,13 @@ mx workspace import --title "OAuth rollout" --tooltip "Waiting on staging verifi
       <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
         <h2 className="text-2xl font-semibold tracking-tight">Workspace Update</h2>
         <p className="mt-3 text-sm leading-7 text-foreground-soft">
-          <Cmd>mx workspace update</Cmd> changes workspace metadata after the workspace already exists. Use it for title or tooltip edits without relaunching anything.
+          <Cmd>muxy workspace update</Cmd> changes workspace metadata after the workspace already exists. Use it for title or tooltip edits without relaunching anything.
         </p>
         <CodeBlock>{`# Update the current workspace tooltip
-mx workspace update --tooltip "Ready for review"
+muxy workspace update --tooltip "Ready for review"
 
 # Update another workspace
-mx workspace update /path/to/workspace --title "oauth-timeout" --tooltip "Waiting on staging verification"`}</CodeBlock>
+muxy workspace update /path/to/workspace --title "oauth-timeout" --tooltip "Waiting on staging verification"`}</CodeBlock>
         <ul className="mt-3 space-y-1">
           <Flag name="[path]" description="Workspace directory to update. Defaults to the current working directory." />
           <Flag name="--title <title>" description="Optional workspace title update." />
@@ -99,19 +99,19 @@ mx workspace update /path/to/workspace --title "oauth-timeout" --tooltip "Waitin
       <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
         <h2 className="text-2xl font-semibold tracking-tight">Workspace Up</h2>
         <p className="mt-3 text-sm leading-7 text-foreground-soft">
-          <Cmd>mx workspace up</Cmd> is the idempotent runtime command. It launches a stopped workspace and restores exited runtime when the workspace is already running.
+          <Cmd>muxy workspace up</Cmd> is the idempotent runtime command. It launches a stopped workspace and restores exited runtime when the workspace is already running.
         </p>
         <CodeBlock>{`# Ensure the current workspace is running
-mx workspace up
+muxy workspace up
 
 # Target another workspace directory
-mx workspace up /path/to/workspace
+muxy workspace up /path/to/workspace
 
 # Force a full stop and relaunch
-mx workspace up /path/to/workspace --restart
+muxy workspace up /path/to/workspace --restart
 
 # Launch and focus one named tracked window
-mx workspace up /path/to/workspace --focus frontend`}</CodeBlock>
+muxy workspace up /path/to/workspace --focus frontend`}</CodeBlock>
         <ul className="mt-3 space-y-1">
           <Flag name="[path]" description="Workspace directory to launch. Defaults to the current working directory." />
           <Flag name="--restart" description="Always perform a full stop and fresh launch instead of the normal idempotent path." />
@@ -124,11 +124,11 @@ mx workspace up /path/to/workspace --focus frontend`}</CodeBlock>
         <p className="mt-3 text-sm leading-7 text-foreground-soft">
           Coding agents report their lifecycle explicitly. Muxy uses these events to surface waiting and done states in the app and dashboard. This command records state only; it does not launch or stop an agent.
         </p>
-        <CodeBlock>{`mx agent event --type init
-mx agent event --type start
-mx agent event --type waiting
-mx agent event --type done
-mx agent event --type exit`}</CodeBlock>
+        <CodeBlock>{`muxy agent event --type init
+muxy agent event --type start
+muxy agent event --type waiting
+muxy agent event --type done
+muxy agent event --type exit`}</CodeBlock>
         <ul className="mt-3 space-y-1">
           <Flag name="--type <event>" description="Required event type: init, start, waiting, done, or exit." />
           <Flag name="[path]" description="Workspace directory to associate with the event. Defaults to the current working directory." />
@@ -140,13 +140,13 @@ mx agent event --type exit`}</CodeBlock>
 
       <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
         <h2 className="text-2xl font-semibold tracking-tight">Typical Flow</h2>
-        <CodeBlock>{`mx workspace import --title "bugfix/login-timeout"
-mx workspace up --restart
-mx workspace update --tooltip "Investigating flaky OAuth callback"
-mx agent event --type init
-mx agent event --type start
+        <CodeBlock>{`muxy workspace import --title "bugfix/login-timeout"
+muxy workspace up --restart
+muxy workspace update --tooltip "Investigating flaky OAuth callback"
+muxy agent event --type init
+muxy agent event --type start
 # ... later ...
-mx agent event --type waiting`}</CodeBlock>
+muxy agent event --type waiting`}</CodeBlock>
         <p className="mt-2 text-sm leading-7 text-foreground-soft">
           The GUI remains the primary place to create projects and configure templates. The CLI stays focused on registration, lightweight metadata updates, launch-time workflows, and agent reporting.
         </p>

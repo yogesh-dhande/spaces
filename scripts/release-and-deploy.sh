@@ -96,10 +96,10 @@ echo ""
 # Step 2: Code sign binaries
 echo "🔐 Step 2/6: Code signing binaries..."
 BUILD_DIR="$MACOS_DIR/.build/release"
-MUXY_APP="$BUILD_DIR/Muxy"
-MX_CLI="$BUILD_DIR/mx"
+MUXY_APP="$BUILD_DIR/MuxyApp"
+MUXY_CLI="$BUILD_DIR/muxy"
 
-if [[ ! -f "$MUXY_APP" ]] || [[ ! -f "$MX_CLI" ]]; then
+if [[ ! -f "$MUXY_APP" ]] || [[ ! -f "$MUXY_CLI" ]]; then
   echo "Error: Release binaries not found in $BUILD_DIR" >&2
   exit 1
 fi
@@ -108,13 +108,13 @@ set -a          # auto-export all variables defined from now on
 source "$REPO_ROOT/.env"
 set +a          # stop auto-exporting
 
-"$SCRIPTS_DIR/codesign.sh" "$MUXY_APP" "$MX_CLI"
+"$SCRIPTS_DIR/codesign.sh" "$MUXY_APP" "$MUXY_CLI"
 echo "✓ Code signing complete"
 echo ""
 
 # Step 3: Create DMG installer
 echo "💿 Step 3/6: Creating DMG installer..."
-"$SCRIPTS_DIR/create-dmg.sh" "$MUXY_APP" "$MX_CLI" "$VERSION"
+"$SCRIPTS_DIR/create-dmg.sh" "$MUXY_APP" "$MUXY_CLI" "$VERSION"
 DMG_NAME="Muxy-${VERSION}.dmg"
 DMG_PATH="$REPO_ROOT/apps/web/public/releases/$VERSION/$DMG_NAME"
 

@@ -5,7 +5,7 @@ import streamctl
 
 public struct MXCommand: ParsableCommand {
     public static let configuration = CommandConfiguration(
-        commandName: "mx", abstract: "Workspace registration, runtime, and coding-agent lifecycle commands for Muxy.",
+        commandName: "muxy", abstract: "Workspace registration, runtime, and coding-agent lifecycle commands for Muxy.",
         discussion: """
             Notes:
               - All settings are stored in ~/.muxy/muxy.db.
@@ -285,7 +285,7 @@ private func requireWorkspace(path: String?, orchestrator: MuxyOrchestrator, con
     let directory = path ?? context.currentDirectoryPath()
     let normalizedDirectory = context.normalizePath(directory)
     guard let workspace = try orchestrator.store.workspace(dir: normalizedDirectory) else {
-        throw ValidationError("Workspace not found at: \(normalizedDirectory). Run `mx workspace import [path]` first.")
+        throw ValidationError("Workspace not found at: \(normalizedDirectory). Run `muxy workspace import [path]` first.")
     }
 
     return workspace

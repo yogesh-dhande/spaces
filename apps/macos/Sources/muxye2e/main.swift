@@ -4,10 +4,10 @@ import appctl
 import streamctl
 
 /// Small manual-testing helper that exposes fixture seeding and state-dump
-/// commands without expanding the user-facing `mx` CLI surface.
+/// commands without expanding the user-facing `muxy` CLI surface.
 struct MXE2ECommand: ParsableCommand {
     static let configuration = CommandConfiguration(
-        commandName: "mxe2e", abstract: "Manual real-system test helpers for Muxy.",
+        commandName: "muxye2e", abstract: "Manual real-system test helpers for Muxy.",
         subcommands: [
             SeedFixtureCommand.self, CleanupFixturesCommand.self, CreateWorkspaceCommand.self, LookupWorkspaceCommand.self,
             SelectWorkspaceDetailCommand.self, DumpWorkspaceCommand.self, FocusableWindowNamesCommand.self, ArchiveWorkspaceCommand.self,

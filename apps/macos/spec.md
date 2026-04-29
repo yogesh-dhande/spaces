@@ -34,13 +34,13 @@ Muxy provides a desktop app and a CLI for power users and coding agents.
   `Running` and `Stopped` should stay easy to explain, while failed processes or stale tracked windows surface as warnings on top of that lifecycle state.
 - Require explicit tracked-window targets for CLI-driven focus.
   Focus should not guess which window the user meant, because arbitrary focus becomes unpredictable as workspaces collect multiple windows.
-  Example: one workspace may have a frontend browser, an admin browser, an API terminal, and a coding-agent terminal all open at once. If the user clicks Focus in the GUI or runs `mx workspace up --focus`, Muxy should not silently pick whichever window was captured first or happened to survive most recently. The user may want the admin browser now and the coding-agent terminal five seconds later. Requiring an explicit tracked window target keeps focus behavior deterministic. CLI focus targets should be selected by unique window names rather than numeric positions.
+  Example: one workspace may have a frontend browser, an admin browser, an API terminal, and a coding-agent terminal all open at once. If the user clicks Focus in the GUI or runs `muxy workspace up --focus`, Muxy should not silently pick whichever window was captured first or happened to survive most recently. The user may want the admin browser now and the coding-agent terminal five seconds later. Requiring an explicit tracked window target keeps focus behavior deterministic. CLI focus targets should be selected by unique window names rather than numeric positions.
 - Never resize or reposition tracked windows unless initiated by the user.
   Muxy should respect where the user placed each tracked window, because it cannot infer whether the user wants side-by-side windows, overlapping windows, or some other layout that includes non-Muxy windows.
 - Never control windows that Muxy does not explicitly track.
   Muxy should not hide, move, resize, or otherwise manipulate unrelated windows, because the user may intentionally keep an untracked window visible next to a tracked workspace window.
 - Keep coding-agent events explicit.
-  `mx workspace import` and `mx workspace up` must not infer agent lifecycle, because only the agent can accurately report when it actually initialized, started active work, is waiting, is done, or exited.
+  `muxy workspace import` and `muxy workspace up` must not infer agent lifecycle, because only the agent can accurately report when it actually initialized, started active work, is waiting, is done, or exited.
 - Use explicit names as the stable identity surface for focusable browser sessions, processes, and coding-agent terminals.
   Names express purpose and intent, stay meaningful when URLs or process commands change, and avoid collisions where multiple coding agents may run the same command. Those names must be unique within a workspace's combined focusable set so GUI and CLI focus can target one unambiguous window by name.
 
@@ -191,8 +191,8 @@ Muxy focuses those windows; it does not decide their geometry.
 - Missing configured processes in the dashboard should open that one configured process directly and reuse the same configured row instead of creating a duplicate row.
 - Dashboard rows should show the tracked window or process name as the primary label and the target detail, such as a browser URL or process command, as secondary text.
 - Ad-hoc terminal rows should keep their generated focus name as the primary label and use the live terminal window title as secondary text.
-- CLI-driven focus through `mx workspace up --focus` should require an explicit tracked window target instead of picking an arbitrary window.
-- CLI focus should use unique names across focusable browser sessions, processes, and coding-agent terminals, and `mx workspace up --focus` should require one of those names explicitly.
+- CLI-driven focus through `muxy workspace up --focus` should require an explicit tracked window target instead of picking an arbitrary window.
+- CLI focus should use unique names across focusable browser sessions, processes, and coding-agent terminals, and `muxy workspace up --focus` should require one of those names explicitly.
 - Configured workspace processes and browser sessions must always have explicit names; Muxy should reject unnamed entries instead of falling back to commands or URLs as identities.
 - Focus target discovery may remain GUI-centric; the CLI does not need a separate read-only discovery command.
 - Window-number shortcuts should use a configurable direct-focus modifier plus digits `1` through `9`.
@@ -203,9 +203,9 @@ Muxy focuses those windows; it does not decide their geometry.
 - Every keyboard shortcut the product supports must be configurable from the GUI settings panel.
 
 ## Coding-Agent Integration
-- Coding agents can explicitly report lifecycle events through `mx agent event`.
+- Coding agents can explicitly report lifecycle events through `muxy agent event`.
 - Agent status events are not implied by `workspace import` or `workspace up`, but workspace launch should open any configured coding-agent rows so they appear alongside runtime-managed agents under one `Coding Agents` section.
-- `mx agent event` should support explicit `init`, `start`, `waiting`, `done`, and `exit` events.
+- `muxy agent event` should support explicit `init`, `start`, `waiting`, `done`, and `exit` events.
 - Agent events from unsupported terminal hosts should be dropped instead of recorded. Coding agents run from tmux are not supported by Muxy and should return an explicit error instead of being inferred onto workspace process terminals.
 - `init` should identify the originating terminal and either attach to an already tracked terminal row or create a tracked terminal row for that coding agent.
 - Terminal identity should be adapter-driven and consistent across supported hosts: prefer tmux window identity when present, otherwise prefer a stable session/token identity, and only fall back to a yabai window identity when no durable session-like identity exists.
@@ -231,4 +231,4 @@ Muxy focuses those windows; it does not decide their geometry.
 ## Update Experience
 - The app should check for updates periodically and allow manual update checks.
 - When an update is available, the user should be able to install it from within the app.
-- `mx --version` should report the current version.
+- `muxy --version` should report the current version.

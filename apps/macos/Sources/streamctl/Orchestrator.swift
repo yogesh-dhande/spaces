@@ -1566,7 +1566,7 @@ public final class MuxyOrchestrator {
         guard let baseLabel = sanitizedFocusName(preferredLabel) else { return nil }
         // Configured coding-agent slots reserve their exact names even before a live agent
         // reports in. Ad-hoc agents that choose the same label get suffixed so the Run tab
-        // and `mx workspace focus --name ...` keep a stable one-name-to-one-row mapping.
+        // and `muxy workspace focus --name ...` keep a stable one-name-to-one-row mapping.
         let usedNames = Set(
             try focusableWorkspaceTargets(workspaceID: workspaceID).filter { entry in
                 guard case .agent(let record) = entry.target, let excludingAgentWindowID else { return true }
@@ -2244,7 +2244,7 @@ public final class MuxyOrchestrator {
             guard liveTmuxWindowIDs.contains(tmuxWindowID) else {
                 guard process.status != .exited else { continue }
                 // Preserve configured process rows when their tmux window vanishes so an
-                // explicit `mx workspace up` can still restart just the dead process.
+                // explicit `muxy workspace up` can still restart just the dead process.
                 try store.upsert(
                     runningProcess: RunningProcessRecord(
                         id: process.id, workspaceID: process.workspaceID, templateName: process.templateName, command: process.command,
@@ -3075,7 +3075,7 @@ public final class MuxyOrchestrator {
                 if currentDate().timeIntervalSince(waitStartedAt) > 900 {
                     throw MuxyError.invalidArgument(
                         message:
-                            "Timed out waiting for workspace setup to finish. Retry launch after setup completes or run mx workspace up --restart.")
+                            "Timed out waiting for workspace setup to finish. Retry launch after setup completes or run muxy workspace up --restart.")
                 }
                 Thread.sleep(forTimeInterval: 0.2)
             }

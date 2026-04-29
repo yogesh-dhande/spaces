@@ -43,7 +43,7 @@ export default function InstallationDocsPage() {
             3. Drag <code className="rounded bg-background-soft px-1.5 py-0.5 text-xs">Muxy.app</code> to your <strong>Applications</strong> folder.
           </li>
           <li>
-            4. Double-click <code className="rounded bg-background-soft px-1.5 py-0.5 text-xs">Install mx CLI</code> in the DMG to install the <code className="rounded bg-background-soft px-1.5 py-0.5 text-xs">mx</code> command.
+            4. Double-click <code className="rounded bg-background-soft px-1.5 py-0.5 text-xs">Install muxy CLI</code> in the DMG to install the <code className="rounded bg-background-soft px-1.5 py-0.5 text-xs">muxy</code> command.
           </li>
           <li>
             5. Eject the DMG.
@@ -87,7 +87,7 @@ export default function InstallationDocsPage() {
           Confirm the CLI and GUI are working:
         </p>
         <pre className="mt-3 rounded-lg bg-background-soft p-3 text-xs leading-6">
-{`mx --version
+{`muxy --version
 open -a Muxy`}
         </pre>
         <p className="mt-2 text-sm leading-7 text-foreground-soft">
@@ -109,7 +109,7 @@ open -a Muxy`}
         </p>
         <pre className="mt-3 rounded-lg bg-background-soft p-3 text-xs leading-6">
 {`rm -rf /Applications/Muxy.app
-rm -f /usr/local/bin/mx ~/.local/bin/mx
+rm -f /usr/local/bin/muxy ~/.local/bin/muxy
 rm -rf ~/.muxy ~/muxy`}
         </pre>
         <p className="mt-2 text-sm leading-7 text-foreground-soft">

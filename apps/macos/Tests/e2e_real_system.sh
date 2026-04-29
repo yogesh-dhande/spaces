@@ -10,9 +10,9 @@ MACOS_DIR="$ROOT_DIR/apps/macos"
 # scripts/swiftpm.sh already changes into apps/macos internally, so the default
 # build command must not add a second package-path override.
 BUILD_CMD="${BUILD_CMD:-$ROOT_DIR/scripts/swiftpm.sh build}"
-MUXY_APP="${MUXY_APP:-$MACOS_DIR/.build/debug/Muxy}"
-MX_BIN="${MX_BIN:-$MACOS_DIR/.build/debug/mx}"
-MX_E2E_BIN="${MX_E2E_BIN:-$MACOS_DIR/.build/debug/mxe2e}"
+MUXY_APP="${MUXY_APP:-$MACOS_DIR/.build/debug/MuxyApp}"
+MX_BIN="${MX_BIN:-$MACOS_DIR/.build/debug/muxy}"
+MX_E2E_BIN="${MX_E2E_BIN:-$MACOS_DIR/.build/debug/muxye2e}"
 APP_LOG="${APP_LOG:-/tmp/muxy-e2e-app.log}"
 EVENT_LOG="${EVENT_LOG:-/tmp/muxy-e2e-events.log}"
 METRICS_LOG="${METRICS_LOG:-/tmp/muxy-e2e-metrics.log}"
@@ -91,7 +91,7 @@ cleanup() {
   if [[ -n "${MUXY_PID}" ]]; then
     kill "${MUXY_PID}" >/dev/null 2>&1 || true
   fi
-  pkill -x Muxy >/dev/null 2>&1 || true
+  pkill -x MuxyApp >/dev/null 2>&1 || true
   print_run_summary "$exit_code"
   open_final_recording
 }
@@ -275,7 +275,7 @@ reset_fixture_runtime() {
 
 close_existing_muxy_instances() {
   log_step "closing existing Muxy instances"
-  pkill -x Muxy >/dev/null 2>&1 || true
+  pkill -x MuxyApp >/dev/null 2>&1 || true
   local deadline=$((SECONDS + ACTION_TIMEOUT_SECONDS))
   while (( SECONDS < deadline )); do
     if [[ "$(muxy_instance_count)" == "0" ]]; then
@@ -452,7 +452,7 @@ print_recording_summary() {
 }
 
 muxy_instance_count() {
-  (pgrep -x Muxy || true) | wc -l | tr -d ' '
+  (pgrep -x MuxyApp || true) | wc -l | tr -d ' '
 }
 
 ensure_single_muxy_instance() {
@@ -463,7 +463,7 @@ ensure_single_muxy_instance() {
     local deadline=$((SECONDS + ACTION_TIMEOUT_SECONDS))
     while (( SECONDS < deadline )); do
       count="$(muxy_instance_count)"
-      if [[ "$count" == "1" ]] && pgrep -x Muxy | grep -qx "$expected_pid"; then
+      if [[ "$count" == "1" ]] && pgrep -x MuxyApp | grep -qx "$expected_pid"; then
         return 0
       fi
       sleep 0.2
@@ -508,19 +508,20 @@ APPLESCRIPT
 wait_for_muxy_frontmost_ready() {
   # Most GUI actions in this script assume a single visible Muxy window and an
   # active accessibility tree, so block until that state exists and Muxy is
-  # actually frontmost. The later UI automation still queries `process "Muxy"`
-  # by name, so the strict single-instance checks above are what keep System
-  # Events from drifting onto the user's regular app instance here.
+  # actually frontmost. The later UI automation queries `process "MuxyApp"`
+  # because the internal executable name differs from the user-facing app name.
+  # The strict single-instance checks above are what keep System Events from
+  # drifting onto the user's regular app instance here.
   local deadline=$((SECONDS + ACTION_TIMEOUT_SECONDS))
   while (( SECONDS < deadline )); do
     if ! kill -0 "$MUXY_PID" >/dev/null 2>&1; then
       fail "Muxy exited during launch"
     fi
     activate_muxy_pid "$MUXY_PID"
-    if [[ "$(frontmost_app 2>/dev/null || true)" == "Muxy" ]] && osascript <<'APPLESCRIPT' 2>/dev/null | grep -Eiq '^(1|true)$'; then
+    if [[ "$(frontmost_app 2>/dev/null || true)" == "MuxyApp" ]] && osascript <<'APPLESCRIPT' 2>/dev/null | grep -Eiq '^(1|true)$'; then
 tell application "System Events"
-  if exists process "Muxy" then
-    tell process "Muxy"
+  if exists process "MuxyApp" then
+    tell process "MuxyApp"
       return (count of windows) > 0
     end tell
   end if
@@ -539,8 +540,8 @@ wait_for_muxy_splitter_ready() {
   while (( SECONDS < deadline )); do
     if osascript <<'APPLESCRIPT' 2>/dev/null | grep -q '^1$'; then
 tell application "System Events"
-  if exists process "Muxy" then
-    tell process "Muxy"
+  if exists process "MuxyApp" then
+    tell process "MuxyApp"
       if (count of windows) is 0 then return 0
       try
         set _ to splitter group 1 of window 1
@@ -563,8 +564,8 @@ APPLESCRIPT
 muxy_splitter_ready() {
   osascript <<'APPLESCRIPT' 2>/dev/null | grep -q '^1$'
 tell application "System Events"
-  if exists process "Muxy" then
-    tell process "Muxy"
+  if exists process "MuxyApp" then
+    tell process "MuxyApp"
       if (count of windows) is 0 then return 0
       try
         set _ to splitter group 1 of window 1
@@ -608,7 +609,7 @@ install_demo_fixture() {
 
 seed_fixture() {
   log_step "seeding project fixture"
-  # mxe2e seeds deterministic project/workspace templates through the real
+  # muxye2e seeds deterministic project/workspace templates through the real
   # streamctl layer so the manual test is reproducible.
   "$MX_E2E_BIN" seed-fixture \
     --project-dir "$TEST_REPO" \
@@ -830,7 +831,7 @@ ui_click_identifier() {
 on run argv
   set targetID to item 1 of argv
   tell application "System Events"
-    tell process "Muxy"
+    tell process "MuxyApp"
       repeat with targetElement in entire contents of window 1
         try
           if (value of attribute "AXIdentifier" of targetElement) is targetID then
@@ -852,7 +853,7 @@ ui_click_workspace_detail_header_button() {
 on run argv
   set targetDescription to item 1 of argv
   tell application "System Events"
-    tell process "Muxy"
+    tell process "MuxyApp"
       tell scroll area 2 of splitter group 1 of window 1
         repeat with targetButton in buttons
           try
@@ -878,7 +879,7 @@ on run argv
   set targetID to item 1 of argv
   set targetValue to item 2 of argv
   tell application "System Events"
-    tell process "Muxy"
+    tell process "MuxyApp"
       repeat with targetElement in entire contents of window 1
         try
           if (value of attribute "AXIdentifier" of targetElement) is targetID then
@@ -902,7 +903,7 @@ on run argv
   set targetID to item 1 of argv
   set targetValue to item 2 of argv
   tell application "System Events"
-    tell process "Muxy"
+    tell process "MuxyApp"
       repeat with targetElement in entire contents of window 1
         try
           if (value of attribute "AXIdentifier" of targetElement) is targetID then
@@ -925,7 +926,7 @@ ui_double_click_identifier() {
 on run argv
   set targetID to item 1 of argv
   tell application "System Events"
-    tell process "Muxy"
+    tell process "MuxyApp"
       repeat with targetElement in entire contents of window 1
         try
           if (value of attribute "AXIdentifier" of targetElement) is targetID then
@@ -950,7 +951,7 @@ ui_select_outline_row() {
 on run argv
   set targetRow to (item 1 of argv) as integer
   tell application "System Events"
-    tell process "Muxy"
+    tell process "MuxyApp"
       select row targetRow of outline 1 of scroll area 1 of splitter group 1 of window 1
     end tell
   end tell
@@ -975,7 +976,7 @@ ui_click_tab() {
 on run argv
   set targetLabel to item 1 of argv
   tell application "System Events"
-    tell process "Muxy"
+    tell process "MuxyApp"
       repeat with targetElement in (entire contents of window 1)
         try
           if (role of targetElement) is "AXRadioButton" and (title of targetElement) is targetLabel then
@@ -1033,7 +1034,7 @@ archive_workspace_via_gui() {
   ui_click_button_description "Archive"
   osascript <<'APPLESCRIPT' >/dev/null 2>&1 || true
 tell application "System Events"
-  tell process "Muxy"
+  tell process "MuxyApp"
     if exists sheet 1 of window 1 then click button "Archive" of sheet 1 of window 1
   end tell
 end tell
@@ -1086,7 +1087,7 @@ restart_workspace_via_gui() {
   ui_show_workspace_detail "$workspace_dir" ""
   sleep 0.5
   if ! ui_click_workspace_detail_header_button "Restart"; then
-    log_debug "restart_workspace_via_gui fallback=mx-workspace-up-restart"
+    log_debug "restart_workspace_via_gui fallback=muxy-workspace-up-restart"
     run_mx_logged /tmp/muxy-e2e-restart-workspace-fallback.log workspace up "$workspace_dir" --restart
     transition_pause "workspace restart fallback"
     return 0
@@ -1450,7 +1451,7 @@ record_browser_focus_metric() {
     record_metric_sample "$name" "$(extract_metric_field "$line" "elapsed_ms")"
     return 0
   fi
-  # `mx workspace up --focus docs` can resolve through the shared name-based
+  # `muxy workspace up --focus docs` can resolve through the shared name-based
   # focus path instead of the browser-session-specific path, so the app may log
   # `named_window_focus target=docs` even though the visible behavior is still
   # "focus the tracked docs Chrome tab". Accept either metric shape here.
@@ -2001,7 +2002,7 @@ PY
   pass_case
 
   begin_case "$host: dead process recovery"
-  # Kill one tracked process, then confirm `mx workspace up` revives only the
+  # Kill one tracked process, then confirm `muxy workspace up` revives only the
   # dead runtime instead of forcing a full workspace restart.
   dump_workspace "$workspace_dir" "$dump_file"
   local frontend_pid

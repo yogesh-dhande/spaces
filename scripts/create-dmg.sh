@@ -2,12 +2,12 @@
 set -euo pipefail
 
 if [ $# -ne 3 ]; then
-  echo "Usage: $0 <Muxy-app-path> <mx-cli-path> <version>"
+  echo "Usage: $0 <Muxy-app-path> <muxy-cli-path> <version>"
   exit 1
 fi
 
 MUXY_APP="$1"
-MX_CLI="$2"
+MUXY_CLI="$2"
 VERSION="$3"
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 RELEASES_DIR="$REPO_ROOT/apps/web/public/releases/$VERSION"
@@ -29,17 +29,17 @@ mkdir -p "$app_bundle/Contents/MacOS"
 mkdir -p "$app_bundle/Contents/Resources"
 
 # Copy Muxy binary
-cp "$MUXY_APP" "$app_bundle/Contents/MacOS/Muxy"
-chmod +x "$app_bundle/Contents/MacOS/Muxy"
+cp "$MUXY_APP" "$app_bundle/Contents/MacOS/MuxyApp"
+chmod +x "$app_bundle/Contents/MacOS/MuxyApp"
 
 # Copy Info.plist
-cp apps/macos/Sources/Muxy/Info.plist "$app_bundle/Contents/Info.plist"
+cp apps/macos/Sources/MuxyApp/Info.plist "$app_bundle/Contents/Info.plist"
 
 # Copy app icon
-cp apps/macos/Sources/Muxy/AppIcon.icns "$app_bundle/Contents/Resources/AppIcon.icns"
+cp apps/macos/Sources/MuxyApp/AppIcon.icns "$app_bundle/Contents/Resources/AppIcon.icns"
 
 # Create CLI installer package
-cli_installer="$staging/Install mx CLI"
+cli_installer="$staging/Install muxy CLI"
 cat > "$cli_installer" << 'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -52,12 +52,12 @@ else
   mkdir -p "$INSTALL_DIR"
 fi
 
-# Copy mx CLI
+# Copy muxy CLI
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-cp "$SCRIPT_DIR/Muxy.app/Contents/Resources/mx" "$INSTALL_DIR/mx"
-chmod +x "$INSTALL_DIR/mx"
+cp "$SCRIPT_DIR/Muxy.app/Contents/Resources/muxy" "$INSTALL_DIR/muxy"
+chmod +x "$INSTALL_DIR/muxy"
 
-echo "✓ mx CLI installed to $INSTALL_DIR/mx"
+echo "✓ muxy CLI installed to $INSTALL_DIR/muxy"
 
 # Check if directory is in PATH
 if [[ ":$PATH:" != *":$INSTALL_DIR:"* ]]; then
@@ -74,9 +74,9 @@ read -p "Press Enter to close..."
 EOF
 chmod +x "$cli_installer"
 
-# Copy mx CLI to Resources
+# Copy muxy CLI to Resources
 mkdir -p "$app_bundle/Contents/Resources"
-cp "$MX_CLI" "$app_bundle/Contents/Resources/mx"
+cp "$MUXY_CLI" "$app_bundle/Contents/Resources/muxy"
 
 # Copy Sparkle.framework (required dependency)
 mkdir -p "$app_bundle/Contents/Frameworks"

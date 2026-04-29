@@ -80,7 +80,7 @@ export const docsPageLinks: DocsPageLink[] = [
     href: "/docs/cli",
     title: "CLI Reference",
     summary:
-      "Use the minimal mx CLI for workspace import, idempotent launch, and explicit coding-agent events.",
+      "Use the minimal muxy CLI for workspace import, idempotent launch, and explicit coding-agent events.",
   },
 ];
 

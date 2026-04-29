@@ -11,8 +11,8 @@ set -euo pipefail
 #   4 = second process/iTerm row
 # -----------------------------------------------------------------------------
 WORKSPACE_DIR="${WORKSPACE_DIR:-/Users/yogesh/muxy/workspaces/frontend-demo/banana}"
-MUXY_APP="${MUXY_APP:-$(cd "$(dirname "$0")/.." && pwd)/apps/macos/.build/debug/Muxy}"
-MX_BIN="${MX_BIN:-$(cd "$(dirname "$0")/.." && pwd)/apps/macos/.build/debug/mx}"
+MUXY_APP="${MUXY_APP:-$(cd "$(dirname "$0")/.." && pwd)/apps/macos/.build/debug/MuxyApp}"
+MX_BIN="${MX_BIN:-$(cd "$(dirname "$0")/.." && pwd)/apps/macos/.build/debug/muxy}"
 PROFILE_LOG="${PROFILE_LOG:-/tmp/muxy-window-focus-profile.log}"
 SAMPLE_COUNT="${SAMPLE_COUNT:-3}"
 STARTUP_SAMPLE_COUNT="${STARTUP_SAMPLE_COUNT:-3}"
@@ -66,7 +66,7 @@ build_if_needed() {
 
 close_existing_muxy_instances() {
   osascript -e 'tell application "Muxy" to quit' >/dev/null 2>&1 || true
-  pkill -x Muxy >/dev/null 2>&1 || true
+  pkill -x MuxyApp >/dev/null 2>&1 || true
   sleep 1
 }
 
@@ -93,7 +93,7 @@ launch_debug_muxy() {
 focus_muxy_app() {
   local pid="${launched_pid}"
   if [[ -z "${pid}" ]]; then
-    pid="$(pgrep -x Muxy | tail -n 1)"
+    pid="$(pgrep -x MuxyApp | tail -n 1)"
   fi
   if [[ -z "${pid}" ]]; then
     echo "Could not find a running Muxy process." >&2

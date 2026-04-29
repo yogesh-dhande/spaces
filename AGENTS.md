@@ -9,18 +9,18 @@
 
 ## Product Constraints
 - `Muxy` is a macOS Swift app for orchestration of coding tools
-- The CLI is named `mx`.
+- The CLI is named `muxy`.
 - Workspaces map to captured window sets managed via yabai.
 - Use yabai as the single source of truth for window IDs.
 - Avoid window-level automation outside yabai
 - Any project setting used during workspace creation or launch must be overridable per workspace after creation.
-- Anything configurable in the GUI must also be configurable via `mx`.
+- Anything configurable in the GUI must also be configurable via `muxy`.
 
 ## Coding Agent Workflow
-- Always start by ensuring a Muxy workspace exists by running `~/projects/muxy/apps/macos/.build/debug/mx workspace import --title [text] --tooltip [text]` from the project root.
+- Always start by ensuring a Muxy workspace exists by running `~/projects/muxy/apps/macos/.build/debug/muxy workspace import --title [text] --tooltip [text]` from the project root.
 - Before manually launching a new Muxy app instance for debugging or profiling, close any existing Muxy instances so only one global hotkey listener is active.
-- When blocked on user input or permissions, run `~/projects/muxy/apps/macos/.build/debug/mx agent event --type waiting` before asking.
-- When changes are ready for review, first run `~/projects/muxy/apps/macos/.build/debug/mx workspace update --tooltip [text]`, then run `~/projects/muxy/apps/macos/.build/debug/mx workspace up --restart`.
+- When blocked on user input or permissions, run `~/projects/muxy/apps/macos/.build/debug/muxy agent event --type waiting` before asking.
+- When changes are ready for review, first run `~/projects/muxy/apps/macos/.build/debug/muxy workspace update --tooltip [text]`, then run `~/projects/muxy/apps/macos/.build/debug/muxy workspace up --restart`.
 
 ## Verification Rules
 - Always run lint and build before finalizing macOS app changes.
@@ -28,7 +28,7 @@
 - Whenever `scripts/coverage.sh` is run, report the overall coverage percentage.
 - Whenever `scripts/coverage.sh` is run, also report module-level coverage percentages for major modules such as `streamctl`, `gui`, and `appctl`.
 - Always consider adding or expanding tests before finalizing code changes.
-- When fixing a bug, reproduce it first using the real system, `~/projects/muxy/apps/macos/.build/debug/mx` cli, and/or database inspection when practical, then add a test, implement the fix, and confirm both the test and the real workflow.
+- When fixing a bug, reproduce it first using the real system, `~/projects/muxy/apps/macos/.build/debug/muxy` cli, and/or database inspection when practical, then add a test, implement the fix, and confirm both the test and the real workflow.
 - When running `git commit` via Codex, allow at least a 10-minute timeout so pre-commit checks can finish.
 
 ## Documentation Rules

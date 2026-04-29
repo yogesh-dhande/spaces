@@ -83,7 +83,7 @@ private enum ScreenRecorderSignal {
         signal(SIGINT, SIG_IGN)
         signal(SIGTERM, SIG_IGN)
 
-        let queue = DispatchQueue(label: "mxe2e.screen-recorder.signal")
+        let queue = DispatchQueue(label: "muxye2e.screen-recorder.signal")
         let sources = [SIGINT, SIGTERM].map { signalNumber -> DispatchSourceSignal in
             let source = DispatchSource.makeSignalSource(signal: signalNumber, queue: queue)
             source.setEventHandler(handler: onStop)
@@ -152,7 +152,7 @@ struct RecordScreenCommand: ParsableCommand {
         configuration.showsCursor = true
 
         let stream = SCStream(filter: filter, configuration: configuration, delegate: recorder)
-        try stream.addStreamOutput(recorder, type: .screen, sampleHandlerQueue: DispatchQueue(label: "mxe2e.screen-recorder.frames"))
+        try stream.addStreamOutput(recorder, type: .screen, sampleHandlerQueue: DispatchQueue(label: "muxye2e.screen-recorder.frames"))
 
         try await stream.startCapture()
         let started = try await Self.waitForRecorderStart(recorder, timeoutSeconds: timeoutSeconds)

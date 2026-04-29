@@ -1,9 +1,9 @@
 # Muxy Monorepo
 
-Muxy is a macOS workspace orchestrator with a Swift app and CLI (`mx`) plus a static Next.js marketing and docs site.
+Muxy is a macOS workspace orchestrator with a Swift app and CLI (`muxy`) plus a static Next.js marketing and docs site.
 
 ## Repo Layout
-- `apps/macos`: macOS app, `mx` CLI, Swift sources, tests, product docs
+- `apps/macos`: macOS app, `muxy` CLI, Swift sources, tests, product docs
 - `apps/web`: static marketing site and user-facing docs
 - `scripts`: root wrappers for build, test, coverage, release, and deploy workflows
 
@@ -57,8 +57,8 @@ The pre-commit hook currently does three things:
 Useful local entry points:
 
 ```bash
-apps/macos/.build/debug/Muxy
-apps/macos/.build/debug/mx --help
+apps/macos/.build/debug/MuxyApp
+apps/macos/.build/debug/muxy --help
 ```
 
 ### Website
