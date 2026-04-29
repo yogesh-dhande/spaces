@@ -9,7 +9,7 @@ export const docsPageLinks: DocsPageLink[] = [
     href: "/docs/installation",
     title: "Installation & Setup",
     summary:
-      "Get Muxy installed, permissions configured, and your environment verified. Muxy guides you through any missing prerequisites with a step-by-step in-app setup flow on first launch.",
+      "Get Spaces installed, permissions configured, and your environment verified. Spaces guides you through any missing prerequisites with a step-by-step in-app setup flow on first launch.",
   },
   {
     href: "/docs/getting-started",
@@ -38,7 +38,7 @@ export const docsPageLinks: DocsPageLink[] = [
     href: "/docs/window-management",
     title: "Window Management",
     summary:
-      "Muxy automatically tracks the windows a workspace opens and lets you jump to any one of them with a keyboard shortcut.",
+      "Spaces automatically tracks the windows a workspace opens and lets you jump to any one of them with a keyboard shortcut.",
   },
   {
     href: "/docs/processes",
@@ -56,7 +56,7 @@ export const docsPageLinks: DocsPageLink[] = [
     href: "/docs/coding-agents",
     title: "Coding Agents",
     summary:
-      "Track Claude Code, Codex, and other coding agents per workspace, and wire up global hooks so each session reports its state to Muxy automatically.",
+      "Track Claude Code, Codex, and other coding agents per workspace, and wire up global hooks so each session reports its state to Spaces automatically.",
   },
   {
     href: "/docs/shortcuts",
@@ -80,7 +80,7 @@ export const docsPageLinks: DocsPageLink[] = [
     href: "/docs/cli",
     title: "CLI Reference",
     summary:
-      "Use the minimal muxy CLI for workspace import, idempotent launch, and explicit coding-agent events.",
+      "Use the minimal spaces CLI for workspace import, idempotent launch, and explicit coding-agent events.",
   },
 ];
 
@@ -96,7 +96,7 @@ export const cookbookGuides: CookbookGuideLink[] = [
     href: "/docs/guides/nextjs-host",
     title: "Next.js (No Docker)",
     summary:
-      "Single-repo frontend running directly on host with Muxy-managed ports.",
+      "Single-repo frontend running directly on host with Spaces-managed ports.",
     stack: ["Next.js", "Host"],
   },
   {

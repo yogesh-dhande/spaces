@@ -1,9 +1,9 @@
 # Architecture
 
-This document describes how Muxy is built: module boundaries, storage, runtime flows, and external integrations. User-visible behavior belongs in [spec.md](/Users/yogesh/projects/muxy/apps/macos/spec.md).
+This document describes how Spaces is built: module boundaries, storage, runtime flows, and external integrations. User-visible behavior belongs in [spec.md](/Users/yogesh/projects/muxy/apps/macos/spec.md).
 
 ## System Overview
-Muxy is a macOS Swift app and CLI built around a shared orchestration layer.
+Spaces is a macOS Swift app and CLI built around a shared orchestration layer.
 
 Core invariants:
 - SQLite is the single source of truth for persisted model data and global preferences.
@@ -16,37 +16,37 @@ Core invariants:
 
 ```mermaid
 flowchart LR
-  cli["muxy"] --> mxcli["mxcli"]
-  mxcli --> stream["streamctl"]
-  app["MuxyApp"] --> gui["gui"]
-  gui --> stream
+  cli["spaces"] --> spacescli["spacescli"]
+  spacescli --> stream["workspacecore"]
+  app["SpacesApp"] --> spacesui["spacesui"]
+  spacesui --> stream
 
   stream --> store["SQLite store"]
-  stream --> appctl["appctl adapters"]
+  stream --> systembridge["systembridge adapters"]
   stream --> git["Git helpers"]
 
-  appctl --> yabai["yabai"]
-  appctl --> iterm["iTerm2 AppleScript"]
-  appctl --> ghostty["Ghostty AppleScript"]
-  appctl --> chrome["Chrome AppleScript"]
+  systembridge --> yabai["yabai"]
+  systembridge --> iterm["iTerm2 AppleScript"]
+  systembridge --> ghostty["Ghostty AppleScript"]
+  systembridge --> chrome["Chrome AppleScript"]
 ```
 
 ## Module Responsibilities
-- `MuxyApp`: minimal app entry point that boots AppKit.
-- `gui`: AppKit UI layer that renders state and dispatches actions into `streamctl`. Shared visual language lives in `Theme.swift` (brand color tokens mirroring `apps/web/app/globals.css`) and `RowPrimitives.swift` (status dot, type icon tile, shortcut/project/branch chips, `ColoredBackgroundView` helper). The workspace detail pane is a single scrollable `NSStackView`; it stacks the header, directory meta row, inline tooltip editor, and five configuration sections (Processes, Browser sessions, Coding agents, Named ports, Stop script) in order. Each section is a self-contained class (e.g. `ProcessesSection.swift`) that owns its transient form state, swaps each row between collapsed and editing subviews via `NSAnimationContext`, and publishes commits through an `onCommit` closure that the host bridges to `orchestrator.updateWorkspaceSettings`. Named-port rows render the configured env-var name plus the currently reserved port number from `workspace_ports`, mirroring how browser-session rows separate configured input from resolved display output. The `⋯` overflow menu is built by the static `AppKitController.makeWorkspaceOverflowMenu(workspaceID:path:target:)`, which emits a stock `NSMenu` whose path-based items forward to `copyDirectoryPath(_:)` and `revealDirectoryInFinder(_:)`, while workspace actions use the same shared `senderIdentifier(_:)` helper for `NSMenuItem` and `NSControl` senders. Update discovery also lives here: `UpdateChecker` polls the latest GitHub release API, caches the result for four hours, and hands the chosen DMG asset to `AppUpdater` for download, install, and relaunch.
-- `muxy`: executable shim that boots the declarative CLI parser.
-- `mxcli`: declarative `swift-argument-parser` command tree for `muxy`, including command help, leaf validation, and translation from CLI inputs into orchestration calls.
-- `streamctl`: core orchestration, lifecycle, validation, persistence coordination, and environment building.
-- `appctl`: system adapters for shell commands, yabai, iTerm2, Ghostty, Chrome, and related OS integrations.
+- `SpacesApp`: minimal app entry point that boots AppKit.
+- `spacesui`: AppKit UI layer that renders state and dispatches actions into `workspacecore`. Shared visual language lives in `Theme.swift` (brand color tokens mirroring `apps/web/app/globals.css`) and `RowPrimitives.swift` (status dot, type icon tile, shortcut/project/branch chips, `ColoredBackgroundView` helper). The workspace detail pane is a single scrollable `NSStackView`; it stacks the header, directory meta row, inline tooltip editor, and five configuration sections (Processes, Browser sessions, Coding agents, Named ports, Stop script) in order. Each section is a self-contained class (e.g. `ProcessesSection.swift`) that owns its transient form state, swaps each row between collapsed and editing subviews via `NSAnimationContext`, and publishes commits through an `onCommit` closure that the host bridges to `orchestrator.updateWorkspaceSettings`. Named-port rows render the configured env-var name plus the currently reserved port number from `workspace_ports`, mirroring how browser-session rows separate configured input from resolved display output. The `⋯` overflow menu is built by the static `AppKitController.makeWorkspaceOverflowMenu(workspaceID:path:target:)`, which emits a stock `NSMenu` whose path-based items forward to `copyDirectoryPath(_:)` and `revealDirectoryInFinder(_:)`, while workspace actions use the same shared `senderIdentifier(_:)` helper for `NSMenuItem` and `NSControl` senders. Update discovery also lives here: `UpdateChecker` polls the latest GitHub release API, caches the result for four hours, and hands the chosen DMG asset to `AppUpdater` for download, install, and relaunch.
+- `spaces`: executable shim that boots the declarative CLI parser.
+- `spacescli`: declarative `swift-argument-parser` command tree for `spaces`, including command help, leaf validation, and translation from CLI inputs into orchestration calls.
+- `workspacecore`: core orchestration, lifecycle, validation, persistence coordination, and environment building.
+- `systembridge`: system adapters for shell commands, yabai, iTerm2, Ghostty, Chrome, and related OS integrations.
 
 ## Persistence
 
 ### Database
-- Path: `~/.muxy/muxy.db`
+- Path: `~/.spaces/spaces.db`
 - SQLite stores projects, workspaces, runtime state, and global settings.
 - SQLite should run in WAL mode with a busy timeout so overlapping GUI, CLI, and background work does not produce avoidable lock failures.
 - `migration_state.current_version` is the authoritative forward-only schema marker.
-- Migration safety snapshots are stored in `~/.muxy/backups/` and retained as a rolling set of the newest 10 migration backups.
+- Migration safety snapshots are stored in `~/.spaces/backups/` and retained as a rolling set of the newest 10 migration backups.
 
 ### Migration Rules
 - Migrations must preserve existing user data.
@@ -54,9 +54,9 @@ flowchart LR
 - Existing installs migrate in ordered `N -> N+1` steps until they reach the current schema version.
 - Each migration step runs inside `BEGIN IMMEDIATE ... COMMIT`, updates `migration_state` in the same transaction, and rolls back on failure.
 - Additive and compatible schema changes should use `CREATE TABLE IF NOT EXISTS`, `ALTER TABLE`, backfills, indexes, and table rebuilds with copy when SQLite requires them.
-- Before the first migration step for an open, Muxy creates a SQLite-safe backup snapshot in `~/.muxy/backups/`.
-- After migrations finish, Muxy runs `PRAGMA integrity_check` and fails startup if validation does not return `ok`.
-- Compatible changes must not require destructive resets, and startup errors must not instruct users to delete `~/.muxy/muxy.db`.
+- Before the first migration step for an open, Spaces creates a SQLite-safe backup snapshot in `~/.spaces/backups/`.
+- After migrations finish, Spaces runs `PRAGMA integrity_check` and fails startup if validation does not return `ok`.
+- Compatible changes must not require destructive resets, and startup errors must not instruct users to delete `~/.spaces/spaces.db`.
 
 ## Data Model
 
@@ -140,16 +140,16 @@ It also lets lifecycle state stay explicit while runtime health is derived from 
 - Browser-session focus uses the tracked Chrome window plus tab `1` as the fast path, instead of rescanning Chrome tabs on every focus.
 - CLI workspace focus resolves explicit names instead of numeric window indexes. Those names come from the same workspace-level focus model used for browser sessions, running processes, and agent terminals, and the names must stay unique within a workspace.
 - The CLI stays path-based: commands target the current working directory by default or accept an explicit workspace path argument.
-- Terminal focus pulsing is terminal-agnostic: Muxy queries the target yabai window and briefly presents an AppKit overlay aligned to that window instead of mutating terminal-specific appearance settings.
+- Terminal focus pulsing is terminal-agnostic: Spaces queries the target yabai window and briefly presents an AppKit overlay aligned to that window instead of mutating terminal-specific appearance settings.
 - iTerm2 focus now splits into two phases: a fast AppleScript select path that returns as soon as the target session/window is brought forward, followed by a background verification pass that confirms the intended session became current without delaying the pulse overlay.
-- Tracked windows are persisted so Muxy can refocus or clean up only the windows it owns.
+- Tracked windows are persisted so Spaces can refocus or clean up only the windows it owns.
 - Direct focus requests auto-recover stale browser-session windows by reopening and re-tracking them, while process and generic window failures still surface typed missing-window errors to the GUI.
 - Browser-session existence is not polled during background refresh; stale browser mappings are detected on demand when the user focuses that session.
 - Window cycling is tolerant of stale tracked yabai IDs and keeps advancing until it finds the next live target.
 - Reconciliation is required because window state can drift outside the app.
 
 ### Terminal Integration Contract
-Muxy currently supports iTerm2 and Ghostty. A future terminal integration should plug into the same orchestration flow instead of adding one-off launch and focus paths.
+Spaces currently supports iTerm2 and Ghostty. A future terminal integration should plug into the same orchestration flow instead of adding one-off launch and focus paths.
 
 Target shape:
 
@@ -196,11 +196,11 @@ struct TerminalFocusTarget: Sendable {
 
 Required behavior:
 - Availability: expose a cheap `isAvailable()` check so setup validation and host selection can reject unsupported terminals early.
-- Launch: create a new dedicated terminal context, inject the requested environment into the child shell, and run the provided command without requiring Muxy to synthesize host-specific shell glue outside the adapter.
-- Identity: return a stable `TerminalTrackingIdentity` that Muxy can persist on `RunningProcessRecord`, `WindowRecord`, and `AgentWindowRecord`.
+- Launch: create a new dedicated terminal context, inject the requested environment into the child shell, and run the provided command without requiring Spaces to synthesize host-specific shell glue outside the adapter.
+- Identity: return a stable `TerminalTrackingIdentity` that Spaces can persist on `RunningProcessRecord`, `WindowRecord`, and `AgentWindowRecord`.
 - Current-context resolution: turn the current hook process environment plus the current yabai focus into a `TerminalTrackingIdentity` so CLI agent events do not need host-specific matching logic.
 - Focus: refocus the tracked terminal target, not just the containing yabai window, so tabbed terminals reopen the exact tracked session or surface when possible.
-- Reconciliation: enumerate live tracking identities so Muxy can detect stale runtime records after users close windows manually.
+- Reconciliation: enumerate live tracking identities so Spaces can detect stale runtime records after users close windows manually.
 
 Identity rules:
 - yabai remains the source of truth for window IDs and cross-app focus.
@@ -208,32 +208,32 @@ Identity rules:
 - If the terminal cannot provide a durable session identifier, the integration must still provide a deterministic fallback that maps back to the yabai-managed window.
 - Current examples:
   `iTerm2` tracks sessions primarily by session ID and falls back to a yabai window ID.
-  `Ghostty` tracks by the real Ghostty terminal ID for focus/liveness plus a separate Muxy-issued hook token for event attribution.
+  `Ghostty` tracks by the real Ghostty terminal ID for focus/liveness plus a separate Spaces-issued hook token for event attribution.
 - `WindowRecord` stores a stable `name` for focus identity separately from a display `detail`, so CLI focus targets can stay deterministic while GUI rows still show live browser URLs, process commands, or terminal window titles.
 
 Operational requirements:
 - Workspace shell launch and process launch must both work through the same adapter surface.
 - Process sessions must still run under tmux so terminal closure does not kill the underlying process.
-- The adapter must tolerate background launch (`background: true`) because `muxy workspace up` and recovery flows may avoid stealing focus.
+- The adapter must tolerate background launch (`background: true`) because `spaces workspace up` and recovery flows may avoid stealing focus.
 - The integration must not introduce window management outside yabai; any native terminal APIs are only for terminal-local actions such as opening, closing, or selecting a terminal target.
 
 Implementation note:
-- The shared launch and discovery contract now lives in `appctl` as `TerminalAdapter`, and `MuxyOrchestrator` resolves `TerminalHost` to a concrete adapter through one registry.
+- The shared launch and discovery contract now lives in `systembridge` as `TerminalAdapter`, and `WorkspaceOrchestrator` resolves `TerminalHost` to a concrete adapter through one registry.
 - `TerminalAdapter.openWindowAndRun(...)` must inject any requested launch environment into the child shell process and return the stable tracking identity that later hooks and focus flows should use.
 - The shared focus contract now also requires host-specific refocus by typed tracking identity. iTerm2 implements that with session/tab selection, while Ghostty refocuses the tracked terminal by Ghostty terminal ID and only falls back to the yabai window when direct terminal focus fails.
 - Richer iTerm2-only helpers can still exist outside the shared interface, but a new terminal should first conform to `TerminalAdapter` so launch, focus, and discovery all follow one path.
 
 ## Agent Integration
 - Agent events are explicit CLI inputs that attach status to tracked workspace agent windows.
-- `muxy agent event` only resolves direct terminal environments. If the command is run from tmux, the CLI rejects it explicitly because Muxy does not support coding agents running inside tmux.
+- `spaces agent event` only resolves direct terminal environments. If the command is run from tmux, the CLI rejects it explicitly because Spaces does not support coding agents running inside tmux.
 - Agent windows are stored separately from regular process windows because they carry provider and lifecycle metadata, but `init` also reconciles them against tracked terminal windows so ad-hoc agent terminals become focusable tracked rows.
 - Configured agent-launcher names are treated as reserved focus labels. The launcher-owned agent instance may keep that exact label, while unrelated ad-hoc agents that report the same label are suffixed during registration so GUI rows and CLI focus targets stay unambiguous.
-- Workspace launch now opens configured coding agents through the same direct-terminal path as manual agent launch. That creates the tracked agent rows eagerly, while later `muxy agent event` calls still supply the actual lifecycle status.
+- Workspace launch now opens configured coding agents through the same direct-terminal path as manual agent launch. That creates the tracked agent rows eagerly, while later `spaces agent event` calls still supply the actual lifecycle status.
 - The dashboard and numbered window shortcuts keep configured and ad-hoc agent rows in one `Coding Agents` section. Configured rows occupy their stable slots first, then unmatched ad-hoc agent rows append after them so shortcut ordering remains deterministic.
-- Configured-agent relaunch is conservative: if a reserved row still points at a live tracked terminal, Muxy keeps that row and treats launch as a no-op. Only clearly stale rows are evicted and replaced.
+- Configured-agent relaunch is conservative: if a reserved row still points at a live tracked terminal, Spaces keeps that row and treats launch as a no-op. Only clearly stale rows are evicted and replaced.
 - Agent reconciliation prefers terminal identity first:
   `iTerm2` uses the shell session ID from the environment.
-  `Ghostty` keeps a Muxy-issued `terminalTrackingID` for CLI hook attribution and a separate `terminalNativeID` for the real Ghostty terminal. Hook events only trust the tracking token; they do not infer the emitting shell from the frontmost Ghostty terminal or yabai window.
+  `Ghostty` keeps a Spaces-issued `terminalTrackingID` for CLI hook attribution and a separate `terminalNativeID` for the real Ghostty terminal. Hook events only trust the tracking token; they do not infer the emitting shell from the frontmost Ghostty terminal or yabai window.
 - Workspace-managed process terminals persist the tmux window ID on their running-process and tracked-window records so later agent events, reattachment, and exit cleanup can reconcile against the same process-backed terminal slot.
 - When an agent attaches to a workspace-managed process terminal, the record keeps the tmux window ID so a later `exit` can keep an idle placeholder row instead of deleting it.
 - Dashboard attention state is derived from runtime records rather than inferred from UI state.
@@ -241,18 +241,18 @@ Implementation note:
 
 Ghostty-specific reconciliation:
 - Ghostty AppleScript exposes stable terminal IDs through the window -> tab -> terminal graph, but does not reliably expose live terminal environment variables on current Ghostty builds.
-- Because yabai window IDs can change when users retab or add tabs in Ghostty, Muxy treats the Ghostty terminal ID as the durable identity and yabai window IDs as refreshable focus bindings.
+- Because yabai window IDs can change when users retab or add tabs in Ghostty, Spaces treats the Ghostty terminal ID as the durable identity and yabai window IDs as refreshable focus bindings.
 - Ghostty rows without a stored native terminal ID are not treated as live just because their tracking token still exists; only the real Ghostty terminal ID participates in liveness and retab rebinding.
 - Background refresh keeps a tracked Ghostty row alive when its stored terminal ID still appears in Ghostty's live terminal graph, even if the previously stored yabai window ID has disappeared.
-- Later agent events can refresh metadata only when they present the stored tracking token and Muxy can unambiguously recover the existing native terminal ID from tracked rows.
-- Focus is slightly more permissive than liveness for Ghostty: refocus still prefers `terminalNativeID`, but if the matching tracked terminal row has not been backfilled with that native ID yet, Muxy may fall back to the persisted `terminalTrackingID` for the same workspace row. This fallback is intentionally scoped to already-tracked rows and does not use the frontmost Ghostty terminal or a guessed yabai window.
+- Later agent events can refresh metadata only when they present the stored tracking token and Spaces can unambiguously recover the existing native terminal ID from tracked rows.
+- Focus is slightly more permissive than liveness for Ghostty: refocus still prefers `terminalNativeID`, but if the matching tracked terminal row has not been backfilled with that native ID yet, Spaces may fall back to the persisted `terminalTrackingID` for the same workspace row. This fallback is intentionally scoped to already-tracked rows and does not use the frontmost Ghostty terminal or a guessed yabai window.
 - Dashboard dismissals are stored as a persisted set of attention-event IDs in SQLite global settings, then filtered in the GUI so workspace detail panes keep showing the underlying runtime rows.
 
 Terminal host notes:
-- iTerm2 exposes a usable shell session ID directly (`ITERM_SESSION_ID`), so Muxy can rely on that same host-native identifier for launch tracking, hook attribution, liveness checks, and refocus.
+- iTerm2 exposes a usable shell session ID directly (`ITERM_SESSION_ID`), so Spaces can rely on that same host-native identifier for launch tracking, hook attribution, liveness checks, and refocus.
 - Ghostty does not expose an equivalent shell-local native terminal ID to the running shell on this machine. That is why Ghostty needs the split between `terminalTrackingID` and `terminalNativeID`.
-- Ghostty AppleScript can enumerate the real terminal graph and focus a terminal by Ghostty terminal ID, but it cannot safely tell Muxy which background shell emitted an `muxy agent event`. That attribution must come from the Muxy-issued hook token.
-- Ghostty direct-property or environment-variable AppleScript access has proven unreliable enough that Muxy should avoid new designs that depend on reading live terminal env vars back out of Ghostty.
+- Ghostty AppleScript can enumerate the real terminal graph and focus a terminal by Ghostty terminal ID, but it cannot safely tell Spaces which background shell emitted an `spaces agent event`. That attribution must come from the Spaces-issued hook token.
+- Ghostty direct-property or environment-variable AppleScript access has proven unreliable enough that Spaces should avoid new designs that depend on reading live terminal env vars back out of Ghostty.
 
 ## Lifecycle and Health
 - Workspace lifecycle state is explicit and persisted on the workspace record.
@@ -261,7 +261,7 @@ Terminal host notes:
 
 ## Shortcut Architecture
 - Shortcut defaults and user overrides are stored in SQLite global settings and edited from the GUI settings panel.
-- Global shortcuts use Carbon hotkey registration for actions that must work while Muxy is not frontmost.
+- Global shortcuts use Carbon hotkey registration for actions that must work while Spaces is not frontmost.
 - In-app shortcuts use an AppKit event monitor so they can respect focused text inputs and support digit-family shortcuts such as window `1` through `9`.
 - Leader-based shortcuts store a suffix key spec and derive their shared modifiers from `gui_leader_hotkey`; the orchestrator resolves them to full effective hotkeys for both the GUI and CLI. Reload and the workspace terminal action use this same leader-backed resolution path.
 - Window focus shortcuts are modeled as modifier families rather than nine separate persisted bindings: one family for direct focus and one for queued multi-focus replay.

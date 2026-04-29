@@ -22,7 +22,7 @@ const keyFeatures: Feature[] = [
   {
     title: "Manage Git worktrees or separate clones",
     description:
-      "Spin up isolated workspaces for every branch using Git worktrees — so parallel feature work never collides. Not a worktrees person? Muxy works with separate clones just as well.",
+      "Spin up isolated workspaces for every branch using Git worktrees — so parallel feature work never collides. Not a worktrees person? Spaces works with separate clones just as well.",
   },
   {
     title: "Organize work into logical workspaces",
@@ -52,13 +52,13 @@ const keyFeatures: Feature[] = [
   {
     title: "Launch and teardown on demand",
     description:
-      "Close a workspace and Muxy shuts down its processes and closes its windows. Come back tomorrow, open it, and everything restarts exactly as it was.",
+      "Close a workspace and Spaces shuts down its processes and closes its windows. Come back tomorrow, open it, and everything restarts exactly as it was.",
     span: "wide",
   },
   {
     title: "Native MacOS app under 5 MB",
     description:
-      "Built with Swift and AppKit — not Electron. No 200MB runtime, no sluggish UI, no fan spinning up just to show you a window list. Muxy stays out of your way and off your CPU.",
+      "Built with Swift and AppKit — not Electron. No 200MB runtime, no sluggish UI, no fan spinning up just to show you a window list. Spaces stays out of your way and off your CPU.",
   },
 ];
 
@@ -70,7 +70,7 @@ type FaqItem = {
 const faqItems: FaqItem[] = [
   {
     question: "How much does it cost?",
-    answer: <>Muxy is free!</>,
+    answer: <>Spaces is free!</>,
   },
   {
     question: "What are the system requirements?",
@@ -113,11 +113,11 @@ const faqItems: FaqItem[] = [
         >
           yabai
         </a>{" "}
-        is an open-source macOS window management utility. Muxy uses it to bring
+        is an open-source macOS window management utility. Spaces uses it to bring
         the right window to the front when you switch workspaces. macOS requires
         accessibility permissions before any app can programmatically control
         windows on behalf of other processes — yabai uses this to perform focus
-        switching on Muxy&apos;s behalf.
+        switching on Spaces&apos;s behalf.
       </>
     ),
   },
@@ -134,7 +134,7 @@ const faqItems: FaqItem[] = [
         shortcuts at any time. To let the agent set workspace tooltips and
         signal its status, add the{" "}
         <Link href="/docs/cli" className="text-accent hover:underline">
-          Muxy agent instructions
+          Spaces agent instructions
         </Link>{" "}
         to your project&apos;s AGENTS.md. See the{" "}
         <Link href="/docs/guides" className="text-accent hover:underline">
@@ -145,11 +145,11 @@ const faqItems: FaqItem[] = [
     ),
   },
   {
-    question: "I only work on one project at a time. How will Muxy help me?",
+    question: "I only work on one project at a time. How will Spaces help me?",
     answer: (
       <ul className="ml-4 list-disc space-y-1">
         <li>
-          Muxy is still helpful in managing windows, monitoring processes,
+          Spaces is still helpful in managing windows, monitoring processes,
           quickly spinning up or down projects
         </li>
         <li>
@@ -163,8 +163,8 @@ const faqItems: FaqItem[] = [
     question: "Do you collect any data?",
     answer: (
       <>
-        No. Muxy is a native desktop app that runs entirely on your Mac. It does
-        not send any data back to Muxy or any third party.
+        No. Spaces is a native desktop app that runs entirely on your Mac. It does
+        not send any data back to Spaces or any third party.
       </>
     ),
   },
@@ -173,15 +173,15 @@ const faqItems: FaqItem[] = [
     answer: (
       <>
         Email{" "}
-        <a href="mailto:support@muxy.dev" className="text-accent hover:underline">
-          support@muxy.dev
+        <a href="mailto:support@spaces.dev" className="text-accent hover:underline">
+          support@spaces.dev
         </a>
         .
       </>
     ),
   },
   {
-    question: "What does muxy mean?",
+    question: "What does Spaces mean?",
     answer: (
       <>
         Multiplex your work? Or something like that. I needed a name and a
@@ -197,7 +197,7 @@ type ComparisonStep = {
   body: string;
 };
 
-const withoutMuxy: ComparisonStep[] = [
+const withoutSpaces: ComparisonStep[] = [
   {
     n: "1",
     title: "Find the tab",
@@ -220,7 +220,7 @@ const withoutMuxy: ComparisonStep[] = [
   },
 ];
 
-const withMuxy: ComparisonStep[] = [
+const withSpaces: ComparisonStep[] = [
   {
     n: "1",
     title: "Open the workspace",
@@ -263,7 +263,7 @@ export default function HomePage() {
           <div className="lg:col-span-7">
             <p className="inline-flex items-center gap-2 font-mono text-[0.7rem] uppercase tracking-[0.18em] text-foreground-soft">
               <span className="h-1.5 w-1.5 rounded-full bg-accent" />
-              Build faster with Muxy
+              Build faster with Spaces
             </p>
             <h1 className="mt-5 text-4xl font-semibold leading-[1.05] tracking-tight md:text-5xl lg:text-[3.75rem]">
               Instant context switching
@@ -359,17 +359,17 @@ export default function HomePage() {
         </div>
       </section>
 
-      {/* ── Introducing Muxy ── */}
+      {/* ── Introducing Spaces ── */}
       <section className="mx-auto w-full max-w-7xl px-6 py-20 md:py-28">
         <div className="mx-auto max-w-3xl text-center">
           <p className="font-mono text-[0.7rem] uppercase tracking-[0.18em] text-foreground-soft">
-            Introducing Muxy
+            Introducing Spaces
           </p>
           <h2 className="mt-4 text-3xl font-semibold leading-tight tracking-tight md:text-5xl">
             The command center for parallel development.
           </h2>
           <p className="mt-5 text-base leading-7 text-foreground-soft md:text-lg md:leading-8">
-            Muxy groups the tabs, terminals, editors, and agents for each task
+            Spaces groups the tabs, terminals, editors, and agents for each task
             into a workspace you can open, switch, and close as one unit. Move
             between projects and features without losing your place — or
             colliding with yourself.
@@ -379,14 +379,14 @@ export default function HomePage() {
         <div className="mt-12 grid gap-6 md:grid-cols-2">
           <ComparisonColumn
             variant="without"
-            eyebrow="Without Muxy"
-            steps={withoutMuxy}
+            eyebrow="Without Spaces"
+            steps={withoutSpaces}
             result="ten minutes of setup before you've typed a line of code."
           />
           <ComparisonColumn
             variant="with"
-            eyebrow="With Muxy"
-            steps={withMuxy}
+            eyebrow="With Spaces"
+            steps={withSpaces}
             result="you're coding, not context-switching."
           />
         </div>
@@ -406,7 +406,7 @@ export default function HomePage() {
               Three primitives. One mental model.
             </h2>
             <p className="mt-5 text-base leading-7 text-foreground-soft md:text-lg md:leading-8">
-              Muxy works the way you already think about coding — projects
+              Spaces works the way you already think about coding — projects
               contain tasks, tasks have their own windows and state. It just
               makes those layers real.
             </p>
@@ -416,7 +416,7 @@ export default function HomePage() {
             <article className="rounded-3xl border border-line/80 bg-surface/90 p-5 shadow-[0_30px_80px_-50px_color-mix(in_oklab,var(--ink)_55%,transparent)] md:p-7">
               <LayerHeader step="01" label="Project" icon="▤" />
               <p className="mt-3 text-sm leading-6 text-foreground-soft md:text-base md:leading-7">
-                Point Muxy at a repo. Define your setup script, named ports,
+                Point Spaces at a repo. Define your setup script, named ports,
                 browser URLs, and the processes you run. Do this once.
               </p>
               <div className="mt-5 rounded-2xl border border-line/80 bg-background-soft/70 p-5 md:p-6">
@@ -430,7 +430,7 @@ export default function HomePage() {
                   <LayerHeader step="03" label="Runtime" icon="▦" />
                   <p className="mt-3 text-sm leading-6 text-foreground-soft md:text-base md:leading-7">
                     With one click, start all the processes and open browser URLs of a workspace.
-                    Muxy manages the runtime environment, windows, and monitors coding agents. 
+                    Spaces manages the runtime environment, windows, and monitors coding agents. 
                     You can jump to any workspace window or cycle between windows of the current workspace 
                     using keyboard shortcuts.
                   </p>
@@ -474,7 +474,7 @@ export default function HomePage() {
               Your whole dev loop, in one place
             </h2>
             <p className="mt-5 text-base leading-7 text-foreground-soft md:text-lg md:leading-8">
-              Muxy turns the scattered terminals, tabs, editors, agents, and worktrees into logical workspaces you can open, switch, and close as one.
+              Spaces turns the scattered terminals, tabs, editors, agents, and worktrees into logical workspaces you can open, switch, and close as one.
             </p>
           </div>
 
@@ -498,7 +498,7 @@ export default function HomePage() {
           <p className="mt-5 text-base leading-7 text-foreground-soft md:text-lg md:leading-8">
             Common questions about setup, tools, and the app. Still stuck?{" "}
             <a
-              href="mailto:support@muxy.dev"
+              href="mailto:support@spaces.dev"
               className="text-accent hover:underline"
             >
               Email us.
@@ -547,7 +547,7 @@ export default function HomePage() {
               Stop hunting. Start shipping.
             </h2>
             <p className="mx-auto mt-4 max-w-2xl text-base leading-7 text-foreground-soft md:text-lg">
-              Muxy helps you build faster by managing context and reducing
+              Spaces helps you build faster by managing context and reducing
               chaos.
             </p>
             <div className="mt-8 flex flex-wrap justify-center gap-3">

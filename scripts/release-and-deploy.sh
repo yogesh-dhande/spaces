@@ -44,7 +44,7 @@ echo "✓ Release tag is available"
 echo ""
 
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo "  Muxy Release v$VERSION"
+echo "  Spaces Release v$VERSION"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo ""
 
@@ -57,10 +57,10 @@ echo ""
 # Step 2: Code sign binaries
 echo "🔐 Step 2/6: Code signing binaries..."
 BUILD_DIR="$MACOS_DIR/.build/release"
-MUXY_APP="$BUILD_DIR/MuxyApp"
-MUXY_CLI="$BUILD_DIR/muxy"
+SPACES_APP="$BUILD_DIR/SpacesApp"
+SPACES_CLI="$BUILD_DIR/spaces"
 
-if [[ ! -f "$MUXY_APP" ]] || [[ ! -f "$MUXY_CLI" ]]; then
+if [[ ! -f "$SPACES_APP" ]] || [[ ! -f "$SPACES_CLI" ]]; then
   echo "Error: Release binaries not found in $BUILD_DIR" >&2
   exit 1
 fi
@@ -69,14 +69,14 @@ set -a          # auto-export all variables defined from now on
 source "$REPO_ROOT/.env"
 set +a          # stop auto-exporting
 
-"$SCRIPTS_DIR/codesign.sh" "$MUXY_APP" "$MUXY_CLI"
+"$SCRIPTS_DIR/codesign.sh" "$SPACES_APP" "$SPACES_CLI"
 echo "✓ Code signing complete"
 echo ""
 
 # Step 3: Create DMG installer
 echo "💿 Step 3/6: Creating DMG installer..."
-"$SCRIPTS_DIR/create-dmg.sh" "$MUXY_APP" "$MUXY_CLI" "$VERSION"
-DMG_NAME="Muxy-${VERSION}.dmg"
+"$SCRIPTS_DIR/create-dmg.sh" "$SPACES_APP" "$SPACES_CLI" "$VERSION"
+DMG_NAME="Spaces-${VERSION}.dmg"
 DMG_PATH="$REPO_ROOT/dist/releases/$VERSION/$DMG_NAME"
 
 if [[ ! -f "$DMG_PATH" ]]; then
@@ -110,7 +110,7 @@ fi
 echo "🚀 Step 5/6: Creating GitHub release..."
 cd "$REPO_ROOT"
 gh release create "$TAG" "$DMG_PATH" \
-  --title "Muxy $VERSION" \
+  --title "Spaces $VERSION" \
   --generate-notes
 echo "✓ GitHub release created"
 echo ""

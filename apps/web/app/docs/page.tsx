@@ -6,7 +6,7 @@ import { docsPageLinks } from "./content";
 
 export const metadata: Metadata = {
   title: "Docs",
-  description: "Getting started with Muxy workspaces.",
+  description: "Getting started with Spaces workspaces.",
 };
 
 const terms = [
@@ -58,10 +58,10 @@ export default function DocsPage() {
             Documentation
           </p>
           <h1 className="mt-4 max-w-3xl text-4xl font-semibold leading-[1.05] tracking-tight md:text-6xl">
-            Muxy in five minutes.
+            Spaces in five minutes.
           </h1>
           <p className="mt-5 max-w-2xl text-base leading-7 text-foreground-soft md:text-lg md:leading-8">
-            A quick mental model for how Muxy helps you run and switch
+            A quick mental model for how Spaces helps you run and switch
             workspaces during parallel development.
           </p>
           <div className="mt-8 flex flex-wrap items-center gap-3">
@@ -95,7 +95,7 @@ export default function DocsPage() {
                 Core terms.
               </h2>
               <p className="mt-4 max-w-sm text-sm leading-7 text-foreground-soft">
-                The small vocabulary you need to get oriented with Muxy.
+                The small vocabulary you need to get oriented with Spaces.
               </p>
             </div>
 

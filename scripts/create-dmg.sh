@@ -2,18 +2,18 @@
 set -euo pipefail
 
 if [ $# -ne 3 ]; then
-  echo "Usage: $0 <Muxy-app-path> <muxy-cli-path> <version>"
+  echo "Usage: $0 <Spaces-app-path> <spaces-cli-path> <version>"
   exit 1
 fi
 
-MUXY_APP="$1"
-MUXY_CLI="$2"
+SPACES_APP="$1"
+SPACES_CLI="$2"
 VERSION="$3"
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 RELEASES_DIR="$REPO_ROOT/dist/releases/$VERSION"
-DMG_NAME="Muxy-${VERSION}.dmg"
+DMG_NAME="Spaces-${VERSION}.dmg"
 DMG_PATH="$RELEASES_DIR/$DMG_NAME"
-VOLUME_NAME="Muxy-${VERSION}"
+VOLUME_NAME="Spaces-${VERSION}"
 
 # Create releases directory if it doesn't exist
 mkdir -p "$RELEASES_DIR"
@@ -24,22 +24,22 @@ temp_dmg=""
 trap 'rm -rf "$staging"; [ -n "$temp_dmg" ] && rm -f "$temp_dmg"' EXIT
 
 # Create app bundle structure
-app_bundle="$staging/Muxy.app"
+app_bundle="$staging/Spaces.app"
 mkdir -p "$app_bundle/Contents/MacOS"
 mkdir -p "$app_bundle/Contents/Resources"
 
-# Copy Muxy binary
-cp "$MUXY_APP" "$app_bundle/Contents/MacOS/MuxyApp"
-chmod +x "$app_bundle/Contents/MacOS/MuxyApp"
+# Copy Spaces binary
+cp "$SPACES_APP" "$app_bundle/Contents/MacOS/SpacesApp"
+chmod +x "$app_bundle/Contents/MacOS/SpacesApp"
 
 # Copy Info.plist
-cp apps/macos/Sources/MuxyApp/Info.plist "$app_bundle/Contents/Info.plist"
+cp apps/macos/Sources/SpacesApp/Info.plist "$app_bundle/Contents/Info.plist"
 
 # Copy app icon
-cp apps/macos/Sources/MuxyApp/AppIcon.icns "$app_bundle/Contents/Resources/AppIcon.icns"
+cp apps/macos/Sources/SpacesApp/AppIcon.icns "$app_bundle/Contents/Resources/AppIcon.icns"
 
 # Create CLI installer package
-cli_installer="$staging/Install muxy CLI"
+cli_installer="$staging/Install spaces CLI"
 cat > "$cli_installer" << 'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -52,12 +52,12 @@ else
   mkdir -p "$INSTALL_DIR"
 fi
 
-# Copy muxy CLI
+# Copy spaces CLI
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-cp "$SCRIPT_DIR/Muxy.app/Contents/Resources/muxy" "$INSTALL_DIR/muxy"
-chmod +x "$INSTALL_DIR/muxy"
+cp "$SCRIPT_DIR/Spaces.app/Contents/Resources/spaces" "$INSTALL_DIR/spaces"
+chmod +x "$INSTALL_DIR/spaces"
 
-echo "✓ muxy CLI installed to $INSTALL_DIR/muxy"
+echo "✓ spaces CLI installed to $INSTALL_DIR/spaces"
 
 # Check if directory is in PATH
 if [[ ":$PATH:" != *":$INSTALL_DIR:"* ]]; then
@@ -74,9 +74,9 @@ read -p "Press Enter to close..."
 EOF
 chmod +x "$cli_installer"
 
-# Copy muxy CLI to Resources
+# Copy spaces CLI to Resources
 mkdir -p "$app_bundle/Contents/Resources"
-cp "$MUXY_CLI" "$app_bundle/Contents/Resources/muxy"
+cp "$SPACES_CLI" "$app_bundle/Contents/Resources/spaces"
 
 # Sign the complete app bundle (required for notarization)
 IDENTITY="${CODESIGN_IDENTITY:--}"

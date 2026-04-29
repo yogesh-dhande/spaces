@@ -10,9 +10,9 @@ set -euo pipefail
 #   3 = first process/iTerm row
 #   4 = second process/iTerm row
 # -----------------------------------------------------------------------------
-WORKSPACE_DIR="${WORKSPACE_DIR:-/Users/yogesh/muxy/workspaces/frontend-demo/banana}"
-MUXY_APP="${MUXY_APP:-$(cd "$(dirname "$0")/.." && pwd)/apps/macos/.build/debug/MuxyApp}"
-MX_BIN="${MX_BIN:-$(cd "$(dirname "$0")/.." && pwd)/apps/macos/.build/debug/muxy}"
+WORKSPACE_DIR="${WORKSPACE_DIR:-/Users/yogesh/spaces/workspaces/frontend-demo/banana}"
+MUXY_APP="${MUXY_APP:-$(cd "$(dirname "$0")/.." && pwd)/apps/macos/.build/debug/SpacesApp}"
+MX_BIN="${MX_BIN:-$(cd "$(dirname "$0")/.." && pwd)/apps/macos/.build/debug/spaces}"
 PROFILE_LOG="${PROFILE_LOG:-/tmp/muxy-window-focus-profile.log}"
 SAMPLE_COUNT="${SAMPLE_COUNT:-3}"
 STARTUP_SAMPLE_COUNT="${STARTUP_SAMPLE_COUNT:-3}"
@@ -65,8 +65,8 @@ build_if_needed() {
 }
 
 close_existing_muxy_instances() {
-  osascript -e 'tell application "Muxy" to quit' >/dev/null 2>&1 || true
-  pkill -x MuxyApp >/dev/null 2>&1 || true
+  osascript -e 'tell application "Spaces" to quit' >/dev/null 2>&1 || true
+  pkill -x SpacesApp >/dev/null 2>&1 || true
   sleep 1
 }
 
@@ -86,17 +86,17 @@ launch_debug_muxy() {
     sleep 0.2
   done
 
-  echo "Failed to launch debug Muxy app." >&2
+  echo "Failed to launch debug Spaces app." >&2
   exit 1
 }
 
 focus_muxy_app() {
   local pid="${launched_pid}"
   if [[ -z "${pid}" ]]; then
-    pid="$(pgrep -x MuxyApp | tail -n 1)"
+    pid="$(pgrep -x SpacesApp | tail -n 1)"
   fi
   if [[ -z "${pid}" ]]; then
-    echo "Could not find a running Muxy process." >&2
+    echo "Could not find a running Spaces process." >&2
     exit 1
   fi
 
@@ -108,7 +108,7 @@ focus_muxy_app() {
     fi
     sleep 0.1
   done
-  echo "Timed out waiting for debug Muxy app to become frontmost." >&2
+  echo "Timed out waiting for debug Spaces app to become frontmost." >&2
   exit 1
 }
 
@@ -198,7 +198,7 @@ collect_direct_shortcut_sample() {
   focus_muxy_app
   send_cmd_number "${index}"
   local line
-  line="$(wait_for_pattern "muxy: window_shortcut stage=total index=${index} elapsed_ms=")"
+  line="$(wait_for_pattern "spaces: window_shortcut stage=total index=${index} elapsed_ms=")"
   sleep_seconds "${POST_ACTION_SETTLE_SECONDS}"
   extract_metric "${line}" "elapsed_ms"
 }
@@ -208,7 +208,7 @@ collect_cycle_sample() {
   focus_workspace_window "${start_index}"
   send_cycle_next
   local line
-  line="$(wait_for_pattern "muxy: cycle workspace=.* direction=next total_ms=[0-9]+ target=.* success=1")"
+  line="$(wait_for_pattern "spaces: cycle workspace=.* direction=next total_ms=[0-9]+ target=.* success=1")"
   sleep_seconds "${POST_ACTION_SETTLE_SECONDS}"
   extract_metric "${line}" "total_ms"
 }
@@ -245,7 +245,7 @@ collect_startup_first_interaction_sample() {
     focus_muxy_app
     send_cmd_number "${STARTUP_SHORTCUT_INDEX}"
     local line=""
-    line="$(find_new_pattern_once "muxy: startup stage=first_interaction elapsed_ms=" || true)"
+    line="$(find_new_pattern_once "spaces: startup stage=first_interaction elapsed_ms=" || true)"
     if [[ -n "${line}" ]]; then
       sleep_seconds "${POST_ACTION_SETTLE_SECONDS}"
       extract_metric "${line}" "elapsed_ms"
@@ -273,15 +273,15 @@ collect_startup_sample() {
   local apply_selection_line
   local first_interaction_ms
 
-  shell_window_line="$(wait_for_pattern "muxy: startup stage=shell_window_ready elapsed_ms=")"
-  shortcut_monitor_line="$(wait_for_pattern "muxy: startup stage=shortcut_monitor_ready elapsed_ms=")"
-  setup_complete_line="$(wait_for_pattern "muxy: startup stage=setup_complete elapsed_ms=")"
-  main_content_line="$(wait_for_pattern "muxy: startup stage=main_content_ready elapsed_ms=")"
-  workspace_scan_breakdown_line="$(wait_for_pattern "muxy: startup stage=sidebar_snapshot_workspace_scan_breakdown elapsed_ms=")"
-  workspace_scan_line="$(wait_for_pattern "muxy: startup stage=sidebar_snapshot_workspace_scan_ready elapsed_ms=")"
-  dashboard_snapshot_line="$(wait_for_pattern "muxy: startup stage=sidebar_snapshot_dashboard_ready elapsed_ms=")"
-  snapshot_complete_line="$(wait_for_pattern "muxy: startup stage=sidebar_snapshot_complete elapsed_ms=")"
-  apply_selection_line="$(wait_for_pattern "muxy: startup stage=apply_snapshot_selection_ready elapsed_ms=")"
+  shell_window_line="$(wait_for_pattern "spaces: startup stage=shell_window_ready elapsed_ms=")"
+  shortcut_monitor_line="$(wait_for_pattern "spaces: startup stage=shortcut_monitor_ready elapsed_ms=")"
+  setup_complete_line="$(wait_for_pattern "spaces: startup stage=setup_complete elapsed_ms=")"
+  main_content_line="$(wait_for_pattern "spaces: startup stage=main_content_ready elapsed_ms=")"
+  workspace_scan_breakdown_line="$(wait_for_pattern "spaces: startup stage=sidebar_snapshot_workspace_scan_breakdown elapsed_ms=")"
+  workspace_scan_line="$(wait_for_pattern "spaces: startup stage=sidebar_snapshot_workspace_scan_ready elapsed_ms=")"
+  dashboard_snapshot_line="$(wait_for_pattern "spaces: startup stage=sidebar_snapshot_dashboard_ready elapsed_ms=")"
+  snapshot_complete_line="$(wait_for_pattern "spaces: startup stage=sidebar_snapshot_complete elapsed_ms=")"
+  apply_selection_line="$(wait_for_pattern "spaces: startup stage=apply_snapshot_selection_ready elapsed_ms=")"
   first_interaction_ms="$(collect_startup_first_interaction_sample)"
 
   local setup_check_metrics
@@ -408,12 +408,12 @@ collect_setup_check_sample() {
   local check_lines=()
   local check_id
   for check_id in "${SETUP_CHECK_IDS[@]}"; do
-    check_lines+=("$(find_pattern_anywhere "muxy: setup_check id=${check_id} elapsed_ms=[0-9]+ passed=[01]" || true)")
+    check_lines+=("$(find_pattern_anywhere "spaces: setup_check id=${check_id} elapsed_ms=[0-9]+ passed=[01]" || true)")
   done
   local startup_blocking_line
   local run_all_line
-  startup_blocking_line="$(find_pattern_anywhere "muxy: setup_check stage=startup_blocking elapsed_ms=" || true)"
-  run_all_line="$(find_pattern_anywhere "muxy: setup_check stage=run_all elapsed_ms=" || true)"
+  startup_blocking_line="$(find_pattern_anywhere "spaces: setup_check stage=startup_blocking elapsed_ms=" || true)"
+  run_all_line="$(find_pattern_anywhere "spaces: setup_check stage=run_all elapsed_ms=" || true)"
 
   for line in "${check_lines[@]}"; do
     if [[ -n "${line}" ]]; then

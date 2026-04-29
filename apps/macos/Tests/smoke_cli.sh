@@ -2,10 +2,10 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd -P)"
-BIN="$ROOT_DIR/.build/debug/muxy"
+BIN="$ROOT_DIR/.build/debug/spaces"
 
 if [[ ! -x "$BIN" ]]; then
-  echo "Building muxy..."
+  echo "Building spaces..."
   (cd "$ROOT_DIR" && swift build >/dev/null)
 fi
 
@@ -37,7 +37,7 @@ if "$BIN" workspace up "$TEST_REPO" >/dev/null 2>"$UP_ERR"; then
   echo "expected up without a registered workspace to fail"
   exit 1
 fi
-grep -q -- "Run \`muxy workspace import \\[path\\]\` first" "$UP_ERR"
+grep -q -- "Run \`spaces workspace import \\[path\\]\` first" "$UP_ERR"
 
 UPDATE_ERR="$(mktemp)"
 if "$BIN" workspace update "$TEST_REPO" >/dev/null 2>"$UPDATE_ERR"; then

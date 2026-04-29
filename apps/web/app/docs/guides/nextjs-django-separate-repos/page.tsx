@@ -5,7 +5,7 @@ import { DocsShell } from "../../components/docs-shell";
 export const metadata: Metadata = {
   title: "Guide: Next.js + Django (Separate Repos)",
   description:
-    "Cookbook guide for operating frontend and backend from separate repositories with Muxy.",
+    "Cookbook guide for operating frontend and backend from separate repositories with Spaces.",
 };
 
 const card = "border-t border-line/70 pt-8 first:border-t-0 first:pt-0";

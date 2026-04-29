@@ -10,7 +10,7 @@ export default function WorkspacesDocsPage() {
   return (
     <DocsShell
       title="Workspaces"
-      description="A workspace is the core runtime unit in Muxy. It owns process templates, browser sessions, window tracking, and reserved ports."
+      description="A workspace is the core runtime unit in Spaces. It owns process templates, browser sessions, window tracking, and reserved ports."
       pagePath="/docs/workspaces"
     >
       <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
@@ -46,8 +46,8 @@ export default function WorkspacesDocsPage() {
           <li>• Double-click the title, branch, or tooltip to rename them inline. <code>Escape</code> or click away to cancel.</li>
           <li>• Renaming the branch inline renames the underlying git branch.</li>
           <li>• Add, remove, or rename named ports per workspace.</li>
-          <li>• Edit a process command while the workspace is running and Muxy restarts just that process.</li>
-          <li>• Add a browser session and Muxy opens it right away if the workspace is already running.</li>
+          <li>• Edit a process command while the workspace is running and Spaces restarts just that process.</li>
+          <li>• Add a browser session and Spaces opens it right away if the workspace is already running.</li>
           <li>• The GUI is the place to edit workspace settings after creation. The CLI stays focused on import, launch, and agent events.</li>
         </ul>
       </article>
@@ -55,11 +55,11 @@ export default function WorkspacesDocsPage() {
       <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
         <h2 className="text-2xl font-semibold tracking-tight">Named Ports</h2>
         <p className="mt-2 text-sm leading-7 text-foreground-soft">
-          Name the ports your project uses (for example <code>FRONTEND_PORT</code>, <code>API_PORT</code>) and Muxy gives each workspace its own port number behind those names. Two workspaces can run the same project at the same time without fighting over a port.
+          Name the ports your project uses (for example <code>FRONTEND_PORT</code>, <code>API_PORT</code>) and Spaces gives each workspace its own port number behind those names. Two workspaces can run the same project at the same time without fighting over a port.
         </p>
         <ul className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
           <li>• Each named port is exposed as an environment variable to every workspace process, plus the setup and stop scripts.</li>
-          <li>• Muxy reserves the port number while the workspace exists, so nothing else on your Mac can grab it.</li>
+          <li>• Spaces reserves the port number while the workspace exists, so nothing else on your Mac can grab it.</li>
           <li>• Ports are released when the workspace is archived.</li>
         </ul>
         <pre className="mt-3 w-full max-w-full min-w-0 overflow-x-auto whitespace-pre-wrap break-words rounded-lg border border-line/70 bg-background-soft/60 p-3 text-xs leading-6 text-foreground">
@@ -87,8 +87,8 @@ API_PORT=21002`}</code>
           Selecting another workspace swaps the whole context — its windows and processes all follow you.
         </p>
         <ul className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
-          <li>• <code>cmd+alt+=</code> from anywhere brings Muxy forward; pick the workspace you want.</li>
-          <li>• Inside Muxy, <code>cmd+alt+]</code> / <code>cmd+alt+[</code> step between workspaces.</li>
+          <li>• <code>cmd+alt+=</code> from anywhere brings Spaces forward; pick the workspace you want.</li>
+          <li>• Inside Spaces, <code>cmd+alt+]</code> / <code>cmd+alt+[</code> step between workspaces.</li>
           <li>• <code>cmd+1</code> through <code>cmd+9</code> focus a specific window of the selected workspace.</li>
           <li>• Click any workspace in the sidebar or window row in the workspace run tab to jump directly.</li>
         </ul>

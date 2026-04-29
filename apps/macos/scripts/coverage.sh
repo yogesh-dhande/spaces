@@ -80,15 +80,15 @@ xcrun llvm-cov report \
 echo "Coverage summary:"
 awk '
 BEGIN {
-    module_order[1] = "streamctl"
-    module_order[2] = "gui"
-    module_order[3] = "appctl"
-    module_order[4] = "muxycli"
+    module_order[1] = "workspacecore"
+    module_order[2] = "spacesui"
+    module_order[3] = "systembridge"
+    module_order[4] = "spaces"
 }
 /^TOTAL[[:space:]]/ {
     overall_lines = $10
 }
-/^(appctl|gui|streamctl|muxycli)\// {
+/^(systembridge|spacesui|workspacecore|spaces)\// {
     split($1, parts, "/")
     module = parts[1]
     regions_total[module] += $2
