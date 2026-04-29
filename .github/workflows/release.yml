@@ -29,7 +29,13 @@ jobs:
       - name: Select Xcode
         uses: maxim-lobanov/setup-xcode@v1
         with:
-          xcode-version: "16.2"
+          xcode-version: latest-stable
+
+      - name: Print Swift toolchain
+        run: |
+          xcode-select -p
+          xcrun swift --version
+          swift --version
 
       - name: Resolve SwiftPM dependencies
         run: scripts/swiftpm.sh package resolve
