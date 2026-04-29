@@ -62,9 +62,9 @@ private final class ScreenRecorderOutput: NSObject, SCStreamOutput, SCStreamDele
     func finishWriting() async throws {
         writerInput.markAsFinished()
         let writer = self.writer
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            writer.finishWriting { if let error = writer.error { continuation.resume(throwing: error) } else { continuation.resume() } }
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in writer.finishWriting { continuation.resume() }
         }
+        if let error = writer.error { throw error }
     }
 }
 
