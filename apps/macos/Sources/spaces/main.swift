@@ -1,0 +1,3 @@
+import spacescli
+
+SpacesCommand.main()

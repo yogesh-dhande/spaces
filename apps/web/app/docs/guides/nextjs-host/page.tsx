@@ -5,7 +5,7 @@ import { DocsShell } from "../../components/docs-shell";
 export const metadata: Metadata = {
   title: "Guide: Next.js (No Docker)",
   description:
-    "Cookbook guide for running a single Next.js app directly on host with Muxy project settings.",
+    "Cookbook guide for running a single Next.js app directly on host with Spaces project settings.",
 };
 
 const card = "border-t border-line/70 pt-8 first:border-t-0 first:pt-0";
@@ -25,7 +25,7 @@ export default function NextjsHostGuidePage() {
         <h2 className="text-2xl font-semibold tracking-tight">Use Case</h2>
         <p className={prose}>
           You have one Next.js repo and run <code>npm run dev</code> directly.
-          You want multiple Muxy workspaces active at once, each with isolated ports
+          You want multiple Spaces workspaces active at once, each with isolated ports
           and browser tabs.
         </p>
       </article>
@@ -51,7 +51,7 @@ cp .env.example .env`}</code>
           <code>cp</code> creates an independent <code>.env</code> copy per workspace.
           Copy is safer when you want branch-local env edits.
           A symlink keeps one source of truth, but changes affect all workspaces and can cause surprising cross-branch coupling.
-          Swap <code>.env.example</code> for any real path you maintain — Muxy does not provide a built-in shared env file.
+          Swap <code>.env.example</code> for any real path you maintain — Spaces does not provide a built-in shared env file.
         </p>
 
         <h3 className="mt-4 text-sm font-semibold text-foreground">Processes</h3>
@@ -76,7 +76,7 @@ cp .env.example .env`}</code>
         </pre>
         <p className={prose}>
           Status checks give early signal when the server is down, hung, or failed after startup.
-          Useful for restart policies and for quickly seeing run health in the Muxy UI.
+          Useful for restart policies and for quickly seeing run health in the Spaces UI.
         </p>
       </article>
 

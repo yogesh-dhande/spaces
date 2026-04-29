@@ -3,27 +3,27 @@ import { DocsShell } from "../components/docs-shell";
 
 export const metadata: Metadata = {
   title: "Window Management",
-  description: "How Muxy captures and focuses workspace windows.",
+  description: "How Spaces captures and focuses workspace windows.",
 };
 
 export default function WindowManagementDocsPage() {
   return (
     <DocsShell
       title="Window Management"
-      description="Muxy captures the windows a workspace opens and jumps you back to any one of them with a keystroke. It doesn't move or resize them."
+      description="Spaces captures the windows a workspace opens and jumps you back to any one of them with a keystroke. It doesn't move or resize them."
       pagePath="/docs/window-management"
     >
       <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
-        <h2 className="text-2xl font-semibold tracking-tight">What Muxy Tracks</h2>
+        <h2 className="text-2xl font-semibold tracking-tight">What Spaces Tracks</h2>
         <p className="mt-2 text-sm leading-7 text-foreground-soft">
-          When a workspace launches, Muxy opens one window per thing it runs and remembers each one:
+          When a workspace launches, Spaces opens one window per thing it runs and remembers each one:
         </p>
         <ul className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
           <li>• A terminal window per process or coding agent</li>
           <li>• A Chrome window per browser session.</li>
         </ul>
         <p className="mt-3 text-sm leading-7 text-foreground-soft">
-          Place those windows wherever you want. Muxy never moves, resizes, or tiles them without explicit user action — and never touches windows it didn&apos;t open.
+          Place those windows wherever you want. Spaces never moves, resizes, or tiles them without explicit user action — and never touches windows it didn&apos;t open.
         </p>
       </article>
 
@@ -31,7 +31,7 @@ export default function WindowManagementDocsPage() {
         <h2 className="text-2xl font-semibold tracking-tight">Focusing a Window</h2>
         <ul className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
           <li>• <code>cmd+1</code> through <code>cmd+9</code> focus windows 1 through 9 of the selected workspace.</li>
-          <li>• Hold <code>cmd+alt</code> and tap digits to queue a sequence of windows, then release — Muxy focuses them in order. Use this to see multiple windows at once.</li>
+          <li>• Hold <code>cmd+alt</code> and tap digits to queue a sequence of windows, then release — Spaces focuses them in order. Use this to see multiple windows at once.</li>
           <li>• Click a row in the workspace&apos;s window list to focus that window.</li>
           <li>• A brief color pulse (optional) flashes on terminal windows so you can see where focus landed.</li>
         </ul>
@@ -41,8 +41,8 @@ export default function WindowManagementDocsPage() {
         <h2 className="text-2xl font-semibold tracking-tight">Recovery</h2>
         <ul className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
           <li>• If you close a tracked browser window, focusing it reopens the URL in a new Chrome window.</li>
-          <li>• If you close a tracked terminal window, Muxy reopens it and reattaches to the still-running process.</li>
-          <li>• If the underlying process is gone, Muxy prompts you before restarting it (<code>Cmd+R</code> to recover, <code>Esc</code> to cancel).</li>
+          <li>• If you close a tracked terminal window, Spaces reopens it and reattaches to the still-running process.</li>
+          <li>• If the underlying process is gone, Spaces prompts you before restarting it (<code>Cmd+R</code> to recover, <code>Esc</code> to cancel).</li>
         </ul>
       </article>
 

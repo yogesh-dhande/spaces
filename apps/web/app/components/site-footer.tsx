@@ -1,6 +1,6 @@
 import Image from "next/image";
 import Link from "next/link";
-import MuxyLogo from "../muxy.svg";
+import SpacesLogo from "../spaces.svg";
 
 const githubReleasesURL = "https://github.com/yogesh-dhande/spaces/releases/latest";
 
@@ -9,8 +9,8 @@ export function SiteFooter() {
     <footer className="mt-24 border-t border-line/70">
       <div className="mx-auto flex w-full max-w-7xl flex-col items-start justify-between gap-6 px-6 py-10 md:flex-row md:items-center">
         <div className="flex items-center gap-2">
-          <Image src={MuxyLogo} alt="" width={20} height={20} />
-          <span className="text-sm font-semibold tracking-tight">Muxy</span>
+          <Image src={SpacesLogo} alt="" width={20} height={20} />
+          <span className="text-sm font-semibold tracking-tight">Spaces</span>
           <span className="ml-2 text-xs text-foreground-soft">
             Your command center for parallel development.
           </span>
@@ -41,10 +41,10 @@ export function SiteFooter() {
             Download
           </a>
           <a
-            href="mailto:support@muxy.dev"
+            href="mailto:support@spaces.dev"
             className="transition-colors hover:text-foreground"
           >
-            support@muxy.dev
+            support@spaces.dev
           </a>
         </nav>
       </div>

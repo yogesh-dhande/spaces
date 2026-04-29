@@ -5,7 +5,7 @@ import { DocsShell } from "../../components/docs-shell";
 export const metadata: Metadata = {
   title: "Guide: Next.js + Django Monorepo (No Docker)",
   description:
-    "Cookbook guide for running a full-stack monorepo directly on host with Muxy.",
+    "Cookbook guide for running a full-stack monorepo directly on host with Spaces.",
 };
 
 const card = "border-t border-line/70 pt-8 first:border-t-0 first:pt-0";
@@ -47,12 +47,12 @@ cd ../backend && pip install -r requirements.txt
 cp .env.example .env`}</code>
         </pre>
         <p className={prose}>
-          Bootstraps both app layers. The setup script runs in a shell, so chained <code>cd &amp;&amp; ...</code> steps are fine here (processes are the place where you must wrap with <code>bash -lc</code>). Copying <code>.env</code> gives per-workspace config freedom. Symlink centralizes updates but can cause cross-workspace side effects. Swap <code>.env.example</code> for whatever seed file your repo keeps — Muxy does not provide a built-in shared env file.
+          Bootstraps both app layers. The setup script runs in a shell, so chained <code>cd &amp;&amp; ...</code> steps are fine here (processes are the place where you must wrap with <code>bash -lc</code>). Copying <code>.env</code> gives per-workspace config freedom. Symlink centralizes updates but can cause cross-workspace side effects. Swap <code>.env.example</code> for whatever seed file your repo keeps — Spaces does not provide a built-in shared env file.
         </p>
 
         <h3 className="mt-4 text-sm font-semibold text-foreground">Processes</h3>
         <p className={prose}>
-          Add two processes. Muxy invokes each command directly, so use <code>bash -lc</code> when you need <code>cd</code> plus shell composition.
+          Add two processes. Spaces invokes each command directly, so use <code>bash -lc</code> when you need <code>cd</code> plus shell composition.
         </p>
         <pre className={code}>
           <code>{`# frontend process

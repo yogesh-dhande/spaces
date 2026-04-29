@@ -17,7 +17,7 @@ export default function WorkspaceLifecycleDocsPage() {
         <h2 className="text-2xl font-semibold tracking-tight">States</h2>
         <ul className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
           <li>• <strong>Stopped</strong> &mdash; the workspace exists but nothing is running.</li>
-          <li>• <strong>Running</strong> &mdash; Muxy has started its processes. Browser sessions stay configured but open on demand when you focus them.</li>
+          <li>• <strong>Running</strong> &mdash; Spaces has started its processes. Browser sessions stay configured but open on demand when you focus them.</li>
           <li>• <strong>Archived</strong> &mdash; hidden from the sidebar. For Git projects the worktree is removed; for non-Git projects the project directory is left alone. The default workspace can&apos;t be archived.</li>
         </ul>
       </article>
@@ -25,7 +25,7 @@ export default function WorkspaceLifecycleDocsPage() {
       <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
         <h2 className="text-2xl font-semibold tracking-tight">Create</h2>
         <p className="mt-2 text-sm leading-7 text-foreground-soft">
-          On create, Muxy copies the project&apos;s templates into the workspace, reserves its named ports, and runs the setup script. Git projects also get a branch worktree. If you named a branch that doesn&apos;t exist yet, Muxy creates it from the target branch.
+          On create, Spaces copies the project&apos;s templates into the workspace, reserves its named ports, and runs the setup script. Git projects also get a branch worktree. If you named a branch that doesn&apos;t exist yet, Spaces creates it from the target branch.
         </p>
       </article>
 
@@ -44,9 +44,9 @@ export default function WorkspaceLifecycleDocsPage() {
       <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
         <h2 className="text-2xl font-semibold tracking-tight">Update While Running</h2>
         <ul className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
-          <li>• Add a process &mdash; Muxy starts it right away in a new terminal window.</li>
-          <li>• Edit a process command &mdash; Muxy restarts just that process.</li>
-          <li>• Add a browser session &mdash; Muxy opens it in Chrome immediately.</li>
+          <li>• Add a process &mdash; Spaces starts it right away in a new terminal window.</li>
+          <li>• Edit a process command &mdash; Spaces restarts just that process.</li>
+          <li>• Add a browser session &mdash; Spaces opens it in Chrome immediately.</li>
         </ul>
       </article>
 
@@ -54,12 +54,12 @@ export default function WorkspaceLifecycleDocsPage() {
         <h2 className="text-2xl font-semibold tracking-tight">Stop and Restart</h2>
         <ul className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
           <li>• Stop gracefully interrupts each process, then escalates if needed.</li>
-          <li>• Muxy closes the terminal and browser windows it opened for the workspace.</li>
+          <li>• Spaces closes the terminal and browser windows it opened for the workspace.</li>
           <li>• The stop script runs after the processes are down.</li>
           <li>• Restart is stop followed by launch.</li>
         </ul>
         <p className="mt-3 text-sm leading-7 text-foreground-soft">
-          For scripts and coding agents, <code>muxy workspace up</code> is the idempotent way to make sure a workspace is running: it launches when stopped and restarts any exited processes when already running. Add <code>--restart</code> to stop and relaunch unconditionally, or <code>--focus &lt;name&gt;</code> to foreground one named tracked window after launch.
+          For scripts and coding agents, <code>spaces workspace up</code> is the idempotent way to make sure a workspace is running: it launches when stopped and restarts any exited processes when already running. Add <code>--restart</code> to stop and relaunch unconditionally, or <code>--focus &lt;name&gt;</code> to foreground one named tracked window after launch.
         </p>
       </article>
 

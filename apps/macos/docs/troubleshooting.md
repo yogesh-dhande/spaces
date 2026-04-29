@@ -24,26 +24,26 @@ Show the focused window:
 yabai -m query --windows --window
 ```
 
-## muxy Diagnostics
+## spaces Diagnostics
 
 Register the current directory as a workspace:
 ```bash
-muxy workspace import --title "debug" --tooltip "Local troubleshooting session"
+spaces workspace import --title "debug" --tooltip "Local troubleshooting session"
 ```
 
 Force a clean runtime restart:
 ```bash
-muxy workspace up --restart
+spaces workspace up --restart
 ```
 
 ## Runtime Logs
 
 Process logs are stored under:
 ```
-~/.muxy/runtime/<workspace-id>/*.log
+~/.spaces/runtime/<workspace-id>/*.log
 ```
 
 Inspect a log:
 ```bash
-tail -n 200 ~/.muxy/runtime/<workspace-id>/<process>.log
+tail -n 200 ~/.spaces/runtime/<workspace-id>/<process>.log
 ```

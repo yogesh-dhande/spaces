@@ -3,7 +3,7 @@ import { DocsShell } from "../components/docs-shell";
 
 export const metadata: Metadata = {
   title: "Troubleshooting",
-  description: "Common setup, launch, and runtime issues in Muxy.",
+  description: "Common setup, launch, and runtime issues in Spaces.",
 };
 
 export default function TroubleshootingDocsPage() {
@@ -17,24 +17,24 @@ export default function TroubleshootingDocsPage() {
         <h2 className="text-2xl font-semibold tracking-tight">Quick Triage</h2>
         <ol className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
           <li>1. Check that yabai, tmux, Ghostty or iTerm2, and Chrome are installed.</li>
-          <li>2. Check that Muxy and yabai have Accessibility permission in System Settings.</li>
+          <li>2. Check that Spaces and yabai have Accessibility permission in System Settings.</li>
           <li>3. Confirm the workspace isn&apos;t archived.</li>
-          <li>4. If launch complains about existing runtime, run <code>muxy workspace up --restart</code>.</li>
+          <li>4. If launch complains about existing runtime, run <code>spaces workspace up --restart</code>.</li>
         </ol>
       </article>
 
       <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
         <h2 className="text-2xl font-semibold tracking-tight">Launch / Stop / Restart Issues</h2>
         <ul className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
-          <li>• <strong>&ldquo;Workspace is already running&rdquo;</strong> &mdash; use <code>muxy workspace up --restart</code> to reset state.</li>
+          <li>• <strong>&ldquo;Workspace is already running&rdquo;</strong> &mdash; use <code>spaces workspace up --restart</code> to reset state.</li>
           <li>• <strong>No terminal windows appear</strong> &mdash; confirm your processes are running.</li>
           <li>• <strong>No browser windows appear</strong> &mdash; confirm Chrome is installed and the workspace has browser sessions configured.</li>
-          <li>• <strong>Something is left running after stop</strong> &mdash; add the teardown command to the project or workspace stop script to clean up state not managed by Muxy.</li>
+          <li>• <strong>Something is left running after stop</strong> &mdash; add the teardown command to the project or workspace stop script to clean up state not managed by Spaces.</li>
         </ul>
         <pre className="mt-3 w-full max-w-full min-w-0 overflow-x-auto whitespace-pre-wrap break-words rounded-lg border border-line/70 bg-background-soft/60 p-3 text-xs leading-6 text-foreground">
-          <code>{`muxy workspace up /path/to/workspace
-muxy workspace up /path/to/workspace --restart
-muxy workspace up /path/to/workspace --focus frontend`}</code>
+          <code>{`spaces workspace up /path/to/workspace
+spaces workspace up /path/to/workspace --restart
+spaces workspace up /path/to/workspace --focus frontend`}</code>
         </pre>
       </article>
 

@@ -3,8 +3,8 @@ import "./globals.css";
 
 export const metadata: Metadata = {
   title: {
-    default: "Muxy",
-    template: "%s | Muxy",
+    default: "Spaces",
+    template: "%s | Spaces",
   },
   description: "Your command center for parallel development.",
 };
