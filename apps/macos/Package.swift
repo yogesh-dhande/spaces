@@ -16,8 +16,7 @@ let package = Package(
         .executable(name: "MuxyApp", targets: ["MuxyApp"])
     ],
     dependencies: [
-        .package(url: "https://github.com/apple/swift-argument-parser.git", from: "1.5.0"),
-        .package(url: "https://github.com/sparkle-project/Sparkle.git", from: "2.6.0")
+        .package(url: "https://github.com/apple/swift-argument-parser.git", from: "1.5.0")
     ],
     targets: [
         .target(name: "appctl"),
@@ -47,10 +46,7 @@ let package = Package(
         .executableTarget(name: "muxycli", dependencies: ["mxcli"], path: "Sources/muxycli"),
         .executableTarget(
             name: "MuxyApp",
-            dependencies: [
-                "gui",
-                .product(name: "Sparkle", package: "Sparkle")
-            ],
+            dependencies: ["gui"],
             path: "Sources/MuxyApp",
             exclude: ["Info.plist"],
             resources: [.copy("AppIcon.icns")],

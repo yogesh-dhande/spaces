@@ -496,7 +496,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 checkForUpdatesMenuItem?.title = "Up to Date"
                 let alert = NSAlert()
                 alert.messageText = "You're up to date"
-                alert.informativeText = "Muxy \(AppVersion.current) is the latest version."
+                alert.informativeText = "Muxy \(AppVersion.current) matches the latest GitHub release."
                 alert.alertStyle = .informational
                 alert.addButton(withTitle: "OK")
                 alert.runModal()
@@ -511,9 +511,14 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         alert.informativeText = "Muxy v\(info.version) is available (you have v\(AppVersion.current)).\n\n\(info.releaseNotes.prefix(500))"
         alert.alertStyle = .informational
         alert.addButton(withTitle: "Download & Install")
+        alert.addButton(withTitle: "View Release")
         alert.addButton(withTitle: "Later")
         let response = alert.runModal()
-        if response == .alertFirstButtonReturn { performUpdate(info: info) }
+        if response == .alertFirstButtonReturn {
+            performUpdate(info: info)
+        } else if response == .alertSecondButtonReturn {
+            NSWorkspace.shared.open(UpdateChecker.latestReleaseURL)
+        }
     }
 
     private func performUpdate(info: UpdateInfo) {

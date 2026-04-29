@@ -230,5 +230,5 @@ Muxy focuses those windows; it does not decide their geometry.
 
 ## Update Experience
 - The app should check for updates periodically and allow manual update checks.
-- When an update is available, the user should be able to install it from within the app.
+- Update discovery should use the latest GitHub release, and the user should be able to install it from within the app.
 - `muxy --version` should report the current version.

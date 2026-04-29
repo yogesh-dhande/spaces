@@ -1,5 +1,0 @@
-# Releases are deployed here via scripts/deploy-to-firebase.sh
-# Structure:
-#   - appcast.xml (no-cache)
-#   - {version}/Muxy-{version}.dmg (long cache)
-#   - latest.html (redirect to latest DMG via appcast parsing)

@@ -2,6 +2,8 @@ import Image from "next/image";
 import Link from "next/link";
 import MuxyLogo from "../muxy.svg";
 
+const githubReleasesURL = "https://github.com/yogesh-dhande/spaces/releases/latest";
+
 export function SiteFooter() {
   return (
     <footer className="mt-24 border-t border-line/70">
@@ -31,7 +33,7 @@ export function SiteFooter() {
             CLI Reference
           </Link>
           <a
-            href="/releases/latest"
+            href={githubReleasesURL}
             target="_blank"
             rel="noopener noreferrer"
             className="transition-colors hover:text-foreground"

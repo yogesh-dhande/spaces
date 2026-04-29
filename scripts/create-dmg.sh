@@ -10,7 +10,7 @@ MUXY_APP="$1"
 MUXY_CLI="$2"
 VERSION="$3"
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-RELEASES_DIR="$REPO_ROOT/apps/web/public/releases/$VERSION"
+RELEASES_DIR="$REPO_ROOT/dist/releases/$VERSION"
 DMG_NAME="Muxy-${VERSION}.dmg"
 DMG_PATH="$RELEASES_DIR/$DMG_NAME"
 VOLUME_NAME="Muxy-${VERSION}"
@@ -77,16 +77,6 @@ chmod +x "$cli_installer"
 # Copy muxy CLI to Resources
 mkdir -p "$app_bundle/Contents/Resources"
 cp "$MUXY_CLI" "$app_bundle/Contents/Resources/muxy"
-
-# Copy Sparkle.framework (required dependency)
-mkdir -p "$app_bundle/Contents/Frameworks"
-SPARKLE_FRAMEWORK="apps/macos/.build/arm64-apple-macosx/release/Sparkle.framework"
-if [[ -d "$SPARKLE_FRAMEWORK" ]]; then
-  cp -R "$SPARKLE_FRAMEWORK" "$app_bundle/Contents/Frameworks/"
-else
-  echo "Error: Sparkle.framework not found at $SPARKLE_FRAMEWORK" >&2
-  exit 1
-fi
 
 # Sign the complete app bundle (required for notarization)
 IDENTITY="${CODESIGN_IDENTITY:--}"

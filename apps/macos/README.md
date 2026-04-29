@@ -102,4 +102,4 @@ Build and deploy a release from the repository root with:
 scripts/release-and-deploy.sh <version>
 ```
 
-That script builds the release binaries, signs them, creates the DMG, optionally notarizes it, builds the website, and publishes the release assets.
+That script builds the release binaries, signs them, creates the DMG, optionally notarizes it, and publishes the installer to GitHub Releases.

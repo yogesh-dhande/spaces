@@ -4,6 +4,8 @@ import { AppHeroPreview } from "./components/app-hero-preview";
 import { SiteHeader } from "./components/site-header";
 import { SiteFooter } from "./components/site-footer";
 
+const githubReleasesURL = "https://github.com/yogesh-dhande/spaces/releases/latest";
+
 type Feature = {
   title: string;
   description: string;
@@ -274,8 +276,10 @@ export default function HomePage() {
             </p>
             <div className="mt-8 flex flex-wrap items-center gap-3">
               <Link
-                href="/releases/latest"
+                href={githubReleasesURL}
                 className="btn-primary inline-flex items-center gap-2 rounded-full px-6 py-3 text-sm font-semibold"
+                target="_blank"
+                rel="noopener noreferrer"
               >
                 Download
               </Link>
@@ -548,8 +552,10 @@ export default function HomePage() {
             </p>
             <div className="mt-8 flex flex-wrap justify-center gap-3">
               <Link
-                href="/releases/latest"
+                href={githubReleasesURL}
                 className="btn-primary inline-flex items-center gap-2 rounded-full px-6 py-3 text-sm font-semibold"
+                target="_blank"
+                rel="noopener noreferrer"
               >
                 Download
               </Link>

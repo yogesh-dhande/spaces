@@ -2,6 +2,8 @@ import type { Metadata } from "next";
 import { DocsShell } from "../components/docs-shell";
 import Link from "next/link";
 
+const githubReleasesURL = "https://github.com/yogesh-dhande/spaces/releases/latest";
+
 export const metadata: Metadata = {
   title: "Installation & Setup",
   description:
@@ -22,8 +24,10 @@ export default function InstallationDocsPage() {
         </p>
         <p className="mt-3">
           <Link
-            href="/releases/latest"
+            href={githubReleasesURL}
             className="inline-flex rounded-full border border-line px-4 py-2 text-sm font-semibold transition-colors hover:border-accent hover:text-accent"
+            target="_blank"
+            rel="noopener noreferrer"
           >
             Download Latest Release
           </Link>
@@ -98,7 +102,7 @@ open -a Muxy`}
       <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
         <h2 className="text-2xl font-semibold tracking-tight">Updates</h2>
         <p className="mt-2 text-sm leading-7 text-foreground-soft">
-          Muxy checks for updates on its own. When a new version is available, you can install it from inside the app.
+          Muxy checks GitHub Releases on its own. When a new version is available, you can install it from inside the app or open the release page directly.
         </p>
       </article>
 

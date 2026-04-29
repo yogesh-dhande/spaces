@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Complete release workflow: build, package, and deploy to Firebase Hosting
+# Complete release workflow: build, package, and publish to GitHub Releases
 #
 # Usage:
 #   scripts/release-and-deploy.sh <version>
@@ -15,7 +15,7 @@ set -euo pipefail
 #   APPLE_ID           - Apple ID for notarization
 #   TEAM_ID            - Apple Developer Team ID for notarization
 #   APP_PASSWORD       - App-specific password for notarization
-#   FIREBASE_TOKEN     - Firebase CI token (uses local auth if unset)
+#   GH_TOKEN           - GitHub token with permission to create releases
 
 if [ $# -ne 1 ]; then
   echo "Usage: $0 <version>"
@@ -27,63 +27,24 @@ VERSION="$1"
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 SCRIPTS_DIR="$REPO_ROOT/scripts"
 MACOS_DIR="$REPO_ROOT/apps/macos"
-WEB_DIR="$REPO_ROOT/apps/web"
+TAG="v$VERSION"
+RELEASE_URL="https://github.com/yogesh-dhande/spaces/releases/tag/$TAG"
 
-# Function to compare semantic versions (returns 0 if v1 > v2, 1 otherwise)
-version_gt() {
-  test "$(printf '%s\n' "$@" | sort -V | head -n 1)" != "$1"
-}
-
-# Check if this version already exists on Firebase
-APPCAST_URL="https://muxy-dev.web.app/releases/appcast.xml"
-echo "Checking for existing version on Firebase..."
-
-if DEPLOYED_VERSION=$(curl -sf "$APPCAST_URL" 2>/dev/null | grep -o '<sparkle:version>[^<]*</sparkle:version>' | sed 's/<[^>]*>//g' | head -1); then
-  echo "  Current deployed version: $DEPLOYED_VERSION"
-  
-  # Check if new version is higher than deployed version
-  if version_gt "$VERSION" "$DEPLOYED_VERSION"; then
-    echo "✓ New version $VERSION is higher than $DEPLOYED_VERSION"
-    echo ""
-  elif [ "$DEPLOYED_VERSION" = "$VERSION" ]; then
-    echo ""
-    echo "⚠️  WARNING: Version $VERSION is already deployed!"
-    echo "  Appcast URL: $APPCAST_URL"
-    echo ""
-    echo "Overwriting an existing version can cause issues:"
-    echo "  • CDN cache conflicts (DMG cached for 1 year)"
-    echo "  • Signature mismatches in appcast.xml"
-    echo "  • Auto-update won't trigger (same version number)"
-    echo ""
-    read -p "Continue anyway? [y/N] " -n 1 -r
-    echo ""
-    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-      echo "Aborted. Consider using a higher version number."
-      exit 1
-    fi
-    echo ""
-  else
-    echo ""
-    echo "❌ ERROR: Version $VERSION is lower than or equal to deployed version $DEPLOYED_VERSION"
-    echo ""
-    echo "Version numbers must increase. Consider using:"
-    IFS='.' read -ra PARTS <<< "$DEPLOYED_VERSION"
-    MAJOR="${PARTS[0]}"
-    MINOR="${PARTS[1]:-0}"
-    PATCH="${PARTS[2]:-0}"
-    echo "  • Patch: ${MAJOR}.${MINOR}.$((PATCH + 1))"
-    echo "  • Minor: ${MAJOR}.$((MINOR + 1)).0"
-    echo "  • Major: $((MAJOR + 1)).0.0"
-    echo ""
-    exit 1
-  fi
-else
-  echo "✓ No existing appcast found (first release or appcast unavailable)"
-  echo ""
+if ! command -v gh >/dev/null 2>&1; then
+  echo "Error: GitHub CLI is required. Install it from https://cli.github.com/" >&2
+  exit 1
 fi
 
+echo "Checking for existing GitHub release $TAG..."
+if gh release view "$TAG" >/dev/null 2>&1; then
+  echo "Error: GitHub release $TAG already exists." >&2
+  exit 1
+fi
+echo "✓ Release tag is available"
+echo ""
+
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo "  Muxy Release & Deploy v$VERSION"
+echo "  Muxy Release v$VERSION"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo ""
 
@@ -116,7 +77,7 @@ echo ""
 echo "💿 Step 3/6: Creating DMG installer..."
 "$SCRIPTS_DIR/create-dmg.sh" "$MUXY_APP" "$MUXY_CLI" "$VERSION"
 DMG_NAME="Muxy-${VERSION}.dmg"
-DMG_PATH="$REPO_ROOT/apps/web/public/releases/$VERSION/$DMG_NAME"
+DMG_PATH="$REPO_ROOT/dist/releases/$VERSION/$DMG_NAME"
 
 if [[ ! -f "$DMG_PATH" ]]; then
   echo "Error: DMG not created at $DMG_PATH" >&2
@@ -145,18 +106,20 @@ else
   echo ""
 fi
 
-# Step 5: Build Next.js website
-echo "🌐 Step 5/6: Building Next.js website..."
-cd "$WEB_DIR"
-npm run build
-echo "✓ Next.js build complete"
+# Step 5: Create GitHub release
+echo "🚀 Step 5/6: Creating GitHub release..."
+cd "$REPO_ROOT"
+gh release create "$TAG" "$DMG_PATH" \
+  --title "Muxy $VERSION" \
+  --generate-notes
+echo "✓ GitHub release created"
 echo ""
 
-# Step 6: Deploy to Firebase Hosting
-echo "🚀 Step 6/6: Deploying to Firebase Hosting..."
-cd "$REPO_ROOT"
-"$SCRIPTS_DIR/deploy-to-firebase.sh" "$DMG_PATH" "$VERSION"
-echo "✓ Deployment complete"
+# Step 6: Build Next.js website
+echo "🌐 Step 6/6: Building Next.js website..."
+cd "$REPO_ROOT/apps/web"
+npm run build
+echo "✓ Next.js build complete"
 echo ""
 
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
@@ -164,7 +127,6 @@ echo "  ✨ Release v$VERSION Complete!"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo ""
 echo "📍 URLs:"
-echo "  • Appcast:  https://muxy-dev.web.app/releases/appcast.xml"
-echo "  • Download: https://muxy-dev.web.app/releases/latest"
-echo "  • DMG:      https://muxy-dev.web.app/releases/$VERSION/$DMG_NAME"
+echo "  • Release:  $RELEASE_URL"
+echo "  • DMG:      $RELEASE_URL"
 echo ""
