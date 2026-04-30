@@ -83,7 +83,7 @@ IDENTITY="${CODESIGN_IDENTITY:--}"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ENTITLEMENTS="$SCRIPT_DIR/entitlements.plist"
 echo "Signing app bundle with identity: $IDENTITY"
-codesign --force --deep --options runtime --entitlements "$ENTITLEMENTS" --sign "$IDENTITY" "$app_bundle"
+codesign --force --deep --timestamp --options runtime --entitlements "$ENTITLEMENTS" --sign "$IDENTITY" "$app_bundle"
 
 # Verify signature
 codesign --verify --verbose=2 "$app_bundle"
