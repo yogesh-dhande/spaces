@@ -2,7 +2,12 @@
 # https://github.com/firebase/firebase-tools
 
 name: Deploy to Firebase Hosting on PR
-on: pull_request
+on:
+  pull_request:
+    paths:
+      - 'apps/web/**'
+      - '.github/workflows/firebase-hosting-merge.yml'
+      - '.github/workflows/firebase-hosting-pull-request.yml'
 permissions:
   checks: write
   contents: read
