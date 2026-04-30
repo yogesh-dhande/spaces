@@ -125,6 +125,12 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "$GITHUB_REF_NAME" "$DMG_PATH" \
-            --title "Spaces ${{ steps.version.outputs.version }}" \
-            --generate-notes
+          release_title="Spaces ${{ steps.version.outputs.version }}"
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release edit "$GITHUB_REF_NAME" --title "$release_title"
+            gh release upload "$GITHUB_REF_NAME" "$DMG_PATH" --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" "$DMG_PATH" \
+              --title "$release_title" \
+              --generate-notes
+          fi
