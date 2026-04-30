@@ -96,6 +96,8 @@ jobs:
             apps/macos/.build/release/spaces
 
       - name: Package DMG
+        env:
+          CODESIGN_IDENTITY: ${{ secrets.CODESIGN_IDENTITY }}
         run: |
           scripts/create-dmg.sh \
             apps/macos/.build/release/SpacesApp \
@@ -105,7 +107,7 @@ jobs:
           echo "DMG_NAME=$dmg_name" >> "$GITHUB_ENV"
           echo "DMG_PATH=dist/releases/${{ steps.version.outputs.version }}/$dmg_name" >> "$GITHUB_ENV"
 
-      - name: Notarize (optional)
+      - name: Notarize
         env:
           APPLE_ID: ${{ secrets.APPLE_ID }}
           TEAM_ID: ${{ secrets.TEAM_ID }}
