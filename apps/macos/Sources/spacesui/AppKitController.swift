@@ -4729,20 +4729,20 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let row = NSStackView()
         row.orientation = .horizontal
         row.alignment = .centerY
-        row.spacing = 10
+        row.spacing = 8
 
-        let segments = ["Move ↑↓", "Open ↵", "Close Esc", "Visible rows \(footerShortcutHint(for: .guiWindowShortcut))", "Dismiss alert ⌘ X"]
+        let segments = ["Move ↑↓", "Open ↵", "Close Esc", "Jump \(footerShortcutHint(for: .guiWindowShortcut))", "Dismiss ⌘X"]
 
         for index in segments.indices {
             if index > 0 {
                 let separator = NSTextField(labelWithString: "•")
-                separator.font = .systemFont(ofSize: 11, weight: .medium)
+                separator.font = .systemFont(ofSize: 10.5, weight: .medium)
                 separator.textColor = .tertiaryLabelColor
                 row.addArrangedSubview(separator)
             }
 
             let label = NSTextField(labelWithString: segments[index])
-            label.font = .systemFont(ofSize: 11, weight: .regular)
+            label.font = .systemFont(ofSize: 10.5, weight: .regular)
             label.textColor = .secondaryLabelColor
             label.lineBreakMode = .byTruncatingTail
             row.addArrangedSubview(label)
@@ -7569,29 +7569,30 @@ struct CommandPaletteItem: Sendable {
     private let detailField = NSTextField(labelWithString: "")
     private let iconContainer = NSView()
     private var clickHandler: (() -> Void)?
+    private var isSelectedState = false
 
     init(item: CommandPaletteItem, isSelected: Bool, onClick: @escaping () -> Void) {
         clickHandler = onClick
         super.init(frame: .zero)
         translatesAutoresizingMaskIntoConstraints = false
         wantsLayer = true
-        layer?.cornerRadius = 8
+        layer?.cornerRadius = 7
         setContentHuggingPriority(.defaultHigh, for: .vertical)
         setContentCompressionResistancePriority(.required, for: .vertical)
-        heightAnchor.constraint(greaterThanOrEqualToConstant: 48).isActive = true
+        heightAnchor.constraint(greaterThanOrEqualToConstant: 40).isActive = true
 
         let content = NSStackView()
         content.orientation = .horizontal
         content.alignment = .centerY
-        content.spacing = 10
-        content.edgeInsets = NSEdgeInsets(top: 8, left: 10, bottom: 8, right: 10)
+        content.spacing = 7
+        content.edgeInsets = NSEdgeInsets(top: 6, left: 6, bottom: 6, right: 6)
         content.translatesAutoresizingMaskIntoConstraints = false
 
         shortcutContainer.translatesAutoresizingMaskIntoConstraints = false
         shortcutContainer.setContentHuggingPriority(.required, for: .horizontal)
         shortcutContainer.setContentCompressionResistancePriority(.required, for: .horizontal)
         NSLayoutConstraint.activate([
-            shortcutContainer.widthAnchor.constraint(greaterThanOrEqualToConstant: 30),
+            shortcutContainer.widthAnchor.constraint(greaterThanOrEqualToConstant: 26),
             shortcutContainer.heightAnchor.constraint(greaterThanOrEqualToConstant: 14),
         ])
 
@@ -7609,15 +7610,15 @@ struct CommandPaletteItem: Sendable {
         let textStack = NSStackView()
         textStack.orientation = .vertical
         textStack.alignment = .leading
-        textStack.spacing = 2
+        textStack.spacing = 1
         textStack.translatesAutoresizingMaskIntoConstraints = false
 
-        labelField.font = .systemFont(ofSize: 13, weight: .medium)
+        labelField.font = .systemFont(ofSize: 13, weight: .semibold)
         labelField.textColor = Theme.text
         labelField.lineBreakMode = .byTruncatingTail
         labelField.maximumNumberOfLines = 1
 
-        detailField.font = .systemFont(ofSize: 12, weight: .regular)
+        detailField.font = .monospacedSystemFont(ofSize: 11.5, weight: .regular)
         detailField.textColor = Theme.muted
         detailField.lineBreakMode = .byTruncatingTail
         detailField.maximumNumberOfLines = 1
@@ -7635,14 +7636,14 @@ struct CommandPaletteItem: Sendable {
         branchContainer.setContentCompressionResistancePriority(.required, for: .horizontal)
 
         branchIconView.image = NSImage(systemSymbolName: "arrow.triangle.branch", accessibilityDescription: "Branch")
-        branchIconView.contentTintColor = Theme.muted
+        branchIconView.contentTintColor = Theme.mutedSecondary
         branchIconView.translatesAutoresizingMaskIntoConstraints = false
         NSLayoutConstraint.activate([
-            branchIconView.widthAnchor.constraint(equalToConstant: 10), branchIconView.heightAnchor.constraint(equalToConstant: 10),
+            branchIconView.widthAnchor.constraint(equalToConstant: 9), branchIconView.heightAnchor.constraint(equalToConstant: 9),
         ])
 
-        branchField.font = .monospacedSystemFont(ofSize: 10.5, weight: .regular)
-        branchField.textColor = Theme.muted
+        branchField.font = .monospacedSystemFont(ofSize: 10, weight: .regular)
+        branchField.textColor = Theme.mutedSecondary
         branchField.lineBreakMode = .byTruncatingTail
         branchField.maximumNumberOfLines = 1
 
@@ -7650,18 +7651,18 @@ struct CommandPaletteItem: Sendable {
         branchContainer.addArrangedSubview(branchField)
 
         alertsIndicatorView.image = NSImage(systemSymbolName: "bell.badge", accessibilityDescription: "Alerts notification")
-        alertsIndicatorView.contentTintColor = Theme.muted
+        alertsIndicatorView.contentTintColor = Theme.red
         alertsIndicatorView.translatesAutoresizingMaskIntoConstraints = false
         alertsIndicatorView.setContentHuggingPriority(.required, for: .horizontal)
         alertsIndicatorView.setContentCompressionResistancePriority(.required, for: .horizontal)
         NSLayoutConstraint.activate([
-            alertsIndicatorView.widthAnchor.constraint(equalToConstant: 11), alertsIndicatorView.heightAnchor.constraint(equalToConstant: 11),
+            alertsIndicatorView.widthAnchor.constraint(equalToConstant: 10), alertsIndicatorView.heightAnchor.constraint(equalToConstant: 10),
         ])
 
         let topTextRow = NSStackView()
         topTextRow.orientation = .horizontal
         topTextRow.alignment = .firstBaseline
-        topTextRow.spacing = 6
+        topTextRow.spacing = 5
         topTextRow.translatesAutoresizingMaskIntoConstraints = false
         topTextRow.addArrangedSubview(labelField)
         topTextRow.addArrangedSubview(detailField)
@@ -7671,7 +7672,7 @@ struct CommandPaletteItem: Sendable {
         let lowerTextRow = NSStackView()
         lowerTextRow.orientation = .horizontal
         lowerTextRow.alignment = .firstBaseline
-        lowerTextRow.spacing = 6
+        lowerTextRow.spacing = 5
         lowerTextRow.translatesAutoresizingMaskIntoConstraints = false
         lowerTextRow.addArrangedSubview(workspaceField)
         lowerTextRow.addArrangedSubview(branchContainer)
@@ -7680,8 +7681,8 @@ struct CommandPaletteItem: Sendable {
         textStack.addArrangedSubview(topTextRow)
         textStack.addArrangedSubview(lowerTextRow)
 
-        content.addArrangedSubview(statusContainer)
         content.addArrangedSubview(shortcutContainer)
+        content.addArrangedSubview(statusContainer)
         content.addArrangedSubview(iconContainer)
         content.addArrangedSubview(textStack)
         content.addArrangedSubview(NSView())
@@ -7698,13 +7699,14 @@ struct CommandPaletteItem: Sendable {
 
     @available(*, unavailable) required init?(coder: NSCoder) { fatalError("init(coder:) not available") }
 
-    override var intrinsicContentSize: NSSize { NSSize(width: NSView.noIntrinsicMetric, height: 48) }
+    override var intrinsicContentSize: NSSize { NSSize(width: NSView.noIntrinsicMetric, height: 40) }
 
     func update(item: CommandPaletteItem, isSelected: Bool, shortcutText: String?, onClick: (() -> Void)? = nil) {
         if let onClick { clickHandler = onClick }
-        effectiveAppearance.performAsCurrentDrawingAppearance { layer?.backgroundColor = (isSelected ? Theme.accentTint : .clear).cgColor }
-        layer?.borderWidth = isSelected ? 1 : 0
-        layer?.borderColor = isSelected ? Theme.accent.withAlphaComponent(0.24).cgColor : NSColor.clear.cgColor
+        isSelectedState = isSelected
+        effectiveAppearance.performAsCurrentDrawingAppearance { layer?.backgroundColor = (isSelected ? Theme.rowSelected : .clear).cgColor }
+        layer?.borderWidth = 1
+        layer?.borderColor = (isSelected ? Theme.accent.withAlphaComponent(0.18) : NSColor.clear).cgColor
 
         labelField.stringValue = item.label
         workspaceField.stringValue = item.workspaceTitle
@@ -7778,7 +7780,7 @@ struct CommandPaletteItem: Sendable {
     override func viewDidChangeEffectiveAppearance() {
         super.viewDidChangeEffectiveAppearance()
         effectiveAppearance.performAsCurrentDrawingAppearance {
-            layer?.backgroundColor = layer?.borderWidth == 1 ? Theme.accentTint.cgColor : NSColor.clear.cgColor
+            layer?.backgroundColor = isSelectedState ? Theme.rowSelected.cgColor : NSColor.clear.cgColor
         }
     }
 }
@@ -8048,7 +8050,7 @@ extension AppKitController {
         if let commandPalettePanel { return commandPalettePanel }
 
         let panel = NSPanel(
-            contentRect: NSRect(x: 0, y: 0, width: 760, height: 520), styleMask: [.titled, .fullSizeContentView], backing: .buffered, defer: false)
+            contentRect: NSRect(x: 0, y: 0, width: 720, height: 470), styleMask: [.titled, .fullSizeContentView], backing: .buffered, defer: false)
         panel.titleVisibility = .hidden
         panel.titlebarAppearsTransparent = true
         panel.isFloatingPanel = true
@@ -8066,7 +8068,7 @@ extension AppKitController {
 
         let root = ColoredBackgroundView()
         root.fillColor = Theme.surface
-        root.cornerRadius = 14
+        root.cornerRadius = 12
         root.translatesAutoresizingMaskIntoConstraints = false
         root.wantsLayer = true
         root.layer?.borderWidth = 1
@@ -8078,7 +8080,7 @@ extension AppKitController {
         let headerRow = NSStackView()
         headerRow.orientation = .vertical
         headerRow.alignment = .leading
-        headerRow.spacing = 4
+        headerRow.spacing = 2
         headerRow.translatesAutoresizingMaskIntoConstraints = false
         headerRow.setContentHuggingPriority(.required, for: .vertical)
         headerRow.setContentCompressionResistancePriority(.required, for: .vertical)
@@ -8086,12 +8088,12 @@ extension AppKitController {
         let brandRow = NSStackView()
         brandRow.orientation = .horizontal
         brandRow.alignment = .centerY
-        brandRow.spacing = 8
+        brandRow.spacing = 7
         brandRow.translatesAutoresizingMaskIntoConstraints = false
 
         let titleIconView = NSImageView()
         if let appIcon = NSApp.applicationIconImage.copy() as? NSImage {
-            appIcon.size = NSSize(width: 20, height: 20)
+            appIcon.size = NSSize(width: 18, height: 18)
             titleIconView.image = appIcon
         } else {
             titleIconView.image = NSImage(systemSymbolName: "square.grid.2x2.fill", accessibilityDescription: "Spaces")
@@ -8101,28 +8103,25 @@ extension AppKitController {
         titleIconView.setContentHuggingPriority(.required, for: .horizontal)
         titleIconView.setContentCompressionResistancePriority(.required, for: .horizontal)
         NSLayoutConstraint.activate([
-            titleIconView.widthAnchor.constraint(equalToConstant: 20), titleIconView.heightAnchor.constraint(equalToConstant: 20),
+            titleIconView.widthAnchor.constraint(equalToConstant: 18), titleIconView.heightAnchor.constraint(equalToConstant: 18),
         ])
 
         let titleLabel = NSTextField(labelWithString: "Spaces")
-        titleLabel.font = .systemFont(ofSize: 18, weight: .semibold)
+        titleLabel.font = .systemFont(ofSize: 17, weight: .semibold)
         titleLabel.textColor = Theme.text
-        let subtitleLabel = NSTextField(labelWithString: "Search and navigate to any space")
-        subtitleLabel.font = .systemFont(ofSize: 11)
-        subtitleLabel.textColor = Theme.muted
         brandRow.addArrangedSubview(titleIconView)
         brandRow.addArrangedSubview(titleLabel)
         headerRow.addArrangedSubview(brandRow)
-        headerRow.addArrangedSubview(subtitleLabel)
 
         let searchField = NSSearchField()
-        searchField.placeholderString = "fuzzy search workspaces, targets, and details"
-        searchField.font = .systemFont(ofSize: 14)
+        searchField.placeholderString = "fuzzy search to navigate your spaces"
+        searchField.font = .systemFont(ofSize: 13)
         searchField.translatesAutoresizingMaskIntoConstraints = false
         searchField.delegate = self
         searchField.focusRingType = .default
         searchField.setAccessibilityIdentifier("command-palette-search")
-        searchField.heightAnchor.constraint(equalToConstant: 32).isActive = true
+        searchField.controlSize = .large
+        searchField.heightAnchor.constraint(equalToConstant: 30).isActive = true
         searchField.setContentHuggingPriority(.required, for: .vertical)
         searchField.setContentCompressionResistancePriority(.required, for: .vertical)
 
@@ -8152,8 +8151,8 @@ extension AppKitController {
         tableView.backgroundColor = .clear
         tableView.selectionHighlightStyle = .none
         tableView.focusRingType = .none
-        tableView.rowHeight = 52
-        tableView.intercellSpacing = NSSize(width: 0, height: 4)
+        tableView.rowHeight = 42
+        tableView.intercellSpacing = NSSize(width: 0, height: 2)
         tableView.allowsMultipleSelection = false
         tableView.allowsEmptySelection = false
         tableView.delegate = self
@@ -8199,30 +8198,30 @@ extension AppKitController {
         NSLayoutConstraint.activate([
             content.leadingAnchor.constraint(equalTo: root.leadingAnchor), content.trailingAnchor.constraint(equalTo: root.trailingAnchor),
             content.topAnchor.constraint(equalTo: root.topAnchor), content.bottomAnchor.constraint(equalTo: root.bottomAnchor),
-            headerRow.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 18),
-            headerRow.trailingAnchor.constraint(lessThanOrEqualTo: content.trailingAnchor, constant: -18),
-            headerRow.topAnchor.constraint(equalTo: content.topAnchor, constant: 18),
+            headerRow.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 14),
+            headerRow.trailingAnchor.constraint(lessThanOrEqualTo: content.trailingAnchor, constant: -14),
+            headerRow.topAnchor.constraint(equalTo: content.topAnchor, constant: 14),
 
-            searchField.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 18),
-            searchField.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -18),
-            searchField.topAnchor.constraint(equalTo: headerRow.bottomAnchor, constant: 12),
+            searchField.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 14),
+            searchField.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -14),
+            searchField.topAnchor.constraint(equalTo: headerRow.bottomAnchor, constant: 10),
 
-            divider.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 18),
-            divider.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -18),
-            divider.topAnchor.constraint(equalTo: searchField.bottomAnchor, constant: 12),
+            divider.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 14),
+            divider.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -14),
+            divider.topAnchor.constraint(equalTo: searchField.bottomAnchor, constant: 10),
 
-            footerRow.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 18),
-            footerRow.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -18),
-            footerRow.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -18),
+            footerRow.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 14),
+            footerRow.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -14),
+            footerRow.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -14),
 
-            footerSeparator.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 18),
-            footerSeparator.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -18),
-            footerSeparator.bottomAnchor.constraint(equalTo: footerRow.topAnchor, constant: -8),
+            footerSeparator.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 14),
+            footerSeparator.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -14),
+            footerSeparator.bottomAnchor.constraint(equalTo: footerRow.topAnchor, constant: -6),
 
-            scrollView.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 18),
-            scrollView.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -18),
-            scrollView.topAnchor.constraint(equalTo: divider.bottomAnchor, constant: 12),
-            scrollView.bottomAnchor.constraint(equalTo: footerSeparator.topAnchor, constant: -12),
+            scrollView.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 14),
+            scrollView.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -14),
+            scrollView.topAnchor.constraint(equalTo: divider.bottomAnchor, constant: 10),
+            scrollView.bottomAnchor.constraint(equalTo: footerSeparator.topAnchor, constant: -8),
 
             emptyLabel.centerXAnchor.constraint(equalTo: scrollView.centerXAnchor),
             emptyLabel.centerYAnchor.constraint(equalTo: scrollView.centerYAnchor),
@@ -8237,10 +8236,10 @@ extension AppKitController {
         container.translatesAutoresizingMaskIntoConstraints = false
         container.addSubview(root)
         NSLayoutConstraint.activate([
-            root.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 12),
-            root.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -12),
-            root.topAnchor.constraint(equalTo: container.topAnchor, constant: 12),
-            root.bottomAnchor.constraint(equalTo: container.bottomAnchor, constant: -12),
+            root.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 10),
+            root.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -10),
+            root.topAnchor.constraint(equalTo: container.topAnchor, constant: 10),
+            root.bottomAnchor.constraint(equalTo: container.bottomAnchor, constant: -10),
         ])
 
         panel.contentView = container
