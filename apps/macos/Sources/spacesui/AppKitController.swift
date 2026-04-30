@@ -170,6 +170,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     private var commandPaletteFilteredItems: [CommandPaletteItem] = []
     private var commandPaletteContextWorkspaceID: String?
     private var commandPaletteSelectedIndex = 0
+    private var commandPaletteNeedsReload = true
+    private var isDismissingCommandPalette = false
     private var pendingWorktreeDiscoveryReload = false
     private var lastTrackedWindowCounts: [String: Int] = [:]
     private let updateChecker = UpdateChecker()
@@ -2073,9 +2075,12 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         return detailContainer
     }
 
+    private func invalidateCommandPaletteCache() { commandPaletteNeedsReload = true }
+
     private func reloadData() {
         do {
             pendingWorktreeDiscoveryReload = false
+            invalidateCommandPaletteCache()
             configCache = try orchestrator.syncConfig()
             loadShortcutSpecs()
             projects = try orchestrator.listProjects()
@@ -2215,6 +2220,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         logStartupProfile("apply_snapshot_start")
         let shouldPreserveDetailPane = preserveDetailPane && canPreserveDetailPaneAfterSidebarReload()
         pendingWorktreeDiscoveryReload = false
+        invalidateCommandPaletteCache()
         configCache = snapshot.config
         loadShortcutSpecs()
         projects = snapshot.projects
@@ -6625,7 +6631,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     private func toggleWindowFromHotkey() {
         guard let window else { return }
         logHotkeyDebug("toggle_window begin \(hotkeyWindowStateSummary())")
-        if commandPalettePanel != nil { dismissCommandPalette() }
+        if commandPalettePanel?.isVisible == true { dismissCommandPalette() }
         if NSApp.isActive, !NSApp.isHidden, window.isVisible, !window.isMiniaturized {
             logHotkeyDebug("toggle_window hide_main")
             NSApp.hide(nil)
@@ -7346,7 +7352,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     public func windowDidResignKey(_ notification: Notification) {
         guard let resignedWindow = notification.object as? NSWindow else { return }
         logHotkeyDebug("window_did_resign_key class=\(type(of: resignedWindow)) title=\(resignedWindow.title) \(hotkeyWindowStateSummary())")
-        if resignedWindow === commandPalettePanel { dismissCommandPalette() }
+        if resignedWindow === commandPalettePanel, !isDismissingCommandPalette { dismissCommandPalette() }
     }
 
     @objc public func numberOfRows(in tableView: NSTableView) -> Int {
@@ -8015,29 +8021,26 @@ extension AppKitController {
         panel.orderFrontRegardless()
         panel.makeKey()
         commandPaletteSearchField?.stringValue = ""
+        commandPaletteSelectedIndex = 0
         if let commandPaletteSearchField { panel.makeFirstResponder(commandPaletteSearchField) }
         applyCommandPaletteFilter()
-        reloadCommandPaletteItems()
+        if commandPaletteItems.isEmpty {
+            reloadCommandPaletteItems()
+        } else if commandPaletteNeedsReload, commandPaletteLoadTask == nil {
+            reloadCommandPaletteItems()
+        }
         logHotkeyDebug("present_palette end \(hotkeyWindowStateSummary())")
     }
 
     private func dismissCommandPalette() {
         guard let panel = commandPalettePanel else { return }
+        guard !isDismissingCommandPalette else { return }
+        isDismissingCommandPalette = true
         logHotkeyDebug("dismiss_palette begin visible=\(panel.isVisible ? 1 : 0) key=\(panel.isKeyWindow ? 1 : 0) \(hotkeyWindowStateSummary())")
-        commandPaletteLoadTask?.cancel()
-        commandPaletteLoadTask = nil
         panel.makeFirstResponder(nil)
         panel.orderOut(nil)
-        commandPalettePanel = nil
-        commandPaletteSearchField = nil
-        commandPaletteTableView = nil
-        commandPaletteLoadingIndicator = nil
-        commandPaletteEmptyLabel = nil
-        commandPaletteSummaryLabel = nil
         commandPaletteContextWorkspaceID = nil
-        commandPaletteFilteredItems.removeAll()
-        commandPaletteSelectedIndex = 0
-        panel.close()
+        isDismissingCommandPalette = false
         logHotkeyDebug("dismiss_palette end \(hotkeyWindowStateSummary())")
     }
 
@@ -8264,6 +8267,7 @@ extension AppKitController {
             switch result {
             case .success(let items):
                 self.logHotkeyDebug("reload_palette_items success count=\(items.count)")
+                self.commandPaletteNeedsReload = false
                 self.commandPaletteItems = self.filteredCommandPaletteItems(items)
                 self.applyCommandPaletteFilter()
             case .failure(let error):
@@ -8281,7 +8285,7 @@ extension AppKitController {
         commandPaletteLoadingIndicator?.isHidden = !loading
         if loading { commandPaletteLoadingIndicator?.startAnimation(nil) } else { commandPaletteLoadingIndicator?.stopAnimation(nil) }
         commandPaletteEmptyLabel?.isHidden = loading
-        commandPaletteTableView?.isHidden = loading
+        commandPaletteTableView?.isHidden = loading && commandPaletteItems.isEmpty
     }
 
     private func applyCommandPaletteFilter() {
