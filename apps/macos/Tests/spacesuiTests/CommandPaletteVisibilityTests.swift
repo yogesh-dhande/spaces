@@ -4,6 +4,19 @@ import workspacecore
 @testable import spacesui
 
 @Suite struct CommandPaletteVisibilityTests {
+    @Test func paletteContextPrefersPreviouslySelectedWorkspace() {
+        let workspaceID = AppKitController.commandPaletteContextWorkspaceID(
+            selectedWorkspaceID: "workspace-selected", focusedWorkspaceID: "workspace-focused")
+
+        #expect(workspaceID == "workspace-selected")
+    }
+
+    @Test func paletteContextFallsBackToFocusedTrackedWorkspace() {
+        let workspaceID = AppKitController.commandPaletteContextWorkspaceID(selectedWorkspaceID: nil, focusedWorkspaceID: "workspace-focused")
+
+        #expect(workspaceID == "workspace-focused")
+    }
+
     @Test func emptyQueryShowsAlertsThenCurrentWorkspaceItemsOnly() {
         let alertsItem = CommandPaletteItem(
             id: "alerts::attention", source: .alertsAttention, alertsAttentionID: "attention-1", workspaceID: "workspace-a",
@@ -22,6 +35,22 @@ import workspacecore
             allItems: [alertsItem, currentWorkspaceItem, otherWorkspaceItem], query: "", currentWorkspaceID: "workspace-a")
 
         #expect(visible.map(\.id) == ["alerts::attention", "workspace-a::0"])
+    }
+
+    @Test func emptyQueryPrefersAlertsWhenWorkspaceRowHasSameVisibleTarget() {
+        let alertsItem = CommandPaletteItem(
+            id: "alerts::frontend", source: .alertsAttention, alertsAttentionID: "attention-frontend", workspaceID: "workspace-a",
+            workspaceTitle: "Workspace A", workspaceBranch: "main", projectTitle: "Muxy", kind: .process, label: "Frontend", detail: "bun dev",
+            status: .process(.exited), focusRequest: .workspaceProcess(workspaceID: "workspace-a", processID: "proc-alert"))
+        let workspaceItem = CommandPaletteItem(
+            id: "workspace-a::frontend", source: .workspaceTarget, alertsAttentionID: nil, workspaceID: "workspace-a", workspaceTitle: "Workspace A",
+            workspaceBranch: "main", projectTitle: "Muxy", kind: .process, label: "Frontend", detail: "bun dev", status: .process(.running),
+            focusRequest: .workspaceProcess(workspaceID: "workspace-a", processID: "proc-live"))
+
+        let visible = AppKitController.visibleCommandPaletteItems(
+            allItems: [alertsItem, workspaceItem], query: "", currentWorkspaceID: "workspace-a")
+
+        #expect(visible.map(\.id) == ["alerts::frontend"])
     }
 
     @Test func emptyQueryWithoutCurrentWorkspaceShowsAlertsOnly() {

@@ -6572,9 +6572,13 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         return nil
     }
 
+    nonisolated static func commandPaletteContextWorkspaceID(selectedWorkspaceID: String?, focusedWorkspaceID: String?) -> String? {
+        selectedWorkspaceID ?? focusedWorkspaceID
+    }
+
     private func commandPaletteDefaultWorkspaceID() -> String? {
-        if NSApp.isActive, !showingAlerts, !showingSettings, let selectedWorkspaceID { return selectedWorkspaceID }
-        return try? orchestrator.workspaceIDForFocusedWindow()
+        Self.commandPaletteContextWorkspaceID(
+            selectedWorkspaceID: selectedWorkspaceID, focusedWorkspaceID: try? orchestrator.workspaceIDForFocusedWindow())
     }
 
     private func handleCommandPaletteShortcut(event: NSEvent) -> Bool {
@@ -7517,6 +7521,12 @@ struct CommandPaletteItem: Sendable {
         }
     }
 
+    var visibleIdentity: String {
+        let normalizedLabel = label.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let normalizedDetail = detail?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ?? ""
+        return "\(workspaceID):\(kind):\(normalizedLabel):\(normalizedDetail)"
+    }
+
     var iconSymbol: String {
         switch kind {
         case .browser: return "globe"
@@ -7795,15 +7805,18 @@ extension AppKitController {
         if trimmedQuery.isEmpty {
             var items: [CommandPaletteItem] = []
             var seenFocusIdentities: Set<String> = []
+            var seenVisibleIdentities: Set<String> = []
 
             for item in allItems where item.source == .alertsAttention {
                 guard seenFocusIdentities.insert(item.focusIdentity).inserted else { continue }
+                guard seenVisibleIdentities.insert(item.visibleIdentity).inserted else { continue }
                 items.append(item)
             }
 
             guard let currentWorkspaceID else { return items }
             for item in allItems where item.source == .workspaceTarget && item.workspaceID == currentWorkspaceID {
                 guard seenFocusIdentities.insert(item.focusIdentity).inserted else { continue }
+                guard seenVisibleIdentities.insert(item.visibleIdentity).inserted else { continue }
                 items.append(item)
             }
             return items
