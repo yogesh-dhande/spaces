@@ -4729,25 +4729,38 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let row = NSStackView()
         row.orientation = .horizontal
         row.alignment = .centerY
-        row.spacing = 8
+        row.spacing = 5
 
-        let segments = ["Move ↑↓", "Open ↵", "Close Esc", "Jump \(footerShortcutHint(for: .guiWindowShortcut))", "Dismiss ⌘X"]
-
-        for index in segments.indices {
-            if index > 0 {
-                let separator = NSTextField(labelWithString: "•")
-                separator.font = .systemFont(ofSize: 10.5, weight: .medium)
-                separator.textColor = .tertiaryLabelColor
-                row.addArrangedSubview(separator)
-            }
-
-            let label = NSTextField(labelWithString: segments[index])
-            label.font = .systemFont(ofSize: 10.5, weight: .regular)
-            label.textColor = .secondaryLabelColor
-            label.lineBreakMode = .byTruncatingTail
-            row.addArrangedSubview(label)
+        func addSep() {
+            let sep = NSTextField(labelWithString: "|")
+            sep.font = .systemFont(ofSize: 10, weight: .thin)
+            sep.textColor = .quaternaryLabelColor
+            row.addArrangedSubview(sep)
         }
 
+        func addSegment(keys: [String], label: String) {
+            let group = NSStackView()
+            group.orientation = .horizontal
+            group.alignment = .centerY
+            group.spacing = 3
+            for key in keys { group.addArrangedSubview(RowPrimitives.shortcutChip(key)) }
+            let lbl = NSTextField(labelWithString: label)
+            lbl.font = .systemFont(ofSize: 10.5, weight: .regular)
+            lbl.textColor = .secondaryLabelColor
+            group.addArrangedSubview(lbl)
+            row.addArrangedSubview(group)
+        }
+
+        let jumpKey = footerShortcutHint(for: .guiWindowShortcut).components(separatedBy: " ").filter { !$0.isEmpty }.joined()
+        addSegment(keys: ["↑", "↓"], label: "Move")
+        addSep()
+        addSegment(keys: ["↵"], label: "Open")
+        addSep()
+        addSegment(keys: ["esc"], label: "Close")
+        addSep()
+        addSegment(keys: [jumpKey], label: "Jump")
+        addSep()
+        addSegment(keys: ["⌘X"], label: "Dismiss alert")
         row.addArrangedSubview(NSView())
         return row
     }
@@ -7587,6 +7600,7 @@ struct CommandPaletteItem: Sendable {
         content.spacing = 7
         content.edgeInsets = NSEdgeInsets(top: 6, left: 6, bottom: 6, right: 6)
         content.translatesAutoresizingMaskIntoConstraints = false
+        content.detachesHiddenViews = true
 
         shortcutContainer.translatesAutoresizingMaskIntoConstraints = false
         shortcutContainer.setContentHuggingPriority(.required, for: .horizontal)
@@ -7656,7 +7670,7 @@ struct CommandPaletteItem: Sendable {
         alertsIndicatorView.setContentHuggingPriority(.required, for: .horizontal)
         alertsIndicatorView.setContentCompressionResistancePriority(.required, for: .horizontal)
         NSLayoutConstraint.activate([
-            alertsIndicatorView.widthAnchor.constraint(equalToConstant: 10), alertsIndicatorView.heightAnchor.constraint(equalToConstant: 10),
+            alertsIndicatorView.widthAnchor.constraint(equalToConstant: 14), alertsIndicatorView.heightAnchor.constraint(equalToConstant: 14),
         ])
 
         let topTextRow = NSStackView()
@@ -7666,8 +7680,6 @@ struct CommandPaletteItem: Sendable {
         topTextRow.translatesAutoresizingMaskIntoConstraints = false
         topTextRow.addArrangedSubview(labelField)
         topTextRow.addArrangedSubview(detailField)
-        topTextRow.addArrangedSubview(NSView())
-        topTextRow.addArrangedSubview(alertsIndicatorView)
 
         let lowerTextRow = NSStackView()
         lowerTextRow.orientation = .horizontal
@@ -7681,11 +7693,12 @@ struct CommandPaletteItem: Sendable {
         textStack.addArrangedSubview(topTextRow)
         textStack.addArrangedSubview(lowerTextRow)
 
-        content.addArrangedSubview(shortcutContainer)
         content.addArrangedSubview(statusContainer)
+        content.addArrangedSubview(shortcutContainer)
         content.addArrangedSubview(iconContainer)
         content.addArrangedSubview(textStack)
         content.addArrangedSubview(NSView())
+        content.addArrangedSubview(alertsIndicatorView)
 
         addSubview(content)
         NSLayoutConstraint.activate([
@@ -8114,7 +8127,7 @@ extension AppKitController {
         headerRow.addArrangedSubview(brandRow)
 
         let searchField = NSSearchField()
-        searchField.placeholderString = "fuzzy search to navigate your spaces"
+        searchField.placeholderString = "fuzzy search workspaces, targets, and details"
         searchField.font = .systemFont(ofSize: 13)
         searchField.translatesAutoresizingMaskIntoConstraints = false
         searchField.delegate = self
@@ -8124,6 +8137,28 @@ extension AppKitController {
         searchField.heightAnchor.constraint(equalToConstant: 30).isActive = true
         searchField.setContentHuggingPriority(.required, for: .vertical)
         searchField.setContentCompressionResistancePriority(.required, for: .vertical)
+
+        let countBadge = ColoredBackgroundView()
+        countBadge.fillColor = Theme.chipBg
+        countBadge.cornerRadius = 4
+        countBadge.translatesAutoresizingMaskIntoConstraints = false
+
+        let countLabel = NSTextField(labelWithString: "")
+        countLabel.font = .monospacedSystemFont(ofSize: 10.5, weight: .medium)
+        countLabel.textColor = Theme.muted
+        countLabel.translatesAutoresizingMaskIntoConstraints = false
+        countBadge.addSubview(countLabel)
+        NSLayoutConstraint.activate([
+            countLabel.leadingAnchor.constraint(equalTo: countBadge.leadingAnchor, constant: 5),
+            countLabel.trailingAnchor.constraint(equalTo: countBadge.trailingAnchor, constant: -5),
+            countLabel.topAnchor.constraint(equalTo: countBadge.topAnchor, constant: 2),
+            countLabel.bottomAnchor.constraint(equalTo: countBadge.bottomAnchor, constant: -2),
+        ])
+        searchField.addSubview(countBadge)
+        NSLayoutConstraint.activate([
+            countBadge.trailingAnchor.constraint(equalTo: searchField.trailingAnchor, constant: -8),
+            countBadge.centerYAnchor.constraint(equalTo: searchField.centerYAnchor),
+        ])
 
         let divider = NSBox()
         divider.boxType = .separator
@@ -8218,8 +8253,8 @@ extension AppKitController {
             footerSeparator.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -14),
             footerSeparator.bottomAnchor.constraint(equalTo: footerRow.topAnchor, constant: -6),
 
-            scrollView.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 14),
-            scrollView.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -14),
+            scrollView.leadingAnchor.constraint(equalTo: content.leadingAnchor),
+            scrollView.trailingAnchor.constraint(equalTo: content.trailingAnchor),
             scrollView.topAnchor.constraint(equalTo: divider.bottomAnchor, constant: 10),
             scrollView.bottomAnchor.constraint(equalTo: footerSeparator.topAnchor, constant: -8),
 
@@ -8248,7 +8283,7 @@ extension AppKitController {
         commandPaletteTableView = tableView
         commandPaletteLoadingIndicator = loadingIndicator
         commandPaletteEmptyLabel = emptyLabel
-        commandPaletteSummaryLabel = nil
+        commandPaletteSummaryLabel = countLabel
         logHotkeyDebug("ensure_palette_panel created")
         return panel
     }
@@ -8314,6 +8349,9 @@ extension AppKitController {
             tableView.deselectAll(nil)
         }
         logHotkeyDebug("rebuild_palette_rows_done rows=\(tableView.numberOfRows) selected_row=\(tableView.selectedRow)")
+        let count = commandPaletteFilteredItems.count
+        commandPaletteSummaryLabel?.stringValue = count > 0 ? "\(count)" : ""
+        commandPaletteSummaryLabel?.superview?.isHidden = count == 0
     }
 
     private func moveCommandPaletteSelection(delta: Int) {
