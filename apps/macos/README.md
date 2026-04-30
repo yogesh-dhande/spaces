@@ -107,3 +107,8 @@ scripts/release-and-deploy.sh <version>
 ```
 
 That script builds the release binaries, signs them, creates the DMG, optionally notarizes it, and publishes the installer to GitHub Releases.
+
+GitHub Actions release signing requires three repository secrets:
+- `CODESIGN_IDENTITY`
+- `CODESIGN_CERTIFICATE_P12`
+- `CODESIGN_CERTIFICATE_PASSWORD`
