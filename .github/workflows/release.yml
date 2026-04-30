@@ -1,4 +1,4 @@
-# Build, sign, package, and publish a Muxy release when a version tag is pushed.
+# Build, sign, package, and publish a Spaces release when a version tag is pushed.
 #
 # Trigger: push a tag matching v* (e.g. v0.3.0)
 #
@@ -52,16 +52,16 @@ jobs:
           CODESIGN_IDENTITY: ${{ secrets.CODESIGN_IDENTITY }}
         run: |
           scripts/codesign.sh \
-            apps/macos/.build/release/MuxyApp \
-            apps/macos/.build/release/muxy
+            apps/macos/.build/release/SpacesApp \
+            apps/macos/.build/release/spaces
 
       - name: Package DMG
         run: |
           scripts/create-dmg.sh \
-            apps/macos/.build/release/MuxyApp \
-            apps/macos/.build/release/muxy \
+            apps/macos/.build/release/SpacesApp \
+            apps/macos/.build/release/spaces \
             ${{ steps.version.outputs.version }}
-          dmg_name="Muxy-${{ steps.version.outputs.version }}.dmg"
+          dmg_name="Spaces-${{ steps.version.outputs.version }}.dmg"
           echo "DMG_NAME=$dmg_name" >> "$GITHUB_ENV"
           echo "DMG_PATH=dist/releases/${{ steps.version.outputs.version }}/$dmg_name" >> "$GITHUB_ENV"
 
@@ -84,5 +84,5 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release create "$GITHUB_REF_NAME" "$DMG_PATH" \
-            --title "Muxy ${{ steps.version.outputs.version }}" \
+            --title "Spaces ${{ steps.version.outputs.version }}" \
             --generate-notes
