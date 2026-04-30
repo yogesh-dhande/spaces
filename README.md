@@ -89,11 +89,15 @@ This workflow:
 
 Important environment variables:
 - `CODESIGN_IDENTITY`
+- `CODESIGN_CERTIFICATE_P12`
+- `CODESIGN_CERTIFICATE_PASSWORD`
 - `NOTARIZE`
 - `APPLE_ID`
 - `TEAM_ID`
 - `APP_PASSWORD`
 - `GH_TOKEN`
+
+For GitHub Actions releases, `CODESIGN_CERTIFICATE_P12` must be the base64-encoded Developer ID Application `.p12` bundle that matches `CODESIGN_IDENTITY`, and `CODESIGN_CERTIFICATE_PASSWORD` must be the password used when exporting that `.p12`.
 
 ### Website deploy
 Firebase Hosting deploys from [`.github/workflows/firebase-hosting-merge.yml`](/Users/yogesh/projects/muxy/.github/workflows/firebase-hosting-merge.yml:1). It builds `apps/web` and deploys the static export on pushes to `main` that touch the site or on manual dispatch.
