@@ -19,7 +19,7 @@ fi
 
 for binary in "$@"; do
   echo "Signing $binary with identity: $IDENTITY"
-  codesign --force --options runtime --entitlements "$ENTITLEMENTS" --sign "$IDENTITY" "$binary"
+  codesign --force --timestamp --options runtime --entitlements "$ENTITLEMENTS" --sign "$IDENTITY" "$binary"
 done
 
 echo "Done."
