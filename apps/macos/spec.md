@@ -101,7 +101,7 @@ Spaces focuses those windows; it does not decide their geometry.
 - The project settings pane should use the same flat detail-header treatment as workspace detail: project title and directory path at the top, then project-level configuration sections and footer actions.
 - Sidebar workspace rows show the workspace title on the first line and the git branch name on a second indented line underneath; the branch line is omitted when the workspace has no branch recorded.
 - The workspace detail pane is a single scrollable page: title + actions at the top, directory path with copy and reveal-in-Finder buttons, inline tooltip editor, then configuration sections for Processes, Browser sessions, Coding agents, Named ports, and Stop script. Each section shows its configured items as rows and expands inline into an edit form when the pencil icon is clicked; the `+ add` header button appends a new item. Running process rows should expose stop and restart actions before edit and delete, while non-running process rows should show run before edit and delete. Named-port rows should show the reserved port number as secondary text next to the configured name. A `⋯` overflow button in the action row exposes Copy path and Reveal in Finder, with Reveal in Finder available as a keyboard-invokable menu item via `⌘⇧F`.
-- The workspace detail footer should show inline shortcut hints for Toggle app, Dashboard, Settings, Open editor, New terminal, Next window, and Prev window, in that order.
+- The workspace detail footer should show inline shortcut hints for Toggle app, Alerts, Settings, Open editor, New terminal, Next window, and Prev window, in that order.
 
 ## Workspaces
 
@@ -163,24 +163,31 @@ Spaces focuses those windows; it does not decide their geometry.
 - Spaces should still reconcile stale tracked windows in the background instead of forcing the user to repair state manually.
 - Degraded runtime health should appear as a warning on top of the current `Running` or `Stopped` lifecycle state, not as a separate replacement state label.
 
-## Dashboard and Health
+## Alerts and Health
 - The app should surface attention items across workspaces in one place.
 - Attention includes exited processes, missing configured processes in running workspaces, and coding-agent states such as waiting or done.
 - A stopped workspace can still contribute attention items when that helps the user notice something actionable.
-- Missing configured processes in running workspaces should appear in the dashboard with the same direct recovery path offered from the Run tab.
-- Dashboard attention rows should support direct window focus by click and by the numbered window shortcuts.
-- The dashboard sidebar badge and dock badge should reflect the number of visible dashboard attention rows after dismissals are applied.
-- Users should be able to dismiss individual dashboard attention items so they disappear from the dashboard list and dock badge until that specific attention event changes.
-- Dismissing a dashboard attention item must not hide the underlying process or agent row from the workspace detail pane.
+- Missing configured processes in running workspaces should appear in Alerts with the same direct recovery path offered from the Run tab.
+- Alerts rows should support direct window focus by click and by the numbered window shortcuts.
+- The Alerts sidebar badge and dock badge should reflect the number of visible Alerts attention rows after dismissals are applied.
+- Users should be able to dismiss individual Alerts attention items so they disappear from the Alerts list and dock badge until that specific attention event changes.
+- Dismissing an Alerts attention item must not hide the underlying process or agent row from the workspace detail pane.
 
 ## Editing and Shortcuts
 - The app should support keyboard-driven use for common actions.
 - Project and workspace detail screens should prefer flat section layouts with spacing and dividers over nested bordered cards.
 - Global shortcuts should bring Spaces forward and support fast workspace switching.
 - The global app-toggle shortcut should hide Spaces when it is already frontmost and visible, and show it otherwise.
+- The app should expose a separate global command-palette shortcut that opens a lightweight palette without requiring the full main window to stay visible.
+- The command palette should default to `Cmd+Opt+-`.
 - Summoning Spaces from the global app-toggle shortcut should raise the main window above other apps and onto the active space.
-- When Spaces is summoned, it should select the workspace for the window that was focused immediately before activation when that window belongs to a tracked workspace; otherwise it should show the dashboard.
-- The app should expose a configurable shortcut leader that supplies the shared modifiers for leader-based shortcuts like workspace navigation, dashboard, editor, terminal, Finder, and queued window focus.
+- When Spaces is summoned, it should select the workspace for the window that was focused immediately before activation when that window belongs to a tracked workspace; otherwise it should show Alerts.
+- The app should expose a configurable shortcut leader that supplies the shared modifiers for leader-based shortcuts like workspace navigation, Alerts, editor, terminal, Finder, and queued window focus.
+- The command palette should draw from every navigable workspace target that can appear in workspace detail rows: browser sessions, processes, ad-hoc windows, configured coding-agent launchers, and live coding-agent terminals.
+- When the command palette opens with an empty query, it should show Alerts attention items first and then the items for the current workspace. If there is no current tracked workspace, the empty state should show only Alerts attention items.
+- Command-palette rows should show the same status language used by workspace detail rows, including process state and coding-agent state.
+- Once the user types a query, command-palette search should fuzzy-match across all workspaces using workspace title, target name, and secondary detail text, including compact cross-field queries such as `fu` matching `Frontend` plus `URL`.
+- The first command-palette result should stay selected by default, arrow keys should move the selection, and `Enter` should execute the same target-level focus/open action used by the numbered window shortcuts.
 - Window rows in the selected workspace should expose numbered shortcuts for direct focus.
 - Numbered window focus shortcuts should keep the saved workspace-settings order for configured browser sessions and processes, and append newly added ad-hoc windows after those configured rows.
 - Window focus actions and numbered shortcuts should follow one target-level rule: make that target available now.
@@ -188,8 +195,8 @@ Spaces focuses those windows; it does not decide their geometry.
 - Opening a configured browser session, process, or coding agent from a stopped workspace should move that workspace out of the stopped state immediately.
 - Partial runtime is a first-class workspace state: some configured targets may be live and focusable while others remain directly openable.
 - Window focus actions must operate on one target only and must not route through full-workspace `Launch` or `Restart` semantics.
-- Missing configured processes in the dashboard should open that one configured process directly and reuse the same configured row instead of creating a duplicate row.
-- Dashboard rows should show the tracked window or process name as the primary label and the target detail, such as a browser URL or process command, as secondary text.
+- Missing configured processes in Alerts should open that one configured process directly and reuse the same configured row instead of creating a duplicate row.
+- Alerts rows should show the tracked window or process name as the primary label and the target detail, such as a browser URL or process command, as secondary text.
 - Ad-hoc terminal rows should keep their generated focus name as the primary label and use the live terminal window title as secondary text.
 - CLI-driven focus through `spaces workspace up --focus` should require an explicit tracked window target instead of picking an arbitrary window.
 - CLI focus should use unique names across focusable browser sessions, processes, and coding-agent terminals, and `spaces workspace up --focus` should require one of those names explicitly.
@@ -199,7 +206,7 @@ Spaces focuses those windows; it does not decide their geometry.
 - Window-number sequence shortcuts should use a separate configurable modifier plus digits `1` through `9`, then replay the queued focus actions in order when the modifiers are released.
 - Shortcut handling must not break normal text-edit shortcuts while an input is focused.
 - Recovery affordances should reserve `Cmd+R`; app-data reload should default to leader+`R` so it stays distinct from recovery modals.
-- Dashboard should default to leader+`G` so it does not conflict with the macOS Dock toggle shortcut.
+- Alerts should default to leader+`A`.
 - Every keyboard shortcut the product supports must be configurable from the GUI settings panel.
 
 ## Coding-Agent Integration
@@ -219,7 +226,7 @@ Spaces focuses those windows; it does not decide their geometry.
 - Every tracked window row should have a unique visible name within its workspace. Two coding-agent rows must not share the same name.
 - Configured coding-agent launcher names are reserved within the workspace. An ad-hoc coding agent that reports the same label should be auto-renamed with a numeric suffix instead of colliding with the configured launcher slot.
 - Launching a configured coding agent is idempotent for its reserved slot: if that coding agent still has a live tracked terminal, Spaces should keep the existing row instead of deleting and recreating it.
-- `start` should show a spinner, `waiting` should show a warning indicator and count toward dashboard and dock attention, and `done` should remain in dashboard and dock attention until dismissed while still rendering as a green dot on the workspace row. `idle` should render as a gray dot without creating dashboard attention.
+- `start` should show a spinner, `waiting` should show a warning indicator and count toward Alerts and dock attention, and `done` should remain in Alerts and dock attention until dismissed while still rendering as a green dot on the workspace row. `idle` should render as a gray dot without creating Alerts attention.
 - `exit` should return the row to idle when the terminal is still open; if the terminal is closed, ad-hoc agent rows should be removed immediately, including when background runtime refresh detects the terminal closure after the fact, while rows linked to workspace process terminals should remain idle.
 
 ## Errors and Feedback

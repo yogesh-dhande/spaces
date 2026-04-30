@@ -37,9 +37,9 @@ private final class InlineWorkspaceEditorTextView: NSTextView {
 
 @MainActor
 public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineViewDataSource, NSOutlineViewDelegate, NSSplitViewDelegate,
-    NSWindowDelegate, NSTextFieldDelegate
+    NSWindowDelegate, NSTextFieldDelegate, NSSearchFieldDelegate, NSTableViewDelegate, NSTableViewDataSource
 {
-    private enum DashboardIconTint: Sendable {
+    private enum AlertsIconTint: Sendable {
         case browser
         case terminal
         case code
@@ -66,10 +66,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         var isEditing: Bool
     }
 
-    private struct DashboardAttentionEntry: Sendable {
+    private struct AlertsAttentionEntry: Sendable {
         let attentionID: String
         let icon: String
-        let iconTint: DashboardIconTint
+        let iconTint: AlertsIconTint
         let label: String
         let detail: String?
         let shortcut: String
@@ -80,15 +80,16 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let focusRequest: WindowFocusRequest?
     }
 
-    private struct DashboardGroup: Sendable {
+    private struct AlertsGroup: Sendable {
         let projectName: String
         let workspaceID: String
         let workspaceName: String
-        let items: [DashboardAttentionEntry]
+        let workspaceBranch: String?
+        let items: [AlertsAttentionEntry]
         var latestDate: Date? { items.compactMap(\.eventDate).max() }
     }
 
-    struct MissingConfiguredProcessDashboardItem: Sendable, Equatable {
+    struct MissingConfiguredProcessAlertsItem: Sendable, Equatable {
         let attentionID: String
         let label: String
         let detail: String?
@@ -101,7 +102,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     }
 
     enum SidebarArrowSelectionTarget: Equatable, Sendable {
-        case dashboard
+        case alerts
         case workspace(String)
     }
 
@@ -116,8 +117,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     private var outlineItemRefCache: [String: OutlineItemRef] = [:]
     private var workspacesByProject: [String: [WorkspaceSummary]] = [:]
     private var workspaceRuntimeStatusByID: [String: WorkspaceRuntimeStatus] = [:]
-    private var dashboardGroups: [DashboardGroup] = []
-    private var dismissedDashboardAttentionItemIDs: Set<String> = []
+    private var alertsGroups: [AlertsGroup] = []
+    private var dismissedAlertsAttentionItemIDs: Set<String> = []
     private var visibleDetailWorkspaceID: String?
 
     private var selectedProjectID: String?
@@ -133,7 +134,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     private var shortcutLeaderModifiers: Set<HotkeyModifier> = []
     private var pendingLeaderCaptureModifiers: Set<HotkeyModifier> = []
     private var toggleShortcutSpec: HotkeySpec?
-    private var dashboardShortcutSpec: HotkeySpec?
+    private var commandPaletteShortcutSpec: HotkeySpec?
+    private var alertsShortcutSpec: HotkeySpec?
     private var shortcutMonitor: Any?
     private var addWorkspaceShortcutSpec: HotkeySpec?
     private var reloadShortcutSpec: HotkeySpec?
@@ -157,6 +159,17 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     private var activeSpaceSummonCleanupTask: Task<Void, Never>?
     private var visibleWorkspaceDetailRefreshTask: Task<Void, Never>?
     private var visibleWorkspaceDetailRefreshWorkspaceID: String?
+    private var commandPalettePanel: NSPanel?
+    private var commandPaletteSearchField: NSSearchField?
+    private var commandPaletteTableView: NSTableView?
+    private var commandPaletteLoadingIndicator: NSProgressIndicator?
+    private var commandPaletteEmptyLabel: NSTextField?
+    private var commandPaletteSummaryLabel: NSTextField?
+    private var commandPaletteLoadTask: Task<Void, Never>?
+    private var commandPaletteItems: [CommandPaletteItem] = []
+    private var commandPaletteFilteredItems: [CommandPaletteItem] = []
+    private var commandPaletteContextWorkspaceID: String?
+    private var commandPaletteSelectedIndex = 0
     private var pendingWorktreeDiscoveryReload = false
     private var lastTrackedWindowCounts: [String: Int] = [:]
     private let updateChecker = UpdateChecker()
@@ -197,13 +210,13 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     private var windowIssueToastDismissTask: Task<Void, Never>?
     private lazy var iso8601Formatter: ISO8601DateFormatter = ISO8601DateFormatter()
 
-    // Dashboard sidebar row
-    private var dashboardRowView: NSView?
-    private var dashboardRowStack: NSStackView?
-    private var dashboardRowBadge: NSTextField?
-    private var showingDashboard = false
-    /// Maps sequential window shortcut numbers (1-9) to focus targets for the current dashboard view.
-    private var dashboardFocusRequestMap: [Int: WindowFocusRequest] = [:]
+    // Alerts sidebar row
+    private var alertsRowView: NSView?
+    private var alertsRowStack: NSStackView?
+    private var alertsRowBadge: NSTextField?
+    private var showingAlerts = false
+    /// Maps sequential window shortcut numbers (1-9) to focus targets for the current Alerts view.
+    private var alertsFocusRequestMap: [Int: WindowFocusRequest] = [:]
     private var bufferedWindowShortcutIndices: [Int] = []
     private var deferredExternalWindowHideTask: Task<Void, Never>?
 
@@ -213,11 +226,12 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         var routeCompletedAt: Date?
     }
 
-    private enum WindowFocusRequest: Sendable {
+    enum WindowFocusRequest: Sendable {
         case workspaceBrowserSession(workspaceID: String, targetURL: String)
         case workspaceWindow(workspaceID: String, index: Int)
         case workspaceProcess(workspaceID: String, processID: String)
         case workspaceMissingConfiguredProcess(workspaceID: String, processKey: String)
+        case workspaceAgentLauncher(workspaceID: String, name: String)
         case agentWindow(AgentWindowRecord)
     }
 
@@ -240,7 +254,19 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let status = GetEventParameter(
             event, EventParamName(kEventParamDirectObject), EventParamType(typeEventHotKeyID), nil, MemoryLayout<EventHotKeyID>.size, nil, &hotKeyID)
         if status != noErr { return status }
-        Task { @MainActor in controller.handleGlobalHotkey(id: hotKeyID.id) }
+        controller.logHotkeyDebug(
+            "event_received id=\(hotKeyID.id) status=\(status) main_thread=\(Thread.isMainThread ? 1 : 0) \(controller.hotkeyWindowStateSummary())")
+        if Thread.isMainThread {
+            MainActor.assumeIsolated {
+                controller.logHotkeyDebug("event_dispatch_direct id=\(hotKeyID.id)")
+                controller.handleGlobalHotkey(id: hotKeyID.id)
+            }
+        } else {
+            Task { @MainActor in
+                controller.logHotkeyDebug("event_dispatch_task id=\(hotKeyID.id)")
+                controller.handleGlobalHotkey(id: hotKeyID.id)
+            }
+        }
         return noErr
     }
 
@@ -304,6 +330,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             NotificationCenter.default.removeObserver(appDidResignActiveObserver)
             self.appDidResignActiveObserver = nil
         }
+        commandPaletteLoadTask?.cancel()
+        commandPaletteLoadTask = nil
+        commandPalettePanel?.close()
     }
 
     private func setupAgentEventIPCObserver() {
@@ -329,7 +358,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                     return
                 }
                 self.logWorkspaceDetailIPC("selecting id=\(workspaceID) title=\(workspace.title)")
-                self.showingDashboard = false
+                self.showingAlerts = false
                 self.showingSettings = false
                 self.selectWorkspace(workspace)
                 self.refreshSelection()
@@ -359,6 +388,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         ) { [weak self] _ in
             Task { @MainActor [weak self] in
                 guard let self else { return }
+                self.logHotkeyDebug("app_did_become_active \(self.hotkeyWindowStateSummary())")
                 if let profile = self.activeWindowShortcutProfile {
                     let routeElapsedMS = profile.routeCompletedAt.map { self.windowShortcutElapsedMS(since: $0) } ?? -1
                     self.logWindowShortcutProfile(
@@ -372,7 +402,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             forName: NSApplication.didResignActiveNotification, object: NSApp, queue: .main
         ) { [weak self] _ in
             Task { @MainActor [weak self] in
-                guard let self, let profile = self.activeWindowShortcutProfile else { return }
+                guard let self else { return }
+                self.logHotkeyDebug("app_did_resign_active \(self.hotkeyWindowStateSummary())")
+                if self.commandPalettePanel?.isVisible == true { self.dismissCommandPalette() }
+                guard let profile = self.activeWindowShortcutProfile else { return }
                 let routeElapsedMS = profile.routeCompletedAt.map { self.windowShortcutElapsedMS(since: $0) } ?? -1
                 self.logWindowShortcutProfile(
                     "stage=app_resigned_active index=\(profile.index) elapsed_ms=\(self.windowShortcutElapsedMS(since: profile.startedAt)) route_gap_ms=\(routeElapsedMS)"
@@ -539,7 +572,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
     private func canPreserveDetailPaneAfterSidebarReload() -> Bool {
         if activeAddWorkspaceFormTag != nil || activeAddProjectFormTag != nil { return true }
-        if showingDashboard || showingSettings { return true }
+        if showingAlerts || showingSettings { return true }
         if let selectedWorkspaceID { return findWorkspace(id: selectedWorkspaceID) != nil }
         if let selectedProjectID { return projects.contains(where: { $0.id == selectedProjectID }) }
         return false
@@ -592,7 +625,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let projects: [ProjectSummary]
         let workspacesByProject: [String: [WorkspaceSummary]]
         let workspaceRuntimeStatusByID: [String: WorkspaceRuntimeStatus]
-        let dashboardGroups: [DashboardGroup]
+        let alertsGroups: [AlertsGroup]
     }
 
     /// Holds a click closure and serves as the NSGestureRecognizer target for clickable row views.
@@ -627,7 +660,36 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         logStartupProfile("first_interaction", details: "kind=\(kind)")
     }
 
-    private static func dashboardIconColor(_ tint: DashboardIconTint) -> NSColor {
+    nonisolated private static func hotkeyDebugEnabled() -> Bool { ProcessInfo.processInfo.environment["DEBUG"] == "1" }
+
+    nonisolated private static func hotkeyDebugLogPath() -> String { NSTemporaryDirectory().appending("/spaces-hotkey-debug.log") }
+
+    private func logHotkeyDebug(_ message: String) {
+        guard Self.hotkeyDebugEnabled() else { return }
+        let line = "spaces: hotkey_debug \(message)\n"
+        fputs(line, stderr)
+        guard let data = line.data(using: .utf8) else { return }
+        let path = Self.hotkeyDebugLogPath()
+        if !FileManager.default.fileExists(atPath: path) { FileManager.default.createFile(atPath: path, contents: nil) }
+        guard let handle = FileHandle(forWritingAtPath: path) else { return }
+        do {
+            try handle.seekToEnd()
+            try handle.write(contentsOf: data)
+            try handle.close()
+        } catch { try? handle.close() }
+    }
+
+    private func hotkeyWindowStateSummary() -> String {
+        let mainVisible = window?.isVisible == true ? 1 : 0
+        let mainMini = window?.isMiniaturized == true ? 1 : 0
+        let mainKey = window?.isKeyWindow == true ? 1 : 0
+        let paletteVisible = commandPalettePanel?.isVisible == true ? 1 : 0
+        let paletteKey = commandPalettePanel?.isKeyWindow == true ? 1 : 0
+        return
+            "app_active=\(NSApp.isActive ? 1 : 0) app_hidden=\(NSApp.isHidden ? 1 : 0) main_visible=\(mainVisible) main_key=\(mainKey) main_mini=\(mainMini) palette_exists=\(commandPalettePanel == nil ? 0 : 1) palette_visible=\(paletteVisible) palette_key=\(paletteKey)"
+    }
+
+    private static func alertsIconColor(_ tint: AlertsIconTint) -> NSColor {
         switch tint {
         case .browser: .systemBlue
         case .terminal: .systemGreen
@@ -637,31 +699,31 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         }
     }
 
-    nonisolated private static func dashboardAttentionID(process: RunningProcessRecord) -> String {
+    nonisolated private static func alertsAttentionID(process: RunningProcessRecord) -> String {
         "process:\(process.id):exited:\(process.exitedAt ?? "unknown")"
     }
 
-    nonisolated private static func dashboardAttentionID(agentWindow: AgentWindowRecord) -> String {
+    nonisolated private static func alertsAttentionID(agentWindow: AgentWindowRecord) -> String {
         "agent:\(agentWindow.id):\(agentWindow.status.rawValue):\(agentWindow.updatedAt)"
     }
 
-    nonisolated static func dashboardAttentionAgentWindows(_ agentWindows: [AgentWindowRecord]) -> [AgentWindowRecord] {
+    nonisolated static func alertsAttentionAgentWindows(_ agentWindows: [AgentWindowRecord]) -> [AgentWindowRecord] {
         agentWindows.filter { $0.status == .waiting || $0.status == .done }
     }
 
-    nonisolated static func dashboardMissingConfiguredProcessItems(workspaceID: String, processEntries: [WorkspaceRunProcessEntry])
-        -> [MissingConfiguredProcessDashboardItem]
+    nonisolated static func alertsMissingConfiguredProcessItems(workspaceID: String, processEntries: [WorkspaceRunProcessEntry])
+        -> [MissingConfiguredProcessAlertsItem]
     {
         processEntries.compactMap { entry in
             guard entry.kind == .missingConfiguredProcess, let processKey = entry.processKey, let label = entry.processLabel else { return nil }
-            return MissingConfiguredProcessDashboardItem(
+            return MissingConfiguredProcessAlertsItem(
                 attentionID: "process-missing:\(workspaceID):\(processKey)", label: label, detail: entry.processCommand, processKey: processKey)
         }
     }
 
-    nonisolated private static func dashboardFocusRequest(
-        window: WindowRecord, windowListIndex: Int, process: RunningProcessRecord, workspaceID: String
-    ) -> WindowFocusRequest {
+    nonisolated private static func alertsFocusRequest(window: WindowRecord, windowListIndex: Int, process: RunningProcessRecord, workspaceID: String)
+        -> WindowFocusRequest
+    {
         if window.role == "browser", let targetURL = window.targetURL, !targetURL.isEmpty {
             return .workspaceBrowserSession(workspaceID: workspaceID, targetURL: targetURL)
         }
@@ -777,7 +839,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         }.value
     }
 
-    nonisolated private static func performWindowFocusSnapshot(_ request: WindowFocusRequest) async -> Result<Void, Error> {
+    nonisolated private static func performWindowFocusSnapshot(_ request: WindowFocusRequest) async -> Result<ExternalWindowAction, Error> {
         await Task.detached(priority: .userInitiated) {
             do {
                 let db = try DatabaseLocator.defaultPath()
@@ -786,14 +848,23 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 switch request {
                 case .workspaceBrowserSession(let workspaceID, let targetURL):
                     try orchestrator.focusWorkspaceBrowserSession(workspaceID: workspaceID, targetURL: targetURL)
-                case .workspaceWindow(let workspaceID, let index): try orchestrator.focusWorkspaceWindow(workspaceID: workspaceID, index: index)
+                    return .success(.focus)
+                case .workspaceWindow(let workspaceID, let index):
+                    try orchestrator.focusWorkspaceWindow(workspaceID: workspaceID, index: index)
+                    return .success(.focus)
                 case .workspaceProcess(let workspaceID, let processID):
                     try orchestrator.focusWorkspaceProcess(workspaceID: workspaceID, processID: processID)
+                    return .success(.focus)
                 case .workspaceMissingConfiguredProcess(let workspaceID, let processKey):
                     try orchestrator.recoverMissingConfiguredProcess(workspaceID: workspaceID, processKey: processKey)
-                case .agentWindow(let record): try orchestrator.focusAgentWindow(record)
+                    return .success(.open)
+                case .workspaceAgentLauncher(let workspaceID, let name):
+                    _ = try orchestrator.launchAgentLauncher(workspaceID: workspaceID, name: name)
+                    return .success(.open)
+                case .agentWindow(let record):
+                    try orchestrator.focusAgentWindow(record)
+                    return .success(.focus)
                 }
-                return .success(())
             } catch { return .failure(error) }
         }.value
     }
@@ -851,7 +922,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         }.value
     }
 
-    nonisolated private static func focusWindowShortcutSnapshot(index: Int, selectedWorkspaceID: String?, dashboardFocusRequest: WindowFocusRequest?)
+    nonisolated private static func focusWindowShortcutSnapshot(index: Int, selectedWorkspaceID: String?, alertsFocusRequest: WindowFocusRequest?)
         async -> Result<WindowShortcutExecutionOutcome, Error>
     {
         await Task.detached(priority: .userInitiated) {
@@ -860,23 +931,26 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 let store = try SQLiteStore(path: db)
                 let orchestrator = WorkspaceOrchestrator(store: store)
 
-                if let dashboardFocusRequest {
-                    switch dashboardFocusRequest {
+                if let alertsFocusRequest {
+                    switch alertsFocusRequest {
                     case .workspaceBrowserSession(let workspaceID, let targetURL):
                         try orchestrator.focusWorkspaceBrowserSession(workspaceID: workspaceID, targetURL: targetURL)
-                        return .success(.focused(kind: "dashboard_browser"))
+                        return .success(.focused(kind: "alerts_browser"))
                     case .workspaceWindow(let workspaceID, let index):
                         try orchestrator.focusWorkspaceWindow(workspaceID: workspaceID, index: index)
-                        return .success(.focused(kind: "dashboard_window"))
+                        return .success(.focused(kind: "alerts_window"))
                     case .workspaceProcess(let workspaceID, let processID):
                         try orchestrator.focusWorkspaceProcess(workspaceID: workspaceID, processID: processID)
-                        return .success(.focused(kind: "dashboard_process"))
+                        return .success(.focused(kind: "alerts_process"))
                     case .workspaceMissingConfiguredProcess(let workspaceID, let processKey):
                         try orchestrator.recoverMissingConfiguredProcess(workspaceID: workspaceID, processKey: processKey)
-                        return .success(.opened(kind: "dashboard_process"))
+                        return .success(.opened(kind: "alerts_process"))
+                    case .workspaceAgentLauncher(let workspaceID, let name):
+                        _ = try orchestrator.launchAgentLauncher(workspaceID: workspaceID, name: name)
+                        return .success(.opened(kind: "alerts_agent_launcher"))
                     case .agentWindow(let record):
                         try orchestrator.focusAgentWindow(record)
-                        return .success(.focused(kind: "dashboard_agent"))
+                        return .success(.focused(kind: "alerts_agent"))
                     }
                 }
                 guard let selectedWorkspaceID else { return .success(.noWorkspace) }
@@ -980,16 +1054,16 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         }.value
     }
 
-    nonisolated private static func buildDashboardGroupsSnapshot(
+    nonisolated private static func buildAlertsGroupsSnapshot(
         orchestrator: WorkspaceOrchestrator, projects: [ProjectSummary], workspacesByProject: [String: [WorkspaceSummary]]
-    ) throws -> [DashboardGroup] {
+    ) throws -> [AlertsGroup] {
         let iso8601Formatter = ISO8601DateFormatter()
-        var groups: [DashboardGroup] = []
+        var groups: [AlertsGroup] = []
         for project in projects {
             let workspaces = workspacesByProject[project.id] ?? []
             for workspace in workspaces {
                 let agentWindowsList = (try? orchestrator.agentWindows(workspaceID: workspace.id)) ?? []
-                let attentionAgentWindows = dashboardAttentionAgentWindows(agentWindowsList)
+                let attentionAgentWindows = alertsAttentionAgentWindows(agentWindowsList)
                 guard workspace.isRunning || !attentionAgentWindows.isEmpty else { continue }
 
                 let processes = workspace.isRunning ? ((try? orchestrator.runningProcesses(workspaceID: workspace.id)) ?? []) : []
@@ -1004,7 +1078,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                     configuredProcesses: configuredProcesses, windows: windows, processes: processes, agentWindows: agentWindowsList)
                 var processByWindowID: [Int: RunningProcessRecord] = [:]
                 for process in processes { if let wid = process.windowID { processByWindowID[wid] = process } }
-                var items: [DashboardAttentionEntry] = []
+                var items: [AlertsAttentionEntry] = []
                 var matchedProcessIDs: Set<String> = []
 
                 for (idx, win) in windows.enumerated() {
@@ -1012,7 +1086,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                     matchedProcessIDs.insert(process.id)
                     guard process.status == .exited else { continue }
                     let icon: String
-                    let iconTint: DashboardIconTint
+                    let iconTint: AlertsIconTint
                     let label: String
                     let detail: String?
                     switch win.role {
@@ -1039,27 +1113,26 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                     }
                     let eventDate = process.exitedAt.flatMap { iso8601Formatter.date(from: $0) }
                     items.append(
-                        DashboardAttentionEntry(
-                            attentionID: Self.dashboardAttentionID(process: process), icon: icon, iconTint: iconTint, label: label, detail: detail,
+                        AlertsAttentionEntry(
+                            attentionID: Self.alertsAttentionID(process: process), icon: icon, iconTint: iconTint, label: label, detail: detail,
                             shortcut: "", processStatus: process.status, agentStatus: nil, countsTowardBadge: true, eventDate: eventDate,
-                            focusRequest: Self.dashboardFocusRequest(
-                                window: win, windowListIndex: idx + 1, process: process, workspaceID: workspace.id)))
+                            focusRequest: Self.alertsFocusRequest(window: win, windowListIndex: idx + 1, process: process, workspaceID: workspace.id))
+                    )
                 }
 
                 for process in processes where !matchedProcessIDs.contains(process.id) {
                     guard process.status == .exited else { continue }
                     let eventDate = process.exitedAt.flatMap { iso8601Formatter.date(from: $0) }
                     items.append(
-                        DashboardAttentionEntry(
-                            attentionID: Self.dashboardAttentionID(process: process), icon: "terminal", iconTint: .terminal,
-                            label: process.templateName, detail: process.command, shortcut: "", processStatus: process.status, agentStatus: nil,
-                            countsTowardBadge: true, eventDate: eventDate,
-                            focusRequest: .workspaceProcess(workspaceID: workspace.id, processID: process.id)))
+                        AlertsAttentionEntry(
+                            attentionID: Self.alertsAttentionID(process: process), icon: "terminal", iconTint: .terminal, label: process.templateName,
+                            detail: process.command, shortcut: "", processStatus: process.status, agentStatus: nil, countsTowardBadge: true,
+                            eventDate: eventDate, focusRequest: .workspaceProcess(workspaceID: workspace.id, processID: process.id)))
                 }
 
-                for item in dashboardMissingConfiguredProcessItems(workspaceID: workspace.id, processEntries: processEntries) {
+                for item in alertsMissingConfiguredProcessItems(workspaceID: workspace.id, processEntries: processEntries) {
                     items.append(
-                        DashboardAttentionEntry(
+                        AlertsAttentionEntry(
                             attentionID: item.attentionID, icon: "terminal", iconTint: .warning, label: item.label, detail: item.detail, shortcut: "",
                             processStatus: .idle, agentStatus: nil, countsTowardBadge: true, eventDate: nil,
                             focusRequest: .workspaceMissingConfiguredProcess(workspaceID: workspace.id, processKey: item.processKey)))
@@ -1067,8 +1140,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
                 for agentWin in attentionAgentWindows {
                     items.append(
-                        DashboardAttentionEntry(
-                            attentionID: Self.dashboardAttentionID(agentWindow: agentWin), icon: "cpu.fill", iconTint: .warning,
+                        AlertsAttentionEntry(
+                            attentionID: Self.alertsAttentionID(agentWindow: agentWin), icon: "cpu.fill", iconTint: .warning,
                             label: agentWin.label ?? "Coding Agent CLI", detail: nil, shortcut: "", processStatus: nil, agentStatus: agentWin.status,
                             countsTowardBadge: true, eventDate: iso8601Formatter.date(from: agentWin.updatedAt), focusRequest: .agentWindow(agentWin))
                     )
@@ -1083,7 +1156,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                     case (_, nil): return true
                     }
                 }
-                groups.append(DashboardGroup(projectName: project.name, workspaceID: workspace.id, workspaceName: workspace.title, items: items))
+                groups.append(
+                    AlertsGroup(
+                        projectName: project.name, workspaceID: workspace.id, workspaceName: workspace.title, workspaceBranch: workspace.branch,
+                        items: items))
             }
         }
         groups.sort {
@@ -1134,17 +1210,17 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 )
                 logStartupSnapshotProfile(
                     "sidebar_snapshot_workspace_scan_ready", details: "workspace_count=\(workspaceCount) scan_ms=\(workspaceScanMS)")
-                let dashboardGroups = try buildDashboardGroupsSnapshot(
+                let alertsGroups = try buildAlertsGroupsSnapshot(
                     orchestrator: orchestrator, projects: projects, workspacesByProject: workspacesByProject)
                 logStartupSnapshotProfile(
-                    "sidebar_snapshot_dashboard_ready",
-                    details: "group_count=\(dashboardGroups.count) item_count=\(dashboardGroups.reduce(0) { $0 + $1.items.count })")
+                    "sidebar_snapshot_alerts_ready",
+                    details: "group_count=\(alertsGroups.count) item_count=\(alertsGroups.reduce(0) { $0 + $1.items.count })")
                 logStartupSnapshotProfile(
                     "sidebar_snapshot_complete", details: "total_ms=\(Int((ProcessInfo.processInfo.systemUptime - snapshotStartedAt) * 1000))")
                 return .success(
                     .init(
                         config: config, projects: projects, workspacesByProject: workspacesByProject,
-                        workspaceRuntimeStatusByID: workspaceRuntimeStatusByID, dashboardGroups: dashboardGroups))
+                        workspaceRuntimeStatusByID: workspaceRuntimeStatusByID, alertsGroups: alertsGroups))
             } catch { return .failure(error) }
         }.value
     }
@@ -1165,10 +1241,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     }
 
     nonisolated static func shouldRefreshVisibleWorkspaceDetail(
-        selectedWorkspaceID: String?, showingDashboard: Bool, showingSettings: Bool, workspaceExists: Bool
+        selectedWorkspaceID: String?, showingAlerts: Bool, showingSettings: Bool, workspaceExists: Bool
     ) -> Bool {
         guard selectedWorkspaceID != nil else { return false }
-        guard !showingDashboard, !showingSettings else { return false }
+        guard !showingAlerts, !showingSettings else { return false }
         return workspaceExists
     }
 
@@ -1588,9 +1664,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let topBarRow = makeSidebarTopBarRow()
         topBarRow.translatesAutoresizingMaskIntoConstraints = false
 
-        let dashboardRow = makeDashboardSidebarRow()
-        dashboardRow.translatesAutoresizingMaskIntoConstraints = false
-        dashboardRowView = dashboardRow
+        let alertsRow = makeAlertsSidebarRow()
+        alertsRow.translatesAutoresizingMaskIntoConstraints = false
+        alertsRowView = alertsRow
 
         let sectionHeader = sidebarSectionHeader(
             title: "Projects", actions: [(symbol: "plus", tooltip: "New project", action: #selector(addProject))])
@@ -1634,7 +1710,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         scroll.documentView = outlineView
 
         container.addSubview(topBarRow)
-        container.addSubview(dashboardRow)
+        container.addSubview(alertsRow)
         container.addSubview(sectionHeader)
         container.addSubview(scroll)
 
@@ -1643,13 +1719,13 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             topBarRow.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -8),
             topBarRow.topAnchor.constraint(equalTo: container.topAnchor, constant: 8),
 
-            dashboardRow.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 8),
-            dashboardRow.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -8),
-            dashboardRow.topAnchor.constraint(equalTo: topBarRow.bottomAnchor, constant: 8),
+            alertsRow.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 8),
+            alertsRow.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -8),
+            alertsRow.topAnchor.constraint(equalTo: topBarRow.bottomAnchor, constant: 8),
 
             sectionHeader.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 16),
             sectionHeader.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -16),
-            sectionHeader.topAnchor.constraint(equalTo: dashboardRow.bottomAnchor, constant: 10),
+            sectionHeader.topAnchor.constraint(equalTo: alertsRow.bottomAnchor, constant: 10),
 
             scroll.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 4),
             scroll.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -4),
@@ -1698,15 +1774,15 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         return row
     }
 
-    private func makeDashboardSidebarRow() -> NSView {
+    private func makeAlertsSidebarRow() -> NSView {
         let row = NSView()
-        row.setAccessibilityIdentifier("sidebar-dashboard")
+        row.setAccessibilityIdentifier("sidebar-alerts")
 
-        let titleLabel = NSTextField(labelWithString: "Dashboard")
+        let titleLabel = NSTextField(labelWithString: "Alerts")
         titleLabel.font = .systemFont(ofSize: 12, weight: .medium)
         titleLabel.textColor = .labelColor
 
-        let hintLabel = NSTextField(labelWithString: footerShortcutHint(for: .guiDashboardShortcut))
+        let hintLabel = NSTextField(labelWithString: footerShortcutHint(for: .guiAlertsShortcut))
         hintLabel.font = .systemFont(ofSize: 10, weight: .regular)
         hintLabel.textColor = .tertiaryLabelColor
         hintLabel.setContentHuggingPriority(.required, for: .horizontal)
@@ -1726,7 +1802,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         NSLayoutConstraint.activate([
             badge.widthAnchor.constraint(greaterThanOrEqualToConstant: 18), badge.heightAnchor.constraint(equalToConstant: 14),
         ])
-        dashboardRowBadge = badge
+        alertsRowBadge = badge
 
         let stack = NSStackView()
         stack.orientation = .horizontal
@@ -1740,7 +1816,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         stack.addArrangedSubview(hintLabel)
         stack.addArrangedSubview(NSView())  // spacer
         stack.addArrangedSubview(badge)
-        dashboardRowStack = stack
+        alertsRowStack = stack
 
         row.addSubview(stack)
         NSLayoutConstraint.activate([
@@ -1748,85 +1824,94 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             stack.topAnchor.constraint(equalTo: row.topAnchor), stack.bottomAnchor.constraint(equalTo: row.bottomAnchor),
         ])
 
-        let click = NSClickGestureRecognizer(target: self, action: #selector(dashboardRowClicked))
+        let click = NSClickGestureRecognizer(target: self, action: #selector(alertsRowClicked))
         row.addGestureRecognizer(click)
         return row
     }
 
-    @objc private func dashboardRowClicked() { showDashboardDetail() }
+    @objc private func alertsRowClicked() { showAlertsDetail() }
 
-    private func updateDashboardRowAppearance() {
-        guard let stack = dashboardRowStack else { return }
-        if showingDashboard {
+    private func updateAlertsRowAppearance() {
+        guard let stack = alertsRowStack else { return }
+        if showingAlerts {
             stack.layer?.backgroundColor = sidebarSelectedCardBackgroundColor().cgColor
         } else {
             stack.layer?.backgroundColor = NSColor.clear.cgColor
         }
     }
 
-    // MARK: - Dashboard content
+    // MARK: - Alerts content
 
-    private func buildDashboardGroups() -> [DashboardGroup] {
-        dashboardGroups.compactMap { group in
-            let items = group.items.filter { !dismissedDashboardAttentionItemIDs.contains($0.attentionID) }
+    private func buildAlertsGroups() -> [AlertsGroup] {
+        alertsGroups.compactMap { group -> AlertsGroup? in
+            let items = group.items.filter { !dismissedAlertsAttentionItemIDs.contains($0.attentionID) }
             guard !items.isEmpty else { return nil }
-            return DashboardGroup(projectName: group.projectName, workspaceID: group.workspaceID, workspaceName: group.workspaceName, items: items)
+            return AlertsGroup(
+                projectName: group.projectName, workspaceID: group.workspaceID, workspaceName: group.workspaceName,
+                workspaceBranch: group.workspaceBranch, items: items)
         }
     }
 
-    private func dashboardAttentionCount() -> Int {
-        buildDashboardGroups().reduce(0) { total, group in total + group.items.filter(\.countsTowardBadge).count }
+    private func alertsAttentionCount() -> Int {
+        buildAlertsGroups().reduce(0) { total, group in total + group.items.filter(\.countsTowardBadge).count }
     }
 
-    private func loadDashboardDismissedAttentionItemIDs() {
-        dismissedDashboardAttentionItemIDs = (try? orchestrator.dashboardDismissedAttentionItemIDs()) ?? []
+    private func loadAlertsDismissedAttentionItemIDs() {
+        dismissedAlertsAttentionItemIDs = (try? orchestrator.alertsDismissedAttentionItemIDs()) ?? []
     }
 
-    private func pruneDismissedDashboardAttentionItemIDsIfNeeded() {
-        let activeIDs = Set(dashboardGroups.flatMap { $0.items.map(\.attentionID) })
-        let prunedIDs = dismissedDashboardAttentionItemIDs.intersection(activeIDs)
-        guard prunedIDs != dismissedDashboardAttentionItemIDs else { return }
-        dismissedDashboardAttentionItemIDs = prunedIDs
-        do { try orchestrator.setDashboardDismissedAttentionItemIDs(prunedIDs) } catch { showError(error) }
+    private func pruneDismissedAlertsAttentionItemIDsIfNeeded() {
+        let activeIDs = Set(alertsGroups.flatMap { $0.items.map(\.attentionID) })
+        let prunedIDs = dismissedAlertsAttentionItemIDs.intersection(activeIDs)
+        guard prunedIDs != dismissedAlertsAttentionItemIDs else { return }
+        dismissedAlertsAttentionItemIDs = prunedIDs
+        do { try orchestrator.setAlertsDismissedAttentionItemIDs(prunedIDs) } catch { showError(error) }
     }
 
-    private func dismissDashboardAttentionItem(_ attentionID: String) {
-        guard !dismissedDashboardAttentionItemIDs.contains(attentionID) else { return }
-        dismissedDashboardAttentionItemIDs.insert(attentionID)
+    private func dismissAlertsAttentionItem(_ attentionID: String) {
+        guard !dismissedAlertsAttentionItemIDs.contains(attentionID) else { return }
+        dismissedAlertsAttentionItemIDs.insert(attentionID)
         do {
-            try orchestrator.setDashboardDismissedAttentionItemIDs(dismissedDashboardAttentionItemIDs)
-            updateDashboardSidebarBadge()
-            if showingDashboard { showDashboardDetail() }
+            try orchestrator.setAlertsDismissedAttentionItemIDs(dismissedAlertsAttentionItemIDs)
+            updateAlertsSidebarBadge()
+            if showingAlerts { showAlertsDetail() }
         } catch {
-            dismissedDashboardAttentionItemIDs.remove(attentionID)
+            dismissedAlertsAttentionItemIDs.remove(attentionID)
             showError(error)
         }
     }
 
-    private func showDashboardDetail() {
+    private func filteredCommandPaletteItems(_ items: [CommandPaletteItem]) -> [CommandPaletteItem] {
+        items.filter { item in
+            guard let attentionID = item.alertsAttentionID else { return true }
+            return !dismissedAlertsAttentionItemIDs.contains(attentionID)
+        }
+    }
+
+    private func showAlertsDetail() {
         clearInlineWorkspaceFieldRefs()
         activeAddWorkspaceFormTag = nil
         activeAddProjectFormTag = nil
         visibleDetailWorkspaceID = nil
         showingSettings = false
-        showingDashboard = true
+        showingAlerts = true
         let previousProjectID = selectedProjectID
         let previousWorkspaceID = selectedWorkspaceID
         selectedProjectID = nil
         selectedWorkspaceID = nil
-        dashboardFocusRequestMap = [:]
+        alertsFocusRequestMap = [:]
         outlineView.deselectAll(nil)
         // Reload only the previously-selected workspace row to clear its selection styling;
         // avoid full reloadData() which would reset expand/collapse state.
         refreshSidebarSelectionRows(
             previousProjectID: previousProjectID, currentProjectID: nil, previousWorkspaceID: previousWorkspaceID, currentWorkspaceID: nil)
-        updateDashboardRowAppearance()
+        updateAlertsRowAppearance()
 
         for view in detailContainer.subviews { view.removeFromSuperview() }
         detailContainer.wantsLayer = true
         detailContainer.layer?.backgroundColor = sidebarPanelBackgroundColor().cgColor
 
-        let groups = buildDashboardGroups()
+        let groups = buildAlertsGroups()
         let stack = NSStackView()
         stack.orientation = .vertical
         stack.alignment = .leading
@@ -1835,7 +1920,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
         // Header
         let accentColor = sidebarThemeColor(light: (13, 95, 93), dark: (61, 198, 184))
-        let headerTitle = NSTextField(labelWithString: "Dashboard")
+        let headerTitle = NSTextField(labelWithString: "Alerts")
         headerTitle.font = .systemFont(ofSize: 20, weight: .semibold)
         headerTitle.textColor = sidebarPrimaryTextColor(isSelected: false, isArchived: false)
 
@@ -1919,7 +2004,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
                 for entry in group.items {
                     let shortcut = shortcutCounter <= 9 ? windowShortcutBadgeText(index: shortcutCounter) : ""
-                    if shortcutCounter <= 9, let focusRequest = entry.focusRequest { dashboardFocusRequestMap[shortcutCounter] = focusRequest }
+                    if shortcutCounter <= 9, let focusRequest = entry.focusRequest { alertsFocusRequestMap[shortcutCounter] = focusRequest }
                     shortcutCounter += 1
                     let cardAction: (() async -> Void)?
                     if let focusRequest = entry.focusRequest {
@@ -1930,7 +2015,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                     } else {
                         cardAction = nil
                     }
-                    let card = dashboardWindowCard(entry: entry, shortcut: shortcut, action: cardAction)
+                    let card = alertsWindowCard(entry: entry, shortcut: shortcut, action: cardAction)
                     itemsStack.addArrangedSubview(card)
                     constrainFormFieldToFillWidth(card, in: itemsStack)
                 }
@@ -1943,8 +2028,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         showScrollableDetailStack(stack)
     }
 
-    /// Builds a dashboard card with focus and dismiss affordances while preserving the workspace Run tab rows.
-    private func dashboardWindowCard(entry: DashboardAttentionEntry, shortcut: String, action: (() async -> Void)? = nil) -> NSView {
+    /// Builds an alerts card with focus and dismiss affordances while preserving the workspace Run tab rows.
+    private func alertsWindowCard(entry: AlertsAttentionEntry, shortcut: String, action: (() async -> Void)? = nil) -> NSView {
         let dismissButton = NSButton()
         dismissButton.title = ""
         dismissButton.image = NSImage(systemSymbolName: "xmark", accessibilityDescription: "Dismiss")
@@ -1954,14 +2039,14 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         dismissButton.contentTintColor = .secondaryLabelColor
         dismissButton.bezelStyle = .regularSquare
         dismissButton.target = self
-        dismissButton.action = #selector(dismissDashboardAttentionItemAction(_:))
+        dismissButton.action = #selector(dismissAlertsAttentionItemAction(_:))
         dismissButton.identifier = NSUserInterfaceItemIdentifier(entry.attentionID)
-        dismissButton.toolTip = "Dismiss from dashboard"
+        dismissButton.toolTip = "Dismiss from alerts"
 
         let mainRow = windowRow(
-            icon: entry.icon, iconColor: Self.dashboardIconColor(entry.iconTint), label: entry.label, detail: entry.detail, shortcut: shortcut,
+            icon: entry.icon, iconColor: Self.alertsIconColor(entry.iconTint), label: entry.label, detail: entry.detail, shortcut: shortcut,
             processStatus: entry.processStatus, agentStatus: entry.agentStatus,
-            automationID: entry.agentStatus == nil ? nil : "dashboard-agent-\(Self.automationIdentifierSlug(entry.label))",
+            automationID: entry.agentStatus == nil ? nil : "alerts-agent-\(Self.automationIdentifierSlug(entry.label))",
             trailingAccessory: dismissButton, action: action)
 
         let container = NSStackView()
@@ -1975,9 +2060,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         return container
     }
 
-    @objc private func dismissDashboardAttentionItemAction(_ sender: NSButton) {
+    @objc private func dismissAlertsAttentionItemAction(_ sender: NSButton) {
         guard let attentionID = sender.identifier?.rawValue, !attentionID.isEmpty else { return }
-        dismissDashboardAttentionItem(attentionID)
+        dismissAlertsAttentionItem(attentionID)
     }
 
     private func makeRightPane() -> NSView {
@@ -2003,14 +2088,14 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                     workspaceRuntimeStatusByID[workspace.id] = try orchestrator.workspaceRuntimeStatus(workspaceID: workspace.id)
                 }
             }
-            dashboardGroups = try Self.buildDashboardGroupsSnapshot(
+            alertsGroups = try Self.buildAlertsGroupsSnapshot(
                 orchestrator: orchestrator, projects: projects, workspacesByProject: workspacesByProject)
-            loadDashboardDismissedAttentionItemIDs()
-            pruneDismissedDashboardAttentionItemIDsIfNeeded()
+            loadAlertsDismissedAttentionItemIDs()
+            pruneDismissedAlertsAttentionItemIDsIfNeeded()
             outlineView.reloadData()
             applySidebarProjectExpansionState()
             refreshSelection()
-            updateDashboardSidebarBadge()
+            updateAlertsSidebarBadge()
         } catch { showError(error) }
     }
 
@@ -2102,7 +2187,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         suppressOutlineSelectionChanges = false
         refreshSidebarSelectionRows(
             previousProjectID: previousProjectID, currentProjectID: nil, previousWorkspaceID: previousWorkspaceID, currentWorkspaceID: nil)
-        updateDashboardRowAppearance()
+        updateAlertsRowAppearance()
     }
 
     private func requestSidebarReload() {
@@ -2135,9 +2220,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         projects = snapshot.projects
         workspacesByProject = snapshot.workspacesByProject
         workspaceRuntimeStatusByID = snapshot.workspaceRuntimeStatusByID
-        dashboardGroups = snapshot.dashboardGroups
-        loadDashboardDismissedAttentionItemIDs()
-        pruneDismissedDashboardAttentionItemIDsIfNeeded()
+        alertsGroups = snapshot.alertsGroups
+        loadAlertsDismissedAttentionItemIDs()
+        pruneDismissedAlertsAttentionItemIDsIfNeeded()
         outlineView.reloadData()
         applySidebarProjectExpansionState()
         logStartupProfile("apply_snapshot_outline_ready")
@@ -2145,21 +2230,21 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             refreshSelection()
             logStartupProfile("apply_snapshot_selection_ready")
         } else if Self.shouldRefreshVisibleWorkspaceDetail(
-            selectedWorkspaceID: selectedWorkspaceID, showingDashboard: showingDashboard, showingSettings: showingSettings,
+            selectedWorkspaceID: selectedWorkspaceID, showingAlerts: showingAlerts, showingSettings: showingSettings,
             workspaceExists: selectedWorkspaceID.flatMap { findWorkspace(id: $0) } != nil)
         {
             refreshSelection()
             logStartupProfile("apply_snapshot_selection_preserved_ready")
         }
-        updateDashboardSidebarBadge()
-        logStartupProfile("apply_snapshot_dashboard_badge_ready", details: "group_count=\(dashboardGroups.count)")
-        if showingDashboard { showDashboardDetail() }
+        updateAlertsSidebarBadge()
+        logStartupProfile("apply_snapshot_alerts_badge_ready", details: "group_count=\(alertsGroups.count)")
+        if showingAlerts { showAlertsDetail() }
     }
 
-    /// Update the Dashboard sidebar row badge with the current attention item count.
-    private func updateDashboardSidebarBadge() {
-        let totalCount = dashboardAttentionCount()
-        if let badge = dashboardRowBadge {
+    /// Update the Alerts sidebar row badge with the current attention item count.
+    private func updateAlertsSidebarBadge() {
+        let totalCount = alertsAttentionCount()
+        if let badge = alertsRowBadge {
             badge.stringValue = "\(totalCount)"
             badge.isHidden = totalCount == 0
         }
@@ -2168,8 +2253,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     }
 
     private func refreshSelection() {
-        if showingDashboard {
-            showDashboardDetail()
+        if showingAlerts {
+            showAlertsDetail()
             return
         }
         if showingSettings {
@@ -2186,14 +2271,14 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             showProjectDetail(project: project)
             return
         }
-        showDashboardDetail()
+        showAlertsDetail()
     }
 
     private func requestVisibleWorkspaceDetailRefreshIfNeeded(reason _: String) {
         guard let workspaceID = selectedWorkspaceID else { return }
         guard
             Self.shouldRefreshVisibleWorkspaceDetail(
-                selectedWorkspaceID: selectedWorkspaceID, showingDashboard: showingDashboard, showingSettings: showingSettings,
+                selectedWorkspaceID: selectedWorkspaceID, showingAlerts: showingAlerts, showingSettings: showingSettings,
                 workspaceExists: findWorkspace(id: workspaceID) != nil)
         else { return }
         if visibleWorkspaceDetailRefreshWorkspaceID == workspaceID, let task = visibleWorkspaceDetailRefreshTask, !task.isCancelled { return }
@@ -2211,7 +2296,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 }
             }
 
-            guard self.selectedWorkspaceID == workspaceID, !self.showingDashboard, !self.showingSettings else { return }
+            guard self.selectedWorkspaceID == workspaceID, !self.showingAlerts, !self.showingSettings else { return }
             switch result {
             case .success(let outcome):
                 guard outcome.didChangeVisibleState else { return }
@@ -2228,8 +2313,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         activeAddProjectFormTag = nil
         visibleDetailWorkspaceID = nil
         showingSettings = false
-        showingDashboard = false
-        updateDashboardRowAppearance()
+        showingAlerts = false
+        updateAlertsRowAppearance()
         activeShortcutCaptureSetting = nil
         for view in detailContainer.subviews { view.removeFromSuperview() }
         let placeholder = NSTextField(labelWithString: message)
@@ -2249,8 +2334,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         activeAddProjectFormTag = nil
         visibleDetailWorkspaceID = nil
         showingSettings = false
-        showingDashboard = false
-        updateDashboardRowAppearance()
+        showingAlerts = false
+        updateAlertsRowAppearance()
         activeShortcutCaptureSetting = nil
         for view in detailContainer.subviews { view.removeFromSuperview() }
 
@@ -2500,8 +2585,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         activeAddProjectFormTag = nil
         visibleDetailWorkspaceID = nil
         showingSettings = true
-        showingDashboard = false
-        updateDashboardRowAppearance()
+        showingAlerts = false
+        updateAlertsRowAppearance()
         shortcutButtonsBySetting.removeAll()
         activeShortcutCaptureSetting = nil
         for view in detailContainer.subviews { view.removeFromSuperview() }
@@ -2770,8 +2855,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         activeAddProjectFormTag = nil
         visibleDetailWorkspaceID = nil
         showingSettings = false
-        showingDashboard = false
-        updateDashboardRowAppearance()
+        showingAlerts = false
+        updateAlertsRowAppearance()
         activeShortcutCaptureSetting = nil
         for view in detailContainer.subviews { view.removeFromSuperview() }
         detailContainer.wantsLayer = true
@@ -3039,7 +3124,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         activeAddWorkspaceFormTag = nil
         activeAddProjectFormTag = nil
         showingSettings = false
-        showingDashboard = false
+        showingAlerts = false
         clearSidebarSelectionForTransientDetail()
         for view in detailContainer.subviews { view.removeFromSuperview() }
         detailContainer.wantsLayer = true
@@ -3227,7 +3312,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         activeAddWorkspaceFormTag = nil
         activeAddProjectFormTag = nil
         showingSettings = false
-        showingDashboard = false
+        showingAlerts = false
         clearSidebarSelectionForTransientDetail()
         for view in detailContainer.subviews { view.removeFromSuperview() }
         detailContainer.wantsLayer = true
@@ -3446,8 +3531,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         activeAddProjectFormTag = nil
         visibleDetailWorkspaceID = workspace.id
         showingSettings = false
-        showingDashboard = false
-        updateDashboardRowAppearance()
+        showingAlerts = false
+        updateAlertsRowAppearance()
         activeShortcutCaptureSetting = nil
         for view in detailContainer.subviews { view.removeFromSuperview() }
         detailContainer.wantsLayer = true
@@ -4620,10 +4705,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
     private func workspaceDetailShortcutFooterSegments() -> [String] {
         [
-            "Toggle app \(footerShortcutHint(for: .guiHotkey))", "Dashboard \(footerShortcutHint(for: .guiDashboardShortcut))",
-            "Settings \(footerShortcutHint(for: .guiOpenSettingsShortcut))", "Open editor \(footerShortcutHint(for: .guiOpenEditorShortcut))",
-            "New terminal \(footerShortcutHint(for: .guiOpenTerminalShortcut))", "Next window \(footerShortcutHint(for: .guiNextShortcut))",
-            "Prev window \(footerShortcutHint(for: .guiPreviousShortcut))",
+            "Toggle app \(footerShortcutHint(for: .guiHotkey))", "Palette \(footerShortcutHint(for: .guiCommandPaletteHotkey))",
+            "Alerts \(footerShortcutHint(for: .guiAlertsShortcut))", "Settings \(footerShortcutHint(for: .guiOpenSettingsShortcut))",
+            "Open editor \(footerShortcutHint(for: .guiOpenEditorShortcut))", "New terminal \(footerShortcutHint(for: .guiOpenTerminalShortcut))",
+            "Next window \(footerShortcutHint(for: .guiNextShortcut))", "Prev window \(footerShortcutHint(for: .guiPreviousShortcut))",
         ]
     }
 
@@ -4632,6 +4717,33 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         guard let spec = shortcutSpec(for: setting) else { return setting.defaultSpec }
         if setting.usesDigitRangeCapture { return displayShortcut(spec, separator: " ", keyText: "1-9") }
         return displayShortcut(spec, separator: " ")
+    }
+
+    private func commandPaletteFooterRow() -> NSStackView {
+        let row = NSStackView()
+        row.orientation = .horizontal
+        row.alignment = .centerY
+        row.spacing = 10
+
+        let segments = ["Move ↑↓", "Open ↵", "Close Esc", "Visible rows \(footerShortcutHint(for: .guiWindowShortcut))", "Dismiss alert ⌘ X"]
+
+        for index in segments.indices {
+            if index > 0 {
+                let separator = NSTextField(labelWithString: "•")
+                separator.font = .systemFont(ofSize: 11, weight: .medium)
+                separator.textColor = .tertiaryLabelColor
+                row.addArrangedSubview(separator)
+            }
+
+            let label = NSTextField(labelWithString: segments[index])
+            label.font = .systemFont(ofSize: 11, weight: .regular)
+            label.textColor = .secondaryLabelColor
+            label.lineBreakMode = .byTruncatingTail
+            row.addArrangedSubview(label)
+        }
+
+        row.addArrangedSubview(NSView())
+        return row
     }
 
     private func displayShortcut(_ spec: HotkeySpec) -> String { displayShortcut(spec, separator: "") }
@@ -4690,6 +4802,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         case "right": return "→"
         case "up": return "↑"
         case "down": return "↓"
+        case "minus": return "-"
         default: return key.uppercased()
         }
     }
@@ -5370,6 +5483,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
     public func controlTextDidChange(_ obj: Notification) {
         guard let changedField = obj.object as? NSTextField else { return }
+        if changedField === commandPaletteSearchField {
+            logHotkeyDebug("search_change query=\(changedField.stringValue)")
+            applyCommandPaletteFilter()
+            return
+        }
         for refs in AddProjectFieldCache.shared.cache.values {
             guard refs.repoURLField === changedField else { continue }
             updateAddProjectSourceUI(refs)
@@ -5390,6 +5508,28 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
     public func control(_ control: NSControl, textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
         guard let textField = control as? NSTextField else { return false }
+        if textField === commandPaletteSearchField {
+            if commandSelector == #selector(NSText.cut(_:)) {
+                dismissSelectedCommandPaletteAlertsItem()
+                return true
+            }
+            if commandSelector == #selector(NSResponder.moveDown(_:)) {
+                moveCommandPaletteSelection(delta: 1)
+                return true
+            }
+            if commandSelector == #selector(NSResponder.moveUp(_:)) {
+                moveCommandPaletteSelection(delta: -1)
+                return true
+            }
+            if commandSelector == #selector(NSResponder.insertNewline(_:)) {
+                executeSelectedCommandPaletteItem()
+                return true
+            }
+            if commandSelector == #selector(NSResponder.cancelOperation(_:)) {
+                dismissCommandPalette()
+                return true
+            }
+        }
         guard let tag = inlineWorkspaceFieldTagByObjectID[ObjectIdentifier(textField)] else { return false }
         if commandSelector == #selector(NSResponder.insertNewline(_:)) {
             saveInlineWorkspaceMetadata(tag: tag)
@@ -5604,7 +5744,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         return []
     }
 
-    nonisolated private static func browserSessionDisplayName(for targetURL: String?, sessions: [BrowserSession]) -> String? {
+    nonisolated static func browserSessionDisplayName(for targetURL: String?, sessions: [BrowserSession]) -> String? {
         guard let targetURL, !targetURL.isEmpty else { return nil }
         var bestMatch: (length: Int, name: String)?
         for session in sessions {
@@ -5698,24 +5838,34 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
     private func setupGlobalHotkey() {
         guard let toggleShortcutSpec else {
+            logHotkeyDebug("setup skipped missing_toggle_spec")
             teardownGlobalHotkey()
             return
         }
-        registerHotkeys(toggle: toggleShortcutSpec, next: nextShortcutSpec, previous: previousShortcutSpec)
+        logHotkeyDebug(
+            "setup start toggle=\(toggleShortcutSpec) palette=\(String(describing: commandPaletteShortcutSpec)) next=\(String(describing: nextShortcutSpec)) previous=\(String(describing: previousShortcutSpec))"
+        )
+        registerHotkeys(
+            toggle: toggleShortcutSpec, commandPalette: commandPaletteShortcutSpec, next: nextShortcutSpec, previous: previousShortcutSpec)
     }
 
     private func teardownGlobalHotkey() {
+        logHotkeyDebug("teardown refs=\(hotkeyRefs.count) handler=\(hotkeyHandler == nil ? 0 : 1)")
         for ref in hotkeyRefs.values { UnregisterEventHotKey(ref) }
         hotkeyRefs.removeAll()
         if let hotkeyHandler { RemoveEventHandler(hotkeyHandler) }
         hotkeyHandler = nil
     }
 
-    private func registerHotkeys(toggle: HotkeySpec, next: HotkeySpec?, previous: HotkeySpec?) {
+    private func registerHotkeys(toggle: HotkeySpec, commandPalette: HotkeySpec?, next: HotkeySpec?, previous: HotkeySpec?) {
         teardownGlobalHotkey()
         let signature = OSType(UInt32(truncatingIfNeeded: "AMUX".utf8.reduce(0) { ($0 << 8) + UInt32($1) }))
         let target = GetEventDispatcherTarget()
+        logHotkeyDebug("register begin signature=\(signature)")
         registerHotkey(spec: toggle, id: GlobalHotkey.toggle.rawValue, signature: signature, target: target)
+        if let commandPalette {
+            registerHotkey(spec: commandPalette, id: GlobalHotkey.openCommandPalette.rawValue, signature: signature, target: target)
+        }
         if let next { registerHotkey(spec: next, id: GlobalHotkey.next.rawValue, signature: signature, target: target) }
         if let previous { registerHotkey(spec: previous, id: GlobalHotkey.previous.rawValue, signature: signature, target: target) }
         if let openEditorShortcutSpec {
@@ -5723,14 +5873,16 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         }
 
         var eventSpec = EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyPressed))
-        _ = InstallEventHandler(
+        let status = InstallEventHandler(
             target, hotkeyHandlerProc, 1, &eventSpec, UnsafeMutableRawPointer(Unmanaged.passUnretained(self).toOpaque()), &hotkeyHandler)
+        logHotkeyDebug("register handler_status=\(status) refs=\(hotkeyRefs.count) handler=\(hotkeyHandler == nil ? 0 : 1)")
     }
 
     private func registerHotkey(spec: HotkeySpec, id: UInt32, signature: OSType, target: EventTargetRef?) {
         var ref: EventHotKeyRef?
         let hotKeyID = EventHotKeyID(signature: signature, id: id)
         let status = RegisterEventHotKey(UInt32(spec.keyCode), spec.modifiersCarbon, hotKeyID, target, 0, &ref)
+        logHotkeyDebug("register_hotkey id=\(id) spec=\(spec) status=\(status) ref=\(ref == nil ? 0 : 1)")
         if status == noErr, let ref { hotkeyRefs[id] = ref }
     }
 
@@ -5743,11 +5895,12 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             if self.handleNewWorkspaceShortcut(event: event) { return nil }
             if self.handleReloadShortcut(event: event) { return nil }
             if self.handleFormCancelShortcut(event: event) { return nil }
-            if self.handleDashboardShortcut(event: event) { return nil }
+            if self.handleAlertsShortcut(event: event) { return nil }
             if let openSettingsShortcutSpec, matches(event: event, spec: openSettingsShortcutSpec) {
                 self.showSettings()
                 return nil
             }
+            if self.handleCommandPaletteShortcut(event: event) { return nil }
             if self.handleFocusedTextInputShortcut(event: event) { return nil }
             if self.isTextInputFocused() { return event }
             if self.handleSidebarArrowNavigation(event: event) { return nil }
@@ -5823,15 +5976,15 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         return true
     }
 
-    private func handleDashboardShortcut(event: NSEvent) -> Bool {
-        guard let dashboardShortcutSpec, matches(event: event, spec: dashboardShortcutSpec) else { return false }
-        showDashboardDetail()
+    private func handleAlertsShortcut(event: NSEvent) -> Bool {
+        guard let alertsShortcutSpec, matches(event: event, spec: alertsShortcutSpec) else { return false }
+        showAlertsDetail()
         return true
     }
 
     private func handleNewWorkspaceShortcut(event: NSEvent) -> Bool {
         guard let addWorkspaceShortcutSpec, matches(event: event, spec: addWorkspaceShortcutSpec) else { return false }
-        if showingDashboard, windowShortcutIndex(for: event) != nil { return false }
+        if showingAlerts, windowShortcutIndex(for: event) != nil { return false }
         if let activeAddWorkspaceFormTag, let refs = AddWorkspaceFieldCache.shared.cache[activeAddWorkspaceFormTag],
             let project = projects.first(where: { $0.id == refs.projectID })
         {
@@ -5981,10 +6134,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                     let visibleWorkspaceIDs = project.isCollapsed ? [] : visibleWorkspaces(projectID: project.id).map(\.id)
                     return (project.id, visibleWorkspaceIDs)
                 }, hiddenWorkspaceIDs: hiddenWorkspacesCollapsed ? [] : hiddenWorkspaces().map { $0.1.id }, selectedProjectID: selectedProjectID,
-                selectedWorkspaceID: selectedWorkspaceID, showingDashboard: showingDashboard, direction: direction)
+                selectedWorkspaceID: selectedWorkspaceID, showingAlerts: showingAlerts, direction: direction)
         else { return false }
         switch target {
-        case .dashboard: showDashboardDetail()
+        case .alerts: showAlertsDetail()
         case .workspace(let workspaceID):
             guard let (_, workspace) = findWorkspace(id: workspaceID) else { return false }
             selectWorkspace(workspace)
@@ -6006,17 +6159,17 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
     nonisolated static func sidebarArrowSelectionTarget(
         visibleWorkspaceIDsByProject: [(projectID: String, workspaceIDs: [String])], hiddenWorkspaceIDs: [String], selectedProjectID: String?,
-        selectedWorkspaceID: String?, showingDashboard: Bool, direction: Int
+        selectedWorkspaceID: String?, showingAlerts: Bool, direction: Int
     ) -> SidebarArrowSelectionTarget? {
         guard direction == -1 || direction == 1 else { return nil }
         let visibleWorkspaceIDs = visibleWorkspaceIDsByProject.flatMap(\.workspaceIDs) + hiddenWorkspaceIDs
-        if showingDashboard {
+        if showingAlerts {
             guard direction > 0, let firstWorkspaceID = visibleWorkspaceIDs.first else { return nil }
             return .workspace(firstWorkspaceID)
         }
         if let selectedWorkspaceID, let currentIndex = visibleWorkspaceIDs.firstIndex(of: selectedWorkspaceID) {
             let targetIndex = currentIndex + direction
-            if targetIndex < 0 { return .dashboard }
+            if targetIndex < 0 { return .alerts }
             guard targetIndex < visibleWorkspaceIDs.count else { return nil }
             return .workspace(visibleWorkspaceIDs[targetIndex])
         }
@@ -6026,7 +6179,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         if direction < 0 {
             let priorProjects = visibleWorkspaceIDsByProject[..<projectIndex].reversed()
             for project in priorProjects { if let workspaceID = project.workspaceIDs.last { return .workspace(workspaceID) } }
-            return .dashboard
+            return .alerts
         }
         for project in visibleWorkspaceIDsByProject[(projectIndex + 1)...] {
             if let workspaceID = project.workspaceIDs.first { return .workspace(workspaceID) }
@@ -6045,8 +6198,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
     private func handleGlobalHotkey(id: UInt32) {
         guard let hotkey = GlobalHotkey(rawValue: id) else { return }
+        logHotkeyDebug("handle id=\(id) hotkey=\(hotkey) \(hotkeyWindowStateSummary())")
         switch hotkey {
         case .toggle: toggleWindowFromHotkey()
+        case .openCommandPalette: toggleCommandPaletteFromHotkey()
         case .next: if NSApp.isActive { selectNextVisibleWorkspace() } else { focusGlobalWindowNavigation(direction: 1) }
         case .previous: if NSApp.isActive { selectPreviousVisibleWorkspace() } else { focusGlobalWindowNavigation(direction: -1) }
         case .openEditor: openGlobalEditorFromHotkey()
@@ -6067,7 +6222,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
     nonisolated static func activationSelectionTarget(focusedWorkspaceID: String?) -> SidebarArrowSelectionTarget {
         if let focusedWorkspaceID { return .workspace(focusedWorkspaceID) }
-        return .dashboard
+        return .alerts
     }
 
     private func loadShortcutSpecs() {
@@ -6077,7 +6232,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             shortcutLeaderModifiers = (try? HotkeySpec.parseModifierSet(SettingsKey.defaultGUILeaderHotkey)) ?? [.cmd, .alt]
         }
         toggleShortcutSpec = loadShortcutSpec(setting: .guiHotkey)
-        dashboardShortcutSpec = loadShortcutSpec(setting: .guiDashboardShortcut)
+        commandPaletteShortcutSpec = loadShortcutSpec(setting: .guiCommandPaletteHotkey)
+        alertsShortcutSpec = loadShortcutSpec(setting: .guiAlertsShortcut)
         addWorkspaceShortcutSpec = loadShortcutSpec(setting: .guiAddWorkspaceShortcut)
         reloadShortcutSpec = loadShortcutSpec(setting: .guiReloadShortcut)
         nextShortcutSpec = loadShortcutSpec(setting: .guiNextShortcut)
@@ -6099,8 +6255,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     private func shortcutRawValue(for setting: ShortcutSetting) throws -> String {
         switch setting {
         case .guiHotkey: return try orchestrator.guiHotkey()
+        case .guiCommandPaletteHotkey: return try orchestrator.guiCommandPaletteHotkey()
         case .guiLeaderHotkey: return try orchestrator.guiLeaderHotkey()
-        case .guiDashboardShortcut: return try orchestrator.guiDashboardShortcut()
+        case .guiAlertsShortcut: return try orchestrator.guiAlertsShortcut()
         case .guiAddWorkspaceShortcut: return try orchestrator.guiAddWorkspaceShortcut()
         case .guiReloadShortcut: return try orchestrator.guiReloadShortcut()
         case .guiNextShortcut: return try orchestrator.guiNextShortcut()
@@ -6117,8 +6274,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     private func setShortcutSetting(setting: ShortcutSetting, value: String?) throws {
         switch setting {
         case .guiHotkey: try orchestrator.setGUIHotkey(value)
+        case .guiCommandPaletteHotkey: try orchestrator.setGUICommandPaletteHotkey(value)
         case .guiLeaderHotkey: try orchestrator.setGUILeaderHotkey(value)
-        case .guiDashboardShortcut: try orchestrator.setGUIDashboardShortcut(value)
+        case .guiAlertsShortcut: try orchestrator.setGUIAlertsShortcut(value)
         case .guiAddWorkspaceShortcut: try orchestrator.setGUIAddWorkspaceShortcut(value)
         case .guiReloadShortcut: try orchestrator.setGUIReloadShortcut(value)
         case .guiNextShortcut: try orchestrator.setGUINextShortcut(value)
@@ -6135,8 +6293,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     private func shortcutSpec(for setting: ShortcutSetting) -> HotkeySpec? {
         switch setting {
         case .guiHotkey: return toggleShortcutSpec
+        case .guiCommandPaletteHotkey: return commandPaletteShortcutSpec
         case .guiLeaderHotkey: return nil
-        case .guiDashboardShortcut: return dashboardShortcutSpec
+        case .guiAlertsShortcut: return alertsShortcutSpec
         case .guiAddWorkspaceShortcut: return addWorkspaceShortcutSpec
         case .guiReloadShortcut: return reloadShortcutSpec
         case .guiNextShortcut: return nextShortcutSpec
@@ -6169,7 +6328,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     private func performWindowFocus(_ request: WindowFocusRequest) async {
         let result = await Self.performWindowFocusSnapshot(request)
         switch result {
-        case .success: hideAfterSuccessfulExternalWindowAction(.focus)
+        case .success(let action):
+            reloadData()
+            hideAfterSuccessfulExternalWindowAction(action)
         case .failure(let error): await handleWindowFocusFailure(error)
         }
     }
@@ -6191,11 +6352,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
     private func runWindowShortcut(index: Int, startedAt: Date) async {
         activeWindowShortcutProfile = WindowShortcutProfile(index: index, startedAt: startedAt)
-        logWindowShortcutProfile("stage=received index=\(index) dashboard=\(showingDashboard ? 1 : 0)")
-        let dashboardFocusRequest = showingDashboard ? dashboardFocusRequestMap[index] : nil
+        logWindowShortcutProfile("stage=received index=\(index) alerts=\(showingAlerts ? 1 : 0)")
+        let alertsFocusRequest = showingAlerts ? alertsFocusRequestMap[index] : nil
         let routeStartedAt = Date()
         let result = await Self.focusWindowShortcutSnapshot(
-            index: index, selectedWorkspaceID: selectedWorkspaceID, dashboardFocusRequest: dashboardFocusRequest)
+            index: index, selectedWorkspaceID: selectedWorkspaceID, alertsFocusRequest: alertsFocusRequest)
         switch result {
         case .success(.focused(let kind)):
             logWindowShortcutProfile("stage=route_done index=\(index) kind=\(kind) elapsed_ms=\(windowShortcutElapsedMS(since: routeStartedAt))")
@@ -6256,8 +6417,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     }
 
     private func windowShortcutBadgeText(index: Int) -> String {
-        guard let windowShortcutSpec else { return "SHORTCUT \(index)" }
-        return displayShortcutText(windowShortcutSpec, keyText: String(index)).uppercased()
+        guard let windowShortcutSpec else { return "⌘\(index)" }
+        return displayShortcut(windowShortcutSpec, keyText: String(index))
     }
 
     private func flushBufferedWindowShortcuts() {
@@ -6411,9 +6572,58 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         return nil
     }
 
+    private func commandPaletteDefaultWorkspaceID() -> String? {
+        if NSApp.isActive, !showingAlerts, !showingSettings, let selectedWorkspaceID { return selectedWorkspaceID }
+        return try? orchestrator.workspaceIDForFocusedWindow()
+    }
+
+    private func handleCommandPaletteShortcut(event: NSEvent) -> Bool {
+        guard commandPalettePanel?.isVisible == true else { return false }
+        if let windowIndex = windowShortcutIndex(for: event) {
+            executeCommandPaletteShortcut(index: windowIndex)
+            return true
+        }
+        let flags = event.modifierFlags.intersection([.command, .shift, .option, .control])
+        if flags == .command, event.charactersIgnoringModifiers?.lowercased() == "x" {
+            dismissSelectedCommandPaletteAlertsItem()
+            return true
+        }
+        return false
+    }
+
+    private func executeCommandPaletteShortcut(index: Int) {
+        let row = index - 1
+        guard commandPaletteFilteredItems.indices.contains(row) else {
+            NSSound.beep()
+            return
+        }
+        commandPaletteSelectedIndex = row
+        commandPaletteTableView?.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
+        commandPaletteTableView?.scrollRowToVisible(row)
+        executeSelectedCommandPaletteItem()
+    }
+
+    private func dismissSelectedCommandPaletteAlertsItem() {
+        guard commandPaletteFilteredItems.indices.contains(commandPaletteSelectedIndex) else {
+            NSSound.beep()
+            return
+        }
+        let item = commandPaletteFilteredItems[commandPaletteSelectedIndex]
+        guard let attentionID = item.alertsAttentionID else {
+            NSSound.beep()
+            return
+        }
+        dismissAlertsAttentionItem(attentionID)
+        commandPaletteItems.removeAll { $0.alertsAttentionID == attentionID }
+        applyCommandPaletteFilter()
+    }
+
     private func toggleWindowFromHotkey() {
         guard let window else { return }
+        logHotkeyDebug("toggle_window begin \(hotkeyWindowStateSummary())")
+        if commandPalettePanel != nil { dismissCommandPalette() }
         if NSApp.isActive, !NSApp.isHidden, window.isVisible, !window.isMiniaturized {
+            logHotkeyDebug("toggle_window hide_main")
             NSApp.hide(nil)
             return
         }
@@ -6424,6 +6634,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         prepareWindowForActiveSpaceSummon(window)
         window.orderFrontRegardless()
         window.makeKey()
+        logHotkeyDebug("toggle_window show_main focused_workspace=\(focusedWorkspaceID ?? "nil") \(hotkeyWindowStateSummary())")
         scheduleDeferredHotkeySelectionRefresh(focusedWorkspaceID: focusedWorkspaceID ?? nil)
     }
 
@@ -6461,15 +6672,15 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
     private func refreshWorkspaceSelectionForActivation(focusedWorkspaceID: String?) {
         switch Self.activationSelectionTarget(focusedWorkspaceID: focusedWorkspaceID) {
-        case .dashboard:
-            if showingDashboard, !showingSettings {
+        case .alerts:
+            if showingAlerts, !showingSettings {
                 refreshSelection()
                 return
             }
-            showDashboardDetail()
+            showAlertsDetail()
         case .workspace(let targetWorkspaceID):
             guard let (_, workspace) = findWorkspace(id: targetWorkspaceID) else { return }
-            if selectedWorkspaceID == targetWorkspaceID, !showingDashboard, !showingSettings {
+            if selectedWorkspaceID == targetWorkspaceID, !showingAlerts, !showingSettings {
                 refreshSelection()
                 return
             }
@@ -6887,7 +7098,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             selectedProjectID = nil
             selectedWorkspaceID = nil
             showingSettings = false
-            if !showingDashboard { showPlaceholder() }
+            if !showingAlerts { showPlaceholder() }
             refreshSidebarSelectionRows(
                 previousProjectID: previousProjectID, currentProjectID: selectedProjectID, previousWorkspaceID: previousWorkspaceID,
                 currentWorkspaceID: selectedWorkspaceID)
@@ -7120,9 +7331,53 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     }
 
     public func windowDidBecomeKey(_ notification: Notification) {
+        if let focusedWindow = notification.object as? NSWindow {
+            logHotkeyDebug("window_did_become_key class=\(type(of: focusedWindow)) title=\(focusedWindow.title) \(hotkeyWindowStateSummary())")
+        }
         guard !hasAppliedSplitViewWidth else { return }
         hasAppliedSplitViewWidth = true
         applySplitViewWidth()
+    }
+
+    public func windowDidResignKey(_ notification: Notification) {
+        guard let resignedWindow = notification.object as? NSWindow else { return }
+        logHotkeyDebug("window_did_resign_key class=\(type(of: resignedWindow)) title=\(resignedWindow.title) \(hotkeyWindowStateSummary())")
+        if resignedWindow === commandPalettePanel { dismissCommandPalette() }
+    }
+
+    @objc public func numberOfRows(in tableView: NSTableView) -> Int {
+        guard tableView === commandPaletteTableView else { return 0 }
+        return commandPaletteFilteredItems.count
+    }
+
+    @objc public func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
+        guard tableView === commandPaletteTableView else { return nil }
+        guard commandPaletteFilteredItems.indices.contains(row) else { return nil }
+
+        let identifier = NSUserInterfaceItemIdentifier("command-palette-cell")
+        let cell =
+            (tableView.makeView(withIdentifier: identifier, owner: self) as? CommandPaletteTableCellView)
+            ?? {
+                let cell = CommandPaletteTableCellView()
+                cell.identifier = identifier
+                cell.translatesAutoresizingMaskIntoConstraints = false
+                return cell
+            }()
+
+        let item = commandPaletteFilteredItems[row]
+        let shortcutText = row < 9 ? windowShortcutBadgeText(index: row + 1) : nil
+        cell.update(item: item, isSelected: row == commandPaletteSelectedIndex, shortcutText: shortcutText) { [weak self] in
+            self?.commandPaletteSelectedIndex = row
+            self?.executeSelectedCommandPaletteItem()
+        }
+        return cell
+    }
+
+    @objc public func tableViewSelectionDidChange(_ notification: Notification) {
+        guard let tableView = notification.object as? NSTableView, tableView === commandPaletteTableView else { return }
+        guard tableView.selectedRow >= 0 else { return }
+        commandPaletteSelectedIndex = tableView.selectedRow
+        tableView.reloadData(forRowIndexes: IndexSet(integersIn: 0..<tableView.numberOfRows), columnIndexes: IndexSet(integer: 0))
     }
 
     private func saveCurrentProject() -> Bool {
@@ -7206,5 +7461,885 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         alert.addButton(withTitle: "Remove")
         alert.addButton(withTitle: "Cancel")
         confirm(alert.runModal() == .alertFirstButtonReturn)
+    }
+}
+
+struct CommandPaletteItem: Sendable {
+    enum Source: Sendable {
+        case alertsAttention
+        case workspaceTarget
+    }
+
+    enum Status: Sendable {
+        case none
+        case process(RunningProcessState)
+        case agent(AgentWindowStatus)
+        case idle
+    }
+
+    let id: String
+    let source: Source
+    let alertsAttentionID: String?
+    let workspaceID: String
+    let workspaceTitle: String
+    let workspaceBranch: String?
+    let projectTitle: String
+    let kind: AppKitController.WorkspaceRunShortcutTarget.Kind
+    let label: String
+    let detail: String?
+    let status: Status
+    let focusRequest: AppKitController.WindowFocusRequest
+
+    var secondaryText: String {
+        guard let detail, !detail.isEmpty else { return workspaceTitle }
+        return "\(workspaceTitle)  ·  \(detail)"
+    }
+
+    var searchCandidate: CommandPaletteFuzzySearch.Candidate<String> {
+        let combinedText = "\(workspaceTitle) \(workspaceBranch ?? "") \(label) \(detail ?? "")"
+        return CommandPaletteFuzzySearch.Candidate(
+            id: id,
+            fields: [
+                .init(text: workspaceTitle, weight: 0.92), .init(text: workspaceBranch ?? "", weight: 0.9), .init(text: label, weight: 1.0),
+                .init(text: detail ?? "", weight: 0.78), .init(text: secondaryText, weight: 0.84), .init(text: combinedText, weight: 0.88),
+                .init(text: Self.searchInitials(for: combinedText), weight: 0.94),
+            ])
+    }
+
+    var focusIdentity: String {
+        switch focusRequest {
+        case .workspaceBrowserSession(let workspaceID, let targetURL): return "browser:\(workspaceID):\(targetURL)"
+        case .workspaceWindow(let workspaceID, let index): return "window:\(workspaceID):\(index)"
+        case .workspaceProcess(let workspaceID, let processID): return "process:\(workspaceID):\(processID)"
+        case .workspaceMissingConfiguredProcess(let workspaceID, let processKey): return "missing:\(workspaceID):\(processKey)"
+        case .workspaceAgentLauncher(let workspaceID, let name): return "agent-launcher:\(workspaceID):\(name)"
+        case .agentWindow(let record): return "agent:\(record.id)"
+        }
+    }
+
+    var iconSymbol: String {
+        switch kind {
+        case .browser: return "globe"
+        case .process, .missingConfiguredProcess: return "terminal"
+        case .window: return (detail?.localizedStandardContains("http") == true) ? "globe" : "chevron.left.forwardslash.chevron.right"
+        case .agentLauncher, .agent: return "cpu.fill"
+        }
+    }
+
+    var typeKind: RowPrimitives.TypeKind {
+        switch kind {
+        case .browser: return .browser
+        case .agentLauncher, .agent: return .agent
+        case .process, .window, .missingConfiguredProcess: return .process
+        }
+    }
+
+    var isAlertsAttention: Bool { source == .alertsAttention }
+
+    private static func searchInitials(for text: String) -> String {
+        text.split { !$0.isLetter && !$0.isNumber }.compactMap { $0.first.map(String.init) }.joined()
+    }
+}
+
+@MainActor private final class CommandPaletteRowView: NSView {
+    private let shortcutContainer = NSView()
+    private let statusContainer = NSView()
+    private let workspaceField = NSTextField(labelWithString: "")
+    private let branchContainer = NSStackView()
+    private let branchIconView = NSImageView()
+    private let branchField = NSTextField(labelWithString: "")
+    private let alertsIndicatorView = NSImageView()
+    private let labelField = NSTextField(labelWithString: "")
+    private let detailField = NSTextField(labelWithString: "")
+    private let iconContainer = NSView()
+    private var clickHandler: (() -> Void)?
+
+    init(item: CommandPaletteItem, isSelected: Bool, onClick: @escaping () -> Void) {
+        clickHandler = onClick
+        super.init(frame: .zero)
+        translatesAutoresizingMaskIntoConstraints = false
+        wantsLayer = true
+        layer?.cornerRadius = 8
+        setContentHuggingPriority(.defaultHigh, for: .vertical)
+        setContentCompressionResistancePriority(.required, for: .vertical)
+        heightAnchor.constraint(greaterThanOrEqualToConstant: 48).isActive = true
+
+        let content = NSStackView()
+        content.orientation = .horizontal
+        content.alignment = .centerY
+        content.spacing = 10
+        content.edgeInsets = NSEdgeInsets(top: 8, left: 10, bottom: 8, right: 10)
+        content.translatesAutoresizingMaskIntoConstraints = false
+
+        shortcutContainer.translatesAutoresizingMaskIntoConstraints = false
+        shortcutContainer.setContentHuggingPriority(.required, for: .horizontal)
+        shortcutContainer.setContentCompressionResistancePriority(.required, for: .horizontal)
+        NSLayoutConstraint.activate([
+            shortcutContainer.widthAnchor.constraint(greaterThanOrEqualToConstant: 30),
+            shortcutContainer.heightAnchor.constraint(greaterThanOrEqualToConstant: 14),
+        ])
+
+        statusContainer.translatesAutoresizingMaskIntoConstraints = false
+        statusContainer.setContentHuggingPriority(.required, for: .horizontal)
+        statusContainer.setContentCompressionResistancePriority(.required, for: .horizontal)
+        NSLayoutConstraint.activate([
+            statusContainer.widthAnchor.constraint(equalToConstant: 16), statusContainer.heightAnchor.constraint(greaterThanOrEqualToConstant: 14),
+        ])
+
+        iconContainer.translatesAutoresizingMaskIntoConstraints = false
+        iconContainer.setContentHuggingPriority(.required, for: .horizontal)
+        iconContainer.setContentCompressionResistancePriority(.required, for: .horizontal)
+
+        let textStack = NSStackView()
+        textStack.orientation = .vertical
+        textStack.alignment = .leading
+        textStack.spacing = 2
+        textStack.translatesAutoresizingMaskIntoConstraints = false
+
+        labelField.font = .systemFont(ofSize: 13, weight: .medium)
+        labelField.textColor = Theme.text
+        labelField.lineBreakMode = .byTruncatingTail
+        labelField.maximumNumberOfLines = 1
+
+        detailField.font = .systemFont(ofSize: 12, weight: .regular)
+        detailField.textColor = Theme.muted
+        detailField.lineBreakMode = .byTruncatingTail
+        detailField.maximumNumberOfLines = 1
+
+        workspaceField.font = .systemFont(ofSize: 10.5, weight: .semibold)
+        workspaceField.textColor = Theme.accentStrong
+        workspaceField.lineBreakMode = .byTruncatingTail
+        workspaceField.maximumNumberOfLines = 1
+
+        branchContainer.orientation = .horizontal
+        branchContainer.alignment = .centerY
+        branchContainer.spacing = 4
+        branchContainer.translatesAutoresizingMaskIntoConstraints = false
+        branchContainer.setContentHuggingPriority(.required, for: .horizontal)
+        branchContainer.setContentCompressionResistancePriority(.required, for: .horizontal)
+
+        branchIconView.image = NSImage(systemSymbolName: "arrow.triangle.branch", accessibilityDescription: "Branch")
+        branchIconView.contentTintColor = Theme.muted
+        branchIconView.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            branchIconView.widthAnchor.constraint(equalToConstant: 10), branchIconView.heightAnchor.constraint(equalToConstant: 10),
+        ])
+
+        branchField.font = .monospacedSystemFont(ofSize: 10.5, weight: .regular)
+        branchField.textColor = Theme.muted
+        branchField.lineBreakMode = .byTruncatingTail
+        branchField.maximumNumberOfLines = 1
+
+        branchContainer.addArrangedSubview(branchIconView)
+        branchContainer.addArrangedSubview(branchField)
+
+        alertsIndicatorView.image = NSImage(systemSymbolName: "bell.badge", accessibilityDescription: "Alerts notification")
+        alertsIndicatorView.contentTintColor = Theme.muted
+        alertsIndicatorView.translatesAutoresizingMaskIntoConstraints = false
+        alertsIndicatorView.setContentHuggingPriority(.required, for: .horizontal)
+        alertsIndicatorView.setContentCompressionResistancePriority(.required, for: .horizontal)
+        NSLayoutConstraint.activate([
+            alertsIndicatorView.widthAnchor.constraint(equalToConstant: 11), alertsIndicatorView.heightAnchor.constraint(equalToConstant: 11),
+        ])
+
+        let topTextRow = NSStackView()
+        topTextRow.orientation = .horizontal
+        topTextRow.alignment = .firstBaseline
+        topTextRow.spacing = 6
+        topTextRow.translatesAutoresizingMaskIntoConstraints = false
+        topTextRow.addArrangedSubview(labelField)
+        topTextRow.addArrangedSubview(detailField)
+        topTextRow.addArrangedSubview(NSView())
+        topTextRow.addArrangedSubview(alertsIndicatorView)
+
+        let lowerTextRow = NSStackView()
+        lowerTextRow.orientation = .horizontal
+        lowerTextRow.alignment = .firstBaseline
+        lowerTextRow.spacing = 6
+        lowerTextRow.translatesAutoresizingMaskIntoConstraints = false
+        lowerTextRow.addArrangedSubview(workspaceField)
+        lowerTextRow.addArrangedSubview(branchContainer)
+        lowerTextRow.addArrangedSubview(NSView())
+
+        textStack.addArrangedSubview(topTextRow)
+        textStack.addArrangedSubview(lowerTextRow)
+
+        content.addArrangedSubview(statusContainer)
+        content.addArrangedSubview(shortcutContainer)
+        content.addArrangedSubview(iconContainer)
+        content.addArrangedSubview(textStack)
+        content.addArrangedSubview(NSView())
+
+        addSubview(content)
+        NSLayoutConstraint.activate([
+            content.leadingAnchor.constraint(equalTo: leadingAnchor), content.trailingAnchor.constraint(equalTo: trailingAnchor),
+            content.topAnchor.constraint(equalTo: topAnchor), content.bottomAnchor.constraint(equalTo: bottomAnchor),
+        ])
+
+        attachRowClickAction(to: self) { [weak self] in self?.clickHandler?() }
+        update(item: item, isSelected: isSelected, shortcutText: nil)
+    }
+
+    @available(*, unavailable) required init?(coder: NSCoder) { fatalError("init(coder:) not available") }
+
+    override var intrinsicContentSize: NSSize { NSSize(width: NSView.noIntrinsicMetric, height: 48) }
+
+    func update(item: CommandPaletteItem, isSelected: Bool, shortcutText: String?, onClick: (() -> Void)? = nil) {
+        if let onClick { clickHandler = onClick }
+        effectiveAppearance.performAsCurrentDrawingAppearance { layer?.backgroundColor = (isSelected ? Theme.accentTint : .clear).cgColor }
+        layer?.borderWidth = isSelected ? 1 : 0
+        layer?.borderColor = isSelected ? Theme.accent.withAlphaComponent(0.24).cgColor : NSColor.clear.cgColor
+
+        labelField.stringValue = item.label
+        workspaceField.stringValue = item.workspaceTitle
+        branchField.stringValue = item.workspaceBranch ?? ""
+        branchContainer.isHidden = (item.workspaceBranch?.isEmpty ?? true)
+        alertsIndicatorView.isHidden = !item.isAlertsAttention
+        detailField.stringValue = item.detail ?? ""
+        detailField.isHidden = (item.detail?.isEmpty ?? true)
+
+        for view in shortcutContainer.subviews { view.removeFromSuperview() }
+        if let shortcutText, !shortcutText.isEmpty {
+            let shortcutView = RowPrimitives.shortcutChip(shortcutText)
+            shortcutView.translatesAutoresizingMaskIntoConstraints = false
+            shortcutContainer.addSubview(shortcutView)
+            NSLayoutConstraint.activate([
+                shortcutView.leadingAnchor.constraint(equalTo: shortcutContainer.leadingAnchor),
+                shortcutView.trailingAnchor.constraint(equalTo: shortcutContainer.trailingAnchor),
+                shortcutView.centerYAnchor.constraint(equalTo: shortcutContainer.centerYAnchor),
+            ])
+        }
+
+        for view in iconContainer.subviews { view.removeFromSuperview() }
+        let icon = RowPrimitives.typeIconTile(item.typeKind, symbol: item.iconSymbol, accessibilityLabel: item.label)
+        icon.translatesAutoresizingMaskIntoConstraints = false
+        iconContainer.addSubview(icon)
+        NSLayoutConstraint.activate([
+            icon.leadingAnchor.constraint(equalTo: iconContainer.leadingAnchor),
+            icon.trailingAnchor.constraint(equalTo: iconContainer.trailingAnchor), icon.topAnchor.constraint(equalTo: iconContainer.topAnchor),
+            icon.bottomAnchor.constraint(equalTo: iconContainer.bottomAnchor),
+        ])
+
+        for view in statusContainer.subviews { view.removeFromSuperview() }
+        if let statusView = statusView(for: item.status) {
+            statusContainer.addSubview(statusView)
+            NSLayoutConstraint.activate([
+                statusView.centerXAnchor.constraint(equalTo: statusContainer.centerXAnchor),
+                statusView.centerYAnchor.constraint(equalTo: statusContainer.centerYAnchor),
+            ])
+        }
+    }
+
+    private func statusView(for status: CommandPaletteItem.Status) -> NSView? {
+        switch status {
+        case .none: return nil
+        case .idle: return RowPrimitives.statusDot(.idle)
+        case .process(let processStatus):
+            switch processStatus {
+            case .running: return RowPrimitives.statusDot(.running)
+            case .exited: return RowPrimitives.statusDot(.exited)
+            case .idle: return RowPrimitives.statusDot(.idle)
+            }
+        case .agent(let agentStatus):
+            switch agentStatus {
+            case .spinning:
+                let spinner = NSProgressIndicator()
+                spinner.style = .spinning
+                spinner.controlSize = .mini
+                spinner.translatesAutoresizingMaskIntoConstraints = false
+                NSLayoutConstraint.activate([
+                    spinner.widthAnchor.constraint(equalToConstant: 12), spinner.heightAnchor.constraint(equalToConstant: 12),
+                ])
+                spinner.startAnimation(nil)
+                return spinner
+            case .waiting: return RowPrimitives.statusDot(.waiting)
+            case .done: return RowPrimitives.statusDot(.running)
+            case .idle: return RowPrimitives.statusDot(.idle)
+            }
+        }
+    }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        effectiveAppearance.performAsCurrentDrawingAppearance {
+            layer?.backgroundColor = layer?.borderWidth == 1 ? Theme.accentTint.cgColor : NSColor.clear.cgColor
+        }
+    }
+}
+
+@MainActor private final class CommandPaletteTableCellView: NSTableCellView {
+    private var rowView: CommandPaletteRowView?
+
+    func update(item: CommandPaletteItem, isSelected: Bool, shortcutText: String?, onClick: @escaping () -> Void) {
+        if let rowView {
+            rowView.update(item: item, isSelected: isSelected, shortcutText: shortcutText, onClick: onClick)
+            return
+        }
+
+        let rowView = CommandPaletteRowView(item: item, isSelected: isSelected, onClick: onClick)
+        rowView.update(item: item, isSelected: isSelected, shortcutText: shortcutText, onClick: onClick)
+        addSubview(rowView)
+        NSLayoutConstraint.activate([
+            rowView.leadingAnchor.constraint(equalTo: leadingAnchor), rowView.trailingAnchor.constraint(equalTo: trailingAnchor),
+            rowView.topAnchor.constraint(equalTo: topAnchor), rowView.bottomAnchor.constraint(equalTo: bottomAnchor),
+        ])
+        self.rowView = rowView
+    }
+}
+
+extension AppKitController {
+    nonisolated static func visibleCommandPaletteItems(allItems: [CommandPaletteItem], query: String, currentWorkspaceID: String?)
+        -> [CommandPaletteItem]
+    {
+        let trimmedQuery = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmedQuery.isEmpty {
+            var items: [CommandPaletteItem] = []
+            var seenFocusIdentities: Set<String> = []
+
+            for item in allItems where item.source == .alertsAttention {
+                guard seenFocusIdentities.insert(item.focusIdentity).inserted else { continue }
+                items.append(item)
+            }
+
+            guard let currentWorkspaceID else { return items }
+            for item in allItems where item.source == .workspaceTarget && item.workspaceID == currentWorkspaceID {
+                guard seenFocusIdentities.insert(item.focusIdentity).inserted else { continue }
+                items.append(item)
+            }
+            return items
+        }
+
+        let rankedIDs = CommandPaletteFuzzySearch.rank(query: trimmedQuery, candidates: allItems.map(\.searchCandidate)).map(\.id)
+        let itemsByID = Dictionary(uniqueKeysWithValues: allItems.map { ($0.id, $0) })
+        return rankedIDs.compactMap { itemsByID[$0] }
+    }
+
+    nonisolated private static func commandPaletteKind(
+        focusRequest: WindowFocusRequest?, fallbackIcon: String, processStatus: RunningProcessState?, agentStatus: AgentWindowStatus?
+    ) -> WorkspaceRunShortcutTarget.Kind {
+        switch focusRequest {
+        case .workspaceBrowserSession: return .browser
+        case .workspaceWindow: return .window
+        case .workspaceProcess: return .process
+        case .workspaceMissingConfiguredProcess: return .missingConfiguredProcess
+        case .workspaceAgentLauncher: return .agentLauncher
+        case .agentWindow: return .agent
+        case nil:
+            if agentStatus != nil { return .agent }
+            if processStatus != nil {
+                switch fallbackIcon {
+                case "globe": return .browser
+                case "terminal": return .process
+                default: return .window
+                }
+            }
+            switch fallbackIcon {
+            case "globe": return .browser
+            case "terminal": return .process
+            case "cpu.fill": return .agent
+            default: return .window
+            }
+        }
+    }
+
+    nonisolated private static func buildCommandPaletteAlertsItems(alertsGroups: [AlertsGroup]) -> [CommandPaletteItem] {
+        alertsGroups.flatMap { group in
+            group.items.compactMap { entry in
+                guard let focusRequest = entry.focusRequest else { return nil }
+                let kind = commandPaletteKind(
+                    focusRequest: focusRequest, fallbackIcon: entry.icon, processStatus: entry.processStatus, agentStatus: entry.agentStatus)
+                let status: CommandPaletteItem.Status =
+                    if let processStatus = entry.processStatus { .process(processStatus) } else if let agentStatus = entry.agentStatus {
+                        .agent(agentStatus)
+                    } else { .none }
+
+                return CommandPaletteItem(
+                    id: "alerts::\(entry.attentionID)", source: .alertsAttention, alertsAttentionID: entry.attentionID,
+                    workspaceID: group.workspaceID, workspaceTitle: group.workspaceName, workspaceBranch: group.workspaceBranch,
+                    projectTitle: group.projectName, kind: kind, label: entry.label, detail: entry.detail, status: status, focusRequest: focusRequest)
+            }
+        }
+    }
+
+    nonisolated fileprivate static func buildCommandPaletteItems(
+        orchestrator: WorkspaceOrchestrator, projects: [ProjectSummary], workspacesByProject: [String: [WorkspaceSummary]]
+    ) throws -> [CommandPaletteItem] {
+        let alertsGroups = try buildAlertsGroupsSnapshot(orchestrator: orchestrator, projects: projects, workspacesByProject: workspacesByProject)
+        var items: [CommandPaletteItem] = buildCommandPaletteAlertsItems(alertsGroups: alertsGroups)
+
+        for project in projects {
+            for workspace in workspacesByProject[project.id] ?? [] {
+                let windows = (try? orchestrator.windows(workspaceID: workspace.id)) ?? []
+                let processes = (try? orchestrator.runningProcesses(workspaceID: workspace.id)) ?? []
+                let agentWindows = (try? orchestrator.agentWindows(workspaceID: workspace.id)) ?? []
+                let settings = try orchestrator.workspaceSettings(workspaceID: workspace.id)
+                let browserSessions =
+                    shouldShowConfiguredBrowserSessions(workspaceIsRunning: workspace.isRunning)
+                    ? ((try? orchestrator.resolvedWorkspaceBrowserSessions(workspaceID: workspace.id)) ?? []) : []
+                let processEntries = orderedWorkspaceRunProcessEntries(
+                    configuredProcesses: settings?.processes ?? [], windows: windows, processes: processes, agentWindows: agentWindows)
+                let processesByID = Dictionary(uniqueKeysWithValues: processes.map { ($0.id, $0) })
+                let shortcutTargets = orderedWorkspaceRunShortcutTargets(
+                    browserSessions: browserSessions, processEntries: processEntries, processesByID: processesByID,
+                    configuredAgentLaunchers: settings?.agentLaunchers ?? [], agentWindows: agentWindows)
+                let runtimeWindowTitleByAgentID = codingAgentWindowTitleByAgentID(agentWindows: agentWindows, trackedWindows: windows)
+                let configuredAgentByName = Dictionary(uniqueKeysWithValues: (settings?.agentLaunchers ?? []).map { ($0.name, $0) })
+
+                for (offset, target) in shortcutTargets.enumerated() {
+                    let itemID = "\(workspace.id)::\(offset)"
+                    switch target.kind {
+                    case .browser:
+                        guard let targetURL = target.targetURL else { continue }
+                        let label = browserSessionDisplayName(for: targetURL, sessions: browserSessions) ?? targetURL
+                        items.append(
+                            CommandPaletteItem(
+                                id: itemID, source: .workspaceTarget, alertsAttentionID: nil, workspaceID: workspace.id,
+                                workspaceTitle: workspace.title, workspaceBranch: workspace.branch, projectTitle: project.name, kind: target.kind,
+                                label: label, detail: targetURL, status: .none,
+                                focusRequest: .workspaceBrowserSession(workspaceID: workspace.id, targetURL: targetURL)))
+                    case .process:
+                        guard let processID = target.processID, let process = processesByID[processID] else { continue }
+                        items.append(
+                            CommandPaletteItem(
+                                id: itemID, source: .workspaceTarget, alertsAttentionID: nil, workspaceID: workspace.id,
+                                workspaceTitle: workspace.title, workspaceBranch: workspace.branch, projectTitle: project.name, kind: target.kind,
+                                label: process.templateName, detail: process.command, status: .process(process.status),
+                                focusRequest: .workspaceProcess(workspaceID: workspace.id, processID: processID)))
+                    case .window:
+                        guard let windowListIndex = target.windowListIndex, windows.indices.contains(windowListIndex) else { continue }
+                        let window = windows[windowListIndex]
+                        let label: String
+                        let detail: String?
+                        if window.role == "terminal" {
+                            let fallback = terminalFallbackRowText(name: window.name, detail: window.detail, app: window.app)
+                            label = fallback.label
+                            detail = fallback.detail
+                        } else {
+                            label = window.name?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty ?? "Window"
+                            detail = window.detail?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
+                        }
+                        items.append(
+                            CommandPaletteItem(
+                                id: itemID, source: .workspaceTarget, alertsAttentionID: nil, workspaceID: workspace.id,
+                                workspaceTitle: workspace.title, workspaceBranch: workspace.branch, projectTitle: project.name, kind: target.kind,
+                                label: label, detail: detail, status: .none,
+                                focusRequest: .workspaceWindow(workspaceID: workspace.id, index: windowListIndex + 1)))
+                    case .missingConfiguredProcess:
+                        guard let processKey = target.processKey else { continue }
+                        items.append(
+                            CommandPaletteItem(
+                                id: itemID, source: .workspaceTarget, alertsAttentionID: nil, workspaceID: workspace.id,
+                                workspaceTitle: workspace.title, workspaceBranch: workspace.branch, projectTitle: project.name, kind: target.kind,
+                                label: processKey, detail: nil, status: .idle,
+                                focusRequest: .workspaceMissingConfiguredProcess(workspaceID: workspace.id, processKey: processKey)))
+                    case .agentLauncher:
+                        guard let launcherName = target.launcherName else { continue }
+                        let detail = configuredAgentByName[launcherName]?.command
+                        items.append(
+                            CommandPaletteItem(
+                                id: itemID, source: .workspaceTarget, alertsAttentionID: nil, workspaceID: workspace.id,
+                                workspaceTitle: workspace.title, workspaceBranch: workspace.branch, projectTitle: project.name, kind: target.kind,
+                                label: launcherName, detail: detail, status: .none,
+                                focusRequest: .workspaceAgentLauncher(workspaceID: workspace.id, name: launcherName)))
+                    case .agent:
+                        guard let agentWindow = target.agentWindow else { continue }
+                        let label = agentWindow.label?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty ?? "Coding Agent"
+                        let detail = runtimeWindowTitleByAgentID[agentWindow.id]
+                        items.append(
+                            CommandPaletteItem(
+                                id: itemID, source: .workspaceTarget, alertsAttentionID: nil, workspaceID: workspace.id,
+                                workspaceTitle: workspace.title, workspaceBranch: workspace.branch, projectTitle: project.name, kind: target.kind,
+                                label: label, detail: detail, status: .agent(agentWindow.status), focusRequest: .agentWindow(agentWindow)))
+                    }
+                }
+            }
+        }
+
+        return items
+    }
+
+    nonisolated private static func commandPaletteItemsSnapshot() async -> Result<[CommandPaletteItem], Error> {
+        await Task.detached(priority: .userInitiated) {
+            do {
+                let db = try DatabaseLocator.defaultPath()
+                let store = try SQLiteStore(path: db)
+                let orchestrator = WorkspaceOrchestrator(store: store)
+                let projects = try orchestrator.listProjects()
+                var workspacesByProject: [String: [WorkspaceSummary]] = [:]
+                for project in projects {
+                    workspacesByProject[project.id] = try orchestrator.listWorkspaces(projectID: project.id, includeArchived: false)
+                }
+                return .success(
+                    try buildCommandPaletteItems(orchestrator: orchestrator, projects: projects, workspacesByProject: workspacesByProject))
+            } catch { return .failure(error) }
+        }.value
+    }
+
+    private func toggleCommandPaletteFromHotkey() {
+        logHotkeyDebug("toggle_palette begin \(hotkeyWindowStateSummary())")
+        guard setupManager == nil else {
+            logHotkeyDebug("toggle_palette reroute_setup_manager")
+            toggleWindowFromHotkey()
+            return
+        }
+        if commandPalettePanel?.isVisible == true {
+            logHotkeyDebug("toggle_palette dismiss_visible_panel")
+            dismissCommandPalette()
+            return
+        }
+        presentCommandPalette()
+    }
+
+    private func presentCommandPalette() {
+        let panel = ensureCommandPalettePanel()
+        logHotkeyDebug("present_palette begin \(hotkeyWindowStateSummary())")
+        commandPaletteContextWorkspaceID = commandPaletteDefaultWorkspaceID()
+        if !NSApp.isActive || NSApp.isHidden { window.orderOut(nil) }
+        NSApp.unhide(nil)
+        NSApp.activate(ignoringOtherApps: true)
+        prepareWindowForActiveSpaceSummon(panel)
+        panel.center()
+        panel.orderFrontRegardless()
+        panel.makeKey()
+        commandPaletteSearchField?.stringValue = ""
+        if let commandPaletteSearchField { panel.makeFirstResponder(commandPaletteSearchField) }
+        applyCommandPaletteFilter()
+        reloadCommandPaletteItems()
+        logHotkeyDebug("present_palette end \(hotkeyWindowStateSummary())")
+    }
+
+    private func dismissCommandPalette() {
+        guard let panel = commandPalettePanel else { return }
+        logHotkeyDebug("dismiss_palette begin visible=\(panel.isVisible ? 1 : 0) key=\(panel.isKeyWindow ? 1 : 0) \(hotkeyWindowStateSummary())")
+        commandPaletteLoadTask?.cancel()
+        commandPaletteLoadTask = nil
+        panel.makeFirstResponder(nil)
+        panel.orderOut(nil)
+        commandPalettePanel = nil
+        commandPaletteSearchField = nil
+        commandPaletteTableView = nil
+        commandPaletteLoadingIndicator = nil
+        commandPaletteEmptyLabel = nil
+        commandPaletteSummaryLabel = nil
+        commandPaletteContextWorkspaceID = nil
+        commandPaletteFilteredItems.removeAll()
+        commandPaletteSelectedIndex = 0
+        panel.close()
+        logHotkeyDebug("dismiss_palette end \(hotkeyWindowStateSummary())")
+    }
+
+    private func ensureCommandPalettePanel() -> NSPanel {
+        if let commandPalettePanel { return commandPalettePanel }
+
+        let panel = NSPanel(
+            contentRect: NSRect(x: 0, y: 0, width: 760, height: 520), styleMask: [.titled, .fullSizeContentView], backing: .buffered, defer: false)
+        panel.titleVisibility = .hidden
+        panel.titlebarAppearsTransparent = true
+        panel.isFloatingPanel = true
+        panel.hidesOnDeactivate = false
+        panel.level = .floating
+        panel.isMovableByWindowBackground = true
+        panel.collectionBehavior = [.moveToActiveSpace]
+        panel.backgroundColor = .clear
+        panel.isReleasedWhenClosed = false
+        panel.delegate = self
+
+        if let closeButton = panel.standardWindowButton(.closeButton) { closeButton.isHidden = true }
+        if let miniButton = panel.standardWindowButton(.miniaturizeButton) { miniButton.isHidden = true }
+        if let zoomButton = panel.standardWindowButton(.zoomButton) { zoomButton.isHidden = true }
+
+        let root = ColoredBackgroundView()
+        root.fillColor = Theme.surface
+        root.cornerRadius = 14
+        root.translatesAutoresizingMaskIntoConstraints = false
+        root.wantsLayer = true
+        root.layer?.borderWidth = 1
+        root.layer?.borderColor = Theme.border.cgColor
+
+        let content = NSView()
+        content.translatesAutoresizingMaskIntoConstraints = false
+
+        let headerRow = NSStackView()
+        headerRow.orientation = .vertical
+        headerRow.alignment = .leading
+        headerRow.spacing = 4
+        headerRow.translatesAutoresizingMaskIntoConstraints = false
+        headerRow.setContentHuggingPriority(.required, for: .vertical)
+        headerRow.setContentCompressionResistancePriority(.required, for: .vertical)
+
+        let brandRow = NSStackView()
+        brandRow.orientation = .horizontal
+        brandRow.alignment = .centerY
+        brandRow.spacing = 8
+        brandRow.translatesAutoresizingMaskIntoConstraints = false
+
+        let titleIconView = NSImageView()
+        if let appIcon = NSApp.applicationIconImage.copy() as? NSImage {
+            appIcon.size = NSSize(width: 20, height: 20)
+            titleIconView.image = appIcon
+        } else {
+            titleIconView.image = NSImage(systemSymbolName: "square.grid.2x2.fill", accessibilityDescription: "Spaces")
+            titleIconView.contentTintColor = Theme.accentStrong
+        }
+        titleIconView.translatesAutoresizingMaskIntoConstraints = false
+        titleIconView.setContentHuggingPriority(.required, for: .horizontal)
+        titleIconView.setContentCompressionResistancePriority(.required, for: .horizontal)
+        NSLayoutConstraint.activate([
+            titleIconView.widthAnchor.constraint(equalToConstant: 20), titleIconView.heightAnchor.constraint(equalToConstant: 20),
+        ])
+
+        let titleLabel = NSTextField(labelWithString: "Spaces")
+        titleLabel.font = .systemFont(ofSize: 18, weight: .semibold)
+        titleLabel.textColor = Theme.text
+        let subtitleLabel = NSTextField(labelWithString: "Search and navigate to any space")
+        subtitleLabel.font = .systemFont(ofSize: 11)
+        subtitleLabel.textColor = Theme.muted
+        brandRow.addArrangedSubview(titleIconView)
+        brandRow.addArrangedSubview(titleLabel)
+        headerRow.addArrangedSubview(brandRow)
+        headerRow.addArrangedSubview(subtitleLabel)
+
+        let searchField = NSSearchField()
+        searchField.placeholderString = "fuzzy search workspaces, targets, and details"
+        searchField.font = .systemFont(ofSize: 14)
+        searchField.translatesAutoresizingMaskIntoConstraints = false
+        searchField.delegate = self
+        searchField.focusRingType = .default
+        searchField.setAccessibilityIdentifier("command-palette-search")
+        searchField.heightAnchor.constraint(equalToConstant: 32).isActive = true
+        searchField.setContentHuggingPriority(.required, for: .vertical)
+        searchField.setContentCompressionResistancePriority(.required, for: .vertical)
+
+        let divider = NSBox()
+        divider.boxType = .separator
+        divider.translatesAutoresizingMaskIntoConstraints = false
+        divider.setContentHuggingPriority(.required, for: .vertical)
+        divider.setContentCompressionResistancePriority(.required, for: .vertical)
+
+        let footerSeparator = NSBox()
+        footerSeparator.boxType = .separator
+        footerSeparator.translatesAutoresizingMaskIntoConstraints = false
+        footerSeparator.setContentHuggingPriority(.required, for: .vertical)
+        footerSeparator.setContentCompressionResistancePriority(.required, for: .vertical)
+
+        let footerRow = commandPaletteFooterRow()
+        footerRow.translatesAutoresizingMaskIntoConstraints = false
+        footerRow.setContentHuggingPriority(.required, for: .vertical)
+        footerRow.setContentCompressionResistancePriority(.required, for: .vertical)
+
+        let tableView = NSTableView()
+        let tableColumn = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("command-palette-column"))
+        tableColumn.resizingMask = .autoresizingMask
+        tableView.addTableColumn(tableColumn)
+        tableView.headerView = nil
+        tableView.usesAlternatingRowBackgroundColors = false
+        tableView.backgroundColor = .clear
+        tableView.selectionHighlightStyle = .none
+        tableView.focusRingType = .none
+        tableView.rowHeight = 52
+        tableView.intercellSpacing = NSSize(width: 0, height: 4)
+        tableView.allowsMultipleSelection = false
+        tableView.allowsEmptySelection = false
+        tableView.delegate = self
+        tableView.dataSource = self
+        tableView.target = self
+        tableView.action = #selector(commandPaletteTableRowClicked(_:))
+        tableView.translatesAutoresizingMaskIntoConstraints = false
+
+        let emptyLabel = NSTextField(labelWithString: "No matching targets")
+        emptyLabel.font = .systemFont(ofSize: 12)
+        emptyLabel.textColor = Theme.muted
+        emptyLabel.isHidden = true
+        emptyLabel.alignment = .center
+        emptyLabel.translatesAutoresizingMaskIntoConstraints = false
+        emptyLabel.setContentHuggingPriority(.required, for: .vertical)
+        emptyLabel.setContentCompressionResistancePriority(.required, for: .vertical)
+
+        let loadingIndicator = NSProgressIndicator()
+        loadingIndicator.style = .spinning
+        loadingIndicator.controlSize = .regular
+        loadingIndicator.translatesAutoresizingMaskIntoConstraints = false
+        loadingIndicator.isDisplayedWhenStopped = false
+        loadingIndicator.setContentHuggingPriority(.required, for: .vertical)
+        loadingIndicator.setContentCompressionResistancePriority(.required, for: .vertical)
+
+        let scrollView = NSScrollView()
+        scrollView.drawsBackground = false
+        scrollView.hasVerticalScroller = true
+        scrollView.borderType = .noBorder
+        scrollView.translatesAutoresizingMaskIntoConstraints = false
+        scrollView.documentView = tableView
+
+        content.addSubview(headerRow)
+        content.addSubview(searchField)
+        content.addSubview(divider)
+        content.addSubview(scrollView)
+        content.addSubview(emptyLabel)
+        content.addSubview(loadingIndicator)
+        content.addSubview(footerSeparator)
+        content.addSubview(footerRow)
+
+        root.addSubview(content)
+        NSLayoutConstraint.activate([
+            content.leadingAnchor.constraint(equalTo: root.leadingAnchor), content.trailingAnchor.constraint(equalTo: root.trailingAnchor),
+            content.topAnchor.constraint(equalTo: root.topAnchor), content.bottomAnchor.constraint(equalTo: root.bottomAnchor),
+            headerRow.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 18),
+            headerRow.trailingAnchor.constraint(lessThanOrEqualTo: content.trailingAnchor, constant: -18),
+            headerRow.topAnchor.constraint(equalTo: content.topAnchor, constant: 18),
+
+            searchField.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 18),
+            searchField.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -18),
+            searchField.topAnchor.constraint(equalTo: headerRow.bottomAnchor, constant: 12),
+
+            divider.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 18),
+            divider.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -18),
+            divider.topAnchor.constraint(equalTo: searchField.bottomAnchor, constant: 12),
+
+            footerRow.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 18),
+            footerRow.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -18),
+            footerRow.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -18),
+
+            footerSeparator.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 18),
+            footerSeparator.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -18),
+            footerSeparator.bottomAnchor.constraint(equalTo: footerRow.topAnchor, constant: -8),
+
+            scrollView.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 18),
+            scrollView.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -18),
+            scrollView.topAnchor.constraint(equalTo: divider.bottomAnchor, constant: 12),
+            scrollView.bottomAnchor.constraint(equalTo: footerSeparator.topAnchor, constant: -12),
+
+            emptyLabel.centerXAnchor.constraint(equalTo: scrollView.centerXAnchor),
+            emptyLabel.centerYAnchor.constraint(equalTo: scrollView.centerYAnchor),
+
+            loadingIndicator.centerXAnchor.constraint(equalTo: scrollView.centerXAnchor),
+            loadingIndicator.centerYAnchor.constraint(equalTo: scrollView.centerYAnchor),
+
+            tableView.widthAnchor.constraint(equalTo: scrollView.contentView.widthAnchor),
+        ])
+
+        let container = NSView()
+        container.translatesAutoresizingMaskIntoConstraints = false
+        container.addSubview(root)
+        NSLayoutConstraint.activate([
+            root.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 12),
+            root.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -12),
+            root.topAnchor.constraint(equalTo: container.topAnchor, constant: 12),
+            root.bottomAnchor.constraint(equalTo: container.bottomAnchor, constant: -12),
+        ])
+
+        panel.contentView = container
+        commandPalettePanel = panel
+        commandPaletteSearchField = searchField
+        commandPaletteTableView = tableView
+        commandPaletteLoadingIndicator = loadingIndicator
+        commandPaletteEmptyLabel = emptyLabel
+        commandPaletteSummaryLabel = nil
+        logHotkeyDebug("ensure_palette_panel created")
+        return panel
+    }
+
+    private func reloadCommandPaletteItems() {
+        commandPaletteLoadTask?.cancel()
+        setCommandPaletteLoading(true)
+        logHotkeyDebug("reload_palette_items begin")
+        commandPaletteLoadTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            let result = await Self.commandPaletteItemsSnapshot()
+            guard !Task.isCancelled else { return }
+            self.commandPaletteLoadTask = nil
+            self.setCommandPaletteLoading(false)
+            switch result {
+            case .success(let items):
+                self.logHotkeyDebug("reload_palette_items success count=\(items.count)")
+                self.commandPaletteItems = self.filteredCommandPaletteItems(items)
+                self.applyCommandPaletteFilter()
+            case .failure(let error):
+                self.logHotkeyDebug("reload_palette_items failure error=\(error)")
+                if !self.handleDeferredSetupRequirementIfNeeded(error) {
+                    self.dismissCommandPalette()
+                    self.showError(error)
+                }
+            }
+        }
+    }
+
+    private func setCommandPaletteLoading(_ loading: Bool) {
+        logHotkeyDebug("set_palette_loading loading=\(loading ? 1 : 0)")
+        commandPaletteLoadingIndicator?.isHidden = !loading
+        if loading { commandPaletteLoadingIndicator?.startAnimation(nil) } else { commandPaletteLoadingIndicator?.stopAnimation(nil) }
+        commandPaletteEmptyLabel?.isHidden = loading
+        commandPaletteTableView?.isHidden = loading
+    }
+
+    private func applyCommandPaletteFilter() {
+        let query = commandPaletteSearchField?.stringValue.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        commandPaletteFilteredItems = Self.visibleCommandPaletteItems(
+            allItems: commandPaletteItems, query: query, currentWorkspaceID: commandPaletteContextWorkspaceID)
+        commandPaletteSelectedIndex = commandPaletteFilteredItems.isEmpty ? 0 : 0
+        logHotkeyDebug(
+            "apply_palette_filter query=\(query.isEmpty ? "<empty>" : query) all=\(commandPaletteItems.count) filtered=\(commandPaletteFilteredItems.count) context_workspace=\(commandPaletteContextWorkspaceID ?? "nil")"
+        )
+        rebuildCommandPaletteRows()
+    }
+
+    private func rebuildCommandPaletteRows() {
+        guard let tableView = commandPaletteTableView else { return }
+        tableView.isHidden = commandPaletteFilteredItems.isEmpty
+        let showEmptyState =
+            commandPaletteFilteredItems.isEmpty
+            && !(commandPaletteSearchField?.stringValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
+        commandPaletteEmptyLabel?.isHidden = !showEmptyState
+        logHotkeyDebug("rebuild_palette_rows count=\(commandPaletteFilteredItems.count) selected=\(commandPaletteSelectedIndex)")
+        tableView.reloadData()
+        if commandPaletteFilteredItems.indices.contains(commandPaletteSelectedIndex) {
+            tableView.selectRowIndexes(IndexSet(integer: commandPaletteSelectedIndex), byExtendingSelection: false)
+            tableView.scrollRowToVisible(commandPaletteSelectedIndex)
+        } else {
+            tableView.deselectAll(nil)
+        }
+        logHotkeyDebug("rebuild_palette_rows_done rows=\(tableView.numberOfRows) selected_row=\(tableView.selectedRow)")
+    }
+
+    private func moveCommandPaletteSelection(delta: Int) {
+        guard !commandPaletteFilteredItems.isEmpty else { return }
+        let nextIndex = min(max(commandPaletteSelectedIndex + delta, 0), commandPaletteFilteredItems.count - 1)
+        guard nextIndex != commandPaletteSelectedIndex else { return }
+        commandPaletteSelectedIndex = nextIndex
+        commandPaletteTableView?.selectRowIndexes(IndexSet(integer: nextIndex), byExtendingSelection: false)
+        commandPaletteTableView?.scrollRowToVisible(nextIndex)
+    }
+
+    private func executeSelectedCommandPaletteItem() {
+        guard commandPaletteFilteredItems.indices.contains(commandPaletteSelectedIndex) else {
+            NSSound.beep()
+            return
+        }
+        let item = commandPaletteFilteredItems[commandPaletteSelectedIndex]
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            let result = await Self.performWindowFocusSnapshot(item.focusRequest)
+            switch result {
+            case .success(let action):
+                dismissCommandPalette()
+                reloadData()
+                hideAfterSuccessfulExternalWindowAction(action)
+            case .failure(let error): await handleWindowFocusFailure(error)
+            }
+        }
+    }
+
+    @objc private func commandPaletteTableRowClicked(_ sender: Any?) {
+        guard let tableView = sender as? NSTableView else { return }
+        let row = tableView.clickedRow
+        guard row >= 0 else { return }
+        commandPaletteSelectedIndex = row
+        executeSelectedCommandPaletteItem()
+    }
+}
+
+extension String {
+    fileprivate var nilIfEmpty: String? {
+        let trimmed = trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
     }
 }

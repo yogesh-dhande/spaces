@@ -2631,16 +2631,22 @@ public final class WorkspaceOrchestrator {
 
     public func setGUIHotkey(_ raw: String?) throws { try store.setSetting(key: SettingsKey.guiHotkey, value: raw) }
 
+    public func guiCommandPaletteHotkey() throws -> String {
+        try store.setting(key: SettingsKey.guiCommandPaletteHotkey) ?? SettingsKey.defaultGUICommandPaletteHotkey
+    }
+
+    public func setGUICommandPaletteHotkey(_ raw: String?) throws { try store.setSetting(key: SettingsKey.guiCommandPaletteHotkey, value: raw) }
+
     public func guiLeaderHotkey() throws -> String { HotkeySpec.normalizedModifierSet(try guiLeaderModifiers()) }
 
     public func setGUILeaderHotkey(_ raw: String?) throws { try store.setSetting(key: SettingsKey.guiLeaderHotkey, value: raw) }
 
-    public func guiDashboardShortcut() throws -> String {
-        try effectiveLeaderBackedShortcut(settingKey: SettingsKey.guiDashboardShortcut, defaultValue: SettingsKey.defaultGUIDashboardShortcut)
+    public func guiAlertsShortcut() throws -> String {
+        try effectiveLeaderBackedShortcut(settingKey: SettingsKey.guiAlertsShortcut, defaultValue: SettingsKey.defaultGUIAlertsShortcut)
     }
 
-    public func setGUIDashboardShortcut(_ raw: String?) throws {
-        try store.setSetting(key: SettingsKey.guiDashboardShortcut, value: try normalizeLeaderBackedShortcut(raw))
+    public func setGUIAlertsShortcut(_ raw: String?) throws {
+        try store.setSetting(key: SettingsKey.guiAlertsShortcut, value: try normalizeLeaderBackedShortcut(raw))
     }
 
     public func guiAddProjectShortcut() throws -> String {
@@ -2722,20 +2728,20 @@ public final class WorkspaceOrchestrator {
         try store.setSetting(key: SettingsKey.guiWindowSequenceShortcut, value: try normalizeLeaderBackedShortcut(raw))
     }
 
-    public func dashboardDismissedAttentionItemIDs() throws -> Set<String> {
-        guard let raw = try store.setting(key: SettingsKey.dashboardDismissedAttentionItems), !raw.isEmpty else { return [] }
+    public func alertsDismissedAttentionItemIDs() throws -> Set<String> {
+        guard let raw = try store.setting(key: SettingsKey.alertsDismissedAttentionItems), !raw.isEmpty else { return [] }
         guard let data = raw.data(using: .utf8) else { return [] }
         let decoded = (try? JSONDecoder().decode([String].self, from: data)) ?? []
         return Set(decoded)
     }
 
-    public func setDashboardDismissedAttentionItemIDs(_ ids: Set<String>) throws {
+    public func setAlertsDismissedAttentionItemIDs(_ ids: Set<String>) throws {
         guard !ids.isEmpty else {
-            try store.setSetting(key: SettingsKey.dashboardDismissedAttentionItems, value: nil)
+            try store.setSetting(key: SettingsKey.alertsDismissedAttentionItems, value: nil)
             return
         }
         let encoded = try JSONEncoder().encode(ids.sorted())
-        try store.setSetting(key: SettingsKey.dashboardDismissedAttentionItems, value: String(decoding: encoded, as: UTF8.self))
+        try store.setSetting(key: SettingsKey.alertsDismissedAttentionItems, value: String(decoding: encoded, as: UTF8.self))
     }
 
     private func guiLeaderModifiers() throws -> Set<HotkeyModifier> {

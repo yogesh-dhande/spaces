@@ -53,7 +53,7 @@ export default function CodingAgentsDocsPage() {
       <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
         <h2 className="text-2xl font-semibold tracking-tight">Lifecycle Events</h2>
         <p className="mt-2 text-sm leading-7 text-foreground-soft">
-          Agents report their own state through <code>spaces agent event --type &lt;event&gt;</code>. Spaces uses each event to update the agent row and, for <code>waiting</code> and <code>done</code>, to raise dashboard and dock attention until you dismiss it.
+          Agents report their own state through <code>spaces agent event --type &lt;event&gt;</code>. Spaces uses each event to update the agent row and, for <code>waiting</code> and <code>done</code>, to raise Alerts and dock attention until you dismiss it.
         </p>
         <ul className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
           <li>• <strong>init</strong> &mdash; identify the terminal and attach it to a tracked row.</li>

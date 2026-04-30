@@ -200,7 +200,7 @@ struct WorkspaceRuntimePayload: Encodable {
     let agentWindows: [AgentWindowRecord]
 }
 
-struct DashboardPayload: Encodable {
+struct AlertsPayload: Encodable {
     struct Group: Encodable {
         let projectName: String
         let workspaceID: String
@@ -234,15 +234,15 @@ struct DashboardPayload: Encodable {
     let groups: [Group]
 }
 
-enum DashboardPayloadBuilder {
-    static func build(orchestrator: WorkspaceOrchestrator) throws -> DashboardPayload {
+enum AlertsPayloadBuilder {
+    static func build(orchestrator: WorkspaceOrchestrator) throws -> AlertsPayload {
         let projects = try orchestrator.listProjects()
         var workspacesByProject: [String: [WorkspaceSummary]] = [:]
         for project in projects { workspacesByProject[project.id] = try orchestrator.listWorkspaces(projectID: project.id, includeArchived: false) }
 
         let iso8601Formatter = ISO8601DateFormatter()
-        let dismissedIDs = Array(try orchestrator.dashboardDismissedAttentionItemIDs()).sorted()
-        var groups: [DashboardPayload.Group] = []
+        let dismissedIDs = Array(try orchestrator.alertsDismissedAttentionItemIDs()).sorted()
+        var groups: [AlertsPayload.Group] = []
 
         for project in projects {
             for workspace in workspacesByProject[project.id] ?? [] {
@@ -258,7 +258,7 @@ enum DashboardPayloadBuilder {
                 var processByWindowID: [Int: RunningProcessRecord] = [:]
                 for process in processes { if let windowID = process.windowID { processByWindowID[windowID] = process } }
 
-                var items: [DashboardPayload.Item] = []
+                var items: [AlertsPayload.Item] = []
                 var matchedProcessIDs: Set<String> = []
 
                 for (index, window) in windows.enumerated() {
@@ -270,21 +270,21 @@ enum DashboardPayloadBuilder {
                     let eventDate = process.exitedAt
 
                     items.append(
-                        DashboardPayload.Item(
-                            attentionID: dashboardAttentionID(process: process),
+                        AlertsPayload.Item(
+                            attentionID: alertsAttentionID(process: process),
                             kind: window.role == "browser" ? "browser" : (window.role == "terminal" ? "process" : "window"), icon: presentation.icon,
                             label: presentation.label, detail: presentation.detail, processStatus: process.status.rawValue, agentStatus: nil,
                             eventDate: eventDate,
-                            focusRequest: dashboardFocusRequest(
-                                window: window, windowListIndex: index + 1, process: process, workspaceID: workspace.id)))
+                            focusRequest: alertsFocusRequest(window: window, windowListIndex: index + 1, process: process, workspaceID: workspace.id))
+                    )
                 }
 
                 for process in processes where !matchedProcessIDs.contains(process.id) {
                     guard process.status == .exited else { continue }
                     let eventDate = process.exitedAt
                     items.append(
-                        DashboardPayload.Item(
-                            attentionID: dashboardAttentionID(process: process), kind: "process", icon: "terminal", label: process.templateName,
+                        AlertsPayload.Item(
+                            attentionID: alertsAttentionID(process: process), kind: "process", icon: "terminal", label: process.templateName,
                             detail: process.command, processStatus: process.status.rawValue, agentStatus: nil, eventDate: eventDate,
                             focusRequest: .init(
                                 kind: "workspace_process", workspaceID: workspace.id, windowIndex: nil, processID: process.id, agentWindowID: nil,
@@ -293,8 +293,8 @@ enum DashboardPayloadBuilder {
 
                 for agentWindow in attentionAgentWindows {
                     items.append(
-                        DashboardPayload.Item(
-                            attentionID: dashboardAttentionID(agentWindow: agentWindow), kind: "agent", icon: "cpu.fill",
+                        AlertsPayload.Item(
+                            attentionID: alertsAttentionID(agentWindow: agentWindow), kind: "agent", icon: "cpu.fill",
                             label: agentWindow.label ?? "Coding Agent CLI", detail: nil, processStatus: nil, agentStatus: agentWindow.status.rawValue,
                             eventDate: agentWindow.updatedAt,
                             focusRequest: .init(
@@ -328,19 +328,17 @@ enum DashboardPayloadBuilder {
             }
         }
 
-        return DashboardPayload(dismissedAttentionItemIDs: dismissedIDs, groups: groups)
+        return AlertsPayload(dismissedAttentionItemIDs: dismissedIDs, groups: groups)
     }
 
-    private static func dashboardAttentionID(process: RunningProcessRecord) -> String {
-        "process:\(process.id):exited:\(process.exitedAt ?? "unknown")"
-    }
+    private static func alertsAttentionID(process: RunningProcessRecord) -> String { "process:\(process.id):exited:\(process.exitedAt ?? "unknown")" }
 
-    private static func dashboardAttentionID(agentWindow: AgentWindowRecord) -> String {
+    private static func alertsAttentionID(agentWindow: AgentWindowRecord) -> String {
         "agent:\(agentWindow.id):\(agentWindow.status.rawValue):\(agentWindow.updatedAt)"
     }
 
-    private static func dashboardFocusRequest(window: WindowRecord, windowListIndex: Int, process: RunningProcessRecord, workspaceID: String)
-        -> DashboardPayload.Item.FocusRequest
+    private static func alertsFocusRequest(window: WindowRecord, windowListIndex: Int, process: RunningProcessRecord, workspaceID: String)
+        -> AlertsPayload.Item.FocusRequest
     {
         if window.role == "browser", let targetURL = window.targetURL, !targetURL.isEmpty {
             return .init(

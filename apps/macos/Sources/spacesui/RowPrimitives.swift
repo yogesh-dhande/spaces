@@ -1,7 +1,7 @@
 import AppKit
 
 /// Small view builders shared across the workspace detail, sidebar, and
-/// dashboard screens. Encodes the compact row vocabulary from
+/// alerts screens. Encodes the compact row vocabulary from
 /// `design-mocks/workspace-detail/shared.css`: a status dot, a tinted type
 /// icon tile, and a handful of chips (shortcut, project, branch).
 ///

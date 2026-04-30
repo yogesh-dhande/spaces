@@ -36,12 +36,12 @@ TMP_HOME="$TMP_ROOT/home"
 TMP_DB="$TMP_ROOT/spaces.db"
 TMP_RUNTIME_DIR="$TMP_ROOT/runtime"
 FIXTURE_TEMPLATE_DIR="$ROOT_DIR/apps/macos/Tests/fixtures/e2e_demo"
-TEST_REPO="$TMP_ROOT/atlas-dashboard"
+TEST_REPO="$TMP_ROOT/atlas-alerts"
 TEST_REPO_2="$TMP_ROOT/harbor-ops"
 WORKSPACE_TITLE="Release Readiness"
 WORKSPACE_BRANCH="release-readiness"
 WORKSPACE_TOOLTIP="Polish the launch checklist and QA follow-ups"
-PRIMARY_WORKSPACE_TITLE="Customer Dashboard"
+PRIMARY_WORKSPACE_TITLE="Customer Alerts"
 SECONDARY_WORKSPACE_TITLE="Operations Console"
 MOCK_AGENT_LABEL="Mock Agent"
 SPACES_PID=""
@@ -583,7 +583,7 @@ APPLESCRIPT
 setup_git_fixture() {
   log_step "creating git fixture repo"
   mkdir -p "$TEST_REPO" "$TEST_REPO_2"
-  install_demo_fixture "atlas" "$TEST_REPO" "# Atlas Dashboard"
+  install_demo_fixture "atlas" "$TEST_REPO" "# Atlas Alerts"
   install_demo_fixture "harbor" "$TEST_REPO_2" "# Harbor Ops"
 }
 
@@ -1835,7 +1835,7 @@ run_launch_and_focus_assertions() {
     assert_equals "Ghostty" "$terminal_app" "Ghostty launch"
   fi
   wait_for_http_body_contains "$PRIMARY_DOCS_URL" "Atlas docs sentinel"
-  wait_for_http_body_contains "$PRIMARY_BACKEND_STATUS_URL" '"workspace": "atlas-dashboard"'
+  wait_for_http_body_contains "$PRIMARY_BACKEND_STATUS_URL" '"workspace": "atlas-alerts"'
   pass_case
 
   begin_case "$host: focus tracked Chrome tab with extra user tab present"

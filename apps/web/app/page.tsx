@@ -16,7 +16,7 @@ const keyFeatures: Feature[] = [
   {
     title: "Manager mode for coding agents",
     description:
-      "See all your coding agents in one dashboard. Know instantly which ones are working, which ones are waiting on you, and which ones are done. Jump to any agent with a keyboard shortcut.",
+      "See all your coding agents in one Alerts view. Know instantly which ones are working, which ones are waiting on you, and which ones are done. Jump to any agent with a keyboard shortcut.",
     span: "wide",
   },
   {
@@ -133,7 +133,7 @@ const faqItems: FaqItem[] = [
         attached to the workspace so you can jump back to it with keyboard
         shortcuts at any time. To let the agent set workspace tooltips and
         signal its status, add the{" "}
-        <Link href="/docs/cli" className="text-accent hover:underline">
+        <Link href="/docs/coding-agents" className="text-accent hover:underline">
           Spaces agent instructions
         </Link>{" "}
         to your project&apos;s AGENTS.md. See the{" "}
@@ -239,7 +239,7 @@ const withSpaces: ComparisonStep[] = [
   {
     n: "4",
     title: "See what needs you",
-    body: "Failed processes, failed checks, and agents waiting on a human all surface in one dashboard.",
+    body: "Failed processes, failed checks, and agents waiting on a human all surface in one Alerts view.",
   },
 ];
 

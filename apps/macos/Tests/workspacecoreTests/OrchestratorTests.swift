@@ -602,7 +602,7 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertEqual(try orchestrator.guiLeaderHotkey(), SettingsKey.defaultGUILeaderHotkey)
         XCTAssertEqual(try orchestrator.guiNextShortcut(), "cmd+alt+]")
         XCTAssertEqual(try orchestrator.guiPreviousShortcut(), "cmd+alt+[")
-        XCTAssertEqual(try orchestrator.guiDashboardShortcut(), "cmd+alt+g")
+        XCTAssertEqual(try orchestrator.guiAlertsShortcut(), "cmd+alt+a")
         XCTAssertEqual(try orchestrator.guiAddWorkspaceShortcut(), SettingsKey.defaultGUIAddWorkspaceShortcut)
         XCTAssertEqual(try orchestrator.guiReloadShortcut(), "cmd+alt+r")
         XCTAssertEqual(try orchestrator.guiOpenEditorShortcut(), "cmd+alt+e")
@@ -615,7 +615,7 @@ final class OrchestratorTests: XCTestCase {
         try orchestrator.setGUILeaderHotkey("ctrl+alt")
         try orchestrator.setGUINextShortcut("n")
         try orchestrator.setGUIPreviousShortcut("p")
-        try orchestrator.setGUIDashboardShortcut("d")
+        try orchestrator.setGUIAlertsShortcut("d")
         try orchestrator.setGUIAddWorkspaceShortcut("ctrl+alt+w")
         try orchestrator.setGUIReloadShortcut("r")
         try orchestrator.setGUIOpenEditorShortcut("e")
@@ -625,13 +625,13 @@ final class OrchestratorTests: XCTestCase {
         try orchestrator.setGUIWindowShortcut("cmd+1")
         try orchestrator.setGUIWindowSequenceShortcut("1")
         try orchestrator.setActiveWorkspace(id: "workspace-123")
-        try orchestrator.setDashboardDismissedAttentionItemIDs(Set(["attention-2", "attention-1"]))
+        try orchestrator.setAlertsDismissedAttentionItemIDs(Set(["attention-2", "attention-1"]))
 
         XCTAssertEqual(try orchestrator.guiHotkey(), "ctrl+alt+h")
         XCTAssertEqual(try orchestrator.guiLeaderHotkey(), "alt+ctrl")
         XCTAssertEqual(try orchestrator.guiNextShortcut(), "alt+ctrl+n")
         XCTAssertEqual(try orchestrator.guiPreviousShortcut(), "alt+ctrl+p")
-        XCTAssertEqual(try orchestrator.guiDashboardShortcut(), "alt+ctrl+d")
+        XCTAssertEqual(try orchestrator.guiAlertsShortcut(), "alt+ctrl+d")
         XCTAssertEqual(try orchestrator.guiAddWorkspaceShortcut(), "ctrl+alt+w")
         XCTAssertEqual(try orchestrator.guiReloadShortcut(), "alt+ctrl+r")
         XCTAssertEqual(try orchestrator.guiOpenEditorShortcut(), "alt+ctrl+e")
@@ -641,22 +641,22 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertEqual(try orchestrator.guiWindowShortcut(), "cmd+1")
         XCTAssertEqual(try orchestrator.guiWindowSequenceShortcut(), "alt+ctrl+1")
         XCTAssertEqual(try orchestrator.activeWorkspaceID(), "workspace-123")
-        XCTAssertEqual(try orchestrator.dashboardDismissedAttentionItemIDs(), Set(["attention-1", "attention-2"]))
+        XCTAssertEqual(try orchestrator.alertsDismissedAttentionItemIDs(), Set(["attention-1", "attention-2"]))
 
         try orchestrator.setActiveWorkspace(id: nil)
         XCTAssertNil(try orchestrator.activeWorkspaceID())
     }
 
-    func testDashboardDismissedAttentionItemIDsClearsWhenEmpty() throws {
+    func testAlertsDismissedAttentionItemIDsClearsWhenEmpty() throws {
         let store = try makeTemporaryStore()
         let orchestrator = WorkspaceOrchestrator(store: store)
 
-        try orchestrator.setDashboardDismissedAttentionItemIDs(Set(["attention-1"]))
-        XCTAssertEqual(try orchestrator.dashboardDismissedAttentionItemIDs(), Set(["attention-1"]))
+        try orchestrator.setAlertsDismissedAttentionItemIDs(Set(["attention-1"]))
+        XCTAssertEqual(try orchestrator.alertsDismissedAttentionItemIDs(), Set(["attention-1"]))
 
-        try orchestrator.setDashboardDismissedAttentionItemIDs([])
-        XCTAssertTrue(try orchestrator.dashboardDismissedAttentionItemIDs().isEmpty)
-        XCTAssertNil(try store.setting(key: SettingsKey.dashboardDismissedAttentionItems))
+        try orchestrator.setAlertsDismissedAttentionItemIDs([])
+        XCTAssertTrue(try orchestrator.alertsDismissedAttentionItemIDs().isEmpty)
+        XCTAssertNil(try store.setting(key: SettingsKey.alertsDismissedAttentionItems))
     }
 
     func testLeaderBackedShortcutsStayStoredAsSuffixesWhenLeaderChanges() throws {
