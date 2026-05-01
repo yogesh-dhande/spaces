@@ -8192,8 +8192,6 @@ extension AppKitController {
         tableView.allowsEmptySelection = false
         tableView.delegate = self
         tableView.dataSource = self
-        tableView.target = self
-        tableView.action = #selector(commandPaletteTableRowClicked(_:))
         tableView.translatesAutoresizingMaskIntoConstraints = false
 
         let emptyLabel = NSTextField(labelWithString: "No matching targets")
@@ -8380,14 +8378,6 @@ extension AppKitController {
             case .failure(let error): await handleWindowFocusFailure(error)
             }
         }
-    }
-
-    @objc private func commandPaletteTableRowClicked(_ sender: Any?) {
-        guard let tableView = sender as? NSTableView else { return }
-        let row = tableView.clickedRow
-        guard row >= 0 else { return }
-        commandPaletteSelectedIndex = row
-        executeSelectedCommandPaletteItem()
     }
 }
 
