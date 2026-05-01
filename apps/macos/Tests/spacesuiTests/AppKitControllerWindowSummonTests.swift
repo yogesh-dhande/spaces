@@ -23,4 +23,12 @@ import Testing
         #expect(cleaned.contains(.fullScreenAuxiliary))
         #expect(cleaned.contains(.managed))
     }
+
+    @Test func commandPalettePresentationActivatesAppWhenInactive() {
+        #expect(AppKitController.shouldActivateAppForCommandPalettePresentation(appIsActive: false))
+    }
+
+    @Test func commandPalettePresentationSkipsActivationWhenAlreadyActive() {
+        #expect(!AppKitController.shouldActivateAppForCommandPalettePresentation(appIsActive: true))
+    }
 }

@@ -6699,6 +6699,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         return updated
     }
 
+    nonisolated static func shouldActivateAppForCommandPalettePresentation(appIsActive: Bool) -> Bool { !appIsActive }
+
     private func scheduleDeferredHotkeySelectionRefresh(focusedWorkspaceID: String?) {
         deferredHotkeySelectionRefreshTask?.cancel()
         deferredHotkeySelectionRefreshTask = Task { @MainActor [weak self] in
@@ -8078,6 +8080,10 @@ extension AppKitController {
         let panel = ensureCommandPalettePanel()
         logHotkeyDebug("present_palette begin \(hotkeyWindowStateSummary())")
         commandPaletteContextWorkspaceID = commandPaletteDefaultWorkspaceID()
+        if Self.shouldActivateAppForCommandPalettePresentation(appIsActive: NSApp.isActive) {
+            NSApp.activate(ignoringOtherApps: true)
+            NSApp.unhide(nil)
+        }
         prepareWindowForActiveSpaceSummon(panel)
         panel.center()
         panel.orderFrontRegardless()
