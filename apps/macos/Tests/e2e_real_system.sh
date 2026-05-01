@@ -29,6 +29,12 @@ RECORD_VIDEO_CAPTURE_DEVICE="${RECORD_VIDEO_CAPTURE_DEVICE:-}"
 RECORD_VIDEO_FRAMERATE="${RECORD_VIDEO_FRAMERATE:-15}"
 RECORDER_OUTPUT_START_TIMEOUT_SECONDS="${RECORDER_OUTPUT_START_TIMEOUT_SECONDS:-8}"
 RECORDER_STOP_TIMEOUT_SECONDS="${RECORDER_STOP_TIMEOUT_SECONDS:-10}"
+REAL_SYSTEM_PROFILE_REPETITIONS="${REAL_SYSTEM_PROFILE_REPETITIONS:-5}"
+PROFILE_ARTIFACT_DIR="${PROFILE_ARTIFACT_DIR:-$MACOS_DIR/.artifacts/real-system-profiles}"
+PROFILE_HISTORY_CSV="${PROFILE_HISTORY_CSV:-$PROFILE_ARTIFACT_DIR/metrics-history.csv}"
+PROFILE_REPORT_HTML="${PROFILE_REPORT_HTML:-$PROFILE_ARTIFACT_DIR/report.html}"
+PROFILE_RENDER_SCRIPT="${PROFILE_RENDER_SCRIPT:-$MACOS_DIR/Tests/render_profile_report.py}"
+WORKSPACE_SERVICE_CONTENT_TIMEOUT_SECONDS="${WORKSPACE_SERVICE_CONTENT_TIMEOUT_SECONDS:-60}"
 
 TMP_PREFIX="${TMP_PREFIX:-/tmp/spaces-real-e2e}"
 TMP_ROOT="$(cd "$(mktemp -d "$TMP_PREFIX".XXXXXX)" && pwd -P)"
@@ -248,12 +254,51 @@ build_binaries() {
 stop_stale_fixture_port_listeners() {
   local ports=(20000 20001 20002 20003 20004 20005)
   local pid
+  local parent_pid
+  local parent_command
   for port in "${ports[@]}"; do
+    while IFS= read -r holder; do
+      [[ -n "$holder" ]] || continue
+      log_debug "stale fixture port listener port=$port holder=$holder"
+    done < <(lsof -nP -iTCP:"$port" -sTCP:LISTEN 2>/dev/null | tail -n +2 || true)
     while IFS= read -r pid; do
       [[ -n "$pid" ]] || continue
-      kill "$pid" >/dev/null 2>&1 || true
+      parent_pid="$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ' || true)"
+      if [[ -n "$parent_pid" ]]; then
+        parent_command="$(ps -o command= -p "$parent_pid" 2>/dev/null || true)"
+        if [[ "$parent_command" == *"spaces-e2e-demo"* || "$parent_command" == *".spaces-e2e-demo"* ]]; then
+          kill -9 "$parent_pid" >/dev/null 2>&1 || true
+        fi
+      fi
+      kill -9 "$pid" >/dev/null 2>&1 || true
     done < <(lsof -tiTCP:"$port" -sTCP:LISTEN 2>/dev/null || true)
   done
+}
+
+ensure_fixture_ports_free() {
+  local ports=(20000 20001 20002 20003 20004 20005)
+  local port
+  local deadline=$((SECONDS + ACTION_TIMEOUT_SECONDS))
+  while (( SECONDS < deadline )); do
+    local busy=0
+    for port in "${ports[@]}"; do
+      if lsof -tiTCP:"$port" -sTCP:LISTEN >/dev/null 2>&1; then
+        busy=1
+        break
+      fi
+    done
+    if (( busy == 0 )); then
+      return 0
+    fi
+    sleep 0.2
+  done
+  for port in "${ports[@]}"; do
+    while IFS= read -r holder; do
+      [[ -n "$holder" ]] || continue
+      log_debug "fixture port still busy port=$port holder=$holder"
+    done < <(lsof -nP -iTCP:"$port" -sTCP:LISTEN 2>/dev/null | tail -n +2 || true)
+  done
+  fail "fixture ports 20000-20005 are still busy after cleanup"
 }
 
 cleanup_existing_fixture_projects() {
@@ -263,6 +308,7 @@ cleanup_existing_fixture_projects() {
   close_fixture_chrome_windows
   "$MX_E2E_BIN" cleanup-fixtures --dir-prefix "$TMP_PREFIX" >/tmp/spaces-e2e-cleanup.json || true
   rm -rf "$TMP_PREFIX".* /private"$TMP_PREFIX".* 2>/dev/null || true
+  ensure_fixture_ports_free
 }
 
 reset_fixture_runtime() {
@@ -270,7 +316,9 @@ reset_fixture_runtime() {
   log_step "resetting tracked workspace runtime"
   "$MX_E2E_BIN" stop-workspace --workspace-dir "$workspace_dir" >/tmp/spaces-e2e-stop-workspace.json || true
   close_fixture_chrome_windows
+  stop_stale_fixture_port_listeners
   sleep 1
+  ensure_fixture_ports_free
 }
 
 close_existing_spaces_instances() {
@@ -685,17 +733,41 @@ with urllib.request.urlopen(sys.argv[1], timeout=2) as response:
 PY
 }
 
+http_body_contains() {
+  local url="$1"
+  local expected="$2"
+  local body
+  if body="$(http_get_body "$url" 2>/dev/null)" && grep -Fq "$expected" <<<"$body"; then
+    return 0
+  fi
+  return 1
+}
+
 wait_for_http_body_contains() {
   local url="$1"
   local expected="$2"
   local deadline=$((SECONDS + ACTION_TIMEOUT_SECONDS))
   while (( SECONDS < deadline )); do
-    if body="$(http_get_body "$url" 2>/dev/null)" && grep -Fq "$expected" <<<"$body"; then
+    if http_body_contains "$url" "$expected"; then return 0; fi
+    sleep 0.2
+  done
+  fail "timed out waiting for HTTP content at $url containing: $expected"
+}
+
+wait_for_workspace_http_content_optional() {
+  local docs_url="$1"
+  local docs_expected="$2"
+  local backend_url="$3"
+  local backend_expected="$4"
+  local timeout_seconds="${5:-$WORKSPACE_SERVICE_CONTENT_TIMEOUT_SECONDS}"
+  local deadline=$((SECONDS + timeout_seconds))
+  while (( SECONDS < deadline )); do
+    if http_body_contains "$docs_url" "$docs_expected" && http_body_contains "$backend_url" "$backend_expected"; then
       return 0
     fi
     sleep 0.2
   done
-  fail "timed out waiting for HTTP content at $url containing: $expected"
+  return 1
 }
 
 slugify_automation_id() {
@@ -821,6 +893,60 @@ wait_for_workspace_running_state() {
     sleep 0.5
   done
   fail "workspace running state did not become $expected for $workspace_dir"
+}
+
+workspace_process_status() {
+  local workspace_dir="$1"
+  local process_name="$2"
+  local out="$TMP_ROOT/workspace-process-status.json"
+  dump_workspace "$workspace_dir" "$out"
+  python3 - "$out" "$process_name" <<'PY'
+import json, sys
+with open(sys.argv[1]) as fh:
+    data = json.load(fh)
+target = sys.argv[2]
+for process in data.get("runningProcesses", []):
+    if process.get("name") == target:
+        print(process.get("status") or "")
+        break
+PY
+}
+
+wait_for_workspace_process_status() {
+  local workspace_dir="$1"
+  local process_name="$2"
+  local expected_status="$3"
+  local deadline=$((SECONDS + ACTION_TIMEOUT_SECONDS))
+  while (( SECONDS < deadline )); do
+    if [[ "$(workspace_process_status "$workspace_dir" "$process_name")" == "$expected_status" ]]; then
+      return 0
+    fi
+    sleep 0.2
+  done
+  fail "workspace process did not reach status=$expected_status: $process_name"
+}
+
+url_port() {
+  local url="$1"
+  python3 - "$url" <<'PY'
+from urllib.parse import urlparse
+import sys
+parsed = urlparse(sys.argv[1])
+print(parsed.port or "")
+PY
+}
+
+wait_for_tcp_listener_port() {
+  local port="$1"
+  [[ -n "$port" ]] || fail "missing port for listener wait"
+  local deadline=$((SECONDS + ACTION_TIMEOUT_SECONDS))
+  while (( SECONDS < deadline )); do
+    if lsof -tiTCP:"$port" -sTCP:LISTEN >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 0.2
+  done
+  fail "timed out waiting for TCP listener on port $port"
 }
 
 ui_click_identifier() {
@@ -1117,6 +1243,41 @@ end tell
 APPLESCRIPT
 }
 
+activate_google_chrome() {
+  osascript <<'APPLESCRIPT'
+tell application "Google Chrome" to activate
+APPLESCRIPT
+}
+
+spaces_command_palette_visible() {
+  osascript <<'APPLESCRIPT' 2>/dev/null | tr -d '\n'
+tell application "System Events"
+  if exists process "SpacesApp" then
+    tell process "SpacesApp"
+      repeat with targetWindow in windows
+        try
+          repeat with targetElement in entire contents of targetWindow
+            try
+              if (value of attribute "AXIdentifier" of targetElement) is "command-palette-search" then return "1"
+            end try
+          end repeat
+        end try
+      end repeat
+    end tell
+  end if
+end tell
+return "0"
+APPLESCRIPT
+}
+
+wait_for_spaces_command_palette_presented() {
+  wait_for_app_log_pattern "spaces: hotkey_debug present_palette end .*palette_visible=1"
+}
+
+wait_for_spaces_command_palette_dismissed() {
+  wait_for_app_log_pattern "spaces: hotkey_debug dismiss_palette end .*palette_visible=0"
+}
+
 chrome_front_url() {
   osascript <<'APPLESCRIPT'
 tell application "Google Chrome"
@@ -1280,6 +1441,22 @@ end tell
 APPLESCRIPT
 }
 
+send_spaces_toggle_hotkey() {
+  osascript <<'APPLESCRIPT'
+tell application "System Events"
+  key code 24 using {command down, option down}
+end tell
+APPLESCRIPT
+}
+
+send_spaces_command_palette_hotkey() {
+  osascript <<'APPLESCRIPT'
+tell application "System Events"
+  key code 27 using {command down, option down}
+end tell
+APPLESCRIPT
+}
+
 send_spaces_window_shortcut() {
   local index="$1"
   local code=""
@@ -1298,6 +1475,32 @@ on run argv
   end tell
 end run
 APPLESCRIPT
+}
+
+send_spaces_hotkey_with_ack() {
+  local send_fn="$1"
+  local pattern="$2"
+  local attempts="${3:-3}"
+  local attempt=1
+  while (( attempt <= attempts )); do
+    ensure_single_spaces_instance "$SPACES_PID"
+    "$send_fn"
+    if wait_for_app_log_pattern_optional "$pattern" >/dev/null; then
+      return 0
+    fi
+    log_debug "hotkey pattern '$pattern' was not received on attempt $attempt; retrying"
+    attempt=$((attempt + 1))
+    sleep 0.1
+  done
+  fail "timed out waiting for hotkey reception: $pattern"
+}
+
+send_spaces_toggle_hotkey_with_ack() {
+  send_spaces_hotkey_with_ack send_spaces_toggle_hotkey "spaces: hotkey_debug toggle_window begin "
+}
+
+send_spaces_command_palette_hotkey_with_ack() {
+  send_spaces_hotkey_with_ack send_spaces_command_palette_hotkey "spaces: hotkey_debug toggle_palette begin "
 }
 
 send_spaces_window_shortcut_with_ack() {
@@ -1340,7 +1543,13 @@ APPLESCRIPT
 record_metric_sample() {
   local name="$1"
   local value_ms="$2"
-  printf '%s\t%s\n' "$name" "$value_ms" >>"$METRICS_LOG"
+  local terminal_host="${3:-unknown}"
+  local workspace_scope="${4:-single}"
+  printf '%s\t%s\tterminal_host=%s\tworkspace_scope=%s\n' \
+    "$name" \
+    "$value_ms" \
+    "$terminal_host" \
+    "$workspace_scope" >>"$METRICS_LOG"
 }
 
 find_new_app_log_pattern_once() {
@@ -1408,47 +1617,69 @@ extract_metric_field() {
 record_perf_metric() {
   local name="$1"
   local pattern="$2"
+  local terminal_host="${3:-unknown}"
+  local workspace_scope="${4:-single}"
   local line
   line="$(wait_for_app_log_pattern "$pattern")"
-  record_metric_sample "$name" "$(extract_metric_field "$line" "elapsed_ms")"
+  record_metric_sample "$name" "$(extract_metric_field "$line" "elapsed_ms")" "$terminal_host" "$workspace_scope"
 }
 
 record_cycle_metric() {
   local name="$1"
   local direction="$2"
-  record_perf_metric "$name" "spaces: perf metric=window_cycle .*success=1 .*elapsed_ms=[0-9]+ .*direction=${direction}"
+  local terminal_host="$3"
+  local workspace_scope="${4:-single}"
+  record_perf_metric "$name" "spaces: perf metric=window_cycle .*success=1 .*elapsed_ms=[0-9]+ .*direction=${direction}" "$terminal_host" "$workspace_scope"
 }
 
-record_window_shortcut_metric() {
+record_toggle_window_metric() {
   local name="$1"
-  local index="$2"
-  local line
-  if line="$(wait_for_app_log_pattern_optional "spaces: perf metric=window_shortcut target=index=${index} success=1 elapsed_ms=")"; then
-    record_metric_sample "$name" "$(extract_metric_field "$line" "elapsed_ms")"
-    return 0
-  fi
-  log_debug "window shortcut metric missing for index=$index; skipping dedicated shortcut metric"
-  return 0
+  local action="$2"
+  local app_active_before="$3"
+  local terminal_host="$4"
+  local workspace_scope="${5:-single}"
+  record_perf_metric \
+    "$name" \
+    "spaces: perf metric=toggle_window target=action=${action} .*app_active_before=${app_active_before} .*success=1 elapsed_ms=" \
+    "$terminal_host" \
+    "$workspace_scope"
+}
+
+record_toggle_palette_metric() {
+  local name="$1"
+  local action="$2"
+  local app_active_before="$3"
+  local terminal_host="$4"
+  local workspace_scope="${5:-single}"
+  record_perf_metric \
+    "$name" \
+    "spaces: perf metric=toggle_palette target=action=${action} .*app_active_before=${app_active_before} .*success=1 elapsed_ms=" \
+    "$terminal_host" \
+    "$workspace_scope"
 }
 
 record_named_focus_metric() {
   local name="$1"
   local target_name="$2"
+  local terminal_host="$3"
+  local workspace_scope="${4:-single}"
   local line
   if ! line="$(wait_for_app_log_pattern_optional "spaces: perf metric=(named_window_focus|browser_focus|process_focus) .*target=${target_name} .*success=1 .*elapsed_ms=")"; then
     log_debug "named focus metric missing for target=$target_name; skipping metric $name"
     return 0
   fi
-  record_metric_sample "$name" "$(extract_metric_field "$line" "elapsed_ms")"
+  record_metric_sample "$name" "$(extract_metric_field "$line" "elapsed_ms")" "$terminal_host" "$workspace_scope"
 }
 
 record_browser_focus_metric() {
   local name="$1"
   local target_url="$2"
   local focus_name="${3:-}"
+  local terminal_host="$4"
+  local workspace_scope="${5:-single}"
   local line
   if line="$(wait_for_app_log_pattern_optional "spaces: perf metric=browser_focus .*target=${target_url} .*success=1 .*elapsed_ms=")"; then
-    record_metric_sample "$name" "$(extract_metric_field "$line" "elapsed_ms")"
+    record_metric_sample "$name" "$(extract_metric_field "$line" "elapsed_ms")" "$terminal_host" "$workspace_scope"
     return 0
   fi
   # `spaces workspace up --focus docs` can resolve through the shared name-based
@@ -1456,7 +1687,7 @@ record_browser_focus_metric() {
   # `named_window_focus target=docs` even though the visible behavior is still
   # "focus the tracked docs Chrome tab". Accept either metric shape here.
   if [[ -n "$focus_name" ]] && line="$(wait_for_app_log_pattern_optional "spaces: perf metric=named_window_focus .*target=${focus_name} .*success=1 .*elapsed_ms=")"; then
-    record_metric_sample "$name" "$(extract_metric_field "$line" "elapsed_ms")"
+    record_metric_sample "$name" "$(extract_metric_field "$line" "elapsed_ms")" "$terminal_host" "$workspace_scope"
     return 0
   fi
   fail "timed out waiting for browser-focus metric: url=$target_url name=${focus_name:-<none>}"
@@ -1465,9 +1696,11 @@ record_browser_focus_metric() {
 record_process_focus_metric() {
   local name="$1"
   local process_name="$2"
+  local terminal_host="$3"
+  local workspace_scope="${4:-single}"
   local line
   line="$(wait_for_app_log_pattern "spaces: perf metric=(process_focus|named_window_focus) .*target=${process_name} .*success=1 .*elapsed_ms=")"
-  record_metric_sample "$name" "$(extract_metric_field "$line" "elapsed_ms")"
+  record_metric_sample "$name" "$(extract_metric_field "$line" "elapsed_ms")" "$terminal_host" "$workspace_scope"
 }
 
 wait_for_iterm_session_focus() {
@@ -1478,6 +1711,91 @@ wait_for_iterm_session_focus() {
   wait_for_condition "iterm_front_session" "$expected_session_id"
 }
 
+git_worktree_clean() {
+  [[ -z "$(git -C "$ROOT_DIR" status --short)" ]]
+}
+
+persist_profile_artifacts() {
+  local exit_code="$1"
+  if (( exit_code != 0 )); then
+    printf 'Profile artifacts: skipped because the suite failed\n'
+    return 0
+  fi
+  if [[ ! -s "$METRICS_LOG" ]]; then
+    printf 'Profile artifacts: skipped because no metrics were recorded\n'
+    return 0
+  fi
+
+  mkdir -p "$PROFILE_ARTIFACT_DIR"
+  local timestamp machine_name machine_model git_branch git_sha git_state worktree_fingerprint
+  timestamp="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+  machine_name="$(scutil --get ComputerName 2>/dev/null || hostname)"
+  machine_model="$(sysctl -n hw.model 2>/dev/null || uname -m)"
+  git_branch="$(git -C "$ROOT_DIR" rev-parse --abbrev-ref HEAD)"
+  git_sha="$(git -C "$ROOT_DIR" rev-parse HEAD)"
+  read -r git_state worktree_fingerprint < <(
+    python3 - "$ROOT_DIR" <<'PY'
+import hashlib
+import os
+import subprocess
+import sys
+
+root = sys.argv[1]
+
+def run(*args: str) -> bytes:
+    return subprocess.run(args, cwd=root, check=True, stdout=subprocess.PIPE).stdout
+
+head = run("git", "rev-parse", "HEAD").decode().strip()
+status = run("git", "status", "--porcelain=v1", "--untracked-files=all", "-z")
+state = "clean" if not status else "dirty"
+
+if state == "clean":
+    print(state, head)
+    raise SystemExit(0)
+
+hasher = hashlib.sha256()
+hasher.update(head.encode())
+hasher.update(b"\0STATUS\0")
+hasher.update(status)
+hasher.update(b"\0DIFF_HEAD\0")
+hasher.update(run("git", "diff", "--no-ext-diff", "--binary", "HEAD"))
+hasher.update(b"\0DIFF_CACHED\0")
+hasher.update(run("git", "diff", "--no-ext-diff", "--binary", "--cached"))
+
+for raw_path in run("git", "ls-files", "--others", "--exclude-standard", "-z").split(b"\0"):
+    if not raw_path:
+        continue
+    path = raw_path.decode("utf-8", "surrogateescape")
+    hasher.update(b"\0UNTRACKED_PATH\0")
+    hasher.update(raw_path)
+    file_path = os.path.join(root, path)
+    if os.path.isfile(file_path):
+        hasher.update(b"\0UNTRACKED_FILE\0")
+        with open(file_path, "rb") as handle:
+            hasher.update(handle.read())
+    else:
+        hasher.update(b"\0UNTRACKED_NONFILE\0")
+
+print(state, hasher.hexdigest())
+PY
+  )
+
+  python3 "$PROFILE_RENDER_SCRIPT" \
+    --metrics-log "$METRICS_LOG" \
+    --csv "$PROFILE_HISTORY_CSV" \
+    --report "$PROFILE_REPORT_HTML" \
+    --timestamp "$timestamp" \
+    --machine-name "$machine_name" \
+    --machine-model "$machine_model" \
+    --git-branch "$git_branch" \
+    --git-sha "$git_sha" \
+    --git-state "$git_state" \
+    --worktree-fingerprint "$worktree_fingerprint"
+
+  printf 'Profile history CSV: %s\n' "$PROFILE_HISTORY_CSV"
+  printf 'Profile report HTML: %s\n' "$PROFILE_REPORT_HTML"
+}
+
 print_metric_summary() {
   if [[ ! -s "$METRICS_LOG" ]]; then
     printf 'Performance metrics: none recorded\n'
@@ -1486,21 +1804,33 @@ print_metric_summary() {
   printf 'Performance metrics:\n'
   awk -F '\t' '
     {
+      metric = $1
       value = $2 + 0
-      count[$1] += 1
-      sum[$1] += value
-      if (!(($1) in min) || value < min[$1]) min[$1] = value
-      if (value > max[$1]) max[$1] = value
-      samples[$1] = samples[$1] (samples[$1] == "" ? "" : ",") value
+      host = "unknown"
+      scope = "single"
+      for (i = 3; i <= NF; i++) {
+        split($i, part, "=")
+        if (part[1] == "terminal_host") host = part[2]
+        if (part[1] == "workspace_scope") scope = part[2]
+      }
+      key = metric "|" host "|" scope
+      count[key] += 1
+      sum[key] += value
+      metric_name[key] = metric
+      metric_host[key] = host
+      metric_scope[key] = scope
+      if (!(key in min) || value < min[key]) min[key] = value
+      if (value > max[key]) max[key] = value
+      samples[key] = samples[key] (samples[key] == "" ? "" : ",") value
     }
     END {
       for (key in count) {
         avg = sum[key] / count[key]
-        printf "%s\t%d\t%.1f\t%d\t%d\t%s\n", key, count[key], avg, min[key], max[key], samples[key]
+        printf "%s\t%s\t%s\t%d\t%.1f\t%d\t%d\t%s\n", metric_name[key], metric_host[key], metric_scope[key], count[key], avg, min[key], max[key], samples[key]
       }
     }
-  ' "$METRICS_LOG" | sort | while IFS=$'\t' read -r key count avg min max samples; do
-    printf '  %s: avg=%sms min=%sms max=%sms samples=[%s]\n' "$key" "$avg" "$min" "$max" "$samples"
+  ' "$METRICS_LOG" | sort | while IFS=$'\t' read -r metric host scope count avg min max samples; do
+    printf '  %s [host=%s scope=%s]: avg=%sms min=%sms max=%sms samples=[%s]\n' "$metric" "$host" "$scope" "$avg" "$min" "$max" "$samples"
   done
 }
 
@@ -1533,6 +1863,7 @@ print_run_summary() {
   fi
   print_case_summary
   print_metric_summary
+  persist_profile_artifacts "$exit_code"
   print_recording_summary
   printf 'Metrics log: %s\n' "$METRICS_LOG"
   printf 'Results log: %s\n' "$RESULTS_LOG"
@@ -1740,6 +2071,28 @@ run_mx_logged() {
   env DEBUG=1 "$MX_BIN" "$@" >"$stdout_file" 2>>"$APP_LOG"
 }
 
+ensure_workspace_http_ready() {
+  local workspace_dir="$1"
+  local docs_url="$2"
+  local docs_expected="$3"
+  local backend_url="$4"
+  local backend_expected="$5"
+  local docs_port backend_port
+  docs_port="$(url_port "$docs_url")"
+  backend_port="$(url_port "$backend_url")"
+
+  wait_for_workspace_process_status "$workspace_dir" "frontend" "running"
+  wait_for_workspace_process_status "$workspace_dir" "backend" "running"
+  wait_for_tcp_listener_port "$docs_port"
+  wait_for_tcp_listener_port "$backend_port"
+
+  if wait_for_workspace_http_content_optional \
+    "$docs_url" "$docs_expected" "$backend_url" "$backend_expected" "$WORKSPACE_SERVICE_CONTENT_TIMEOUT_SECONDS"; then
+    return 0
+  fi
+  fail "timed out waiting for verified workspace HTTP content"
+}
+
 window_url_for_name() {
   local dump_file="$1"
   local window_name="$2"
@@ -1811,6 +2164,7 @@ run_launch_and_focus_assertions() {
 
   begin_case "$host: launch workspace and persist terminal host"
   run_mx_logged /tmp/spaces-e2e-launch.log workspace up "$workspace_dir" --focus docs
+  wait_for_workspace_running_state "$workspace_dir" "true"
   transition_pause "$host launch workspace"
   dump_chrome_state "$host docs-focus after-launch"
   wait_for_condition "chrome_front_url" "$PRIMARY_DOCS_URL"
@@ -1834,14 +2188,13 @@ run_launch_and_focus_assertions() {
   else
     assert_equals "Ghostty" "$terminal_app" "Ghostty launch"
   fi
-  wait_for_http_body_contains "$PRIMARY_DOCS_URL" "Atlas docs sentinel"
-  wait_for_http_body_contains "$PRIMARY_BACKEND_STATUS_URL" '"workspace": "atlas-alerts"'
+  ensure_workspace_http_ready "$workspace_dir" "$PRIMARY_DOCS_URL" "Atlas docs sentinel" "$PRIMARY_BACKEND_STATUS_URL" '"workspace": "atlas-alerts"'
   pass_case
 
   begin_case "$host: focus tracked Chrome tab with extra user tab present"
   # Prove the docs focus really left us on the tracked Chrome window before we
   # inject an untracked user tab into that same window.
-  local extra_user_tab_url="https://spaces.dev/"
+  local extra_user_tab_url="https://usespaces.dev/"
   dump_chrome_state "$host docs-focus before-extra-tab"
   wait_for_condition "chrome_front_window_id" "$docs_window_id"
   wait_for_condition "chrome_window_active_url $docs_window_id" "$PRIMARY_DOCS_URL"
@@ -1852,7 +2205,7 @@ run_launch_and_focus_assertions() {
   wait_for_condition "chrome_window_active_url $docs_window_id" "$extra_user_tab_url"
   run_mx_logged /tmp/spaces-e2e-focus-docs.log workspace up "$workspace_dir" --focus docs
   transition_pause "$host refocus docs"
-  record_browser_focus_metric "$host.browser_focus.docs" "$PRIMARY_DOCS_URL" "docs"
+  record_browser_focus_metric "browser_untracked_tab.cli_window_focus.browser_tracked_tab" "$PRIMARY_DOCS_URL" "docs" "$host" "single"
   dump_chrome_state "$host after-refocus-docs"
   wait_for_condition "chrome_front_window_id" "$docs_window_id"
   wait_for_condition "chrome_window_active_url $docs_window_id" "$PRIMARY_DOCS_URL"
@@ -1910,7 +2263,7 @@ PY
     [[ "$(iterm_front_session)" != "$frontend_session_id" ]] || fail "expected extra iTerm2 tab to be selected"
     run_mx_logged /tmp/spaces-e2e-focus-frontend.log workspace up "$workspace_dir" --focus frontend
     transition_pause "$host focus frontend terminal"
-    record_process_focus_metric "$host.process_focus.frontend" "frontend"
+    record_process_focus_metric "terminal_untracked_tab.cli_window_focus.process_tracked_tab" "frontend" "$host" "single"
     frontend_session_id="$(wait_for_workspace_terminal_tracking_id "$workspace_dir" "frontend" "$dump_file")"
     wait_for_iterm_session_focus "$frontend_session_id"
     pass_case
@@ -1945,7 +2298,7 @@ PY
     [[ "$(ghostty_focused_terminal)" != "$frontend_terminal_id" ]] || fail "expected extra Ghostty tab to be selected"
     run_mx_logged /tmp/spaces-e2e-focus-frontend-2.log workspace up "$workspace_dir" --focus frontend
     transition_pause "$host refocus frontend terminal"
-    record_process_focus_metric "$host.process_focus.frontend" "frontend"
+    record_process_focus_metric "terminal_untracked_tab.cli_window_focus.process_tracked_tab" "frontend" "$host" "single"
     wait_for_condition "ghostty_focused_terminal" "$frontend_terminal_id"
     pass_case
   fi
@@ -1967,12 +2320,12 @@ PY
   send_spaces_window_shortcut_with_ack "$docs_shortcut_index"
   transition_pause "$host shortcut focus docs"
   wait_for_condition "chrome_window_active_url $docs_window_id" "$PRIMARY_DOCS_URL"
-  record_window_shortcut_metric "$host.shortcut.docs" "$docs_shortcut_index"
-  record_named_focus_metric "$host.shortcut.docs.focus" "docs"
+  record_browser_focus_metric "spaces_detail_ui.keyboard_window_shortcut.browser_tracked_tab" "$PRIMARY_DOCS_URL" "docs" "$host" "single"
   ui_show_workspace_detail "$workspace_dir" "$workspace_title"
   sleep 0.5
   send_spaces_window_shortcut_with_ack "$frontend_shortcut_index"
   transition_pause "$host shortcut focus frontend"
+  record_process_focus_metric "spaces_detail_ui.keyboard_window_shortcut.process_tracked_tab" "frontend" "$host" "single"
   if [[ "$host" == "iterm2" ]]; then
     frontend_session_id="$(wait_for_workspace_terminal_tracking_id "$workspace_dir" "frontend" "$dump_file")"
     wait_for_iterm_session_focus "$frontend_session_id"
@@ -1989,7 +2342,7 @@ PY
   wait_for_condition "chrome_front_url" "$PRIMARY_DOCS_URL"
   send_cycle_hotkey next
   transition_pause "$host cycle next"
-  record_cycle_metric "$host.cycle.next" "next"
+  record_cycle_metric "terminal_tracked_tab.keyboard_cycle_next.browser_tracked_tab" "next" "$host" "single"
   if [[ "$host" == "iterm2" ]]; then
     wait_for_any_value "iterm_focused_session $frontend_window_id" "$frontend_session_id" "$backend_session_id"
   else
@@ -1997,7 +2350,7 @@ PY
   fi
   send_cycle_hotkey previous
   transition_pause "$host cycle previous"
-  record_cycle_metric "$host.cycle.previous" "previous"
+  record_cycle_metric "browser_tracked_tab.keyboard_cycle_previous.terminal_tracked_tab" "previous" "$host" "single"
   wait_for_condition "chrome_front_url" "$PRIMARY_DOCS_URL"
   pass_case
 
@@ -2044,6 +2397,60 @@ PY
   assert_equals "false" "$(json_get "$dump_file" "workspace.isRunning")" "workspace stopped"
   pass_case
   reset_fixture_runtime "$workspace_dir"
+}
+
+run_hotkey_visibility_profiling() {
+  local host="$1"
+  local workspace_dir="$2"
+  local iteration
+
+  begin_case "$host: profile repeated app visibility toggle"
+  ensure_single_spaces_instance "$SPACES_PID"
+  reset_fixture_runtime "$workspace_dir"
+  run_mx_logged /tmp/spaces-e2e-profile-window-toggle.log workspace up "$workspace_dir" --focus docs
+  transition_pause "$host seed docs focus for app toggle profiling"
+  wait_for_condition "chrome_front_url" "$PRIMARY_DOCS_URL"
+  wait_for_condition "frontmost_app" "Google Chrome"
+  for (( iteration = 1; iteration <= REAL_SYSTEM_PROFILE_REPETITIONS; iteration++ )); do
+    send_spaces_toggle_hotkey_with_ack
+    wait_for_spaces_frontmost_ready
+    record_toggle_window_metric "external_app.keyboard_toggle_main_window.main_window" "show" "0" "$host" "single"
+    send_spaces_toggle_hotkey_with_ack
+    wait_for_condition "frontmost_app" "Google Chrome"
+    record_toggle_window_metric "main_window.keyboard_toggle_main_window.external_app" "hide" "1" "$host" "single"
+  done
+  pass_case
+
+  begin_case "$host: profile repeated command palette toggle states"
+  ensure_single_spaces_instance "$SPACES_PID"
+  reset_fixture_runtime "$workspace_dir"
+  run_mx_logged /tmp/spaces-e2e-profile-command-palette.log workspace up "$workspace_dir" --focus docs
+  transition_pause "$host seed docs focus for command palette profiling"
+  wait_for_condition "chrome_front_url" "$PRIMARY_DOCS_URL"
+  wait_for_condition "frontmost_app" "Google Chrome"
+  for (( iteration = 1; iteration <= REAL_SYSTEM_PROFILE_REPETITIONS; iteration++ )); do
+    send_spaces_command_palette_hotkey_with_ack
+    wait_for_condition "frontmost_app" "SpacesApp"
+    wait_for_spaces_command_palette_presented
+    record_toggle_palette_metric "external_app.keyboard_toggle_palette.palette" "show" "0" "$host" "single"
+
+    send_spaces_command_palette_hotkey_with_ack
+    wait_for_spaces_command_palette_dismissed
+    record_toggle_palette_metric "palette.keyboard_toggle_palette.external_app" "hide" "1" "$host" "single"
+
+    send_spaces_command_palette_hotkey_with_ack
+    wait_for_condition "frontmost_app" "SpacesApp"
+    wait_for_spaces_command_palette_presented
+    record_toggle_palette_metric "main_window.keyboard_toggle_palette.palette" "show" "1" "$host" "single"
+
+    send_spaces_command_palette_hotkey_with_ack
+    wait_for_spaces_command_palette_dismissed
+    record_toggle_palette_metric "palette.keyboard_toggle_palette.main_window" "hide" "1" "$host" "single"
+
+    activate_google_chrome
+    wait_for_condition "frontmost_app" "Google Chrome"
+  done
+  pass_case
 }
 
 run_multi_workspace_focus_and_cycle_assertions() {
@@ -2183,7 +2590,7 @@ PY
   send_cycle_hotkey next
   transition_pause "$host primary cycle next"
   log_debug "$host multi primary cycle next sent"
-  record_cycle_metric "$host.multi.primary.next" "next"
+  record_cycle_metric "terminal_tracked_tab.keyboard_cycle_next.browser_tracked_tab" "next" "$host" "primary"
   if [[ "$host" == "iterm2" ]]; then
     dump_iterm_state "$host multi after-primary-next"
   fi
@@ -2196,7 +2603,7 @@ PY
   send_cycle_hotkey previous
   transition_pause "$host primary cycle previous"
   log_debug "$host multi primary cycle previous sent"
-  record_cycle_metric "$host.multi.primary.previous" "previous"
+  record_cycle_metric "browser_tracked_tab.keyboard_cycle_previous.terminal_tracked_tab" "previous" "$host" "primary"
   wait_for_condition "chrome_front_url" "$primary_docs_url"
 
   run_mx_logged /tmp/spaces-e2e-multi-secondary-focus.log workspace up "$secondary_workspace_dir" --focus docs
@@ -2206,7 +2613,7 @@ PY
   send_cycle_hotkey next
   transition_pause "$host secondary cycle next"
   log_debug "$host multi secondary cycle next sent"
-  record_cycle_metric "$host.multi.secondary.next" "next"
+  record_cycle_metric "terminal_tracked_tab.keyboard_cycle_next.browser_tracked_tab" "next" "$host" "secondary"
   if [[ "$host" == "iterm2" ]]; then
     dump_iterm_state "$host multi after-secondary-next"
   fi
@@ -2219,7 +2626,7 @@ PY
   send_cycle_hotkey previous
   transition_pause "$host secondary cycle previous"
   log_debug "$host multi secondary cycle previous sent"
-  record_cycle_metric "$host.multi.secondary.previous" "previous"
+  record_cycle_metric "browser_tracked_tab.keyboard_cycle_previous.terminal_tracked_tab" "previous" "$host" "secondary"
   wait_for_condition "chrome_front_url" "$secondary_docs_url"
 
   reset_fixture_runtime "$primary_workspace_dir"
@@ -2336,6 +2743,7 @@ EOF
   for host in "${hosts[@]}"; do
     if host_available "$host"; then
       run_launch_and_focus_assertions "$host" "$workspace_dir"
+      run_hotkey_visibility_profiling "$host" "$workspace_dir"
       run_multi_workspace_focus_and_cycle_assertions "$host" "$workspace_dir" "$second_workspace_dir"
       run_agent_status_assertions "$host" "$workspace_dir"
       assert_file_contains "$EVENT_LOG" "$stop_marker"
