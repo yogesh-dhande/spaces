@@ -6612,13 +6612,15 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         return nil
     }
 
-    nonisolated static func commandPaletteContextWorkspaceID(selectedWorkspaceID: String?, focusedWorkspaceID: String?) -> String? {
-        selectedWorkspaceID ?? focusedWorkspaceID
+    nonisolated static func commandPaletteContextWorkspaceID(selectedWorkspaceID: String?, focusedWorkspaceID: () throws -> String?) rethrows
+        -> String?
+    {
+        if let selectedWorkspaceID { return selectedWorkspaceID }
+        return try focusedWorkspaceID()
     }
 
     private func commandPaletteDefaultWorkspaceID() -> String? {
-        Self.commandPaletteContextWorkspaceID(
-            selectedWorkspaceID: selectedWorkspaceID, focusedWorkspaceID: try? orchestrator.workspaceIDForFocusedWindow())
+        try? Self.commandPaletteContextWorkspaceID(selectedWorkspaceID: selectedWorkspaceID) { try orchestrator.workspaceIDForFocusedWindow() }
     }
 
     private func handleCommandPaletteShortcut(event: NSEvent) -> Bool {
@@ -8053,8 +8055,7 @@ extension AppKitController {
         let panel = ensureCommandPalettePanel()
         logHotkeyDebug("present_palette begin \(hotkeyWindowStateSummary())")
         commandPaletteContextWorkspaceID = commandPaletteDefaultWorkspaceID()
-        if !NSApp.isActive || NSApp.isHidden { window.orderOut(nil) }
-        NSApp.unhide(nil)
+        if NSApp.isHidden { NSApp.unhide(nil) }
         NSApp.activate(ignoringOtherApps: true)
         prepareWindowForActiveSpaceSummon(panel)
         panel.center()

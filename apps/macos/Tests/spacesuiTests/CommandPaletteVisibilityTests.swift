@@ -6,13 +6,23 @@ import workspacecore
 @Suite struct CommandPaletteVisibilityTests {
     @Test func paletteContextPrefersPreviouslySelectedWorkspace() {
         let workspaceID = AppKitController.commandPaletteContextWorkspaceID(
-            selectedWorkspaceID: "workspace-selected", focusedWorkspaceID: "workspace-focused")
+            selectedWorkspaceID: "workspace-selected", focusedWorkspaceID: { "workspace-focused" })
+
+        #expect(workspaceID == "workspace-selected")
+    }
+
+    @Test func paletteContextSkipsFocusedWorkspaceLookupWhenSelectionExists() throws {
+        enum SentinelError: Error { case shouldNotBeCalled }
+
+        let workspaceID = try AppKitController.commandPaletteContextWorkspaceID(selectedWorkspaceID: "workspace-selected") {
+            throw SentinelError.shouldNotBeCalled
+        }
 
         #expect(workspaceID == "workspace-selected")
     }
 
     @Test func paletteContextFallsBackToFocusedTrackedWorkspace() {
-        let workspaceID = AppKitController.commandPaletteContextWorkspaceID(selectedWorkspaceID: nil, focusedWorkspaceID: "workspace-focused")
+        let workspaceID = AppKitController.commandPaletteContextWorkspaceID(selectedWorkspaceID: nil, focusedWorkspaceID: { "workspace-focused" })
 
         #expect(workspaceID == "workspace-focused")
     }

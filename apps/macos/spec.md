@@ -178,7 +178,7 @@ Spaces focuses those windows; it does not decide their geometry.
 - Project and workspace detail screens should prefer flat section layouts with spacing and dividers over nested bordered cards.
 - Global shortcuts should bring Spaces forward and support fast workspace switching.
 - The global app-toggle shortcut should hide Spaces when it is already frontmost and visible, and show it otherwise.
-- The app should expose a separate global command-palette shortcut that opens a lightweight palette without requiring the full main window to stay visible.
+- The app should expose a separate global command-palette shortcut that opens a lightweight palette without changing the visibility of the main window.
 - The command palette should default to `Cmd+Opt+-`.
 - Summoning Spaces from the global app-toggle shortcut should raise the main window above other apps and onto the active space.
 - When Spaces is summoned, it should select the workspace for the window that was focused immediately before activation when that window belongs to a tracked workspace; otherwise it should show Alerts.
