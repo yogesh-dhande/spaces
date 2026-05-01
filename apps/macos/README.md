@@ -40,8 +40,8 @@ Useful commands:
 apps/macos/.build/debug/SpacesApp
 apps/macos/.build/debug/spaces --help
 apps/macos/.build/debug/spacese2e --help
-apps/macos/.build/debug/spaces workspace import --title "debug" --tooltip "Local debug session"
-apps/macos/.build/debug/spaces workspace update --tooltip "Ready for review"
+apps/macos/.build/debug/spaces workspace import --title "debug" --notes "Local debug session"
+apps/macos/.build/debug/spaces workspace update --notes "Ready for review"
 apps/macos/.build/debug/spaces workspace up --restart
 apps/macos/Tests/e2e_real_system.sh
 ```

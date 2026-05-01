@@ -28,7 +28,7 @@ yabai -m query --windows --window
 
 Register the current directory as a workspace:
 ```bash
-spaces workspace import --title "debug" --tooltip "Local troubleshooting session"
+spaces workspace import --title "debug" --notes "Local troubleshooting session"
 ```
 
 Force a clean runtime restart:

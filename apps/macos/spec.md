@@ -61,7 +61,7 @@ A workspace is an isolated stream of work for one project.
 A workspace has:
 - a directory
 - a title
-- optional tooltip text
+- optional notes text
 - an optional git branch
 - per-workspace overrides for launch-time settings
 - a captured set of windows and runtime state
@@ -100,7 +100,7 @@ Spaces focuses those windows; it does not decide their geometry.
 - Sidebar project rows should expose a dedicated settings action that opens project settings in the detail pane.
 - The project settings pane should use the same flat detail-header treatment as workspace detail: project title and directory path at the top, then project-level configuration sections and footer actions.
 - Sidebar workspace rows show the workspace title on the first line and the git branch name on a second indented line underneath; the branch line is omitted when the workspace has no branch recorded.
-- The workspace detail pane is a single scrollable page: title + actions at the top, directory path with copy and reveal-in-Finder buttons, inline tooltip editor, then configuration sections for Processes, Browser sessions, Coding agents, Named ports, and Stop script. Each section shows its configured items as rows and expands inline into an edit form when the pencil icon is clicked; the `+ add` header button appends a new item. Running process rows should expose stop and restart actions before edit and delete, while non-running process rows should show run before edit and delete. Named-port rows should show the reserved port number as secondary text next to the configured name. A `⋯` overflow button in the action row exposes Copy path and Reveal in Finder, with Reveal in Finder available as a keyboard-invokable menu item via `⌘⇧F`.
+- The workspace detail pane is a single scrollable page: title + actions at the top, directory path with copy and reveal-in-Finder buttons, inline notes editor, then configuration sections for Processes, Browser sessions, Coding agents, Named ports, and Stop script. Each section shows its configured items as rows and expands inline into an edit form when the pencil icon is clicked; the `+ add` header button appends a new item. Running process rows should expose stop and restart actions before edit and delete, while non-running process rows should show run before edit and delete. Named-port rows should show the reserved port number as secondary text next to the configured name. A `⋯` overflow button in the action row exposes Copy path and Reveal in Finder, with Reveal in Finder available as a keyboard-invokable menu item via `⌘⇧F`.
 - The workspace detail footer should show inline shortcut hints for Toggle app, Alerts, Settings, Open editor, New terminal, Next window, and Prev window, in that order.
 
 ## Workspaces
@@ -108,7 +108,7 @@ Spaces focuses those windows; it does not decide their geometry.
 ### Creation
 - Users can create, update, focus, stop, restart, and archive workspaces from the GUI.
 - The CLI should stay minimal and support `workspace import`, `workspace update`, `workspace up`, and `agent event`.
-- For git projects, new workspaces are branch-oriented and should support an existing-branch picker, a new-branch entry path, target branch, directory name, title, and tooltip inputs.
+- For git projects, new workspaces are branch-oriented and should support an existing-branch picker, a new-branch entry path, target branch, directory name, title, and notes inputs.
 - Workspace creation should feel fast in the GUI, with visible progress during setup.
 - Workspace settings used for launch must remain editable after creation.
 
@@ -132,7 +132,7 @@ Spaces focuses those windows; it does not decide their geometry.
   - if stopped, it launches the workspace
   - if running, it restores failed or exited runtime as defined by the command mode
   - `--restart` forces a full restart
-- `workspace update` should own post-creation workspace metadata edits such as title and tooltip.
+- `workspace update` should own post-creation workspace metadata edits such as title and notes.
 - Launch should wait for setup to finish and should surface setup failures clearly.
 - Named ports must be available to setup scripts, stop scripts, and process commands.
 - Adding a named port from the workspace detail view should reserve its port number immediately instead of waiting for the next workspace launch.

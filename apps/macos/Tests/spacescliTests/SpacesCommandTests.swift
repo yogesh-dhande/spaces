@@ -32,11 +32,11 @@ final class MXCommandTests: XCTestCase {
     }
 
     func testWorkspaceUpdateParsesPathAndMetadata() throws {
-        let command = try WorkspaceUpdateCommand.parse(["/tmp/worktree", "--title", "Title", "--tooltip", "Summary"])
+        let command = try WorkspaceUpdateCommand.parse(["/tmp/worktree", "--title", "Title", "--notes", "Summary"])
 
         XCTAssertEqual(command.path, "/tmp/worktree")
         XCTAssertEqual(command.title, "Title")
-        XCTAssertEqual(command.tooltip, "Summary")
+        XCTAssertEqual(command.notes, "Summary")
     }
 
     func testWorkspacePathParsesExplicitPath() throws {

@@ -177,7 +177,7 @@ public final class WorkspaceOrchestrator {
         return records.map {
             WorkspaceSummary(
                 id: $0.id, title: $0.title, branch: $0.branch, targetBranch: $0.targetBranch, dir: $0.dir, isRunning: $0.isRunning,
-                isArchived: $0.isArchived, isHidden: $0.isHidden, isDefault: $0.isDefault, tooltip: $0.tooltip)
+                isArchived: $0.isArchived, isHidden: $0.isHidden, isDefault: $0.isDefault, notes: $0.notes)
         }
     }
 
@@ -265,9 +265,9 @@ public final class WorkspaceOrchestrator {
         try store.touchWorkspaceSettings(workspaceID: workspace.id, updatedAt: nowISO8601())
     }
 
-    public func updateWorkspaceTooltip(workspaceID: String, tooltip: String?) throws {
+    public func updateWorkspaceNotes(workspaceID: String, notes: String?) throws {
         let (_, workspace) = try resolveWorkspace(id: workspaceID)
-        try store.updateWorkspaceTooltip(id: workspace.id, tooltip: tooltip)
+        try store.updateWorkspaceNotes(id: workspace.id, notes: notes)
     }
 
     public func updateWorkspaceHidden(workspaceID: String, isHidden: Bool) throws {
@@ -288,13 +288,13 @@ public final class WorkspaceOrchestrator {
     }
 
     public func updateWorkspaceMetadata(
-        workspaceID: String, title: String? = nil, branch: String? = nil, directoryName: String? = nil, tooltip: String?? = nil
+        workspaceID: String, title: String? = nil, branch: String? = nil, directoryName: String? = nil, notes: String?? = nil
     ) throws {
         let (project, workspace) = try resolveWorkspace(id: workspaceID)
         var updatedTitle = workspace.title
         var updatedBranch = workspace.branch
         var updatedDirname = workspace.dirname
-        var updatedTooltip = workspace.tooltip
+        var updatedNotes = workspace.notes
         var didChange = false
 
         if let title {
@@ -343,9 +343,9 @@ public final class WorkspaceOrchestrator {
             }
         }
 
-        if let tooltip {
-            if tooltip != workspace.tooltip {
-                updatedTooltip = tooltip
+        if let notes {
+            if notes != workspace.notes {
+                updatedNotes = notes
                 didChange = true
             }
         }
@@ -354,13 +354,13 @@ public final class WorkspaceOrchestrator {
         if workspace.isDefault {
             if updatedBranch != workspace.branch { try store.updateWorkspaceBranch(id: workspace.id, branch: updatedBranch) }
             if updatedDirname != workspace.dirname { try store.updateWorkspaceDirname(id: workspace.id, dirname: updatedDirname) }
-            if updatedTooltip != workspace.tooltip { try store.updateWorkspaceTooltip(id: workspace.id, tooltip: updatedTooltip) }
+            if updatedNotes != workspace.notes { try store.updateWorkspaceNotes(id: workspace.id, notes: updatedNotes) }
             return
         }
         let updatedWorkspace = WorkspaceRecord(
             id: workspace.id, projectID: workspace.projectID, title: updatedTitle, dir: workspace.dir, dirname: updatedDirname, branch: updatedBranch,
             targetBranch: workspace.targetBranch, isDefault: workspace.isDefault, isArchived: workspace.isArchived, isHidden: workspace.isHidden,
-            isRunning: workspace.isRunning, lastLaunchedAt: workspace.lastLaunchedAt, tooltip: updatedTooltip)
+            isRunning: workspace.isRunning, lastLaunchedAt: workspace.lastLaunchedAt, notes: updatedNotes)
         try store.upsert(workspace: updatedWorkspace)
     }
 
@@ -593,7 +593,7 @@ public final class WorkspaceOrchestrator {
                         id: workspace.id, projectID: workspace.projectID, title: workspace.title, dir: workspace.dir, dirname: workspace.dirname,
                         branch: worktree.branchName, targetBranch: workspace.targetBranch, isDefault: workspace.isDefault,
                         isArchived: workspace.isArchived, isHidden: workspace.isHidden, isRunning: workspace.isRunning,
-                        lastLaunchedAt: workspace.lastLaunchedAt, tooltip: workspace.tooltip)
+                        lastLaunchedAt: workspace.lastLaunchedAt, notes: workspace.notes)
                     try store.upsert(workspace: updatedWorkspace)
                 }
 

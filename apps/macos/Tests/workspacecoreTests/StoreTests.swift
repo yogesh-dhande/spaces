@@ -36,8 +36,9 @@ final class StoreTests: XCTestCase {
         let workspacePortDefinitionColumns = try readTableColumns(dbURL: dbURL, table: "workspace_port_definitions")
         let projectPortDefinitionColumns = try readTableColumns(dbURL: dbURL, table: "project_port_definitions")
         let workspaceForeignKeys = try readSingleInteger(dbURL: dbURL, sql: "SELECT COUNT(*) FROM pragma_foreign_key_list('workspaces')")
-        XCTAssertEqual(version, 2)
+        XCTAssertEqual(version, 3)
         XCTAssertTrue(workspaceColumns.contains("title"))
+        XCTAssertTrue(workspaceColumns.contains("notes"))
         XCTAssertTrue(workspaceColumns.contains("is_hidden"))
         XCTAssertTrue(projectColumns.contains("is_collapsed"))
         XCTAssertFalse(workspaceSettingsColumns.contains("updated_at"))
@@ -59,24 +60,24 @@ final class StoreTests: XCTestCase {
         _ = try SQLiteStore(path: dbURL.path)
         _ = try SQLiteStore(path: dbURL.path)
 
-        XCTAssertEqual(try readSingleInteger(dbURL: dbURL, sql: "SELECT current_version FROM migration_state"), 2)
+        XCTAssertEqual(try readSingleInteger(dbURL: dbURL, sql: "SELECT current_version FROM migration_state"), 3)
         XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent("backups").path))
     }
 
-    // Tests a released v1 database migrates in place by arranging representative data and asserting v2 state, backup creation, and integrity validation.
-    func testSchemaV1MigratesToV2AndPreservesData() throws {
+    // Tests a released v1 database migrates in place by arranging representative data and asserting current state, backup creation, and integrity validation.
+    func testSchemaV1MigratesToCurrentVersionAndPreservesData() throws {
         let root = try makeTempDirectory()
         let dbURL = root.appendingPathComponent("migrating.db")
         try createSchemaV1Fixture(dbURL: dbURL)
 
         let store = try SQLiteStore(path: dbURL.path)
 
-        XCTAssertEqual(try readSingleInteger(dbURL: dbURL, sql: "SELECT current_version FROM migration_state"), 2)
+        XCTAssertEqual(try readSingleInteger(dbURL: dbURL, sql: "SELECT current_version FROM migration_state"), 3)
         XCTAssertEqual(try readSingleText(dbURL: dbURL, sql: "PRAGMA integrity_check"), "ok")
         XCTAssertEqual(try readSingleInteger(dbURL: dbURL, sql: "SELECT COUNT(*) FROM pragma_foreign_key_list('workspace_processes')"), 1)
         XCTAssertEqual(try store.projects().count, 1)
         XCTAssertEqual(try store.project(id: "project-1")?.ports.first?.name, "API_PORT")
-        XCTAssertEqual(try store.workspace(id: "workspace-1")?.tooltip, "Feature tooltip")
+        XCTAssertEqual(try store.workspace(id: "workspace-1")?.notes, "Feature tooltip")
         XCTAssertEqual(try store.workspaceProcesses(workspaceID: "workspace-1").first?.name, "api")
         XCTAssertEqual(try store.workspaceBrowserSessions(workspaceID: "workspace-1").first?.url, "https://example.com")
         XCTAssertEqual(try store.agentWindows(workspaceID: "workspace-1").first?.label, "Codex")
@@ -84,7 +85,7 @@ final class StoreTests: XCTestCase {
 
         let backups = try FileManager.default.contentsOfDirectory(at: root.appendingPathComponent("backups"), includingPropertiesForKeys: nil)
         XCTAssertEqual(backups.count, 1)
-        XCTAssertTrue(backups[0].lastPathComponent.contains("-v1-to-v2.sqlite3"))
+        XCTAssertTrue(backups[0].lastPathComponent.contains("-v1-to-v3.sqlite3"))
     }
 
     // Tests unsupported future schemas fail closed by arranging a DB ahead of the current code and asserting the startup error avoids reset instructions.

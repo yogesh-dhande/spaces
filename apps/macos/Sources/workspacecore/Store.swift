@@ -147,7 +147,7 @@ public final class SQLiteStore {
         try withImmediateTransaction {
             try execute(
                 sql: """
-                    INSERT INTO workspaces(id, project_id, title, dir, dirname, branch, target_branch, is_default, is_archived, is_hidden, is_running, last_launched_at, tooltip)
+                    INSERT INTO workspaces(id, project_id, title, dir, dirname, branch, target_branch, is_default, is_archived, is_hidden, is_running, last_launched_at, notes)
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(id) DO UPDATE SET
                       title = excluded.title,
@@ -160,12 +160,12 @@ public final class SQLiteStore {
                       is_hidden = excluded.is_hidden,
                       is_running = excluded.is_running,
                       last_launched_at = excluded.last_launched_at,
-                      tooltip = excluded.tooltip
+                      notes = excluded.notes
                     """,
                 bindings: [
                     workspace.id, workspace.projectID, workspace.title, workspace.dir, workspace.dirname ?? "", workspace.branch ?? "",
                     workspace.targetBranch ?? "", workspace.isDefault ? "1" : "0", workspace.isArchived ? "1" : "0", workspace.isHidden ? "1" : "0",
-                    workspace.isRunning ? "1" : "0", workspace.lastLaunchedAt ?? "", workspace.tooltip ?? "",
+                    workspace.isRunning ? "1" : "0", workspace.lastLaunchedAt ?? "", workspace.notes ?? "",
                 ])
             try execute(sql: "DELETE FROM ignored_worktrees WHERE worktree_dir = ?", bindings: [workspace.dir])
         }
@@ -175,7 +175,7 @@ public final class SQLiteStore {
         guard
             let row = try queryRow(
                 sql: """
-                    SELECT id, project_id, title, dir, dirname, branch, target_branch, is_default, is_archived, is_hidden, is_running, last_launched_at, tooltip
+                    SELECT id, project_id, title, dir, dirname, branch, target_branch, is_default, is_archived, is_hidden, is_running, last_launched_at, notes
                     FROM workspaces WHERE id = ?
                     """, bindings: [id])
         else { return nil }
@@ -188,7 +188,7 @@ public final class SQLiteStore {
         guard
             let row = try queryRow(
                 sql: """
-                    SELECT id, project_id, title, dir, dirname, branch, target_branch, is_default, is_archived, is_hidden, is_running, last_launched_at, tooltip
+                    SELECT id, project_id, title, dir, dirname, branch, target_branch, is_default, is_archived, is_hidden, is_running, last_launched_at, notes
                     FROM workspaces WHERE project_id = ? AND title = ?
                     """, bindings: [projectID, title])
         else { return nil }
@@ -199,7 +199,7 @@ public final class SQLiteStore {
         guard
             let row = try queryRow(
                 sql: """
-                    SELECT id, project_id, title, dir, dirname, branch, target_branch, is_default, is_archived, is_hidden, is_running, last_launched_at, tooltip
+                    SELECT id, project_id, title, dir, dirname, branch, target_branch, is_default, is_archived, is_hidden, is_running, last_launched_at, notes
                     FROM workspaces WHERE dir = ?
                     """, bindings: [dir])
         else { return nil }
@@ -209,7 +209,7 @@ public final class SQLiteStore {
     public func workspaces(projectID: String, includeArchived: Bool = false) throws -> [WorkspaceRecord] {
         let rows = try queryRows(
             sql: """
-                SELECT id, project_id, title, dir, dirname, branch, target_branch, is_default, is_archived, is_hidden, is_running, last_launched_at, tooltip
+                SELECT id, project_id, title, dir, dirname, branch, target_branch, is_default, is_archived, is_hidden, is_running, last_launched_at, notes
                 FROM workspaces
                 WHERE project_id = ? AND (? = '1' OR is_archived = 0)
                 ORDER BY is_default DESC, title
@@ -267,8 +267,8 @@ public final class SQLiteStore {
         try execute(sql: "UPDATE workspaces SET is_hidden = ? WHERE id = ?", bindings: [isHidden ? "1" : "0", id])
     }
 
-    public func updateWorkspaceTooltip(id: String, tooltip: String?) throws {
-        try execute(sql: "UPDATE workspaces SET tooltip = ? WHERE id = ?", bindings: [tooltip ?? "", id])
+    public func updateWorkspaceNotes(id: String, notes: String?) throws {
+        try execute(sql: "UPDATE workspaces SET notes = ? WHERE id = ?", bindings: [notes ?? "", id])
     }
 
     public func updateWorkspaceTitle(id: String, title: String) throws {
@@ -841,7 +841,7 @@ public final class SQLiteStore {
         return WorkspaceRecord(
             id: row[0], projectID: row[1], title: row[2], dir: row[3], dirname: row[4].isEmpty ? nil : row[4], branch: row[5].isEmpty ? nil : row[5],
             targetBranch: row[6].isEmpty ? nil : row[6], isDefault: row[7] == "1", isArchived: row[8] == "1", isHidden: row[9] != "0",
-            isRunning: row[10] == "1", lastLaunchedAt: row[11].isEmpty ? nil : row[11], tooltip: row[12].isEmpty ? nil : row[12])
+            isRunning: row[10] == "1", lastLaunchedAt: row[11].isEmpty ? nil : row[11], notes: row[12].isEmpty ? nil : row[12])
     }
 
     private func decodeRunningProcess(row: [String]) -> RunningProcessRecord? {

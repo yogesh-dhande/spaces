@@ -186,7 +186,7 @@ These are examples of how the general guidelines apply to important parts of the
 ### Workspace Detail
 - Workspace detail is a good example of when a single scrollable page is better than multiple tabs.
 - A compact header, thin metadata rows, and stacked sections work well for dense operational data.
-- The current path row, tooltip editor, and resource sections are examples of how to surface detail without turning the page into a generic settings form.
+- The current path row, notes editor, and resource sections are examples of how to surface detail without turning the page into a generic settings form.
 
 ### Sidebar Navigation
 - Two-line rows are appropriate when an item has one clear identity and one important secondary piece of metadata.

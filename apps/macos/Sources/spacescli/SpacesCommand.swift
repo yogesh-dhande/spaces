@@ -11,7 +11,7 @@ public struct SpacesCommand: ParsableCommand {
               - All settings are stored in ~/.spaces/spaces.db.
               - Runtime state is stored in ~/.spaces/spaces.db and migrated in place with additive schema changes.
               - Paths default to the current directory when omitted.
-              - `workspace import` registers the current directory by default and can apply `--title` or `--tooltip` when creating or re-importing a workspace.
+              - `workspace import` registers the current directory by default and can apply `--title` or `--notes` when creating or re-importing a workspace.
               - `workspace update` mutates workspace metadata after creation.
               - `workspace path` prints the absolute directory of the workspace so shells can copy or `cd` into it.
               - `workspace up` waits for pending/running setup to complete and fails with the setup error if setup failed. It ensures a workspace and all its processes are running: launches when stopped; when already running, restarts any exited processes. Windows open without activating the app. Add `--restart` to force a full stop+launch. Add `--focus <name>` to bring one named workspace window to the foreground after launch.
@@ -55,7 +55,7 @@ struct WorkspaceImportCommand: ParsableCommand {
 
     @Option(name: .long, help: "Workspace title override.") var title: String?
 
-    @Option(name: .long, help: "Workspace tooltip override.") var tooltip: String?
+    @Option(name: .long, help: "Workspace notes override.") var notes: String?
 
     func run() throws {
         let context = CLIContext()
@@ -65,8 +65,8 @@ struct WorkspaceImportCommand: ParsableCommand {
         let workspace: WorkspaceRecord
 
         if let existing = try orchestrator.store.workspace(dir: normalizedImportDirectory), !existing.isArchived {
-            if title != nil || tooltip != nil {
-                try orchestrator.updateWorkspaceMetadata(workspaceID: existing.id, title: title, tooltip: tooltip != nil ? .some(tooltip) : nil)
+            if title != nil || notes != nil {
+                try orchestrator.updateWorkspaceMetadata(workspaceID: existing.id, title: title, notes: notes != nil ? .some(notes) : nil)
             }
 
             workspace = try orchestrator.store.workspace(id: existing.id) ?? existing
@@ -77,8 +77,8 @@ struct WorkspaceImportCommand: ParsableCommand {
         }
 
         var created = try orchestrator.createWorkspaceFromWorktree(worktreePath: importDirectory, name: title)
-        if let tooltip {
-            try orchestrator.updateWorkspaceMetadata(workspaceID: created.id, tooltip: .some(tooltip))
+        if let notes {
+            try orchestrator.updateWorkspaceMetadata(workspaceID: created.id, notes: .some(notes))
             created = try requireWorkspace(id: created.id, orchestrator: orchestrator)
         }
 
@@ -97,10 +97,10 @@ struct WorkspaceUpdateCommand: ParsableCommand {
 
     @Option(name: .long, help: "Workspace title override.") var title: String?
 
-    @Option(name: .long, help: "Workspace tooltip override.") var tooltip: String?
+    @Option(name: .long, help: "Workspace notes override.") var notes: String?
 
     func validate() throws {
-        if title == nil && tooltip == nil { throw ValidationError("Specify at least one field to update with `--title` or `--tooltip`.") }
+        if title == nil && notes == nil { throw ValidationError("Specify at least one field to update with `--title` or `--notes`.") }
     }
 
     func run() throws {
@@ -108,7 +108,7 @@ struct WorkspaceUpdateCommand: ParsableCommand {
         let orchestrator = try context.makeOrchestrator()
         let workspace = try requireWorkspace(path: path, orchestrator: orchestrator, context: context)
 
-        try orchestrator.updateWorkspaceMetadata(workspaceID: workspace.id, title: title, tooltip: tooltip != nil ? .some(tooltip) : nil)
+        try orchestrator.updateWorkspaceMetadata(workspaceID: workspace.id, title: title, notes: notes != nil ? .some(notes) : nil)
 
         let updatedWorkspace = try requireWorkspace(id: workspace.id, orchestrator: orchestrator)
         try context.output.emit(

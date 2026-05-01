@@ -88,7 +88,7 @@ struct WorkspaceSummaryPayload: Encodable {
     let isArchived: Bool
     let isHidden: Bool
     let isDefault: Bool
-    let tooltip: String?
+    let notes: String?
 }
 
 extension WorkspaceSummaryPayload {
@@ -102,7 +102,7 @@ extension WorkspaceSummaryPayload {
         isArchived = value.isArchived
         isHidden = value.isHidden
         isDefault = value.isDefault
-        tooltip = value.tooltip
+        notes = value.notes
     }
 }
 
