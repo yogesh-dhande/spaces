@@ -54,11 +54,19 @@ public final class WorkspaceOrchestrator {
         let hookSessionID: String?
     }
 
-    private enum WorkspaceNavigationCursor: Equatable {
+    private enum WorkspaceNavigationCursor: Hashable {
+        case agent(String)
+        case process(String)
         case terminal(String)
         case browserWindowURL(Int, String)
         case browserURL(String)
         case window(Int)
+    }
+
+    private struct WorkspaceNavigationCycleSession {
+        let orderedCursors: [WorkspaceNavigationCursor]
+        var currentIndex: Int
+        var lastUsedAt: Date
     }
 
     private enum WorkspaceNavigationTarget {
@@ -94,11 +102,15 @@ public final class WorkspaceOrchestrator {
     private var workspaceSetupInFlight: Set<String> = []
     private let windowNavigationLock = NSLock()
     private var windowNavigationCursorByWorkspace: [String: WorkspaceNavigationCursor] = [:]
+    private var windowNavigationHistoryByWorkspace: [String: [WorkspaceNavigationCursor]] = [:]
+    private var windowNavigationCycleSessionByWorkspace: [String: WorkspaceNavigationCycleSession] = [:]
     private let browserScanCacheLock = NSLock()
     private var browserWindowScanCacheByWorkspace: [String: BrowserWindowScanCacheEntry] = [:]
     private let itermTerminalSessionLock = NSLock()
     private var itermTerminalSessionByWorkspaceAndWindowID: [String: ItermTerminalSessionMetadata] = [:]
     private let terminalFocusPulseController: TerminalFocusPulseControlling
+    private let windowNavigationCycleSessionTimeout: TimeInterval = 2
+    private let windowNavigationHistoryLimit = 64
 
     public init(
         store: SQLiteStore, projectsRootDirectory: URL? = nil, workspacesRootDirectory: URL? = nil, git: GitClient = .init(),
@@ -1305,22 +1317,25 @@ public final class WorkspaceOrchestrator {
         logCycleProfile(
             "workspace=\(workspaceID) stage=current_target direction=\(direction) resolved_index=\(currentIndex.map(String.init) ?? "nil") elapsed_ms=\(elapsedMS(since: currentIndexStartedAt))"
         )
+        let cycleOrdering = cycleTargetOrdering(workspaceID: workspaceID, targets: targets, currentIndex: currentIndex)
+        let orderedTargets = cycleOrdering.indices.map { targets[$0] }
+        let orderedCurrentIndex = cycleOrdering.currentIndex
         let targetIndex: Int
-        if let currentIndex {
-            targetIndex = (currentIndex + delta + targets.count) % targets.count
+        if let orderedCurrentIndex {
+            targetIndex = (orderedCurrentIndex + delta + orderedTargets.count) % orderedTargets.count
         } else if delta > 0 {
             targetIndex = 0
         } else {
-            targetIndex = targets.count - 1
+            targetIndex = orderedTargets.count - 1
         }
         var resolvedTargetIndex = targetIndex
         var ok = false
-        for attempt in 0..<targets.count {
-            let candidateIndex = (targetIndex + (attempt * delta) + (targets.count * 4)) % targets.count
+        for attempt in 0..<orderedTargets.count {
+            let candidateIndex = (targetIndex + (attempt * delta) + (orderedTargets.count * 4)) % orderedTargets.count
             let focusTargetStartedAt = currentDate()
-            let candidateFocused = try focusNavigationTarget(targets[candidateIndex], workspaceID: workspaceID)
+            let candidateFocused = try focusNavigationTarget(orderedTargets[candidateIndex], workspaceID: workspaceID)
             logCycleProfile(
-                "workspace=\(workspaceID) stage=focus_target direction=\(direction) attempt=\(attempt) index=\(candidateIndex) target=\(navigationTargetDebugName(targets[candidateIndex])) success=\(candidateFocused ? "1" : "0") elapsed_ms=\(elapsedMS(since: focusTargetStartedAt))"
+                "workspace=\(workspaceID) stage=focus_target direction=\(direction) attempt=\(attempt) index=\(candidateIndex) target=\(navigationTargetDebugName(orderedTargets[candidateIndex])) success=\(candidateFocused ? "1" : "0") elapsed_ms=\(elapsedMS(since: focusTargetStartedAt))"
             )
             guard candidateFocused else { continue }
             resolvedTargetIndex = candidateIndex
@@ -1329,16 +1344,18 @@ public final class WorkspaceOrchestrator {
         }
         if ok {
             let activeWorkspaceStartedAt = currentDate()
-            setWindowNavigationCursor(navigationCursor(for: targets[resolvedTargetIndex]), workspaceID: workspaceID)
+            rememberNavigationTarget(orderedTargets[resolvedTargetIndex], workspaceID: workspaceID, asCycleNavigation: true)
+            setWindowNavigationCycleSession(
+                workspaceID: workspaceID, orderedCursors: orderedTargets.compactMap(navigationCursor(for:)), currentIndex: resolvedTargetIndex)
             try setActiveWorkspace(id: workspaceID)
             logCycleProfile(
                 "workspace=\(workspaceID) stage=set_active direction=\(direction) elapsed_ms=\(elapsedMS(since: activeWorkspaceStartedAt))")
         }
         logCycleProfile(
-            "workspace=\(workspaceID) direction=\(direction) total_ms=\(elapsedMS(since: cycleStartedAt)) target=\(navigationTargetDebugName(targets[resolvedTargetIndex])) success=\(ok ? "1" : "0")"
+            "workspace=\(workspaceID) direction=\(direction) total_ms=\(elapsedMS(since: cycleStartedAt)) target=\(navigationTargetDebugName(orderedTargets[resolvedTargetIndex])) success=\(ok ? "1" : "0")"
         )
         logPerfMetric(
-            "window_cycle", workspaceID: workspaceID, target: navigationTargetDebugName(targets[resolvedTargetIndex]),
+            "window_cycle", workspaceID: workspaceID, target: navigationTargetDebugName(orderedTargets[resolvedTargetIndex]),
             detail: "direction=\(direction)", elapsedMS: elapsedMS(since: cycleStartedAt), success: ok)
     }
 
@@ -1466,18 +1483,14 @@ public final class WorkspaceOrchestrator {
 
     private func navigationCursor(for target: WorkspaceNavigationTarget) -> WorkspaceNavigationCursor? {
         switch target {
-        case .agent(let record):
-            if let terminalID = terminalTargetID(record: record), !terminalID.isEmpty { return .terminal(terminalID) }
-            if let windowID = record.windowID ?? record.yabaiWindowID { return .window(windowID) }
+        case .agent(let record): return .agent(record.id)
+        case .process(let process): return .process(process.id)
         case .browser(let window):
             if let browserURL = window.targetURL, !browserURL.isEmpty, let windowID = window.windowID {
                 return .browserWindowURL(windowID, browserURL)
             }
             if let browserURL = window.targetURL, !browserURL.isEmpty { return .browserURL(browserURL) }
             if let windowID = window.windowID { return .window(windowID) }
-        case .process(let process):
-            if let terminalID = terminalTargetID(process: process), !terminalID.isEmpty { return .terminal(terminalID) }
-            if let windowID = process.windowID { return .window(windowID) }
         case .window(let window):
             if let terminalID = terminalTargetID(window: window), !terminalID.isEmpty { return .terminal(terminalID) }
             if let windowID = window.windowID { return .window(windowID) }
@@ -1547,8 +1560,91 @@ public final class WorkspaceOrchestrator {
         }
     }
 
-    private func rememberNavigationTarget(_ target: WorkspaceNavigationTarget, workspaceID: String) {
-        setWindowNavigationCursor(navigationCursor(for: target), workspaceID: workspaceID)
+    private func cycleTargetOrdering(workspaceID: String, targets: [WorkspaceNavigationTarget], currentIndex: Int?) -> (
+        indices: [Int], currentIndex: Int?
+    ) {
+        let targetCursors = targets.map(navigationCursor(for:))
+        if let session = windowNavigationCycleSession(workspaceID: workspaceID, now: currentDate()),
+            let sessionIndices = sessionTargetIndices(session: session, targetCursors: targetCursors)
+        {
+            let resolvedCurrentIndex =
+                if let currentIndex, let cursor = targetCursors[currentIndex] {
+                    sessionIndices.firstIndex(where: { targetCursors[$0] == cursor }) ?? session.currentIndex
+                } else { session.currentIndex }
+            return (sessionIndices, resolvedCurrentIndex)
+        }
+
+        let history = windowNavigationHistory(workspaceID: workspaceID)
+        let historyRanks = Dictionary(uniqueKeysWithValues: history.enumerated().map { ($1, $0) })
+        let orderedIndices = targets.indices.sorted { lhs, rhs in
+            let lhsRank = targetCursors[lhs].flatMap { historyRanks[$0] } ?? Int.max
+            let rhsRank = targetCursors[rhs].flatMap { historyRanks[$0] } ?? Int.max
+            if lhsRank != rhsRank { return lhsRank > rhsRank }
+            return lhs < rhs
+        }
+        return (orderedIndices, currentIndex.flatMap { originalIndex in orderedIndices.firstIndex(of: originalIndex) })
+    }
+
+    private func sessionTargetIndices(session: WorkspaceNavigationCycleSession, targetCursors: [WorkspaceNavigationCursor?]) -> [Int]? {
+        var remainingIndicesByCursor: [WorkspaceNavigationCursor: [Int]] = [:]
+        for (index, cursor) in targetCursors.enumerated() {
+            guard let cursor else { return nil }
+            remainingIndicesByCursor[cursor, default: []].append(index)
+        }
+        var orderedIndices: [Int] = []
+        for cursor in session.orderedCursors {
+            guard var indices = remainingIndicesByCursor[cursor], let nextIndex = indices.first else { return nil }
+            orderedIndices.append(nextIndex)
+            indices.removeFirst()
+            remainingIndicesByCursor[cursor] = indices.isEmpty ? nil : indices
+        }
+        for (_, indices) in remainingIndicesByCursor.sorted(by: { $0.value[0] < $1.value[0] }) { orderedIndices.append(contentsOf: indices) }
+        return orderedIndices
+    }
+
+    private func rememberNavigationTarget(_ target: WorkspaceNavigationTarget, workspaceID: String, asCycleNavigation: Bool = false) {
+        updateWindowNavigationState(navigationCursor(for: target), workspaceID: workspaceID, asCycleNavigation: asCycleNavigation)
+    }
+
+    private func updateWindowNavigationState(_ cursor: WorkspaceNavigationCursor?, workspaceID: String, asCycleNavigation: Bool) {
+        windowNavigationLock.lock()
+        defer { windowNavigationLock.unlock() }
+        if let cursor {
+            windowNavigationCursorByWorkspace[workspaceID] = cursor
+            var history = windowNavigationHistoryByWorkspace[workspaceID] ?? []
+            history.removeAll(where: { $0 == cursor })
+            history.insert(cursor, at: 0)
+            if history.count > windowNavigationHistoryLimit { history.removeLast(history.count - windowNavigationHistoryLimit) }
+            windowNavigationHistoryByWorkspace[workspaceID] = history
+            if !asCycleNavigation { windowNavigationCycleSessionByWorkspace.removeValue(forKey: workspaceID) }
+        } else {
+            windowNavigationCursorByWorkspace.removeValue(forKey: workspaceID)
+            windowNavigationCycleSessionByWorkspace.removeValue(forKey: workspaceID)
+        }
+    }
+
+    private func setWindowNavigationCycleSession(workspaceID: String, orderedCursors: [WorkspaceNavigationCursor], currentIndex: Int) {
+        windowNavigationLock.lock()
+        windowNavigationCycleSessionByWorkspace[workspaceID] = WorkspaceNavigationCycleSession(
+            orderedCursors: orderedCursors, currentIndex: currentIndex, lastUsedAt: currentDate())
+        windowNavigationLock.unlock()
+    }
+
+    private func windowNavigationHistory(workspaceID: String) -> [WorkspaceNavigationCursor] {
+        windowNavigationLock.lock()
+        defer { windowNavigationLock.unlock() }
+        return windowNavigationHistoryByWorkspace[workspaceID] ?? []
+    }
+
+    private func windowNavigationCycleSession(workspaceID: String, now: Date) -> WorkspaceNavigationCycleSession? {
+        windowNavigationLock.lock()
+        defer { windowNavigationLock.unlock() }
+        guard let session = windowNavigationCycleSessionByWorkspace[workspaceID] else { return nil }
+        guard now.timeIntervalSince(session.lastUsedAt) <= windowNavigationCycleSessionTimeout else {
+            windowNavigationCycleSessionByWorkspace.removeValue(forKey: workspaceID)
+            return nil
+        }
+        return session
     }
 
     private func sanitizedFocusName(_ value: String?) -> String? {
@@ -2631,16 +2727,22 @@ public final class WorkspaceOrchestrator {
 
     public func setGUIHotkey(_ raw: String?) throws { try store.setSetting(key: SettingsKey.guiHotkey, value: raw) }
 
+    public func guiCommandPaletteHotkey() throws -> String {
+        try store.setting(key: SettingsKey.guiCommandPaletteHotkey) ?? SettingsKey.defaultGUICommandPaletteHotkey
+    }
+
+    public func setGUICommandPaletteHotkey(_ raw: String?) throws { try store.setSetting(key: SettingsKey.guiCommandPaletteHotkey, value: raw) }
+
     public func guiLeaderHotkey() throws -> String { HotkeySpec.normalizedModifierSet(try guiLeaderModifiers()) }
 
     public func setGUILeaderHotkey(_ raw: String?) throws { try store.setSetting(key: SettingsKey.guiLeaderHotkey, value: raw) }
 
-    public func guiDashboardShortcut() throws -> String {
-        try effectiveLeaderBackedShortcut(settingKey: SettingsKey.guiDashboardShortcut, defaultValue: SettingsKey.defaultGUIDashboardShortcut)
+    public func guiAlertsShortcut() throws -> String {
+        try effectiveLeaderBackedShortcut(settingKey: SettingsKey.guiAlertsShortcut, defaultValue: SettingsKey.defaultGUIAlertsShortcut)
     }
 
-    public func setGUIDashboardShortcut(_ raw: String?) throws {
-        try store.setSetting(key: SettingsKey.guiDashboardShortcut, value: try normalizeLeaderBackedShortcut(raw))
+    public func setGUIAlertsShortcut(_ raw: String?) throws {
+        try store.setSetting(key: SettingsKey.guiAlertsShortcut, value: try normalizeLeaderBackedShortcut(raw))
     }
 
     public func guiAddProjectShortcut() throws -> String {
@@ -2713,29 +2815,20 @@ public final class WorkspaceOrchestrator {
 
     public func setGUIWindowShortcut(_ raw: String?) throws { try store.setSetting(key: SettingsKey.guiWindowShortcut, value: raw) }
 
-    public func guiWindowSequenceShortcut() throws -> String {
-        try effectiveLeaderBackedShortcut(
-            settingKey: SettingsKey.guiWindowSequenceShortcut, defaultValue: SettingsKey.defaultGUIWindowSequenceShortcut)
-    }
-
-    public func setGUIWindowSequenceShortcut(_ raw: String?) throws {
-        try store.setSetting(key: SettingsKey.guiWindowSequenceShortcut, value: try normalizeLeaderBackedShortcut(raw))
-    }
-
-    public func dashboardDismissedAttentionItemIDs() throws -> Set<String> {
-        guard let raw = try store.setting(key: SettingsKey.dashboardDismissedAttentionItems), !raw.isEmpty else { return [] }
+    public func alertsDismissedAttentionItemIDs() throws -> Set<String> {
+        guard let raw = try store.setting(key: SettingsKey.alertsDismissedAttentionItems), !raw.isEmpty else { return [] }
         guard let data = raw.data(using: .utf8) else { return [] }
         let decoded = (try? JSONDecoder().decode([String].self, from: data)) ?? []
         return Set(decoded)
     }
 
-    public func setDashboardDismissedAttentionItemIDs(_ ids: Set<String>) throws {
+    public func setAlertsDismissedAttentionItemIDs(_ ids: Set<String>) throws {
         guard !ids.isEmpty else {
-            try store.setSetting(key: SettingsKey.dashboardDismissedAttentionItems, value: nil)
+            try store.setSetting(key: SettingsKey.alertsDismissedAttentionItems, value: nil)
             return
         }
         let encoded = try JSONEncoder().encode(ids.sorted())
-        try store.setSetting(key: SettingsKey.dashboardDismissedAttentionItems, value: String(decoding: encoded, as: UTF8.self))
+        try store.setSetting(key: SettingsKey.alertsDismissedAttentionItems, value: String(decoding: encoded, as: UTF8.self))
     }
 
     private func guiLeaderModifiers() throws -> Set<HotkeyModifier> {

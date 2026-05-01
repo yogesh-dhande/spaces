@@ -7,7 +7,7 @@ import Testing
         #expect(AppKitController.activationSelectionTarget(focusedWorkspaceID: "workspace-focused") == .workspace("workspace-focused"))
     }
 
-    @Test func activationShowsDashboardWhenFocusedWindowIsNotTracked() {
-        #expect(AppKitController.activationSelectionTarget(focusedWorkspaceID: nil) == .dashboard)
+    @Test func activationShowsAlertsWhenFocusedWindowIsNotTracked() {
+        #expect(AppKitController.activationSelectionTarget(focusedWorkspaceID: nil) == .alerts)
     }
 }

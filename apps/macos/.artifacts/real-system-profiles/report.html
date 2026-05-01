@@ -1,0 +1,955 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Spaces Real-System Profiling</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+      --bg: #f4efe8;
+      --panel: #fffdf9;
+      --text: #1f2328;
+      --muted: #5f6b76;
+      --border: #d9cfc1;
+      --accent: #8f3b2e;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #181512;
+        --panel: #221d18;
+        --text: #f6efe5;
+        --muted: #c3b3a1;
+        --border: #4b4035;
+        --accent: #f3a36b;
+      }
+    }
+    body {
+      margin: 0;
+      font-family: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: linear-gradient(180deg, var(--bg), color-mix(in srgb, var(--bg) 82%, var(--accent)));
+      color: var(--text);
+    }
+    main {
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 32px 20px 56px;
+    }
+    h1 {
+      margin: 0 0 8px;
+      font-size: 2rem;
+    }
+    p {
+      color: var(--muted);
+    }
+    .metric {
+      margin-top: 24px;
+      padding: 20px;
+      border: 1px solid var(--border);
+      border-radius: 18px;
+      background: var(--panel);
+      box-shadow: 0 16px 40px rgba(0, 0, 0, 0.08);
+    }
+    .meta {
+      margin-bottom: 4px;
+    }
+    .samples {
+      margin-top: 0;
+      overflow-wrap: anywhere;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin-top: 12px;
+      font-size: 0.95rem;
+    }
+    th, td {
+      text-align: left;
+      padding: 10px 8px;
+      border-top: 1px solid var(--border);
+      vertical-align: top;
+    }
+    thead th {
+      color: var(--muted);
+      font-weight: 600;
+    }
+    tbody tr {
+      transition: background-color 120ms ease;
+    }
+    code {
+      font-family: ui-monospace, "SFMono-Regular", Menlo, monospace;
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Spaces Real-System Profiling</h1>
+    <p>Aggregated from clean and dirty worktree runs of <code>apps/macos/Tests/e2e_real_system.sh</code>. Dirty revisions are labeled as <code>HEAD+fingerprint</code>.</p>
+    <section class="metric">
+  <h2>browser_tracked_tab.keyboard_cycle_previous.terminal_tracked_tab</h2>
+  <p class="meta">Host: <code>Ghostty</code> · Workspace scope: <code>primary</code></p>
+  <p>Recorded during the Ghostty primary-workspace real-system scenario, this metric measures how long Spaces takes to cycle backward from the tracked browser tab to the tracked terminal tab.</p>
+  <p class="samples">Latest samples: <code>129</code></p>
+  <table>
+    <thead>
+      <tr>
+        <th>Snapshot</th>
+        <th>Timestamp</th>
+        <th>Branch</th>
+        <th>Revision</th>
+        <th>State</th>
+        <th>Machine</th>
+        <th>Model</th>
+        <th>Avg ms</th>
+        <th>Min ms</th>
+        <th>Max ms</th>
+        <th>Count</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr style="background-color: rgba(253, 234, 206, 0.21);"><th>Best</th><td>2026-05-01T21:54:58Z</td><td>alerts-command-palette</td><td><code>29a56c1ddb50+26f2eceae6e3</code></td><td>dirty</td><td>yogesh-mac-2024</td><td>Mac16,7</td><td>125.0</td><td>125</td><td>125</td><td>1</td></tr>
+      <tr style="background-color: rgba(253, 234, 206, 0.21);"><th>Previous</th><td>2026-05-01T21:54:58Z</td><td>alerts-command-palette</td><td><code>29a56c1ddb50+26f2eceae6e3</code></td><td>dirty</td><td>yogesh-mac-2024</td><td>Mac16,7</td><td>125.0</td><td>125</td><td>125</td><td>1</td></tr>
+      <tr style="background-color: rgba(253, 233, 206, 0.21);"><th>Latest</th><td>2026-05-01T22:47:50Z</td><td>alerts-command-palette</td><td><code>29a56c1ddb50+c4f5ef5fa437</code></td><td>dirty</td><td>yogesh-mac-2024</td><td>Mac16,7</td><td>129.0</td><td>129</td><td>129</td><td>1</td></tr>
+    </tbody>
+  </table>
+</section><section class="metric">
+  <h2>browser_tracked_tab.keyboard_cycle_previous.terminal_tracked_tab</h2>
+  <p class="meta">Host: <code>Ghostty</code> · Workspace scope: <code>secondary</code></p>
+  <p>Recorded during the Ghostty secondary-workspace real-system scenario, this metric measures how long Spaces takes to cycle backward from the tracked browser tab to the tracked terminal tab.</p>
+  <p class="samples">Latest samples: <code>129</code></p>
+  <table>
+    <thead>
+      <tr>
+        <th>Snapshot</th>
+        <th>Timestamp</th>
+        <th>Branch</th>
+        <th>Revision</th>
+        <th>State</th>
+        <th>Machine</th>
+        <th>Model</th>
+        <th>Avg ms</th>
+        <th>Min ms</th>
+        <th>Max ms</th>
+        <th>Count</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr style="background-color: rgba(253, 234, 206, 0.21);"><th>Best</th><td>2026-05-01T21:54:58Z</td><td>alerts-command-palette</td><td><code>29a56c1ddb50+26f2eceae6e3</code></td><td>dirty</td><td>yogesh-mac-2024</td><td>Mac16,7</td><td>125.0</td><td>125</td><td>125</td><td>1</td></tr>
+      <tr style="background-color: rgba(253, 234, 206, 0.21);"><th>Previous</th><td>2026-05-01T21:54:58Z</td><td>alerts-command-palette</td><td><code>29a56c1ddb50+26f2eceae6e3</code></td><td>dirty</td><td>yogesh-mac-2024</td><td>Mac16,7</td><td>125.0</td><td>125</td><td>125</td><td>1</td></tr>
+      <tr style="background-color: rgba(253, 233, 206, 0.21);"><th>Latest</th><td>2026-05-01T22:47:50Z</td><td>alerts-command-palette</td><td><code>29a56c1ddb50+c4f5ef5fa437</code></td><td>dirty</td><td>yogesh-mac-2024</td><td>Mac16,7</td><td>129.0</td><td>129</td><td>129</td><td>1</td></tr>
+    </tbody>
+  </table>
+</section><section class="metric">
+  <h2>browser_tracked_tab.keyboard_cycle_previous.terminal_tracked_tab</h2>
+  <p class="meta">Host: <code>Ghostty</code> · Workspace scope: <code>single</code></p>
+  <p>Recorded during the Ghostty single-workspace real-system scenario, this metric measures how long Spaces takes to cycle backward from the tracked browser tab to the tracked terminal tab.</p>
+  <p class="samples">Latest samples: <code>142</code></p>
+  <table>
+    <thead>
+      <tr>
+        <th>Snapshot</th>
+        <th>Timestamp</th>
+        <th>Branch</th>
+        <th>Revision</th>
+        <th>State</th>
+        <th>Machine</th>
+        <th>Model</th>
+        <th>Avg ms</th>
+        <th>Min ms</th>
+        <th>Max ms</th>
+        <th>Count</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr style="background-color: rgba(253, 233, 206, 0.21);"><th>Best</th><td>2026-05-01T17:33:56Z</td><td>alerts-command-palette</td><td><code>336955a34e3d+cf08f5ba04dc</code></td><td>dirty</td><td>yogesh-mac-2024</td><td>Mac16,7</td><td>128.0</td><td>128</td><td>128</td><td>1</td></tr>
+      <tr style="background-color: rgba(253, 232, 205, 0.21);"><th>Previous</th><td>2026-05-01T21:54:58Z</td><td>alerts-command-palette</td><td><code>29a56c1ddb50+26f2eceae6e3</code></td><td>dirty</td><td>yogesh-mac-2024</td><td>Mac16,7</td><td>149.0</td><td>149</td><td>149</td><td>1</td></tr>
+      <tr style="background-color: rgba(253, 233, 205, 0.21);"><th>Latest</th><td>2026-05-01T22:47:50Z</td><td>alerts-command-palette</td><td><code>29a56c1ddb50+c4f5ef5fa437</code></td><td>dirty</td><td>yogesh-mac-2024</td><td>Mac16,7</td><td>142.0</td><td>142</td><td>142</td><td>1</td></tr>
+    </tbody>
+  </table>
+</section><section class="metric">
+  <h2>browser_tracked_tab.keyboard_cycle_previous.terminal_tracked_tab</h2>
+  <p class="meta">Host: <code>iTerm2</code> · Workspace scope: <code>primary</code></p>
+  <p>Recorded during the iTerm2 primary-workspace real-system scenario, this metric measures how long Spaces takes to cycle backward from the tracked browser tab to the tracked terminal tab.</p>
+  <p class="samples">Latest samples: <code>148</code></p>
+  <table>
+    <thead>
+      <tr>
+        <th>Snapshot</th>
+        <th>Timestamp</th>
+        <th>Branch</th>
+        <th>Revision</th>
+        <th>State</th>
+        <th>Machine</th>
+        <th>Model</th>
+        <th>Avg ms</th>
+        <th>Min ms</th>
+        <th>Max ms</th>
+        <th>Count</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr style="background-color: rgba(253, 234, 206, 0.21);"><th>Best</th><td>2026-05-01T21:54:58Z</td><td>alerts-command-palette</td><td><code>29a56c1ddb50+26f2eceae6e3</code></td><td>dirty</td><td>yogesh-mac-2024</td><td>Mac16,7</td><td>126.0</td><td>126</td><td>126</td><td>1</td></tr>
+      <tr style="background-color: rgba(253, 234, 206, 0.21);"><th>Previous</th><td>2026-05-01T21:54:58Z</td><td>alerts-command-palette</td><td><code>29a56c1ddb50+26f2eceae6e3</code></td><td>dirty</td><td>yogesh-mac-2024</td><td>Mac16,7</td><td>126.0</td><td>126</td><td>126</td><td>1</td></tr>
+      <tr style="background-color: rgba(253, 232, 205, 0.21);"><th>Latest</th><td>2026-05-01T22:47:50Z</td><td>alerts-command-palette</td><td><code>29a56c1ddb50+c4f5ef5fa437</code></td><td>dirty</td><td>yogesh-mac-2024</td><td>Mac16,7</td><td>148.0</td><td>148</td><td>148</td><td>1</td></tr>
+    </tbody>
+  </table>
+</section><section class="metric">
+  <h2>browser_tracked_tab.keyboard_cycle_previous.terminal_tracked_tab</h2>
+  <p class="meta">Host: <code>iTerm2</code> · Workspace scope: <code>secondary</code></p>
+  <p>Recorded during the iTerm2 secondary-workspace real-system scenario, this metric measures how long Spaces takes to cycle backward from the tracked browser tab to the tracked terminal tab.</p>
+  <p class="samples">Latest samples: <code>148</code></p>
+  <table>
+    <thead>
+      <tr>
+        <th>Snapshot</th>
+        <th>Timestamp</th>
+        <th>Branch</th>
+        <th>Revision</th>
+        <th>State</th>
+        <th>Machine</th>
+        <th>Model</th>
+        <th>Avg ms</th>
+        <th>Min ms</th>
+        <th>Max ms</th>
+        <th>Count</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr style="background-color: rgba(253, 234, 206, 0.21);"><th>Best</th><td>2026-05-01T21:54:58Z</td><td>alerts-command-palette</td><td><code>29a56c1ddb50+26f2eceae6e3</code></td><td>dirty</td><td>yogesh-mac-2024</td><td>Mac16,7</td><td>126.0</td><td>126</td><td>126</td><td>1</td></tr>
+      <tr style="background-color: rgba(253, 234, 206, 0.21);"><th>Previous</th><td>2026-05-01T21:54:58Z</td><td>alerts-command-palette</td><td><code>29a56c1ddb50+26f2eceae6e3</code></td><td>dirty</td><td>yogesh-mac-2024</td><td>Mac16,7</td><td>126.0</td><td>126</td><td>126</td><td>1</td></tr>
+      <tr style="background-color: rgba(253, 232, 205, 0.21);"><th>Latest</th><td>2026-05-01T22:47:50Z</td><td>alerts-command-palette</td><td><code>29a56c1ddb50+c4f5ef5fa437</code></td><td>dirty</td><td>yogesh-mac-2024</td><td>Mac16,7</td><td>148.0</td><td>148</td><td>148</td><td>1</td></tr>
+    </tbody>
+  </table>
+</section><section class="metric">
+  <h2>browser_tracked_tab.keyboard_cycle_previous.terminal_tracked_tab</h2>
+  <p class="meta">Host: <code>iTerm2</code> · Workspace scope: <code>single</code></p>
+  <p>Recorded during the iTerm2 single-workspace real-system scenario, this metric measures how long Spaces takes to cycle backward from the tracked browser tab to the tracked terminal tab.</p>
+  <p class="samples">Latest samples: <code>137</code></p>
+  <table>
+    <thead>
+      <tr>
+        <th>Snapshot</th>
+        <th>Timestamp</th>
+        <th>Branch</th>
+        <th>Revision</th>
+        <th>State</th>
+        <th>Machine</th>
+        <th>Model</th>
+        <th>Avg ms</th>
+        <th>Min ms</th>
+        <th>Max ms</th>
+        <th>Count</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr style="background-color: rgba(253, 234, 206, 0.21);"><th>Best</th><td>2026-05-01T18:21:04Z</td><td>alerts-command-palette</td><td><code>efe7ae6b2b12+a59685e1974b</code></td><td>dirty</td><td>yogesh-mac-2024</td><td>Mac16,7</td><td>125.0</td><td>125</td><td>125</td><td>1</td></tr>
+      <tr style="background-color: rgba(253, 233, 206, 0.21);"><th>Previous</th><td>2026-05-01T21:54:58Z</td><td>alerts-command-palette</td><td><code>29a56c1ddb50+26f2eceae6e3</code></td><td>dirty</td><td>yogesh-mac-2024</td><td>Mac16,7</td><td>131.0</td><td>131</td><td>131</td><td>1</td></tr>
+      <tr style="background-color: rgba(253, 233, 205, 0.21);"><th>Latest</th><td>2026-05-01T22:47:50Z</td><td>alerts-command-palette</td><td><code>29a56c1ddb50+c4f5ef5fa437</code></td><td>dirty</td><td>yogesh-mac-2024</td><td>Mac16,7</td><td>137.0</td><td>137</td><td>137</td><td>1</td></tr>
+    </tbody>
+  </table>
+</section><section class="metric">
+  <h2>browser_untracked_tab.cli_window_focus.browser_tracked_tab</h2>
+  <p class="meta">Host: <code>Ghostty</code> · Workspace scope: <code>single</code></p>
+  <p>Recorded during the Ghostty single-workspace real-system scenario, this metric measures how long Spaces takes to use CLI window focus to move from an untracked browser tab back to the tracked browser tab.</p>
+  <p class="samples">Latest samples: <code>242</code></p>
+  <table>
+    <thead>
+      <tr>
+        <th>Snapshot</th>
+        <th>Timestamp</th>
+        <th>Branch</th>
+        <th>Revision</th>
+        <th>State</th>
+        <th>Machine</th>
+        <th>Model</th>
+        <th>Avg ms</th>
+        <th>Min ms</th>
+        <th>Max ms</th>
+        <th>Count</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr style="background-color: rgba(253, 233, 205, 0.21);"><th>Best</th><td>2026-05-01T21:54:58Z</td><td>alerts-command-palette</td><td><code>29a56c1ddb50+26f2eceae6e3</code></td><td>dirty</td><td>yogesh-mac-2024</td><td>Mac16,7</td><td>139.0</td><td>139</td><td>139</td><td>1</td></tr>
+      <tr style="background-color: rgba(253, 233, 205, 0.21);"><th>Previous</th><td>2026-05-01T21:54:58Z</td><td>alerts-command-palette</td><td><code>29a56c1ddb50+26f2eceae6e3</code></td><td>dirty</td><td>yogesh-mac-2024</td><td>Mac16,7</td><td>139.0</td><td>139</td><td>139</td><td>1</td></tr>
+      <tr style="background-color: rgba(252, 227, 199, 0.23);"><th>Latest</th><td>2026-05-01T22:47:50Z</td><td>alerts-command-palette</td><td><code>29a56c1ddb50+c4f5ef5fa437</code></td><td>dirty</td><td>yogesh-mac-2024</td><td>Mac16,7</td><td>242.0</td><td>242</td><td>242</td><td>1</td></tr>
+    </tbody>
+  </table>
+</section><section class="metric">
+  <h2>browser_untracked_tab.cli_window_focus.browser_tracked_tab</h2>
+  <p class="meta">Host: <code>iTerm2</code> · Workspace scope: <code>single</code></p>
+  <p>Recorded during the iTerm2 single-workspace real-system scenario, this metric measures how long Spaces takes to use CLI window focus to move from an untracked browser tab back to the tracked browser tab.</p>
+  <p class="samples">Latest samples: <code>227</code></p>
+  <table>
+    <thead>
+      <tr>
+        <th>Snapshot</th>
+        <th>Timestamp</th>
+        <th>Branch</th>
+        <th>Revision</th>
+        <th>State</th>
+        <th>Machine</th>
+        <th>Model</th>
+        <th>Avg ms</th>
+        <th>Min ms</th>
+        <th>Max ms</th>
+        <th>Count</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr style="background-color: rgba(252, 228, 200, 0.23);"><th>Best</th><td>2026-05-01T21:54:58Z</td><td>alerts-command-palette</td><td><code>29a56c1ddb50+26f2eceae6e3</code></td><td>dirty</td><td>yogesh-mac-2024</td><td>Mac16,7</td><td>220.0</td><td>220</td><td>220</td><td>1</td></tr>
+      <tr style="background-color: rgba(252, 228, 200, 0.23);"><th>Previous</th><td>2026-05-01T21:54:58Z</td><td>alerts-command-palette</td><td><code>29a56c1ddb50+26f2eceae6e3</code></td><td>dirty</td><td>yogesh-mac-2024</td><td>Mac16,7</td><td>220.0</td><td>220</td><td>220</td><td>1</td></tr>
+      <tr style="background-color: rgba(252, 228, 200, 0.23);"><th>Latest</th><td>2026-05-01T22:47:50Z</td><td>alerts-command-palette</td><td><code>29a56c1ddb50+c4f5ef5fa437</code></td><td>dirty</td><td>yogesh-mac-2024</td><td>Mac16,7</td><td>227.0</td><td>227</td><td>227</td><td>1</td></tr>
+    </tbody>
+  </table>
+</section><section class="metric">
+  <h2>external_app.keyboard_toggle_main_window.main_window</h2>
+  <p class="meta">Host: <code>Ghostty</code> · Workspace scope: <code>single</code></p>
+  <p>Recorded during the Ghostty single-workspace real-system scenario, this metric measures how long Spaces takes to show the main app window when another app is frontmost.</p>
+  <p class="samples">Latest samples: <code>131,130,135,133,135</code></p>
+  <table>
+    <thead>
+      <tr>
+        <th>Snapshot</th>
+        <th>Timestamp</th>
+        <th>Branch</th>
+        <th>Revision</th>
+        <th>State</th>
+        <th>Machine</th>
+        <th>Model</th>
+        <th>Avg ms</th>
+        <th>Min ms</th>
+        <th>Max ms</th>
+        <th>Count</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr style="background-color: rgba(253, 234, 206, 0.21);"><th>Best</th><td>2026-05-01T18:43:55Z</td><td>alerts-command-palette</td><td><code>efe7ae6b2b12+c6593eebda54</code></td><td>dirty</td><td>yogesh-mac-2024</td><td>Mac16,7</td><td>122.3</td><td>112</td><td>129</td><td>3</td></tr>
+      <tr style="background-color: rgba(253, 233, 206, 0.21);"><th>Previous</th><td>2026-05-01T21:54:58Z</td><td>alerts-command-palette</td><td><code>29a56c1ddb50+26f2eceae6e3</code></td><td>dirty</td><td>yogesh-mac-2024</td><td>Mac16,7</td><td>129.2</td><td>120</td><td>135</td><td>5</td></tr>
+      <tr style="background-color: rgba(253, 233, 206, 0.21);"><th>Latest</th><td>2026-05-01T22:47:50Z</td><td>alerts-command-palette</td><td><code>29a56c1ddb50+c4f5ef5fa437</code></td><td>dirty</td><td>yogesh-mac-2024</td><td>Mac16,7</td><td>132.8</td><td>130</td><td>135</td><td>5</td></tr>
+    </tbody>
+  </table>
+</section><section class="metric">
+  <h2>external_app.keyboard_toggle_main_window.main_window</h2>
+  <p class="meta">Host: <code>iTerm2</code> · Workspace scope: <code>single</code></p>
+  <p>Recorded during the iTerm2 single-workspace real-system scenario, this metric measures how long Spaces takes to show the main app window when another app is frontmost.</p>
+  <p class="samples">Latest samples: <code>119,134,130,126,129</code></p>
+  <table>
+    <thead>
+      <tr>
+        <th>Snapshot</th>
+        <th>Timestamp</th>
+        <th>Branch</th>
+        <th>Revision</th>
+        <th>State</th>
+        <th>Machine</th>
+        <th>Model</th>
+        <th>Avg ms</th>
+        <th>Min ms</th>
+        <th>Max ms</th>
+        <th>Count</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr style="background-color: rgba(253, 234, 206, 0.21);"><th>Best</th><td>2026-05-01T18:47:40Z</td><td>alerts-command-palette</td><td><code>efe7ae6b2b12+6b8b0369170a</code></td><td>dirty</td><td>yogesh-mac-2024</td><td>Mac16,7</td><td>120.0</td><td>120</td><td>120</td><td>1</td></tr>
+      <tr style="background-color: rgba(253, 233, 206, 0.21);"><th>Previous</th><td>2026-05-01T21:54:58Z</td><td>alerts-command-palette</td><td><code>29a56c1ddb50+26f2eceae6e3</code></td><td>dirty</td><td>yogesh-mac-2024</td><td>Mac16,7</td><td>131.4</td><td>119</td><td>147</td><td>5</td></tr>
+      <tr style="background-color: rgba(253, 233, 206, 0.21);"><th>Latest</th><td>2026-05-01T22:47:50Z</td><td>alerts-command-palette</td><td><code>29a56c1ddb50+c4f5ef5fa437</code></td><td>dirty</td><td>yogesh-mac-2024</td><td>Mac16,7</td><td>127.6</td><td>119</td><td>134</td><td>5</td></tr>
+    </tbody>
+  </table>
+</section><section class="metric">
+  <h2>external_app.keyboard_toggle_palette.palette</h2>
+  <p class="meta">Host: <code>Ghostty</code> · Workspace scope: <code>single</code></p>
+  <p>Recorded during the Ghostty single-workspace real-system scenario, this metric measures how long Spaces takes to show the command palette when another app is frontmost.</p>
+  <p class="samples">Latest samples: <code>4,4,4,4,4</code></p>
+  <table>
+    <thead>
+      <tr>
+        <th>Snapshot</th>
+        <th>Timestamp</th>
+        <th>Branch</th>
+        <th>Revision</th>
+        <th>State</th>
+        <th>Machine</th>
+        <th>Model</th>
+        <th>Avg ms</th>
+        <th>Min ms</th>
+        <th>Max ms</th>
+        <th>Count</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr style="background-color: rgba(254, 240, 213, 0.18);"><th>Best</th><td>2026-05-01T22:47:50Z</td><td>alerts-command-palette</td><td><code>29a56c1ddb50+c4f5ef5fa437</code></td><td>dirty</td><td>yogesh-mac-2024</td><td>Mac16,7</td><td>4.0</td><td>4</td><td>4</td><td>5</td></tr>
+      <tr style="background-color: rgba(254, 240, 213, 0.18);"><th>Previous</th><td>2026-05-01T21:54:58Z</td><td>alerts-command-palette</td><td><code>29a56c1ddb50+26f2eceae6e3</code></td><td>dirty</td><td>yogesh-mac-2024</td><td>Mac16,7</td><td>5.0</td><td>4</td><td>6</td><td>5</td></tr>
+      <tr style="background-color: rgba(254, 240, 213, 0.18);"><th>Latest</th><td>2026-05-01T22:47:50Z</td><td>alerts-command-palette</td><td><code>29a56c1ddb50+c4f5ef5fa437</code></td><td>dirty</td><td>yogesh-mac-2024</td><td>Mac16,7</td><td>4.0</td><td>4</td><td>4</td><td>5</td></tr>
+    </tbody>
+  </table>
+</section><section class="metric">
+  <h2>external_app.keyboard_toggle_palette.palette</h2>
+  <p class="meta">Host: <code>iTerm2</code> · Workspace scope: <code>single</code></p>
+  <p>Recorded during the iTerm2 single-workspace real-system scenario, this metric measures how long Spaces takes to show the command palette when another app is frontmost.</p>
+  <p class="samples">Latest samples: <code>13,3,4,4,4</code></p>
+  <table>
+    <thead>
+      <tr>
+        <th>Snapshot</th>
+        <th>Timestamp</th>
+        <th>Branch</th>
+        <th>Revision</th>
+        <th>State</th>
+        <th>Machine</th>
+        <th>Model</th>
+        <th>Avg ms</th>
+        <th>Min ms</th>
+        <th>Max ms</th>
+        <th>Count</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr style="background-color: rgba(254, 240, 213, 0.18);"><th>Best</th><td>2026-05-01T22:47:50Z</td><td>alerts-command-palette</td><td><code>29a56c1ddb50+c4f5ef5fa437</code></td><td>dirty</td><td>yogesh-mac-2024</td><td>Mac16,7</td><td>5.6</td><td>3</td><td>13</td><td>5</td></tr>
+      <tr style="background-color: rgba(254, 240, 213, 0.18);"><th>Previous</th><td>2026-05-01T21:54:58Z</td><td>alerts-command-palette</td><td><code>29a56c1ddb50+26f2eceae6e3</code></td><td>dirty</td><td>yogesh-mac-2024</td><td>Mac16,7</td><td>7.6</td><td>5</td><td>16</td><td>5</td></tr>
+      <tr style="background-color: rgba(254, 240, 213, 0.18);"><th>Latest</th><td>2026-05-01T22:47:50Z</td><td>alerts-command-palette</td><td><code>29a56c1ddb50+c4f5ef5fa437</code></td><td>dirty</td><td>yogesh-mac-2024</td><td>Mac16,7</td><td>5.6</td><td>3</td><td>13</td><td>5</td></tr>
+    </tbody>
+  </table>
+</section><section class="metric">
+  <h2>main_window.keyboard_toggle_main_window.external_app</h2>
+  <p class="meta">Host: <code>Ghostty</code> · Workspace scope: <code>single</code></p>
+  <p>Recorded during the Ghostty single-workspace real-system scenario, this metric measures how long Spaces takes to hide the main app window and return focus away from Spaces.</p>
+  <p class="samples">Latest samples: <code>0,0,0,2,0</code></p>
+  <table>
+    <thead>
+      <tr>
+        <th>Snapshot</th>
+        <th>Timestamp</th>
+        <th>Branch</th>
+        <th>Revision</th>
+        <th>State</th>
+        <th>Machine</th>
+        <th>Model</th>
+        <th>Avg ms</th>
+        <th>Min ms</th>
+        <th>Max ms</th>
+        <th>Count</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr style="background-color: rgba(255, 241, 214, 0.18);"><th>Best</th><td>2026-05-01T17:33:56Z</td><td>alerts-command-palette</td><td><code>336955a34e3d+cf08f5ba04dc</code></td><td>dirty</td><td>yogesh-mac-2024</td><td>Mac16,7</td><td>0.0</td><td>0</td><td>0</td><td>5</td></tr>
+      <tr style="background-color: rgba(255, 241, 214, 0.18);"><th>Previous</th><td>2026-05-01T21:54:58Z</td><td>alerts-command-palette</td><td><code>29a56c1ddb50+26f2eceae6e3</code></td><td>dirty</td><td>yogesh-mac-2024</td><td>Mac16,7</td><td>0.0</td><td>0</td><td>0</td><td>5</td></tr>
+      <tr style="background-color: rgba(254, 240, 213, 0.18);"><th>Latest</th><td>2026-05-01T22:47:50Z</td><td>alerts-command-palette</td><td><code>29a56c1ddb50+c4f5ef5fa437</code></td><td>dirty</td><td>yogesh-mac-2024</td><td>Mac16,7</td><td>0.4</td><td>0</td><td>2</td><td>5</td></tr>
+    </tbody>
+  </table>
+</section><section class="metric">
+  <h2>main_window.keyboard_toggle_main_window.external_app</h2>
+  <p class="meta">Host: <code>iTerm2</code> · Workspace scope: <code>single</code></p>
+  <p>Recorded during the iTerm2 single-workspace real-system scenario, this metric measures how long Spaces takes to hide the main app window and return focus away from Spaces.</p>
+  <p class="samples">Latest samples: <code>0,0,0,0,0</code></p>
+  <table>
+    <thead>
+      <tr>
+        <th>Snapshot</th>
+        <th>Timestamp</th>
+        <th>Branch</th>
+        <th>Revision</th>
+        <th>State</th>
+        <th>Machine</th>
+        <th>Model</th>
+        <th>Avg ms</th>
+        <th>Min ms</th>
+        <th>Max ms</th>
+        <th>Count</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr style="background-color: rgba(255, 241, 214, 0.18);"><th>Best</th><td>2026-05-01T17:33:56Z</td><td>alerts-command-palette</td><td><code>336955a34e3d+cf08f5ba04dc</code></td><td>dirty</td><td>yogesh-mac-2024</td><td>Mac16,7</td><td>0.0</td><td>0</td><td>0</td><td>5</td></tr>
+      <tr style="background-color: rgba(255, 241, 214, 0.18);"><th>Previous</th><td>2026-05-01T21:54:58Z</td><td>alerts-command-palette</td><td><code>29a56c1ddb50+26f2eceae6e3</code></td><td>dirty</td><td>yogesh-mac-2024</td><td>Mac16,7</td><td>0.0</td><td>0</td><td>0</td><td>5</td></tr>
+      <tr style="background-color: rgba(255, 241, 214, 0.18);"><th>Latest</th><td>2026-05-01T22:47:50Z</td><td>alerts-command-palette</td><td><code>29a56c1ddb50+c4f5ef5fa437</code></td><td>dirty</td><td>yogesh-mac-2024</td><td>Mac16,7</td><td>0.0</td><td>0</td><td>0</td><td>5</td></tr>
+    </tbody>
+  </table>
+</section><section class="metric">
+  <h2>main_window.keyboard_toggle_palette.palette</h2>
+  <p class="meta">Host: <code>Ghostty</code> · Workspace scope: <code>single</code></p>
+  <p>Recorded during the Ghostty single-workspace real-system scenario, this metric measures how long Spaces takes to show the command palette when the main app window is frontmost.</p>
+  <p class="samples">Latest samples: <code>5,6,5,5,6</code></p>
+  <table>
+    <thead>
+      <tr>
+        <th>Snapshot</th>
+        <th>Timestamp</th>
+        <th>Branch</th>
+        <th>Revision</th>
+        <th>State</th>
+        <th>Machine</th>
+        <th>Model</th>
+        <th>Avg ms</th>
+        <th>Min ms</th>
+        <th>Max ms</th>
+        <th>Count</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr style="background-color: rgba(254, 240, 213, 0.18);"><th>Best</th><td>2026-05-01T18:45:50Z</td><td>alerts-command-palette</td><td><code>efe7ae6b2b12+1763ffb421df</code></td><td>dirty</td><td>yogesh-mac-2024</td><td>Mac16,7</td><td>5.3</td><td>5</td><td>6</td><td>3</td></tr>
+      <tr style="background-color: rgba(254, 240, 213, 0.18);"><th>Previous</th><td>2026-05-01T21:54:58Z</td><td>alerts-command-palette</td><td><code>29a56c1ddb50+26f2eceae6e3</code></td><td>dirty</td><td>yogesh-mac-2024</td><td>Mac16,7</td><td>6.0</td><td>6</td><td>6</td><td>5</td></tr>
+      <tr style="background-color: rgba(254, 240, 213, 0.18);"><th>Latest</th><td>2026-05-01T22:47:50Z</td><td>alerts-command-palette</td><td><code>29a56c1ddb50+c4f5ef5fa437</code></td><td>dirty</td><td>yogesh-mac-2024</td><td>Mac16,7</td><td>5.4</td><td>5</td><td>6</td><td>5</td></tr>
+    </tbody>
+  </table>
+</section><section class="metric">
+  <h2>main_window.keyboard_toggle_palette.palette</h2>
+  <p class="meta">Host: <code>iTerm2</code> · Workspace scope: <code>single</code></p>
+  <p>Recorded during the iTerm2 single-workspace real-system scenario, this metric measures how long Spaces takes to show the command palette when the main app window is frontmost.</p>
+  <p class="samples">Latest samples: <code>5,6,5,5,5</code></p>
+  <table>
+    <thead>
+      <tr>
+        <th>Snapshot</th>
+        <th>Timestamp</th>
+        <th>Branch</th>
+        <th>Revision</th>
+        <th>State</th>
+        <th>Machine</th>
+        <th>Model</th>
+        <th>Avg ms</th>
+        <th>Min ms</th>
+        <th>Max ms</th>
+        <th>Count</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr style="background-color: rgba(254, 240, 213, 0.18);"><th>Best</th><td>2026-05-01T22:47:50Z</td><td>alerts-command-palette</td><td><code>29a56c1ddb50+c4f5ef5fa437</code></td><td>dirty</td><td>yogesh-mac-2024</td><td>Mac16,7</td><td>5.2</td><td>5</td><td>6</td><td>5</td></tr>
+      <tr style="background-color: rgba(254, 240, 213, 0.18);"><th>Previous</th><td>2026-05-01T21:54:58Z</td><td>alerts-command-palette</td><td><code>29a56c1ddb50+26f2eceae6e3</code></td><td>dirty</td><td>yogesh-mac-2024</td><td>Mac16,7</td><td>6.4</td><td>5</td><td>9</td><td>5</td></tr>
+      <tr style="background-color: rgba(254, 240, 213, 0.18);"><th>Latest</th><td>2026-05-01T22:47:50Z</td><td>alerts-command-palette</td><td><code>29a56c1ddb50+c4f5ef5fa437</code></td><td>dirty</td><td>yogesh-mac-2024</td><td>Mac16,7</td><td>5.2</td><td>5</td><td>6</td><td>5</td></tr>
+    </tbody>
+  </table>
+</section><section class="metric">
+  <h2>palette.keyboard_toggle_palette.external_app</h2>
+  <p class="meta">Host: <code>Ghostty</code> · Workspace scope: <code>single</code></p>
+  <p>Recorded during the Ghostty single-workspace real-system scenario, this metric measures how long Spaces takes to hide the command palette and return focus away from Spaces.</p>
+  <p class="samples">Latest samples: <code>2,7,3,3,3</code></p>
+  <table>
+    <thead>
+      <tr>
+        <th>Snapshot</th>
+        <th>Timestamp</th>
+        <th>Branch</th>
+        <th>Revision</th>
+        <th>State</th>
+        <th>Machine</th>
+        <th>Model</th>
+        <th>Avg ms</th>
+        <th>Min ms</th>
+        <th>Max ms</th>
+        <th>Count</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr style="background-color: rgba(254, 240, 213, 0.18);"><th>Best</th><td>2026-05-01T17:33:56Z</td><td>alerts-command-palette</td><td><code>336955a34e3d+cf08f5ba04dc</code></td><td>dirty</td><td>yogesh-mac-2024</td><td>Mac16,7</td><td>3.0</td><td>3</td><td>3</td><td>5</td></tr>
+      <tr style="background-color: rgba(254, 240, 213, 0.18);"><th>Previous</th><td>2026-05-01T21:54:58Z</td><td>alerts-command-palette</td><td><code>29a56c1ddb50+26f2eceae6e3</code></td><td>dirty</td><td>yogesh-mac-2024</td><td>Mac16,7</td><td>7.4</td><td>4</td><td>17</td><td>5</td></tr>
+      <tr style="background-color: rgba(254, 240, 213, 0.18);"><th>Latest</th><td>2026-05-01T22:47:50Z</td><td>alerts-command-palette</td><td><code>29a56c1ddb50+c4f5ef5fa437</code></td><td>dirty</td><td>yogesh-mac-2024</td><td>Mac16,7</td><td>3.6</td><td>2</td><td>7</td><td>5</td></tr>
+    </tbody>
+  </table>
+</section><section class="metric">
+  <h2>palette.keyboard_toggle_palette.external_app</h2>
+  <p class="meta">Host: <code>iTerm2</code> · Workspace scope: <code>single</code></p>
+  <p>Recorded during the iTerm2 single-workspace real-system scenario, this metric measures how long Spaces takes to hide the command palette and return focus away from Spaces.</p>
+  <p class="samples">Latest samples: <code>2,3,3,5,3</code></p>
+  <table>
+    <thead>
+      <tr>
+        <th>Snapshot</th>
+        <th>Timestamp</th>
+        <th>Branch</th>
+        <th>Revision</th>
+        <th>State</th>
+        <th>Machine</th>
+        <th>Model</th>
+        <th>Avg ms</th>
+        <th>Min ms</th>
+        <th>Max ms</th>
+        <th>Count</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr style="background-color: rgba(254, 240, 213, 0.18);"><th>Best</th><td>2026-05-01T17:33:56Z</td><td>alerts-command-palette</td><td><code>336955a34e3d+cf08f5ba04dc</code></td><td>dirty</td><td>yogesh-mac-2024</td><td>Mac16,7</td><td>3.0</td><td>2</td><td>4</td><td>5</td></tr>
+      <tr style="background-color: rgba(254, 240, 213, 0.18);"><th>Previous</th><td>2026-05-01T21:54:58Z</td><td>alerts-command-palette</td><td><code>29a56c1ddb50+26f2eceae6e3</code></td><td>dirty</td><td>yogesh-mac-2024</td><td>Mac16,7</td><td>3.6</td><td>3</td><td>4</td><td>5</td></tr>
+      <tr style="background-color: rgba(254, 240, 213, 0.18);"><th>Latest</th><td>2026-05-01T22:47:50Z</td><td>alerts-command-palette</td><td><code>29a56c1ddb50+c4f5ef5fa437</code></td><td>dirty</td><td>yogesh-mac-2024</td><td>Mac16,7</td><td>3.2</td><td>2</td><td>5</td><td>5</td></tr>
+    </tbody>
+  </table>
+</section><section class="metric">
+  <h2>palette.keyboard_toggle_palette.main_window</h2>
+  <p class="meta">Host: <code>Ghostty</code> · Workspace scope: <code>single</code></p>
+  <p>Recorded during the Ghostty single-workspace real-system scenario, this metric measures how long Spaces takes to hide the command palette and return to the main app window.</p>
+  <p class="samples">Latest samples: <code>6,6,4,4,5</code></p>
+  <table>
+    <thead>
+      <tr>
+        <th>Snapshot</th>
+        <th>Timestamp</th>
+        <th>Branch</th>
+        <th>Revision</th>
+        <th>State</th>
+        <th>Machine</th>
+        <th>Model</th>
+        <th>Avg ms</th>
+        <th>Min ms</th>
+        <th>Max ms</th>
+        <th>Count</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr style="background-color: rgba(254, 240, 213, 0.18);"><th>Best</th><td>2026-05-01T18:45:50Z</td><td>alerts-command-palette</td><td><code>efe7ae6b2b12+1763ffb421df</code></td><td>dirty</td><td>yogesh-mac-2024</td><td>Mac16,7</td><td>3.7</td><td>3</td><td>4</td><td>3</td></tr>
+      <tr style="background-color: rgba(254, 240, 213, 0.18);"><th>Previous</th><td>2026-05-01T21:54:58Z</td><td>alerts-command-palette</td><td><code>29a56c1ddb50+26f2eceae6e3</code></td><td>dirty</td><td>yogesh-mac-2024</td><td>Mac16,7</td><td>5.2</td><td>4</td><td>6</td><td>5</td></tr>
+      <tr style="background-color: rgba(254, 240, 213, 0.18);"><th>Latest</th><td>2026-05-01T22:47:50Z</td><td>alerts-command-palette</td><td><code>29a56c1ddb50+c4f5ef5fa437</code></td><td>dirty</td><td>yogesh-mac-2024</td><td>Mac16,7</td><td>5.0</td><td>4</td><td>6</td><td>5</td></tr>
+    </tbody>
+  </table>
+</section><section class="metric">
+  <h2>palette.keyboard_toggle_palette.main_window</h2>
+  <p class="meta">Host: <code>iTerm2</code> · Workspace scope: <code>single</code></p>
+  <p>Recorded during the iTerm2 single-workspace real-system scenario, this metric measures how long Spaces takes to hide the command palette and return to the main app window.</p>
+  <p class="samples">Latest samples: <code>3,7,4,4,4</code></p>
+  <table>
+    <thead>
+      <tr>
+        <th>Snapshot</th>
+        <th>Timestamp</th>
+        <th>Branch</th>
+        <th>Revision</th>
+        <th>State</th>
+        <th>Machine</th>
+        <th>Model</th>
+        <th>Avg ms</th>
+        <th>Min ms</th>
+        <th>Max ms</th>
+        <th>Count</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr style="background-color: rgba(254, 240, 213, 0.18);"><th>Best</th><td>2026-05-01T18:47:40Z</td><td>alerts-command-palette</td><td><code>efe7ae6b2b12+6b8b0369170a</code></td><td>dirty</td><td>yogesh-mac-2024</td><td>Mac16,7</td><td>3.0</td><td>3</td><td>3</td><td>1</td></tr>
+      <tr style="background-color: rgba(254, 240, 213, 0.18);"><th>Previous</th><td>2026-05-01T21:54:58Z</td><td>alerts-command-palette</td><td><code>29a56c1ddb50+26f2eceae6e3</code></td><td>dirty</td><td>yogesh-mac-2024</td><td>Mac16,7</td><td>6.2</td><td>5</td><td>7</td><td>5</td></tr>
+      <tr style="background-color: rgba(254, 240, 213, 0.18);"><th>Latest</th><td>2026-05-01T22:47:50Z</td><td>alerts-command-palette</td><td><code>29a56c1ddb50+c4f5ef5fa437</code></td><td>dirty</td><td>yogesh-mac-2024</td><td>Mac16,7</td><td>4.4</td><td>3</td><td>7</td><td>5</td></tr>
+    </tbody>
+  </table>
+</section><section class="metric">
+  <h2>spaces_detail_ui.keyboard_window_shortcut.browser_tracked_tab</h2>
+  <p class="meta">Host: <code>Ghostty</code> · Workspace scope: <code>single</code></p>
+  <p>Recorded during the Ghostty single-workspace real-system scenario, this metric measures how long Spaces takes to complete a numbered window shortcut from the Spaces detail UI and focus the tracked browser tab.</p>
+  <p class="samples">Latest samples: <code>134</code></p>
+  <table>
+    <thead>
+      <tr>
+        <th>Snapshot</th>
+        <th>Timestamp</th>
+        <th>Branch</th>
+        <th>Revision</th>
+        <th>State</th>
+        <th>Machine</th>
+        <th>Model</th>
+        <th>Avg ms</th>
+        <th>Min ms</th>
+        <th>Max ms</th>
+        <th>Count</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr style="background-color: rgba(253, 234, 206, 0.21);"><th>Best</th><td>2026-05-01T18:54:37Z</td><td>alerts-command-palette</td><td><code>efe7ae6b2b12+0b5edcce0f81</code></td><td>dirty</td><td>yogesh-mac-2024</td><td>Mac16,7</td><td>121.0</td><td>121</td><td>121</td><td>1</td></tr>
+      <tr style="background-color: rgba(253, 234, 206, 0.21);"><th>Previous</th><td>2026-05-01T21:54:58Z</td><td>alerts-command-palette</td><td><code>29a56c1ddb50+26f2eceae6e3</code></td><td>dirty</td><td>yogesh-mac-2024</td><td>Mac16,7</td><td>127.0</td><td>127</td><td>127</td><td>1</td></tr>
+      <tr style="background-color: rgba(253, 233, 205, 0.21);"><th>Latest</th><td>2026-05-01T22:47:50Z</td><td>alerts-command-palette</td><td><code>29a56c1ddb50+c4f5ef5fa437</code></td><td>dirty</td><td>yogesh-mac-2024</td><td>Mac16,7</td><td>134.0</td><td>134</td><td>134</td><td>1</td></tr>
+    </tbody>
+  </table>
+</section><section class="metric">
+  <h2>spaces_detail_ui.keyboard_window_shortcut.browser_tracked_tab</h2>
+  <p class="meta">Host: <code>iTerm2</code> · Workspace scope: <code>single</code></p>
+  <p>Recorded during the iTerm2 single-workspace real-system scenario, this metric measures how long Spaces takes to complete a numbered window shortcut from the Spaces detail UI and focus the tracked browser tab.</p>
+  <p class="samples">Latest samples: <code>127</code></p>
+  <table>
+    <thead>
+      <tr>
+        <th>Snapshot</th>
+        <th>Timestamp</th>
+        <th>Branch</th>
+        <th>Revision</th>
+        <th>State</th>
+        <th>Machine</th>
+        <th>Model</th>
+        <th>Avg ms</th>
+        <th>Min ms</th>
+        <th>Max ms</th>
+        <th>Count</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr style="background-color: rgba(253, 234, 206, 0.21);"><th>Best</th><td>2026-05-01T21:54:58Z</td><td>alerts-command-palette</td><td><code>29a56c1ddb50+26f2eceae6e3</code></td><td>dirty</td><td>yogesh-mac-2024</td><td>Mac16,7</td><td>125.0</td><td>125</td><td>125</td><td>1</td></tr>
+      <tr style="background-color: rgba(253, 234, 206, 0.21);"><th>Previous</th><td>2026-05-01T21:54:58Z</td><td>alerts-command-palette</td><td><code>29a56c1ddb50+26f2eceae6e3</code></td><td>dirty</td><td>yogesh-mac-2024</td><td>Mac16,7</td><td>125.0</td><td>125</td><td>125</td><td>1</td></tr>
+      <tr style="background-color: rgba(253, 234, 206, 0.21);"><th>Latest</th><td>2026-05-01T22:47:50Z</td><td>alerts-command-palette</td><td><code>29a56c1ddb50+c4f5ef5fa437</code></td><td>dirty</td><td>yogesh-mac-2024</td><td>Mac16,7</td><td>127.0</td><td>127</td><td>127</td><td>1</td></tr>
+    </tbody>
+  </table>
+</section><section class="metric">
+  <h2>spaces_detail_ui.keyboard_window_shortcut.process_tracked_tab</h2>
+  <p class="meta">Host: <code>Ghostty</code> · Workspace scope: <code>single</code></p>
+  <p>Recorded during the Ghostty single-workspace real-system scenario, this metric measures how long Spaces takes to complete a numbered window shortcut from the Spaces detail UI and focus the tracked process tab.</p>
+  <p class="samples">Latest samples: <code>151</code></p>
+  <table>
+    <thead>
+      <tr>
+        <th>Snapshot</th>
+        <th>Timestamp</th>
+        <th>Branch</th>
+        <th>Revision</th>
+        <th>State</th>
+        <th>Machine</th>
+        <th>Model</th>
+        <th>Avg ms</th>
+        <th>Min ms</th>
+        <th>Max ms</th>
+        <th>Count</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr style="background-color: rgba(253, 233, 205, 0.21);"><th>Best</th><td>2026-05-01T18:21:04Z</td><td>alerts-command-palette</td><td><code>efe7ae6b2b12+a59685e1974b</code></td><td>dirty</td><td>yogesh-mac-2024</td><td>Mac16,7</td><td>134.0</td><td>134</td><td>134</td><td>1</td></tr>
+      <tr style="background-color: rgba(253, 231, 204, 0.21);"><th>Previous</th><td>2026-05-01T21:54:58Z</td><td>alerts-command-palette</td><td><code>29a56c1ddb50+26f2eceae6e3</code></td><td>dirty</td><td>yogesh-mac-2024</td><td>Mac16,7</td><td>164.0</td><td>164</td><td>164</td><td>1</td></tr>
+      <tr style="background-color: rgba(253, 232, 204, 0.21);"><th>Latest</th><td>2026-05-01T22:47:50Z</td><td>alerts-command-palette</td><td><code>29a56c1ddb50+c4f5ef5fa437</code></td><td>dirty</td><td>yogesh-mac-2024</td><td>Mac16,7</td><td>151.0</td><td>151</td><td>151</td><td>1</td></tr>
+    </tbody>
+  </table>
+</section><section class="metric">
+  <h2>spaces_detail_ui.keyboard_window_shortcut.process_tracked_tab</h2>
+  <p class="meta">Host: <code>iTerm2</code> · Workspace scope: <code>single</code></p>
+  <p>Recorded during the iTerm2 single-workspace real-system scenario, this metric measures how long Spaces takes to complete a numbered window shortcut from the Spaces detail UI and focus the tracked process tab.</p>
+  <p class="samples">Latest samples: <code>164</code></p>
+  <table>
+    <thead>
+      <tr>
+        <th>Snapshot</th>
+        <th>Timestamp</th>
+        <th>Branch</th>
+        <th>Revision</th>
+        <th>State</th>
+        <th>Machine</th>
+        <th>Model</th>
+        <th>Avg ms</th>
+        <th>Min ms</th>
+        <th>Max ms</th>
+        <th>Count</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr style="background-color: rgba(253, 232, 204, 0.21);"><th>Best</th><td>2026-05-01T19:15:38Z</td><td>alerts-command-palette</td><td><code>c463029f8a46+898919e36459</code></td><td>dirty</td><td>yogesh-mac-2024</td><td>Mac16,7</td><td>152.0</td><td>152</td><td>152</td><td>1</td></tr>
+      <tr style="background-color: rgba(253, 232, 204, 0.21);"><th>Previous</th><td>2026-05-01T21:54:58Z</td><td>alerts-command-palette</td><td><code>29a56c1ddb50+26f2eceae6e3</code></td><td>dirty</td><td>yogesh-mac-2024</td><td>Mac16,7</td><td>152.0</td><td>152</td><td>152</td><td>1</td></tr>
+      <tr style="background-color: rgba(253, 231, 204, 0.21);"><th>Latest</th><td>2026-05-01T22:47:50Z</td><td>alerts-command-palette</td><td><code>29a56c1ddb50+c4f5ef5fa437</code></td><td>dirty</td><td>yogesh-mac-2024</td><td>Mac16,7</td><td>164.0</td><td>164</td><td>164</td><td>1</td></tr>
+    </tbody>
+  </table>
+</section><section class="metric">
+  <h2>terminal_tracked_tab.keyboard_cycle_next.browser_tracked_tab</h2>
+  <p class="meta">Host: <code>Ghostty</code> · Workspace scope: <code>primary</code></p>
+  <p>Recorded during the Ghostty primary-workspace real-system scenario, this metric measures how long Spaces takes to cycle forward from the tracked terminal tab to the tracked browser tab.</p>
+  <p class="samples">Latest samples: <code>158</code></p>
+  <table>
+    <thead>
+      <tr>
+        <th>Snapshot</th>
+        <th>Timestamp</th>
+        <th>Branch</th>
+        <th>Revision</th>
+        <th>State</th>
+        <th>Machine</th>
+        <th>Model</th>
+        <th>Avg ms</th>
+        <th>Min ms</th>
+        <th>Max ms</th>
+        <th>Count</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr style="background-color: rgba(253, 233, 206, 0.21);"><th>Best</th><td>2026-05-01T18:21:04Z</td><td>alerts-command-palette</td><td><code>efe7ae6b2b12+a59685e1974b</code></td><td>dirty</td><td>yogesh-mac-2024</td><td>Mac16,7</td><td>130.0</td><td>130</td><td>130</td><td>1</td></tr>
+      <tr style="background-color: rgba(253, 232, 205, 0.21);"><th>Previous</th><td>2026-05-01T21:54:58Z</td><td>alerts-command-palette</td><td><code>29a56c1ddb50+26f2eceae6e3</code></td><td>dirty</td><td>yogesh-mac-2024</td><td>Mac16,7</td><td>147.0</td><td>147</td><td>147</td><td>1</td></tr>
+      <tr style="background-color: rgba(253, 232, 204, 0.21);"><th>Latest</th><td>2026-05-01T22:47:50Z</td><td>alerts-command-palette</td><td><code>29a56c1ddb50+c4f5ef5fa437</code></td><td>dirty</td><td>yogesh-mac-2024</td><td>Mac16,7</td><td>158.0</td><td>158</td><td>158</td><td>1</td></tr>
+    </tbody>
+  </table>
+</section><section class="metric">
+  <h2>terminal_tracked_tab.keyboard_cycle_next.browser_tracked_tab</h2>
+  <p class="meta">Host: <code>Ghostty</code> · Workspace scope: <code>secondary</code></p>
+  <p>Recorded during the Ghostty secondary-workspace real-system scenario, this metric measures how long Spaces takes to cycle forward from the tracked terminal tab to the tracked browser tab.</p>
+  <p class="samples">Latest samples: <code>158</code></p>
+  <table>
+    <thead>
+      <tr>
+        <th>Snapshot</th>
+        <th>Timestamp</th>
+        <th>Branch</th>
+        <th>Revision</th>
+        <th>State</th>
+        <th>Machine</th>
+        <th>Model</th>
+        <th>Avg ms</th>
+        <th>Min ms</th>
+        <th>Max ms</th>
+        <th>Count</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr style="background-color: rgba(253, 233, 206, 0.21);"><th>Best</th><td>2026-05-01T18:21:04Z</td><td>alerts-command-palette</td><td><code>efe7ae6b2b12+a59685e1974b</code></td><td>dirty</td><td>yogesh-mac-2024</td><td>Mac16,7</td><td>130.0</td><td>130</td><td>130</td><td>1</td></tr>
+      <tr style="background-color: rgba(253, 232, 205, 0.21);"><th>Previous</th><td>2026-05-01T21:54:58Z</td><td>alerts-command-palette</td><td><code>29a56c1ddb50+26f2eceae6e3</code></td><td>dirty</td><td>yogesh-mac-2024</td><td>Mac16,7</td><td>147.0</td><td>147</td><td>147</td><td>1</td></tr>
+      <tr style="background-color: rgba(253, 232, 204, 0.21);"><th>Latest</th><td>2026-05-01T22:47:50Z</td><td>alerts-command-palette</td><td><code>29a56c1ddb50+c4f5ef5fa437</code></td><td>dirty</td><td>yogesh-mac-2024</td><td>Mac16,7</td><td>158.0</td><td>158</td><td>158</td><td>1</td></tr>
+    </tbody>
+  </table>
+</section><section class="metric">
+  <h2>terminal_tracked_tab.keyboard_cycle_next.browser_tracked_tab</h2>
+  <p class="meta">Host: <code>Ghostty</code> · Workspace scope: <code>single</code></p>
+  <p>Recorded during the Ghostty single-workspace real-system scenario, this metric measures how long Spaces takes to cycle forward from the tracked terminal tab to the tracked browser tab.</p>
+  <p class="samples">Latest samples: <code>155</code></p>
+  <table>
+    <thead>
+      <tr>
+        <th>Snapshot</th>
+        <th>Timestamp</th>
+        <th>Branch</th>
+        <th>Revision</th>
+        <th>State</th>
+        <th>Machine</th>
+        <th>Model</th>
+        <th>Avg ms</th>
+        <th>Min ms</th>
+        <th>Max ms</th>
+        <th>Count</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr style="background-color: rgba(253, 233, 206, 0.21);"><th>Best</th><td>2026-05-01T17:33:56Z</td><td>alerts-command-palette</td><td><code>336955a34e3d+cf08f5ba04dc</code></td><td>dirty</td><td>yogesh-mac-2024</td><td>Mac16,7</td><td>131.0</td><td>131</td><td>131</td><td>1</td></tr>
+      <tr style="background-color: rgba(253, 233, 205, 0.21);"><th>Previous</th><td>2026-05-01T21:54:58Z</td><td>alerts-command-palette</td><td><code>29a56c1ddb50+26f2eceae6e3</code></td><td>dirty</td><td>yogesh-mac-2024</td><td>Mac16,7</td><td>145.0</td><td>145</td><td>145</td><td>1</td></tr>
+      <tr style="background-color: rgba(253, 232, 204, 0.21);"><th>Latest</th><td>2026-05-01T22:47:50Z</td><td>alerts-command-palette</td><td><code>29a56c1ddb50+c4f5ef5fa437</code></td><td>dirty</td><td>yogesh-mac-2024</td><td>Mac16,7</td><td>155.0</td><td>155</td><td>155</td><td>1</td></tr>
+    </tbody>
+  </table>
+</section><section class="metric">
+  <h2>terminal_tracked_tab.keyboard_cycle_next.browser_tracked_tab</h2>
+  <p class="meta">Host: <code>iTerm2</code> · Workspace scope: <code>primary</code></p>
+  <p>Recorded during the iTerm2 primary-workspace real-system scenario, this metric measures how long Spaces takes to cycle forward from the tracked terminal tab to the tracked browser tab.</p>
+  <p class="samples">Latest samples: <code>191</code></p>
+  <table>
+    <thead>
+      <tr>
+        <th>Snapshot</th>
+        <th>Timestamp</th>
+        <th>Branch</th>
+        <th>Revision</th>
+        <th>State</th>
+        <th>Machine</th>
+        <th>Model</th>
+        <th>Avg ms</th>
+        <th>Min ms</th>
+        <th>Max ms</th>
+        <th>Count</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr style="background-color: rgba(253, 232, 204, 0.21);"><th>Best</th><td>2026-05-01T17:33:56Z</td><td>alerts-command-palette</td><td><code>336955a34e3d+cf08f5ba04dc</code></td><td>dirty</td><td>yogesh-mac-2024</td><td>Mac16,7</td><td>160.0</td><td>160</td><td>160</td><td>1</td></tr>
+      <tr style="background-color: rgba(253, 231, 203, 0.22);"><th>Previous</th><td>2026-05-01T21:54:58Z</td><td>alerts-command-palette</td><td><code>29a56c1ddb50+26f2eceae6e3</code></td><td>dirty</td><td>yogesh-mac-2024</td><td>Mac16,7</td><td>172.0</td><td>172</td><td>172</td><td>1</td></tr>
+      <tr style="background-color: rgba(253, 230, 202, 0.22);"><th>Latest</th><td>2026-05-01T22:47:50Z</td><td>alerts-command-palette</td><td><code>29a56c1ddb50+c4f5ef5fa437</code></td><td>dirty</td><td>yogesh-mac-2024</td><td>Mac16,7</td><td>191.0</td><td>191</td><td>191</td><td>1</td></tr>
+    </tbody>
+  </table>
+</section><section class="metric">
+  <h2>terminal_tracked_tab.keyboard_cycle_next.browser_tracked_tab</h2>
+  <p class="meta">Host: <code>iTerm2</code> · Workspace scope: <code>secondary</code></p>
+  <p>Recorded during the iTerm2 secondary-workspace real-system scenario, this metric measures how long Spaces takes to cycle forward from the tracked terminal tab to the tracked browser tab.</p>
+  <p class="samples">Latest samples: <code>191</code></p>
+  <table>
+    <thead>
+      <tr>
+        <th>Snapshot</th>
+        <th>Timestamp</th>
+        <th>Branch</th>
+        <th>Revision</th>
+        <th>State</th>
+        <th>Machine</th>
+        <th>Model</th>
+        <th>Avg ms</th>
+        <th>Min ms</th>
+        <th>Max ms</th>
+        <th>Count</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr style="background-color: rgba(253, 232, 204, 0.21);"><th>Best</th><td>2026-05-01T17:33:56Z</td><td>alerts-command-palette</td><td><code>336955a34e3d+cf08f5ba04dc</code></td><td>dirty</td><td>yogesh-mac-2024</td><td>Mac16,7</td><td>160.0</td><td>160</td><td>160</td><td>1</td></tr>
+      <tr style="background-color: rgba(253, 231, 203, 0.22);"><th>Previous</th><td>2026-05-01T21:54:58Z</td><td>alerts-command-palette</td><td><code>29a56c1ddb50+26f2eceae6e3</code></td><td>dirty</td><td>yogesh-mac-2024</td><td>Mac16,7</td><td>172.0</td><td>172</td><td>172</td><td>1</td></tr>
+      <tr style="background-color: rgba(253, 230, 202, 0.22);"><th>Latest</th><td>2026-05-01T22:47:50Z</td><td>alerts-command-palette</td><td><code>29a56c1ddb50+c4f5ef5fa437</code></td><td>dirty</td><td>yogesh-mac-2024</td><td>Mac16,7</td><td>191.0</td><td>191</td><td>191</td><td>1</td></tr>
+    </tbody>
+  </table>
+</section><section class="metric">
+  <h2>terminal_tracked_tab.keyboard_cycle_next.browser_tracked_tab</h2>
+  <p class="meta">Host: <code>iTerm2</code> · Workspace scope: <code>single</code></p>
+  <p>Recorded during the iTerm2 single-workspace real-system scenario, this metric measures how long Spaces takes to cycle forward from the tracked terminal tab to the tracked browser tab.</p>
+  <p class="samples">Latest samples: <code>155</code></p>
+  <table>
+    <thead>
+      <tr>
+        <th>Snapshot</th>
+        <th>Timestamp</th>
+        <th>Branch</th>
+        <th>Revision</th>
+        <th>State</th>
+        <th>Machine</th>
+        <th>Model</th>
+        <th>Avg ms</th>
+        <th>Min ms</th>
+        <th>Max ms</th>
+        <th>Count</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr style="background-color: rgba(253, 232, 204, 0.21);"><th>Best</th><td>2026-05-01T22:47:50Z</td><td>alerts-command-palette</td><td><code>29a56c1ddb50+c4f5ef5fa437</code></td><td>dirty</td><td>yogesh-mac-2024</td><td>Mac16,7</td><td>155.0</td><td>155</td><td>155</td><td>1</td></tr>
+      <tr style="background-color: rgba(253, 231, 204, 0.21);"><th>Previous</th><td>2026-05-01T21:54:58Z</td><td>alerts-command-palette</td><td><code>29a56c1ddb50+26f2eceae6e3</code></td><td>dirty</td><td>yogesh-mac-2024</td><td>Mac16,7</td><td>165.0</td><td>165</td><td>165</td><td>1</td></tr>
+      <tr style="background-color: rgba(253, 232, 204, 0.21);"><th>Latest</th><td>2026-05-01T22:47:50Z</td><td>alerts-command-palette</td><td><code>29a56c1ddb50+c4f5ef5fa437</code></td><td>dirty</td><td>yogesh-mac-2024</td><td>Mac16,7</td><td>155.0</td><td>155</td><td>155</td><td>1</td></tr>
+    </tbody>
+  </table>
+</section><section class="metric">
+  <h2>terminal_untracked_tab.cli_window_focus.process_tracked_tab</h2>
+  <p class="meta">Host: <code>Ghostty</code> · Workspace scope: <code>single</code></p>
+  <p>Recorded during the Ghostty single-workspace real-system scenario, this metric measures how long Spaces takes to use CLI window focus to move from an untracked terminal tab back to the tracked process tab.</p>
+  <p class="samples">Latest samples: <code>145</code></p>
+  <table>
+    <thead>
+      <tr>
+        <th>Snapshot</th>
+        <th>Timestamp</th>
+        <th>Branch</th>
+        <th>Revision</th>
+        <th>State</th>
+        <th>Machine</th>
+        <th>Model</th>
+        <th>Avg ms</th>
+        <th>Min ms</th>
+        <th>Max ms</th>
+        <th>Count</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr style="background-color: rgba(253, 234, 206, 0.21);"><th>Best</th><td>2026-05-01T18:54:37Z</td><td>alerts-command-palette</td><td><code>efe7ae6b2b12+0b5edcce0f81</code></td><td>dirty</td><td>yogesh-mac-2024</td><td>Mac16,7</td><td>127.0</td><td>127</td><td>127</td><td>1</td></tr>
+      <tr style="background-color: rgba(253, 233, 205, 0.21);"><th>Previous</th><td>2026-05-01T21:54:58Z</td><td>alerts-command-palette</td><td><code>29a56c1ddb50+26f2eceae6e3</code></td><td>dirty</td><td>yogesh-mac-2024</td><td>Mac16,7</td><td>140.0</td><td>140</td><td>140</td><td>1</td></tr>
+      <tr style="background-color: rgba(253, 233, 205, 0.21);"><th>Latest</th><td>2026-05-01T22:47:50Z</td><td>alerts-command-palette</td><td><code>29a56c1ddb50+c4f5ef5fa437</code></td><td>dirty</td><td>yogesh-mac-2024</td><td>Mac16,7</td><td>145.0</td><td>145</td><td>145</td><td>1</td></tr>
+    </tbody>
+  </table>
+</section><section class="metric">
+  <h2>terminal_untracked_tab.cli_window_focus.process_tracked_tab</h2>
+  <p class="meta">Host: <code>iTerm2</code> · Workspace scope: <code>single</code></p>
+  <p>Recorded during the iTerm2 single-workspace real-system scenario, this metric measures how long Spaces takes to use CLI window focus to move from an untracked terminal tab back to the tracked process tab.</p>
+  <p class="samples">Latest samples: <code>246</code></p>
+  <table>
+    <thead>
+      <tr>
+        <th>Snapshot</th>
+        <th>Timestamp</th>
+        <th>Branch</th>
+        <th>Revision</th>
+        <th>State</th>
+        <th>Machine</th>
+        <th>Model</th>
+        <th>Avg ms</th>
+        <th>Min ms</th>
+        <th>Max ms</th>
+        <th>Count</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr style="background-color: rgba(252, 227, 199, 0.23);"><th>Best</th><td>2026-05-01T21:54:58Z</td><td>alerts-command-palette</td><td><code>29a56c1ddb50+26f2eceae6e3</code></td><td>dirty</td><td>yogesh-mac-2024</td><td>Mac16,7</td><td>241.0</td><td>241</td><td>241</td><td>1</td></tr>
+      <tr style="background-color: rgba(252, 227, 199, 0.23);"><th>Previous</th><td>2026-05-01T21:54:58Z</td><td>alerts-command-palette</td><td><code>29a56c1ddb50+26f2eceae6e3</code></td><td>dirty</td><td>yogesh-mac-2024</td><td>Mac16,7</td><td>241.0</td><td>241</td><td>241</td><td>1</td></tr>
+      <tr style="background-color: rgba(252, 227, 199, 0.23);"><th>Latest</th><td>2026-05-01T22:47:50Z</td><td>alerts-command-palette</td><td><code>29a56c1ddb50+c4f5ef5fa437</code></td><td>dirty</td><td>yogesh-mac-2024</td><td>Mac16,7</td><td>246.0</td><td>246</td><td>246</td><td>1</td></tr>
+    </tbody>
+  </table>
+</section>
+  </main>
+</body>
+</html>

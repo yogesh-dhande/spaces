@@ -1,0 +1,143 @@
+import Testing
+import workspacecore
+
+@testable import spacesui
+
+@Suite struct CommandPaletteVisibilityTests {
+    private func makeItem(
+        id: String, source: CommandPaletteItem.Source, workspaceID: String, kind: AppKitController.WorkspaceRunShortcutTarget.Kind, label: String,
+        detail: String?, focusRequest: AppKitController.WindowFocusRequest, alertsAttentionID: String? = nil, workspaceTitle: String? = nil,
+        workspaceBranch: String? = "main", projectTitle: String = "Muxy", status: CommandPaletteItem.Status = .none
+    ) -> CommandPaletteItem {
+        CommandPaletteItem(
+            id: id, source: source, alertsAttentionID: alertsAttentionID, workspaceID: workspaceID, workspaceTitle: workspaceTitle ?? workspaceID,
+            workspaceBranch: workspaceBranch, projectTitle: projectTitle, kind: kind, label: label, detail: detail, status: status,
+            focusRequest: focusRequest, recentFocusIdentity: CommandPaletteItem.recentFocusIdentity(for: focusRequest, detail: detail))
+    }
+
+    @Test func paletteContextPrefersPreviouslySelectedWorkspace() {
+        let workspaceID = AppKitController.commandPaletteContextWorkspaceID(
+            selectedWorkspaceID: "workspace-selected", focusedWorkspaceID: { "workspace-focused" })
+
+        #expect(workspaceID == "workspace-selected")
+    }
+
+    @Test func paletteContextSkipsFocusedWorkspaceLookupWhenSelectionExists() throws {
+        enum SentinelError: Error { case shouldNotBeCalled }
+
+        let workspaceID = try AppKitController.commandPaletteContextWorkspaceID(selectedWorkspaceID: "workspace-selected") {
+            throw SentinelError.shouldNotBeCalled
+        }
+
+        #expect(workspaceID == "workspace-selected")
+    }
+
+    @Test func paletteContextFallsBackToFocusedTrackedWorkspace() {
+        let workspaceID = AppKitController.commandPaletteContextWorkspaceID(selectedWorkspaceID: nil, focusedWorkspaceID: { "workspace-focused" })
+
+        #expect(workspaceID == "workspace-focused")
+    }
+
+    @Test func emptyQueryShowsAlertsThenRecentTargetsAcrossWorkspaces() {
+        let alertsItem = makeItem(
+            id: "alerts::attention", source: .alertsAttention, workspaceID: "workspace-a", kind: .process, label: "Frontend", detail: "bun dev",
+            focusRequest: .workspaceProcess(workspaceID: "workspace-a", processID: "proc-1"), alertsAttentionID: "attention-1",
+            workspaceTitle: "Workspace A", status: .process(.exited))
+        let currentWorkspaceItem = makeItem(
+            id: "workspace-a::0", source: .workspaceTarget, workspaceID: "workspace-a", kind: .browser, label: "Docs",
+            detail: "http://localhost:3000/docs",
+            focusRequest: .workspaceBrowserSession(workspaceID: "workspace-a", targetURL: "http://localhost:3000/docs"), workspaceTitle: "Workspace A"
+        )
+        let otherWorkspaceItem = makeItem(
+            id: "workspace-b::0", source: .workspaceTarget, workspaceID: "workspace-b", kind: .browser, label: "Admin",
+            detail: "http://localhost:4000", focusRequest: .workspaceBrowserSession(workspaceID: "workspace-b", targetURL: "http://localhost:4000"),
+            workspaceTitle: "Workspace B", workspaceBranch: "release")
+
+        let visible = AppKitController.visibleCommandPaletteItems(
+            allItems: [alertsItem, currentWorkspaceItem, otherWorkspaceItem], query: "", currentWorkspaceID: "workspace-a",
+            recentFocusIdentities: [otherWorkspaceItem.recentFocusIdentity, currentWorkspaceItem.recentFocusIdentity])
+
+        #expect(visible.map(\.id) == ["alerts::attention", "workspace-b::0", "workspace-a::0"])
+    }
+
+    @Test func emptyQueryPrefersAlertsWhenWorkspaceRowHasSameVisibleTarget() {
+        let alertsItem = makeItem(
+            id: "alerts::frontend", source: .alertsAttention, workspaceID: "workspace-a", kind: .process, label: "Frontend", detail: "bun dev",
+            focusRequest: .workspaceProcess(workspaceID: "workspace-a", processID: "proc-alert"), alertsAttentionID: "attention-frontend",
+            workspaceTitle: "Workspace A", status: .process(.exited))
+        let workspaceItem = makeItem(
+            id: "workspace-a::frontend", source: .workspaceTarget, workspaceID: "workspace-a", kind: .process, label: "Frontend", detail: "bun dev",
+            focusRequest: .workspaceProcess(workspaceID: "workspace-a", processID: "proc-live"), workspaceTitle: "Workspace A",
+            status: .process(.running))
+
+        let visible = AppKitController.visibleCommandPaletteItems(
+            allItems: [alertsItem, workspaceItem], query: "", currentWorkspaceID: "workspace-a", recentFocusIdentities: [])
+
+        #expect(visible.map(\.id) == ["alerts::frontend"])
+    }
+
+    @Test func emptyQueryWithoutCurrentWorkspaceStillShowsRecentTargets() {
+        let alertsItem = makeItem(
+            id: "alerts::attention", source: .alertsAttention, workspaceID: "workspace-a", kind: .agent, label: "Claude", detail: nil,
+            focusRequest: .agentWindow(
+                .init(
+                    id: "agent-1", workspaceID: "workspace-a", provider: .ghostty, label: "Claude", terminalTrackingID: nil, codexThreadID: nil,
+                    windowID: nil, yabaiWindowID: nil, status: .waiting, createdAt: "2026-04-30T00:00:00Z", updatedAt: "2026-04-30T00:00:00Z")),
+            alertsAttentionID: "attention-2", workspaceTitle: "Workspace A", status: .agent(.waiting))
+        let workspaceItem = makeItem(
+            id: "workspace-a::0", source: .workspaceTarget, workspaceID: "workspace-a", kind: .process, label: "Frontend", detail: "bun dev",
+            focusRequest: .workspaceProcess(workspaceID: "workspace-a", processID: "proc-1"), workspaceTitle: "Workspace A",
+            status: .process(.running))
+
+        let visible = AppKitController.visibleCommandPaletteItems(
+            allItems: [alertsItem, workspaceItem], query: "", currentWorkspaceID: nil, recentFocusIdentities: [workspaceItem.recentFocusIdentity])
+
+        #expect(visible.map(\.id) == ["alerts::attention", "workspace-a::0"])
+    }
+
+    @Test func emptyQueryCapsVisibleItemsToNine() {
+        let alertsItem = makeItem(
+            id: "alerts::attention", source: .alertsAttention, workspaceID: "workspace-a", kind: .process, label: "Frontend", detail: "bun dev",
+            focusRequest: .workspaceProcess(workspaceID: "workspace-a", processID: "proc-1"), alertsAttentionID: "attention-1",
+            workspaceTitle: "Workspace A")
+        let workspaceItems = (1...10).map { index in
+            makeItem(
+                id: "workspace-\(index)", source: .workspaceTarget, workspaceID: "workspace-\(index)", kind: .browser, label: "Target \(index)",
+                detail: "http://localhost:\(3000 + index)",
+                focusRequest: .workspaceBrowserSession(workspaceID: "workspace-\(index)", targetURL: "http://localhost:\(3000 + index)"))
+        }
+
+        let visible = AppKitController.visibleCommandPaletteItems(
+            allItems: [alertsItem] + workspaceItems, query: "", currentWorkspaceID: nil,
+            recentFocusIdentities: workspaceItems.reversed().map(\.recentFocusIdentity))
+
+        #expect(visible.count == 9)
+        #expect(visible.first?.id == "alerts::attention")
+    }
+
+    @Test func emptyQueryCapsAlertsOnlyListToNine() {
+        let alertItems = (1...12).map { index in
+            makeItem(
+                id: "alerts::\(index)", source: .alertsAttention, workspaceID: "workspace-\(index)", kind: .process, label: "Alert \(index)",
+                detail: "command \(index)", focusRequest: .workspaceProcess(workspaceID: "workspace-\(index)", processID: "proc-\(index)"),
+                alertsAttentionID: "attention-\(index)")
+        }
+
+        let visible = AppKitController.visibleCommandPaletteItems(allItems: alertItems, query: "", currentWorkspaceID: nil, recentFocusIdentities: [])
+
+        #expect(visible.count == 9)
+        #expect(visible.map(\.id) == Array((1...9).map { "alerts::\($0)" }))
+    }
+
+    @Test func searchQueryUsesAllWorkspaceItems() {
+        let workspaceItem = makeItem(
+            id: "workspace-b::0", source: .workspaceTarget, workspaceID: "workspace-b", kind: .browser, label: "URL", detail: "http://localhost:4000",
+            focusRequest: .workspaceBrowserSession(workspaceID: "workspace-b", targetURL: "http://localhost:4000"), workspaceTitle: "Frontend",
+            workspaceBranch: "feature/url")
+
+        let visible = AppKitController.visibleCommandPaletteItems(
+            allItems: [workspaceItem], query: "fu", currentWorkspaceID: nil, recentFocusIdentities: [])
+
+        #expect(visible.map(\.id) == ["workspace-b::0"])
+    }
+}

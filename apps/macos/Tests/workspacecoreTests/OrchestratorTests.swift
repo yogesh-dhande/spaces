@@ -602,7 +602,7 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertEqual(try orchestrator.guiLeaderHotkey(), SettingsKey.defaultGUILeaderHotkey)
         XCTAssertEqual(try orchestrator.guiNextShortcut(), "cmd+alt+]")
         XCTAssertEqual(try orchestrator.guiPreviousShortcut(), "cmd+alt+[")
-        XCTAssertEqual(try orchestrator.guiDashboardShortcut(), "cmd+alt+g")
+        XCTAssertEqual(try orchestrator.guiAlertsShortcut(), "cmd+alt+a")
         XCTAssertEqual(try orchestrator.guiAddWorkspaceShortcut(), SettingsKey.defaultGUIAddWorkspaceShortcut)
         XCTAssertEqual(try orchestrator.guiReloadShortcut(), "cmd+alt+r")
         XCTAssertEqual(try orchestrator.guiOpenEditorShortcut(), "cmd+alt+e")
@@ -610,12 +610,11 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertEqual(try orchestrator.guiOpenFinderShortcut(), "cmd+alt+f")
         XCTAssertEqual(try orchestrator.guiOpenSettingsShortcut(), SettingsKey.defaultGUIOpenSettingsShortcut)
         XCTAssertEqual(try orchestrator.guiWindowShortcut(), SettingsKey.defaultGUIWindowShortcut)
-        XCTAssertEqual(try orchestrator.guiWindowSequenceShortcut(), "cmd+alt+1")
         try orchestrator.setGUIHotkey("ctrl+alt+h")
         try orchestrator.setGUILeaderHotkey("ctrl+alt")
         try orchestrator.setGUINextShortcut("n")
         try orchestrator.setGUIPreviousShortcut("p")
-        try orchestrator.setGUIDashboardShortcut("d")
+        try orchestrator.setGUIAlertsShortcut("d")
         try orchestrator.setGUIAddWorkspaceShortcut("ctrl+alt+w")
         try orchestrator.setGUIReloadShortcut("r")
         try orchestrator.setGUIOpenEditorShortcut("e")
@@ -623,15 +622,14 @@ final class OrchestratorTests: XCTestCase {
         try orchestrator.setGUIOpenFinderShortcut("f")
         try orchestrator.setGUIOpenSettingsShortcut("ctrl+alt+,")
         try orchestrator.setGUIWindowShortcut("cmd+1")
-        try orchestrator.setGUIWindowSequenceShortcut("1")
         try orchestrator.setActiveWorkspace(id: "workspace-123")
-        try orchestrator.setDashboardDismissedAttentionItemIDs(Set(["attention-2", "attention-1"]))
+        try orchestrator.setAlertsDismissedAttentionItemIDs(Set(["attention-2", "attention-1"]))
 
         XCTAssertEqual(try orchestrator.guiHotkey(), "ctrl+alt+h")
         XCTAssertEqual(try orchestrator.guiLeaderHotkey(), "alt+ctrl")
         XCTAssertEqual(try orchestrator.guiNextShortcut(), "alt+ctrl+n")
         XCTAssertEqual(try orchestrator.guiPreviousShortcut(), "alt+ctrl+p")
-        XCTAssertEqual(try orchestrator.guiDashboardShortcut(), "alt+ctrl+d")
+        XCTAssertEqual(try orchestrator.guiAlertsShortcut(), "alt+ctrl+d")
         XCTAssertEqual(try orchestrator.guiAddWorkspaceShortcut(), "ctrl+alt+w")
         XCTAssertEqual(try orchestrator.guiReloadShortcut(), "alt+ctrl+r")
         XCTAssertEqual(try orchestrator.guiOpenEditorShortcut(), "alt+ctrl+e")
@@ -639,24 +637,23 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertEqual(try orchestrator.guiOpenFinderShortcut(), "alt+ctrl+f")
         XCTAssertEqual(try orchestrator.guiOpenSettingsShortcut(), "ctrl+alt+,")
         XCTAssertEqual(try orchestrator.guiWindowShortcut(), "cmd+1")
-        XCTAssertEqual(try orchestrator.guiWindowSequenceShortcut(), "alt+ctrl+1")
         XCTAssertEqual(try orchestrator.activeWorkspaceID(), "workspace-123")
-        XCTAssertEqual(try orchestrator.dashboardDismissedAttentionItemIDs(), Set(["attention-1", "attention-2"]))
+        XCTAssertEqual(try orchestrator.alertsDismissedAttentionItemIDs(), Set(["attention-1", "attention-2"]))
 
         try orchestrator.setActiveWorkspace(id: nil)
         XCTAssertNil(try orchestrator.activeWorkspaceID())
     }
 
-    func testDashboardDismissedAttentionItemIDsClearsWhenEmpty() throws {
+    func testAlertsDismissedAttentionItemIDsClearsWhenEmpty() throws {
         let store = try makeTemporaryStore()
         let orchestrator = WorkspaceOrchestrator(store: store)
 
-        try orchestrator.setDashboardDismissedAttentionItemIDs(Set(["attention-1"]))
-        XCTAssertEqual(try orchestrator.dashboardDismissedAttentionItemIDs(), Set(["attention-1"]))
+        try orchestrator.setAlertsDismissedAttentionItemIDs(Set(["attention-1"]))
+        XCTAssertEqual(try orchestrator.alertsDismissedAttentionItemIDs(), Set(["attention-1"]))
 
-        try orchestrator.setDashboardDismissedAttentionItemIDs([])
-        XCTAssertTrue(try orchestrator.dashboardDismissedAttentionItemIDs().isEmpty)
-        XCTAssertNil(try store.setting(key: SettingsKey.dashboardDismissedAttentionItems))
+        try orchestrator.setAlertsDismissedAttentionItemIDs([])
+        XCTAssertTrue(try orchestrator.alertsDismissedAttentionItemIDs().isEmpty)
+        XCTAssertNil(try store.setting(key: SettingsKey.alertsDismissedAttentionItems))
     }
 
     func testLeaderBackedShortcutsStayStoredAsSuffixesWhenLeaderChanges() throws {
@@ -1392,6 +1389,39 @@ final class OrchestratorTests: XCTestCase {
         let focusedIDs = try String(contentsOf: focusLog).split(separator: "\n").map(String.init)
         XCTAssertEqual(focusedIDs, ["303", "303", "202"])
         XCTAssertEqual(try orchestrator.activeWorkspaceID(), workspace.id)
+    }
+
+    func testFocusWindowNavigationFreezesRecencyOrderAcrossCycleSession() throws {
+        let clock = TestClock(now: Date(timeIntervalSince1970: 1_000))
+        let (orchestrator, store, _, workspace, root) = try makeOrchestratorWithWorkspace(currentDate: clock.now)
+        let focusLog = root.appendingPathComponent("frozen-cycle-focus.log")
+
+        try store.upsert(
+            window: WindowRecord(
+                id: UUID().uuidString, workspaceID: workspace.id, app: "iTerm2", title: "one", windowID: 101, role: "terminal", orderIndex: 0,
+                lastSeenAt: "now"))
+        try store.upsert(
+            window: WindowRecord(
+                id: UUID().uuidString, workspaceID: workspace.id, app: "iTerm2", title: "two", windowID: 202, role: "terminal", orderIndex: 1,
+                lastSeenAt: "now"))
+        try store.upsert(
+            window: WindowRecord(
+                id: UUID().uuidString, workspaceID: workspace.id, app: "iTerm2", title: "three", windowID: 303, role: "terminal", orderIndex: 2,
+                lastSeenAt: "now"))
+
+        try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) {
+            try withEnv(name: "YABAI_FOCUS_LOG_FILE", value: focusLog.path) {
+                try orchestrator.focusWorkspaceWindow(workspaceID: workspace.id, index: 1)
+                try orchestrator.focusWorkspaceWindow(workspaceID: workspace.id, index: 2)
+                try orchestrator.focusWorkspaceWindow(workspaceID: workspace.id, index: 3)
+                try withEnv(name: "YABAI_FOCUSED_ID", value: "303") { try orchestrator.focusPreviousWindow(workspaceID: workspace.id) }
+                try withEnv(name: "YABAI_FOCUSED_ID", value: "202") { try orchestrator.focusPreviousWindow(workspaceID: workspace.id) }
+                try withEnv(name: "YABAI_FOCUSED_ID", value: "101") { try orchestrator.focusNextWindow(workspaceID: workspace.id) }
+            }
+        }
+
+        let focusedIDs = try String(contentsOf: focusLog).split(separator: "\n").map(String.init)
+        XCTAssertEqual(focusedIDs.suffix(3), ["202", "101", "202"])
     }
 
     func testFocusWindowNavigationUsesRememberedCursorForSharedWindowTargets() throws {

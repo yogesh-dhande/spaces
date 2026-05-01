@@ -26,22 +26,22 @@ import workspacecore
     @Test func visibleWorkspaceDetailRefreshRequiresSelectedExistingWorkspace() {
         #expect(
             AppKitController.shouldRefreshVisibleWorkspaceDetail(
-                selectedWorkspaceID: "workspace-1", showingDashboard: false, showingSettings: false, workspaceExists: true))
+                selectedWorkspaceID: "workspace-1", showingAlerts: false, showingSettings: false, workspaceExists: true))
         #expect(
             !AppKitController.shouldRefreshVisibleWorkspaceDetail(
-                selectedWorkspaceID: nil, showingDashboard: false, showingSettings: false, workspaceExists: true))
+                selectedWorkspaceID: nil, showingAlerts: false, showingSettings: false, workspaceExists: true))
         #expect(
             !AppKitController.shouldRefreshVisibleWorkspaceDetail(
-                selectedWorkspaceID: "workspace-1", showingDashboard: false, showingSettings: false, workspaceExists: false))
+                selectedWorkspaceID: "workspace-1", showingAlerts: false, showingSettings: false, workspaceExists: false))
     }
 
-    @Test func visibleWorkspaceDetailRefreshSkipsDashboardAndSettings() {
+    @Test func visibleWorkspaceDetailRefreshSkipsAlertsAndSettings() {
         #expect(
             !AppKitController.shouldRefreshVisibleWorkspaceDetail(
-                selectedWorkspaceID: "workspace-1", showingDashboard: true, showingSettings: false, workspaceExists: true))
+                selectedWorkspaceID: "workspace-1", showingAlerts: true, showingSettings: false, workspaceExists: true))
         #expect(
             !AppKitController.shouldRefreshVisibleWorkspaceDetail(
-                selectedWorkspaceID: "workspace-1", showingDashboard: false, showingSettings: true, workspaceExists: true))
+                selectedWorkspaceID: "workspace-1", showingAlerts: false, showingSettings: true, workspaceExists: true))
     }
 
     @Test func configuredBrowserSessionsAlsoShowForStoppedWorkspaces() {

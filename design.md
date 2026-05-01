@@ -143,6 +143,13 @@ The current macOS redesign in `apps/macos/Sources/gui` and `design-mocks/workspa
 - Navigation rows should prioritize quick scanning over descriptive prose.
 - Example: the current sidebar uses compact project rows and two-line workspace rows with muted secondary metadata.
 
+## Command Palettes
+- Command palettes should feel fast, compact, and keyboard-first.
+- A palette row should keep one clear primary label and one quiet secondary line that adds workspace context and detail without crowding the scan path.
+- The selected row should read as a lightweight accent wash, not as a heavy filled button.
+- Palette surfaces should stay visually lighter than full windows: minimal chrome, one search field, one result list, and subdued supporting copy.
+- Reuse the same icon and status language from workspace rows so the palette feels like an alternate navigation surface, not a separate feature.
+
 ## Overflow Menus
 - Use a trailing `⋯` overflow button for contextual actions that do not deserve persistent visibility.
 - Overflow menus should group low-frequency actions without hiding the primary workflow.
