@@ -35,6 +35,13 @@ private final class InlineWorkspaceEditorTextView: NSTextView {
     }
 }
 
+private final class CommandPaletteSearchField: NSSearchField { override var needsPanelToBecomeKey: Bool { true } }
+
+private final class CommandPalettePanel: NSPanel {
+    override var canBecomeKey: Bool { true }
+    override var canBecomeMain: Bool { false }
+}
+
 @MainActor
 public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineViewDataSource, NSOutlineViewDelegate, NSSplitViewDelegate,
     NSWindowDelegate, NSTextFieldDelegate, NSSearchFieldDelegate, NSTableViewDelegate, NSTableViewDataSource
@@ -6346,7 +6353,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         switch result {
         case .success(let action):
             reloadData()
-            hideAfterSuccessfulExternalWindowAction(action)
+            if case .open = action { hideAfterSuccessfulExternalWindowAction(action) }
         case .failure(let error): await handleWindowFocusFailure(error)
         }
     }
@@ -6380,7 +6387,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             rememberRecentCommandPaletteFocusIdentity(recentFocusIdentity)
             logWindowShortcutProfile("stage=total index=\(index) elapsed_ms=\(windowShortcutElapsedMS(since: startedAt))")
             logPerfMetric("window_shortcut", target: "index=\(index)", elapsedMS: windowShortcutElapsedMS(since: startedAt), success: true)
-            hideAfterSuccessfulExternalWindowAction(.focus)
         case .success(.opened(let kind)):
             logWindowShortcutProfile("stage=route_done index=\(index) kind=\(kind) elapsed_ms=\(windowShortcutElapsedMS(since: routeStartedAt))")
             activeWindowShortcutProfile?.routeCompletedAt = Date()
@@ -8072,8 +8078,6 @@ extension AppKitController {
         let panel = ensureCommandPalettePanel()
         logHotkeyDebug("present_palette begin \(hotkeyWindowStateSummary())")
         commandPaletteContextWorkspaceID = commandPaletteDefaultWorkspaceID()
-        if NSApp.isHidden { NSApp.unhide(nil) }
-        NSApp.activate(ignoringOtherApps: true)
         prepareWindowForActiveSpaceSummon(panel)
         panel.center()
         panel.orderFrontRegardless()
@@ -8107,11 +8111,13 @@ extension AppKitController {
     private func ensureCommandPalettePanel() -> NSPanel {
         if let commandPalettePanel { return commandPalettePanel }
 
-        let panel = NSPanel(
-            contentRect: NSRect(x: 0, y: 0, width: 720, height: 470), styleMask: [.titled, .fullSizeContentView], backing: .buffered, defer: false)
+        let panel = CommandPalettePanel(
+            contentRect: NSRect(x: 0, y: 0, width: 720, height: 470), styleMask: [.titled, .fullSizeContentView, .nonactivatingPanel],
+            backing: .buffered, defer: false)
         panel.titleVisibility = .hidden
         panel.titlebarAppearsTransparent = true
         panel.isFloatingPanel = true
+        panel.becomesKeyOnlyIfNeeded = false
         panel.hidesOnDeactivate = false
         panel.level = .floating
         panel.isMovableByWindowBackground = true
@@ -8171,7 +8177,7 @@ extension AppKitController {
         brandRow.addArrangedSubview(titleLabel)
         headerRow.addArrangedSubview(brandRow)
 
-        let searchField = NSSearchField()
+        let searchField = CommandPaletteSearchField()
         searchField.placeholderString = "fuzzy search workspaces, targets, and details"
         searchField.font = .systemFont(ofSize: 13)
         searchField.translatesAutoresizingMaskIntoConstraints = false
@@ -8421,7 +8427,7 @@ extension AppKitController {
                 if case .focus = action { self.rememberRecentCommandPaletteFocusIdentity(item.recentFocusIdentity) }
                 dismissCommandPalette()
                 reloadData()
-                hideAfterSuccessfulExternalWindowAction(action)
+                if case .open = action { hideAfterSuccessfulExternalWindowAction(action) }
             case .failure(let error): await handleWindowFocusFailure(error)
             }
         }

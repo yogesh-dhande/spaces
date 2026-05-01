@@ -1271,11 +1271,13 @@ APPLESCRIPT
 }
 
 wait_for_spaces_command_palette_presented() {
-  wait_for_app_log_pattern "spaces: hotkey_debug present_palette end .*palette_visible=1"
+  local expected_main_visible="${1:-[01]}"
+  wait_for_app_log_pattern "spaces: hotkey_debug present_palette end .*main_visible=${expected_main_visible} .*palette_visible=1 .*palette_key=1"
 }
 
 wait_for_spaces_command_palette_dismissed() {
-  wait_for_app_log_pattern "spaces: hotkey_debug dismiss_palette end .*palette_visible=0"
+  local expected_main_visible="${1:-[01]}"
+  wait_for_app_log_pattern "spaces: hotkey_debug dismiss_palette end .*main_visible=${expected_main_visible} .*palette_visible=0"
 }
 
 chrome_front_url() {
@@ -2430,24 +2432,26 @@ run_hotkey_visibility_profiling() {
   wait_for_condition "frontmost_app" "Google Chrome"
   for (( iteration = 1; iteration <= REAL_SYSTEM_PROFILE_REPETITIONS; iteration++ )); do
     send_spaces_command_palette_hotkey_with_ack
-    wait_for_condition "frontmost_app" "SpacesApp"
-    wait_for_spaces_command_palette_presented
+    wait_for_spaces_command_palette_presented "0"
     record_toggle_palette_metric "external_app.keyboard_toggle_palette.palette" "show" "0" "$host" "single"
 
     send_spaces_command_palette_hotkey_with_ack
     wait_for_spaces_command_palette_dismissed
+    wait_for_condition "frontmost_app" "Google Chrome"
     record_toggle_palette_metric "palette.keyboard_toggle_palette.external_app" "hide" "1" "$host" "single"
 
+    send_spaces_toggle_hotkey_with_ack
+    wait_for_spaces_frontmost_ready
     send_spaces_command_palette_hotkey_with_ack
-    wait_for_condition "frontmost_app" "SpacesApp"
-    wait_for_spaces_command_palette_presented
+    wait_for_spaces_command_palette_presented "1"
     record_toggle_palette_metric "main_window.keyboard_toggle_palette.palette" "show" "1" "$host" "single"
 
     send_spaces_command_palette_hotkey_with_ack
-    wait_for_spaces_command_palette_dismissed
+    wait_for_spaces_command_palette_dismissed "1"
+    wait_for_spaces_frontmost_ready
     record_toggle_palette_metric "palette.keyboard_toggle_palette.main_window" "hide" "1" "$host" "single"
 
-    activate_google_chrome
+    send_spaces_toggle_hotkey_with_ack
     wait_for_condition "frontmost_app" "Google Chrome"
   done
   pass_case

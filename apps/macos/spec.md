@@ -192,6 +192,7 @@ Spaces focuses those windows; it does not decide their geometry.
 - Window rows in the selected workspace should expose numbered shortcuts for direct focus.
 - Numbered window focus shortcuts should keep the saved workspace-settings order for configured browser sessions and processes, and append newly added ad-hoc windows after those configured rows.
 - Window focus actions and numbered shortcuts should follow one target-level rule: make that target available now.
+- Focusing a target from the app UI or command palette should keep Spaces visible instead of hiding the app after the target receives focus.
 - A live target should receive focus. A configured target that is not live should be opened directly instead of requiring a full workspace launch or restart.
 - Opening a configured browser session, process, or coding agent from a stopped workspace should move that workspace out of the stopped state immediately.
 - Partial runtime is a first-class workspace state: some configured targets may be live and focusable while others remain directly openable.
