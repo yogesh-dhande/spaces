@@ -5551,10 +5551,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     public func control(_ control: NSControl, textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
         guard let textField = control as? NSTextField else { return false }
         if textField === commandPaletteSearchField {
-            if commandSelector == #selector(NSText.cut(_:)) {
-                dismissSelectedCommandPaletteAlertsItem()
-                return true
-            }
             if commandSelector == #selector(NSResponder.moveDown(_:)) {
                 moveCommandPaletteSelection(delta: 1)
                 return true
@@ -6603,12 +6599,25 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             executeCommandPaletteShortcut(index: windowIndex)
             return true
         }
-        let flags = event.modifierFlags.intersection([.command, .shift, .option, .control])
-        if flags == .command, event.charactersIgnoringModifiers?.lowercased() == "x" {
+        if matchesCommandPaletteDismissShortcut(event: event) {
             dismissSelectedCommandPaletteAlertsItem()
             return true
         }
         return false
+    }
+
+    nonisolated static func commandPaletteDismissShortcutMatches(
+        charactersIgnoringModifiers: String?, modifiers: Set<HotkeyModifier>, leaderModifiers: Set<HotkeyModifier>
+    ) -> Bool {
+        guard charactersIgnoringModifiers?.lowercased() == "x" else { return false }
+        return modifiers == leaderModifiers
+    }
+
+    private func matchesCommandPaletteDismissShortcut(event: NSEvent) -> Bool {
+        let flags = event.modifierFlags.intersection([.command, .shift, .option, .control])
+        return Self.commandPaletteDismissShortcutMatches(
+            charactersIgnoringModifiers: event.charactersIgnoringModifiers, modifiers: shortcutModifiers(from: flags),
+            leaderModifiers: shortcutLeaderModifiers)
     }
 
     private func executeCommandPaletteShortcut(index: Int) {
@@ -7853,6 +7862,7 @@ extension AppKitController {
                 guard seenFocusIdentities.insert(item.focusIdentity).inserted else { continue }
                 guard seenVisibleIdentities.insert(item.visibleIdentity).inserted else { continue }
                 items.append(item)
+                if items.count == maxEmptyQueryItems { break }
             }
 
             for item in rankedWorkspaceItems {

@@ -28,11 +28,21 @@ export default function WindowManagementDocsPage() {
       </article>
 
       <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
-        <h2 className="text-2xl font-semibold tracking-tight">Focusing a Window</h2>
+        <h2 className="text-2xl font-semibold tracking-tight">Command Palette First</h2>
+        <ul className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
+          <li>• Press <code>cmd+alt+-</code> to open the command palette.</li>
+          <li>• With an empty query, Spaces shows Alerts first and then your most recently used windows so you can jump to any with a keyboard shortcut.</li>
+          <li>• Start typing to fuzzy search across workspace title, target name, and detail text.</li>
+          <li>• Press <code>return</code> to focus a live window or open the selected target directly if it isn&apos;t live yet.</li>
+        </ul>
+      </article>
+
+      <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
+        <h2 className="text-2xl font-semibold tracking-tight">Direct Window Focus from the UI</h2>
         <ul className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
           <li>• <code>cmd+1</code> through <code>cmd+9</code> focus windows 1 through 9 of the selected workspace.</li>
-          <li>• Hold <code>cmd+alt</code> and tap digits to queue a sequence of windows, then release — Spaces focuses them in order. Use this to see multiple windows at once.</li>
           <li>• Click a row in the workspace&apos;s window list to focus that window.</li>
+          <li>• Use <code>cmd+alt+]</code> and <code>cmd+alt+[</code> to cycle through the current workspace&apos;s windows in recent-use order.</li>
           <li>• A brief color pulse (optional) flashes on terminal windows so you can see where focus landed.</li>
         </ul>
       </article>

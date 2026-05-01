@@ -38,7 +38,7 @@ export const docsPageLinks: DocsPageLink[] = [
     href: "/docs/window-management",
     title: "Window Management",
     summary:
-      "Spaces automatically tracks the windows a workspace opens and lets you jump to any one of them with a keyboard shortcut.",
+      "Spaces automatically tracks the windows a workspace opens and lets you jump to any one of them with a keyboard shortcut or the command palette.",
   },
   {
     href: "/docs/processes",

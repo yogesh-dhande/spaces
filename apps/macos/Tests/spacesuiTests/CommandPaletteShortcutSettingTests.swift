@@ -19,4 +19,19 @@ import workspacecore
         #expect(commandPaletteIndex != nil)
         #expect(commandPaletteIndex == hotkeyIndex.map { $0 + 1 })
     }
+
+    @Test func commandPaletteDismissShortcutUsesLeaderPlusX() {
+        #expect(
+            AppKitController.commandPaletteDismissShortcutMatches(
+                charactersIgnoringModifiers: "x", modifiers: [.cmd, .alt], leaderModifiers: [.cmd, .alt]))
+        #expect(
+            !AppKitController.commandPaletteDismissShortcutMatches(
+                charactersIgnoringModifiers: "x", modifiers: [.cmd], leaderModifiers: [.cmd, .alt]))
+        #expect(
+            !AppKitController.commandPaletteDismissShortcutMatches(
+                charactersIgnoringModifiers: "x", modifiers: [.cmd, .alt, .shift], leaderModifiers: [.cmd, .alt]))
+        #expect(
+            !AppKitController.commandPaletteDismissShortcutMatches(
+                charactersIgnoringModifiers: "c", modifiers: [.cmd, .alt], leaderModifiers: [.cmd, .alt]))
+    }
 }

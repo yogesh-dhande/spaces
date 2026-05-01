@@ -37,7 +37,7 @@ const keyFeatures: Feature[] = [
   {
     title: "Jump to any workspace",
     description:
-      "A global shortcut pulls up any workspace instantly — choose a window and it snaps into focus right where you left it.",
+      "A global command palette pulls up any window instantly — choose a window and it snaps into focus right where you left it.",
   },
   {
     title: "Cycle windows within a workspace",

@@ -115,6 +115,20 @@ import workspacecore
         #expect(visible.first?.id == "alerts::attention")
     }
 
+    @Test func emptyQueryCapsAlertsOnlyListToNine() {
+        let alertItems = (1...12).map { index in
+            makeItem(
+                id: "alerts::\(index)", source: .alertsAttention, workspaceID: "workspace-\(index)", kind: .process, label: "Alert \(index)",
+                detail: "command \(index)", focusRequest: .workspaceProcess(workspaceID: "workspace-\(index)", processID: "proc-\(index)"),
+                alertsAttentionID: "attention-\(index)")
+        }
+
+        let visible = AppKitController.visibleCommandPaletteItems(allItems: alertItems, query: "", currentWorkspaceID: nil, recentFocusIdentities: [])
+
+        #expect(visible.count == 9)
+        #expect(visible.map(\.id) == Array((1...9).map { "alerts::\($0)" }))
+    }
+
     @Test func searchQueryUsesAllWorkspaceItems() {
         let workspaceItem = makeItem(
             id: "workspace-b::0", source: .workspaceTarget, workspaceID: "workspace-b", kind: .browser, label: "URL", detail: "http://localhost:4000",
