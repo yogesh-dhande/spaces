@@ -229,6 +229,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     private var alertsFocusRequestMap: [Int: WindowFocusRequest] = [:]
     private var bufferedWindowShortcutIndices: [Int] = []
     private var deferredExternalWindowHideTask: Task<Void, Never>?
+    private var recentCommandPaletteFocusIdentities: [String] = []
 
     private struct WindowShortcutProfile {
         let index: Int
@@ -251,7 +252,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     }
 
     private enum WindowShortcutExecutionOutcome: Sendable {
-        case focused(kind: String)
+        case focused(kind: String, recentFocusIdentity: String)
         case opened(kind: String)
         case noWorkspace
         case noMatch
@@ -945,13 +946,16 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                     switch alertsFocusRequest {
                     case .workspaceBrowserSession(let workspaceID, let targetURL):
                         try orchestrator.focusWorkspaceBrowserSession(workspaceID: workspaceID, targetURL: targetURL)
-                        return .success(.focused(kind: "alerts_browser"))
+                        return .success(
+                            .focused(kind: "alerts_browser", recentFocusIdentity: CommandPaletteItem.recentFocusIdentity(for: alertsFocusRequest)))
                     case .workspaceWindow(let workspaceID, let index):
                         try orchestrator.focusWorkspaceWindow(workspaceID: workspaceID, index: index)
-                        return .success(.focused(kind: "alerts_window"))
+                        return .success(
+                            .focused(kind: "alerts_window", recentFocusIdentity: CommandPaletteItem.recentFocusIdentity(for: alertsFocusRequest)))
                     case .workspaceProcess(let workspaceID, let processID):
                         try orchestrator.focusWorkspaceProcess(workspaceID: workspaceID, processID: processID)
-                        return .success(.focused(kind: "alerts_process"))
+                        return .success(
+                            .focused(kind: "alerts_process", recentFocusIdentity: CommandPaletteItem.recentFocusIdentity(for: alertsFocusRequest)))
                     case .workspaceMissingConfiguredProcess(let workspaceID, let processKey):
                         try orchestrator.recoverMissingConfiguredProcess(workspaceID: workspaceID, processKey: processKey)
                         return .success(.opened(kind: "alerts_process"))
@@ -960,7 +964,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                         return .success(.opened(kind: "alerts_agent_launcher"))
                     case .agentWindow(let record):
                         try orchestrator.focusAgentWindow(record)
-                        return .success(.focused(kind: "alerts_agent"))
+                        return .success(
+                            .focused(kind: "alerts_agent", recentFocusIdentity: CommandPaletteItem.recentFocusIdentity(for: alertsFocusRequest)))
                     }
                 }
                 guard let selectedWorkspaceID else { return .success(.noWorkspace) }
@@ -985,16 +990,19 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 switch target.kind {
                 case .browser:
                     guard let targetURL = target.targetURL else { return .success(.noMatch) }
+                    let focusRequest = WindowFocusRequest.workspaceBrowserSession(workspaceID: selectedWorkspaceID, targetURL: targetURL)
                     try orchestrator.focusWorkspaceBrowserSession(workspaceID: selectedWorkspaceID, targetURL: targetURL)
-                    return .success(.focused(kind: "browser"))
+                    return .success(.focused(kind: "browser", recentFocusIdentity: CommandPaletteItem.recentFocusIdentity(for: focusRequest)))
                 case .process:
                     guard let processID = target.processID else { return .success(.noMatch) }
+                    let focusRequest = WindowFocusRequest.workspaceProcess(workspaceID: selectedWorkspaceID, processID: processID)
                     try orchestrator.focusWorkspaceProcess(workspaceID: selectedWorkspaceID, processID: processID)
-                    return .success(.focused(kind: "process"))
+                    return .success(.focused(kind: "process", recentFocusIdentity: CommandPaletteItem.recentFocusIdentity(for: focusRequest)))
                 case .window:
                     guard let windowListIndex = target.windowListIndex else { return .success(.noMatch) }
+                    let focusRequest = WindowFocusRequest.workspaceWindow(workspaceID: selectedWorkspaceID, index: windowListIndex + 1)
                     try orchestrator.focusWorkspaceWindow(workspaceID: selectedWorkspaceID, index: windowListIndex + 1)
-                    return .success(.focused(kind: "window"))
+                    return .success(.focused(kind: "window", recentFocusIdentity: CommandPaletteItem.recentFocusIdentity(for: focusRequest)))
                 case .missingConfiguredProcess:
                     guard let processKey = target.processKey else { return .success(.noMatch) }
                     try orchestrator.recoverMissingConfiguredProcess(workspaceID: selectedWorkspaceID, processKey: processKey)
@@ -1005,8 +1013,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                     return .success(.opened(kind: "agent_launcher"))
                 case .agent:
                     guard let record = target.agentWindow else { return .success(.noMatch) }
+                    let focusRequest = WindowFocusRequest.agentWindow(record)
                     try orchestrator.focusAgentWindow(record)
-                    return .success(.focused(kind: "agent"))
+                    return .success(.focused(kind: "agent", recentFocusIdentity: CommandPaletteItem.recentFocusIdentity(for: focusRequest)))
                 }
             } catch { return .failure(error) }
         }.value
@@ -1895,6 +1904,14 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         items.filter { item in
             guard let attentionID = item.alertsAttentionID else { return true }
             return !dismissedAlertsAttentionItemIDs.contains(attentionID)
+        }
+    }
+
+    private func rememberRecentCommandPaletteFocusIdentity(_ identity: String) {
+        recentCommandPaletteFocusIdentities.removeAll(where: { $0 == identity })
+        recentCommandPaletteFocusIdentities.insert(identity, at: 0)
+        if recentCommandPaletteFocusIdentities.count > 64 {
+            recentCommandPaletteFocusIdentities.removeLast(recentCommandPaletteFocusIdentities.count - 64)
         }
     }
 
@@ -6385,9 +6402,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let result = await Self.focusWindowShortcutSnapshot(
             index: index, selectedWorkspaceID: selectedWorkspaceID, alertsFocusRequest: alertsFocusRequest)
         switch result {
-        case .success(.focused(let kind)):
+        case .success(.focused(let kind, let recentFocusIdentity)):
             logWindowShortcutProfile("stage=route_done index=\(index) kind=\(kind) elapsed_ms=\(windowShortcutElapsedMS(since: routeStartedAt))")
             activeWindowShortcutProfile?.routeCompletedAt = Date()
+            rememberRecentCommandPaletteFocusIdentity(recentFocusIdentity)
             logWindowShortcutProfile("stage=total index=\(index) elapsed_ms=\(windowShortcutElapsedMS(since: startedAt))")
             logPerfMetric("window_shortcut", target: "index=\(index)", elapsedMS: windowShortcutElapsedMS(since: startedAt), success: true)
             hideAfterSuccessfulExternalWindowAction(.focus)
@@ -7538,6 +7556,7 @@ struct CommandPaletteItem: Sendable {
     let detail: String?
     let status: Status
     let focusRequest: AppKitController.WindowFocusRequest
+    let recentFocusIdentity: String
 
     var secondaryText: String {
         guard let detail, !detail.isEmpty else { return workspaceTitle }
@@ -7593,6 +7612,19 @@ struct CommandPaletteItem: Sendable {
 
     private static func searchInitials(for text: String) -> String {
         text.split { !$0.isLetter && !$0.isNumber }.compactMap { $0.first.map(String.init) }.joined()
+    }
+
+    static func recentFocusIdentity(for focusRequest: AppKitController.WindowFocusRequest, detail: String? = nil) -> String {
+        switch focusRequest {
+        case .workspaceBrowserSession(let workspaceID, let targetURL): return "browser:\(workspaceID):\(targetURL)"
+        case .workspaceWindow(let workspaceID, let index):
+            let normalizedDetail = detail?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ?? ""
+            return "window:\(workspaceID):\(index):\(normalizedDetail)"
+        case .workspaceProcess(let workspaceID, let processID): return "process:\(workspaceID):\(processID)"
+        case .workspaceMissingConfiguredProcess(let workspaceID, let processKey): return "missing:\(workspaceID):\(processKey)"
+        case .workspaceAgentLauncher(let workspaceID, let name): return "agent-launcher:\(workspaceID):\(name)"
+        case .agentWindow(let record): return "agent:\(record.workspaceID):\(record.id)"
+        }
     }
 }
 
@@ -7845,11 +7877,18 @@ struct CommandPaletteItem: Sendable {
 }
 
 extension AppKitController {
-    nonisolated static func visibleCommandPaletteItems(allItems: [CommandPaletteItem], query: String, currentWorkspaceID: String?)
-        -> [CommandPaletteItem]
-    {
+    nonisolated static func visibleCommandPaletteItems(
+        allItems: [CommandPaletteItem], query: String, currentWorkspaceID _: String?, recentFocusIdentities: [String], maxEmptyQueryItems: Int = 9
+    ) -> [CommandPaletteItem] {
         let trimmedQuery = query.trimmingCharacters(in: .whitespacesAndNewlines)
         if trimmedQuery.isEmpty {
+            let recentRanks = Dictionary(uniqueKeysWithValues: recentFocusIdentities.enumerated().map { ($1, $0) })
+            let rankedWorkspaceItems = allItems.enumerated().filter { $0.element.source == .workspaceTarget }.sorted { lhs, rhs in
+                let lhsRank = recentRanks[lhs.element.recentFocusIdentity] ?? Int.max
+                let rhsRank = recentRanks[rhs.element.recentFocusIdentity] ?? Int.max
+                if lhsRank != rhsRank { return lhsRank < rhsRank }
+                return lhs.offset < rhs.offset
+            }.map(\.element)
             var items: [CommandPaletteItem] = []
             var seenFocusIdentities: Set<String> = []
             var seenVisibleIdentities: Set<String> = []
@@ -7860,11 +7899,11 @@ extension AppKitController {
                 items.append(item)
             }
 
-            guard let currentWorkspaceID else { return items }
-            for item in allItems where item.source == .workspaceTarget && item.workspaceID == currentWorkspaceID {
+            for item in rankedWorkspaceItems {
                 guard seenFocusIdentities.insert(item.focusIdentity).inserted else { continue }
                 guard seenVisibleIdentities.insert(item.visibleIdentity).inserted else { continue }
                 items.append(item)
+                if items.count == maxEmptyQueryItems { break }
             }
             return items
         }
@@ -7916,7 +7955,8 @@ extension AppKitController {
                 return CommandPaletteItem(
                     id: "alerts::\(entry.attentionID)", source: .alertsAttention, alertsAttentionID: entry.attentionID,
                     workspaceID: group.workspaceID, workspaceTitle: group.workspaceName, workspaceBranch: group.workspaceBranch,
-                    projectTitle: group.projectName, kind: kind, label: entry.label, detail: entry.detail, status: status, focusRequest: focusRequest)
+                    projectTitle: group.projectName, kind: kind, label: entry.label, detail: entry.detail, status: status, focusRequest: focusRequest,
+                    recentFocusIdentity: CommandPaletteItem.recentFocusIdentity(for: focusRequest, detail: entry.detail))
             }
         }
     }
@@ -7956,7 +7996,9 @@ extension AppKitController {
                                 id: itemID, source: .workspaceTarget, alertsAttentionID: nil, workspaceID: workspace.id,
                                 workspaceTitle: workspace.title, workspaceBranch: workspace.branch, projectTitle: project.name, kind: target.kind,
                                 label: label, detail: targetURL, status: .none,
-                                focusRequest: .workspaceBrowserSession(workspaceID: workspace.id, targetURL: targetURL)))
+                                focusRequest: .workspaceBrowserSession(workspaceID: workspace.id, targetURL: targetURL),
+                                recentFocusIdentity: CommandPaletteItem.recentFocusIdentity(
+                                    for: .workspaceBrowserSession(workspaceID: workspace.id, targetURL: targetURL), detail: targetURL)))
                     case .process:
                         guard let processID = target.processID, let process = processesByID[processID] else { continue }
                         items.append(
@@ -7964,7 +8006,9 @@ extension AppKitController {
                                 id: itemID, source: .workspaceTarget, alertsAttentionID: nil, workspaceID: workspace.id,
                                 workspaceTitle: workspace.title, workspaceBranch: workspace.branch, projectTitle: project.name, kind: target.kind,
                                 label: process.templateName, detail: process.command, status: .process(process.status),
-                                focusRequest: .workspaceProcess(workspaceID: workspace.id, processID: processID)))
+                                focusRequest: .workspaceProcess(workspaceID: workspace.id, processID: processID),
+                                recentFocusIdentity: CommandPaletteItem.recentFocusIdentity(
+                                    for: .workspaceProcess(workspaceID: workspace.id, processID: processID), detail: process.command)))
                     case .window:
                         guard let windowListIndex = target.windowListIndex, windows.indices.contains(windowListIndex) else { continue }
                         let window = windows[windowListIndex]
@@ -7983,7 +8027,9 @@ extension AppKitController {
                                 id: itemID, source: .workspaceTarget, alertsAttentionID: nil, workspaceID: workspace.id,
                                 workspaceTitle: workspace.title, workspaceBranch: workspace.branch, projectTitle: project.name, kind: target.kind,
                                 label: label, detail: detail, status: .none,
-                                focusRequest: .workspaceWindow(workspaceID: workspace.id, index: windowListIndex + 1)))
+                                focusRequest: .workspaceWindow(workspaceID: workspace.id, index: windowListIndex + 1),
+                                recentFocusIdentity: CommandPaletteItem.recentFocusIdentity(
+                                    for: .workspaceWindow(workspaceID: workspace.id, index: windowListIndex + 1), detail: detail)))
                     case .missingConfiguredProcess:
                         guard let processKey = target.processKey else { continue }
                         items.append(
@@ -7991,7 +8037,9 @@ extension AppKitController {
                                 id: itemID, source: .workspaceTarget, alertsAttentionID: nil, workspaceID: workspace.id,
                                 workspaceTitle: workspace.title, workspaceBranch: workspace.branch, projectTitle: project.name, kind: target.kind,
                                 label: processKey, detail: nil, status: .idle,
-                                focusRequest: .workspaceMissingConfiguredProcess(workspaceID: workspace.id, processKey: processKey)))
+                                focusRequest: .workspaceMissingConfiguredProcess(workspaceID: workspace.id, processKey: processKey),
+                                recentFocusIdentity: CommandPaletteItem.recentFocusIdentity(
+                                    for: .workspaceMissingConfiguredProcess(workspaceID: workspace.id, processKey: processKey))))
                     case .agentLauncher:
                         guard let launcherName = target.launcherName else { continue }
                         let detail = configuredAgentByName[launcherName]?.command
@@ -8000,7 +8048,9 @@ extension AppKitController {
                                 id: itemID, source: .workspaceTarget, alertsAttentionID: nil, workspaceID: workspace.id,
                                 workspaceTitle: workspace.title, workspaceBranch: workspace.branch, projectTitle: project.name, kind: target.kind,
                                 label: launcherName, detail: detail, status: .none,
-                                focusRequest: .workspaceAgentLauncher(workspaceID: workspace.id, name: launcherName)))
+                                focusRequest: .workspaceAgentLauncher(workspaceID: workspace.id, name: launcherName),
+                                recentFocusIdentity: CommandPaletteItem.recentFocusIdentity(
+                                    for: .workspaceAgentLauncher(workspaceID: workspace.id, name: launcherName), detail: detail)))
                     case .agent:
                         guard let agentWindow = target.agentWindow else { continue }
                         let label = agentWindow.label?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty ?? "Coding Agent"
@@ -8009,7 +8059,8 @@ extension AppKitController {
                             CommandPaletteItem(
                                 id: itemID, source: .workspaceTarget, alertsAttentionID: nil, workspaceID: workspace.id,
                                 workspaceTitle: workspace.title, workspaceBranch: workspace.branch, projectTitle: project.name, kind: target.kind,
-                                label: label, detail: detail, status: .agent(agentWindow.status), focusRequest: .agentWindow(agentWindow)))
+                                label: label, detail: detail, status: .agent(agentWindow.status), focusRequest: .agentWindow(agentWindow),
+                                recentFocusIdentity: CommandPaletteItem.recentFocusIdentity(for: .agentWindow(agentWindow), detail: detail)))
                     }
                 }
             }
@@ -8351,7 +8402,8 @@ extension AppKitController {
     private func applyCommandPaletteFilter() {
         let query = commandPaletteSearchField?.stringValue.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         commandPaletteFilteredItems = Self.visibleCommandPaletteItems(
-            allItems: commandPaletteItems, query: query, currentWorkspaceID: commandPaletteContextWorkspaceID)
+            allItems: commandPaletteItems, query: query, currentWorkspaceID: commandPaletteContextWorkspaceID,
+            recentFocusIdentities: recentCommandPaletteFocusIdentities)
         commandPaletteSelectedIndex = commandPaletteFilteredItems.isEmpty ? 0 : 0
         logHotkeyDebug(
             "apply_palette_filter query=\(query.isEmpty ? "<empty>" : query) all=\(commandPaletteItems.count) filtered=\(commandPaletteFilteredItems.count) context_workspace=\(commandPaletteContextWorkspaceID ?? "nil")"
@@ -8400,6 +8452,7 @@ extension AppKitController {
             let result = await Self.performWindowFocusSnapshot(item.focusRequest)
             switch result {
             case .success(let action):
+                if case .focus = action { self.rememberRecentCommandPaletteFocusIdentity(item.recentFocusIdentity) }
                 dismissCommandPalette()
                 reloadData()
                 hideAfterSuccessfulExternalWindowAction(action)

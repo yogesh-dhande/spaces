@@ -184,10 +184,11 @@ Spaces focuses those windows; it does not decide their geometry.
 - When Spaces is summoned, it should select the workspace for the window that was focused immediately before activation when that window belongs to a tracked workspace; otherwise it should show Alerts.
 - The app should expose a configurable shortcut leader that supplies the shared modifiers for leader-based shortcuts like workspace navigation, Alerts, editor, terminal, Finder, and queued window focus.
 - The command palette should draw from every navigable workspace target that can appear in workspace detail rows: browser sessions, processes, ad-hoc windows, configured coding-agent launchers, and live coding-agent terminals.
-- When the command palette opens with an empty query, it should show Alerts attention items first and then the items for the current workspace. If there is no current tracked workspace, the empty state should show only Alerts attention items.
+- When the command palette opens with an empty query, it should show Alerts attention items first and then the most recently focused targets across workspaces, capped to the first nine visible rows. If there is no recent focus history, it should fall back to the existing workspace-target order.
 - Command-palette rows should show the same status language used by workspace detail rows, including process state and coding-agent state.
 - Once the user types a query, command-palette search should fuzzy-match across all workspaces using workspace title, target name, and secondary detail text, including compact cross-field queries such as `fu` matching `Frontend` plus `URL`.
 - The first command-palette result should stay selected by default, arrow keys should move the selection, and `Enter` should execute the same target-level focus/open action used by the numbered window shortcuts.
+- Leader-based previous/next window cycling should follow the most recently focused targets within the workspace rather than the static workspace definition order. Each repeated cycle sequence should traverse a frozen ordering snapshot so `previous` and `next` walk the full target set instead of bouncing between the last two windows.
 - Window rows in the selected workspace should expose numbered shortcuts for direct focus.
 - Numbered window focus shortcuts should keep the saved workspace-settings order for configured browser sessions and processes, and append newly added ad-hoc windows after those configured rows.
 - Window focus actions and numbered shortcuts should follow one target-level rule: make that target available now.

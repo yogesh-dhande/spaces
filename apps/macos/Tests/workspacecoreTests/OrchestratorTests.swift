@@ -1394,6 +1394,39 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertEqual(try orchestrator.activeWorkspaceID(), workspace.id)
     }
 
+    func testFocusWindowNavigationFreezesRecencyOrderAcrossCycleSession() throws {
+        let clock = TestClock(now: Date(timeIntervalSince1970: 1_000))
+        let (orchestrator, store, _, workspace, root) = try makeOrchestratorWithWorkspace(currentDate: clock.now)
+        let focusLog = root.appendingPathComponent("frozen-cycle-focus.log")
+
+        try store.upsert(
+            window: WindowRecord(
+                id: UUID().uuidString, workspaceID: workspace.id, app: "iTerm2", title: "one", windowID: 101, role: "terminal", orderIndex: 0,
+                lastSeenAt: "now"))
+        try store.upsert(
+            window: WindowRecord(
+                id: UUID().uuidString, workspaceID: workspace.id, app: "iTerm2", title: "two", windowID: 202, role: "terminal", orderIndex: 1,
+                lastSeenAt: "now"))
+        try store.upsert(
+            window: WindowRecord(
+                id: UUID().uuidString, workspaceID: workspace.id, app: "iTerm2", title: "three", windowID: 303, role: "terminal", orderIndex: 2,
+                lastSeenAt: "now"))
+
+        try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) {
+            try withEnv(name: "YABAI_FOCUS_LOG_FILE", value: focusLog.path) {
+                try orchestrator.focusWorkspaceWindow(workspaceID: workspace.id, index: 1)
+                try orchestrator.focusWorkspaceWindow(workspaceID: workspace.id, index: 2)
+                try orchestrator.focusWorkspaceWindow(workspaceID: workspace.id, index: 3)
+                try withEnv(name: "YABAI_FOCUSED_ID", value: "303") { try orchestrator.focusPreviousWindow(workspaceID: workspace.id) }
+                try withEnv(name: "YABAI_FOCUSED_ID", value: "202") { try orchestrator.focusPreviousWindow(workspaceID: workspace.id) }
+                try withEnv(name: "YABAI_FOCUSED_ID", value: "101") { try orchestrator.focusNextWindow(workspaceID: workspace.id) }
+            }
+        }
+
+        let focusedIDs = try String(contentsOf: focusLog).split(separator: "\n").map(String.init)
+        XCTAssertEqual(focusedIDs.suffix(3), ["202", "101", "202"])
+    }
+
     func testFocusWindowNavigationUsesRememberedCursorForSharedWindowTargets() throws {
         let (orchestrator, store, _, workspace, root, mockIterm, _) = try makeMockItermOrchestratorWithWorkspace()
         let focusLog = root.appendingPathComponent("shared-target-focus.log")
