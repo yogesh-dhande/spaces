@@ -610,7 +610,6 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertEqual(try orchestrator.guiOpenFinderShortcut(), "cmd+alt+f")
         XCTAssertEqual(try orchestrator.guiOpenSettingsShortcut(), SettingsKey.defaultGUIOpenSettingsShortcut)
         XCTAssertEqual(try orchestrator.guiWindowShortcut(), SettingsKey.defaultGUIWindowShortcut)
-        XCTAssertEqual(try orchestrator.guiWindowSequenceShortcut(), "cmd+alt+1")
         try orchestrator.setGUIHotkey("ctrl+alt+h")
         try orchestrator.setGUILeaderHotkey("ctrl+alt")
         try orchestrator.setGUINextShortcut("n")
@@ -623,7 +622,6 @@ final class OrchestratorTests: XCTestCase {
         try orchestrator.setGUIOpenFinderShortcut("f")
         try orchestrator.setGUIOpenSettingsShortcut("ctrl+alt+,")
         try orchestrator.setGUIWindowShortcut("cmd+1")
-        try orchestrator.setGUIWindowSequenceShortcut("1")
         try orchestrator.setActiveWorkspace(id: "workspace-123")
         try orchestrator.setAlertsDismissedAttentionItemIDs(Set(["attention-2", "attention-1"]))
 
@@ -639,7 +637,6 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertEqual(try orchestrator.guiOpenFinderShortcut(), "alt+ctrl+f")
         XCTAssertEqual(try orchestrator.guiOpenSettingsShortcut(), "ctrl+alt+,")
         XCTAssertEqual(try orchestrator.guiWindowShortcut(), "cmd+1")
-        XCTAssertEqual(try orchestrator.guiWindowSequenceShortcut(), "alt+ctrl+1")
         XCTAssertEqual(try orchestrator.activeWorkspaceID(), "workspace-123")
         XCTAssertEqual(try orchestrator.alertsDismissedAttentionItemIDs(), Set(["attention-1", "attention-2"]))
 

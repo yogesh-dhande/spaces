@@ -182,7 +182,7 @@ Spaces focuses those windows; it does not decide their geometry.
 - The command palette should default to `Cmd+Opt+-`.
 - Summoning Spaces from the global app-toggle shortcut should raise the main window above other apps and onto the active space.
 - When Spaces is summoned, it should select the workspace for the window that was focused immediately before activation when that window belongs to a tracked workspace; otherwise it should show Alerts.
-- The app should expose a configurable shortcut leader that supplies the shared modifiers for leader-based shortcuts like workspace navigation, Alerts, editor, terminal, Finder, and queued window focus.
+- The app should expose a configurable shortcut leader that supplies the shared modifiers for leader-based shortcuts like workspace navigation, Alerts, editor, terminal, and Finder.
 - The command palette should draw from every navigable workspace target that can appear in workspace detail rows: browser sessions, processes, ad-hoc windows, configured coding-agent launchers, and live coding-agent terminals.
 - When the command palette opens with an empty query, it should show Alerts attention items first and then the most recently focused targets across workspaces, capped to the first nine visible rows. If there is no recent focus history, it should fall back to the existing workspace-target order.
 - Command-palette rows should show the same status language used by workspace detail rows, including process state and coding-agent state.
@@ -204,7 +204,6 @@ Spaces focuses those windows; it does not decide their geometry.
 - Configured workspace processes and browser sessions must always have explicit names; Spaces should reject unnamed entries instead of falling back to commands or URLs as identities.
 - Focus target discovery may remain GUI-centric; the CLI does not need a separate read-only discovery command.
 - Window-number shortcuts should use a configurable direct-focus modifier plus digits `1` through `9`.
-- Window-number sequence shortcuts should use a separate configurable modifier plus digits `1` through `9`, then replay the queued focus actions in order when the modifiers are released.
 - Shortcut handling must not break normal text-edit shortcuts while an input is focused.
 - Recovery affordances should reserve `Cmd+R`; app-data reload should default to leader+`R` so it stays distinct from recovery modals.
 - Alerts should default to leader+`A`.

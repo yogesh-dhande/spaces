@@ -2815,15 +2815,6 @@ public final class WorkspaceOrchestrator {
 
     public func setGUIWindowShortcut(_ raw: String?) throws { try store.setSetting(key: SettingsKey.guiWindowShortcut, value: raw) }
 
-    public func guiWindowSequenceShortcut() throws -> String {
-        try effectiveLeaderBackedShortcut(
-            settingKey: SettingsKey.guiWindowSequenceShortcut, defaultValue: SettingsKey.defaultGUIWindowSequenceShortcut)
-    }
-
-    public func setGUIWindowSequenceShortcut(_ raw: String?) throws {
-        try store.setSetting(key: SettingsKey.guiWindowSequenceShortcut, value: try normalizeLeaderBackedShortcut(raw))
-    }
-
     public func alertsDismissedAttentionItemIDs() throws -> Set<String> {
         guard let raw = try store.setting(key: SettingsKey.alertsDismissedAttentionItems), !raw.isEmpty else { return [] }
         guard let data = raw.data(using: .utf8) else { return [] }

@@ -154,7 +154,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     private var nextShortcutSpec: HotkeySpec?
     private var previousShortcutSpec: HotkeySpec?
     private var windowShortcutSpec: HotkeySpec?
-    private var windowSequenceShortcutSpec: HotkeySpec?
     private var shortcutButtonsBySetting: [String: NSButton] = [:]
     private var activeShortcutCaptureSetting: ShortcutSetting?
     private weak var pulseColorWell: NSColorWell?
@@ -227,7 +226,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     private var showingAlerts = false
     /// Maps sequential window shortcut numbers (1-9) to focus targets for the current Alerts view.
     private var alertsFocusRequestMap: [Int: WindowFocusRequest] = [:]
-    private var bufferedWindowShortcutIndices: [Int] = []
     private var deferredExternalWindowHideTask: Task<Void, Never>?
     private var recentCommandPaletteFocusIdentities: [String] = []
 
@@ -5933,7 +5931,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     private func setupShortcutMonitor() {
         shortcutMonitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .flagsChanged]) { [weak self] event in
             guard let self else { return event }
-            if event.type == .flagsChanged { return self.handleShortcutFlagsChanged(event: event) ? nil : event }
+            if event.type == .flagsChanged { return self.handleLeaderShortcutCaptureFlagsChanged(event: event) ? nil : event }
             self.recordStartupInteraction(kind: "key_down")
             if self.handleShortcutCaptureEvent(event: event) { return nil }
             if self.handleNewWorkspaceShortcut(event: event) { return nil }
@@ -5964,7 +5962,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 if let workspaceID = self.selectedWorkspaceID { self.openWorkspaceFinder(workspaceID: workspaceID) }
                 return nil
             }
-            if self.handleBufferedWindowShortcut(event: event) { return nil }
             if let windowIndex = windowShortcutIndex(for: event) {
                 self.logWindowShortcutProfile("stage=monitor_schedule index=\(windowIndex)")
                 Task { @MainActor [weak self] in
@@ -5977,15 +5974,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             }
             return event
         }
-    }
-
-    private func handleShortcutFlagsChanged(event: NSEvent) -> Bool {
-        if handleLeaderShortcutCaptureFlagsChanged(event: event) { return true }
-        if bufferedWindowShortcutIndices.isEmpty { return false }
-        let flags = event.modifierFlags.intersection([.command, .shift, .option, .control])
-        guard !flags.contains(.command) || !flags.contains(.shift) else { return false }
-        flushBufferedWindowShortcuts()
-        return true
     }
 
     private func handleLeaderShortcutCaptureFlagsChanged(event: NSEvent) -> Bool {
@@ -6232,14 +6220,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         return nil
     }
 
-    private func handleBufferedWindowShortcut(event: NSEvent) -> Bool {
-        guard let windowIndex = bufferedWindowShortcutIndex(for: event) else { return false }
-        bufferedWindowShortcutIndices.append(windowIndex)
-        logWindowShortcutProfile(
-            "stage=buffered index=\(windowIndex) sequence=\(bufferedWindowShortcutIndices.map(String.init).joined(separator: ","))")
-        return true
-    }
-
     private func handleGlobalHotkey(id: UInt32) {
         guard let hotkey = GlobalHotkey(rawValue: id) else { return }
         logHotkeyDebug("handle id=\(id) hotkey=\(hotkey) \(hotkeyWindowStateSummary())")
@@ -6287,7 +6267,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         openFinderShortcutSpec = loadShortcutSpec(setting: .guiOpenFinderShortcut)
         openSettingsShortcutSpec = loadShortcutSpec(setting: .guiOpenSettingsShortcut)
         windowShortcutSpec = loadShortcutSpec(setting: .guiWindowShortcut)
-        windowSequenceShortcutSpec = loadShortcutSpec(setting: .guiWindowSequenceShortcut)
         refreshWorkspaceShortcutFooterRow()
     }
 
@@ -6311,7 +6290,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         case .guiOpenFinderShortcut: return try orchestrator.guiOpenFinderShortcut()
         case .guiOpenSettingsShortcut: return try orchestrator.guiOpenSettingsShortcut()
         case .guiWindowShortcut: return try orchestrator.guiWindowShortcut()
-        case .guiWindowSequenceShortcut: return try orchestrator.guiWindowSequenceShortcut()
         }
     }
 
@@ -6330,7 +6308,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         case .guiOpenFinderShortcut: try orchestrator.setGUIOpenFinderShortcut(value)
         case .guiOpenSettingsShortcut: try orchestrator.setGUIOpenSettingsShortcut(value)
         case .guiWindowShortcut: try orchestrator.setGUIWindowShortcut(value)
-        case .guiWindowSequenceShortcut: try orchestrator.setGUIWindowSequenceShortcut(value)
         }
     }
 
@@ -6349,7 +6326,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         case .guiOpenFinderShortcut: return openFinderShortcutSpec
         case .guiOpenSettingsShortcut: return openSettingsShortcutSpec
         case .guiWindowShortcut: return windowShortcutSpec
-        case .guiWindowSequenceShortcut: return windowSequenceShortcutSpec
         }
     }
 
@@ -6459,12 +6435,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         return numberedWindowShortcutIndex(for: event, spec: windowShortcutSpec)
     }
 
-    private func bufferedWindowShortcutIndex(for event: NSEvent) -> Int? {
-        guard !event.isARepeat else { return nil }
-        guard let windowSequenceShortcutSpec else { return nil }
-        return numberedWindowShortcutIndex(for: event, spec: windowSequenceShortcutSpec)
-    }
-
     private func numberedWindowShortcutIndex(for event: NSEvent, spec: HotkeySpec) -> Int? {
         guard eventModifierCarbonFlags(event) == spec.modifiersCarbon else { return nil }
         let keyMap: [UInt16: Int] = [
@@ -6477,20 +6447,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     private func windowShortcutBadgeText(index: Int) -> String {
         guard let windowShortcutSpec else { return "⌘\(index)" }
         return displayShortcut(windowShortcutSpec, keyText: String(index))
-    }
-
-    private func flushBufferedWindowShortcuts() {
-        let indices = bufferedWindowShortcutIndices
-        guard !indices.isEmpty else { return }
-        bufferedWindowShortcutIndices.removeAll()
-        logWindowShortcutProfile("stage=flush sequence=\(indices.map(String.init).joined(separator: ","))")
-        Task { @MainActor [weak self] in
-            guard let self else { return }
-            for index in indices {
-                self.logWindowShortcutProfile("stage=sequence_dispatch index=\(index)")
-                await self.runWindowShortcut(index: index, startedAt: Date())
-            }
-        }
     }
 
     private func selectNextVisibleWorkspace() {
