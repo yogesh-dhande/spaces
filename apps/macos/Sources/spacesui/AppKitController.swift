@@ -1,6 +1,7 @@
 import AppKit
 import Carbon
 import Foundation
+import Sparkle
 import systembridge
 import workspacecore
 
@@ -167,7 +168,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     private var activeShortcutCaptureSetting: ShortcutSetting?
     private weak var pulseColorWell: NSColorWell?
     private var periodicWorkspaceRefreshTask: Task<Void, Never>?
-    private var periodicUpdateCheckTask: Task<Void, Never>?
     private var periodicProcessMonitorTask: Task<Void, Never>?
     private var periodicWorktreeDiscoveryTask: Task<Void, Never>?
     private var periodicSidebarMetadataRefreshTask: Task<Void, Never>?
@@ -191,10 +191,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     private var pendingCommandPalettePresentation: PendingCommandPalettePresentation?
     private var pendingWorktreeDiscoveryReload = false
     private var lastTrackedWindowCounts: [String: Int] = [:]
-    private let updateChecker = UpdateChecker()
-    private let appUpdater = AppUpdater()
-    private var checkForUpdatesMenuItem: NSMenuItem?
-    private var availableUpdate: UpdateInfo?
+    private lazy var updaterController: SPUStandardUpdaterController? = {
+        guard Self.isRunningFromAppBundle else { return nil }
+        return SPUStandardUpdaterController(startingUpdater: false, updaterDelegate: nil, userDriverDelegate: nil)
+    }()
     private var agentEventIPCObserver: NSObjectProtocol?
     private var selectWorkspaceDetailIPCObserver: NSObjectProtocol?
     private var appDidBecomeActiveObserver: NSObjectProtocol?
@@ -266,6 +266,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         case noMatch
     }
 
+    private static let isRunningFromAppBundle = Bundle.main.bundleURL.pathExtension == "app"
+
     private lazy var hotkeyHandlerProc: EventHandlerUPP = { _, event, userData in
         guard let userData else { return noErr }
         let controller = Unmanaged<AppKitController>.fromOpaque(userData).takeUnretainedValue()
@@ -306,6 +308,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         NSApp.activate(ignoringOtherApps: true)
         logStartupProfile("app_activated")
         buildMainMenu()
+        updaterController?.startUpdater()
         logStartupProfile("main_menu_ready")
         loadShortcutSpecs()
         logStartupProfile("shortcut_specs_loaded")
@@ -324,7 +327,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
     public func applicationWillTerminate(_ notification: Notification) {
         periodicWorkspaceRefreshTask?.cancel()
-        periodicUpdateCheckTask?.cancel()
         periodicProcessMonitorTask?.cancel()
         periodicWorktreeDiscoveryTask?.cancel()
         periodicSidebarMetadataRefreshTask?.cancel()
@@ -507,80 +509,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 guard self.canReloadAfterBackgroundWorkspaceRefresh() else { continue }
                 // Catch external CLI edits (for example title changes) that do not trigger other poller reloads.
                 self.requestSidebarReload()
-            }
-        }
-    }
-
-    private func startPeriodicUpdateCheck() {
-        periodicUpdateCheckTask?.cancel()
-        periodicUpdateCheckTask = Task { [weak self] in
-            guard let self else { return }
-            await self.performUpdateCheck()
-            while !Task.isCancelled {
-                do { try await Task.sleep(for: .seconds(4 * 60 * 60)) } catch { break }
-                await self.performUpdateCheck()
-            }
-        }
-    }
-
-    private func performUpdateCheck() async {
-        let info = await updateChecker.checkForUpdate()
-        availableUpdate = info
-        if let info {
-            checkForUpdatesMenuItem?.title = "Update Available: v\(info.version)"
-        } else {
-            checkForUpdatesMenuItem?.title = "Up to Date"
-            checkForUpdatesMenuItem?.action = #selector(checkForUpdatesMenuAction(_:))
-        }
-    }
-
-    @objc private func checkForUpdatesMenuAction(_ sender: Any?) {
-        Task {
-            checkForUpdatesMenuItem?.title = "Checking..."
-            checkForUpdatesMenuItem?.isEnabled = false
-            let info = await updateChecker.forceCheck()
-            availableUpdate = info
-            checkForUpdatesMenuItem?.isEnabled = true
-            if let info {
-                checkForUpdatesMenuItem?.title = "Update Available: v\(info.version)"
-                showUpdateAlert(info: info)
-            } else {
-                checkForUpdatesMenuItem?.title = "Up to Date"
-                let alert = NSAlert()
-                alert.messageText = "You're up to date"
-                alert.informativeText = "Spaces \(AppVersion.current) matches the latest GitHub release."
-                alert.alertStyle = .informational
-                alert.addButton(withTitle: "OK")
-                alert.runModal()
-                checkForUpdatesMenuItem?.title = "Check for Updates..."
-            }
-        }
-    }
-
-    private func showUpdateAlert(info: UpdateInfo) {
-        let alert = NSAlert()
-        alert.messageText = "Update Available"
-        alert.informativeText = "Spaces v\(info.version) is available (you have v\(AppVersion.current)).\n\n\(info.releaseNotes.prefix(500))"
-        alert.alertStyle = .informational
-        alert.addButton(withTitle: "Download & Install")
-        alert.addButton(withTitle: "View Release")
-        alert.addButton(withTitle: "Later")
-        let response = alert.runModal()
-        if response == .alertFirstButtonReturn {
-            performUpdate(info: info)
-        } else if response == .alertSecondButtonReturn {
-            NSWorkspace.shared.open(UpdateChecker.latestReleaseURL)
-        }
-    }
-
-    private func performUpdate(info: UpdateInfo) {
-        Task {
-            checkForUpdatesMenuItem?.title = "Downloading..."
-            checkForUpdatesMenuItem?.isEnabled = false
-            do { try await appUpdater.downloadAndInstall(from: info.downloadURL) } catch {
-                checkForUpdatesMenuItem?.title = "Update Available: v\(info.version)"
-                checkForUpdatesMenuItem?.isEnabled = true
-                showError(error)
             }
         }
     }
@@ -1610,11 +1538,12 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
         let appMenuItem = NSMenuItem()
         let appMenu = NSMenu(title: "Spaces")
-        let updateItem = NSMenuItem(title: "Check for Updates...", action: #selector(checkForUpdatesMenuAction(_:)), keyEquivalent: "")
-        updateItem.target = self
-        checkForUpdatesMenuItem = updateItem
+        let updateItem = NSMenuItem(
+            title: "Check for Updates...", action: #selector(SPUStandardUpdaterController.checkForUpdates(_:)), keyEquivalent: "")
+        updateItem.target = updaterController
+        updateItem.isEnabled = updaterController != nil
         appMenu.addItem(updateItem)
-        let versionItem = NSMenuItem(title: "Version \(AppVersion.current)", action: nil, keyEquivalent: "")
+        let versionItem = NSMenuItem(title: "Version \(AppVersion.short)", action: nil, keyEquivalent: "")
         versionItem.isEnabled = false
         appMenu.addItem(versionItem)
         appMenu.addItem(.separator())
@@ -2141,7 +2070,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         guard !didStartBackgroundServices else { return }
         didStartBackgroundServices = true
         startPeriodicWorkspaceWindowRefresh()
-        startPeriodicUpdateCheck()
         startPeriodicProcessMonitor()
         startPeriodicWorktreeDiscovery()
         startPeriodicSidebarMetadataRefresh()
@@ -2150,8 +2078,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     private func stopBackgroundServices() {
         periodicWorkspaceRefreshTask?.cancel()
         periodicWorkspaceRefreshTask = nil
-        periodicUpdateCheckTask?.cancel()
-        periodicUpdateCheckTask = nil
         periodicProcessMonitorTask?.cancel()
         periodicProcessMonitorTask = nil
         periodicWorktreeDiscoveryTask?.cancel()

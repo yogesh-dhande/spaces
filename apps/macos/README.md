@@ -109,12 +109,15 @@ Those belong in the spec, architecture doc, or website docs.
 Build and deploy a release from the repository root with:
 
 ```bash
-scripts/release-and-deploy.sh <version>
+scripts/release-and-deploy.sh <version> [build-number]
 ```
 
-That script builds the release binaries, signs them, creates the DMG, optionally notarizes it, and publishes the installer to GitHub Releases.
+That script syncs the shared version metadata, builds the release binaries, signs them, creates both a manual-download DMG and a Sparkle update zip, refreshes the stable appcast, stages Sparkle files into the website static assets, and publishes the DMG to GitHub Releases.
 
-GitHub Actions release signing requires three repository secrets:
+GitHub Actions release publishing requires these repository secrets:
 - `CODESIGN_IDENTITY`
 - `CODESIGN_CERTIFICATE_P12`
 - `CODESIGN_CERTIFICATE_PASSWORD`
+- `SPARKLE_PUBLIC_ED_KEY`
+- `SPARKLE_PRIVATE_ED_KEY`
+- `FIREBASE_SERVICE_ACCOUNT_SPACES_A1814`

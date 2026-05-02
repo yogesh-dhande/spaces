@@ -2,14 +2,6 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-    <key>CFBundleName</key>
-    <string>Spaces</string>
-    <key>CFBundleExecutable</key>
-    <string>SpacesApp</string>
-    <key>CFBundlePackageType</key>
-    <string>APPL</string>
-    <key>CFBundleIdentifier</key>
-    <string>com.spaces.app</string>
     <key>CFBundleShortVersionString</key>
     <string>0.1.0</string>
     <key>CFBundleVersion</key>
@@ -18,7 +10,5 @@
     <string>https://usespaces.dev/releases/appcast.xml</string>
     <key>SUPublicEDKey</key>
     <string>REPLACE_WITH_SPARKLE_PUBLIC_ED_KEY</string>
-    <key>CFBundleIconFile</key>
-    <string>AppIcon</string>
 </dict>
 </plist>

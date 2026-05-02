@@ -23,20 +23,8 @@ staging=$(mktemp -d)
 temp_dmg=""
 trap 'rm -rf "$staging"; [ -n "$temp_dmg" ] && rm -f "$temp_dmg"' EXIT
 
-# Create app bundle structure
 app_bundle="$staging/Spaces.app"
-mkdir -p "$app_bundle/Contents/MacOS"
-mkdir -p "$app_bundle/Contents/Resources"
-
-# Copy Spaces binary
-cp "$SPACES_APP" "$app_bundle/Contents/MacOS/SpacesApp"
-chmod +x "$app_bundle/Contents/MacOS/SpacesApp"
-
-# Copy Info.plist
-cp apps/macos/Sources/SpacesApp/Info.plist "$app_bundle/Contents/Info.plist"
-
-# Copy app icon
-cp apps/macos/Sources/SpacesApp/AppIcon.icns "$app_bundle/Contents/Resources/AppIcon.icns"
+"$REPO_ROOT/scripts/create-app-bundle.sh" "$SPACES_APP" "$SPACES_CLI" "$app_bundle"
 
 # Create CLI installer package
 cli_installer="$staging/Install spaces CLI"
@@ -73,10 +61,6 @@ fi
 read -p "Press Enter to close..."
 EOF
 chmod +x "$cli_installer"
-
-# Copy spaces CLI to Resources
-mkdir -p "$app_bundle/Contents/Resources"
-cp "$SPACES_CLI" "$app_bundle/Contents/Resources/spaces"
 
 # Sign the complete app bundle (required for notarization)
 IDENTITY="${CODESIGN_IDENTITY:--}"

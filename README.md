@@ -77,20 +77,29 @@ npm run build
 Publish macOS releases to GitHub Releases with:
 
 ```bash
-scripts/release-and-deploy.sh <version>
+scripts/release-and-deploy.sh <version> [build-number]
 ```
 
 This workflow:
+- syncs the checked-in version metadata used by the CLI, app menu, and bundle plist
 - builds the release binaries
 - code-signs the app and CLI
-- creates the DMG
-- optionally notarizes it when `NOTARIZE=1`
+- creates a manual-download DMG
+- creates a Sparkle-served `Spaces.app` zip archive
+- updates `dist/updates/stable/appcast.xml` plus any Sparkle delta files
+- stages the Sparkle feed and Sparkle archives into `apps/web/public/releases`
+- builds the static site so Firebase can serve `https://usespaces.dev/releases/*`
+- optionally notarizes the DMG when `NOTARIZE=1`
 - publishes the DMG to GitHub Releases
 
 Important environment variables:
 - `CODESIGN_IDENTITY`
 - `CODESIGN_CERTIFICATE_P12`
 - `CODESIGN_CERTIFICATE_PASSWORD`
+- `SPARKLE_PUBLIC_ED_KEY`
+- `SPARKLE_PRIVATE_ED_KEY`
+- `SPARKLE_FEED_URL`
+- `SPARKLE_DOWNLOAD_URL_PREFIX`
 - `NOTARIZE`
 - `APPLE_ID`
 - `TEAM_ID`
@@ -98,6 +107,8 @@ Important environment variables:
 - `GH_TOKEN`
 
 For GitHub Actions releases, `CODESIGN_CERTIFICATE_P12` must be the base64-encoded Developer ID Application `.p12` bundle that matches `CODESIGN_IDENTITY`, and `CODESIGN_CERTIFICATE_PASSWORD` must be the password used when exporting that `.p12`.
+
+Sparkle update hosting lives under `https://usespaces.dev/releases/` on the static Firebase site. The update feed and Sparkle archives are staged into `apps/web/public/releases`, which Next.js exports as real static files before Firebase deploy.
 
 ### Website deploy
 Firebase Hosting deploys from [`.github/workflows/firebase-hosting-merge.yml`](/Users/yogesh/projects/muxy/.github/workflows/firebase-hosting-merge.yml:1). It builds `apps/web` and deploys the static export on pushes to `main` that touch the site or on manual dispatch.

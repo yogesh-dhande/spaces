@@ -1,0 +1,62 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [ $# -ne 1 ]; then
+  echo "Usage: $0 <version>" >&2
+  exit 1
+fi
+
+VERSION="$1"
+REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+ARCHIVE_PATH="$REPO_ROOT/dist/releases/$VERSION/Spaces-${VERSION}.zip"
+UPDATES_DIR="$REPO_ROOT/dist/updates/stable"
+WEB_RELEASES_DIR="$REPO_ROOT/apps/web/public/releases"
+APPCAST_TOOL="$REPO_ROOT/apps/macos/.build/artifacts/sparkle/Sparkle/bin/generate_appcast"
+
+: "${SPARKLE_PRIVATE_ED_KEY:?Set SPARKLE_PRIVATE_ED_KEY to the private Sparkle EdDSA key.}"
+: "${SPARKLE_DOWNLOAD_URL_PREFIX:=https://usespaces.dev/releases}"
+
+if [[ ! -f "$ARCHIVE_PATH" ]]; then
+  echo "Error: Sparkle archive not found at $ARCHIVE_PATH" >&2
+  exit 1
+fi
+
+if [[ ! -x "$APPCAST_TOOL" ]]; then
+  echo "Error: generate_appcast not found at $APPCAST_TOOL. Run scripts/swiftpm.sh build first." >&2
+  exit 1
+fi
+
+mkdir -p "$UPDATES_DIR"
+cp "$ARCHIVE_PATH" "$UPDATES_DIR/"
+
+archive_basename="Spaces-${VERSION}"
+for extension in html md txt; do
+  notes_path="$REPO_ROOT/dist/releases/$VERSION/${archive_basename}.${extension}"
+  if [[ -f "$notes_path" ]]; then
+    cp "$notes_path" "$UPDATES_DIR/"
+  fi
+done
+
+generate_args=(
+  --ed-key-file -
+  --download-url-prefix "$SPARKLE_DOWNLOAD_URL_PREFIX"
+)
+
+if [[ -n "${SPARKLE_RELEASE_NOTES_URL_PREFIX:-}" ]]; then
+  generate_args+=(--release-notes-url-prefix "$SPARKLE_RELEASE_NOTES_URL_PREFIX")
+fi
+if [[ -n "${SPARKLE_FULL_RELEASE_NOTES_URL:-}" ]]; then
+  generate_args+=(--full-release-notes-url "$SPARKLE_FULL_RELEASE_NOTES_URL")
+fi
+if [[ -n "${SPARKLE_LINK:-}" ]]; then
+  generate_args+=(--link "$SPARKLE_LINK")
+fi
+
+printf '%s' "$SPARKLE_PRIVATE_ED_KEY" | "$APPCAST_TOOL" "${generate_args[@]}" "$UPDATES_DIR"
+rm -rf "$WEB_RELEASES_DIR"
+mkdir -p "$WEB_RELEASES_DIR"
+cp -R "$UPDATES_DIR"/. "$WEB_RELEASES_DIR"/
+touch "$WEB_RELEASES_DIR/.gitkeep"
+
+echo "✓ Generated Sparkle updates in $UPDATES_DIR"
+echo "✓ Staged Sparkle updates in $WEB_RELEASES_DIR"
