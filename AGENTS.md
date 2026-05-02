@@ -18,10 +18,10 @@
 
 ## Coding Agent Workflow
 - If on the `main` branch, switch to a new branch before committing changes. When asked to push, commit, push, and create a PR if there isn't one already. Do not add a coding agent name as a prefix to the branch name or the PR title. Please check the PR status before pushing to existing branches with previously opened PRs. If the PR is closed, create a new branch and a new PR.
-- Always start by ensuring a Spaces workspace exists by running `~/projects/spaces/apps/macos/.build/debug/spaces workspace import --title [text] --tooltip [text]` from the project root.
+- Always start by ensuring a Spaces workspace exists by running `~/projects/spaces/apps/macos/.build/debug/spaces workspace import --title [text] --notes [text]` from the project root.
 - Before manually launching a new Spaces app instance for debugging or profiling, close any existing Spaces instances so only one global hotkey listener is active.
 - When blocked on user input or permissions, run `~/projects/spaces/apps/macos/.build/debug/spaces agent event --type waiting` before asking.
-- When changes are ready for review, first run `~/projects/spaces/apps/macos/.build/debug/spaces workspace update --tooltip [text]`, then run `~/projects/spaces/apps/macos/.build/debug/spaces workspace up --restart`.
+- When changes are ready for review, first run `~/projects/spaces/apps/macos/.build/debug/spaces workspace update --notes [text]`, then run `~/projects/spaces/apps/macos/.build/debug/spaces workspace up --restart`.
 
 ## Verification Rules
 - Always run lint and build before finalizing macOS app changes.
