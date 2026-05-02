@@ -16,7 +16,8 @@ let package = Package(
         .executable(name: "SpacesApp", targets: ["SpacesApp"])
     ],
     dependencies: [
-        .package(url: "https://github.com/apple/swift-argument-parser.git", from: "1.5.0")
+        .package(url: "https://github.com/apple/swift-argument-parser.git", from: "1.5.0"),
+        .package(url: "https://github.com/sparkle-project/Sparkle", from: "2.9.1")
     ],
     targets: [
         .target(name: "systembridge"),
@@ -25,7 +26,14 @@ let package = Package(
             dependencies: ["systembridge"],
             linkerSettings: [.linkedLibrary("sqlite3")]
         ),
-        .target(name: "spacesui", dependencies: ["workspacecore", "systembridge"]),
+        .target(
+            name: "spacesui",
+            dependencies: [
+                "workspacecore",
+                "systembridge",
+                .product(name: "Sparkle", package: "Sparkle"),
+            ]
+        ),
         .target(
             name: "spacescli",
             dependencies: [

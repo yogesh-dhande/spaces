@@ -238,5 +238,6 @@ Spaces focuses those windows; it does not decide their geometry.
 
 ## Update Experience
 - The app should check for updates periodically and allow manual update checks.
-- Update discovery should use the latest GitHub release, and the user should be able to install it from within the app.
+- Update discovery and installation should use one stable Sparkle appcast feed.
+- Manual downloads may still be published separately, but the in-app updater should not depend on GitHub release APIs.
 - `spaces --version` should report the current version.

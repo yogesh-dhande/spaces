@@ -1,37 +1,58 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Complete release workflow: build, package, and publish to GitHub Releases
+# Complete release workflow: build, package, and publish a GitHub release plus
+# a Sparkle appcast/update archive for the stable channel.
 #
 # Usage:
-#   scripts/release-and-deploy.sh <version>
+#   scripts/release-and-deploy.sh <version> [build-number]
 #
 # Example:
-#   scripts/release-and-deploy.sh 0.2.0
+#   scripts/release-and-deploy.sh 0.2.0 42
 #
-# Environment variables (optional):
+# Required environment variables:
 #   CODESIGN_IDENTITY  - Developer ID certificate (optional; ad-hoc if unset)
+#   SPARKLE_PUBLIC_ED_KEY  - Public Sparkle EdDSA key embedded in Info.plist
+#   SPARKLE_PRIVATE_ED_KEY - Private Sparkle EdDSA key used for appcast signing
+# Optional environment variables:
+#   SPARKLE_FEED_URL   - Sparkle appcast URL (default: https://usespaces.dev/releases/appcast.xml)
+#   SPARKLE_DOWNLOAD_URL_PREFIX - Base HTTPS URL for update archives (default: https://usespaces.dev/releases)
+#   SPARKLE_RELEASE_NOTES_URL_PREFIX - Base URL for hosted release notes files
+#   SPARKLE_FULL_RELEASE_NOTES_URL - URL for full release notes
+#   SPARKLE_LINK       - Product URL included in appcast items
 #   NOTARIZE           - Set to "1" to notarize via xcrun notarytool
 #   APPLE_ID           - Apple ID for notarization
 #   TEAM_ID            - Apple Developer Team ID for notarization
 #   APP_PASSWORD       - App-specific password for notarization
 #   GH_TOKEN           - GitHub token with permission to create releases
 
-if [ $# -ne 1 ]; then
-  echo "Usage: $0 <version>"
-  echo "Example: $0 0.2.0"
+if [ $# -lt 1 ] || [ $# -gt 2 ]; then
+  echo "Usage: $0 <version> [build-number]"
+  echo "Example: $0 0.2.0 42"
   exit 1
 fi
 
 VERSION="$1"
+BUILD_NUMBER="${2:-$(date +%Y%m%d%H%M%S)}"
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 SCRIPTS_DIR="$REPO_ROOT/scripts"
 MACOS_DIR="$REPO_ROOT/apps/macos"
 TAG="v$VERSION"
 RELEASE_URL="https://github.com/yogesh-dhande/spaces/releases/tag/$TAG"
+SPARKLE_FEED_URL="${SPARKLE_FEED_URL:-https://usespaces.dev/releases/appcast.xml}"
 
 if ! command -v gh >/dev/null 2>&1; then
   echo "Error: GitHub CLI is required. Install it from https://cli.github.com/" >&2
+  exit 1
+fi
+
+if [[ -z "${SPARKLE_PUBLIC_ED_KEY:-}" ]]; then
+  echo "Error: SPARKLE_PUBLIC_ED_KEY is required." >&2
+  exit 1
+fi
+
+if [[ -z "${SPARKLE_PRIVATE_ED_KEY:-}" ]]; then
+  echo "Error: SPARKLE_PRIVATE_ED_KEY is required." >&2
   exit 1
 fi
 
@@ -49,13 +70,22 @@ echo "━━━━━━━━━━━━━━━━━━━━━━━━�
 echo ""
 
 # Step 1: Build macOS app in release mode
-echo "📦 Step 1/6: Building macOS app..."
+echo "🧾 Step 1/8: Syncing release metadata..."
+"$SCRIPTS_DIR/sync-app-version.sh" \
+  --short "$VERSION" \
+  --build "$BUILD_NUMBER" \
+  --feed-url "$SPARKLE_FEED_URL" \
+  --public-ed-key "$SPARKLE_PUBLIC_ED_KEY"
+echo "✓ Release metadata synced"
+echo ""
+
+echo "📦 Step 2/8: Building macOS app..."
 "$SCRIPTS_DIR/swiftpm.sh" build -c release
 echo "✓ Build complete"
 echo ""
 
-# Step 2: Code sign binaries
-echo "🔐 Step 2/6: Code signing binaries..."
+# Step 3: Code sign binaries
+echo "🔐 Step 3/8: Code signing binaries..."
 BUILD_DIR="$MACOS_DIR/.build/release"
 SPACES_APP="$BUILD_DIR/SpacesApp"
 SPACES_CLI="$BUILD_DIR/spaces"
@@ -73,8 +103,8 @@ set +a          # stop auto-exporting
 echo "✓ Code signing complete"
 echo ""
 
-# Step 3: Create DMG installer
-echo "💿 Step 3/6: Creating DMG installer..."
+# Step 4: Create DMG installer
+echo "💿 Step 4/8: Creating DMG installer..."
 "$SCRIPTS_DIR/create-dmg.sh" "$SPACES_APP" "$SPACES_CLI" "$VERSION"
 DMG_NAME="Spaces-${VERSION}.dmg"
 DMG_PATH="$REPO_ROOT/dist/releases/$VERSION/$DMG_NAME"
@@ -86,9 +116,17 @@ fi
 echo "✓ DMG created: $DMG_NAME"
 echo ""
 
-# Step 4: Notarize (optional)
+# Step 5: Create Sparkle archive
+echo "📦 Step 5/8: Creating Sparkle archive..."
+"$SCRIPTS_DIR/create-sparkle-archive.sh" "$SPACES_APP" "$SPACES_CLI" "$VERSION"
+ZIP_NAME="Spaces-${VERSION}.zip"
+ZIP_PATH="$REPO_ROOT/dist/releases/$VERSION/$ZIP_NAME"
+echo "✓ Sparkle archive created: $ZIP_NAME"
+echo ""
+
+# Step 6: Notarize (optional)
 if [[ "${NOTARIZE:-}" == "1" ]]; then
-  echo "🍎 Step 4/6: Notarizing DMG..."
+  echo "🍎 Step 6/8: Notarizing DMG..."
   if [[ -z "${APPLE_ID:-}" ]] || [[ -z "${TEAM_ID:-}" ]] || [[ -z "${APP_PASSWORD:-}" ]]; then
     echo "Error: APPLE_ID, TEAM_ID, and APP_PASSWORD are required for notarization" >&2
     exit 1
@@ -102,24 +140,34 @@ if [[ "${NOTARIZE:-}" == "1" ]]; then
   echo "✓ Notarization complete"
   echo ""
 else
-  echo "⏭️  Step 4/6: Skipping notarization (set NOTARIZE=1 to enable)"
+  echo "⏭️  Step 6/8: Skipping notarization (set NOTARIZE=1 to enable)"
   echo ""
 fi
 
-# Step 5: Create GitHub release
-echo "🚀 Step 5/6: Creating GitHub release..."
+# Step 7: Generate and publish Sparkle appcast
+echo "🛰️  Step 7/8: Publishing Sparkle appcast..."
+"$SCRIPTS_DIR/publish-sparkle-appcast.sh" "$VERSION"
+echo "✓ Sparkle appcast updated"
+echo ""
+
+# Step 8: Build website static output with staged Sparkle artifacts
+echo "🌐 Step 8/8: Building website..."
+(
+  cd "$REPO_ROOT/apps/web"
+  npm run build
+)
+echo "✓ Website build complete"
+echo ""
+
+echo "⏭️  Local script stops after staging Firebase-ready static output in apps/web/public/releases and apps/web/out"
+echo ""
+
+echo "🚀 Final step: Creating GitHub release..."
 cd "$REPO_ROOT"
 gh release create "$TAG" "$DMG_PATH" \
   --title "Spaces $VERSION" \
   --generate-notes
 echo "✓ GitHub release created"
-echo ""
-
-# Step 6: Build Next.js website
-echo "🌐 Step 6/6: Building Next.js website..."
-cd "$REPO_ROOT/apps/web"
-npm run build
-echo "✓ Next.js build complete"
 echo ""
 
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
@@ -129,4 +177,5 @@ echo ""
 echo "📍 URLs:"
 echo "  • Release:  $RELEASE_URL"
 echo "  • DMG:      $RELEASE_URL"
+echo "  • Appcast:  $SPARKLE_FEED_URL"
 echo ""

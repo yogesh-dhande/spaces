@@ -2,10 +2,15 @@
 #
 # Trigger: push a tag matching v* (e.g. v0.3.0)
 #
-# Optional secrets:
+# Required secrets:
 #   CODESIGN_IDENTITY - Developer ID Application certificate name for code signing.
 #   CODESIGN_CERTIFICATE_P12 - Base64-encoded Developer ID Application .p12 certificate.
 #   CODESIGN_CERTIFICATE_PASSWORD - Password for the .p12 certificate.
+#   SPARKLE_PUBLIC_ED_KEY - Public Sparkle EdDSA key embedded in the app bundle.
+#   SPARKLE_PRIVATE_ED_KEY - Private Sparkle EdDSA key used for appcast signing.
+#   FIREBASE_SERVICE_ACCOUNT_SPACES_A1814 - Firebase Hosting service account JSON.
+#
+# Optional secrets:
 #   APPLE_ID          - Apple ID email for notarization (requires all three notarization secrets).
 #   TEAM_ID           - Apple Developer Team ID for notarization.
 #   APP_PASSWORD      - App-specific password for notarization.
@@ -41,18 +46,20 @@ jobs:
       - name: Resolve SwiftPM dependencies
         run: scripts/swiftpm.sh package resolve
 
-      - name: Build release
-        run: scripts/swiftpm.sh build -c release
-
       - name: Extract version from tag
         id: version
-        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+        run: |
+          echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+          echo "build=${GITHUB_RUN_NUMBER}" >> "$GITHUB_OUTPUT"
 
       - name: Validate signing configuration
         env:
           CODESIGN_IDENTITY: ${{ secrets.CODESIGN_IDENTITY }}
           CODESIGN_CERTIFICATE_P12: ${{ secrets.CODESIGN_CERTIFICATE_P12 }}
           CODESIGN_CERTIFICATE_PASSWORD: ${{ secrets.CODESIGN_CERTIFICATE_PASSWORD }}
+          SPARKLE_PUBLIC_ED_KEY: ${{ secrets.SPARKLE_PUBLIC_ED_KEY }}
+          SPARKLE_PRIVATE_ED_KEY: ${{ secrets.SPARKLE_PRIVATE_ED_KEY }}
+          FIREBASE_SERVICE_ACCOUNT_SPACES_A1814: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_SPACES_A1814 }}
         run: |
           if [[ -z "$CODESIGN_IDENTITY" ]]; then
             echo "::error::Missing required secret CODESIGN_IDENTITY." >&2
@@ -64,6 +71,18 @@ jobs:
           fi
           if [[ -z "$CODESIGN_CERTIFICATE_PASSWORD" ]]; then
             echo "::error::Missing required secret CODESIGN_CERTIFICATE_PASSWORD." >&2
+            exit 1
+          fi
+          if [[ -z "$SPARKLE_PUBLIC_ED_KEY" ]]; then
+            echo "::error::Missing required secret SPARKLE_PUBLIC_ED_KEY." >&2
+            exit 1
+          fi
+          if [[ -z "$SPARKLE_PRIVATE_ED_KEY" ]]; then
+            echo "::error::Missing required secret SPARKLE_PRIVATE_ED_KEY." >&2
+            exit 1
+          fi
+          if [[ -z "$FIREBASE_SERVICE_ACCOUNT_SPACES_A1814" ]]; then
+            echo "::error::Missing required secret FIREBASE_SERVICE_ACCOUNT_SPACES_A1814." >&2
             exit 1
           fi
 
@@ -87,6 +106,19 @@ jobs:
           security default-keychain -d user -s "$keychain_path"
           security find-identity -v -p codesigning "$keychain_path"
 
+      - name: Sync release metadata
+        env:
+          SPARKLE_PUBLIC_ED_KEY: ${{ secrets.SPARKLE_PUBLIC_ED_KEY }}
+        run: |
+          scripts/sync-app-version.sh \
+            --short "${{ steps.version.outputs.version }}" \
+            --build "${{ steps.version.outputs.build }}" \
+            --feed-url "https://usespaces.dev/releases/appcast.xml" \
+            --public-ed-key "$SPARKLE_PUBLIC_ED_KEY"
+
+      - name: Build release
+        run: scripts/swiftpm.sh build -c release
+
       - name: Code sign binaries
         env:
           CODESIGN_IDENTITY: ${{ secrets.CODESIGN_IDENTITY }}
@@ -107,6 +139,18 @@ jobs:
           echo "DMG_NAME=$dmg_name" >> "$GITHUB_ENV"
           echo "DMG_PATH=dist/releases/${{ steps.version.outputs.version }}/$dmg_name" >> "$GITHUB_ENV"
 
+      - name: Package Sparkle archive
+        env:
+          CODESIGN_IDENTITY: ${{ secrets.CODESIGN_IDENTITY }}
+        run: |
+          scripts/create-sparkle-archive.sh \
+            apps/macos/.build/release/SpacesApp \
+            apps/macos/.build/release/spaces \
+            ${{ steps.version.outputs.version }}
+          zip_name="Spaces-${{ steps.version.outputs.version }}.zip"
+          echo "ZIP_NAME=$zip_name" >> "$GITHUB_ENV"
+          echo "ZIP_PATH=dist/releases/${{ steps.version.outputs.version }}/$zip_name" >> "$GITHUB_ENV"
+
       - name: Notarize
         env:
           APPLE_ID: ${{ secrets.APPLE_ID }}
@@ -120,6 +164,26 @@ jobs:
             --password "$APP_PASSWORD" \
             --wait
           xcrun stapler staple "$DMG_PATH"
+
+      - name: Generate and publish Sparkle appcast
+        env:
+          SPARKLE_PRIVATE_ED_KEY: ${{ secrets.SPARKLE_PRIVATE_ED_KEY }}
+          SPARKLE_DOWNLOAD_URL_PREFIX: https://usespaces.dev/releases
+        run: scripts/publish-sparkle-appcast.sh ${{ steps.version.outputs.version }}
+
+      - name: Build website with staged Sparkle artifacts
+        run: |
+          cd apps/web
+          npm ci
+          npm run build
+
+      - name: Deploy Firebase Hosting
+        uses: FirebaseExtended/action-hosting-deploy@v0
+        with:
+          repoToken: ${{ secrets.GITHUB_TOKEN }}
+          firebaseServiceAccount: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_SPACES_A1814 }}
+          channelId: live
+          projectId: spaces-a1814
 
       - name: Create GitHub Release
         env:
