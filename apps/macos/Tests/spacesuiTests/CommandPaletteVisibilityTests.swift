@@ -7,7 +7,7 @@ import workspacecore
     private func makeItem(
         id: String, source: CommandPaletteItem.Source, workspaceID: String, kind: AppKitController.WorkspaceRunShortcutTarget.Kind, label: String,
         detail: String?, focusRequest: AppKitController.WindowFocusRequest, alertsAttentionID: String? = nil, workspaceTitle: String? = nil,
-        workspaceBranch: String? = "main", projectTitle: String = "Muxy", status: CommandPaletteItem.Status = .none
+        workspaceBranch: String? = "main", projectTitle: String = "Spaces", status: CommandPaletteItem.Status = .none
     ) -> CommandPaletteItem {
         CommandPaletteItem(
             id: id, source: source, alertsAttentionID: alertsAttentionID, workspaceID: workspaceID, workspaceTitle: workspaceTitle ?? workspaceID,
