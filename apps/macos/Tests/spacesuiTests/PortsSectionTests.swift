@@ -9,6 +9,7 @@ import workspacecore
         let row = PortRowView(port: PortDefinition(name: "API_PORT"), reservedPort: 3000)
 
         #expect(row.collapsedPrimaryTextForTesting == "API_PORT")
+        #expect(row.collapsedPrimaryTextIsSelectableForTesting)
         #expect(row.collapsedDetailTextForTesting == "3000")
     }
 

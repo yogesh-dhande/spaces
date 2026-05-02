@@ -277,6 +277,7 @@ import workspacecore
         nameLabel.stringValue = port.name.isEmpty ? "(unnamed)" : port.name
         nameLabel.font = .systemFont(ofSize: 13, weight: .medium)
         nameLabel.textColor = Theme.text
+        nameLabel.isSelectable = true
         detailLabel.stringValue = reservedPort.map(String.init) ?? ""
         detailLabel.font = .systemFont(ofSize: 12, weight: .regular)
         detailLabel.textColor = Theme.muted
@@ -339,6 +340,7 @@ import workspacecore
     func formSnapshot() -> PortDefinition { PortDefinition(id: currentPort.id, name: nameField?.stringValue ?? "") }
 
     var collapsedPrimaryTextForTesting: String { nameLabel.stringValue }
+    var collapsedPrimaryTextIsSelectableForTesting: Bool { nameLabel.isSelectable }
     var collapsedDetailTextForTesting: String { detailLabel.stringValue }
 
     private static func makeCollapsedLine(
