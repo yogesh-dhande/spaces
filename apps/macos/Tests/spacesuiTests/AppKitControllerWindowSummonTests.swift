@@ -31,4 +31,19 @@ import Testing
     @Test func commandPalettePresentationSkipsActivationWhenAlreadyActive() {
         #expect(!AppKitController.shouldActivateAppForCommandPalettePresentation(appIsActive: true))
     }
+
+    @Test func commandPalettePresentationKeepsMainWindowHiddenWhenItWasHidden() {
+        #expect(!AppKitController.shouldUnhideMainWindowForCommandPalettePresentation(mainWindowIsVisible: false))
+        #expect(AppKitController.shouldUnhideMainWindowForCommandPalettePresentation(mainWindowIsVisible: true))
+        #expect(AppKitController.shouldOrderOutMainWindowForCommandPalettePresentation(mainWindowIsVisible: false))
+        #expect(!AppKitController.shouldOrderOutMainWindowForCommandPalettePresentation(mainWindowIsVisible: true))
+        #expect(AppKitController.shouldHideAppAfterCommandPaletteDismissal(mainWindowIsVisible: false))
+        #expect(!AppKitController.shouldHideAppAfterCommandPaletteDismissal(mainWindowIsVisible: true))
+    }
+
+    @Test func commandPalettePresentationCompletesOnlyAfterPaletteBecomesKey() {
+        #expect(!AppKitController.commandPalettePresentationIsComplete(panelIsVisible: false, panelIsKey: false))
+        #expect(!AppKitController.commandPalettePresentationIsComplete(panelIsVisible: true, panelIsKey: false))
+        #expect(AppKitController.commandPalettePresentationIsComplete(panelIsVisible: true, panelIsKey: true))
+    }
 }
