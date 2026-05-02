@@ -121,6 +121,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let paletteWasVisible: Bool
     }
 
+    private struct PendingCommandPalettePresentation { let perfContext: HotkeyPerfContext? }
+
     private var window: NSWindow!
     private var splitView: NSSplitView?
     private let outlineView = SidebarOutlineView()
@@ -186,6 +188,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     private var commandPaletteSelectedIndex = 0
     private var commandPaletteNeedsReload = true
     private var isDismissingCommandPalette = false
+    private var pendingCommandPalettePresentation: PendingCommandPalettePresentation?
     private var pendingWorktreeDiscoveryReload = false
     private var lastTrackedWindowCounts: [String: Int] = [:]
     private let updateChecker = UpdateChecker()
@@ -6419,10 +6422,26 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             paletteWasVisible: commandPalettePanel?.isVisible == true)
     }
 
+    nonisolated static func shouldUnhideMainWindowForCommandPalettePresentation(mainWindowIsVisible: Bool) -> Bool { mainWindowIsVisible }
+
+    nonisolated static func shouldOrderOutMainWindowForCommandPalettePresentation(mainWindowIsVisible: Bool) -> Bool { !mainWindowIsVisible }
+
+    nonisolated static func commandPalettePresentationIsComplete(panelIsVisible: Bool, panelIsKey: Bool) -> Bool { panelIsVisible && panelIsKey }
+
+    nonisolated static func shouldHideAppAfterCommandPaletteDismissal(mainWindowIsVisible: Bool) -> Bool { !mainWindowIsVisible }
+
     private func logHotkeyPerfMetric(_ metric: String, action: String, context: HotkeyPerfContext) {
         let target =
             "action=\(action) app_active_before=\(context.appWasActive ? 1 : 0) app_hidden_before=\(context.appWasHidden ? 1 : 0) main_visible_before=\(context.mainWindowWasVisible ? 1 : 0) palette_visible_before=\(context.paletteWasVisible ? 1 : 0)"
         logPerfMetric(metric, target: target, elapsedMS: windowShortcutElapsedMS(since: context.startedAt), success: true)
+    }
+
+    private func completePendingCommandPalettePresentationIfNeeded() {
+        guard let pending = pendingCommandPalettePresentation, let panel = commandPalettePanel else { return }
+        guard Self.commandPalettePresentationIsComplete(panelIsVisible: panel.isVisible, panelIsKey: panel.isKeyWindow) else { return }
+        pendingCommandPalettePresentation = nil
+        logHotkeyDebug("present_palette end \(hotkeyWindowStateSummary())")
+        if let perfContext = pending.perfContext { logHotkeyPerfMetric("toggle_palette", action: "show", context: perfContext) }
     }
 
     private func logPerfMetric(_ metric: String, target: String, elapsedMS: Int, success: Bool) {
@@ -7373,6 +7392,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     public func windowDidBecomeKey(_ notification: Notification) {
         if let focusedWindow = notification.object as? NSWindow {
             logHotkeyDebug("window_did_become_key class=\(type(of: focusedWindow)) title=\(focusedWindow.title) \(hotkeyWindowStateSummary())")
+            if focusedWindow === commandPalettePanel { completePendingCommandPalettePresentationIfNeeded() }
         }
         guard !hasAppliedSplitViewWidth else { return }
         hasAppliedSplitViewWidth = true
@@ -8078,11 +8098,13 @@ extension AppKitController {
 
     private func presentCommandPalette(perfContext: HotkeyPerfContext? = nil) {
         let panel = ensureCommandPalettePanel()
+        let mainWindowWasVisible = window?.isVisible == true && window?.isMiniaturized != true
         logHotkeyDebug("present_palette begin \(hotkeyWindowStateSummary())")
         commandPaletteContextWorkspaceID = commandPaletteDefaultWorkspaceID()
+        if Self.shouldOrderOutMainWindowForCommandPalettePresentation(mainWindowIsVisible: mainWindowWasVisible) { window?.orderOut(nil) }
         if Self.shouldActivateAppForCommandPalettePresentation(appIsActive: NSApp.isActive) {
             NSApp.activate(ignoringOtherApps: true)
-            NSApp.unhide(nil)
+            if Self.shouldUnhideMainWindowForCommandPalettePresentation(mainWindowIsVisible: mainWindowWasVisible) { NSApp.unhide(nil) }
         }
         prepareWindowForActiveSpaceSummon(panel)
         panel.center()
@@ -8097,18 +8119,24 @@ extension AppKitController {
         } else if commandPaletteNeedsReload, commandPaletteLoadTask == nil {
             reloadCommandPaletteItems()
         }
-        logHotkeyDebug("present_palette end \(hotkeyWindowStateSummary())")
-        if let perfContext { logHotkeyPerfMetric("toggle_palette", action: "show", context: perfContext) }
+        pendingCommandPalettePresentation = PendingCommandPalettePresentation(perfContext: perfContext)
+        completePendingCommandPalettePresentationIfNeeded()
+        Task { @MainActor [weak self] in
+            await Task.yield()
+            self?.completePendingCommandPalettePresentationIfNeeded()
+        }
     }
 
     private func dismissCommandPalette(perfContext: HotkeyPerfContext? = nil) {
         guard let panel = commandPalettePanel else { return }
         guard !isDismissingCommandPalette else { return }
         isDismissingCommandPalette = true
+        let mainWindowIsVisible = window?.isVisible == true && window?.isMiniaturized != true
         logHotkeyDebug("dismiss_palette begin visible=\(panel.isVisible ? 1 : 0) key=\(panel.isKeyWindow ? 1 : 0) \(hotkeyWindowStateSummary())")
         panel.makeFirstResponder(nil)
         panel.orderOut(nil)
         commandPaletteContextWorkspaceID = nil
+        if Self.shouldHideAppAfterCommandPaletteDismissal(mainWindowIsVisible: mainWindowIsVisible) { NSApp.hide(nil) }
         isDismissingCommandPalette = false
         logHotkeyDebug("dismiss_palette end \(hotkeyWindowStateSummary())")
         if let perfContext { logHotkeyPerfMetric("toggle_palette", action: "hide", context: perfContext) }
