@@ -165,6 +165,9 @@ jobs:
             --wait
           xcrun stapler staple "$DMG_PATH"
 
+      - name: Verify release artifacts
+        run: scripts/verify-release-artifacts.sh --require-notarization "$DMG_PATH"
+
       - name: Generate and publish Sparkle appcast
         env:
           SPARKLE_PRIVATE_ED_KEY: ${{ secrets.SPARKLE_PRIVATE_ED_KEY }}

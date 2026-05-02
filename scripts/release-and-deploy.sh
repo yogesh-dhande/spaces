@@ -144,6 +144,14 @@ else
   echo ""
 fi
 
+echo "🔎 Verifying release artifacts..."
+verify_args=()
+if [[ "${NOTARIZE:-}" == "1" ]]; then
+  verify_args+=(--require-notarization)
+fi
+"$SCRIPTS_DIR/verify-release-artifacts.sh" "${verify_args[@]}" "$DMG_PATH"
+echo ""
+
 # Step 7: Generate and publish Sparkle appcast
 echo "🛰️  Step 7/8: Publishing Sparkle appcast..."
 "$SCRIPTS_DIR/publish-sparkle-appcast.sh" "$VERSION"
