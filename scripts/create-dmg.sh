@@ -178,20 +178,16 @@ codesign --force --deep --timestamp --options runtime --sign "$IDENTITY" "$insta
 codesign --verify --verbose=2 "$installer_app"
 echo "✓ Installer app signature verified"
 
-# Staple notarization ticket (if notarized)
-# This embeds the ticket so the app can be verified offline
-if xcrun stapler staple "$app_bundle" 2>/dev/null; then
-  echo "✓ Notarization ticket stapled"
-  xcrun stapler validate "$app_bundle"
-else
-  echo "⚠️  No notarization ticket found (app not notarized or stapling failed)"
-fi
-
 # Only the wizard app should be visible in Finder. The source app bundle stays hidden
 # in the mounted DMG and is copied by the installer.
 SetFile -a V "$app_bundle"
 
 # Create compressed DMG directly (skip window customization to avoid AppleScript issues)
 hdiutil create -volname "$VOLUME_NAME" -srcfolder "$staging" -ov -format UDZO "$DMG_PATH"
+
+echo "Signing DMG with identity: $IDENTITY"
+codesign --force --timestamp --sign "$IDENTITY" "$DMG_PATH"
+codesign --verify --verbose=2 "$DMG_PATH"
+echo "✓ DMG signature verified"
 
 echo "✓ Created $DMG_PATH"

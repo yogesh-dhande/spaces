@@ -84,12 +84,13 @@ This workflow:
 - syncs the checked-in version metadata used by the CLI, app menu, and bundle plist
 - builds the release binaries
 - code-signs the app and CLI
-- creates a manual-download DMG
+- creates a signed manual-download DMG
 - creates a Sparkle-served `Spaces.app` zip archive
 - updates `dist/updates/stable/appcast.xml` plus any Sparkle delta files
 - stages the Sparkle feed and Sparkle archives into `apps/web/public/releases`
 - builds the static site so Firebase can serve `https://usespaces.dev/releases/*`
 - optionally notarizes the DMG when `NOTARIZE=1`
+- verifies the final DMG signature plus the bundled installer and app before publish
 - publishes the DMG to GitHub Releases
 
 Important environment variables:
