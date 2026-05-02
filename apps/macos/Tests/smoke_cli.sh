@@ -26,7 +26,7 @@ TEST_REPO="$(mktemp -d /tmp/spaces-smoke-repo.XXXXXX)"
 )
 
 IMPORT_ERR="$(mktemp)"
-if "$BIN" workspace import "$TEST_REPO" --title "smoke" --tooltip "smoke test" >/dev/null 2>"$IMPORT_ERR"; then
+if "$BIN" workspace import "$TEST_REPO" --title "smoke" --notes "smoke test" >/dev/null 2>"$IMPORT_ERR"; then
   echo "expected import without a registered project to fail"
   exit 1
 fi

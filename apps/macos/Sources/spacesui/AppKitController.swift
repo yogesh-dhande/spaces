@@ -57,7 +57,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     private enum InlineWorkspaceDetailField {
         case title
         case branch
-        case tooltip
+        case notes
     }
 
     private struct InlineWorkspaceDetailFieldRefs {
@@ -621,7 +621,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let branch: String?
         let targetBranch: String?
         let directoryName: String?
-        let tooltip: String?
+        let notes: String?
         let allowRemoteBranchLookup: Bool
     }
 
@@ -807,8 +807,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 var workspace = try orchestrator.createWorkspace(
                     projectID: input.projectID, name: input.name, branch: input.branch, targetBranch: input.targetBranch,
                     directoryName: input.directoryName, runSetupScript: false, allowRemoteBranchLookup: input.allowRemoteBranchLookup)
-                if let tooltip = input.tooltip {
-                    try orchestrator.updateWorkspaceTooltip(workspaceID: workspace.id, tooltip: tooltip)
+                if let notes = input.notes {
+                    try orchestrator.updateWorkspaceNotes(workspaceID: workspace.id, notes: notes)
                     if let updated = try orchestrator.store.workspace(id: workspace.id) { workspace = updated }
                 }
                 return .success(workspace)
@@ -3429,9 +3429,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let directoryNameField = NSTextField(string: "")
         directoryNameField.placeholderString = "optional: letters, numbers, -, _"
         directoryNameField.setAccessibilityIdentifier("add-workspace-directory-name")
-        let tooltipField = NSTextField(string: "")
-        tooltipField.placeholderString = "optional: context about what you're working on"
-        tooltipField.setAccessibilityIdentifier("add-workspace-tooltip")
+        let notesField = NSTextField(string: "")
+        notesField.placeholderString = "optional: context about what you're working on"
+        notesField.setAccessibilityIdentifier("add-workspace-notes")
         let autoNameState = project.isGitRepo ? AddWorkspaceAutoNameState() : nil
 
         // --- Single card with all inputs ---
@@ -3464,13 +3464,13 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             advancedInputStack.addArrangedSubview(label(text: "Directory name"))
             advancedInputStack.addArrangedSubview(helpTextLabel("Auto-filled from branch name. Only letters, numbers, -, _ allowed."))
             advancedInputStack.addArrangedSubview(directoryNameField)
-            advancedInputStack.addArrangedSubview(label(text: "Tooltip"))
+            advancedInputStack.addArrangedSubview(label(text: "Notes"))
             advancedInputStack.addArrangedSubview(helpTextLabel("Optional context to display when viewing this workspace."))
-            advancedInputStack.addArrangedSubview(tooltipField)
+            advancedInputStack.addArrangedSubview(notesField)
             constrainFormFieldToFillWidth(targetBranchField, in: advancedInputStack)
             constrainFormFieldToFillWidth(nameField, in: advancedInputStack)
             constrainFormFieldToFillWidth(directoryNameField, in: advancedInputStack)
-            constrainFormFieldToFillWidth(tooltipField, in: advancedInputStack)
+            constrainFormFieldToFillWidth(notesField, in: advancedInputStack)
             advancedInputStack.isHidden = true
             contentStack.addArrangedSubview(advancedInputStack)
             progressiveInputViews = [advancedInputStack]
@@ -3480,10 +3480,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             contentStack.addArrangedSubview(nameField)
             constrainFormFieldToFillWidth(nameField, in: contentStack)
 
-            contentStack.addArrangedSubview(label(text: "Tooltip"))
+            contentStack.addArrangedSubview(label(text: "Notes"))
             contentStack.addArrangedSubview(helpTextLabel("Optional context to display when viewing this workspace."))
-            contentStack.addArrangedSubview(tooltipField)
-            constrainFormFieldToFillWidth(tooltipField, in: contentStack)
+            contentStack.addArrangedSubview(notesField)
+            constrainFormFieldToFillWidth(notesField, in: contentStack)
         }
 
         let card = formSectionCard(
@@ -3515,7 +3515,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             projectID: project.id, isGitRepo: project.isGitRepo, branchModePopup: project.isGitRepo ? branchModePopup : nil,
             existingBranchField: project.isGitRepo ? existingBranchField : nil, newBranchField: project.isGitRepo ? newBranchField : nil,
             targetBranchField: project.isGitRepo ? targetBranchField : nil, nameField: nameField,
-            directoryNameField: project.isGitRepo ? directoryNameField : nil, tooltipField: tooltipField, autoNameState: autoNameState,
+            directoryNameField: project.isGitRepo ? directoryNameField : nil, notesField: notesField, autoNameState: autoNameState,
             progressiveInputViews: progressiveInputViews, createButton: createButton)
         activeAddWorkspaceFormTag = createButton.tag
         if let refs = AddWorkspaceFieldCache.shared.cache[createButton.tag] {
@@ -3673,8 +3673,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         dirField.setAccessibilityIdentifier("workspace-detail-dir")
 
         // --- Inline editable metadata ---
-        let inlineTooltipRow = makeInlineWorkspaceMetadataEditRow(
-            workspaceID: workspace.id, field: .tooltip, icon: "info.circle", labelText: "Tooltip", value: workspace.tooltip ?? "",
+        let inlineNotesRow = makeInlineWorkspaceMetadataEditRow(
+            workspaceID: workspace.id, field: .notes, icon: "info.circle", labelText: "Notes", value: workspace.notes ?? "",
             placeholder: "Optional workspace context", isEditable: true)
 
         // --- Action buttons (icon-only) ---
@@ -3761,7 +3761,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let stopScriptSection = workspaceStopScriptSection(workspace: workspace)
 
         stack.addArrangedSubview(headerAndActionsRow)
-        stack.addArrangedSubview(inlineTooltipRow)
+        stack.addArrangedSubview(inlineNotesRow)
         for section in Self.orderedWorkspaceDetailSections(
             processesSection: processesSection, browserSessionsSection: browserSessionsSection, agentLaunchersSection: agentLaunchersSection,
             portsSection: portsSection, stopScriptSection: stopScriptSection)
@@ -3773,8 +3773,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         if let agentLaunchersSection { stack.setCustomSpacing(36, after: agentLaunchersSection) }
         if let portsSection { stack.setCustomSpacing(20, after: portsSection) }
         stack.setCustomSpacing(16, after: headerAndActionsRow)
-        stack.setCustomSpacing(20, after: inlineTooltipRow)
-        constrainFormFieldToFillWidth(inlineTooltipRow, in: stack)
+        stack.setCustomSpacing(20, after: inlineNotesRow)
+        constrainFormFieldToFillWidth(inlineNotesRow, in: stack)
         constrainFormFieldToFillWidth(headerRow, in: headerAndActionsRow)
         constrainFormFieldToFillWidth(dirField, in: headerAndActionsRow)
         constrainFormFieldToFillWidth(headerAndActionsRow, in: stack)
@@ -4088,7 +4088,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     private func inlineWorkspaceFieldDisplayValue(_ value: String, field: InlineWorkspaceDetailField) -> String {
         let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
         switch field {
-        case .tooltip: return trimmed.isEmpty ? "No tooltip" : trimmed
+        case .notes: return trimmed.isEmpty ? "No notes" : trimmed
         case .title, .branch: return trimmed
         }
     }
@@ -4105,9 +4105,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             switch field {
             case .title: "workspace-detail-title"
             case .branch: "workspace-detail-branch"
-            case .tooltip: "workspace-detail-tooltip"
+            case .notes: "workspace-detail-notes"
             }
-        let isMultiline = field == .tooltip
+        let isMultiline = field == .notes
         let row = NSStackView()
         row.orientation = .horizontal
         row.alignment = isMultiline ? .top : .centerY
@@ -4179,14 +4179,14 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         saveButton.bezelStyle = .rounded
         saveButton.isHidden = true
         saveButton.setAccessibilityIdentifier("\(automationID)-save")
-        saveButton.toolTip = isMultiline ? "Save tooltip (⌘↩)." : "Save (↩)."
+        saveButton.toolTip = isMultiline ? "Save notes (⌘↩)." : "Save (↩)."
 
         let cancelButton = NSButton(title: "Cancel (Esc)", target: self, action: #selector(cancelInlineWorkspaceMetadata(_:)))
         cancelButton.controlSize = .small
         cancelButton.bezelStyle = .rounded
         cancelButton.isHidden = true
         cancelButton.setAccessibilityIdentifier("\(automationID)-cancel")
-        cancelButton.toolTip = isMultiline ? "Cancel tooltip edit (Esc)." : "Cancel (Esc)."
+        cancelButton.toolTip = isMultiline ? "Cancel notes edit (Esc)." : "Cancel (Esc)."
 
         row.addArrangedSubview(iconContainer)
         if isMultiline {
@@ -4272,7 +4272,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     private func normalizeInlineWorkspaceMetadataValue(_ value: String, for field: InlineWorkspaceDetailField) -> String {
         switch field {
         case .title, .branch: return value.trimmingCharacters(in: .whitespacesAndNewlines)
-        case .tooltip: return value.trimmingCharacters(in: .whitespacesAndNewlines)
+        case .notes: return value.trimmingCharacters(in: .whitespacesAndNewlines)
         }
     }
 
@@ -4327,11 +4327,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 let branch = inlineWorkspaceEditorValue(refs).trimmingCharacters(in: .whitespacesAndNewlines)
                 try orchestrator.updateWorkspaceMetadata(workspaceID: refs.workspaceID, branch: branch)
                 refs.originalValue = branch
-            case .tooltip:
-                let trimmedTooltip = inlineWorkspaceEditorValue(refs).trimmingCharacters(in: .whitespacesAndNewlines)
-                let tooltip = trimmedTooltip.isEmpty ? nil : trimmedTooltip
-                try orchestrator.updateWorkspaceTooltip(workspaceID: refs.workspaceID, tooltip: tooltip)
-                refs.originalValue = tooltip ?? ""
+            case .notes:
+                let trimmedNotes = inlineWorkspaceEditorValue(refs).trimmingCharacters(in: .whitespacesAndNewlines)
+                let notes = trimmedNotes.isEmpty ? nil : trimmedNotes
+                try orchestrator.updateWorkspaceNotes(workspaceID: refs.workspaceID, notes: notes)
+                refs.originalValue = notes ?? ""
             }
             refs.valueLabel.stringValue = inlineWorkspaceFieldDisplayValue(refs.originalValue, field: refs.field)
             inlineWorkspaceFieldRefsByTag[tag] = refs
@@ -5121,14 +5121,14 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
     private func storeAddWorkspaceFields(
         projectID: String, isGitRepo: Bool, branchModePopup: NSPopUpButton?, existingBranchField: NSComboBox?, newBranchField: NSTextField?,
-        targetBranchField: NSComboBox?, nameField: NSTextField, directoryNameField: NSTextField?, tooltipField: NSTextField?,
+        targetBranchField: NSComboBox?, nameField: NSTextField, directoryNameField: NSTextField?, notesField: NSTextField?,
         autoNameState: AddWorkspaceAutoNameState?, progressiveInputViews: [NSView], createButton: NSButton
     ) -> Int {
         let id = UUID().uuidString.hashValue
         AddWorkspaceFieldCache.shared.cache[id] = AddWorkspaceFieldRefs(
             projectID: projectID, isGitRepo: isGitRepo, branchModePopup: branchModePopup, existingBranchField: existingBranchField,
             newBranchField: newBranchField, targetBranchField: targetBranchField, nameField: nameField, directoryNameField: directoryNameField,
-            tooltipField: tooltipField, autoNameState: autoNameState, progressiveInputViews: progressiveInputViews, createButton: createButton)
+            notesField: notesField, autoNameState: autoNameState, progressiveInputViews: progressiveInputViews, createButton: createButton)
         branchModePopup?.tag = id
         return id
     }
@@ -5237,7 +5237,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let targetBranch: String?
         if project.isGitRepo { targetBranch = defaultWorkspaceTargetBranchFast(project: project) } else { targetBranch = nil }
         let input = WorkspaceCreateInput(
-            projectID: project.id, name: name, branch: project.isGitRepo ? name : nil, targetBranch: targetBranch, directoryName: nil, tooltip: nil,
+            projectID: project.id, name: name, branch: project.isGitRepo ? name : nil, targetBranch: targetBranch, directoryName: nil, notes: nil,
             allowRemoteBranchLookup: false)
         showOperationProgressOverlay(message: "Creating workspace...", detail: "Generating defaults and creating the workspace record.")
         Task { @MainActor [weak self] in
@@ -5486,9 +5486,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             let directoryName = refs.directoryNameField?.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
             let resolvedDirectoryName: String?
             if let directoryName, directoryName.isEmpty { resolvedDirectoryName = nil } else { resolvedDirectoryName = directoryName }
-            let tooltip = refs.tooltipField?.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-            let resolvedTooltip: String?
-            if let tooltip, tooltip.isEmpty { resolvedTooltip = nil } else { resolvedTooltip = tooltip }
+            let notes = refs.notesField?.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            let resolvedNotes: String?
+            if let notes, notes.isEmpty { resolvedNotes = nil } else { resolvedNotes = notes }
             if refs.isGitRepo, branch.isEmpty { throw WorkspaceError.invalidArgument(message: "Branch name is required for git projects.") }
             if refs.isGitRepo, targetBranch == nil || targetBranch?.isEmpty == true {
                 throw WorkspaceError.invalidArgument(message: "Target branch is required for git projects.")
@@ -5499,7 +5499,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             }
             let input = WorkspaceCreateInput(
                 projectID: refs.projectID, name: name, branch: branch, targetBranch: targetBranch, directoryName: resolvedDirectoryName,
-                tooltip: resolvedTooltip, allowRemoteBranchLookup: true)
+                notes: resolvedNotes, allowRemoteBranchLookup: true)
             let originalTitle = sender.title
             sender.isEnabled = false
             sender.title = "Creating..."

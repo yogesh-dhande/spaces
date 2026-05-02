@@ -36,7 +36,7 @@ private struct SelectWorkspaceDetailCommand: ParsableCommand {
         try emitJSON(
             WorkspaceSummaryPayload(
                 id: workspace.id, title: workspace.title, dir: workspace.dir, isArchived: workspace.isArchived, isRunning: workspace.isRunning,
-                tooltip: workspace.tooltip))
+                notes: workspace.notes))
     }
 }
 
@@ -85,7 +85,7 @@ private struct StopWorkspaceCommand: ParsableCommand {
         try emitJSON(
             WorkspaceSummaryPayload(
                 id: updated.id, title: updated.title, dir: updated.dir, isArchived: updated.isArchived, isRunning: updated.isRunning,
-                tooltip: updated.tooltip))
+                notes: updated.notes))
     }
 }
 
@@ -160,8 +160,7 @@ private struct SeedFixtureCommand: ParsableCommand {
         let payload = SeedFixturePayload(
             projectID: project.id,
             defaultWorkspace: try orchestrator.store.workspace(dir: project.id).map {
-                WorkspaceSummaryPayload(
-                    id: $0.id, title: $0.title, dir: $0.dir, isArchived: $0.isArchived, isRunning: $0.isRunning, tooltip: $0.tooltip)
+                WorkspaceSummaryPayload(id: $0.id, title: $0.title, dir: $0.dir, isArchived: $0.isArchived, isRunning: $0.isRunning, notes: $0.notes)
             })
         try emitJSON(payload)
     }
@@ -209,7 +208,7 @@ private struct CreateWorkspaceCommand: ParsableCommand {
     @Option(name: .long) var branch: String
     @Option(name: .long) var targetBranch: String?
     @Option(name: .long) var directoryName: String?
-    @Option(name: .long) var tooltip: String?
+    @Option(name: .long) var notes: String?
 
     /// Creates a real workspace record and worktree through the production
     /// orchestrator so the shell harness can validate add/remove flows without
@@ -223,14 +222,14 @@ private struct CreateWorkspaceCommand: ParsableCommand {
         var workspace = try orchestrator.createWorkspace(
             projectID: project.id, name: title, branch: branch, targetBranch: targetBranch, directoryName: directoryName, runSetupScript: false,
             allowRemoteBranchLookup: false)
-        if let tooltip {
-            try orchestrator.updateWorkspaceTooltip(workspaceID: workspace.id, tooltip: tooltip)
+        if let notes {
+            try orchestrator.updateWorkspaceNotes(workspaceID: workspace.id, notes: notes)
             workspace = try orchestrator.store.workspace(dir: workspace.dir) ?? workspace
         }
         try emitJSON(
             WorkspaceSummaryPayload(
                 id: workspace.id, title: workspace.title, dir: workspace.dir, isArchived: workspace.isArchived, isRunning: workspace.isRunning,
-                tooltip: workspace.tooltip))
+                notes: workspace.notes))
     }
 }
 
@@ -253,7 +252,7 @@ private struct DumpWorkspaceCommand: ParsableCommand {
             appTerminalHost: appConfig.terminalHost.rawValue,
             workspace: .init(
                 id: workspace.id, title: workspace.title, dir: workspace.dir, isArchived: workspace.isArchived, isRunning: workspace.isRunning,
-                tooltip: workspace.tooltip),
+                notes: workspace.notes),
             settings: try orchestrator.workspaceSettings(workspaceID: workspace.id).map {
                 WorkspaceSettingsPayload(
                     stopScript: $0.stopScript, ports: $0.ports.map(\.name), processes: $0.processes.map { .init(name: $0.name, command: $0.command) },
@@ -356,7 +355,7 @@ private struct ArchiveWorkspaceCommand: ParsableCommand {
         try emitJSON(
             WorkspaceSummaryPayload(
                 id: updated.id, title: updated.title, dir: updated.dir, isArchived: updated.isArchived, isRunning: updated.isRunning,
-                tooltip: updated.tooltip))
+                notes: updated.notes))
     }
 }
 
@@ -382,7 +381,7 @@ private struct SetWorkspaceStopScriptCommand: ParsableCommand {
         try emitJSON(
             WorkspaceSummaryPayload(
                 id: updated.id, title: updated.title, dir: updated.dir, isArchived: updated.isArchived, isRunning: updated.isRunning,
-                tooltip: updated.tooltip))
+                notes: updated.notes))
     }
 }
 
@@ -419,7 +418,7 @@ private struct SetWorkspaceBrowserSessionURLsCommand: ParsableCommand {
         try emitJSON(
             WorkspaceSummaryPayload(
                 id: updated.id, title: updated.title, dir: updated.dir, isArchived: updated.isArchived, isRunning: updated.isRunning,
-                tooltip: updated.tooltip))
+                notes: updated.notes))
     }
 }
 
@@ -481,7 +480,7 @@ private struct WorkspaceSummaryPayload: Codable {
     let dir: String
     let isArchived: Bool
     let isRunning: Bool
-    let tooltip: String?
+    let notes: String?
 }
 
 private struct WorkspaceSettingsPayload: Codable {
@@ -546,7 +545,7 @@ private func workspaceSummary(orchestrator: WorkspaceOrchestrator, projectDir: S
     }
     return WorkspaceSummaryPayload(
         id: workspace.id, title: workspace.title, dir: workspace.dir, isArchived: workspace.isArchived, isRunning: workspace.isRunning,
-        tooltip: workspace.tooltip)
+        notes: workspace.notes)
 }
 
 /// Shared JSON encoder for the shell harness.

@@ -10,11 +10,11 @@ public struct WorkspaceSummary: Sendable {
     public let isArchived: Bool
     public let isHidden: Bool
     public let isDefault: Bool
-    public let tooltip: String?
+    public let notes: String?
 
     public init(
         id: String, title: String, branch: String?, targetBranch: String? = nil, dir: String, isRunning: Bool, isArchived: Bool,
-        isHidden: Bool = false, isDefault: Bool, tooltip: String? = nil
+        isHidden: Bool = false, isDefault: Bool, notes: String? = nil
     ) {
         self.id = id
         self.title = title
@@ -25,6 +25,6 @@ public struct WorkspaceSummary: Sendable {
         self.isArchived = isArchived
         self.isHidden = isHidden
         self.isDefault = isDefault
-        self.tooltip = tooltip
+        self.notes = notes
     }
 }

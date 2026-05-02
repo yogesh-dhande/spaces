@@ -45,7 +45,7 @@ const keyFeatures: Feature[] = [
       "When you are working in a workspace, cycle through windows of only that workspace with keyboard shortcuts so your focus isn't interrupted by other workspaces.",
   },
   {
-    title: "Context tooltips",
+    title: "Workspace notes",
     description:
       "Let your coding agent leave a note about what it did, what's pending, or where things broke. Press cmd+shift+i on any window in the workspace to read it — the context is always one shortcut away.",
   },
@@ -131,7 +131,7 @@ const faqItems: FaqItem[] = [
         </kbd>{" "}
         and start your agent as normal. The terminal window is automatically
         attached to the workspace so you can jump back to it with keyboard
-        shortcuts at any time. To let the agent set workspace tooltips and
+        shortcuts at any time. To let the agent set workspace notes and
         signal its status, add the{" "}
         <Link href="/docs/coding-agents" className="text-accent hover:underline">
           Spaces agent instructions

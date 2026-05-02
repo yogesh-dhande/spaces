@@ -46,7 +46,7 @@ TEST_REPO="$TMP_ROOT/atlas-alerts"
 TEST_REPO_2="$TMP_ROOT/harbor-ops"
 WORKSPACE_TITLE="Release Readiness"
 WORKSPACE_BRANCH="release-readiness"
-WORKSPACE_TOOLTIP="Polish the launch checklist and QA follow-ups"
+WORKSPACE_NOTES="Polish the launch checklist and QA follow-ups"
 PRIMARY_WORKSPACE_TITLE="Customer Alerts"
 SECONDARY_WORKSPACE_TITLE="Operations Console"
 MOCK_AGENT_LABEL="Mock Agent"
@@ -1128,7 +1128,7 @@ create_workspace_via_gui() {
     --title "$WORKSPACE_TITLE" \
     --branch "$WORKSPACE_BRANCH" \
     --target-branch main \
-    --tooltip "$WORKSPACE_TOOLTIP" >"$TMP_ROOT/created-workspace.json"
+    --notes "$WORKSPACE_NOTES" >"$TMP_ROOT/created-workspace.json"
   transition_pause "workspace creation"
 }
 

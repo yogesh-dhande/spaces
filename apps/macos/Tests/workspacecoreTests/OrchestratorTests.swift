@@ -865,8 +865,8 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertTrue(updated.isDefault)
     }
 
-    // Tests workspace metadata update can change title, branch, directory name, and tooltip by arranging representative inputs and asserting the expected result.
-    func testUpdateWorkspaceMetadataUpdatesTitleBranchDirectoryNameAndTooltip() throws {
+    // Tests workspace metadata update can change title, branch, directory name, and notes by arranging representative inputs and asserting the expected result.
+    func testUpdateWorkspaceMetadataUpdatesTitleBranchDirectoryNameAndNotes() throws {
         let repo = try makeTempGitRepo(name: "workspace-update-metadata")
         let root = try makeTempDirectory()
         let workspacesRoot = root.appendingPathComponent("workspaces", isDirectory: true)
@@ -877,13 +877,13 @@ final class OrchestratorTests: XCTestCase {
 
         try orchestrator.updateWorkspaceMetadata(
             workspaceID: workspace.id, title: "feature-auth", branch: "feature-auth", directoryName: "feature_auth",
-            tooltip: .some("Reviewing OAuth flow"))
+            notes: .some("Reviewing OAuth flow"))
 
         let updated = try XCTUnwrap(store.workspace(id: workspace.id))
         XCTAssertEqual(updated.title, "feature-auth")
         XCTAssertEqual(updated.branch, "feature-auth")
         XCTAssertEqual(updated.dirname, "feature_auth")
-        XCTAssertEqual(updated.tooltip, "Reviewing OAuth flow")
+        XCTAssertEqual(updated.notes, "Reviewing OAuth flow")
         XCTAssertEqual(
             try runGitAndCapture(["rev-parse", "--abbrev-ref", "HEAD"], cwd: workspace.dir).trimmingCharacters(in: .whitespacesAndNewlines),
             "feature-auth")
@@ -903,11 +903,11 @@ final class OrchestratorTests: XCTestCase {
         let project = try orchestrator.addProject(dir: projectDir.path)
         let defaultWorkspace = try XCTUnwrap(store.workspace(projectID: project.id, name: "default"))
 
-        try orchestrator.updateWorkspaceMetadata(workspaceID: defaultWorkspace.id, title: "Codex Task", tooltip: .some("Imported from agent"))
+        try orchestrator.updateWorkspaceMetadata(workspaceID: defaultWorkspace.id, title: "Codex Task", notes: .some("Imported from agent"))
 
         let updated = try XCTUnwrap(store.workspace(id: defaultWorkspace.id))
         XCTAssertEqual(updated.title, "Codex Task")
-        XCTAssertEqual(updated.tooltip, "Imported from agent")
+        XCTAssertEqual(updated.notes, "Imported from agent")
         XCTAssertTrue(updated.isDefault)
 
         XCTAssertThrowsError(try orchestrator.archiveWorkspace(workspaceID: defaultWorkspace.id)) { error in
@@ -915,8 +915,8 @@ final class OrchestratorTests: XCTestCase {
         }
     }
 
-    // Tests workspace metadata update can clear tooltip by arranging representative inputs and asserting the expected result.
-    func testUpdateWorkspaceMetadataClearsTooltip() throws {
+    // Tests workspace metadata update can clear notes by arranging representative inputs and asserting the expected result.
+    func testUpdateWorkspaceMetadataClearsNotes() throws {
         let root = try makeTempDirectory()
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
@@ -924,12 +924,12 @@ final class OrchestratorTests: XCTestCase {
         let orchestrator = WorkspaceOrchestrator(store: store)
         let project = try orchestrator.addProject(dir: projectDir.path)
         let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
-        try orchestrator.updateWorkspaceMetadata(workspaceID: workspace.id, tooltip: .some("Investigating timeout regression"))
+        try orchestrator.updateWorkspaceMetadata(workspaceID: workspace.id, notes: .some("Investigating timeout regression"))
 
-        try orchestrator.updateWorkspaceMetadata(workspaceID: workspace.id, tooltip: .some(nil))
+        try orchestrator.updateWorkspaceMetadata(workspaceID: workspace.id, notes: .some(nil))
 
         let updated = try XCTUnwrap(store.workspace(id: workspace.id))
-        XCTAssertNil(updated.tooltip)
+        XCTAssertNil(updated.notes)
     }
 
     // Tests workspace active state can be toggled independently of runtime state by arranging representative inputs and asserting persistence.
@@ -4889,8 +4889,8 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertEqual(try store.workspace(id: workspace.id)?.isHidden, true)
     }
 
-    // Tests updateWorkspaceTooltip persists tooltip through orchestrator by arranging representative inputs and asserting the expected result.
-    func testUpdateWorkspaceTooltipPersistsThroughOrchestrator() throws {
+    // Tests updateWorkspaceNotes persists notes through orchestrator by arranging representative inputs and asserting the expected result.
+    func testUpdateWorkspaceNotesPersistsThroughOrchestrator() throws {
         let root = try makeTempDirectory()
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
@@ -4900,11 +4900,11 @@ final class OrchestratorTests: XCTestCase {
         let project = try orchestrator.addProject(dir: projectDir.path)
         let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
 
-        try orchestrator.updateWorkspaceTooltip(workspaceID: workspace.id, tooltip: "Working on API")
-        XCTAssertEqual(try store.workspace(id: workspace.id)?.tooltip, "Working on API")
+        try orchestrator.updateWorkspaceNotes(workspaceID: workspace.id, notes: "Working on API")
+        XCTAssertEqual(try store.workspace(id: workspace.id)?.notes, "Working on API")
 
-        try orchestrator.updateWorkspaceTooltip(workspaceID: workspace.id, tooltip: nil)
-        XCTAssertNil(try store.workspace(id: workspace.id)?.tooltip)
+        try orchestrator.updateWorkspaceNotes(workspaceID: workspace.id, notes: nil)
+        XCTAssertNil(try store.workspace(id: workspace.id)?.notes)
     }
 
     // Tests workspaceSettings seeds and returns defaults for workspace without explicit settings by arranging representative inputs and asserting the expected result.
@@ -4972,7 +4972,7 @@ final class OrchestratorTests: XCTestCase {
         runningWorkspace = WorkspaceRecord(
             id: workspace.id, projectID: workspace.projectID, title: workspace.title, dir: "/nonexistent/workspace-\(UUID().uuidString)",
             dirname: workspace.dirname, branch: workspace.branch, targetBranch: workspace.targetBranch, isDefault: workspace.isDefault,
-            isArchived: workspace.isArchived, isHidden: workspace.isHidden, isRunning: true, lastLaunchedAt: nil, tooltip: nil)
+            isArchived: workspace.isArchived, isHidden: workspace.isHidden, isRunning: true, lastLaunchedAt: nil, notes: nil)
         try store.upsert(workspace: runningWorkspace)
 
         // Stop should succeed (skip script because dir is missing) rather than throw.
@@ -5003,7 +5003,7 @@ final class OrchestratorTests: XCTestCase {
         let runningWorkspace = WorkspaceRecord(
             id: workspace.id, projectID: workspace.projectID, title: workspace.title, dir: projectDir.path, dirname: workspace.dirname,
             branch: workspace.branch, targetBranch: workspace.targetBranch, isDefault: workspace.isDefault, isArchived: workspace.isArchived,
-            isHidden: workspace.isHidden, isRunning: true, lastLaunchedAt: nil, tooltip: nil)
+            isHidden: workspace.isHidden, isRunning: true, lastLaunchedAt: nil, notes: nil)
         try store.upsert(workspace: runningWorkspace)
 
         // Stop workspace: should attempt to close the editor window via yabai (yabai.closeWindow may fail silently).
@@ -5939,8 +5939,8 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertEqual(fetched.title, "feature")
     }
 
-    // Tests updateWorkspaceMetadata with a tooltip matching the current (nil) is a no-op (covers tooltip == workspace.tooltip false branch).
-    func testUpdateWorkspaceMetadataWithSameTooltipIsNoOp() throws {
+    // Tests updateWorkspaceMetadata with notes matching the current (nil) is a no-op (covers notes == workspace.notes false branch).
+    func testUpdateWorkspaceMetadataWithSameNotesIsNoOp() throws {
         let root = try makeTempDirectory()
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
@@ -5949,11 +5949,11 @@ final class OrchestratorTests: XCTestCase {
         let project = try orchestrator.addProject(dir: projectDir.path)
         let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
 
-        // tooltip: .some(nil) — outer optional is present, inner value is nil (same as current nil tooltip).
-        // tooltip != workspace.tooltip → nil != nil → false → didChange stays false → guard else return.
-        XCTAssertNoThrow(try orchestrator.updateWorkspaceMetadata(workspaceID: workspace.id, tooltip: .some(nil)))
+        // notes: .some(nil) — outer optional is present, inner value is nil (same as current nil notes).
+        // notes != workspace.notes → nil != nil → false → didChange stays false → guard else return.
+        XCTAssertNoThrow(try orchestrator.updateWorkspaceMetadata(workspaceID: workspace.id, notes: .some(nil)))
         let fetched = try XCTUnwrap(store.workspace(id: workspace.id))
-        XCTAssertNil(fetched.tooltip)
+        XCTAssertNil(fetched.notes)
     }
 
     // Tests upWorkspace throws invalidArgument when the workspace is archived (covers guard !workspace.isArchived else throw).

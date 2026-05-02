@@ -15,7 +15,7 @@ struct AddWorkspaceFieldRefs {
     let targetBranchField: NSComboBox?
     let nameField: NSTextField
     let directoryNameField: NSTextField?
-    let tooltipField: NSTextField?
+    let notesField: NSTextField?
     let autoNameState: AddWorkspaceAutoNameState?
     let progressiveInputViews: [NSView]
     let createButton: NSButton

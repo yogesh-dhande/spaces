@@ -2,12 +2,15 @@ import Foundation
 import SQLite3
 
 enum DatabaseSchema {
-    static let currentVersion = 2
+    static let currentVersion = 3
 
     static let migrationSteps: [DatabaseMigrationStep] = [
         DatabaseMigrationStep(
             fromVersion: 1, toVersion: 2, description: "Add foreign keys and cascade rules to persisted child tables", requiresBackup: true,
-            apply: { db in try migrateV1ToV2(db: db) })
+            apply: { db in try migrateV1ToV2(db: db) }),
+        DatabaseMigrationStep(
+            fromVersion: 2, toVersion: 3, description: "Rename workspace tooltip metadata to notes", requiresBackup: true,
+            apply: { db in try migrateV2ToV3(db: db) }),
     ]
 
     static let latestSchemaSQL = """
@@ -85,7 +88,7 @@ enum DatabaseSchema {
           is_hidden INTEGER NOT NULL DEFAULT 0,
           is_running INTEGER NOT NULL,
           last_launched_at TEXT,
-          tooltip TEXT,
+          notes TEXT,
           UNIQUE(project_id, title),
           FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
         );
@@ -603,11 +606,15 @@ enum DatabaseSchema {
                 """)
     }
 
-    private static func rebuildTable(db: OpaquePointer, tableName: String, createSQL: String, copySQL: String) throws {
-        try execute(db: db, sql: "ALTER TABLE \(tableName) RENAME TO \(tableName)_v1;")
+    private static func migrateV2ToV3(db: OpaquePointer) throws { try execute(db: db, sql: "ALTER TABLE workspaces RENAME COLUMN tooltip TO notes;") }
+
+    private static func rebuildTable(db: OpaquePointer, tableName: String, createSQL: String, copySQL: String, previousVersionSuffix: String = "v1")
+        throws
+    {
+        try execute(db: db, sql: "ALTER TABLE \(tableName) RENAME TO \(tableName)_\(previousVersionSuffix);")
         try execute(db: db, sql: createSQL)
         try execute(db: db, sql: copySQL)
-        try execute(db: db, sql: "DROP TABLE \(tableName)_v1;")
+        try execute(db: db, sql: "DROP TABLE \(tableName)_\(previousVersionSuffix);")
     }
 
     private static func execute(db: OpaquePointer, sql: String) throws {

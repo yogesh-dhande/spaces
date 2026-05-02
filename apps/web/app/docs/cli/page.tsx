@@ -46,7 +46,7 @@ export default function CliReferencePage() {
         </p>
         <CodeBlock>{`spaces --version
 spaces workspace import
-spaces workspace update --tooltip "Ready for review"
+spaces workspace update --notes "Ready for review"
 spaces workspace up
 spaces agent event --type waiting`}</CodeBlock>
       </article>
@@ -71,28 +71,28 @@ spaces workspace import
 spaces workspace import /path/to/worktree
 
 # Create or update visible metadata during import
-spaces workspace import --title "OAuth rollout" --tooltip "Waiting on staging verification"`}</CodeBlock>
+spaces workspace import --title "OAuth rollout" --notes "Waiting on staging verification"`}</CodeBlock>
         <ul className="mt-3 space-y-1">
           <Flag name="[path]" description="Workspace directory to register. Defaults to the current working directory." />
           <Flag name="--title <title>" description="Optional workspace title. If the workspace already exists, the title is updated." />
-          <Flag name="--tooltip <text>" description="Optional workspace tooltip. If the workspace already exists, the tooltip is updated." />
+          <Flag name="--notes <text>" description="Optional workspace notes. If the workspace already exists, the notes are updated." />
         </ul>
       </article>
 
       <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
         <h2 className="text-2xl font-semibold tracking-tight">Workspace Update</h2>
         <p className="mt-3 text-sm leading-7 text-foreground-soft">
-          <Cmd>spaces workspace update</Cmd> changes workspace metadata after the workspace already exists. Use it for title or tooltip edits without relaunching anything.
+          <Cmd>spaces workspace update</Cmd> changes workspace metadata after the workspace already exists. Use it for title or notes edits without relaunching anything.
         </p>
-        <CodeBlock>{`# Update the current workspace tooltip
-spaces workspace update --tooltip "Ready for review"
+        <CodeBlock>{`# Update the current workspace notes
+spaces workspace update --notes "Ready for review"
 
 # Update another workspace
-spaces workspace update /path/to/workspace --title "oauth-timeout" --tooltip "Waiting on staging verification"`}</CodeBlock>
+spaces workspace update /path/to/workspace --title "oauth-timeout" --notes "Waiting on staging verification"`}</CodeBlock>
         <ul className="mt-3 space-y-1">
           <Flag name="[path]" description="Workspace directory to update. Defaults to the current working directory." />
           <Flag name="--title <title>" description="Optional workspace title update." />
-          <Flag name="--tooltip <text>" description="Optional workspace tooltip update." />
+          <Flag name="--notes <text>" description="Optional workspace notes update." />
         </ul>
       </article>
 
@@ -142,7 +142,7 @@ spaces agent event --type exit`}</CodeBlock>
         <h2 className="text-2xl font-semibold tracking-tight">Typical Flow</h2>
         <CodeBlock>{`spaces workspace import --title "bugfix/login-timeout"
 spaces workspace up --restart
-spaces workspace update --tooltip "Investigating flaky OAuth callback"
+spaces workspace update --notes "Investigating flaky OAuth callback"
 spaces agent event --type init
 spaces agent event --type start
 # ... later ...

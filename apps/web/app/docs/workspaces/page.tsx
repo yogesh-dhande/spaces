@@ -30,7 +30,7 @@ export default function WorkspacesDocsPage() {
           <li>• <strong>Branch</strong> &mdash; pick an existing branch or enter a name to create a new one.</li>
           <li>• <strong>Target branch</strong> &mdash; the base for a new branch. Defaults to the project&apos;s default, falling back to <code>main</code> or <code>master</code>.</li>
           <li>• <strong>Directory name</strong> &mdash; the folder name for the worktree. Auto-generated, editable later.</li>
-          <li>• <strong>Tooltip</strong> &mdash; optional context you can edit any time or ask a coding agent to keep in sync with the work.</li>
+          <li>• <strong>Notes</strong> &mdash; optional context you can edit any time or ask a coding agent to keep in sync with the work.</li>
         </ul>
         <p className="mt-3 text-sm leading-7 text-foreground-soft">
           For a non-Git project, the workspace uses the project directory itself and doesn&apos;t need a branch.
@@ -43,7 +43,7 @@ export default function WorkspacesDocsPage() {
           A new workspace inherits the project&apos;s processes, browser sessions, and ports. From there, each workspace edits its own copy — the project&apos;s templates stay unchanged.
         </p>
         <ul className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
-          <li>• Double-click the title, branch, or tooltip to rename them inline. <code>Escape</code> or click away to cancel.</li>
+          <li>• Double-click the title, branch, or notes to rename them inline. <code>Escape</code> or click away to cancel.</li>
           <li>• Renaming the branch inline renames the underlying git branch.</li>
           <li>• Add, remove, or rename named ports per workspace.</li>
           <li>• Edit a process command while the workspace is running and Spaces restarts just that process.</li>
