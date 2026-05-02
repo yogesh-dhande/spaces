@@ -106,7 +106,7 @@ extension GhosttyAdapter: TerminalAdapter {
     public func resolveCurrentTrackingIdentity(environment: [String: String], yabaiFocusedWindowID: Int?) throws -> TerminalTrackingIdentity? {
         // Ghostty hook attribution must come from the injected shell token. Falling back to a
         // frontmost terminal or window here misattributes background hooks to whichever Ghostty
-        // tab the user happens to be viewing when `spaces agent event` runs.
+        // tab the user happens to be viewing when `spaces signal` runs.
         if let trackingID = environment["SPACES_TERMINAL_TRACKING_ID"], !trackingID.isEmpty { return .session(trackingID) }
         return nil
     }

@@ -11,43 +11,19 @@ public struct SpacesCommand: ParsableCommand {
               - All settings are stored in ~/.spaces/spaces.db.
               - Runtime state is stored in ~/.spaces/spaces.db and migrated in place with additive schema changes.
               - Paths default to the current directory when omitted.
-              - `workspace import` registers the current directory by default and can apply `--title` or `--notes` when creating or re-importing a workspace.
-              - `workspace update` mutates workspace metadata after creation.
-              - `workspace path` prints the absolute directory of the workspace so shells can copy or `cd` into it.
-              - `workspace up` waits for pending/running setup to complete and fails with the setup error if setup failed. It ensures a workspace and all its processes are running: launches when stopped; when already running, restarts any exited processes. Windows open without activating the app. Add `--restart` to force a full stop+launch. Add `--focus <name>` to bring one named workspace window to the foreground after launch.
-              - `agent launch --name <name>` launches one configured coding agent in a dedicated terminal window without tmux.
-              - Agent events stay explicit. `workspace import` and `workspace up` do not imply agent lifecycle. Events from unsupported terminal hosts are dropped. Agent events fired from tmux are rejected because Spaces does not support coding agents running inside tmux.
-            """, version: AppVersion.current, subcommands: [WorkspaceCommand.self, AgentCommand.self])
+              - `import` registers the current directory by default and can apply `--title` or `--notes` when creating or re-importing a workspace.
+              - `update` mutates workspace metadata after creation.
+              - `start` waits for pending/running setup to complete and fails with the setup error if setup failed. It ensures a workspace and all its processes are running: launches when stopped; when already running, restarts any exited processes. Windows open without activating the app.
+              - `restart` forces a full stop and relaunch for a workspace.
+              - `open <name>` resolves one named tracked browser, process, or coding-agent target in the workspace and brings it to the foreground.
+              - Agent events stay explicit. `import`, `start`, and `restart` do not imply agent lifecycle. `signal <event>` records those lifecycle transitions. Events from unsupported terminal hosts are dropped. Agent events fired from tmux are rejected because Spaces does not support coding agents running inside tmux.
+            """, version: AppVersion.current,
+        subcommands: [ImportCommand.self, UpdateCommand.self, StartCommand.self, RestartCommand.self, OpenCommand.self, SignalCommand.self])
 
     public init() {}
 }
 
-struct WorkspaceCommand: ParsableCommand {
-    static let configuration = CommandConfiguration(
-        commandName: "workspace", abstract: "Import, update, and launch workspaces.",
-        subcommands: [WorkspaceImportCommand.self, WorkspaceUpdateCommand.self, WorkspaceUpCommand.self, WorkspacePathCommand.self])
-}
-
-struct WorkspacePathCommand: ParsableCommand {
-    static let configuration = CommandConfiguration(commandName: "path", abstract: "Print the absolute directory path for a workspace.")
-
-    @Argument(help: "Workspace directory. Defaults to the current directory.") var path: String?
-
-    func run() throws {
-        let context = CLIContext()
-        let orchestrator = try context.makeOrchestrator()
-        let workspace = try requireWorkspace(path: path, orchestrator: orchestrator, context: context)
-        try context.output.emit(text: workspace.dir, json: WorkspacePathPayload(dir: workspace.dir, id: workspace.id, title: workspace.title))
-    }
-}
-
-struct WorkspacePathPayload: Encodable {
-    let dir: String
-    let id: String
-    let title: String
-}
-
-struct WorkspaceImportCommand: ParsableCommand {
+struct ImportCommand: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "import", abstract: "Register a workspace for the current directory or a provided path.")
 
@@ -89,7 +65,7 @@ struct WorkspaceImportCommand: ParsableCommand {
     }
 }
 
-struct WorkspaceUpdateCommand: ParsableCommand {
+struct UpdateCommand: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "update", abstract: "Update workspace metadata for the current directory or a provided path.")
 
@@ -117,24 +93,17 @@ struct WorkspaceUpdateCommand: ParsableCommand {
     }
 }
 
-struct WorkspaceUpCommand: ParsableCommand {
-    static let configuration = CommandConfiguration(
-        commandName: "up", abstract: "Ensure a workspace is running and optionally focus a tracked window.")
+struct StartCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "start", abstract: "Ensure a workspace is running.")
 
     @Argument(help: "Workspace directory. Defaults to the current directory.") var path: String?
-
-    @Flag(name: .long, help: "Force a full stop and relaunch if the workspace is already running.") var restart = false
-
-    @Option(name: .long, help: "Focus a named workspace window after launch.") var focus: String?
 
     func run() throws {
         let context = CLIContext()
         let orchestrator = try context.makeOrchestrator()
         let workspace = try requireWorkspace(path: path, orchestrator: orchestrator, context: context)
 
-        try orchestrator.upWorkspace(workspaceID: workspace.id, restartIfRunning: restart, background: focus == nil)
-
-        if let focus { try orchestrator.focusWorkspaceWindow(workspaceID: workspace.id, name: focus) }
+        try orchestrator.upWorkspace(workspaceID: workspace.id, restartIfRunning: false, background: true)
 
         let updatedWorkspace = try requireWorkspace(id: workspace.id, orchestrator: orchestrator)
         try context.output.emit(
@@ -142,15 +111,8 @@ struct WorkspaceUpCommand: ParsableCommand {
     }
 }
 
-struct AgentCommand: ParsableCommand {
-    static let configuration = CommandConfiguration(
-        commandName: "agent", abstract: "Record coding-agent lifecycle events.", subcommands: [AgentLaunchCommand.self, AgentEventCommand.self])
-}
-
-struct AgentLaunchCommand: ParsableCommand {
-    static let configuration = CommandConfiguration(commandName: "launch", abstract: "Launch one configured coding agent for the current workspace.")
-
-    @Option(name: .long, help: "Configured coding agent name.") var name: String
+struct RestartCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "restart", abstract: "Force a full stop and relaunch for a workspace.")
 
     @Argument(help: "Workspace directory. Defaults to the current directory.") var path: String?
 
@@ -158,19 +120,41 @@ struct AgentLaunchCommand: ParsableCommand {
         let context = CLIContext()
         let orchestrator = try context.makeOrchestrator()
         let workspace = try requireWorkspace(path: path, orchestrator: orchestrator, context: context)
-        let record = try orchestrator.launchAgentLauncher(workspaceID: workspace.id, name: name)
+
+        try orchestrator.upWorkspace(workspaceID: workspace.id, restartIfRunning: true, background: true)
+
+        let updatedWorkspace = try requireWorkspace(id: workspace.id, orchestrator: orchestrator)
         try context.output.emit(
-            text: "Launched coding agent \(record.label ?? name)\tworkspace=\(workspace.id)",
-            json: MutationResultPayload(message: "Launched coding agent.", resource: ["workspaceID": workspace.id, "label": record.label ?? name]))
+            text: "Workspace restarted \(workspace.id)", json: MutationResultPayload(message: "Workspace restarted.", resource: updatedWorkspace))
     }
 }
 
-struct AgentEventCommand: ParsableCommand {
-    static let configuration = CommandConfiguration(
-        commandName: "event", abstract: "Record an explicit lifecycle event for the current coding-agent terminal.")
+struct OpenCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "open", abstract: "Open or focus one named tracked workspace target.")
 
-    @Option(
-        name: .long,
+    @Argument(help: "Name of the tracked browser, process, or coding-agent target to open.") var name: String
+
+    @Argument(help: "Workspace directory. Defaults to the current directory.") var path: String?
+
+    func run() throws {
+        let context = CLIContext()
+        let orchestrator = try context.makeOrchestrator()
+        let workspace = try requireWorkspace(path: path, orchestrator: orchestrator, context: context)
+
+        try orchestrator.focusWorkspaceWindow(workspaceID: workspace.id, name: name)
+
+        let updatedWorkspace = try requireWorkspace(id: workspace.id, orchestrator: orchestrator)
+        try context.output.emit(
+            text: "Opened workspace target \(name)\tworkspace=\(workspace.id)",
+            json: MutationResultPayload(message: "Opened workspace target.", resource: updatedWorkspace))
+    }
+}
+
+struct SignalCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "signal", abstract: "Record an explicit lifecycle event for the current coding-agent terminal.")
+
+    @Argument(
         help: ArgumentHelp("Lifecycle event to record.", discussion: "Allowed values: \(AgentEventType.allValueStrings.joined(separator: ", "))."))
     var type: AgentEventType
 
@@ -285,7 +269,7 @@ private func requireWorkspace(path: String?, orchestrator: WorkspaceOrchestrator
     let directory = path ?? context.currentDirectoryPath()
     let normalizedDirectory = context.normalizePath(directory)
     guard let workspace = try orchestrator.store.workspace(dir: normalizedDirectory) else {
-        throw ValidationError("Workspace not found at: \(normalizedDirectory). Run `spaces workspace import [path]` first.")
+        throw ValidationError("Workspace not found at: \(normalizedDirectory). Run `spaces import [path]` first.")
     }
 
     return workspace

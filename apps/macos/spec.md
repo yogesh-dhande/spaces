@@ -34,13 +34,13 @@ Spaces provides a desktop app and a CLI for power users and coding agents.
   `Running` and `Stopped` should stay easy to explain, while failed processes or stale tracked windows surface as warnings on top of that lifecycle state.
 - Require explicit tracked-window targets for CLI-driven focus.
   Focus should not guess which window the user meant, because arbitrary focus becomes unpredictable as workspaces collect multiple windows.
-  Example: one workspace may have a frontend browser, an admin browser, an API terminal, and a coding-agent terminal all open at once. If the user clicks Focus in the GUI or runs `spaces workspace up --focus`, Spaces should not silently pick whichever window was captured first or happened to survive most recently. The user may want the admin browser now and the coding-agent terminal five seconds later. Requiring an explicit tracked window target keeps focus behavior deterministic. CLI focus targets should be selected by unique window names rather than numeric positions.
+  Example: one workspace may have a frontend browser, an admin browser, an API terminal, and a coding-agent terminal all open at once. If the user clicks Focus in the GUI or runs `spaces open <name>`, Spaces should not silently pick whichever window was captured first or happened to survive most recently. The user may want the admin browser now and the coding-agent terminal five seconds later. Requiring an explicit tracked window target keeps focus behavior deterministic. CLI focus targets should be selected by unique window names rather than numeric positions.
 - Never resize or reposition tracked windows unless initiated by the user.
   Spaces should respect where the user placed each tracked window, because it cannot infer whether the user wants side-by-side windows, overlapping windows, or some other layout that includes non-Spaces windows.
 - Never control windows that Spaces does not explicitly track.
   Spaces should not hide, move, resize, or otherwise manipulate unrelated windows, because the user may intentionally keep an untracked window visible next to a tracked workspace window.
 - Keep coding-agent events explicit.
-  `spaces workspace import` and `spaces workspace up` must not infer agent lifecycle, because only the agent can accurately report when it actually initialized, started active work, is waiting, is done, or exited.
+  `spaces import`, `spaces start`, and `spaces restart` must not infer agent lifecycle, because only the agent can accurately report when it actually initialized, started active work, is waiting, is done, or exited.
 - Use explicit names as the stable identity surface for focusable browser sessions, processes, and coding-agent terminals.
   Names express purpose and intent, stay meaningful when URLs or process commands change, and avoid collisions where multiple coding agents may run the same command. Those names must be unique within a workspace's combined focusable set so GUI and CLI focus can target one unambiguous window by name.
 
@@ -107,7 +107,7 @@ Spaces focuses those windows; it does not decide their geometry.
 
 ### Creation
 - Users can create, update, focus, stop, restart, and archive workspaces from the GUI.
-- The CLI should stay minimal and support `workspace import`, `workspace update`, `workspace up`, and `agent event`.
+- The CLI should stay minimal and support `import`, `update`, `start`, `restart`, `open`, and `signal`.
 - For git projects, new workspaces are branch-oriented and should support an existing-branch picker, a new-branch entry path, target branch, directory name, title, and notes inputs.
 - Workspace creation should feel fast in the GUI, with visible progress during setup.
 - Workspace settings used for launch must remain editable after creation.
@@ -128,11 +128,11 @@ Spaces focuses those windows; it does not decide their geometry.
 - If a user needs composite shell behavior such as `cd x && y`, pipes, or redirection, they should wrap it explicitly, for example `bash -lc "cd x && y"`.
 - Stop shuts down tracked runtime state and closes tracked dedicated windows safely.
 - Restart performs a stop followed by a fresh launch.
-- `workspace up` is the idempotent "ensure running" path:
+- `start` is the idempotent "ensure running" path:
   - if stopped, it launches the workspace
   - if running, it restores failed or exited runtime as defined by the command mode
-  - `--restart` forces a full restart
-- `workspace update` should own post-creation workspace metadata edits such as title and notes.
+- `restart` forces a full restart
+- `update` should own post-creation workspace metadata edits such as title and notes.
 - Launch should wait for setup to finish and should surface setup failures clearly.
 - Named ports must be available to setup scripts, stop scripts, and process commands.
 - Adding a named port from the workspace detail view should reserve its port number immediately instead of waiting for the next workspace launch.
@@ -200,8 +200,8 @@ Spaces focuses those windows; it does not decide their geometry.
 - Missing configured processes in Alerts should open that one configured process directly and reuse the same configured row instead of creating a duplicate row.
 - Alerts rows should show the tracked window or process name as the primary label and the target detail, such as a browser URL or process command, as secondary text.
 - Ad-hoc terminal rows should keep their generated focus name as the primary label and use the live terminal window title as secondary text.
-- CLI-driven focus through `spaces workspace up --focus` should require an explicit tracked window target instead of picking an arbitrary window.
-- CLI focus should use unique names across focusable browser sessions, processes, and coding-agent terminals, and `spaces workspace up --focus` should require one of those names explicitly.
+- CLI-driven focus through `spaces open <name>` should require an explicit tracked window target instead of picking an arbitrary window.
+- CLI focus should use unique names across focusable browser sessions, processes, and coding-agent terminals, and `spaces open <name>` should require one of those names explicitly.
 - Configured workspace processes and browser sessions must always have explicit names; Spaces should reject unnamed entries instead of falling back to commands or URLs as identities.
 - Focus target discovery may remain GUI-centric; the CLI does not need a separate read-only discovery command.
 - Window-number shortcuts should use a configurable direct-focus modifier plus digits `1` through `9`.
@@ -211,9 +211,9 @@ Spaces focuses those windows; it does not decide their geometry.
 - Every keyboard shortcut the product supports must be configurable from the GUI settings panel.
 
 ## Coding-Agent Integration
-- Coding agents can explicitly report lifecycle events through `spaces agent event`.
-- Agent status events are not implied by `workspace import` or `workspace up`, but workspace launch should open any configured coding-agent rows so they appear alongside runtime-managed agents under one `Coding Agents` section.
-- `spaces agent event` should support explicit `init`, `start`, `waiting`, `done`, and `exit` events.
+- Coding agents can explicitly report lifecycle events through `spaces signal`.
+- Agent status events are not implied by `import`, `start`, or `restart`, but workspace launch should open any configured coding-agent rows so they appear alongside runtime-managed agents under one `Coding Agents` section.
+- `spaces signal` should support explicit `init`, `start`, `waiting`, `done`, and `exit` events.
 - Agent events from unsupported terminal hosts should be dropped instead of recorded. Coding agents run from tmux are not supported by Spaces and should return an explicit error instead of being inferred onto workspace process terminals.
 - `init` should identify the originating terminal and either attach to an already tracked terminal row or create a tracked terminal row for that coding agent.
 - Terminal identity should be adapter-driven and consistent across supported hosts: prefer tmux window identity when present, otherwise prefer a stable session/token identity, and only fall back to a yabai window identity when no durable session-like identity exists.

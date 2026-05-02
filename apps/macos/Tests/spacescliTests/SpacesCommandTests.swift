@@ -18,58 +18,57 @@ final class MXCommandTests: XCTestCase {
         }
     }
 
-    func testWorkspaceUpParsesLeafCommandOptions() throws {
-        let command = try WorkspaceUpCommand.parse(["/tmp/worktree", "--restart", "--focus", "frontend"])
+    func testImportParsesPath() throws {
+        let command = try ImportCommand.parse(["."])
 
-        XCTAssertEqual(command.path, "/tmp/worktree")
-        XCTAssertTrue(command.restart)
-        XCTAssertEqual(command.focus, "frontend")
+        XCTAssertEqual(command.path, ".")
     }
 
-    func testWorkspaceUpdateRequiresMutationFlag() {
-        XCTAssertThrowsError(try WorkspaceUpdateCommand.parse([])) { error in XCTAssertTrue(String(describing: error).contains("at least one field"))
-        }
+    func testUpdateRequiresMutationFlag() {
+        XCTAssertThrowsError(try UpdateCommand.parse([])) { error in XCTAssertTrue(String(describing: error).contains("at least one field")) }
     }
 
-    func testWorkspaceUpdateParsesPathAndMetadata() throws {
-        let command = try WorkspaceUpdateCommand.parse(["/tmp/worktree", "--title", "Title", "--notes", "Summary"])
+    func testUpdateParsesPathAndMetadata() throws {
+        let command = try UpdateCommand.parse([".", "--title", "Title", "--notes", "Ready for review"])
 
-        XCTAssertEqual(command.path, "/tmp/worktree")
+        XCTAssertEqual(command.path, ".")
         XCTAssertEqual(command.title, "Title")
-        XCTAssertEqual(command.notes, "Summary")
+        XCTAssertEqual(command.notes, "Ready for review")
     }
 
-    func testWorkspacePathParsesExplicitPath() throws {
-        let command = try WorkspacePathCommand.parse(["/tmp/worktree"])
-        XCTAssertEqual(command.path, "/tmp/worktree")
+    func testStartParsesWorkspacePath() throws {
+        let command = try StartCommand.parse(["."])
+
+        XCTAssertEqual(command.path, ".")
     }
 
-    func testWorkspacePathDefaultsToCurrentDirectory() throws {
-        let command = try WorkspacePathCommand.parse([])
+    func testRestartParsesWorkspacePath() throws {
+        let command = try RestartCommand.parse(["."])
+
+        XCTAssertEqual(command.path, ".")
+    }
+
+    func testOpenParsesNameAndOptionalWorkspacePath() throws {
+        let command = try OpenCommand.parse(["frontend"])
+
+        XCTAssertEqual(command.name, "frontend")
         XCTAssertNil(command.path)
     }
 
-    func testWorkspacePathIsListedAsASubcommand() {
-        let subcommands = WorkspaceCommand.configuration.subcommands.map { String(describing: $0) }
-        XCTAssertTrue(subcommands.contains("WorkspacePathCommand"), "Expected `workspace path` to be wired into WorkspaceCommand; got \(subcommands)")
-    }
-
-    func testAgentEventParsesTypedEnums() throws {
-        let command = try AgentEventCommand.parse(["--type", "waiting", "/tmp/worktree"])
+    func testSignalParsesTypedEnums() throws {
+        let command = try SignalCommand.parse(["waiting"])
 
         XCTAssertEqual(command.type, .waiting)
-        XCTAssertEqual(command.path, "/tmp/worktree")
+        XCTAssertNil(command.path)
     }
 
-    func testAgentLaunchParsesNameAndWorkspacePath() throws {
-        let command = try AgentLaunchCommand.parse(["--name", "Codex", "/tmp/worktree"])
-
-        XCTAssertEqual(command.name, "Codex")
-        XCTAssertEqual(command.path, "/tmp/worktree")
+    func testSpacesCommandListsFlattenedPublicVerbs() {
+        let subcommands = SpacesCommand.configuration.subcommands.map { String(describing: $0) }
+        XCTAssertEqual(subcommands, ["ImportCommand", "UpdateCommand", "StartCommand", "RestartCommand", "OpenCommand", "SignalCommand"])
     }
 
-    func testAgentEventRejectsUnknownEnumValue() {
-        XCTAssertThrowsError(try AgentEventCommand.parse(["--type", "bogus"])) { error in
+    func testSignalRejectsUnknownEnumValue() {
+        XCTAssertThrowsError(try SignalCommand.parse(["bogus"])) { error in
             let rendered = String(describing: error)
             XCTAssertTrue(rendered.contains("bogus") || rendered.contains("waiting"))
         }

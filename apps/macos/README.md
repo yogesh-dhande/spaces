@@ -1,6 +1,6 @@
 # Spaces macOS App
 
-`Spaces` is the macOS app and `spaces` is the companion CLI for workspace import, metadata updates, idempotent workspace launch, and agent activity.
+`Spaces` is the macOS app and `spaces` is the companion CLI for `import`, `update`, `start`, `restart`, `open`, and `signal`.
 
 ## Read This With
 - [spec.md](/Users/yogesh/projects/spaces/apps/macos/spec.md): UX and product behavior
@@ -40,9 +40,9 @@ Useful commands:
 apps/macos/.build/debug/SpacesApp
 apps/macos/.build/debug/spaces --help
 apps/macos/.build/debug/spacese2e --help
-apps/macos/.build/debug/spaces workspace import --title "debug" --notes "Local debug session"
-apps/macos/.build/debug/spaces workspace update --notes "Ready for review"
-apps/macos/.build/debug/spaces workspace up --restart
+apps/macos/.build/debug/spaces import --title "debug" --notes "Local debug session"
+apps/macos/.build/debug/spaces update --notes "Ready for review"
+apps/macos/.build/debug/spaces restart
 apps/macos/Tests/e2e_real_system.sh
 ```
 
