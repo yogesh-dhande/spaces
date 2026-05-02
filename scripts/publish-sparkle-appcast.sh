@@ -12,9 +12,11 @@ ARCHIVE_PATH="$REPO_ROOT/dist/releases/$VERSION/Spaces-${VERSION}.zip"
 UPDATES_DIR="$REPO_ROOT/dist/updates/stable"
 WEB_RELEASES_DIR="$REPO_ROOT/apps/web/public/releases"
 APPCAST_TOOL="$REPO_ROOT/apps/macos/.build/artifacts/sparkle/Sparkle/bin/generate_appcast"
+APPCAST_PATH="$UPDATES_DIR/appcast.xml"
 
 : "${SPARKLE_PRIVATE_ED_KEY:?Set SPARKLE_PRIVATE_ED_KEY to the private Sparkle EdDSA key.}"
 : "${SPARKLE_DOWNLOAD_URL_PREFIX:=https://usespaces.dev/releases}"
+export SPARKLE_DOWNLOAD_URL_PREFIX
 
 if [[ ! -f "$ARCHIVE_PATH" ]]; then
   echo "Error: Sparkle archive not found at $ARCHIVE_PATH" >&2
@@ -53,6 +55,37 @@ if [[ -n "${SPARKLE_LINK:-}" ]]; then
 fi
 
 printf '%s' "$SPARKLE_PRIVATE_ED_KEY" | "$APPCAST_TOOL" "${generate_args[@]}" "$UPDATES_DIR"
+
+# generate_appcast reuses existing items when re-running a release. Normalize
+# enclosure URLs so retries cannot preserve a stale path from an older feed.
+perl -0pi -e '
+  my $prefix = $ENV{SPARKLE_DOWNLOAD_URL_PREFIX};
+  $prefix =~ s{/+$}{};
+  s{(<enclosure\b[^>]*\burl=")([^"]+)(")}{
+    my ($start, $url, $end) = ($1, $2, $3);
+    my $normalized = $url =~ m{^\Q$prefix/\E}
+      ? $url
+      : $prefix . "/" . ($url =~ m{/([^/?#]+)$} ? $1 : $url);
+    $start . $normalized . $end;
+  }ge;
+' "$APPCAST_PATH"
+
+if ! perl -0ne '
+  my $prefix = $ENV{SPARKLE_DOWNLOAD_URL_PREFIX};
+  $prefix =~ s{/+$}{};
+  my $invalid = 0;
+  while (/<enclosure\b[^>]*\burl="([^"]+)"/g) {
+    if (index($1, "$prefix/") != 0) {
+      $invalid = 1;
+      last;
+    }
+  }
+  END { exit($invalid) }
+' "$APPCAST_PATH"; then
+  echo "Error: appcast contains enclosure URLs outside $SPARKLE_DOWNLOAD_URL_PREFIX" >&2
+  exit 1
+fi
+
 rm -rf "$WEB_RELEASES_DIR"
 mkdir -p "$WEB_RELEASES_DIR"
 cp -R "$UPDATES_DIR"/. "$WEB_RELEASES_DIR"/
