@@ -55,6 +55,14 @@ final class MXCommandTests: XCTestCase {
         XCTAssertNil(command.path)
     }
 
+    func testProcessShellConfigParsesOptionalShell() throws {
+        let readCommand = try ProcessShellConfigCommand.parse([])
+        XCTAssertNil(readCommand.shell)
+
+        let writeCommand = try ProcessShellConfigCommand.parse(["bash"])
+        XCTAssertEqual(writeCommand.shell, "bash")
+    }
+
     func testSignalParsesTypedEnums() throws {
         let command = try SignalCommand.parse(["waiting"])
 
@@ -64,7 +72,8 @@ final class MXCommandTests: XCTestCase {
 
     func testSpacesCommandListsFlattenedPublicVerbs() {
         let subcommands = SpacesCommand.configuration.subcommands.map { String(describing: $0) }
-        XCTAssertEqual(subcommands, ["ImportCommand", "UpdateCommand", "StartCommand", "RestartCommand", "OpenCommand", "SignalCommand"])
+        XCTAssertEqual(
+            subcommands, ["ImportCommand", "UpdateCommand", "StartCommand", "RestartCommand", "OpenCommand", "ConfigCommand", "SignalCommand"])
     }
 
     func testSignalRejectsUnknownEnumValue() {

@@ -35,12 +35,16 @@ final class StoreTests: XCTestCase {
         let workspacePortColumns = try readTableColumns(dbURL: dbURL, table: "workspace_ports")
         let workspacePortDefinitionColumns = try readTableColumns(dbURL: dbURL, table: "workspace_port_definitions")
         let projectPortDefinitionColumns = try readTableColumns(dbURL: dbURL, table: "project_port_definitions")
+        let workspaceProcessColumns = try readTableColumns(dbURL: dbURL, table: "workspace_processes")
+        let projectProcessColumns = try readTableColumns(dbURL: dbURL, table: "project_processes")
         let workspaceForeignKeys = try readSingleInteger(dbURL: dbURL, sql: "SELECT COUNT(*) FROM pragma_foreign_key_list('workspaces')")
-        XCTAssertEqual(version, 3)
+        XCTAssertEqual(version, 4)
         XCTAssertTrue(workspaceColumns.contains("title"))
         XCTAssertTrue(workspaceColumns.contains("notes"))
         XCTAssertTrue(workspaceColumns.contains("is_hidden"))
         XCTAssertTrue(projectColumns.contains("is_collapsed"))
+        XCTAssertTrue(workspaceProcessColumns.contains("execution_mode"))
+        XCTAssertTrue(projectProcessColumns.contains("execution_mode"))
         XCTAssertFalse(workspaceSettingsColumns.contains("updated_at"))
         XCTAssertFalse(workspaceStatusColumns.contains("on_exit"))
         XCTAssertTrue(windowColumns.contains("name"))
@@ -60,7 +64,7 @@ final class StoreTests: XCTestCase {
         _ = try SQLiteStore(path: dbURL.path)
         _ = try SQLiteStore(path: dbURL.path)
 
-        XCTAssertEqual(try readSingleInteger(dbURL: dbURL, sql: "SELECT current_version FROM migration_state"), 3)
+        XCTAssertEqual(try readSingleInteger(dbURL: dbURL, sql: "SELECT current_version FROM migration_state"), 4)
         XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent("backups").path))
     }
 
@@ -72,20 +76,21 @@ final class StoreTests: XCTestCase {
 
         let store = try SQLiteStore(path: dbURL.path)
 
-        XCTAssertEqual(try readSingleInteger(dbURL: dbURL, sql: "SELECT current_version FROM migration_state"), 3)
+        XCTAssertEqual(try readSingleInteger(dbURL: dbURL, sql: "SELECT current_version FROM migration_state"), 4)
         XCTAssertEqual(try readSingleText(dbURL: dbURL, sql: "PRAGMA integrity_check"), "ok")
         XCTAssertEqual(try readSingleInteger(dbURL: dbURL, sql: "SELECT COUNT(*) FROM pragma_foreign_key_list('workspace_processes')"), 1)
         XCTAssertEqual(try store.projects().count, 1)
         XCTAssertEqual(try store.project(id: "project-1")?.ports.first?.name, "API_PORT")
         XCTAssertEqual(try store.workspace(id: "workspace-1")?.notes, "Feature tooltip")
         XCTAssertEqual(try store.workspaceProcesses(workspaceID: "workspace-1").first?.name, "api")
+        XCTAssertEqual(try store.workspaceProcesses(workspaceID: "workspace-1").first?.executionMode, .direct)
         XCTAssertEqual(try store.workspaceBrowserSessions(workspaceID: "workspace-1").first?.url, "https://example.com")
         XCTAssertEqual(try store.agentWindows(workspaceID: "workspace-1").first?.label, "Codex")
         XCTAssertEqual(try store.runningProcesses(workspaceID: "workspace-1").first?.terminalTrackingID, "session-1")
 
         let backups = try FileManager.default.contentsOfDirectory(at: root.appendingPathComponent("backups"), includingPropertiesForKeys: nil)
         XCTAssertEqual(backups.count, 1)
-        XCTAssertTrue(backups[0].lastPathComponent.contains("-v1-to-v3.sqlite3"))
+        XCTAssertTrue(backups[0].lastPathComponent.contains("-v1-to-v4.sqlite3"))
     }
 
     // Tests unsupported future schemas fail closed by arranging a DB ahead of the current code and asserting the startup error avoids reset instructions.

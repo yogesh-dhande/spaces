@@ -33,6 +33,8 @@ import workspacecore
     var onRunProcess: ((ProcessTemplate) -> Void)?
     var onStopProcess: ((ProcessTemplate) -> Void)?
     var onRestartProcess: ((ProcessTemplate) -> Void)?
+    var validateProcess: ((ProcessTemplate) throws -> Void)?
+    var presentValidationError: ((Error) -> Void)?
 
     /// Override the remove-confirmation flow. When set, called instead of
     /// `NSAlert`. Tests use this to bypass the modal. Default presents an
@@ -247,6 +249,10 @@ import workspacecore
 
     private func handleSave(row: ProcessRowView, edited: ProcessTemplate) {
         guard let index = rows.firstIndex(of: row), index < processes.count else { return }
+        do { try validateProcess?(edited) } catch {
+            presentValidationError?(error)
+            return
+        }
         processes[index] = edited
         if pendingDraftIndex == index { pendingDraftIndex = nil }
         row.exitEditing(animated: true)
@@ -346,6 +352,7 @@ import workspacecore
     // Fields that appear in the editing subtree.
     private var nameField: NSTextField?
     private var commandField: NSTextField?
+    private var executionModePopup: NSPopUpButton?
     private var onExitPopup: NSPopUpButton?
 
     init(
@@ -421,6 +428,7 @@ import workspacecore
             process: seed, onCancel: { [weak self] in self?.onCancel?() }, onSave: { [weak self] edited in self?.onSave?(edited) })
         nameField = fields.name
         commandField = fields.command
+        executionModePopup = fields.executionMode
         onExitPopup = fields.onExit
         editingContainer = form
 
@@ -462,6 +470,7 @@ import workspacecore
         editingContainer = nil
         nameField = nil
         commandField = nil
+        executionModePopup = nil
         onExitPopup = nil
     }
 
@@ -476,7 +485,8 @@ import workspacecore
     func formSnapshot() -> ProcessTemplate {
         ProcessTemplate(
             id: currentProcess.id, name: (nameField?.stringValue).flatMap { $0.isEmpty ? nil : $0 }, command: commandField?.stringValue ?? "",
-            onExit: ProcessExitAction(rawValue: onExitPopup?.selectedItem?.representedObject as? String ?? "") ?? .none)
+            onExit: ProcessExitAction(rawValue: onExitPopup?.selectedItem?.representedObject as? String ?? "") ?? .none,
+            executionMode: ProcessExecutionMode(rawValue: executionModePopup?.selectedItem?.representedObject as? String ?? "") ?? .direct)
     }
 
     // MARK: Builders
@@ -553,7 +563,7 @@ import workspacecore
     }
 
     private static func makeEditingForm(process: ProcessTemplate, onCancel: @escaping () -> Void, onSave: @escaping (ProcessTemplate) -> Void) -> (
-        NSStackView, (name: NSTextField, command: NSTextField, onExit: NSPopUpButton)
+        NSStackView, (name: NSTextField, command: NSTextField, executionMode: NSPopUpButton, onExit: NSPopUpButton)
     ) {
         let nameField = NSTextField(string: process.name ?? "")
         nameField.placeholderString = "Name"
@@ -562,6 +572,14 @@ import workspacecore
         let commandField = NSTextField(string: process.command)
         commandField.placeholderString = "Command"
         commandField.setAccessibilityIdentifier("process-row-edit-command")
+
+        let executionModePopup = NSPopUpButton(frame: .zero, pullsDown: false)
+        for mode in ProcessExecutionMode.allCases {
+            executionModePopup.addItem(withTitle: mode.displayName)
+            executionModePopup.lastItem?.representedObject = mode.rawValue
+        }
+        executionModePopup.selectItem(at: ProcessExecutionMode.allCases.firstIndex(of: process.executionMode) ?? 0)
+        executionModePopup.setAccessibilityIdentifier("process-row-edit-execution-mode")
 
         let onExitPopup = NSPopUpButton(frame: .zero, pullsDown: false)
         for action in ProcessExitAction.allCases {
@@ -587,6 +605,18 @@ import workspacecore
             return row
         }
 
+        let executionModeRow = labeled("Execution mode", executionModePopup)
+        let onExitRow = labeled("On exit", onExitPopup)
+        executionModeRow.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        onExitRow.setContentHuggingPriority(.defaultLow, for: .horizontal)
+
+        let modeAndExitRow = NSStackView(views: [executionModeRow, onExitRow])
+        modeAndExitRow.orientation = .horizontal
+        modeAndExitRow.alignment = .top
+        modeAndExitRow.spacing = 12
+        modeAndExitRow.translatesAutoresizingMaskIntoConstraints = false
+        executionModeRow.widthAnchor.constraint(equalTo: onExitRow.widthAnchor).isActive = true
+
         let cancelButton = NSButton(title: "Cancel", target: nil, action: nil)
         cancelButton.setAccessibilityIdentifier("process-row-edit-cancel")
         Theme.applySecondaryStyle(to: cancelButton)
@@ -600,11 +630,12 @@ import workspacecore
         // a lightweight target helper tied to the form's lifetime.
         let target = ClosureTarget()
         target.onCancel = onCancel
-        target.onSave = { [weak nameField, weak commandField, weak onExitPopup] in
+        target.onSave = { [weak nameField, weak commandField, weak executionModePopup, weak onExitPopup] in
             let edited = ProcessTemplate(
                 id: process.id, name: nameField?.stringValue.isEmpty == false ? nameField?.stringValue : nil,
                 command: commandField?.stringValue ?? "",
-                onExit: ProcessExitAction(rawValue: onExitPopup?.selectedItem?.representedObject as? String ?? "") ?? .none)
+                onExit: ProcessExitAction(rawValue: onExitPopup?.selectedItem?.representedObject as? String ?? "") ?? .none,
+                executionMode: ProcessExecutionMode(rawValue: executionModePopup?.selectedItem?.representedObject as? String ?? "") ?? .direct)
             onSave(edited)
         }
         let refreshSaveEnabled = { [weak saveButton, weak nameField, weak commandField] in
@@ -628,9 +659,7 @@ import workspacecore
         trailingButtons.spacing = 6
         trailingButtons.translatesAutoresizingMaskIntoConstraints = false
 
-        let form = NSStackView(views: [
-            labeled("Name", nameField), labeled("Command", commandField), labeled("On exit", onExitPopup), trailingButtons,
-        ])
+        let form = NSStackView(views: [labeled("Name", nameField), labeled("Command", commandField), modeAndExitRow, trailingButtons])
         form.orientation = .vertical
         form.alignment = .leading
         form.spacing = 6
@@ -640,7 +669,7 @@ import workspacecore
         // Anchor the target to the form so it lives as long as the form does.
         objc_setAssociatedObject(form, &Self.targetKey, target, .OBJC_ASSOCIATION_RETAIN)
 
-        return (form, (nameField, commandField, onExitPopup))
+        return (form, (nameField, commandField, executionModePopup, onExitPopup))
     }
 
     private static func buildActionButton(symbol: String, tooltip: String, onClick: @escaping (NSButton) -> Void) -> NSButton {

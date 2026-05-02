@@ -34,6 +34,36 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertNil(try store.appConfig().editor)
     }
 
+    func testValidateDirectProcessTemplateRejectsShellSyntaxBeforeLaunch() throws {
+        let store = try makeTemporaryStore()
+        let orchestrator = WorkspaceOrchestrator(store: store)
+
+        XCTAssertThrowsError(
+            try orchestrator.validateProcessTemplate(ProcessTemplate(name: "web", command: "PORT=$FRONTEND_PORT npm run dev", executionMode: .direct))
+        ) { error in
+            XCTAssertEqual(
+                error.localizedDescription,
+                "Invalid argument: Process commands in Direct mode must be direct executable invocations without shell syntax: PORT=$FRONTEND_PORT npm run dev. Use Shell mode for composite commands."
+            )
+        }
+    }
+
+    func testValidateShellProcessTemplateAcceptsShellSyntax() throws {
+        let store = try makeTemporaryStore()
+        let orchestrator = WorkspaceOrchestrator(store: store)
+
+        XCTAssertNoThrow(
+            try orchestrator.validateProcessTemplate(
+                ProcessTemplate(name: "web", command: "PORT=$FRONTEND_PORT npm run dev | tee log.txt", executionMode: .shell)))
+    }
+
+    func testProcessTemplateDecodeDefaultsExecutionModeToDirect() throws {
+        let data = Data(#"{"id":"process-1","name":"web","command":"npm run web","on_exit":"none"}"#.utf8)
+        let template = try JSONDecoder().decode(ProcessTemplate.self, from: data)
+
+        XCTAssertEqual(template.executionMode, .direct)
+    }
+
     func testLaunchAgentLauncherOpensDirectTerminalAndRegistersAgentWindow() throws {
         let root = try makeTempDirectory()
         let store = try makeTemporaryStore()
@@ -2102,6 +2132,65 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertEqual(mockIterm.openWindowAndRunCallCount, 0)
     }
 
+    func testUpdateRunningWorkspaceProcessesRejectsChangedExecutionModeWithoutRestartConfirmation() throws {
+        let (orchestrator, store, _, workspace, _, mockIterm, mockTmux) = try makeMockItermOrchestratorWithWorkspace()
+        try store.touchWorkspaceSettings(workspaceID: workspace.id, updatedAt: "now")
+        let process = ProcessTemplate(id: "process-web", name: "web", command: "npm run web", onExit: .none, executionMode: .direct)
+        try store.setWorkspaceProcesses(workspaceID: workspace.id, processes: [process])
+        try store.updateWorkspaceRunning(id: workspace.id, isRunning: true, launchedAt: "now")
+        try store.upsert(
+            runningProcess: RunningProcessRecord(
+                id: UUID().uuidString, workspaceID: workspace.id, templateName: "web", command: "npm run web", terminalApp: "iTerm2", windowID: 222,
+                terminalTrackingID: "session-web", itermTabIndex: nil, tmuxWindowID: "@2", pid: 2222, status: .running, logPath: nil,
+                lastOutputAt: nil, startedAt: "now", exitedAt: nil))
+        _ = mockTmux.addWindow(sessionName: "spaces-\(workspace.id)-web", id: "@2", name: "web", isActive: true)
+
+        XCTAssertThrowsError(
+            try orchestrator.updateRunningWorkspaceProcesses(
+                workspaceID: workspace.id,
+                processes: [ProcessTemplate(id: process.id, name: "web", command: "npm run web", onExit: .none, executionMode: .shell)],
+                restartChangedCommands: false)
+        ) { error in
+            XCTAssertEqual(
+                error.localizedDescription, "Invalid argument: Changing a running process command or execution mode requires restart confirmation.")
+        }
+
+        XCTAssertEqual(try store.workspaceProcesses(workspaceID: workspace.id).first?.executionMode, .direct)
+        XCTAssertEqual(try store.runningProcesses(workspaceID: workspace.id).map(\.command), ["npm run web"])
+        XCTAssertEqual(mockIterm.openWindowAndRunCallCount, 0)
+    }
+
+    func testUpdateRunningWorkspaceProcessesRestartsChangedExecutionModeWithConfiguredShell() throws {
+        let (orchestrator, store, _, workspace, _, mockIterm, mockTmux) = try makeMockItermOrchestratorWithWorkspace()
+        _ = try orchestrator.updateProcessShell(.sh)
+        try store.touchWorkspaceSettings(workspaceID: workspace.id, updatedAt: "now")
+        let process = ProcessTemplate(id: "process-web", name: "web", command: "npm run web", onExit: .none, executionMode: .direct)
+        try store.setWorkspaceProcesses(workspaceID: workspace.id, processes: [process])
+        try store.updateWorkspaceRunning(id: workspace.id, isRunning: true, launchedAt: "now")
+        let processID = UUID().uuidString
+        try store.upsert(
+            runningProcess: RunningProcessRecord(
+                id: processID, workspaceID: workspace.id, templateName: "web", command: "npm run web", terminalApp: "iTerm2", windowID: 222,
+                terminalTrackingID: "session-web", itermTabIndex: nil, tmuxWindowID: "@2", pid: 2222, status: .running, logPath: nil,
+                lastOutputAt: nil, startedAt: "now", exitedAt: nil))
+        _ = mockTmux.addWindow(sessionName: "spaces-\(workspace.id)-web", id: "@2", name: "web", isActive: true)
+        mockIterm.nextWindowID = 603
+        mockIterm.nextSessionID = "session-web-shell"
+
+        try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) {
+            try orchestrator.updateRunningWorkspaceProcesses(
+                workspaceID: workspace.id,
+                processes: [
+                    ProcessTemplate(
+                        id: process.id, name: "web", command: "cd $SPACES_WORKSPACE_DIR && npm run web", onExit: .none, executionMode: .shell)
+                ], restartChangedCommands: true)
+        }
+
+        XCTAssertEqual(try store.workspaceProcesses(workspaceID: workspace.id).first?.executionMode, .shell)
+        XCTAssertEqual(mockTmux.lastStartedCommand, ["sh", "-lc", "cd $SPACES_WORKSPACE_DIR && npm run web"])
+        XCTAssertEqual(mockIterm.openWindowAndRunCallCount, 1)
+    }
+
     func testUpdateRunningWorkspaceProcessesDeletingEarlierRowKeepsLaterRunningProcessMatchedByID() throws {
         let (orchestrator, store, _, workspace, _, mockIterm, mockTmux) = try makeMockItermOrchestratorWithWorkspace()
         try store.touchWorkspaceSettings(workspaceID: workspace.id, updatedAt: "now")
@@ -2272,11 +2361,11 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertTrue(mockIterm.lastCommand?.contains("spaces-\(workspace.id)-api") == true)
     }
 
-    func testLaunchWorkspaceProcessesInjectEnvWithoutShellWrapping() throws {
+    func testLaunchWorkspaceProcessesInjectLiteralEnvAssignmentsWithoutShellWrapping() throws {
         let (orchestrator, _, _, workspace, _, mockIterm, mockTmux) = try makeMockItermOrchestratorWithWorkspace()
 
         try orchestrator.updateWorkspaceSettings(workspaceID: workspace.id) { settings in
-            settings.processes = [ProcessTemplate(name: "web", command: "WORKSPACE=$SPACES_WORKSPACE_DIR npm run dev")]
+            settings.processes = [ProcessTemplate(name: "web", command: "WORKSPACE=workspace npm run dev")]
         }
 
         try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) {
@@ -2292,9 +2381,34 @@ final class OrchestratorTests: XCTestCase {
         }
 
         XCTAssertEqual(mockTmux.lastStartedCommand, ["npm", "run", "dev"])
-        XCTAssertEqual(mockTmux.lastStartedEnv["WORKSPACE"], workspace.dir)
+        XCTAssertEqual(mockTmux.lastStartedEnv["WORKSPACE"], "workspace")
         XCTAssertTrue(mockIterm.lastCommand?.contains("tmux attach-session -t") == true)
         XCTAssertFalse(mockIterm.lastCommand?.contains("bash -lc") == true)
+    }
+
+    func testLaunchWorkspaceShellModeWrapsCommandWithConfiguredShell() throws {
+        let (orchestrator, _, _, workspace, _, mockIterm, mockTmux) = try makeMockItermOrchestratorWithWorkspace()
+        _ = try orchestrator.updateProcessShell(.bash)
+
+        try orchestrator.updateWorkspaceSettings(workspaceID: workspace.id) { settings in
+            settings.processes = [ProcessTemplate(name: "web", command: "cd $SPACES_WORKSPACE_DIR && npm run dev", executionMode: .shell)]
+        }
+
+        try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) {
+            try withEnv(
+                name: "YABAI_WINDOWS_JSON",
+                value:
+                    #"[{"id":446,"pid":11,"app":"iTerm2","title":"web","space":1,"display":1,"is-sticky":false,"is-hidden":false,"is-visible":true,"is-native-fullscreen":false}]"#
+            ) {
+                try withEnv(name: "YABAI_FOCUSED_ID", value: "446") {
+                    try withEnv(name: "YABAI_FOCUSED_APP", value: "iTerm2") { try orchestrator.launchWorkspace(workspaceID: workspace.id) }
+                }
+            }
+        }
+
+        XCTAssertEqual(mockTmux.lastStartedCommand, ["bash", "-lc", "cd $SPACES_WORKSPACE_DIR && npm run dev"])
+        XCTAssertEqual(mockTmux.lastStartedEnv["SPACES_WORKSPACE_DIR"], workspace.dir)
+        XCTAssertTrue(mockIterm.lastCommand?.contains("tmux attach-session -t") == true)
     }
 
     // Tests launch workspace does not auto open editor by arranging representative inputs and asserting the expected result.
@@ -4544,6 +4658,16 @@ final class OrchestratorTests: XCTestCase {
 
         XCTAssertEqual(updated.terminalHost, .ghostty)
         XCTAssertEqual(try orchestrator.appConfig().terminalHost, .ghostty)
+    }
+
+    func testUpdateProcessShellPersists() throws {
+        let store = try makeTemporaryStore()
+        let orchestrator = WorkspaceOrchestrator(store: store)
+
+        let updated = try orchestrator.updateProcessShell(.bash)
+
+        XCTAssertEqual(updated.processShell, .bash)
+        XCTAssertEqual(try orchestrator.appConfig().processShell, .bash)
     }
 
     // MARK: - listProjects

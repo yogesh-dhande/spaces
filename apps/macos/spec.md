@@ -124,8 +124,11 @@ Spaces focuses those windows; it does not decide their geometry.
 - Unopened browser sessions should not degrade runtime health or show missing-window warnings for an otherwise running workspace.
 - Workspace processes should be launched inside tmux so Spaces can recover the terminal view without losing the underlying process when a supported terminal-host window closes.
 - Editing workspace settings while a workspace is already running must not start or stop browser sessions or coding agents as part of save-time reconciliation. Process name and on-exit edits should update tracked running processes immediately, while command edits should require explicit confirmation to restart the affected running processes; canceling that prompt should leave the existing process configuration unchanged. New configured rows should appear immediately with their non-running status so the user can decide what to open or recover.
-- Process commands are treated as direct executable invocations with arguments.
-- If a user needs composite shell behavior such as `cd x && y`, pipes, or redirection, they should wrap it explicitly, for example `bash -lc "cd x && y"`.
+- Process commands support two execution modes: `Direct` runs an executable with arguments, while `Shell` runs the command through the app-wide shell setting.
+- Direct mode is the recommended deterministic path for plain executable commands such as `scripts/swiftpm.sh build`.
+- Shell mode supports composite shell behavior such as `cd x && y`, pipes, redirection, and shell expansion.
+- The global shell choice for shell-mode processes is configurable in Settings and through `spaces config process-shell`; the default is `zsh`.
+- The project and workspace editors validate process commands when they are saved. Direct mode rejects shell-only syntax, while Shell mode requires only a non-empty command.
 - Stop shuts down tracked runtime state and closes tracked dedicated windows safely.
 - Restart performs a stop followed by a fresh launch.
 - `start` is the idempotent "ensure running" path:
