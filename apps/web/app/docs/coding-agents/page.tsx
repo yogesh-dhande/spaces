@@ -5,11 +5,11 @@ import { CopyablePrompt } from "../components/copyable-prompt";
 const CLAUDE_PROMPT = `Add global Spaces lifecycle hooks to ~/.claude/settings.json so this agent
 reports its state to Spaces.
 
-  SessionStart      ->  spaces agent event --type init
-  UserPromptSubmit  ->  spaces agent event --type start
-  Stop              ->  spaces agent event --type done
-  PermissionRequest ->  spaces agent event --type waiting
-  SessionEnd        ->  spaces agent event --type exit
+  SessionStart      ->  spaces signal init
+  UserPromptSubmit  ->  spaces signal start
+  Stop              ->  spaces signal done
+  PermissionRequest ->  spaces signal waiting
+  SessionEnd        ->  spaces signal exit
 
 Use an empty matcher ("") for every entry. Do not add or remove any
 other keys. After writing the file, show me the diff.`;
@@ -17,10 +17,10 @@ other keys. After writing the file, show me the diff.`;
 const CODEX_PROMPT = `Enable Codex hooks and add global Spaces lifecycle hooks so this agent
 reports its state to Spaces.
 
-  SessionStart      ->  spaces agent event --type init
-  UserPromptSubmit  ->  spaces agent event --type start
-  Stop              ->  spaces agent event --type done
-  PermissionRequest ->  spaces agent event --type waiting
+  SessionStart      ->  spaces signal init
+  UserPromptSubmit  ->  spaces signal start
+  Stop              ->  spaces signal done
+  PermissionRequest ->  spaces signal waiting
 
 Use an empty matcher ("") for every entry. Do not add or remove any
 other keys. After writing the file, show me the diff.
@@ -53,7 +53,7 @@ export default function CodingAgentsDocsPage() {
       <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
         <h2 className="text-2xl font-semibold tracking-tight">Lifecycle Events</h2>
         <p className="mt-2 text-sm leading-7 text-foreground-soft">
-          Agents report their own state through <code>spaces agent event --type &lt;event&gt;</code>. Spaces uses each event to update the agent row and, for <code>waiting</code> and <code>done</code>, to raise Alerts and dock attention until you dismiss it.
+          Agents report their own state through <code>spaces signal &lt;event&gt;</code>. Spaces uses each event to update the agent row and, for <code>waiting</code> and <code>done</code>, to raise Alerts and dock attention until you dismiss it.
         </p>
         <ul className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
           <li>• <strong>init</strong> &mdash; identify the terminal and attach it to a tracked row.</li>
@@ -70,7 +70,7 @@ export default function CodingAgentsDocsPage() {
       <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
         <h2 className="text-2xl font-semibold tracking-tight">Global Hooks</h2>
         <p className="mt-2 text-sm leading-7 text-foreground-soft">
-          Claude Code and Codex both support global hooks that run a shell command at lifecycle points. Point those hooks at <code>spaces agent event</code> once in your user config and every session of the agent, in any project, will report to Spaces automatically — no per-repo setup required.
+          Claude Code and Codex both support global hooks that run a shell command at lifecycle points. Point those hooks at <code>spaces signal</code> once in your user config and every session of the agent, in any project, will report to Spaces automatically — no per-repo setup required.
         </p>
         <p className="mt-3 text-sm leading-7 text-foreground-soft">
           The easiest way to install the recommended config is to paste one of the prompts below into the agent you want to configure. Both prompts preserve any existing hooks and only add the Spaces entries.
@@ -104,7 +104,7 @@ export default function CodingAgentsDocsPage() {
       <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
         <h2 className="text-2xl font-semibold tracking-tight">See Also</h2>
         <ul className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
-          <li>• <a className="text-accent hover:underline" href="/docs/cli">CLI Reference</a> — full flag list for <code>spaces agent event</code>.</li>
+          <li>• <a className="text-accent hover:underline" href="/docs/cli">CLI Reference</a> — full flag list for <code>spaces signal</code>.</li>
           <li>• <a className="text-accent hover:underline" href="/docs/processes">Processes</a> — how agents launched as processes share the process runtime.</li>
           <li>• <a className="text-accent hover:underline" href="/docs/window-management">Window Management</a> — how tracked agent terminals become focusable by shortcut.</li>
         </ul>

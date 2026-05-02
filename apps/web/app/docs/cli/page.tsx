@@ -36,7 +36,7 @@ export default function CliReferencePage() {
   return (
     <DocsShell
       title="CLI Reference"
-      description="The spaces CLI is intentionally minimal. It exists for workspace import, workspace metadata updates, idempotent workspace launch, and explicit coding-agent lifecycle events."
+      description="The spaces CLI is intentionally minimal. It exists for `import`, `update`, `start`, `restart`, `open`, and explicit coding-agent lifecycle events through `signal`."
       pagePath="/docs/cli"
     >
       <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
@@ -45,10 +45,10 @@ export default function CliReferencePage() {
           Use <Cmd>spaces</Cmd> when you are already in a terminal or when a coding agent needs to register a workspace, update its visible metadata, make sure it is running, or report its lifecycle state back to Spaces.
         </p>
         <CodeBlock>{`spaces --version
-spaces workspace import
-spaces workspace update --notes "Ready for review"
-spaces workspace up
-spaces agent event --type waiting`}</CodeBlock>
+spaces import
+spaces update --notes "Ready for review"
+spaces start
+spaces signal waiting`}</CodeBlock>
       </article>
 
       <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
@@ -65,13 +65,13 @@ spaces agent event --type waiting`}</CodeBlock>
           Registers the current directory as a Spaces workspace by default. This is the normal bootstrap step for coding agents and terminal-first workflows.
         </p>
         <CodeBlock>{`# Import the current directory
-spaces workspace import
+spaces import
 
 # Import another directory
-spaces workspace import /path/to/worktree
+spaces import /path/to/worktree
 
 # Create or update visible metadata during import
-spaces workspace import --title "OAuth rollout" --notes "Waiting on staging verification"`}</CodeBlock>
+spaces import --title "OAuth rollout" --notes "Waiting on staging verification"`}</CodeBlock>
         <ul className="mt-3 space-y-1">
           <Flag name="[path]" description="Workspace directory to register. Defaults to the current working directory." />
           <Flag name="--title <title>" description="Optional workspace title. If the workspace already exists, the title is updated." />
@@ -82,13 +82,13 @@ spaces workspace import --title "OAuth rollout" --notes "Waiting on staging veri
       <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
         <h2 className="text-2xl font-semibold tracking-tight">Workspace Update</h2>
         <p className="mt-3 text-sm leading-7 text-foreground-soft">
-          <Cmd>spaces workspace update</Cmd> changes workspace metadata after the workspace already exists. Use it for title or notes edits without relaunching anything.
+          <Cmd>spaces update</Cmd> changes workspace metadata after the workspace already exists. Use it for title or notes edits without relaunching anything.
         </p>
         <CodeBlock>{`# Update the current workspace notes
-spaces workspace update --notes "Ready for review"
+spaces update --notes "Ready for review"
 
 # Update another workspace
-spaces workspace update /path/to/workspace --title "oauth-timeout" --notes "Waiting on staging verification"`}</CodeBlock>
+spaces update /path/to/workspace --title "oauth-timeout" --notes "Waiting on staging verification"`}</CodeBlock>
         <ul className="mt-3 space-y-1">
           <Flag name="[path]" description="Workspace directory to update. Defaults to the current working directory." />
           <Flag name="--title <title>" description="Optional workspace title update." />
@@ -97,40 +97,57 @@ spaces workspace update /path/to/workspace --title "oauth-timeout" --notes "Wait
       </article>
 
       <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
-        <h2 className="text-2xl font-semibold tracking-tight">Workspace Up</h2>
+        <h2 className="text-2xl font-semibold tracking-tight">Start</h2>
         <p className="mt-3 text-sm leading-7 text-foreground-soft">
-          <Cmd>spaces workspace up</Cmd> is the idempotent runtime command. It launches a stopped workspace and restores exited runtime when the workspace is already running.
+          <Cmd>spaces start</Cmd> is the idempotent runtime command. It launches a stopped workspace and restores exited runtime when the workspace is already running.
         </p>
         <CodeBlock>{`# Ensure the current workspace is running
-spaces workspace up
+spaces start
 
 # Target another workspace directory
-spaces workspace up /path/to/workspace
-
-# Force a full stop and relaunch
-spaces workspace up /path/to/workspace --restart
-
-# Launch and focus one named tracked window
-spaces workspace up /path/to/workspace --focus frontend`}</CodeBlock>
+spaces start /path/to/workspace`}</CodeBlock>
         <ul className="mt-3 space-y-1">
           <Flag name="[path]" description="Workspace directory to launch. Defaults to the current working directory." />
-          <Flag name="--restart" description="Always perform a full stop and fresh launch instead of the normal idempotent path." />
-          <Flag name="--focus <name>" description="After launch, focus one tracked browser, process, or agent window by its unique workspace-local name." />
         </ul>
       </article>
 
       <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
-        <h2 className="text-2xl font-semibold tracking-tight">Agent Events</h2>
+        <h2 className="text-2xl font-semibold tracking-tight">Restart</h2>
+        <p className="mt-3 text-sm leading-7 text-foreground-soft">
+          <Cmd>spaces restart</Cmd> performs the explicit full stop-and-relaunch flow. Use it when you want a clean runtime reset instead of the normal ensure-running behavior.
+        </p>
+        <CodeBlock>{`spaces restart
+spaces restart /path/to/workspace`}</CodeBlock>
+        <ul className="mt-3 space-y-1">
+          <Flag name="[path]" description="Workspace directory to relaunch. Defaults to the current working directory." />
+        </ul>
+      </article>
+
+      <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
+        <h2 className="text-2xl font-semibold tracking-tight">Open</h2>
+        <p className="mt-3 text-sm leading-7 text-foreground-soft">
+          <Cmd>spaces open</Cmd> focuses one named tracked browser, process, or coding-agent target. The target name is required so the CLI never guesses which window you meant.
+        </p>
+        <CodeBlock>{`spaces open frontend
+spaces open frontend /path/to/workspace`}</CodeBlock>
+        <ul className="mt-3 space-y-1">
+          <Flag name="<name>" description="Tracked browser, process, or coding-agent name to open or focus." />
+          <Flag name="[path]" description="Workspace directory to resolve. Defaults to the current working directory." />
+        </ul>
+      </article>
+
+      <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
+        <h2 className="text-2xl font-semibold tracking-tight">Signal</h2>
         <p className="mt-3 text-sm leading-7 text-foreground-soft">
           Coding agents report their lifecycle explicitly. Spaces uses these events to surface waiting and done states in the app and Alerts. This command records state only; it does not launch or stop an agent.
         </p>
-        <CodeBlock>{`spaces agent event --type init
-spaces agent event --type start
-spaces agent event --type waiting
-spaces agent event --type done
-spaces agent event --type exit`}</CodeBlock>
+        <CodeBlock>{`spaces signal init
+spaces signal start
+spaces signal waiting
+spaces signal done
+spaces signal exit`}</CodeBlock>
         <ul className="mt-3 space-y-1">
-          <Flag name="--type <event>" description="Required event type: init, start, waiting, done, or exit." />
+          <Flag name="<event>" description="Required event type: init, start, waiting, done, or exit." />
           <Flag name="[path]" description="Workspace directory to associate with the event. Defaults to the current working directory." />
         </ul>
         <p className="mt-3 text-sm leading-7 text-foreground-soft">
@@ -140,13 +157,13 @@ spaces agent event --type exit`}</CodeBlock>
 
       <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
         <h2 className="text-2xl font-semibold tracking-tight">Typical Flow</h2>
-        <CodeBlock>{`spaces workspace import --title "bugfix/login-timeout"
-spaces workspace up --restart
-spaces workspace update --notes "Investigating flaky OAuth callback"
-spaces agent event --type init
-spaces agent event --type start
+        <CodeBlock>{`spaces import --title "bugfix/login-timeout"
+spaces restart
+spaces update --notes "Investigating flaky OAuth callback"
+spaces signal init
+spaces signal start
 # ... later ...
-spaces agent event --type waiting`}</CodeBlock>
+spaces signal waiting`}</CodeBlock>
         <p className="mt-2 text-sm leading-7 text-foreground-soft">
           The GUI remains the primary place to create projects and configure templates. The CLI stays focused on registration, lightweight metadata updates, launch-time workflows, and agent reporting.
         </p>

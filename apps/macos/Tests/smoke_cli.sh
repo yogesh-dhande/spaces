@@ -13,7 +13,7 @@ TMP_HOME="$(mktemp -d /tmp/spaces-smoke-home.XXXXXX)"
 trap 'rm -rf "$TMP_HOME"' EXIT
 export HOME="$TMP_HOME"
 
-# Workspace import + up
+# Workspace import + start
 TEST_REPO="$(mktemp -d /tmp/spaces-smoke-repo.XXXXXX)"
 (
   cd "$TEST_REPO"
@@ -26,21 +26,21 @@ TEST_REPO="$(mktemp -d /tmp/spaces-smoke-repo.XXXXXX)"
 )
 
 IMPORT_ERR="$(mktemp)"
-if "$BIN" workspace import "$TEST_REPO" --title "smoke" --notes "smoke test" >/dev/null 2>"$IMPORT_ERR"; then
+if "$BIN" import "$TEST_REPO" --title "smoke" --notes "smoke test" >/dev/null 2>"$IMPORT_ERR"; then
   echo "expected import without a registered project to fail"
   exit 1
 fi
 grep -q -- "Add the project in the app" "$IMPORT_ERR"
 
 UP_ERR="$(mktemp)"
-if "$BIN" workspace up "$TEST_REPO" >/dev/null 2>"$UP_ERR"; then
-  echo "expected up without a registered workspace to fail"
+if "$BIN" start "$TEST_REPO" >/dev/null 2>"$UP_ERR"; then
+  echo "expected start without a registered workspace to fail"
   exit 1
 fi
-grep -q -- "Run \`spaces workspace import \\[path\\]\` first" "$UP_ERR"
+grep -q -- "Run \`spaces import \\[path\\]\` first" "$UP_ERR"
 
 UPDATE_ERR="$(mktemp)"
-if "$BIN" workspace update "$TEST_REPO" >/dev/null 2>"$UPDATE_ERR"; then
+if "$BIN" update "$TEST_REPO" >/dev/null 2>"$UPDATE_ERR"; then
   echo "expected update without metadata flags to fail"
   exit 1
 fi

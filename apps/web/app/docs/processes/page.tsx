@@ -86,7 +86,7 @@ SPACES_WORKSPACE_DIR              # this workspace's directory`}</code>
       <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
         <h2 className="text-2xl font-semibold tracking-tight">Coding Agents</h2>
         <p className="mt-2 text-sm leading-7 text-foreground-soft">
-          Coding agents run as processes like any other, but they can also report their own lifecycle — started, waiting on you, done — through <code>spaces agent event</code>. Alerts surfaces those states so you know which agent needs you next.
+          Coding agents run as processes like any other, but they can also report their own lifecycle — started, waiting on you, done — through <code>spaces signal</code>. Alerts surfaces those states so you know which agent needs you next.
         </p>
       </article>
     </DocsShell>

@@ -793,16 +793,16 @@ set -euo pipefail
 workspace_dir="${{SPACES_WORKSPACE_DIR:-$PWD}}"
 agent_log="{event_log}"
 mx_bin="{mx_bin}"
-"$mx_bin" agent event --type init "$workspace_dir" >/dev/null
-"$mx_bin" agent event --type start "$workspace_dir" >/dev/null
+"$mx_bin" signal init "$workspace_dir" >/dev/null
+"$mx_bin" signal start "$workspace_dir" >/dev/null
 printf 'agent-start:%s\\n' "$workspace_dir" >>"$agent_log"
 sleep 2
-"$mx_bin" agent event --type waiting "$workspace_dir" >/dev/null
+"$mx_bin" signal waiting "$workspace_dir" >/dev/null
 printf 'agent-waiting:%s\\n' "$workspace_dir" >>"$agent_log"
 sleep 2
-"$mx_bin" agent event --type done "$workspace_dir" >/dev/null
+"$mx_bin" signal done "$workspace_dir" >/dev/null
 printf 'agent-done:%s\\n' "$workspace_dir" >>"$agent_log"
-trap '"$mx_bin" agent event --type exit "$workspace_dir" >/dev/null 2>&1 || true; printf "agent-exit:%s\\n" "$workspace_dir" >>"$agent_log"; exit 0' TERM INT
+trap '"$mx_bin" signal exit "$workspace_dir" >/dev/null 2>&1 || true; printf "agent-exit:%s\\n" "$workspace_dir" >>"$agent_log"; exit 0' TERM INT
 while true; do sleep 5; done
 """
 Path(script_path).write_text(content)
@@ -1214,7 +1214,7 @@ restart_workspace_via_gui() {
   sleep 0.5
   if ! ui_click_workspace_detail_header_button "Restart"; then
     log_debug "restart_workspace_via_gui fallback=spaces-workspace-up-restart"
-    run_mx_logged /tmp/spaces-e2e-restart-workspace-fallback.log workspace up "$workspace_dir" --restart
+    run_mx_logged /tmp/spaces-e2e-restart-workspace-fallback.log restart "$workspace_dir"
     transition_pause "workspace restart fallback"
     return 0
   fi
@@ -1684,7 +1684,7 @@ record_browser_focus_metric() {
     record_metric_sample "$name" "$(extract_metric_field "$line" "elapsed_ms")" "$terminal_host" "$workspace_scope"
     return 0
   fi
-  # `spaces workspace up --focus docs` can resolve through the shared name-based
+  # `spaces open docs` can resolve through the shared name-based
   # focus path instead of the browser-session-specific path, so the app may log
   # `named_window_focus target=docs` even though the visible behavior is still
   # "focus the tracked docs Chrome tab". Accept either metric shape here.
@@ -2165,7 +2165,8 @@ run_launch_and_focus_assertions() {
   transition_pause "switch terminal host to $host"
 
   begin_case "$host: launch workspace and persist terminal host"
-  run_mx_logged /tmp/spaces-e2e-launch.log workspace up "$workspace_dir" --focus docs
+  run_mx_logged /tmp/spaces-e2e-launch.log start "$workspace_dir"
+  run_mx_logged /tmp/spaces-e2e-launch-focus.log open docs "$workspace_dir"
   wait_for_workspace_running_state "$workspace_dir" "true"
   transition_pause "$host launch workspace"
   dump_chrome_state "$host docs-focus after-launch"
@@ -2205,7 +2206,7 @@ run_launch_and_focus_assertions() {
   dump_chrome_state "$host after-extra-tab"
   wait_for_condition "chrome_front_window_id" "$docs_window_id"
   wait_for_condition "chrome_window_active_url $docs_window_id" "$extra_user_tab_url"
-  run_mx_logged /tmp/spaces-e2e-focus-docs.log workspace up "$workspace_dir" --focus docs
+  run_mx_logged /tmp/spaces-e2e-focus-docs.log open docs "$workspace_dir"
   transition_pause "$host refocus docs"
   record_browser_focus_metric "browser_untracked_tab.cli_window_focus.browser_tracked_tab" "$PRIMARY_DOCS_URL" "docs" "$host" "single"
   dump_chrome_state "$host after-refocus-docs"
@@ -2263,7 +2264,7 @@ PY
     transition_pause "$host add extra iTerm2 tab"
     wait_for_condition "frontmost_app" "iTerm2"
     [[ "$(iterm_front_session)" != "$frontend_session_id" ]] || fail "expected extra iTerm2 tab to be selected"
-    run_mx_logged /tmp/spaces-e2e-focus-frontend.log workspace up "$workspace_dir" --focus frontend
+    run_mx_logged /tmp/spaces-e2e-focus-frontend.log open frontend "$workspace_dir"
     transition_pause "$host focus frontend terminal"
     record_process_focus_metric "terminal_untracked_tab.cli_window_focus.process_tracked_tab" "frontend" "$host" "single"
     frontend_session_id="$(wait_for_workspace_terminal_tracking_id "$workspace_dir" "frontend" "$dump_file")"
@@ -2292,13 +2293,13 @@ for window in data["windows"]:
         break
 PY
 )"
-    run_mx_logged /tmp/spaces-e2e-focus-frontend.log workspace up "$workspace_dir" --focus frontend
+    run_mx_logged /tmp/spaces-e2e-focus-frontend.log open frontend "$workspace_dir"
     wait_for_condition "frontmost_app" "ghostty"
     ghostty_open_extra_tab
     sleep 1
     transition_pause "$host add extra Ghostty tab"
     [[ "$(ghostty_focused_terminal)" != "$frontend_terminal_id" ]] || fail "expected extra Ghostty tab to be selected"
-    run_mx_logged /tmp/spaces-e2e-focus-frontend-2.log workspace up "$workspace_dir" --focus frontend
+    run_mx_logged /tmp/spaces-e2e-focus-frontend-2.log open frontend "$workspace_dir"
     transition_pause "$host refocus frontend terminal"
     record_process_focus_metric "terminal_untracked_tab.cli_window_focus.process_tracked_tab" "frontend" "$host" "single"
     wait_for_condition "ghostty_focused_terminal" "$frontend_terminal_id"
@@ -2339,7 +2340,7 @@ PY
   begin_case "$host: workspace window cycling stays on tracked windows"
   # This validates forward/back workspace cycling from the live desktop state.
   ensure_single_spaces_instance "$SPACES_PID"
-  run_mx_logged /tmp/spaces-e2e-cycle-seed.log workspace up "$workspace_dir" --focus docs
+  run_mx_logged /tmp/spaces-e2e-cycle-seed.log open docs "$workspace_dir"
   transition_pause "$host seed docs focus for cycling"
   wait_for_condition "chrome_front_url" "$PRIMARY_DOCS_URL"
   send_cycle_hotkey next
@@ -2357,7 +2358,7 @@ PY
   pass_case
 
   begin_case "$host: dead process recovery"
-  # Kill one tracked process, then confirm `spaces workspace up` revives only the
+  # Kill one tracked process, then confirm `spaces start` revives only the
   # dead runtime instead of forcing a full workspace restart.
   dump_workspace "$workspace_dir" "$dump_file"
   local frontend_pid
@@ -2379,7 +2380,7 @@ PY
     fi
     sleep 0.2
   done
-  run_mx_logged /tmp/spaces-e2e-recover.log workspace up "$workspace_dir"
+  run_mx_logged /tmp/spaces-e2e-recover.log start "$workspace_dir"
   transition_pause "$host recover dead process"
   local recovery_state recovered_pid recovered_status
   recovery_state="$(wait_for_process_running_recovery "$workspace_dir" "frontend" "$frontend_pid")"
@@ -2409,7 +2410,8 @@ run_hotkey_visibility_profiling() {
   begin_case "$host: profile repeated app visibility toggle"
   ensure_single_spaces_instance "$SPACES_PID"
   reset_fixture_runtime "$workspace_dir"
-  run_mx_logged /tmp/spaces-e2e-profile-window-toggle.log workspace up "$workspace_dir" --focus docs
+  run_mx_logged /tmp/spaces-e2e-profile-window-toggle-start.log start "$workspace_dir"
+  run_mx_logged /tmp/spaces-e2e-profile-window-toggle.log open docs "$workspace_dir"
   transition_pause "$host seed docs focus for app toggle profiling"
   wait_for_condition "chrome_front_url" "$PRIMARY_DOCS_URL"
   wait_for_condition "frontmost_app" "Google Chrome"
@@ -2426,7 +2428,8 @@ run_hotkey_visibility_profiling() {
   begin_case "$host: profile repeated command palette toggle states"
   ensure_single_spaces_instance "$SPACES_PID"
   reset_fixture_runtime "$workspace_dir"
-  run_mx_logged /tmp/spaces-e2e-profile-command-palette.log workspace up "$workspace_dir" --focus docs
+  run_mx_logged /tmp/spaces-e2e-profile-command-palette-start.log start "$workspace_dir"
+  run_mx_logged /tmp/spaces-e2e-profile-command-palette.log open docs "$workspace_dir"
   transition_pause "$host seed docs focus for command palette profiling"
   wait_for_condition "chrome_front_url" "$PRIMARY_DOCS_URL"
   wait_for_condition "frontmost_app" "Google Chrome"
@@ -2471,11 +2474,13 @@ run_multi_workspace_focus_and_cycle_assertions() {
   reset_fixture_runtime "$primary_workspace_dir"
   reset_fixture_runtime "$secondary_workspace_dir"
 
-  run_mx_logged /tmp/spaces-e2e-multi-primary-launch.log workspace up "$primary_workspace_dir" --focus docs
+  run_mx_logged /tmp/spaces-e2e-multi-primary-launch.log start "$primary_workspace_dir"
+  run_mx_logged /tmp/spaces-e2e-multi-primary-launch-focus.log open docs "$primary_workspace_dir"
   transition_pause "$host launch primary workspace"
   log_debug "$host multi primary launch complete"
   dump_workspace "$primary_workspace_dir" "$primary_dump"
-  run_mx_logged /tmp/spaces-e2e-multi-secondary-launch.log workspace up "$secondary_workspace_dir" --focus docs
+  run_mx_logged /tmp/spaces-e2e-multi-secondary-launch.log start "$secondary_workspace_dir"
+  run_mx_logged /tmp/spaces-e2e-multi-secondary-launch-focus.log open docs "$secondary_workspace_dir"
   transition_pause "$host launch secondary workspace"
   log_debug "$host multi secondary launch complete"
   dump_workspace "$secondary_workspace_dir" "$secondary_dump"
@@ -2587,7 +2592,7 @@ for window in data["windows"]:
 PY
 )"
 
-  run_mx_logged /tmp/spaces-e2e-multi-primary-focus.log workspace up "$primary_workspace_dir" --focus docs
+  run_mx_logged /tmp/spaces-e2e-multi-primary-focus.log open docs "$primary_workspace_dir"
   transition_pause "$host focus primary docs"
   log_debug "$host multi primary docs focus complete"
   wait_for_condition "chrome_front_url" "$primary_docs_url"
@@ -2610,7 +2615,7 @@ PY
   record_cycle_metric "browser_tracked_tab.keyboard_cycle_previous.terminal_tracked_tab" "previous" "$host" "primary"
   wait_for_condition "chrome_front_url" "$primary_docs_url"
 
-  run_mx_logged /tmp/spaces-e2e-multi-secondary-focus.log workspace up "$secondary_workspace_dir" --focus docs
+  run_mx_logged /tmp/spaces-e2e-multi-secondary-focus.log open docs "$secondary_workspace_dir"
   transition_pause "$host focus secondary docs"
   log_debug "$host multi secondary docs focus complete"
   wait_for_condition "chrome_front_url" "$secondary_docs_url"
@@ -2658,7 +2663,7 @@ run_agent_status_assertions() {
   if [[ -f "$EVENT_LOG" ]]; then
     event_start_line=$(( $(wc -l <"$EVENT_LOG") + 1 ))
   fi
-  run_mx_logged "/tmp/spaces-e2e-$host-agent-launch.log" workspace up "$workspace_dir"
+  run_mx_logged "/tmp/spaces-e2e-$host-agent-launch.log" start "$workspace_dir"
   transition_pause "$host launch workspace with agent"
 
   wait_for_event_log_contains_since_line "agent-waiting:$workspace_dir" "$event_start_line"
