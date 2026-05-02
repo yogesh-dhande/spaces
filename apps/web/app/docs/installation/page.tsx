@@ -44,10 +44,10 @@ export default function InstallationDocsPage() {
             2. Double-click the DMG to mount it.
           </li>
           <li>
-            3. Drag <code className="rounded bg-background-soft px-1.5 py-0.5 text-xs">Spaces.app</code> to your <strong>Applications</strong> folder.
+            3. Double-click <code className="rounded bg-background-soft px-1.5 py-0.5 text-xs">Install Spaces</code> in the DMG.
           </li>
           <li>
-            4. Double-click <code className="rounded bg-background-soft px-1.5 py-0.5 text-xs">Install spaces CLI</code> in the DMG to install the <code className="rounded bg-background-soft px-1.5 py-0.5 text-xs">spaces</code> command.
+            4. The installer copies <code className="rounded bg-background-soft px-1.5 py-0.5 text-xs">Spaces.app</code> and installs the required <code className="rounded bg-background-soft px-1.5 py-0.5 text-xs">spaces</code> command together.
           </li>
           <li>
             5. Eject the DMG.
