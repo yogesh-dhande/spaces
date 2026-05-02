@@ -18,15 +18,15 @@
 
 ## Coding Agent Workflow
 - If on the `main` branch, switch to a new branch before committing changes. When asked to push, commit, push, and create a PR if there isn't one already. Do not add a coding agent name as a prefix to the branch name or the PR title. Please check the PR status before pushing to existing branches with previously opened PRs. If the PR is closed, create a new branch and a new PR.
-- Before manually launching a new Spaces app instance for debugging or profiling, close any existing Spaces instances so only one global hotkey listener is active.
+- When fixing a bug, reproduce it first using the real system, `~/projects/spaces/apps/macos/.build/debug/spaces` cli, and/or database inspection when practical, then add a test, implement the fix, and confirm both the test and the real workflow.
+- Before manually launching a Spaces app instance for debugging or profiling, close any existing Spaces instances so only one global hotkey listener is active.
 
 ## Verification Rules
 - Always run lint and build before finalizing macOS app changes.
 - Run `scripts/coverage.sh` after changes unless the change is limited to `apps/web` or docs/comments.
 - Whenever `scripts/coverage.sh` is run, report the overall coverage percentage.
-- Whenever `scripts/coverage.sh` is run, also report module-level coverage percentages for major modules such as `streamctl`, `gui`, and `appctl`.
-- Always consider adding or expanding tests before finalizing code changes.
-- When fixing a bug, reproduce it first using the real system, `~/projects/spaces/apps/macos/.build/debug/spaces` cli, and/or database inspection when practical, then add a test, implement the fix, and confirm both the test and the real workflow.
+- Whenever `scripts/coverage.sh` is run, also report module-level coverage percentages for major modules such as systembridge, workspacecore, spacescli, etc.
+- Consider adding or expanding tests before finalizing code changes.
 - When running `git commit` via Codex, allow at least a 10-minute timeout so pre-commit checks can finish.
 
 ## Documentation Rules
@@ -41,9 +41,8 @@
 
 ## Data and Migration Rules
 - Database path: `~/.spaces/spaces.db`.
-- Never bump SQLite `schemaVersion` for additive or compatible changes.
 - Use additive, non-destructive migrations that preserve existing data.
-- Any destructive migration or reset path that can remove existing projects or workspaces requires explicit user approval.
+- Never add any destructive migration or reset path that can remove existing projects or workspaces.
 
 ## GUI Rules
 - UI should feel modern and compact.

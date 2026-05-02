@@ -111,7 +111,7 @@ For GitHub Actions releases, `CODESIGN_CERTIFICATE_P12` must be the base64-encod
 Sparkle update hosting lives under `https://usespaces.dev/releases/` on the static Firebase site. The update feed and Sparkle archives are staged into `apps/web/public/releases`, which Next.js exports as real static files before Firebase deploy.
 
 ### Website deploy
-Firebase Hosting deploys from [`.github/workflows/firebase-hosting-merge.yml`](/Users/yogesh/projects/muxy/.github/workflows/firebase-hosting-merge.yml:1). It builds `apps/web` and deploys the static export on pushes to `main` that touch the site or on manual dispatch.
+Firebase Hosting deploys from [`.github/workflows/firebase-hosting-merge.yml`](/Users/yogesh/projects/spaces/.github/workflows/firebase-hosting-merge.yml:1). It builds `apps/web` and deploys the static export on pushes to `main` that touch the site or on manual dispatch.
 
 The workflow authenticates with GitHub OIDC through Google Workload Identity Federation, then deploys through the Firebase Hosting REST API. This avoids `firebase-tools` service-account-key assumptions while keeping the deploy keyless.
 
