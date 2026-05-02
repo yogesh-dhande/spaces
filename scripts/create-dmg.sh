@@ -59,8 +59,10 @@ case "$MODE" in
     /bin/mkdir -p /Applications /usr/local/bin
     /bin/rm -rf "$APP_PATH"
     /usr/bin/ditto "$SOURCE_APP" "$APP_PATH"
+    /usr/bin/xattr -dr com.apple.quarantine "$APP_PATH" 2>/dev/null || true
     /bin/cp "$APP_PATH/Contents/Resources/spaces" "$CLI_PATH"
     /bin/chmod 755 "$CLI_PATH"
+    /usr/bin/xattr -d com.apple.quarantine "$CLI_PATH" 2>/dev/null || true
     emit_result "$APP_PATH" "$CLI_PATH"
     ;;
   user)
@@ -72,8 +74,10 @@ case "$MODE" in
     /bin/mkdir -p "$APP_DIR" "$CLI_DIR"
     /bin/rm -rf "$APP_PATH"
     /usr/bin/ditto "$SOURCE_APP" "$APP_PATH"
+    /usr/bin/xattr -dr com.apple.quarantine "$APP_PATH" 2>/dev/null || true
     /bin/cp "$APP_PATH/Contents/Resources/spaces" "$CLI_PATH"
     /bin/chmod 755 "$CLI_PATH"
+    /usr/bin/xattr -d com.apple.quarantine "$CLI_PATH" 2>/dev/null || true
     if [[ ":$PATH:" != *":$CLI_DIR:"* ]]; then
       PATH_HINT='export PATH="$PATH:$HOME/.local/bin"'
     fi
