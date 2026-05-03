@@ -598,6 +598,51 @@ final class ShellTests: XCTestCase {
         XCTAssertLessThan(Date().timeIntervalSince(startedAt), 2.0)
     }
 
+    func testRunAndCaptureReapsTimedOutLoginShellProbe() throws {
+        let root = try makeTempDirectory()
+        let commandDirectory = root.appendingPathComponent("commands", isDirectory: true)
+        try FileManager.default.createDirectory(at: commandDirectory, withIntermediateDirectories: true)
+
+        let commandFile = commandDirectory.appendingPathComponent("mockcmd")
+        try "#!/bin/sh\nprintf 'reaped-timeout'\n".write(to: commandFile, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: commandFile.path)
+
+        let shellFile = root.appendingPathComponent("mock-shell")
+        let shellScript = """
+            #!/bin/sh
+            if [ "$1" = "-l" ] && [ "$2" = "-c" ]; then
+              trap '' INT TERM
+              while :; do sleep 1; done
+            fi
+            exec /bin/sh "$@"
+            """
+        try shellScript.write(to: shellFile, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: shellFile.path)
+
+        sharedEnvironmentMutationLock.lock()
+        defer { sharedEnvironmentMutationLock.unlock() }
+
+        let originalShell = ProcessInfo.processInfo.environment["SHELL"]
+        let originalPath = ProcessInfo.processInfo.environment["PATH"] ?? ""
+        let originalTimeout = ProcessInfo.processInfo.environment["SPACES_LOGIN_SHELL_PATH_TIMEOUT_SECONDS"]
+        setenv("SHELL", shellFile.path, 1)
+        setenv("PATH", "\(commandDirectory.path):/usr/bin:/bin:/usr/sbin:/sbin", 1)
+        setenv("SPACES_LOGIN_SHELL_PATH_TIMEOUT_SECONDS", "0.05", 1)
+        defer {
+            if let originalShell { setenv("SHELL", originalShell, 1) } else { unsetenv("SHELL") }
+            setenv("PATH", originalPath, 1)
+            if let originalTimeout {
+                setenv("SPACES_LOGIN_SHELL_PATH_TIMEOUT_SECONDS", originalTimeout, 1)
+            } else {
+                unsetenv("SPACES_LOGIN_SHELL_PATH_TIMEOUT_SECONDS")
+            }
+        }
+
+        let output = try Shell.runAndCapture(["mockcmd"])
+        XCTAssertEqual(output, "reaped-timeout")
+        XCTAssertFalse(processListContains(argumentFragment: shellFile.path), "Timed-out login-shell probe should be reaped")
+    }
+
     func testRunAndCaptureFallsBackWhenTimedOutShellLeavesInheritedPipesOpen() throws {
         let root = try makeTempDirectory()
         let commandDirectory = root.appendingPathComponent("commands", isDirectory: true)
@@ -755,6 +800,61 @@ final class ShellTests: XCTestCase {
         XCTAssertEqual(invocationCount, "2")
     }
 
+    func testRunAndCaptureDropsUnsetShellConfigEnvironmentFromLoginProbe() throws {
+        let root = try makeTempDirectory()
+        let firstDirectory = root.appendingPathComponent("first", isDirectory: true)
+        let secondDirectory = root.appendingPathComponent("second", isDirectory: true)
+        try FileManager.default.createDirectory(at: firstDirectory, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: secondDirectory, withIntermediateDirectories: true)
+
+        let firstCommand = firstDirectory.appendingPathComponent("mockcmd")
+        try "#!/bin/sh\nprintf 'with-zdotdir'\n".write(to: firstCommand, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: firstCommand.path)
+
+        let secondCommand = secondDirectory.appendingPathComponent("mockcmd")
+        try "#!/bin/sh\nprintf 'without-zdotdir'\n".write(to: secondCommand, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: secondCommand.path)
+
+        let shellFile = root.appendingPathComponent("mock-shell")
+        let shellScript = """
+            #!/bin/sh
+            if [ "$1" = "-l" ] && [ "$2" = "-c" ]; then
+              case "${ZDOTDIR-__UNSET__}" in
+                "\(root.path)/zdotdir") printf '\n__SPACES_PATH__%s' "\(firstDirectory.path):/usr/bin:/bin" ;;
+                "__UNSET__") printf '\n__SPACES_PATH__%s' "\(secondDirectory.path):/usr/bin:/bin" ;;
+                *) exit 23 ;;
+              esac
+              exit 0
+            fi
+            exec /bin/sh "$@"
+            """
+        try shellScript.write(to: shellFile, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: shellFile.path)
+
+        sharedEnvironmentMutationLock.lock()
+        defer { sharedEnvironmentMutationLock.unlock() }
+
+        let originalShell = ProcessInfo.processInfo.environment["SHELL"]
+        let originalPath = ProcessInfo.processInfo.environment["PATH"] ?? ""
+        let originalHome = ProcessInfo.processInfo.environment["HOME"] ?? ""
+        let originalZdotdir = ProcessInfo.processInfo.environment["ZDOTDIR"]
+        setenv("SHELL", shellFile.path, 1)
+        setenv("PATH", "/usr/bin:/bin:/usr/sbin:/sbin", 1)
+        setenv("HOME", root.path, 1)
+        defer {
+            if let originalShell { setenv("SHELL", originalShell, 1) } else { unsetenv("SHELL") }
+            setenv("PATH", originalPath, 1)
+            setenv("HOME", originalHome, 1)
+            if let originalZdotdir { setenv("ZDOTDIR", originalZdotdir, 1) } else { unsetenv("ZDOTDIR") }
+        }
+
+        setenv("ZDOTDIR", "\(root.path)/zdotdir", 1)
+        XCTAssertEqual(try Shell.runAndCapture(["mockcmd"]), "with-zdotdir")
+
+        unsetenv("ZDOTDIR")
+        XCTAssertEqual(try Shell.runAndCapture(["mockcmd"]), "without-zdotdir")
+    }
+
     // Tests run and capture throws with stderr on failure by arranging representative inputs and asserting the expected result.
     func testRunAndCaptureThrowsWithStderrOnFailure() throws {
         XCTAssertThrowsError(try Shell.runAndCapture(["sh", "-lc", "echo boom >&2; exit 9"])) { error in
@@ -816,4 +916,16 @@ private func currentUserAccountInfo() -> (shellPath: String, homePath: String)? 
     let status = getpwuid_r(uid, &record, &buffer, buffer.count, &result)
     guard status == 0, let entry = result else { return nil }
     return (shellPath: String(cString: entry.pointee.pw_shell), homePath: String(cString: entry.pointee.pw_dir))
+}
+
+private func processListContains(argumentFragment: String) -> Bool {
+    let process = Process()
+    let output = Pipe()
+    process.executableURL = URL(fileURLWithPath: "/usr/bin/pgrep")
+    process.arguments = ["-f", argumentFragment]
+    process.standardOutput = output
+    process.standardError = Pipe()
+    try? process.run()
+    process.waitUntilExit()
+    return process.terminationStatus == 0
 }

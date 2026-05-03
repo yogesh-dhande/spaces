@@ -133,7 +133,7 @@ public enum Shell {
         for key in [
             "PATH", "SHELL", "HOME", "USER", "LOGNAME", "TMPDIR", "ZDOTDIR", "XDG_CONFIG_HOME", "XDG_CONFIG_DIRS", "TERM",
             "SPACES_LOGIN_SHELL_PATH_TIMEOUT_SECONDS", "SPACES_LOGIN_SHELL_PATH_FAILURE_CACHE_SECONDS",
-        ] { if let value = currentEnvironmentValue(for: key) { env[key] = value } }
+        ] { if let value = currentEnvironmentValue(for: key) { env[key] = value } else { env.removeValue(forKey: key) } }
         let currentPath = env["PATH"] ?? ""
         env["PATH"] = mergedCommandPath(currentPath: currentPath, environment: env)
         return env
@@ -332,12 +332,30 @@ public enum Shell {
         let deadline = Date().addingTimeInterval(timeout)
         while process.isRunning {
             if Date() >= deadline {
-                process.interrupt()
-                Thread.sleep(forTimeInterval: 0.05)
-                if process.isRunning { process.terminate() }
-                Thread.sleep(forTimeInterval: 0.05)
+                terminateAndReap(process, timeout: 0.2)
                 return !process.isRunning
             }
+            Thread.sleep(forTimeInterval: 0.01)
+        }
+        return true
+    }
+
+    private static func terminateAndReap(_ process: Process, timeout: TimeInterval) {
+        process.interrupt()
+        if waitForTermination(of: process, timeout: timeout / 4) { return }
+
+        process.terminate()
+        if waitForTermination(of: process, timeout: timeout / 4) { return }
+
+        let pid = process.processIdentifier
+        if pid > 0 { kill(pid, SIGKILL) }
+        _ = waitForTermination(of: process, timeout: timeout / 2)
+    }
+
+    private static func waitForTermination(of process: Process, timeout: TimeInterval) -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        while process.isRunning {
+            if Date() >= deadline { return false }
             Thread.sleep(forTimeInterval: 0.01)
         }
         return true
