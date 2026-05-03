@@ -210,8 +210,9 @@ public enum Shell {
                 // suppress retries briefly in case the user's shell init was transiently slow.
                 return LoginShellPathResolution(path: "", cachePolicy: .cacheFailure(until: failureCacheExpiry(environment: environment)))
             }
-            let stdoutFinished = stdoutReader.waitUntilFinished(timeout: probeTimeout)
-            let stderrFinished = stderrReader.waitUntilFinished(timeout: probeTimeout)
+            let drainDeadline = Date().addingTimeInterval(probeTimeout)
+            let stdoutFinished = stdoutReader.waitUntilFinished(timeout: remainingTime(until: drainDeadline))
+            let stderrFinished = stderrReader.waitUntilFinished(timeout: remainingTime(until: drainDeadline))
             let discoveredPath = discoveredState.path(from: stdoutReader.collectedData())
             guard stdoutFinished, stderrFinished else {
                 stdoutReader.cancel()
@@ -246,6 +247,8 @@ public enum Shell {
     private static func failureCacheExpiry(environment: [String: String], now: Date = Date()) -> Date {
         now.addingTimeInterval(loginShellPathFailureCacheSeconds(environment: environment))
     }
+
+    private static func remainingTime(until deadline: Date, now: Date = Date()) -> TimeInterval { max(0, deadline.timeIntervalSince(now)) }
 
     private static func extractedLoginShellPath(from text: String) -> String? {
         guard let markerRange = text.range(of: "__SPACES_PATH__", options: .backwards) else { return nil }
