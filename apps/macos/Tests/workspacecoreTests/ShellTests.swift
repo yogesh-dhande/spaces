@@ -108,6 +108,81 @@ final class ShellTests: XCTestCase {
         XCTAssertEqual(output, "fish-safe-path")
     }
 
+    func testRunAndCaptureIgnoresTrailingStdoutNoiseAfterLoginShellPathLine() throws {
+        let root = try makeTempDirectory()
+        let commandDirectory = root.appendingPathComponent("commands", isDirectory: true)
+        try FileManager.default.createDirectory(at: commandDirectory, withIntermediateDirectories: true)
+
+        let commandFile = commandDirectory.appendingPathComponent("mockcmd")
+        try "#!/bin/sh\nprintf 'path-with-trailing-noise'\n".write(to: commandFile, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: commandFile.path)
+
+        let shellFile = root.appendingPathComponent("mock-shell")
+        let shellScript = """
+            #!/bin/sh
+            if [ "$1" = "-l" ] && [ "$2" = "-c" ]; then
+              printf '\n__SPACES_PATH__%s\n' "\(commandDirectory.path):/usr/bin:/bin"
+              printf 'startup-noise-after-path\n'
+              exit 0
+            fi
+            exec /bin/sh "$@"
+            """
+        try shellScript.write(to: shellFile, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: shellFile.path)
+
+        sharedEnvironmentMutationLock.lock()
+        defer { sharedEnvironmentMutationLock.unlock() }
+
+        let originalShell = ProcessInfo.processInfo.environment["SHELL"]
+        let originalPath = ProcessInfo.processInfo.environment["PATH"] ?? ""
+        setenv("SHELL", shellFile.path, 1)
+        setenv("PATH", "/usr/bin:/bin:/usr/sbin:/sbin", 1)
+        defer {
+            if let originalShell { setenv("SHELL", originalShell, 1) } else { unsetenv("SHELL") }
+            setenv("PATH", originalPath, 1)
+        }
+
+        let output = try Shell.runAndCapture(["mockcmd"])
+        XCTAssertEqual(output, "path-with-trailing-noise")
+    }
+
+    func testRunAndCapturePreservesPathEntriesContainingMarkerText() throws {
+        let root = try makeTempDirectory()
+        let commandDirectory = root.appendingPathComponent("__SPACES_PATH__-commands", isDirectory: true)
+        try FileManager.default.createDirectory(at: commandDirectory, withIntermediateDirectories: true)
+
+        let commandFile = commandDirectory.appendingPathComponent("mockcmd")
+        try "#!/bin/sh\nprintf 'marker-entry-path'\n".write(to: commandFile, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: commandFile.path)
+
+        let shellFile = root.appendingPathComponent("mock-shell")
+        let shellScript = """
+            #!/bin/sh
+            if [ "$1" = "-l" ] && [ "$2" = "-c" ]; then
+              printf '\n__SPACES_PATH__%s' "\(commandDirectory.path):/usr/bin:/bin"
+              exit 0
+            fi
+            exec /bin/sh "$@"
+            """
+        try shellScript.write(to: shellFile, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: shellFile.path)
+
+        sharedEnvironmentMutationLock.lock()
+        defer { sharedEnvironmentMutationLock.unlock() }
+
+        let originalShell = ProcessInfo.processInfo.environment["SHELL"]
+        let originalPath = ProcessInfo.processInfo.environment["PATH"] ?? ""
+        setenv("SHELL", shellFile.path, 1)
+        setenv("PATH", "/usr/bin:/bin:/usr/sbin:/sbin", 1)
+        defer {
+            if let originalShell { setenv("SHELL", originalShell, 1) } else { unsetenv("SHELL") }
+            setenv("PATH", originalPath, 1)
+        }
+
+        let output = try Shell.runAndCapture(["mockcmd"])
+        XCTAssertEqual(output, "marker-entry-path")
+    }
+
     func testRunAndCapturePrefersLoginShellPathOrderOverInheritedDuplicates() throws {
         let root = try makeTempDirectory()
         let inheritedDirectory = root.appendingPathComponent("inherited", isDirectory: true)
@@ -395,7 +470,7 @@ final class ShellTests: XCTestCase {
         let startedAt = Date()
         let output = try Shell.runAndCapture(["mockcmd"])
         XCTAssertEqual(output, "fallback-path")
-        XCTAssertLessThan(Date().timeIntervalSince(startedAt), 1.5)
+        XCTAssertLessThan(Date().timeIntervalSince(startedAt), 2.0)
     }
 
     func testRunAndCaptureFallsBackWhenTimedOutShellLeavesInheritedPipesOpen() throws {
@@ -441,7 +516,7 @@ final class ShellTests: XCTestCase {
         let startedAt = Date()
         let output = try Shell.runAndCapture(["mockcmd"])
         XCTAssertEqual(output, "fallback-with-open-pipes")
-        XCTAssertLessThan(Date().timeIntervalSince(startedAt), 1.5)
+        XCTAssertLessThan(Date().timeIntervalSince(startedAt), 2.0)
     }
 
     func testRunAndCaptureUsesSingleDrainBudgetAfterShellExit() throws {

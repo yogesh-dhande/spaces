@@ -251,8 +251,11 @@ public enum Shell {
     private static func remainingTime(until deadline: Date, now: Date = Date()) -> TimeInterval { max(0, deadline.timeIntervalSince(now)) }
 
     private static func extractedLoginShellPath(from text: String) -> String? {
-        guard let markerRange = text.range(of: "__SPACES_PATH__", options: .backwards) else { return nil }
-        return String(text[markerRange.upperBound...]).trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let markerRange = text.range(of: "__SPACES_PATH__") else { return nil }
+        let suffix = text[markerRange.upperBound...]
+        let pathLine = suffix.split(maxSplits: 1, omittingEmptySubsequences: false, whereSeparator: \.isNewline).first
+        guard let pathLine else { return nil }
+        return String(pathLine)
     }
 
     private final class DiscoveredPathState: @unchecked Sendable {
