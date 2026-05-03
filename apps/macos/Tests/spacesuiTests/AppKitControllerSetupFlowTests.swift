@@ -1,3 +1,4 @@
+import Foundation
 import Testing
 
 @testable import spacesui
@@ -15,5 +16,17 @@ import Testing
 
     @Test func deferredSetupFlowRunsChecksImmediately() {
         #expect(!AppKitController.shouldDeferSetupChecksUntilAfterSplash(entryContext: .deferredRequirement))
+    }
+
+    @MainActor @Test func startupSetupFlowSchedulesChecksAfterRunLoopTurn() async {
+        var didRun = false
+        await withCheckedContinuation { continuation in
+            AppKitController.scheduleAfterNextRunLoopTurn {
+                didRun = true
+                continuation.resume()
+            }
+            #expect(!didRun)
+        }
+        #expect(didRun)
     }
 }

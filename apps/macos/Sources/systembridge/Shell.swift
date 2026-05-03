@@ -179,8 +179,8 @@ public enum Shell {
     }
 
     private static func loginShellPath(environment: [String: String], currentPath: String) -> String {
-        let shellPath = environment["SHELL"]?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "/bin/zsh"
-        let homePath = environment["HOME"]?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let shellPath = resolvedLoginShellExecutablePath(environment: environment) ?? "/bin/zsh"
+        let homePath = resolvedHomePath(environment: environment) ?? ""
         guard FileManager.default.isExecutableFile(atPath: shellPath) else { return "" }
         let cacheKey = LoginShellPathCacheKey(
             shellPath: shellPath, homePath: homePath, inheritedPath: currentPath,
@@ -245,6 +245,35 @@ public enum Shell {
             }
             return LoginShellPathResolution(path: "", cachePolicy: .cacheFailure(until: failureCacheExpiry(environment: environment)))
         }
+    }
+
+    static func resolvedLoginShellExecutablePath(environment: [String: String]) -> String? {
+        let configuredShell = environment["SHELL"]?.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let configuredShell, !configuredShell.isEmpty { return configuredShell }
+        return currentUserAccountInfo()?.shellPath
+    }
+
+    private static func resolvedHomePath(environment: [String: String]) -> String? {
+        let configuredHome = environment["HOME"]?.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let configuredHome, !configuredHome.isEmpty { return configuredHome }
+        return currentUserAccountInfo()?.homePath
+    }
+
+    private static func currentUserAccountInfo() -> (shellPath: String, homePath: String)? {
+        let uid = getuid()
+        guard let requiredSize = sysconfBufferSize(_SC_GETPW_R_SIZE_MAX) else { return nil }
+        var buffer = [CChar](repeating: 0, count: requiredSize)
+        var passwd = passwd()
+        var result: UnsafeMutablePointer<passwd>?
+        let status = getpwuid_r(uid, &passwd, &buffer, buffer.count, &result)
+        guard status == 0, let record = result else { return nil }
+        return (shellPath: String(cString: record.pointee.pw_shell), homePath: String(cString: record.pointee.pw_dir))
+    }
+
+    private static func sysconfBufferSize(_ name: Int32) -> Int? {
+        let raw = sysconf(name)
+        if raw > 0 { return Int(raw) }
+        return 16_384
     }
 
     private static func loginShellPathTimeoutSeconds(environment: [String: String]) -> TimeInterval {

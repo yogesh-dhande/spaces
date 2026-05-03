@@ -2137,6 +2137,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     nonisolated static func shouldDeferSetupChecksUntilAfterSplash(entryContext: SetupFlowEntryContext) -> Bool {
         shouldShowStartupSplashBeforeSetup(entryContext: entryContext)
     }
+    nonisolated static func scheduleAfterNextRunLoopTurn(_ action: @escaping @MainActor () -> Void) {
+        RunLoop.main.perform { Task { @MainActor in action() } }
+    }
 
     private func enterSetupFlow(preferredInitialCheckID: SetupCheckID? = nil, entryContext: SetupFlowEntryContext = .appLaunch) {
         stopBackgroundServices()
@@ -2164,10 +2167,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             Task { @MainActor [weak self] in await self?.loadInitialSidebarData() }
         }
         if Self.shouldDeferSetupChecksUntilAfterSplash(entryContext: entryContext) {
-            Task { @MainActor in
-                await Task.yield()
-                startSetupChecks()
-            }
+            Self.scheduleAfterNextRunLoopTurn { startSetupChecks() }
         } else {
             startSetupChecks()
         }

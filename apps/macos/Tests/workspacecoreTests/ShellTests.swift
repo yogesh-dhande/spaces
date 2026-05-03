@@ -1,6 +1,7 @@
 import Foundation
 import XCTest
-import systembridge
+
+@testable import systembridge
 
 final class ShellTests: XCTestCase {
     // Tests run returns exit status by arranging representative inputs and asserting the expected result.
@@ -96,6 +97,16 @@ final class ShellTests: XCTestCase {
 
         let output = try Shell.runAndCapture(["mockcmd"])
         XCTAssertEqual(output, "resolved-with-absolute-printenv")
+    }
+
+    func testResolvedLoginShellExecutablePathFallsBackToCurrentUserShellWhenEnvironmentOmitsShell() {
+        let accountInfo = currentUserAccountInfo()
+        guard let shellPath = accountInfo?.shellPath, !shellPath.isEmpty else {
+            XCTFail("Expected current user account info to include a login shell")
+            return
+        }
+
+        XCTAssertEqual(Shell.resolvedLoginShellExecutablePath(environment: [:]), shellPath)
     }
 
     func testRunAndCaptureSeedsLoginShellProbeWithSystemPathWhenInheritedPathIsEmpty() throws {
@@ -793,4 +804,16 @@ final class ShellTests: XCTestCase {
             XCTAssertEqual(result, "mocked-osascript")
         }
     }
+}
+
+private func currentUserAccountInfo() -> (shellPath: String, homePath: String)? {
+    let uid = getuid()
+    let rawSize = sysconf(_SC_GETPW_R_SIZE_MAX)
+    let bufferSize = rawSize > 0 ? Int(rawSize) : 16_384
+    var buffer = [CChar](repeating: 0, count: bufferSize)
+    var record = passwd()
+    var result: UnsafeMutablePointer<passwd>?
+    let status = getpwuid_r(uid, &record, &buffer, buffer.count, &result)
+    guard status == 0, let entry = result else { return nil }
+    return (shellPath: String(cString: entry.pointee.pw_shell), homePath: String(cString: entry.pointee.pw_dir))
 }
