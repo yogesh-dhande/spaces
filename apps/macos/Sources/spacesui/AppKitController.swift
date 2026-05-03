@@ -2128,13 +2128,22 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         didStartBackgroundServices = false
     }
 
-    private func enterSetupFlow(preferredInitialCheckID: SetupCheckID? = nil) {
+    enum SetupFlowEntryContext {
+        case appLaunch
+        case deferredRequirement
+    }
+
+    nonisolated static func shouldShowStartupSplashBeforeSetup(entryContext: SetupFlowEntryContext) -> Bool { entryContext == .appLaunch }
+
+    private func enterSetupFlow(preferredInitialCheckID: SetupCheckID? = nil, entryContext: SetupFlowEntryContext = .appLaunch) {
         stopBackgroundServices()
         setupManager?.stop()
-        // Show a neutral startup view before running setup checks so launch never
-        // presents an empty window while the app decides between onboarding and
-        // the normal workspace UI.
-        window.contentView = makeStartupLoadingContentView()
+        if Self.shouldShowStartupSplashBeforeSetup(entryContext: entryContext) {
+            // Show a neutral startup view before running setup checks so launch never
+            // presents an empty window while the app decides between onboarding and
+            // the normal workspace UI.
+            window.contentView = makeStartupLoadingContentView()
+        }
         let mgr = SetupManager()
         mgr.onComplete = { [weak self] in
             self?.logStartupProfile("setup_complete")
@@ -2152,7 +2161,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
     private func handleDeferredSetupRequirementIfNeeded(_ error: Error) -> Bool {
         guard shouldRouteToDeferredSetup(for: error) else { return false }
-        enterSetupFlow(preferredInitialCheckID: .yabaiServiceRunning)
+        enterSetupFlow(preferredInitialCheckID: .yabaiServiceRunning, entryContext: .deferredRequirement)
         return true
     }
 
