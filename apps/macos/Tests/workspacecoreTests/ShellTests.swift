@@ -301,6 +301,45 @@ final class ShellTests: XCTestCase {
         XCTAssertEqual(output, "inherited-copy")
     }
 
+    func testRunAndCapturePreservesInheritedEmptyPathSegmentForCurrentDirectoryLookup() throws {
+        let root = try makeTempDirectory()
+        let workingDirectory = root.appendingPathComponent("cwd", isDirectory: true)
+        let loginDirectory = root.appendingPathComponent("login", isDirectory: true)
+        try FileManager.default.createDirectory(at: workingDirectory, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: loginDirectory, withIntermediateDirectories: true)
+
+        let commandFile = workingDirectory.appendingPathComponent("mockcmd")
+        try "#!/bin/sh\nprintf 'cwd-copy'\n".write(to: commandFile, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: commandFile.path)
+
+        let shellFile = root.appendingPathComponent("mock-shell")
+        let shellScript = """
+            #!/bin/sh
+            if [ "$1" = "-l" ] && [ "$2" = "-c" ]; then
+              printf '\n__SPACES_PATH__%s' "\(loginDirectory.path):/usr/bin:/bin"
+              exit 0
+            fi
+            exec /bin/sh "$@"
+            """
+        try shellScript.write(to: shellFile, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: shellFile.path)
+
+        sharedEnvironmentMutationLock.lock()
+        defer { sharedEnvironmentMutationLock.unlock() }
+
+        let originalShell = ProcessInfo.processInfo.environment["SHELL"]
+        let originalPath = ProcessInfo.processInfo.environment["PATH"] ?? ""
+        setenv("SHELL", shellFile.path, 1)
+        setenv("PATH", ":/usr/bin:/bin", 1)
+        defer {
+            if let originalShell { setenv("SHELL", originalShell, 1) } else { unsetenv("SHELL") }
+            setenv("PATH", originalPath, 1)
+        }
+
+        let output = try Shell.runAndCapture(["mockcmd"], cwd: workingDirectory.path)
+        XCTAssertEqual(output, "cwd-copy")
+    }
+
     func testRunAndCaptureCachesResolvedLoginShellPath() throws {
         let root = try makeTempDirectory()
         let commandDirectory = root.appendingPathComponent("commands", isDirectory: true)

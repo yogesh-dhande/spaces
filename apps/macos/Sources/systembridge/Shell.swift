@@ -147,19 +147,21 @@ public enum Shell {
     private static func mergedCommandPath(currentPath: String, environment: [String: String]) -> String {
         let brewPaths = "/opt/homebrew/bin:/usr/local/bin:/opt/local/bin"
         let loginShellPath = loginShellPath(environment: environment, currentPath: currentPath)
-        var seen = Set<String>()
-        var ordered: [String] = []
+        var seen = Set(currentPath.split(separator: ":", omittingEmptySubsequences: false).map(String.init).filter { !$0.isEmpty })
+        var additions: [String] = []
 
-        // Preserve the inherited launch environment first, then append any
-        // login-shell-only entries, and finally add common package-manager
-        // prefixes for Finder-style launches with a sparse PATH.
-        for rawPath in [currentPath, loginShellPath, brewPaths] {
-            for component in rawPath.split(separator: ":").map(String.init) where !component.isEmpty {
-                if seen.insert(component).inserted { ordered.append(component) }
+        // Keep the inherited PATH text verbatim so empty segments that mean
+        // "search the current working directory" retain their original order.
+        // Only append concrete directory entries that are missing.
+        for rawPath in [loginShellPath, brewPaths] {
+            for component in rawPath.split(separator: ":", omittingEmptySubsequences: false).map(String.init) where !component.isEmpty {
+                if seen.insert(component).inserted { additions.append(component) }
             }
         }
 
-        return ordered.joined(separator: ":")
+        guard !additions.isEmpty else { return currentPath }
+        guard !currentPath.isEmpty else { return additions.joined(separator: ":") }
+        return currentPath + ":" + additions.joined(separator: ":")
     }
 
     private static func loginShellProbeSeedPath(currentPath: String) -> String {
