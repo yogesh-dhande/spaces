@@ -186,7 +186,7 @@ public enum Shell {
             // environment, but keep it non-interactive. Interactive shells may
             // try to take foreground TTY control during app launch and hang the
             // caller in job-control setup before PATH is printed.
-            process.arguments = ["-l", "-c", "printf '\\n__SPACES_PATH__'; printenv PATH"]
+            process.arguments = ["-l", "-c", "printf '\\n__SPACES_PATH__'; /usr/bin/printenv PATH"]
             var loginEnvironment: [String: String] = [:]
             for key in ["HOME", "USER", "LOGNAME", "TMPDIR", "ZDOTDIR", "XDG_CONFIG_HOME", "XDG_CONFIG_DIRS"] {
                 if let value = environment[key], !value.isEmpty { loginEnvironment[key] = value }

@@ -61,6 +61,43 @@ final class ShellTests: XCTestCase {
         XCTAssertEqual(output, "resolved-via-login-shell")
     }
 
+    func testRunAndCaptureUsesAbsolutePrintenvWhenLoginShellPathOmitsUsrBin() throws {
+        let root = try makeTempDirectory()
+        let commandDirectory = root.appendingPathComponent("commands", isDirectory: true)
+        try FileManager.default.createDirectory(at: commandDirectory, withIntermediateDirectories: true)
+
+        let commandFile = commandDirectory.appendingPathComponent("mockcmd")
+        try "#!/bin/sh\nprintf 'resolved-with-absolute-printenv'\n".write(to: commandFile, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: commandFile.path)
+
+        let shellFile = root.appendingPathComponent("mock-shell")
+        let shellScript = """
+            #!/bin/sh
+            if [ "$1" = "-l" ] && [ "$2" = "-c" ]; then
+              export PATH="\(commandDirectory.path)"
+              exec /bin/sh -c "$3"
+            fi
+            exec /bin/sh "$@"
+            """
+        try shellScript.write(to: shellFile, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: shellFile.path)
+
+        sharedEnvironmentMutationLock.lock()
+        defer { sharedEnvironmentMutationLock.unlock() }
+
+        let originalShell = ProcessInfo.processInfo.environment["SHELL"]
+        let originalPath = ProcessInfo.processInfo.environment["PATH"] ?? ""
+        setenv("SHELL", shellFile.path, 1)
+        setenv("PATH", "", 1)
+        defer {
+            if let originalShell { setenv("SHELL", originalShell, 1) } else { unsetenv("SHELL") }
+            setenv("PATH", originalPath, 1)
+        }
+
+        let output = try Shell.runAndCapture(["mockcmd"])
+        XCTAssertEqual(output, "resolved-with-absolute-printenv")
+    }
+
     func testRunAndCaptureUsesShellAgnosticPathProbe() throws {
         let root = try makeTempDirectory()
         let firstDirectory = root.appendingPathComponent("first", isDirectory: true)
@@ -77,9 +114,9 @@ final class ShellTests: XCTestCase {
             #!/bin/sh
             if [ "$1" = "-l" ] && [ "$2" = "-c" ]; then
               case "$3" in
-                *'printenv PATH'*)
+                *'/usr/bin/printenv PATH'*)
                   printf '\n__SPACES_PATH__'
-                  printenv PATH
+                  /usr/bin/printenv PATH
                   ;;
                 *)
                   printf '\n__SPACES_PATH__%s__SPACES_PATH__%s' "\(firstDirectory.path)" "\(secondDirectory.path)"
@@ -302,7 +339,7 @@ final class ShellTests: XCTestCase {
               count=$((count + 1))
               printf '%s' "$count" > "\(counterFile.path)"
               printf '\n__SPACES_PATH__'
-              printenv PATH
+              /usr/bin/printenv PATH
               exit 0
             fi
             exec /bin/sh "$@"

@@ -2134,17 +2134,26 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     }
 
     nonisolated static func shouldShowStartupSplashBeforeSetup(entryContext: SetupFlowEntryContext) -> Bool { entryContext == .appLaunch }
+    nonisolated static func shouldDeferSetupChecksUntilAfterSplash(entryContext: SetupFlowEntryContext) -> Bool {
+        shouldShowStartupSplashBeforeSetup(entryContext: entryContext)
+    }
 
     private func enterSetupFlow(preferredInitialCheckID: SetupCheckID? = nil, entryContext: SetupFlowEntryContext = .appLaunch) {
         stopBackgroundServices()
         setupManager?.stop()
+        let mgr = SetupManager()
+        setupManager = mgr
+        let startSetupChecks = { [weak self] in
+            guard let self, self.setupManager === mgr else { return }
+            guard let setupView = mgr.begin(preferredInitialCheckID: preferredInitialCheckID) else { return }
+            self.window.contentView = setupView
+        }
         if Self.shouldShowStartupSplashBeforeSetup(entryContext: entryContext) {
             // Show a neutral startup view before running setup checks so launch never
             // presents an empty window while the app decides between onboarding and
             // the normal workspace UI.
             window.contentView = makeStartupLoadingContentView()
         }
-        let mgr = SetupManager()
         mgr.onComplete = { [weak self] in
             self?.logStartupProfile("setup_complete")
             self?.setupManager = nil
@@ -2154,9 +2163,14 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             self?.logStartupProfile("loading_placeholder_ready")
             Task { @MainActor [weak self] in await self?.loadInitialSidebarData() }
         }
-        guard let setupView = mgr.begin(preferredInitialCheckID: preferredInitialCheckID) else { return }
-        setupManager = mgr
-        window.contentView = setupView
+        if Self.shouldDeferSetupChecksUntilAfterSplash(entryContext: entryContext) {
+            Task { @MainActor in
+                await Task.yield()
+                startSetupChecks()
+            }
+        } else {
+            startSetupChecks()
+        }
     }
 
     private func handleDeferredSetupRequirementIfNeeded(_ error: Error) -> Bool {

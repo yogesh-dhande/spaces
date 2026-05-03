@@ -8,4 +8,12 @@ import Testing
     @Test func deferredSetupFlowSkipsStartupSplash() {
         #expect(!AppKitController.shouldShowStartupSplashBeforeSetup(entryContext: .deferredRequirement))
     }
+
+    @Test func startupSetupFlowDefersChecksUntilSplashCanRender() {
+        #expect(AppKitController.shouldDeferSetupChecksUntilAfterSplash(entryContext: .appLaunch))
+    }
+
+    @Test func deferredSetupFlowRunsChecksImmediately() {
+        #expect(!AppKitController.shouldDeferSetupChecksUntilAfterSplash(entryContext: .deferredRequirement))
+    }
 }
