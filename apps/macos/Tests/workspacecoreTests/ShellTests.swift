@@ -183,7 +183,7 @@ final class ShellTests: XCTestCase {
         XCTAssertEqual(output, "marker-entry-path")
     }
 
-    func testRunAndCapturePrefersLoginShellPathOrderOverInheritedDuplicates() throws {
+    func testRunAndCapturePreservesInheritedPathOrderOverLoginShellDuplicates() throws {
         let root = try makeTempDirectory()
         let inheritedDirectory = root.appendingPathComponent("inherited", isDirectory: true)
         let loginDirectory = root.appendingPathComponent("login", isDirectory: true)
@@ -223,7 +223,7 @@ final class ShellTests: XCTestCase {
         }
 
         let output = try Shell.runAndCapture(["mockcmd"])
-        XCTAssertEqual(output, "login-copy")
+        XCTAssertEqual(output, "inherited-copy")
     }
 
     func testRunAndCaptureCachesResolvedLoginShellPath() throws {

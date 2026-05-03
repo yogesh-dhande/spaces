@@ -150,9 +150,10 @@ public enum Shell {
         var seen = Set<String>()
         var ordered: [String] = []
 
-        // Prefer the user's login-shell PATH order when available, then keep any
-        // inherited-only entries, and finally append common package-manager prefixes.
-        for rawPath in [loginShellPath, currentPath, brewPaths] {
+        // Preserve the inherited launch environment first, then append any
+        // login-shell-only entries, and finally add common package-manager
+        // prefixes for Finder-style launches with a sparse PATH.
+        for rawPath in [currentPath, loginShellPath, brewPaths] {
             for component in rawPath.split(separator: ":").map(String.init) where !component.isEmpty {
                 if seen.insert(component).inserted { ordered.append(component) }
             }
