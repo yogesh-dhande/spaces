@@ -2,7 +2,7 @@ import Foundation
 import SQLite3
 
 enum DatabaseSchema {
-    static let currentVersion = 3
+    static let currentVersion = 4
 
     static let migrationSteps: [DatabaseMigrationStep] = [
         DatabaseMigrationStep(
@@ -11,6 +11,9 @@ enum DatabaseSchema {
         DatabaseMigrationStep(
             fromVersion: 2, toVersion: 3, description: "Rename workspace tooltip metadata to notes", requiresBackup: true,
             apply: { db in try migrateV2ToV3(db: db) }),
+        DatabaseMigrationStep(
+            fromVersion: 3, toVersion: 4, description: "Add process execution modes", requiresBackup: true, apply: { db in try migrateV3ToV4(db: db) }
+        ),
     ]
 
     static let latestSchemaSQL = """
@@ -40,6 +43,7 @@ enum DatabaseSchema {
           name TEXT,
           command TEXT NOT NULL,
           on_exit TEXT NOT NULL DEFAULT 'none',
+          execution_mode TEXT NOT NULL DEFAULT 'direct',
           order_index INTEGER NOT NULL,
           FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
         );
@@ -128,6 +132,7 @@ enum DatabaseSchema {
           name TEXT,
           command TEXT NOT NULL,
           on_exit TEXT NOT NULL DEFAULT 'none',
+          execution_mode TEXT NOT NULL DEFAULT 'direct',
           order_index INTEGER NOT NULL,
           FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE
         );
@@ -604,6 +609,18 @@ enum DatabaseSchema {
                 INSERT INTO agent_windows(id, workspace_id, provider, label, terminal_tracking_id, terminal_native_id, tmux_window_id, codex_thread_id, window_id, status, created_at, updated_at, yabai_window_id)
                 SELECT id, workspace_id, provider, label, terminal_tracking_id, terminal_native_id, tmux_window_id, codex_thread_id, window_id, status, created_at, updated_at, yabai_window_id FROM agent_windows_v1
                 """)
+    }
+
+    private static func migrateV3ToV4(db: OpaquePointer) throws {
+        try exec(db: db, sql: "ALTER TABLE project_processes ADD COLUMN execution_mode TEXT NOT NULL DEFAULT 'direct';")
+        try exec(db: db, sql: "ALTER TABLE workspace_processes ADD COLUMN execution_mode TEXT NOT NULL DEFAULT 'direct';")
+    }
+
+    private static func exec(db: OpaquePointer, sql: String) throws {
+        guard sqlite3_exec(db, sql, nil, nil, nil) == SQLITE_OK else {
+            let message = String(cString: sqlite3_errmsg(db))
+            throw NSError(domain: "spaces.store", code: 1, userInfo: [NSLocalizedDescriptionKey: message])
+        }
     }
 
     private static func migrateV2ToV3(db: OpaquePointer) throws { try execute(db: db, sql: "ALTER TABLE workspaces RENAME COLUMN tooltip TO notes;") }

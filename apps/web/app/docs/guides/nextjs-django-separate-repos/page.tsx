@@ -37,11 +37,11 @@ export default function NextjsDjangoSeparateReposGuidePage() {
         <pre className={code}>
           <code>{`Ports: FRONTEND_PORT, BACKEND_PORT
 Frontend Server: API_URL=http://localhost:$BACKEND_PORT PORT=$FRONTEND_PORT npm run dev
-Backend Server: bash -lc "cd /path/to/backend-project && python manage.py runserver 0.0.0.0:\$BACKEND_PORT"
+Backend Server (Shell mode): cd /path/to/backend-project && python manage.py runserver 0.0.0.0:$BACKEND_PORT
 Browser Session: http://localhost:$FRONTEND_PORT`}</code>
         </pre>
         <p className={prose}>
-          The backend server is started from the frontend workspace so both processes can receive the same reserved env vars.
+          The backend server is started from the frontend workspace so both processes can receive the same reserved env vars. Set the backend row to Shell mode because it changes directories before launching.
         </p>
       </article>
 

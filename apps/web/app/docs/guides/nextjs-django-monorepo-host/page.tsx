@@ -47,20 +47,20 @@ cd ../backend && pip install -r requirements.txt
 cp .env.example .env`}</code>
         </pre>
         <p className={prose}>
-          Bootstraps both app layers. The setup script runs in a shell, so chained <code>cd &amp;&amp; ...</code> steps are fine here (processes are the place where you must wrap with <code>bash -lc</code>). Copying <code>.env</code> gives per-workspace config freedom. Symlink centralizes updates but can cause cross-workspace side effects. Swap <code>.env.example</code> for whatever seed file your repo keeps — Spaces does not provide a built-in shared env file.
+          Bootstraps both app layers. The setup script runs in a shell, so chained <code>cd &amp;&amp; ...</code> steps are fine here. Copying <code>.env</code> gives per-workspace config freedom. Symlink centralizes updates but can cause cross-workspace side effects. Swap <code>.env.example</code> for whatever seed file your repo keeps — Spaces does not provide a built-in shared env file.
         </p>
 
         <h3 className="mt-4 text-sm font-semibold text-foreground">Processes</h3>
         <p className={prose}>
-          Add two processes. Spaces invokes each command directly, so use <code>bash -lc</code> when you need <code>cd</code> plus shell composition.
+          Add two processes and set both rows to <strong>Shell</strong> execution mode so <code>cd</code> plus env assignment runs naturally.
         </p>
         <pre className={code}>
           <code>{`# frontend process
-bash -lc "cd frontend && API_URL=http://localhost:\$API_PORT PORT=\$FRONTEND_PORT npm run dev"`}</code>
+cd frontend && API_URL=http://localhost:$API_PORT PORT=$FRONTEND_PORT npm run dev`}</code>
         </pre>
         <pre className={code}>
           <code>{`# backend process
-bash -lc "cd backend && python manage.py runserver 0.0.0.0:\$API_PORT"`}</code>
+cd backend && python manage.py runserver 0.0.0.0:$API_PORT`}</code>
         </pre>
         <p className={prose}>
           Frontend points to the workspace backend port. Both processes stay in one workspace context with shared named-port env vars.

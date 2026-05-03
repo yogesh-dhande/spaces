@@ -44,7 +44,7 @@ export const docsPageLinks: DocsPageLink[] = [
     href: "/docs/processes",
     title: "Processes",
     summary:
-      "Run servers, workers, and coding agents alongside each workspace so they start and stop together.",
+      "Run servers, workers, and coding agents alongside each workspace with explicit Direct or Shell execution modes.",
   },
   {
     href: "/docs/browser-sessions",
@@ -80,7 +80,7 @@ export const docsPageLinks: DocsPageLink[] = [
     href: "/docs/cli",
     title: "CLI Reference",
     summary:
-      "Use the minimal spaces CLI for import, update, start, restart, open, and explicit coding-agent signals.",
+      "Use the minimal spaces CLI for import, update, start, restart, open, process-shell configuration, and explicit coding-agent signals.",
   },
 ];
 

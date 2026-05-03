@@ -1269,7 +1269,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     {
         let previousByID = Dictionary(uniqueKeysWithValues: previous.map { ($0.id, $0) })
         let changedProcessNames = updated.compactMap { updatedTemplate -> String? in
-            guard let previousTemplate = previousByID[updatedTemplate.id], previousTemplate.command != updatedTemplate.command else { return nil }
+            guard let previousTemplate = previousByID[updatedTemplate.id] else { return nil }
+            guard previousTemplate.command != updatedTemplate.command || previousTemplate.executionMode != updatedTemplate.executionMode else {
+                return nil
+            }
             let trimmedUpdatedName = updatedTemplate.name?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
             if !trimmedUpdatedName.isEmpty { return trimmedUpdatedName }
             let trimmedPreviousName = previousTemplate.name?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
@@ -2623,10 +2626,28 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         terminalPopUp.action = #selector(terminalHostChanged(_:))
         terminalPopUp.setContentHuggingPriority(.defaultLow, for: .horizontal)
 
+        let processShellPopUp = NSPopUpButton()
+        processShellPopUp.translatesAutoresizingMaskIntoConstraints = false
+        for shell in ProcessShell.allCases {
+            processShellPopUp.addItem(withTitle: shell.displayName)
+            processShellPopUp.itemArray.last?.representedObject = shell
+        }
+        if let currentShell = configCache?.processShell,
+            let item = processShellPopUp.itemArray.first(where: { ($0.representedObject as? ProcessShell) == currentShell })
+        {
+            processShellPopUp.select(item)
+        }
+        processShellPopUp.setAccessibilityIdentifier("settings-process-shell")
+        processShellPopUp.target = self
+        processShellPopUp.action = #selector(processShellChanged(_:))
+        processShellPopUp.setContentHuggingPriority(.defaultLow, for: .horizontal)
+
         var editorContentViews: [NSView] = [
             settingsLabeledField(
                 name: "Preferred editor", hint: "Opened when you use the editor shortcut from inside a workspace", control: editorPopUp),
             settingsLabeledField(name: "Terminal host", hint: "Used for process panes and coding agents", control: terminalPopUp),
+            settingsLabeledField(
+                name: "Shell for shell-mode processes", hint: "Applies only when a process row uses Shell execution mode", control: processShellPopUp),
         ]
         if let current = currentEditor, !options.contains(where: { $0.preference == current }) {
             let note = helpTextLabel("Saved editor \"\(editorDisplayName(current))\" is not installed.")
@@ -2892,6 +2913,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             self?.presentProjectPortRemoveConfirmation(port: port, confirm: confirm)
         }
         processesSection.onCommit = { [weak self] _ in self?.projectHasUnsavedChanges = true }
+        processesSection.validateProcess = { [weak self] process in try self?.orchestrator.validateProcessTemplate(process) }
+        processesSection.presentValidationError = { [weak self] error in self?.showError(error) }
         processesSection.presentRemoveConfirmation = { [weak self] process, confirm in
             self?.presentProjectProcessRemoveConfirmation(process: process, confirm: confirm)
         }
@@ -3718,6 +3741,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let runningProcesses = (try? orchestrator.runningProcesses(workspaceID: workspace.id)) ?? []
         let runningProcessIDByName = Dictionary(uniqueKeysWithValues: runningProcesses.map { (Self.processRuntimeKey(name: $0.templateName), $0.id) })
         let section = ProcessesSection(processes: config.processes)
+        section.validateProcess = { [weak self] process in try self?.orchestrator.validateProcessTemplate(process) }
+        section.presentValidationError = { [weak self] error in self?.showError(error) }
         section.onCommit = { [weak self] updated in
             guard let self else { return }
             do {
@@ -3800,7 +3825,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let names = processNames.joined(separator: ", ")
         alert.messageText = processNames.count == 1 ? "Restart running process?" : "Restart running processes?"
         alert.informativeText =
-            "Changing the command for \(names) requires an immediate restart. Choose Restart to apply the new command now, or Cancel Changes to keep the existing configuration."
+            "Changing the command or execution mode for \(names) requires an immediate restart. Choose Restart to apply the new launch behavior now, or Cancel Changes to keep the existing configuration."
         alert.alertStyle = .warning
         alert.addButton(withTitle: processNames.count == 1 ? "Restart Process" : "Restart Processes")
         alert.addButton(withTitle: "Cancel Changes")
@@ -5107,6 +5132,12 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         guard let terminalHost = sender.selectedItem?.representedObject as? TerminalHost else { return }
         if configCache?.terminalHost == terminalHost { return }
         do { configCache = try orchestrator.updateTerminalHost(terminalHost) } catch { showError(error) }
+    }
+
+    @objc private func processShellChanged(_ sender: NSPopUpButton) {
+        guard let processShell = sender.selectedItem?.representedObject as? ProcessShell else { return }
+        if configCache?.processShell == processShell { return }
+        do { configCache = try orchestrator.updateProcessShell(processShell) } catch { showError(error) }
     }
 
     @objc private func windowPulseEnabledChanged(_ sender: NSButton) {

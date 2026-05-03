@@ -138,7 +138,10 @@ private struct SeedFixtureCommand: ParsableCommand {
             config.ports = [.init(name: "SPACES_E2E_APP_PORT"), .init(name: "SPACES_E2E_API_PORT")]
             config.stopScript =
                 #"bash -lc 'printf "project-stop:%s\n" "${SPACES_WORKSPACE_DIR}" >> "${SPACES_E2E_EVENTS_LOG:-/tmp/spaces-e2e-events.log}"'"#
-            config.processes = [.init(name: "frontend", command: frontendCommand), .init(name: "backend", command: backendCommand)]
+            config.processes = [
+                .init(name: "frontend", command: frontendCommand, executionMode: .shell),
+                .init(name: "backend", command: backendCommand, executionMode: .shell),
+            ]
             config.browserSessions = [.init(name: "docs", url: docsURL), .init(name: "admin", url: adminURL)]
             config.agentLaunchers = []
         }

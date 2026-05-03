@@ -164,6 +164,7 @@ import workspacecore
         #expect(row.isEditing)
         #expect(row.formContainsField(accessibilityID: "process-row-edit-name"))
         #expect(row.formContainsField(accessibilityID: "process-row-edit-command"))
+        #expect(row.formContainsField(accessibilityID: "process-row-edit-execution-mode"))
         #expect(row.formContainsField(accessibilityID: "process-row-edit-on-exit"))
     }
 
@@ -182,13 +183,32 @@ import workspacecore
 
         let row = section.row(at: 0)!
         row.enterEditing(prefill: nil, animated: false)
-        row.setEditingFormValues(name: "api", command: "bun run dev --verbose", onExit: .restart)
+        row.setEditingFormValues(name: "api", command: "bun run dev --verbose", executionMode: .shell, onExit: .restart)
         row.triggerSave()
 
         #expect(committed.count == 1)
         #expect(committed.first?.command == "bun run dev --verbose")
+        #expect(committed.first?.executionMode == .shell)
         #expect(committed.first?.onExit == .restart)
         #expect(row.isEditing == false)
+    }
+
+    @Test func invalidSavePresentsErrorAndKeepsEditing() {
+        let section = ProcessesSection(processes: [ProcessTemplate(name: "api", command: "bun run dev", onExit: .none)])
+        var commitCount = 0
+        var presentedError: String?
+        section.onCommit = { _ in commitCount += 1 }
+        section.validateProcess = { process in throw WorkspaceError.invalidArgument(message: "Invalid process command: \(process.command)") }
+        section.presentValidationError = { error in presentedError = error.localizedDescription }
+
+        let row = section.row(at: 0)!
+        row.enterEditing(prefill: nil, animated: false)
+        row.setEditingFormValues(name: "api", command: "PORT=$FRONTEND_PORT npm run dev", executionMode: .direct, onExit: .none)
+        row.triggerSave()
+
+        #expect(commitCount == 0)
+        #expect(presentedError == "Invalid argument: Invalid process command: PORT=$FRONTEND_PORT npm run dev")
+        #expect(row.isEditing)
     }
 
     @Test func removeAsksForConfirmationAndProceedsOnApproval() {
@@ -308,7 +328,7 @@ extension ProcessRowView {
         subviews.flatMap { $0.subviewsRecursive() }.contains { $0.accessibilityIdentifier() == accessibilityID }
     }
 
-    func setEditingFormValues(name: String, command: String, onExit: ProcessExitAction) {
+    func setEditingFormValues(name: String, command: String, executionMode: ProcessExecutionMode = .direct, onExit: ProcessExitAction) {
         let allFields = subviews.flatMap { $0.subviewsRecursive() }
         if let nameField = allFields.compactMap({ $0 as? NSTextField }).first(where: { $0.accessibilityIdentifier() == "process-row-edit-name" }) {
             nameField.stringValue = name
@@ -316,6 +336,11 @@ extension ProcessRowView {
         if let commandField = allFields.compactMap({ $0 as? NSTextField }).first(where: { $0.accessibilityIdentifier() == "process-row-edit-command" }
         ) {
             commandField.stringValue = command
+        }
+        if let modePopup = allFields.compactMap({ $0 as? NSPopUpButton }).first(where: {
+            $0.accessibilityIdentifier() == "process-row-edit-execution-mode"
+        }) {
+            modePopup.selectItem(withTitle: executionMode.displayName)
         }
         if let onExitPopup = allFields.compactMap({ $0 as? NSPopUpButton }).first(where: {
             $0.accessibilityIdentifier() == "process-row-edit-on-exit"

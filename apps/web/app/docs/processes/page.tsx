@@ -25,25 +25,32 @@ export default function ProcessesDocsPage() {
       </article>
 
       <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
-        <h2 className="text-2xl font-semibold tracking-tight">Direct Invocation &amp; <code>bash -lc</code></h2>
+        <h2 className="text-2xl font-semibold tracking-tight">Execution Modes</h2>
         <p className="mt-2 text-sm leading-7 text-foreground-soft">
-          Spaces treats each process command as a direct executable invocation, not a shell script. Tokens are parsed into an <code>argv</code> and leading <code>KEY=value</code> pairs are lifted into the command&apos;s environment. Shell operators (<code>&amp;&amp;</code>, <code>||</code>, <code>;</code>, pipes, redirects, subshells, command substitution) are rejected — Spaces surfaces a validation error telling you to wrap the command explicitly.
+          Every process row has an <strong>Execution mode</strong>:
         </p>
+        <ul className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
+          <li>• <strong>Direct</strong> &mdash; Spaces parses the command into an executable plus arguments. This is the recommended deterministic path for plain commands.</li>
+          <li>• <strong>Shell</strong> &mdash; Spaces runs the command through the app-wide shell setting with <code>&lt;shell&gt; -lc &lt;command&gt;</code>.</li>
+        </ul>
         <p className="mt-3 text-sm leading-7 text-foreground-soft">
-          When you need shell composition, invoke a shell yourself with <code>bash -lc</code> so the whole composed command becomes a single argument:
+          Use Direct mode for commands like <code>npm run dev</code>, <code>python manage.py runserver</code>, or <code>scripts/swiftpm.sh build</code>. Use Shell mode when you need shell composition such as <code>cd</code>, pipes, redirects, or expansion.
         </p>
         <pre className="mt-3 w-full max-w-full min-w-0 overflow-x-auto whitespace-pre-wrap break-words rounded-lg border border-line/70 bg-background-soft/60 p-3 text-xs leading-6 text-foreground">
-          <code>{`# direct invocation — works
+          <code>{`# Direct mode
 PORT=$FRONTEND_PORT npm run dev
 
-# shell composition — needs bash -lc
-bash -lc "cd frontend && PORT=\$FRONTEND_PORT npm run dev"
+# Shell mode
+cd frontend && PORT=$FRONTEND_PORT npm run dev
 
-# chained pipelines / conditionals — needs bash -lc
-bash -lc "curl -fsS http://localhost:\$API_PORT/ready && npm run dev"`}</code>
+# Shell mode with pipelines
+npm run dev | tee .logs/frontend.log`}</code>
         </pre>
         <p className="mt-3 text-sm leading-7 text-foreground-soft">
-          Named ports and <code>SPACES_*</code> vars are substituted by Spaces before the command is parsed, so you can reference <code>$FRONTEND_PORT</code> inside the quoted <code>bash -lc</code> string the same way you would outside it. Keep the whole pipeline inside a single <code>bash -lc</code> call so the <code>on-exit</code> policy applies to the composed command, not just the last step.
+          Direct mode rejects shell-only syntax such as <code>&amp;&amp;</code>, pipes, redirects, command substitution, backticks, and raw shell expansion. Shell mode only requires a non-empty command and lets the configured shell do the parsing.
+        </p>
+        <p className="mt-3 text-sm leading-7 text-foreground-soft">
+          Shell mode uses the global shell selected in Spaces Settings. The default is <code>zsh</code>, and you can change it globally to <code>bash</code> or <code>sh</code>.
         </p>
       </article>
 
@@ -77,8 +84,9 @@ SPACES_WORKSPACE_DIR              # this workspace's directory`}</code>
       <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
         <h2 className="text-2xl font-semibold tracking-tight">Editing While Running</h2>
         <ul className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
-          <li>• Add a process &mdash; it starts right away in a new terminal window.</li>
-          <li>• Change a command &mdash; Spaces restarts that process in its existing window.</li>
+          <li>• Add a process &mdash; it appears immediately. You can launch it directly if the workspace is already running.</li>
+          <li>• Change a command or execution mode &mdash; Spaces asks for restart confirmation because the launch semantics changed.</li>
+          <li>• Change only the name or on-exit policy &mdash; Spaces applies the edit immediately when it can.</li>
           <li>• Remove a process &mdash; Spaces stops it and closes its terminal window.</li>
         </ul>
       </article>
