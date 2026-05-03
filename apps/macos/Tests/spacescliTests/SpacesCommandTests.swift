@@ -6,8 +6,6 @@ import workspacecore
 
 @testable import spacescli
 
-private let testAppleScriptOptInEnvVar = "SPACES_ALLOW_TEST_APPLESCRIPT"
-
 final class MXCommandTests: XCTestCase {
     private final class VerifyingIterm2Adapter: Iterm2Adapter, @unchecked Sendable {
         var verifyFocusedSessionCallCount = 0
@@ -278,34 +276,6 @@ final class MXCommandTests: XCTestCase {
             dirname: nil, branch: nil, isDefault: true, isArchived: false, isRunning: false, lastLaunchedAt: nil)
         try store.upsert(workspace: workspace)
         return workspace
-    }
-
-    private func withMockCommands(_ commands: [String: String], run: () throws -> Void) throws {
-        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
-        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: tempDir) }
-
-        for (name, content) in commands {
-            let url = tempDir.appendingPathComponent(name)
-            try content.write(to: url, atomically: true, encoding: .utf8)
-            try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: url.path)
-        }
-
-        let originalPath = ProcessInfo.processInfo.environment["PATH"]
-        setenv("PATH", "\(tempDir.path):\(originalPath ?? "")", 1)
-        defer { if let originalPath { setenv("PATH", originalPath, 1) } else { unsetenv("PATH") } }
-        let originalAppleScriptOptIn = ProcessInfo.processInfo.environment[testAppleScriptOptInEnvVar]
-        if commands.keys.contains("osascript") { setenv(testAppleScriptOptInEnvVar, "1", 1) }
-        defer {
-            if commands.keys.contains("osascript") {
-                if let originalAppleScriptOptIn {
-                    setenv(testAppleScriptOptInEnvVar, originalAppleScriptOptIn, 1)
-                } else {
-                    unsetenv(testAppleScriptOptInEnvVar)
-                }
-            }
-        }
-        try run()
     }
 
     private static let yabaiFocusedWindowMock = """

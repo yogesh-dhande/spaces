@@ -448,25 +448,6 @@ final class AgentHookTests: XCTestCase {
         try store.upsert(workspace: workspace)
         return (project, workspace)
     }
-
-    private func withMockCommands(_ commands: [String: String], run: () throws -> Void) throws {
-        let directory = try makeTempDirectory()
-        for (name, script) in commands {
-            let file = directory.appendingPathComponent(name)
-            try script.write(to: file, atomically: true, encoding: .utf8)
-            try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: file.path)
-        }
-
-        sharedPathMutationLock.lock()
-        defer { sharedPathMutationLock.unlock() }
-        let originalPath = ProcessInfo.processInfo.environment["PATH"] ?? ""
-        let updatedPath = originalPath.isEmpty ? directory.path : "\(directory.path):\(originalPath)"
-        setenv("PATH", updatedPath, 1)
-        defer { setenv("PATH", originalPath, 1) }
-
-        try run()
-    }
-
     private func withEnv(name: String, value: String, run: () throws -> Void) throws {
         let original = ProcessInfo.processInfo.environment[name]
         setenv(name, value, 1)

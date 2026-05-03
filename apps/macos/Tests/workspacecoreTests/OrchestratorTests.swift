@@ -3384,28 +3384,6 @@ final class OrchestratorTests: XCTestCase {
         mockTmux.createSession(named: "spaces-\(workspace.id)")
         return (orchestrator, store, project, workspace, root, mockIterm, mockTmux)
     }
-
-    private func withMockCommands(_ commands: [String: String], run: () throws -> Void) throws {
-        // Mock mechanism: inject command stubs at the front of PATH.
-        // Why: emulate yabai/osascript/open behavior deterministically in unit tests.
-        // Remaining risk: these tests do not prove interoperability with real binaries or OS-level side effects.
-        let directory = try makeTempDirectory()
-        for (name, script) in commands {
-            let file = directory.appendingPathComponent(name)
-            try script.write(to: file, atomically: true, encoding: .utf8)
-            try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: file.path)
-        }
-
-        sharedPathMutationLock.lock()
-        defer { sharedPathMutationLock.unlock() }
-        let originalPath = ProcessInfo.processInfo.environment["PATH"] ?? ""
-        let updatedPath = originalPath.isEmpty ? directory.path : "\(directory.path):\(originalPath)"
-        setenv("PATH", updatedPath, 1)
-        defer { setenv("PATH", originalPath, 1) }
-
-        try withTestAppleScriptOptIn(enabled: commands.keys.contains("osascript")) { try run() }
-    }
-
     private func withEnv(name: String, value: String, run: () throws -> Void) throws {
         let original = ProcessInfo.processInfo.environment[name]
         setenv(name, value, 1)

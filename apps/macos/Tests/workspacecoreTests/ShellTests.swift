@@ -534,21 +534,10 @@ final class ShellTests: XCTestCase {
         }
     }
 
-    private func withMockCommands(_ commands: [String: String], run: () throws -> Void) throws {
-        let directory = try makeTempDirectory()
-        for (name, script) in commands {
-            let file = directory.appendingPathComponent(name)
-            try script.write(to: file, atomically: true, encoding: .utf8)
-            try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: file.path)
+    func testAppleScriptRunUsesMockedCommandEvenWithLoginShellPathProbe() throws {
+        try withMockCommands(["osascript": "#!/bin/sh\nprintf 'mocked-osascript'\n"]) {
+            let result = try AppleScript.run("return 1")
+            XCTAssertEqual(result, "mocked-osascript")
         }
-
-        sharedPathMutationLock.lock()
-        defer { sharedPathMutationLock.unlock() }
-        let originalPath = ProcessInfo.processInfo.environment["PATH"] ?? ""
-        let updatedPath = originalPath.isEmpty ? directory.path : "\(directory.path):\(originalPath)"
-        setenv("PATH", updatedPath, 1)
-        defer { setenv("PATH", originalPath, 1) }
-
-        try withTestAppleScriptOptIn(enabled: commands.keys.contains("osascript")) { try run() }
     }
 }
