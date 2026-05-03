@@ -1,7 +1,7 @@
 import AppKit
 
 struct AddProjectFieldRefs {
-    let sourcePopup: NSPopUpButton
+    let sourceSegmented: NSSegmentedControl
     let localSourceSection: NSStackView
     let cloneSourceSection: NSStackView
     let dirField: NSTextField
