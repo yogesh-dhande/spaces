@@ -1574,6 +1574,41 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         window.makeKeyAndOrderFront(nil)
     }
 
+    private func makeStartupLoadingContentView() -> NSView {
+        let content = NSView()
+        content.translatesAutoresizingMaskIntoConstraints = false
+
+        let stack = NSStackView()
+        stack.orientation = .vertical
+        stack.alignment = .centerX
+        stack.spacing = 10
+        stack.translatesAutoresizingMaskIntoConstraints = false
+
+        let spinner = NSProgressIndicator()
+        spinner.style = .spinning
+        spinner.controlSize = .regular
+        spinner.startAnimation(nil)
+        spinner.translatesAutoresizingMaskIntoConstraints = false
+        stack.addArrangedSubview(spinner)
+
+        let title = NSTextField(labelWithString: "Starting Spaces…")
+        title.font = .systemFont(ofSize: 14, weight: .medium)
+        title.textColor = .labelColor
+        stack.addArrangedSubview(title)
+
+        let detail = NSTextField(labelWithString: "Checking dependencies and loading workspace data.")
+        detail.font = .systemFont(ofSize: 12)
+        detail.textColor = .secondaryLabelColor
+        detail.alignment = .center
+        stack.addArrangedSubview(detail)
+
+        content.addSubview(stack)
+        NSLayoutConstraint.activate([
+            stack.centerXAnchor.constraint(equalTo: content.centerXAnchor), stack.centerYAnchor.constraint(equalTo: content.centerYAnchor),
+        ])
+        return content
+    }
+
     /// Builds the split view layout + footer and sets it as window.contentView.
     private func buildMainWindowContent() {
         let splitView = NSSplitView()
@@ -2096,6 +2131,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     private func enterSetupFlow(preferredInitialCheckID: SetupCheckID? = nil) {
         stopBackgroundServices()
         setupManager?.stop()
+        // Show a neutral startup view before running setup checks so launch never
+        // presents an empty window while the app decides between onboarding and
+        // the normal workspace UI.
+        window.contentView = makeStartupLoadingContentView()
         let mgr = SetupManager()
         mgr.onComplete = { [weak self] in
             self?.logStartupProfile("setup_complete")
@@ -2106,11 +2145,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             self?.logStartupProfile("loading_placeholder_ready")
             Task { @MainActor [weak self] in await self?.loadInitialSidebarData() }
         }
+        guard let setupView = mgr.begin(preferredInitialCheckID: preferredInitialCheckID) else { return }
         setupManager = mgr
-        window.contentView = mgr.makeContentView()
-        // start() can complete synchronously when all required checks already pass,
-        // which avoids a visible setup flash during normal launch.
-        mgr.start(preferredInitialCheckID: preferredInitialCheckID)
+        window.contentView = setupView
     }
 
     private func handleDeferredSetupRequirementIfNeeded(_ error: Error) -> Bool {

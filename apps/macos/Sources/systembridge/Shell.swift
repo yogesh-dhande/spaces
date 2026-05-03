@@ -2,6 +2,87 @@ import Darwin
 import Foundation
 
 public enum Shell {
+    private struct LoginShellPathCacheKey: Hashable {
+        let shellPath: String
+        let homePath: String
+        let inheritedPath: String
+    }
+
+    private final class LoginShellPathCache: @unchecked Sendable {
+        private let lock = NSLock()
+        private var values: [LoginShellPathCacheKey: String] = [:]
+
+        func value(for key: LoginShellPathCacheKey, resolver: () -> (value: String, shouldCache: Bool)) -> String {
+            lock.lock()
+            if let cached = values[key] {
+                lock.unlock()
+                return cached
+            }
+            lock.unlock()
+
+            let resolved = resolver()
+
+            if resolved.shouldCache {
+                lock.lock()
+                values[key] = resolved.value
+                lock.unlock()
+            }
+            return resolved.value
+        }
+    }
+
+    private final class PipeCollector: @unchecked Sendable {
+        private let handle: FileHandle
+        private let lock = NSLock()
+        private var buffer = Data()
+        private var finished = false
+
+        init(handle: FileHandle) {
+            self.handle = handle
+            handle.readabilityHandler = { [weak self] fileHandle in
+                let chunk = fileHandle.availableData
+                guard let self else { return }
+                self.lock.lock()
+                defer { self.lock.unlock() }
+                if chunk.isEmpty {
+                    self.finished = true
+                    fileHandle.readabilityHandler = nil
+                    return
+                }
+                self.buffer.append(chunk)
+            }
+        }
+
+        func waitUntilFinished(timeout: TimeInterval) -> Bool {
+            let deadline = Date().addingTimeInterval(timeout)
+            while true {
+                lock.lock()
+                let isFinished = finished
+                lock.unlock()
+                if isFinished { return true }
+                if Date() >= deadline { return false }
+                Thread.sleep(forTimeInterval: 0.001)
+            }
+        }
+
+        func collectedData() -> Data {
+            lock.lock()
+            defer { lock.unlock() }
+            return buffer
+        }
+
+        func cancel() {
+            handle.readabilityHandler = nil
+            try? handle.close()
+            lock.lock()
+            finished = true
+            lock.unlock()
+        }
+    }
+
+    private static let loginShellPathCache = LoginShellPathCache()
+    private static let loginShellPathTimeoutFallbackSeconds: TimeInterval = 2
+
     /// Returns the current process environment with Homebrew paths appended to PATH.
     /// Reads PATH from the C-level environment so that `setenv()` mutations from tests
     /// (e.g. injected mock command stubs) are reflected in the returned dictionary.
@@ -11,9 +92,94 @@ public enum Shell {
         // made after process start (e.g. in test helpers that inject mock binaries).
         let currentPath: String
         if let raw = getenv("PATH") { currentPath = String(cString: raw) } else { currentPath = "" }
-        let brewPaths = "/opt/homebrew/bin:/usr/local/bin:/opt/local/bin"
-        env["PATH"] = currentPath.isEmpty ? brewPaths : "\(currentPath):\(brewPaths)"
+        env["PATH"] = mergedCommandPath(currentPath: currentPath, environment: env)
         return env
+    }
+
+    private static func mergedCommandPath(currentPath: String, environment: [String: String]) -> String {
+        let brewPaths = "/opt/homebrew/bin:/usr/local/bin:/opt/local/bin"
+        let loginShellPath = loginShellPath(environment: environment, currentPath: currentPath)
+        var seen = Set<String>()
+        var ordered: [String] = []
+
+        // Prefer the user's login-shell PATH order when available, then keep any
+        // inherited-only entries, and finally append common package-manager prefixes.
+        for rawPath in [loginShellPath, currentPath, brewPaths] {
+            for component in rawPath.split(separator: ":").map(String.init) where !component.isEmpty {
+                if seen.insert(component).inserted { ordered.append(component) }
+            }
+        }
+
+        return ordered.joined(separator: ":")
+    }
+
+    private static func loginShellPath(environment: [String: String], currentPath: String) -> String {
+        let shellPath = environment["SHELL"]?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "/bin/zsh"
+        let homePath = environment["HOME"]?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard FileManager.default.isExecutableFile(atPath: shellPath) else { return "" }
+        let cacheKey = LoginShellPathCacheKey(shellPath: shellPath, homePath: homePath, inheritedPath: currentPath)
+        return loginShellPathCache.value(for: cacheKey) {
+            let process = Process()
+            let output = Pipe()
+            let error = Pipe()
+            let stdoutReader = PipeCollector(handle: output.fileHandleForReading)
+            let stderrReader = PipeCollector(handle: error.fileHandleForReading)
+            process.executableURL = URL(fileURLWithPath: shellPath)
+            // Use a login shell so PATH matches the user's configured shell
+            // environment, but keep it non-interactive. Interactive shells may
+            // try to take foreground TTY control during app launch and hang the
+            // caller in job-control setup before PATH is printed.
+            process.arguments = ["-l", "-c", "printf '\\n__SPACES_PATH__'; printenv PATH"]
+            var loginEnvironment: [String: String] = [:]
+            for key in ["HOME", "USER", "LOGNAME", "TMPDIR", "ZDOTDIR", "XDG_CONFIG_HOME", "XDG_CONFIG_DIRS"] {
+                if let value = environment[key], !value.isEmpty { loginEnvironment[key] = value }
+            }
+            loginEnvironment["PATH"] = currentPath
+            loginEnvironment["SHELL"] = shellPath
+            loginEnvironment["TERM"] = environment["TERM"]?.isEmpty == false ? environment["TERM"] : "xterm-256color"
+            process.environment = loginEnvironment
+            process.standardOutput = output
+            process.standardError = error
+
+            guard (try? process.run()) != nil else { return ("", false) }
+            guard waitForProcessExit(process, timeout: loginShellPathTimeoutSeconds(environment: environment)) else {
+                stdoutReader.cancel()
+                stderrReader.cancel()
+                return ("", false)
+            }
+            let drainTimeout = loginShellPathTimeoutSeconds(environment: environment)
+            guard stdoutReader.waitUntilFinished(timeout: drainTimeout), stderrReader.waitUntilFinished(timeout: drainTimeout) else {
+                stdoutReader.cancel()
+                stderrReader.cancel()
+                return ("", false)
+            }
+            guard process.terminationStatus == 0 else { return ("", false) }
+            let text = String(data: stdoutReader.collectedData(), encoding: .utf8) ?? ""
+            guard let markerRange = text.range(of: "__SPACES_PATH__", options: .backwards) else { return ("", true) }
+            return (String(text[markerRange.upperBound...]).trimmingCharacters(in: .whitespacesAndNewlines), true)
+        }
+    }
+
+    private static func loginShellPathTimeoutSeconds(environment: [String: String]) -> TimeInterval {
+        guard let raw = environment["SPACES_LOGIN_SHELL_PATH_TIMEOUT_SECONDS"], let value = TimeInterval(raw), value > 0 else {
+            return loginShellPathTimeoutFallbackSeconds
+        }
+        return value
+    }
+
+    private static func waitForProcessExit(_ process: Process, timeout: TimeInterval) -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        while process.isRunning {
+            if Date() >= deadline {
+                process.interrupt()
+                Thread.sleep(forTimeInterval: 0.05)
+                if process.isRunning { process.terminate() }
+                Thread.sleep(forTimeInterval: 0.05)
+                return !process.isRunning
+            }
+            Thread.sleep(forTimeInterval: 0.01)
+        }
+        return true
     }
 
     private static func resolvedExecutablePath(for executable: String, environment: [String: String]) -> String? {

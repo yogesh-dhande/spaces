@@ -23,8 +23,10 @@ print_failure_diagnostics() {
   /usr/bin/log show --style compact --last 2m --predicate 'process == "SpacesApp" OR process == "Spaces"' | tail -n 120 || true
 }
 
-# Kill any running instance before relaunching.
-pkill -f "$APP" 2>/dev/null || true
+# Kill any running Spaces instance before relaunching so only one global hotkey
+# listener remains active and the visible window is definitely the debug build.
+pkill -x SpacesApp 2>/dev/null || true
+pkill -x Spaces 2>/dev/null || true
 
 "$repo_root/scripts/swiftpm.sh" build
 

@@ -24,6 +24,473 @@ final class ShellTests: XCTestCase {
         XCTAssertEqual(output, "hello")
     }
 
+    func testRunAndCaptureResolvesCommandUsingLoginShellPath() throws {
+        let root = try makeTempDirectory()
+        let commandDirectory = root.appendingPathComponent("commands", isDirectory: true)
+        try FileManager.default.createDirectory(at: commandDirectory, withIntermediateDirectories: true)
+
+        let commandFile = commandDirectory.appendingPathComponent("mockcmd")
+        try "#!/bin/sh\nprintf 'resolved-via-login-shell'\n".write(to: commandFile, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: commandFile.path)
+
+        let shellFile = root.appendingPathComponent("mock-shell")
+        let shellScript = """
+            #!/bin/sh
+            if [ "$1" = "-l" ] && [ "$2" = "-c" ]; then
+              printf '\n__SPACES_PATH__%s' "\(commandDirectory.path):/usr/bin:/bin"
+              exit 0
+            fi
+            exec /bin/sh "$@"
+            """
+        try shellScript.write(to: shellFile, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: shellFile.path)
+
+        sharedEnvironmentMutationLock.lock()
+        defer { sharedEnvironmentMutationLock.unlock() }
+
+        let originalShell = ProcessInfo.processInfo.environment["SHELL"]
+        let originalPath = ProcessInfo.processInfo.environment["PATH"] ?? ""
+        setenv("SHELL", shellFile.path, 1)
+        setenv("PATH", "/usr/bin:/bin:/usr/sbin:/sbin", 1)
+        defer {
+            if let originalShell { setenv("SHELL", originalShell, 1) } else { unsetenv("SHELL") }
+            setenv("PATH", originalPath, 1)
+        }
+
+        let output = try Shell.runAndCapture(["mockcmd"])
+        XCTAssertEqual(output, "resolved-via-login-shell")
+    }
+
+    func testRunAndCaptureUsesShellAgnosticPathProbe() throws {
+        let root = try makeTempDirectory()
+        let firstDirectory = root.appendingPathComponent("first", isDirectory: true)
+        let secondDirectory = root.appendingPathComponent("second", isDirectory: true)
+        try FileManager.default.createDirectory(at: firstDirectory, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: secondDirectory, withIntermediateDirectories: true)
+
+        let commandFile = firstDirectory.appendingPathComponent("mockcmd")
+        try "#!/bin/sh\nprintf 'fish-safe-path'\n".write(to: commandFile, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: commandFile.path)
+
+        let shellFile = root.appendingPathComponent("mock-shell")
+        let shellScript = """
+            #!/bin/sh
+            if [ "$1" = "-l" ] && [ "$2" = "-c" ]; then
+              case "$3" in
+                *'printenv PATH'*)
+                  printf '\n__SPACES_PATH__'
+                  printenv PATH
+                  ;;
+                *)
+                  printf '\n__SPACES_PATH__%s__SPACES_PATH__%s' "\(firstDirectory.path)" "\(secondDirectory.path)"
+                  ;;
+              esac
+              exit 0
+            fi
+            exec /bin/sh "$@"
+            """
+        try shellScript.write(to: shellFile, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: shellFile.path)
+
+        sharedEnvironmentMutationLock.lock()
+        defer { sharedEnvironmentMutationLock.unlock() }
+
+        let originalShell = ProcessInfo.processInfo.environment["SHELL"]
+        let originalPath = ProcessInfo.processInfo.environment["PATH"] ?? ""
+        setenv("SHELL", shellFile.path, 1)
+        setenv("PATH", "\(firstDirectory.path):\(secondDirectory.path):/usr/bin:/bin", 1)
+        defer {
+            if let originalShell { setenv("SHELL", originalShell, 1) } else { unsetenv("SHELL") }
+            setenv("PATH", originalPath, 1)
+        }
+
+        let output = try Shell.runAndCapture(["mockcmd"])
+        XCTAssertEqual(output, "fish-safe-path")
+    }
+
+    func testRunAndCapturePrefersLoginShellPathOrderOverInheritedDuplicates() throws {
+        let root = try makeTempDirectory()
+        let inheritedDirectory = root.appendingPathComponent("inherited", isDirectory: true)
+        let loginDirectory = root.appendingPathComponent("login", isDirectory: true)
+        try FileManager.default.createDirectory(at: inheritedDirectory, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: loginDirectory, withIntermediateDirectories: true)
+
+        let inheritedCommand = inheritedDirectory.appendingPathComponent("mockcmd")
+        try "#!/bin/sh\nprintf 'inherited-copy'\n".write(to: inheritedCommand, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: inheritedCommand.path)
+
+        let loginCommand = loginDirectory.appendingPathComponent("mockcmd")
+        try "#!/bin/sh\nprintf 'login-copy'\n".write(to: loginCommand, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: loginCommand.path)
+
+        let shellFile = root.appendingPathComponent("mock-shell")
+        let shellScript = """
+            #!/bin/sh
+            if [ "$1" = "-l" ] && [ "$2" = "-c" ]; then
+              printf '\n__SPACES_PATH__%s' "\(loginDirectory.path):\(inheritedDirectory.path):/usr/bin:/bin"
+              exit 0
+            fi
+            exec /bin/sh "$@"
+            """
+        try shellScript.write(to: shellFile, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: shellFile.path)
+
+        sharedEnvironmentMutationLock.lock()
+        defer { sharedEnvironmentMutationLock.unlock() }
+
+        let originalShell = ProcessInfo.processInfo.environment["SHELL"]
+        let originalPath = ProcessInfo.processInfo.environment["PATH"] ?? ""
+        setenv("SHELL", shellFile.path, 1)
+        setenv("PATH", "\(inheritedDirectory.path):/usr/bin:/bin", 1)
+        defer {
+            if let originalShell { setenv("SHELL", originalShell, 1) } else { unsetenv("SHELL") }
+            setenv("PATH", originalPath, 1)
+        }
+
+        let output = try Shell.runAndCapture(["mockcmd"])
+        XCTAssertEqual(output, "login-copy")
+    }
+
+    func testRunAndCaptureCachesResolvedLoginShellPath() throws {
+        let root = try makeTempDirectory()
+        let commandDirectory = root.appendingPathComponent("commands", isDirectory: true)
+        try FileManager.default.createDirectory(at: commandDirectory, withIntermediateDirectories: true)
+
+        let commandFile = commandDirectory.appendingPathComponent("mockcmd")
+        try "#!/bin/sh\nprintf 'cached-login-shell'\n".write(to: commandFile, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: commandFile.path)
+
+        let counterFile = root.appendingPathComponent("shell-invocations.txt")
+        let shellFile = root.appendingPathComponent("mock-shell")
+        let shellScript = """
+            #!/bin/sh
+            if [ "$1" = "-l" ] && [ "$2" = "-c" ]; then
+              count=0
+              if [ -f "\(counterFile.path)" ]; then
+                count=$(cat "\(counterFile.path)")
+              fi
+              count=$((count + 1))
+              printf '%s' "$count" > "\(counterFile.path)"
+              printf '\n__SPACES_PATH__%s' "\(commandDirectory.path):/usr/bin:/bin"
+              exit 0
+            fi
+            exec /bin/sh "$@"
+            """
+        try shellScript.write(to: shellFile, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: shellFile.path)
+
+        sharedEnvironmentMutationLock.lock()
+        defer { sharedEnvironmentMutationLock.unlock() }
+
+        let originalShell = ProcessInfo.processInfo.environment["SHELL"]
+        let originalPath = ProcessInfo.processInfo.environment["PATH"] ?? ""
+        let originalHome = ProcessInfo.processInfo.environment["HOME"] ?? ""
+        setenv("SHELL", shellFile.path, 1)
+        setenv("PATH", "/usr/bin:/bin:/usr/sbin:/sbin", 1)
+        setenv("HOME", root.path, 1)
+        defer {
+            if let originalShell { setenv("SHELL", originalShell, 1) } else { unsetenv("SHELL") }
+            setenv("PATH", originalPath, 1)
+            setenv("HOME", originalHome, 1)
+        }
+
+        XCTAssertEqual(try Shell.runAndCapture(["mockcmd"]), "cached-login-shell")
+        XCTAssertEqual(try Shell.runAndCapture(["mockcmd"]), "cached-login-shell")
+        let invocationCount = try String(contentsOf: counterFile, encoding: .utf8)
+        XCTAssertEqual(invocationCount, "1")
+    }
+
+    func testRunAndCaptureRefreshesCachedLoginShellPathWhenInheritedPathChanges() throws {
+        let root = try makeTempDirectory()
+        let firstDirectory = root.appendingPathComponent("first", isDirectory: true)
+        let secondDirectory = root.appendingPathComponent("second", isDirectory: true)
+        try FileManager.default.createDirectory(at: firstDirectory, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: secondDirectory, withIntermediateDirectories: true)
+
+        let firstCommand = firstDirectory.appendingPathComponent("firstcmd")
+        try "#!/bin/sh\nprintf 'first-path'\n".write(to: firstCommand, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: firstCommand.path)
+
+        let secondCommand = secondDirectory.appendingPathComponent("secondcmd")
+        try "#!/bin/sh\nprintf 'second-path'\n".write(to: secondCommand, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: secondCommand.path)
+
+        let counterFile = root.appendingPathComponent("shell-invocations.txt")
+        let shellFile = root.appendingPathComponent("mock-shell")
+        let shellScript = """
+            #!/bin/sh
+            if [ "$1" = "-l" ] && [ "$2" = "-c" ]; then
+              count=0
+              if [ -f "\(counterFile.path)" ]; then
+                count=$(cat "\(counterFile.path)")
+              fi
+              count=$((count + 1))
+              printf '%s' "$count" > "\(counterFile.path)"
+              printf '\n__SPACES_PATH__'
+              printenv PATH
+              exit 0
+            fi
+            exec /bin/sh "$@"
+            """
+        try shellScript.write(to: shellFile, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: shellFile.path)
+
+        sharedEnvironmentMutationLock.lock()
+        defer { sharedEnvironmentMutationLock.unlock() }
+
+        let originalShell = ProcessInfo.processInfo.environment["SHELL"]
+        let originalPath = ProcessInfo.processInfo.environment["PATH"] ?? ""
+        let originalHome = ProcessInfo.processInfo.environment["HOME"] ?? ""
+        setenv("SHELL", shellFile.path, 1)
+        setenv("HOME", root.path, 1)
+        defer {
+            if let originalShell { setenv("SHELL", originalShell, 1) } else { unsetenv("SHELL") }
+            setenv("PATH", originalPath, 1)
+            setenv("HOME", originalHome, 1)
+        }
+
+        setenv("PATH", "\(firstDirectory.path):/usr/bin:/bin", 1)
+        XCTAssertEqual(try Shell.runAndCapture(["firstcmd"]), "first-path")
+
+        setenv("PATH", "\(secondDirectory.path):/usr/bin:/bin", 1)
+        XCTAssertEqual(try Shell.runAndCapture(["secondcmd"]), "second-path")
+
+        let invocationCount = try String(contentsOf: counterFile, encoding: .utf8)
+        XCTAssertEqual(invocationCount, "2")
+    }
+
+    func testRunAndCapturePassesShellConfigEnvironmentIntoLoginProbe() throws {
+        let root = try makeTempDirectory()
+        let commandDirectory = root.appendingPathComponent("commands", isDirectory: true)
+        try FileManager.default.createDirectory(at: commandDirectory, withIntermediateDirectories: true)
+
+        let commandFile = commandDirectory.appendingPathComponent("mockcmd")
+        try "#!/bin/sh\nprintf 'config-env-path'\n".write(to: commandFile, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: commandFile.path)
+
+        let shellFile = root.appendingPathComponent("mock-shell")
+        let shellScript = """
+            #!/bin/sh
+            if [ "$1" = "-l" ] && [ "$2" = "-c" ]; then
+              [ "$ZDOTDIR" = "\(root.path)/zdotdir" ] || exit 17
+              [ "$XDG_CONFIG_HOME" = "\(root.path)/xdg-home" ] || exit 18
+              [ "$XDG_CONFIG_DIRS" = "\(root.path)/xdg-dirs" ] || exit 19
+              printf '\n__SPACES_PATH__%s' "\(commandDirectory.path):/usr/bin:/bin"
+              exit 0
+            fi
+            exec /bin/sh "$@"
+            """
+        try shellScript.write(to: shellFile, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: shellFile.path)
+
+        sharedEnvironmentMutationLock.lock()
+        defer { sharedEnvironmentMutationLock.unlock() }
+
+        let originalShell = ProcessInfo.processInfo.environment["SHELL"]
+        let originalPath = ProcessInfo.processInfo.environment["PATH"] ?? ""
+        let originalZdotdir = ProcessInfo.processInfo.environment["ZDOTDIR"]
+        let originalXdgConfigHome = ProcessInfo.processInfo.environment["XDG_CONFIG_HOME"]
+        let originalXdgConfigDirs = ProcessInfo.processInfo.environment["XDG_CONFIG_DIRS"]
+        setenv("SHELL", shellFile.path, 1)
+        setenv("PATH", "/usr/bin:/bin:/usr/sbin:/sbin", 1)
+        setenv("ZDOTDIR", "\(root.path)/zdotdir", 1)
+        setenv("XDG_CONFIG_HOME", "\(root.path)/xdg-home", 1)
+        setenv("XDG_CONFIG_DIRS", "\(root.path)/xdg-dirs", 1)
+        defer {
+            if let originalShell { setenv("SHELL", originalShell, 1) } else { unsetenv("SHELL") }
+            setenv("PATH", originalPath, 1)
+            if let originalZdotdir { setenv("ZDOTDIR", originalZdotdir, 1) } else { unsetenv("ZDOTDIR") }
+            if let originalXdgConfigHome { setenv("XDG_CONFIG_HOME", originalXdgConfigHome, 1) } else { unsetenv("XDG_CONFIG_HOME") }
+            if let originalXdgConfigDirs { setenv("XDG_CONFIG_DIRS", originalXdgConfigDirs, 1) } else { unsetenv("XDG_CONFIG_DIRS") }
+        }
+
+        let output = try Shell.runAndCapture(["mockcmd"])
+        XCTAssertEqual(output, "config-env-path")
+    }
+
+    func testRunAndCaptureDrainsNoisyLoginShellStderr() throws {
+        let root = try makeTempDirectory()
+        let commandDirectory = root.appendingPathComponent("commands", isDirectory: true)
+        try FileManager.default.createDirectory(at: commandDirectory, withIntermediateDirectories: true)
+
+        let commandFile = commandDirectory.appendingPathComponent("mockcmd")
+        try "#!/bin/sh\nprintf 'stderr-drained'\n".write(to: commandFile, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: commandFile.path)
+
+        let shellFile = root.appendingPathComponent("mock-shell")
+        let shellScript = """
+            #!/bin/sh
+            if [ "$1" = "-l" ] && [ "$2" = "-c" ]; then
+              i=0
+              while [ "$i" -lt 4096 ]; do
+                printf 'stderr-noise-%04d\\n' "$i" >&2
+                i=$((i + 1))
+              done
+              printf '\n__SPACES_PATH__%s' "\(commandDirectory.path):/usr/bin:/bin"
+              exit 0
+            fi
+            exec /bin/sh "$@"
+            """
+        try shellScript.write(to: shellFile, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: shellFile.path)
+
+        sharedEnvironmentMutationLock.lock()
+        defer { sharedEnvironmentMutationLock.unlock() }
+
+        let originalShell = ProcessInfo.processInfo.environment["SHELL"]
+        let originalPath = ProcessInfo.processInfo.environment["PATH"] ?? ""
+        let originalHome = ProcessInfo.processInfo.environment["HOME"] ?? ""
+        setenv("SHELL", shellFile.path, 1)
+        setenv("PATH", "/usr/bin:/bin:/usr/sbin:/sbin", 1)
+        setenv("HOME", root.path, 1)
+        defer {
+            if let originalShell { setenv("SHELL", originalShell, 1) } else { unsetenv("SHELL") }
+            setenv("PATH", originalPath, 1)
+            setenv("HOME", originalHome, 1)
+        }
+
+        XCTAssertEqual(try Shell.runAndCapture(["mockcmd"]), "stderr-drained")
+    }
+
+    func testRunAndCaptureFallsBackWhenLoginShellPathProbeTimesOut() throws {
+        let root = try makeTempDirectory()
+        let commandDirectory = root.appendingPathComponent("commands", isDirectory: true)
+        try FileManager.default.createDirectory(at: commandDirectory, withIntermediateDirectories: true)
+
+        let commandFile = commandDirectory.appendingPathComponent("mockcmd")
+        try "#!/bin/sh\nprintf 'fallback-path'\n".write(to: commandFile, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: commandFile.path)
+
+        let shellFile = root.appendingPathComponent("mock-shell")
+        let shellScript = """
+            #!/bin/sh
+            if [ "$1" = "-l" ] && [ "$2" = "-c" ]; then
+              sleep 5
+              exit 0
+            fi
+            exec /bin/sh "$@"
+            """
+        try shellScript.write(to: shellFile, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: shellFile.path)
+
+        sharedEnvironmentMutationLock.lock()
+        defer { sharedEnvironmentMutationLock.unlock() }
+
+        let originalShell = ProcessInfo.processInfo.environment["SHELL"]
+        let originalPath = ProcessInfo.processInfo.environment["PATH"] ?? ""
+        let originalTimeout = ProcessInfo.processInfo.environment["SPACES_LOGIN_SHELL_PATH_TIMEOUT_SECONDS"]
+        setenv("SHELL", shellFile.path, 1)
+        setenv("PATH", "\(commandDirectory.path):/usr/bin:/bin:/usr/sbin:/sbin", 1)
+        setenv("SPACES_LOGIN_SHELL_PATH_TIMEOUT_SECONDS", "0.05", 1)
+        defer {
+            if let originalShell { setenv("SHELL", originalShell, 1) } else { unsetenv("SHELL") }
+            setenv("PATH", originalPath, 1)
+            if let originalTimeout {
+                setenv("SPACES_LOGIN_SHELL_PATH_TIMEOUT_SECONDS", originalTimeout, 1)
+            } else {
+                unsetenv("SPACES_LOGIN_SHELL_PATH_TIMEOUT_SECONDS")
+            }
+        }
+
+        let startedAt = Date()
+        let output = try Shell.runAndCapture(["mockcmd"])
+        XCTAssertEqual(output, "fallback-path")
+        XCTAssertLessThan(Date().timeIntervalSince(startedAt), 1.5)
+    }
+
+    func testRunAndCaptureFallsBackWhenTimedOutShellLeavesInheritedPipesOpen() throws {
+        let root = try makeTempDirectory()
+        let commandDirectory = root.appendingPathComponent("commands", isDirectory: true)
+        try FileManager.default.createDirectory(at: commandDirectory, withIntermediateDirectories: true)
+
+        let commandFile = commandDirectory.appendingPathComponent("mockcmd")
+        try "#!/bin/sh\nprintf 'fallback-with-open-pipes'\n".write(to: commandFile, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: commandFile.path)
+
+        let shellFile = root.appendingPathComponent("mock-shell")
+        let shellScript = """
+            #!/bin/sh
+            if [ "$1" = "-l" ] && [ "$2" = "-c" ]; then
+              /bin/sh -c "sleep 5 >&1 & sleep 5 >&2 & sleep 5"
+              exit 0
+            fi
+            exec /bin/sh "$@"
+            """
+        try shellScript.write(to: shellFile, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: shellFile.path)
+
+        sharedEnvironmentMutationLock.lock()
+        defer { sharedEnvironmentMutationLock.unlock() }
+
+        let originalShell = ProcessInfo.processInfo.environment["SHELL"]
+        let originalPath = ProcessInfo.processInfo.environment["PATH"] ?? ""
+        let originalTimeout = ProcessInfo.processInfo.environment["SPACES_LOGIN_SHELL_PATH_TIMEOUT_SECONDS"]
+        setenv("SHELL", shellFile.path, 1)
+        setenv("PATH", "\(commandDirectory.path):/usr/bin:/bin:/usr/sbin:/sbin", 1)
+        setenv("SPACES_LOGIN_SHELL_PATH_TIMEOUT_SECONDS", "0.05", 1)
+        defer {
+            if let originalShell { setenv("SHELL", originalShell, 1) } else { unsetenv("SHELL") }
+            setenv("PATH", originalPath, 1)
+            if let originalTimeout {
+                setenv("SPACES_LOGIN_SHELL_PATH_TIMEOUT_SECONDS", originalTimeout, 1)
+            } else {
+                unsetenv("SPACES_LOGIN_SHELL_PATH_TIMEOUT_SECONDS")
+            }
+        }
+
+        let startedAt = Date()
+        let output = try Shell.runAndCapture(["mockcmd"])
+        XCTAssertEqual(output, "fallback-with-open-pipes")
+        XCTAssertLessThan(Date().timeIntervalSince(startedAt), 1.5)
+    }
+
+    func testRunAndCaptureFallsBackWhenExitedShellLeavesBackgroundPipeOpen() throws {
+        let root = try makeTempDirectory()
+        let commandDirectory = root.appendingPathComponent("commands", isDirectory: true)
+        try FileManager.default.createDirectory(at: commandDirectory, withIntermediateDirectories: true)
+
+        let commandFile = commandDirectory.appendingPathComponent("mockcmd")
+        try "#!/bin/sh\nprintf 'fallback-after-exit'\n".write(to: commandFile, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: commandFile.path)
+
+        let shellFile = root.appendingPathComponent("mock-shell")
+        let shellScript = """
+            #!/bin/sh
+            if [ "$1" = "-l" ] && [ "$2" = "-c" ]; then
+              /bin/sh -c "sleep 5 >&1" &
+              printf '\n__SPACES_PATH__%s' "\(commandDirectory.path):/usr/bin:/bin"
+              exit 0
+            fi
+            exec /bin/sh "$@"
+            """
+        try shellScript.write(to: shellFile, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: shellFile.path)
+
+        sharedEnvironmentMutationLock.lock()
+        defer { sharedEnvironmentMutationLock.unlock() }
+
+        let originalShell = ProcessInfo.processInfo.environment["SHELL"]
+        let originalPath = ProcessInfo.processInfo.environment["PATH"] ?? ""
+        let originalTimeout = ProcessInfo.processInfo.environment["SPACES_LOGIN_SHELL_PATH_TIMEOUT_SECONDS"]
+        setenv("SHELL", shellFile.path, 1)
+        setenv("PATH", "\(commandDirectory.path):/usr/bin:/bin:/usr/sbin:/sbin", 1)
+        setenv("SPACES_LOGIN_SHELL_PATH_TIMEOUT_SECONDS", "0.05", 1)
+        defer {
+            if let originalShell { setenv("SHELL", originalShell, 1) } else { unsetenv("SHELL") }
+            setenv("PATH", originalPath, 1)
+            if let originalTimeout {
+                setenv("SPACES_LOGIN_SHELL_PATH_TIMEOUT_SECONDS", originalTimeout, 1)
+            } else {
+                unsetenv("SPACES_LOGIN_SHELL_PATH_TIMEOUT_SECONDS")
+            }
+        }
+
+        let startedAt = Date()
+        let output = try Shell.runAndCapture(["mockcmd"])
+        XCTAssertEqual(output, "fallback-after-exit")
+        XCTAssertLessThan(Date().timeIntervalSince(startedAt), 1.5)
+    }
+
     // Tests run and capture throws with stderr on failure by arranging representative inputs and asserting the expected result.
     func testRunAndCaptureThrowsWithStderrOnFailure() throws {
         XCTAssertThrowsError(try Shell.runAndCapture(["sh", "-lc", "echo boom >&2; exit 9"])) { error in
