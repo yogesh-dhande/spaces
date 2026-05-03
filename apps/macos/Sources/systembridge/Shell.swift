@@ -162,6 +162,20 @@ public enum Shell {
         return ordered.joined(separator: ":")
     }
 
+    private static func loginShellProbeSeedPath(currentPath: String) -> String {
+        let systemPath = "/usr/bin:/bin:/usr/sbin:/sbin"
+        guard !currentPath.isEmpty else { return systemPath }
+
+        var seen = Set<String>()
+        var ordered: [String] = []
+        for rawPath in [currentPath, systemPath] {
+            for component in rawPath.split(separator: ":").map(String.init) where !component.isEmpty {
+                if seen.insert(component).inserted { ordered.append(component) }
+            }
+        }
+        return ordered.joined(separator: ":")
+    }
+
     private static func loginShellPath(environment: [String: String], currentPath: String) -> String {
         let shellPath = environment["SHELL"]?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "/bin/zsh"
         let homePath = environment["HOME"]?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
@@ -191,7 +205,7 @@ public enum Shell {
             for key in ["HOME", "USER", "LOGNAME", "TMPDIR", "ZDOTDIR", "XDG_CONFIG_HOME", "XDG_CONFIG_DIRS"] {
                 if let value = environment[key], !value.isEmpty { loginEnvironment[key] = value }
             }
-            loginEnvironment["PATH"] = currentPath
+            loginEnvironment["PATH"] = loginShellProbeSeedPath(currentPath: currentPath)
             loginEnvironment["SHELL"] = shellPath
             loginEnvironment["TERM"] = environment["TERM"]?.isEmpty == false ? environment["TERM"] : "xterm-256color"
             process.environment = loginEnvironment
