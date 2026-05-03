@@ -6,51 +6,90 @@ public enum Shell {
         let shellPath: String
         let homePath: String
         let inheritedPath: String
+        let zdotdirPath: String
+        let xdgConfigHomePath: String
+        let xdgConfigDirsPath: String
+    }
+
+    private enum CachedLoginShellPath {
+        case success(String)
+        case recentFailure(expiry: Date)
+    }
+
+    private struct LoginShellPathResolution {
+        let path: String
+        let cachePolicy: CachePolicy
+    }
+
+    private enum CachePolicy {
+        case cacheSuccess
+        case cacheFailure(until: Date)
     }
 
     private final class LoginShellPathCache: @unchecked Sendable {
         private let lock = NSLock()
-        private var values: [LoginShellPathCacheKey: String] = [:]
+        private var values: [LoginShellPathCacheKey: CachedLoginShellPath] = [:]
 
-        func value(for key: LoginShellPathCacheKey, resolver: () -> (value: String, shouldCache: Bool)) -> String {
+        func value(for key: LoginShellPathCacheKey, now: Date = Date(), resolver: () -> LoginShellPathResolution) -> String {
             lock.lock()
             if let cached = values[key] {
-                lock.unlock()
-                return cached
+                switch cached {
+                case .success(let path):
+                    lock.unlock()
+                    return path
+                case .recentFailure(let expiry):
+                    if expiry > now {
+                        lock.unlock()
+                        return ""
+                    }
+                    values.removeValue(forKey: key)
+                }
             }
             lock.unlock()
 
             let resolved = resolver()
 
-            if resolved.shouldCache {
-                lock.lock()
-                values[key] = resolved.value
-                lock.unlock()
+            lock.lock()
+            switch resolved.cachePolicy {
+            case .cacheSuccess: values[key] = .success(resolved.path)
+            case .cacheFailure(let until): values[key] = .recentFailure(expiry: until)
             }
-            return resolved.value
+            lock.unlock()
+            return resolved.path
         }
     }
 
     private final class PipeCollector: @unchecked Sendable {
         private let handle: FileHandle
+        private let onData: (@Sendable (Data) -> Void)?
         private let lock = NSLock()
         private var buffer = Data()
         private var finished = false
+        private var readerThread: Thread?
 
-        init(handle: FileHandle) {
+        init(handle: FileHandle, onData: (@Sendable (Data) -> Void)? = nil) {
             self.handle = handle
-            handle.readabilityHandler = { [weak self] fileHandle in
-                let chunk = fileHandle.availableData
+            self.onData = onData
+            let thread = Thread { [weak self] in
                 guard let self else { return }
-                self.lock.lock()
-                defer { self.lock.unlock() }
-                if chunk.isEmpty {
-                    self.finished = true
-                    fileHandle.readabilityHandler = nil
-                    return
+                while true {
+                    let chunk = self.handle.availableData
+                    var snapshot = Data()
+                    self.lock.lock()
+                    if chunk.isEmpty {
+                        self.finished = true
+                        self.lock.unlock()
+                        return
+                    }
+                    self.buffer.append(chunk)
+                    snapshot = self.buffer
+                    self.lock.unlock()
+                    onData?(snapshot)
                 }
-                self.buffer.append(chunk)
             }
+            thread.qualityOfService = .userInitiated
+            readerThread = thread
+            thread.start()
         }
 
         func waitUntilFinished(timeout: TimeInterval) -> Bool {
@@ -72,7 +111,6 @@ public enum Shell {
         }
 
         func cancel() {
-            handle.readabilityHandler = nil
             try? handle.close()
             lock.lock()
             finished = true
@@ -82,6 +120,7 @@ public enum Shell {
 
     private static let loginShellPathCache = LoginShellPathCache()
     private static let loginShellPathTimeoutFallbackSeconds: TimeInterval = 2
+    private static let loginShellPathFailureCacheFallbackSeconds: TimeInterval = 10
 
     /// Returns the current process environment with Homebrew paths appended to PATH.
     /// Reads PATH from the C-level environment so that `setenv()` mutations from tests
@@ -89,11 +128,20 @@ public enum Shell {
     private static func processEnvironment() -> [String: String] {
         var env = ProcessInfo.processInfo.environment
         // getenv reads the C-level environment, which includes setenv() changes
-        // made after process start (e.g. in test helpers that inject mock binaries).
-        let currentPath: String
-        if let raw = getenv("PATH") { currentPath = String(cString: raw) } else { currentPath = "" }
+        // made after process start (e.g. in test helpers that inject mock binaries
+        // or shell-config overrides applied while the app remains running).
+        for key in [
+            "PATH", "SHELL", "HOME", "USER", "LOGNAME", "TMPDIR", "ZDOTDIR", "XDG_CONFIG_HOME", "XDG_CONFIG_DIRS", "TERM",
+            "SPACES_LOGIN_SHELL_PATH_TIMEOUT_SECONDS", "SPACES_LOGIN_SHELL_PATH_FAILURE_CACHE_SECONDS",
+        ] { if let value = currentEnvironmentValue(for: key) { env[key] = value } }
+        let currentPath = env["PATH"] ?? ""
         env["PATH"] = mergedCommandPath(currentPath: currentPath, environment: env)
         return env
+    }
+
+    private static func currentEnvironmentValue(for key: String) -> String? {
+        guard let raw = getenv(key) else { return nil }
+        return String(cString: raw)
     }
 
     private static func mergedCommandPath(currentPath: String, environment: [String: String]) -> String {
@@ -117,12 +165,20 @@ public enum Shell {
         let shellPath = environment["SHELL"]?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "/bin/zsh"
         let homePath = environment["HOME"]?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         guard FileManager.default.isExecutableFile(atPath: shellPath) else { return "" }
-        let cacheKey = LoginShellPathCacheKey(shellPath: shellPath, homePath: homePath, inheritedPath: currentPath)
+        let cacheKey = LoginShellPathCacheKey(
+            shellPath: shellPath, homePath: homePath, inheritedPath: currentPath,
+            zdotdirPath: environment["ZDOTDIR"]?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "",
+            xdgConfigHomePath: environment["XDG_CONFIG_HOME"]?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "",
+            xdgConfigDirsPath: environment["XDG_CONFIG_DIRS"]?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "")
         return loginShellPathCache.value(for: cacheKey) {
             let process = Process()
             let output = Pipe()
             let error = Pipe()
-            let stdoutReader = PipeCollector(handle: output.fileHandleForReading)
+            let discoveredState = DiscoveredPathState()
+            let stdoutReader = PipeCollector(handle: output.fileHandleForReading) { data in
+                guard let text = String(data: data, encoding: .utf8), let path = extractedLoginShellPath(from: text) else { return }
+                discoveredState.record(path: path)
+            }
             let stderrReader = PipeCollector(handle: error.fileHandleForReading)
             process.executableURL = URL(fileURLWithPath: shellPath)
             // Use a login shell so PATH matches the user's configured shell
@@ -141,22 +197,35 @@ public enum Shell {
             process.standardOutput = output
             process.standardError = error
 
-            guard (try? process.run()) != nil else { return ("", false) }
-            guard waitForProcessExit(process, timeout: loginShellPathTimeoutSeconds(environment: environment)) else {
+            guard (try? process.run()) != nil else {
+                return LoginShellPathResolution(path: "", cachePolicy: .cacheFailure(until: failureCacheExpiry(environment: environment)))
+            }
+            let probeTimeout = loginShellPathTimeoutSeconds(environment: environment)
+            guard waitForProcessExit(process, timeout: probeTimeout) else {
+                let discoveredPath = discoveredState.path(from: stdoutReader.collectedData())
                 stdoutReader.cancel()
                 stderrReader.cancel()
-                return ("", false)
+                if let discoveredPath { return LoginShellPathResolution(path: discoveredPath, cachePolicy: .cacheSuccess) }
+                // Fall back to the inherited PATH for this command resolution, but only
+                // suppress retries briefly in case the user's shell init was transiently slow.
+                return LoginShellPathResolution(path: "", cachePolicy: .cacheFailure(until: failureCacheExpiry(environment: environment)))
             }
-            let drainTimeout = loginShellPathTimeoutSeconds(environment: environment)
-            guard stdoutReader.waitUntilFinished(timeout: drainTimeout), stderrReader.waitUntilFinished(timeout: drainTimeout) else {
+            let stdoutFinished = stdoutReader.waitUntilFinished(timeout: probeTimeout)
+            let stderrFinished = stderrReader.waitUntilFinished(timeout: probeTimeout)
+            let discoveredPath = discoveredState.path(from: stdoutReader.collectedData())
+            guard stdoutFinished, stderrFinished else {
                 stdoutReader.cancel()
                 stderrReader.cancel()
-                return ("", false)
+                if let discoveredPath { return LoginShellPathResolution(path: discoveredPath, cachePolicy: .cacheSuccess) }
+                // Detached shell startup helpers can keep stdio open after the login shell exits.
+                // Treat that as a temporary probe failure rather than a permanent empty PATH.
+                return LoginShellPathResolution(path: "", cachePolicy: .cacheFailure(until: failureCacheExpiry(environment: environment)))
             }
-            guard process.terminationStatus == 0 else { return ("", false) }
-            let text = String(data: stdoutReader.collectedData(), encoding: .utf8) ?? ""
-            guard let markerRange = text.range(of: "__SPACES_PATH__", options: .backwards) else { return ("", true) }
-            return (String(text[markerRange.upperBound...]).trimmingCharacters(in: .whitespacesAndNewlines), true)
+            if let discoveredPath { return LoginShellPathResolution(path: discoveredPath, cachePolicy: .cacheSuccess) }
+            guard process.terminationStatus == 0 else {
+                return LoginShellPathResolution(path: "", cachePolicy: .cacheFailure(until: failureCacheExpiry(environment: environment)))
+            }
+            return LoginShellPathResolution(path: "", cachePolicy: .cacheFailure(until: failureCacheExpiry(environment: environment)))
         }
     }
 
@@ -165,6 +234,46 @@ public enum Shell {
             return loginShellPathTimeoutFallbackSeconds
         }
         return value
+    }
+
+    private static func loginShellPathFailureCacheSeconds(environment: [String: String]) -> TimeInterval {
+        guard let raw = environment["SPACES_LOGIN_SHELL_PATH_FAILURE_CACHE_SECONDS"], let value = TimeInterval(raw), value > 0 else {
+            return loginShellPathFailureCacheFallbackSeconds
+        }
+        return value
+    }
+
+    private static func failureCacheExpiry(environment: [String: String], now: Date = Date()) -> Date {
+        now.addingTimeInterval(loginShellPathFailureCacheSeconds(environment: environment))
+    }
+
+    private static func extractedLoginShellPath(from text: String) -> String? {
+        guard let markerRange = text.range(of: "__SPACES_PATH__", options: .backwards) else { return nil }
+        return String(text[markerRange.upperBound...]).trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private final class DiscoveredPathState: @unchecked Sendable {
+        private let lock = NSLock()
+        private var discoveredPath: String?
+
+        func record(path: String) {
+            lock.lock()
+            discoveredPath = path
+            lock.unlock()
+        }
+
+        func path(from data: Data) -> String? {
+            if let discovered = cachedPath() { return discovered }
+            guard let text = String(data: data, encoding: .utf8), let extracted = extractedLoginShellPath(from: text) else { return nil }
+            record(path: extracted)
+            return extracted
+        }
+
+        private func cachedPath() -> String? {
+            lock.lock()
+            defer { lock.unlock() }
+            return discoveredPath
+        }
     }
 
     private static func waitForProcessExit(_ process: Process, timeout: TimeInterval) -> Bool {
