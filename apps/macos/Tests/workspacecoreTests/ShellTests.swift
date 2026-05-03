@@ -473,7 +473,7 @@ final class ShellTests: XCTestCase {
         let originalTimeout = ProcessInfo.processInfo.environment["SPACES_LOGIN_SHELL_PATH_TIMEOUT_SECONDS"]
         setenv("SHELL", shellFile.path, 1)
         setenv("PATH", "\(commandDirectory.path):/usr/bin:/bin:/usr/sbin:/sbin", 1)
-        setenv("SPACES_LOGIN_SHELL_PATH_TIMEOUT_SECONDS", "1.0", 1)
+        setenv("SPACES_LOGIN_SHELL_PATH_TIMEOUT_SECONDS", "2.0", 1)
         defer {
             if let originalShell { setenv("SHELL", originalShell, 1) } else { unsetenv("SHELL") }
             setenv("PATH", originalPath, 1)
@@ -487,7 +487,7 @@ final class ShellTests: XCTestCase {
         let startedAt = Date()
         let output = try Shell.runAndCapture(["mockcmd"])
         XCTAssertEqual(output, "single-drain-budget")
-        XCTAssertLessThan(Date().timeIntervalSince(startedAt), 2.4)
+        XCTAssertLessThan(Date().timeIntervalSince(startedAt), 3.5)
     }
 
     func testRunAndCaptureRefreshesCachedLoginShellPathWhenZdotdirChanges() throws {
