@@ -9,7 +9,7 @@ import AppKit
 struct AddWorkspaceFieldRefs {
     let projectID: String
     let isGitRepo: Bool
-    let branchModePopup: NSPopUpButton?
+    let branchModeSegmented: NSSegmentedControl?
     let existingBranchField: NSComboBox?
     let newBranchField: NSTextField?
     let targetBranchField: NSComboBox?
@@ -19,4 +19,6 @@ struct AddWorkspaceFieldRefs {
     let autoNameState: AddWorkspaceAutoNameState?
     let progressiveInputViews: [NSView]
     let createButton: NSButton
+    let customizeStack: NSView?
+    let customizeButton: NSButton?
 }

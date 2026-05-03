@@ -3155,11 +3155,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         stack.addArrangedSubview(headerSubtitle)
 
         // --- Fields ---
-        let sourcePopup = NSPopUpButton()
-        sourcePopup.addItems(withTitles: ["Existing directory", "Clone repository"])
-        sourcePopup.selectItem(at: 0)
-        sourcePopup.target = self
-        sourcePopup.action = #selector(projectSourceChanged(_:))
+        let sourceSegmented = NSSegmentedControl(
+            labels: ["Pick folder", "Clone repo"], trackingMode: .selectOne, target: self, action: #selector(projectSourceChanged(_:)))
+        sourceSegmented.selectedSegment = 0
+        sourceSegmented.setAccessibilityIdentifier("add-project-source-mode")
 
         let dirField = NSTextField(labelWithString: "")
         dirField.toolTip = nil
@@ -3183,7 +3182,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let browserSessionsSection = BrowserSessionsSection(subtitle: "Browser windows opened automatically on launch.")
         let agentLaunchersSection = AgentLaunchersSection(subtitle: "Interactive coding agents that open outside tmux.")
 
-        // --- Source row: popup + dir/URL input on same line ---
+        // --- Source section: segmented control on top, input below ---
         let localSourceSection = NSStackView()
         localSourceSection.orientation = .horizontal
         localSourceSection.alignment = .centerY
@@ -3206,33 +3205,24 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         cloneSourceSection.alignment = .centerY
         cloneSourceSection.spacing = 8
         cloneSourceSection.detachesHiddenViews = true
+        cloneSourceSection.isHidden = true
 
         repoURLField.setContentHuggingPriority(.defaultLow, for: .horizontal)
         repoURLField.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
 
         cloneSourceSection.addArrangedSubview(repoURLField)
 
-        // --- Source section (combined): popup on top, then dir/url row ---
-        let sourceInputRow = NSStackView()
-        sourceInputRow.orientation = .horizontal
-        sourceInputRow.alignment = .centerY
-        sourceInputRow.spacing = 8
-        sourceInputRow.detachesHiddenViews = true
-
-        sourcePopup.setContentHuggingPriority(.defaultHigh, for: .horizontal)
-        sourcePopup.setContentCompressionResistancePriority(.required, for: .horizontal)
-
-        sourceInputRow.addArrangedSubview(sourcePopup)
-        sourceInputRow.addArrangedSubview(localSourceSection)
-        sourceInputRow.addArrangedSubview(cloneSourceSection)
-
         let sourceContentStack = NSStackView()
         sourceContentStack.orientation = .vertical
         sourceContentStack.alignment = .leading
-        sourceContentStack.spacing = 12
+        sourceContentStack.spacing = 8
         sourceContentStack.detachesHiddenViews = true
-        sourceContentStack.addArrangedSubview(sourceInputRow)
-        constrainFormFieldToFillWidth(sourceInputRow, in: sourceContentStack)
+        sourceSegmented.setContentHuggingPriority(.defaultHigh, for: .horizontal)
+        sourceContentStack.addArrangedSubview(sourceSegmented)
+        sourceContentStack.addArrangedSubview(localSourceSection)
+        sourceContentStack.addArrangedSubview(cloneSourceSection)
+        constrainFormFieldToFillWidth(localSourceSection, in: sourceContentStack)
+        constrainFormFieldToFillWidth(cloneSourceSection, in: sourceContentStack)
 
         let sourceCard = formSectionCard(
             icon: "folder.badge.plus", title: "Source", subtitle: "Where does your project live?", contentViews: [sourceContentStack])
@@ -3283,7 +3273,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         showScrollableDetailStack(stack)
 
         createButton.tag = storeAddProjectFields(
-            sourcePopup: sourcePopup, localSourceSection: localSourceSection, cloneSourceSection: cloneSourceSection, dirField: dirField,
+            sourceSegmented: sourceSegmented, localSourceSection: localSourceSection, cloneSourceSection: cloneSourceSection, dirField: dirField,
             repoURLField: repoURLField, setupScriptSection: setupScriptSection, stopScriptSection: stopScriptSection, portsSection: portsSection,
             processesSection: processesSection, browserSessionsSection: browserSessionsSection, agentLaunchersSection: agentLaunchersSection,
             browseButton: browseButton,
@@ -3348,12 +3338,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let nameField = NSTextField(string: project.isGitRepo ? "" : suggestedName)
         nameField.placeholderString = "workspace title"
         nameField.setAccessibilityIdentifier("add-workspace-title")
-        let branchModePopup = NSPopUpButton()
-        branchModePopup.addItems(withTitles: ["Existing branch", "Create branch"])
-        branchModePopup.selectItem(at: 1)
-        branchModePopup.setAccessibilityIdentifier("add-workspace-branch-mode")
-        branchModePopup.target = self
-        branchModePopup.action = #selector(addWorkspaceBranchModeChanged(_:))
         let targetBranchField = NSComboBox()
         targetBranchField.usesDataSource = false
         targetBranchField.completes = true
@@ -3386,56 +3370,93 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         notesField.setAccessibilityIdentifier("add-workspace-notes")
         let autoNameState = project.isGitRepo ? AddWorkspaceAutoNameState() : nil
 
-        // --- Single card with all inputs ---
+        // --- Content card ---
         let contentStack = NSStackView()
         contentStack.orientation = .vertical
         contentStack.alignment = .leading
-        contentStack.spacing = 12
-        var progressiveInputViews: [NSView] = []
+        contentStack.spacing = 10
+
+        var branchModeSegmented: NSSegmentedControl? = nil
+        var customizeStack: NSView? = nil
+        var customizeButton: NSButton? = nil
 
         if project.isGitRepo {
-            contentStack.addArrangedSubview(label(text: "Branch"))
-            contentStack.addArrangedSubview(helpTextLabel("Pick an existing branch or switch to create a new one."))
-            contentStack.addArrangedSubview(branchModePopup)
-            contentStack.addArrangedSubview(existingBranchField)
-            contentStack.addArrangedSubview(newBranchField)
-            constrainFormFieldToFillWidth(branchModePopup, in: contentStack)
-            constrainFormFieldToFillWidth(existingBranchField, in: contentStack)
-            constrainFormFieldToFillWidth(newBranchField, in: contentStack)
+            let modeSegmented = NSSegmentedControl(
+                labels: ["Create branch", "Use existing"], trackingMode: .selectOne, target: self,
+                action: #selector(addWorkspaceBranchModeChanged(_:)))
+            modeSegmented.selectedSegment = 0
+            modeSegmented.setAccessibilityIdentifier("add-workspace-branch-mode")
+            branchModeSegmented = modeSegmented
+            modeSegmented.setContentHuggingPriority(.defaultHigh, for: .horizontal)
+            contentStack.addArrangedSubview(modeSegmented)
 
-            let advancedInputStack = NSStackView()
-            advancedInputStack.orientation = .vertical
-            advancedInputStack.alignment = .leading
-            advancedInputStack.spacing = 12
-            advancedInputStack.addArrangedSubview(label(text: "Target branch"))
-            advancedInputStack.addArrangedSubview(helpTextLabel("The existing branch your new branch will be based on."))
-            advancedInputStack.addArrangedSubview(targetBranchField)
-            advancedInputStack.addArrangedSubview(label(text: "Workspace title"))
-            advancedInputStack.addArrangedSubview(helpTextLabel("Display title for this workspace in the sidebar."))
-            advancedInputStack.addArrangedSubview(nameField)
-            advancedInputStack.addArrangedSubview(label(text: "Directory name"))
-            advancedInputStack.addArrangedSubview(helpTextLabel("Auto-filled from branch name. Only letters, numbers, -, _ allowed."))
-            advancedInputStack.addArrangedSubview(directoryNameField)
-            advancedInputStack.addArrangedSubview(label(text: "Notes"))
-            advancedInputStack.addArrangedSubview(helpTextLabel("Optional context to display when viewing this workspace."))
-            advancedInputStack.addArrangedSubview(notesField)
-            constrainFormFieldToFillWidth(targetBranchField, in: advancedInputStack)
-            constrainFormFieldToFillWidth(nameField, in: advancedInputStack)
-            constrainFormFieldToFillWidth(directoryNameField, in: advancedInputStack)
-            constrainFormFieldToFillWidth(notesField, in: advancedInputStack)
-            advancedInputStack.isHidden = true
-            contentStack.addArrangedSubview(advancedInputStack)
-            progressiveInputViews = [advancedInputStack]
+            let branchInputContainer = NSStackView()
+            branchInputContainer.orientation = .vertical
+            branchInputContainer.spacing = 0
+            branchInputContainer.detachesHiddenViews = true
+            branchInputContainer.addArrangedSubview(newBranchField)
+            branchInputContainer.addArrangedSubview(existingBranchField)
+            constrainFormFieldToFillWidth(newBranchField, in: branchInputContainer)
+            constrainFormFieldToFillWidth(existingBranchField, in: branchInputContainer)
+            existingBranchField.isHidden = true
+
+            let branchRow = labeledInputRow(label: "Branch", input: branchInputContainer)
+            contentStack.addArrangedSubview(branchRow)
+            constrainFormFieldToFillWidth(branchRow, in: contentStack)
+
+            let customize = NSButton(title: " Customize", target: self, action: #selector(toggleWorkspaceCustomize(_:)))
+            customize.bezelStyle = .inline
+            customize.controlSize = .small
+            customize.image = NSImage(systemSymbolName: "chevron.right", accessibilityDescription: nil)
+            customize.imagePosition = .imageLeading
+            customize.setAccessibilityIdentifier("add-workspace-customize")
+            customizeButton = customize
+            contentStack.addArrangedSubview(customize)
+
+            let customStack = NSStackView()
+            customStack.orientation = .vertical
+            customStack.alignment = .leading
+            customStack.spacing = 10
+            customStack.isHidden = true
+            let targetRow = labeledInputRow(label: "Target branch", input: targetBranchField)
+            let titleRow = labeledInputRow(label: "Workspace title", input: nameField)
+            let dirRow = labeledInputRow(label: "Directory", input: directoryNameField)
+            let notesRow = labeledInputRow(label: "Notes", input: notesField)
+            customStack.addArrangedSubview(targetRow)
+            customStack.addArrangedSubview(titleRow)
+            customStack.addArrangedSubview(dirRow)
+            customStack.addArrangedSubview(notesRow)
+            constrainFormFieldToFillWidth(targetRow, in: customStack)
+            constrainFormFieldToFillWidth(titleRow, in: customStack)
+            constrainFormFieldToFillWidth(dirRow, in: customStack)
+            constrainFormFieldToFillWidth(notesRow, in: customStack)
+            contentStack.addArrangedSubview(customStack)
+            constrainFormFieldToFillWidth(customStack, in: contentStack)
+            customizeStack = customStack
         } else {
-            contentStack.addArrangedSubview(label(text: "Workspace title"))
-            contentStack.addArrangedSubview(helpTextLabel("Display title for this workspace in the sidebar."))
-            contentStack.addArrangedSubview(nameField)
-            constrainFormFieldToFillWidth(nameField, in: contentStack)
+            let titleRow = labeledInputRow(label: "Workspace title", input: nameField)
+            contentStack.addArrangedSubview(titleRow)
+            constrainFormFieldToFillWidth(titleRow, in: contentStack)
 
-            contentStack.addArrangedSubview(label(text: "Notes"))
-            contentStack.addArrangedSubview(helpTextLabel("Optional context to display when viewing this workspace."))
-            contentStack.addArrangedSubview(notesField)
-            constrainFormFieldToFillWidth(notesField, in: contentStack)
+            let customize = NSButton(title: " Customize", target: self, action: #selector(toggleWorkspaceCustomize(_:)))
+            customize.bezelStyle = .inline
+            customize.controlSize = .small
+            customize.image = NSImage(systemSymbolName: "chevron.right", accessibilityDescription: nil)
+            customize.imagePosition = .imageLeading
+            customizeButton = customize
+            contentStack.addArrangedSubview(customize)
+
+            let customStack = NSStackView()
+            customStack.orientation = .vertical
+            customStack.alignment = .leading
+            customStack.spacing = 10
+            customStack.isHidden = true
+            let notesRow = labeledInputRow(label: "Notes", input: notesField)
+            customStack.addArrangedSubview(notesRow)
+            constrainFormFieldToFillWidth(notesRow, in: customStack)
+            contentStack.addArrangedSubview(customStack)
+            constrainFormFieldToFillWidth(customStack, in: contentStack)
+            customizeStack = customStack
         }
 
         let card = formSectionCard(
@@ -3464,11 +3485,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         showScrollableDetailStack(stack)
 
         createButton.tag = storeAddWorkspaceFields(
-            projectID: project.id, isGitRepo: project.isGitRepo, branchModePopup: project.isGitRepo ? branchModePopup : nil,
+            projectID: project.id, isGitRepo: project.isGitRepo, branchModeSegmented: project.isGitRepo ? branchModeSegmented : nil,
             existingBranchField: project.isGitRepo ? existingBranchField : nil, newBranchField: project.isGitRepo ? newBranchField : nil,
             targetBranchField: project.isGitRepo ? targetBranchField : nil, nameField: nameField,
             directoryNameField: project.isGitRepo ? directoryNameField : nil, notesField: notesField, autoNameState: autoNameState,
-            progressiveInputViews: progressiveInputViews, createButton: createButton)
+            progressiveInputViews: [], createButton: createButton, customizeStack: customizeStack, customizeButton: customizeButton)
         activeAddWorkspaceFormTag = createButton.tag
         if let refs = AddWorkspaceFieldCache.shared.cache[createButton.tag] {
             updateAddWorkspaceBranchInputUI(refs: refs)
@@ -4951,6 +4972,25 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         view.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
     }
 
+    private func labeledInputRow(label text: String, input: NSView, labelWidth: CGFloat = 108) -> NSStackView {
+        let row = NSStackView()
+        row.orientation = .horizontal
+        row.alignment = .centerY
+        row.spacing = 12
+        let labelField = NSTextField(labelWithString: text)
+        labelField.font = .systemFont(ofSize: 12, weight: .semibold)
+        labelField.textColor = .secondaryLabelColor
+        labelField.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([labelField.widthAnchor.constraint(equalToConstant: labelWidth)])
+        labelField.setContentHuggingPriority(.required, for: .horizontal)
+        labelField.setContentCompressionResistancePriority(.required, for: .horizontal)
+        input.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        input.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        row.addArrangedSubview(labelField)
+        row.addArrangedSubview(input)
+        return row
+    }
+
     private func showScrollableDetailStack(_ stack: NSStackView) {
         let scroll = NSScrollView()
         scroll.translatesAutoresizingMaskIntoConstraints = false
@@ -5057,33 +5097,36 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     }
 
     private func storeAddProjectFields(
-        sourcePopup: NSPopUpButton, localSourceSection: NSStackView, cloneSourceSection: NSStackView, dirField: NSTextField,
+        sourceSegmented: NSSegmentedControl, localSourceSection: NSStackView, cloneSourceSection: NSStackView, dirField: NSTextField,
         repoURLField: NSTextField, setupScriptSection: SetupScriptSection, stopScriptSection: StopScriptSection, portsSection: PortsSection,
         processesSection: ProcessesSection, browserSessionsSection: BrowserSessionsSection, agentLaunchersSection: AgentLaunchersSection,
         browseButton: NSButton, progressiveInputViews: [NSView], createButton: NSButton
     ) -> Int {
         let id = UUID().uuidString.hashValue
         AddProjectFieldCache.shared.cache[id] = AddProjectFieldRefs(
-            sourcePopup: sourcePopup, localSourceSection: localSourceSection, cloneSourceSection: cloneSourceSection, dirField: dirField,
+            sourceSegmented: sourceSegmented, localSourceSection: localSourceSection, cloneSourceSection: cloneSourceSection, dirField: dirField,
             repoURLField: repoURLField, browseButton: browseButton, progressiveInputViews: progressiveInputViews, createButton: createButton,
             setupScriptSection: setupScriptSection, stopScriptSection: stopScriptSection, portsSection: portsSection,
             processesSection: processesSection, browserSessionsSection: browserSessionsSection, agentLaunchersSection: agentLaunchersSection)
-        sourcePopup.tag = id
+        sourceSegmented.tag = id
         browseButton.tag = id
         return id
     }
 
     private func storeAddWorkspaceFields(
-        projectID: String, isGitRepo: Bool, branchModePopup: NSPopUpButton?, existingBranchField: NSComboBox?, newBranchField: NSTextField?,
+        projectID: String, isGitRepo: Bool, branchModeSegmented: NSSegmentedControl?, existingBranchField: NSComboBox?, newBranchField: NSTextField?,
         targetBranchField: NSComboBox?, nameField: NSTextField, directoryNameField: NSTextField?, notesField: NSTextField?,
-        autoNameState: AddWorkspaceAutoNameState?, progressiveInputViews: [NSView], createButton: NSButton
+        autoNameState: AddWorkspaceAutoNameState?, progressiveInputViews: [NSView], createButton: NSButton, customizeStack: NSView?,
+        customizeButton: NSButton?
     ) -> Int {
         let id = UUID().uuidString.hashValue
         AddWorkspaceFieldCache.shared.cache[id] = AddWorkspaceFieldRefs(
-            projectID: projectID, isGitRepo: isGitRepo, branchModePopup: branchModePopup, existingBranchField: existingBranchField,
+            projectID: projectID, isGitRepo: isGitRepo, branchModeSegmented: branchModeSegmented, existingBranchField: existingBranchField,
             newBranchField: newBranchField, targetBranchField: targetBranchField, nameField: nameField, directoryNameField: directoryNameField,
-            notesField: notesField, autoNameState: autoNameState, progressiveInputViews: progressiveInputViews, createButton: createButton)
-        branchModePopup?.tag = id
+            notesField: notesField, autoNameState: autoNameState, progressiveInputViews: progressiveInputViews, createButton: createButton,
+            customizeStack: customizeStack, customizeButton: customizeButton)
+        branchModeSegmented?.tag = id
+        customizeButton?.tag = id
         return id
     }
 
@@ -5279,7 +5322,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             let stopScript = refs.stopScriptSection.currentValue.isEmpty ? nil : refs.stopScriptSection.currentValue
             let input: ProjectCreateInput
             let progressDetail: String
-            if refs.sourcePopup.indexOfSelectedItem == 1 {
+            if refs.sourceSegmented.selectedSegment == 1 {
                 let repoURL = refs.repoURLField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
                 guard !repoURL.isEmpty else { throw WorkspaceError.invalidArgument(message: "Git repository URL is required.") }
                 input = ProjectCreateInput(
@@ -5318,7 +5361,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         } catch { showError(error) }
     }
 
-    @objc private func projectSourceChanged(_ sender: NSPopUpButton) {
+    @objc private func projectSourceChanged(_ sender: NSSegmentedControl) {
         guard let refs = AddProjectFieldCache.shared.cache[sender.tag] else { return }
         updateAddProjectSourceUI(refs)
     }
@@ -5342,7 +5385,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     }
 
     private func updateAddProjectSourceUI(_ refs: AddProjectFieldRefs) {
-        let cloneSelected = refs.sourcePopup.indexOfSelectedItem == 1
+        let cloneSelected = refs.sourceSegmented.selectedSegment == 1
         refs.localSourceSection.isHidden = cloneSelected
         refs.cloneSourceSection.isHidden = !cloneSelected
         updateAddProjectProgressiveDisclosure(refs)
@@ -5355,7 +5398,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     }
 
     private func isAddProjectSourceConfigured(_ refs: AddProjectFieldRefs) -> Bool {
-        if refs.sourcePopup.indexOfSelectedItem == 1 { return !refs.repoURLField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+        if refs.sourceSegmented.selectedSegment == 1 { return !refs.repoURLField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
         let directoryPath = refs.dirField.toolTip?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         return !directoryPath.isEmpty
     }
@@ -5379,10 +5422,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     }
 
     private func addWorkspaceBranchMode(refs: AddWorkspaceFieldRefs) -> AddWorkspaceBranchMode {
-        guard let mode = AddWorkspaceBranchMode(rawValue: refs.branchModePopup?.selectedItem?.title == "Create branch" ? "create" : "existing") else {
-            return .existing
-        }
-        return mode
+        refs.branchModeSegmented?.selectedSegment == 0 ? .create : .existing
     }
 
     private func currentAddWorkspaceBranchValue(_ refs: AddWorkspaceFieldRefs) -> String {
@@ -5423,7 +5463,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         refs.createButton.isEnabled = hasBranch
     }
 
-    @objc private func addWorkspaceBranchModeChanged(_ sender: NSPopUpButton) {
+    @objc private func addWorkspaceBranchModeChanged(_ sender: NSSegmentedControl) {
         guard let refs = AddWorkspaceFieldCache.shared.cache[sender.tag] else { return }
         updateAddWorkspaceBranchInputUI(refs: refs)
         let branchValue = currentAddWorkspaceBranchValue(refs)
@@ -5434,6 +5474,14 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         } else {
             window.makeFirstResponder(refs.existingBranchField)
         }
+    }
+
+    @objc private func toggleWorkspaceCustomize(_ sender: NSButton) {
+        guard let refs = AddWorkspaceFieldCache.shared.cache[sender.tag] else { return }
+        guard let customizeStack = refs.customizeStack else { return }
+        let expanding = customizeStack.isHidden
+        customizeStack.isHidden = !expanding
+        sender.image = NSImage(systemSymbolName: expanding ? "chevron.down" : "chevron.right", accessibilityDescription: nil)
     }
 
     @objc private func createWorkspace(_ sender: NSButton) {
