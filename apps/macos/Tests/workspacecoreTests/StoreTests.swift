@@ -38,7 +38,7 @@ final class StoreTests: XCTestCase {
         let workspaceProcessColumns = try readTableColumns(dbURL: dbURL, table: "workspace_processes")
         let projectProcessColumns = try readTableColumns(dbURL: dbURL, table: "project_processes")
         let workspaceForeignKeys = try readSingleInteger(dbURL: dbURL, sql: "SELECT COUNT(*) FROM pragma_foreign_key_list('workspaces')")
-        XCTAssertEqual(version, 4)
+        XCTAssertEqual(version, 5)
         XCTAssertTrue(workspaceColumns.contains("title"))
         XCTAssertTrue(workspaceColumns.contains("notes"))
         XCTAssertTrue(workspaceColumns.contains("is_hidden"))
@@ -64,8 +64,36 @@ final class StoreTests: XCTestCase {
         _ = try SQLiteStore(path: dbURL.path)
         _ = try SQLiteStore(path: dbURL.path)
 
-        XCTAssertEqual(try readSingleInteger(dbURL: dbURL, sql: "SELECT current_version FROM migration_state"), 4)
+        XCTAssertEqual(try readSingleInteger(dbURL: dbURL, sql: "SELECT current_version FROM migration_state"), 5)
         XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent("backups").path))
+    }
+
+    func testCurrentSchemaRejectsBlankPortNamesAtDatabaseLevel() throws {
+        let root = try makeTempDirectory()
+        let dbURL = root.appendingPathComponent("port-name-constraints.db")
+        _ = try SQLiteStore(path: dbURL.path)
+
+        try runSQLiteExec(
+            dbURL: dbURL,
+            sql: """
+                INSERT INTO projects(id, name, dir, is_git, is_collapsed) VALUES ('project-1', 'Project', '/tmp/project', 0, 0);
+                INSERT INTO workspaces(id, project_id, title, dir, is_default, is_archived, is_hidden, is_running)
+                VALUES ('workspace-1', 'project-1', 'feature', '/tmp/project/feature', 0, 0, 0, 0);
+                """)
+
+        XCTAssertThrowsError(
+            try runSQLiteExec(
+                dbURL: dbURL, sql: "INSERT INTO project_port_definitions(id, project_id, name, order_index) VALUES ('ppd-1', 'project-1', ' ', 0);"))
+        XCTAssertThrowsError(
+            try runSQLiteExec(
+                dbURL: dbURL,
+                sql: "INSERT INTO workspace_port_definitions(id, workspace_id, name, order_index) VALUES ('wpd-1', 'workspace-1', char(10), 0);"))
+        XCTAssertThrowsError(
+            try runSQLiteExec(
+                dbURL: dbURL,
+                sql:
+                    "INSERT INTO workspace_ports(workspace_id, port_index, port_number, port_name, definition_id) VALUES ('workspace-1', 0, 3000, char(9), 'wpd-1');"
+            ))
     }
 
     // Tests a released v1 database migrates in place by arranging representative data and asserting current state, backup creation, and integrity validation.
@@ -76,7 +104,7 @@ final class StoreTests: XCTestCase {
 
         let store = try SQLiteStore(path: dbURL.path)
 
-        XCTAssertEqual(try readSingleInteger(dbURL: dbURL, sql: "SELECT current_version FROM migration_state"), 4)
+        XCTAssertEqual(try readSingleInteger(dbURL: dbURL, sql: "SELECT current_version FROM migration_state"), 5)
         XCTAssertEqual(try readSingleText(dbURL: dbURL, sql: "PRAGMA integrity_check"), "ok")
         XCTAssertEqual(try readSingleInteger(dbURL: dbURL, sql: "SELECT COUNT(*) FROM pragma_foreign_key_list('workspace_processes')"), 1)
         XCTAssertEqual(try store.projects().count, 1)
@@ -90,7 +118,7 @@ final class StoreTests: XCTestCase {
 
         let backups = try FileManager.default.contentsOfDirectory(at: root.appendingPathComponent("backups"), includingPropertiesForKeys: nil)
         XCTAssertEqual(backups.count, 1)
-        XCTAssertTrue(backups[0].lastPathComponent.contains("-v1-to-v4.sqlite3"))
+        XCTAssertTrue(backups[0].lastPathComponent.contains("-v1-to-v5.sqlite3"))
     }
 
     // Tests unsupported future schemas fail closed by arranging a DB ahead of the current code and asserting the startup error avoids reset instructions.
@@ -264,10 +292,10 @@ final class StoreTests: XCTestCase {
         XCTAssertEqual(named.count, 2)
         XCTAssertEqual(named[0].name, "API_PORT")
         XCTAssertEqual(named[1].name, "WEB_PORT")
-        try store.setWorkspacePorts(workspaceID: workspace.id, ports: [4000])
+        try store.setWorkspacePorts(workspaceID: workspace.id, ports: [4000], names: ["ADMIN_PORT"])
         XCTAssertEqual(try store.workspacePorts(workspaceID: workspace.id), [4000])
         let namedAfter = try store.workspacePortsNamed(workspaceID: workspace.id)
-        XCTAssertEqual(namedAfter[0].name, "")
+        XCTAssertEqual(namedAfter[0].name, "ADMIN_PORT")
 
         let processes = [ProcessTemplate(name: "api", command: "npm run api"), ProcessTemplate(command: "npm run worker")]
         try store.setWorkspaceProcesses(workspaceID: workspace.id, processes: processes)
@@ -328,6 +356,22 @@ final class StoreTests: XCTestCase {
         try store.setWorkspacePortDefinitions(workspaceID: workspace.id, definitions: [PortDefinition(name: "DB_PORT")])
         XCTAssertEqual(try store.workspacePortDefinitions(workspaceID: workspace.id).count, 1)
         XCTAssertEqual(try store.workspacePortDefinitions(workspaceID: workspace.id)[0].name, "DB_PORT")
+    }
+
+    func testStoreRejectsBlankPortNames() throws {
+        let store = try makeTemporaryStore()
+        let project = makeProjectRecord(dir: try makeTempDirectory().path)
+        let workspace = makeWorkspaceRecord(projectID: project.id, title: "feature", dir: project.dir)
+        try store.upsert(project: project)
+        try store.upsert(workspace: workspace)
+
+        XCTAssertThrowsError(
+            try store.upsert(
+                project: ProjectRecord(
+                    id: project.id, name: project.name, dir: project.dir, isGitRepo: false, defaultBranch: nil, setupScript: nil, stopScript: nil,
+                    ports: [PortDefinition(name: " ")], processes: [], browserSessions: [], agentLaunchers: [])))
+        XCTAssertThrowsError(try store.setWorkspacePortDefinitions(workspaceID: workspace.id, definitions: [PortDefinition(name: "\n")]))
+        XCTAssertThrowsError(try store.setWorkspacePorts(workspaceID: workspace.id, ports: [3000], names: ["\t"]))
     }
 
     // Tests a delete-and-reinsert logical write is atomic by arranging a duplicate-ID failure and asserting the original child rows survive unchanged.
@@ -470,7 +514,7 @@ final class StoreTests: XCTestCase {
 
         let processID = UUID().uuidString
         try store.touchWorkspaceSettings(workspaceID: workspace.id, updatedAt: "now")
-        try store.setWorkspacePorts(workspaceID: workspace.id, ports: [3000])
+        try store.setWorkspacePorts(workspaceID: workspace.id, ports: [3000], names: ["API_PORT"])
         try store.setWorkspacePortDefinitions(workspaceID: workspace.id, definitions: [PortDefinition(name: "API_PORT")])
         try store.setWorkspaceProcesses(workspaceID: workspace.id, processes: [ProcessTemplate(command: "echo one")])
         try store.setWorkspaceBrowserSessions(workspaceID: workspace.id, sessions: [BrowserSession(url: "https://example.com")])
@@ -515,7 +559,7 @@ final class StoreTests: XCTestCase {
         let workspace = makeWorkspaceRecord(projectID: project.id, title: "feature", dir: project.dir)
         try store.upsert(project: project)
         try store.upsert(workspace: workspace)
-        try store.setWorkspacePorts(workspaceID: workspace.id, ports: [3000])
+        try store.setWorkspacePorts(workspaceID: workspace.id, ports: [3000], names: ["API_PORT"])
         try store.upsert(
             window: WindowRecord(
                 id: UUID().uuidString, workspaceID: workspace.id, app: "Google Chrome", title: nil, windowID: 91, role: "browser", orderIndex: 0,
