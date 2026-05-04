@@ -133,7 +133,8 @@ Spaces focuses those windows; it does not decide their geometry.
 - Direct mode also supports deterministic interpolation of Spaces-provided environment variables such as named ports and `SPACES_*` paths inside executable arguments and leading env assignments, for example `PORT=$PORT1 npm run dev`.
 - Direct mode accepts only simple Spaces variable references such as `$PORT1` or `${PORT1}`. Other shell expansions such as `${PORT1:-3000}`, `$$`, or `$?` must be rejected and require Shell mode instead.
 - Shell mode supports composite shell behavior such as `cd x && y`, pipes, redirection, and shell expansion.
-- The global shell choice for shell-mode processes is configurable in Settings and through `spaces config process-shell`; the default is `zsh`.
+- App-level configuration is changed in the app only, not through `spaces`.
+- The global shell choice for shell-mode processes is configurable in Settings; the default is `zsh`.
 - The project and workspace editors validate process commands when they are saved. Direct mode rejects shell-only syntax, while Shell mode requires only a non-empty command.
 - Stop shuts down tracked runtime state and closes tracked dedicated windows safely.
 - Restart performs a stop followed by a fresh launch.

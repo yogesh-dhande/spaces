@@ -36,7 +36,7 @@ export default function CliReferencePage() {
   return (
     <DocsShell
       title="CLI Reference"
-      description="The spaces CLI is intentionally minimal. It exists for `import`, `update`, `start`, `restart`, `open`, global process-shell configuration, and explicit coding-agent lifecycle events through `signal`."
+      description="The spaces CLI is intentionally minimal. It exists for `import`, `update`, `start`, `restart`, `open`, and explicit coding-agent lifecycle events through `signal`."
       pagePath="/docs/cli"
     >
       <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
@@ -46,7 +46,6 @@ export default function CliReferencePage() {
         </p>
         <CodeBlock>{`spaces --version
 spaces import
-spaces config process-shell
 spaces update --notes "Ready for review"
 spaces start
 spaces signal waiting`}</CodeBlock>
@@ -138,24 +137,6 @@ spaces open frontend /path/to/workspace`}</CodeBlock>
       </article>
 
       <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
-        <h2 className="text-2xl font-semibold tracking-tight">Config</h2>
-        <p className="mt-3 text-sm leading-7 text-foreground-soft">
-          <Cmd>spaces config process-shell</Cmd> reads or updates the global shell used for process rows that run in Shell mode.
-        </p>
-        <CodeBlock>{`# Read the current shell
-spaces config process-shell
-
-# Set the shell used for shell-mode processes
-spaces config process-shell zsh
-spaces config process-shell bash
-spaces config process-shell sh`}</CodeBlock>
-        <ul className="mt-3 space-y-1">
-          <Flag name="process-shell" description="The config key for the global shell used by shell-mode processes." />
-          <Flag name="[zsh|bash|sh]" description="Optional value. When omitted, Spaces prints the current setting." />
-        </ul>
-      </article>
-
-      <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
         <h2 className="text-2xl font-semibold tracking-tight">Signal</h2>
         <p className="mt-3 text-sm leading-7 text-foreground-soft">
           Coding agents report their lifecycle explicitly. Spaces uses these events to surface waiting and done states in the app and Alerts. This command records state only; it does not launch or stop an agent.
@@ -177,7 +158,6 @@ spaces signal exit`}</CodeBlock>
       <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
         <h2 className="text-2xl font-semibold tracking-tight">Typical Flow</h2>
         <CodeBlock>{`spaces import --title "bugfix/login-timeout"
-spaces config process-shell zsh
 spaces restart
 spaces update --notes "Investigating flaky OAuth callback"
 spaces signal init
@@ -185,7 +165,7 @@ spaces signal start
 # ... later ...
 spaces signal waiting`}</CodeBlock>
         <p className="mt-2 text-sm leading-7 text-foreground-soft">
-          The GUI remains the primary place to create projects and configure templates. The CLI stays focused on registration, lightweight metadata updates, one global shell preference, launch-time workflows, and agent reporting.
+          The GUI remains the primary place to create projects and configure templates. The CLI stays focused on registration, lightweight metadata updates, launch-time workflows, and agent reporting.
         </p>
       </article>
     </DocsShell>

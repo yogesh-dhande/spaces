@@ -130,6 +130,7 @@ It also lets lifecycle state stay explicit while runtime health is derived from 
 - Setup scripts, stop scripts, and process commands all execute against the workspace-specific environment.
 - Process launch and terminal recovery use tmux so the process lifetime can outlive a missing terminal window and be reattached later.
 - Global app settings include the selected terminal host, and the GUI is the configuration surface for that value.
+- App-level settings such as terminal host and shell-mode process shell are persisted in the shared store but are configured through the app rather than through `spaces`.
 - Global app settings also store the app-toggle hotkey and the separate command-palette hotkey.
 - Global settings also store the shared window focus pulse color and enabled state behind window-scoped keys.
 - Each `ProcessTemplate` persists an `execution_mode` of `direct` or `shell`. Missing fields in older saved data decode as `direct`.
