@@ -53,7 +53,7 @@ final class OrchestratorTests: XCTestCase {
         ) { error in
             XCTAssertEqual(
                 error.localizedDescription,
-                "Invalid argument: Direct mode only supports simple Spaces variables like $PORT1 or ${PORT1}. Unsupported expansion: ${FRONTEND_PORT:-3000}. Command: PORT=${FRONTEND_PORT:-3000} npm run dev"
+                "Invalid argument: Direct mode only supports simple Spaces variables like $API_PORT or ${API_PORT}. Unsupported expansion: ${FRONTEND_PORT:-3000}. Command: PORT=${FRONTEND_PORT:-3000} npm run dev"
             )
         }
     }
@@ -106,6 +106,17 @@ final class OrchestratorTests: XCTestCase {
         }
     }
 
+    func testUpdateProjectConfigRejectsBlankPortNameAtSaveTime() throws {
+        let root = try makeTempDirectory()
+        let store = try makeTemporaryStore()
+        let orchestrator = WorkspaceOrchestrator(store: store)
+        let project = try orchestrator.addProject(dir: root.path)
+
+        XCTAssertThrowsError(
+            try orchestrator.updateProjectConfig(projectID: project.id) { project in project.ports = [PortDefinition(name: " \n\t ")] }
+        ) { error in XCTAssertEqual(error.localizedDescription, "Invalid argument: Port name is required.") }
+    }
+
     func testUpdateWorkspaceSettingsRejectsUnknownDirectProcessVariableAtSaveTime() throws {
         let root = try makeTempDirectory()
         let store = try makeTemporaryStore()
@@ -124,6 +135,37 @@ final class OrchestratorTests: XCTestCase {
                 "Invalid argument: Direct mode only supports Spaces-provided variables. Unknown variable: $TYPO_PORT. Command: PORT=$TYPO_PORT npm run dev"
             )
         }
+    }
+
+    func testUpdateWorkspaceSettingsRejectsSyntheticPortFallbackVariableAtSaveTime() throws {
+        let root = try makeTempDirectory()
+        let store = try makeTemporaryStore()
+        let orchestrator = WorkspaceOrchestrator(store: store)
+        let project = try orchestrator.addProject(dir: root.path)
+        let workspace = try XCTUnwrap(try store.workspaces(projectID: project.id).first)
+
+        XCTAssertThrowsError(
+            try orchestrator.updateWorkspaceSettings(workspaceID: workspace.id) { settings in
+                settings.ports = [PortDefinition(name: "API_PORT")]
+                settings.processes = [ProcessTemplate(name: "web", command: "PORT=$PORT0 npm run dev", executionMode: .direct)]
+            }
+        ) { error in
+            XCTAssertEqual(
+                error.localizedDescription,
+                "Invalid argument: Direct mode only supports Spaces-provided variables. Unknown variable: $PORT0. Command: PORT=$PORT0 npm run dev")
+        }
+    }
+
+    func testUpdateWorkspaceSettingsRejectsBlankPortNameAtSaveTime() throws {
+        let root = try makeTempDirectory()
+        let store = try makeTemporaryStore()
+        let orchestrator = WorkspaceOrchestrator(store: store)
+        let project = try orchestrator.addProject(dir: root.path)
+        let workspace = try XCTUnwrap(try store.workspaces(projectID: project.id).first)
+
+        XCTAssertThrowsError(
+            try orchestrator.updateWorkspaceSettings(workspaceID: workspace.id) { settings in settings.ports = [PortDefinition(name: "  ")] }
+        ) { error in XCTAssertEqual(error.localizedDescription, "Invalid argument: Port name is required.") }
     }
 
     func testValidateShellProcessTemplateAcceptsShellSyntax() throws {
@@ -4077,6 +4119,20 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertEqual(env["API_PORT"], "8080")
         XCTAssertEqual(env["SPACES_WORKSPACE_DIR"], "/tmp/project/ws")
         XCTAssertEqual(env["SPACES_PROJECT_DIR"], "/tmp/project")
+    }
+
+    func testBuildWorkspaceEnvSkipsUnnamedPortsAndDoesNotSynthesizeFallbackKeys() throws {
+        let store = try makeTemporaryStore()
+        let orchestrator = WorkspaceOrchestrator(store: store)
+        let project = makeProjectRecord(dir: "/tmp/project")
+        let workspace = makeWorkspaceRecord(projectID: project.id, title: "dev", dir: "/tmp/project/ws")
+        let ports: [(port: Int, name: String)] = [(port: 3000, name: " "), (port: 8080, name: "API_PORT")]
+
+        let env = orchestrator.buildWorkspaceEnv(project: project, workspace: workspace, namedPorts: ports)
+
+        XCTAssertNil(env["PORT0"])
+        XCTAssertNil(env["PORT1"])
+        XCTAssertEqual(env["API_PORT"], "8080")
     }
 
     // Tests create workspace from worktree infers project and branch by arranging representative inputs and asserting the expected result.

@@ -14,7 +14,7 @@ final class PortAllocatorTests: XCTestCase {
         let workspaceB = makeWorkspaceRecord(projectID: project.id, title: "beta", dir: projectDir)
         try store.upsert(workspace: workspaceA)
         try store.upsert(workspace: workspaceB)
-        try store.setWorkspacePorts(workspaceID: workspaceA.id, ports: [20000, 20001])
+        try store.setWorkspacePorts(workspaceID: workspaceA.id, ports: [20000, 20001], names: ["RESERVED_API", "RESERVED_WEB"])
 
         let allocator = PortAllocator(store: store)
         let definitions = [PortDefinition(name: "API_PORT"), PortDefinition(name: "WEB_PORT")]
@@ -42,7 +42,7 @@ final class PortAllocatorTests: XCTestCase {
         let workspaceB = makeWorkspaceRecord(projectID: project.id, title: "beta", dir: projectDir)
         try store.upsert(workspace: workspaceA)
         try store.upsert(workspace: workspaceB)
-        try store.setWorkspacePorts(workspaceID: workspaceA.id, ports: [20000, 20001, 20002])
+        try store.setWorkspacePorts(workspaceID: workspaceA.id, ports: [20000, 20001, 20002], names: ["RESERVED_1", "RESERVED_2", "RESERVED_3"])
 
         let allocator = PortAllocator(store: store)
         let definitions = [PortDefinition(name: "API_PORT"), PortDefinition(name: "WEB_PORT")]
@@ -83,7 +83,7 @@ final class PortAllocatorTests: XCTestCase {
         try store.upsert(workspace: workspace)
 
         // Store ports directly so reserveExistingPorts finds a non-empty list.
-        try store.setWorkspacePorts(workspaceID: workspace.id, ports: [29001, 29002])
+        try store.setWorkspacePorts(workspaceID: workspace.id, ports: [29001, 29002], names: ["API_PORT", "WEB_PORT"])
 
         let allocator = PortAllocator(store: store)
         // Should not throw and should call PortReserver.shared.reservePorts (non-empty ports path).

@@ -2,7 +2,7 @@ import Foundation
 import SQLite3
 
 enum DatabaseSchema {
-    static let currentVersion = 4
+    static let currentVersion = 5
 
     static let migrationSteps: [DatabaseMigrationStep] = [
         DatabaseMigrationStep(
@@ -14,6 +14,9 @@ enum DatabaseSchema {
         DatabaseMigrationStep(
             fromVersion: 3, toVersion: 4, description: "Add process execution modes", requiresBackup: true, apply: { db in try migrateV3ToV4(db: db) }
         ),
+        DatabaseMigrationStep(
+            fromVersion: 4, toVersion: 5, description: "Require explicit non-empty port names", requiresBackup: true,
+            apply: { db in try migrateV4ToV5(db: db) }),
     ]
 
     static let latestSchemaSQL = """
@@ -31,7 +34,7 @@ enum DatabaseSchema {
         CREATE TABLE IF NOT EXISTS project_port_definitions (
           id TEXT NOT NULL,
           project_id TEXT NOT NULL,
-          name TEXT NOT NULL,
+          name TEXT NOT NULL CHECK (length(trim(name, ' \n\r\t')) > 0),
           order_index INTEGER NOT NULL,
           PRIMARY KEY (project_id, order_index),
           FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
@@ -101,7 +104,7 @@ enum DatabaseSchema {
           workspace_id TEXT NOT NULL,
           port_index INTEGER NOT NULL,
           port_number INTEGER NOT NULL,
-          port_name TEXT NOT NULL DEFAULT '',
+          port_name TEXT NOT NULL CHECK (length(trim(port_name, ' \n\r\t')) > 0),
           definition_id TEXT NOT NULL DEFAULT '',
           PRIMARY KEY (workspace_id, port_index),
           FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE
@@ -110,7 +113,7 @@ enum DatabaseSchema {
         CREATE TABLE IF NOT EXISTS workspace_port_definitions (
           id TEXT NOT NULL,
           workspace_id TEXT NOT NULL,
-          name TEXT NOT NULL,
+          name TEXT NOT NULL CHECK (length(trim(name, ' \n\r\t')) > 0),
           order_index INTEGER NOT NULL,
           PRIMARY KEY (workspace_id, order_index),
           FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE
@@ -614,6 +617,60 @@ enum DatabaseSchema {
     private static func migrateV3ToV4(db: OpaquePointer) throws {
         try exec(db: db, sql: "ALTER TABLE project_processes ADD COLUMN execution_mode TEXT NOT NULL DEFAULT 'direct';")
         try exec(db: db, sql: "ALTER TABLE workspace_processes ADD COLUMN execution_mode TEXT NOT NULL DEFAULT 'direct';")
+    }
+
+    private static func migrateV4ToV5(db: OpaquePointer) throws {
+        try rebuildTable(
+            db: db, tableName: "project_port_definitions",
+            createSQL: """
+                CREATE TABLE project_port_definitions (
+                  id TEXT NOT NULL,
+                  project_id TEXT NOT NULL,
+                  name TEXT NOT NULL CHECK (length(trim(name, ' \n\r\t')) > 0),
+                  order_index INTEGER NOT NULL,
+                  PRIMARY KEY (project_id, order_index),
+                  FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
+                )
+                """,
+            copySQL: """
+                INSERT INTO project_port_definitions(id, project_id, name, order_index)
+                SELECT id, project_id, name, order_index FROM project_port_definitions_v1
+                """)
+
+        try rebuildTable(
+            db: db, tableName: "workspace_ports",
+            createSQL: """
+                CREATE TABLE workspace_ports (
+                  workspace_id TEXT NOT NULL,
+                  port_index INTEGER NOT NULL,
+                  port_number INTEGER NOT NULL,
+                  port_name TEXT NOT NULL CHECK (length(trim(port_name, ' \n\r\t')) > 0),
+                  definition_id TEXT NOT NULL DEFAULT '',
+                  PRIMARY KEY (workspace_id, port_index),
+                  FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE
+                )
+                """,
+            copySQL: """
+                INSERT INTO workspace_ports(workspace_id, port_index, port_number, port_name, definition_id)
+                SELECT workspace_id, port_index, port_number, port_name, definition_id FROM workspace_ports_v1
+                """)
+
+        try rebuildTable(
+            db: db, tableName: "workspace_port_definitions",
+            createSQL: """
+                CREATE TABLE workspace_port_definitions (
+                  id TEXT NOT NULL,
+                  workspace_id TEXT NOT NULL,
+                  name TEXT NOT NULL CHECK (length(trim(name, ' \n\r\t')) > 0),
+                  order_index INTEGER NOT NULL,
+                  PRIMARY KEY (workspace_id, order_index),
+                  FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE
+                )
+                """,
+            copySQL: """
+                INSERT INTO workspace_port_definitions(id, workspace_id, name, order_index)
+                SELECT id, workspace_id, name, order_index FROM workspace_port_definitions_v1
+                """)
     }
 
     private static func exec(db: OpaquePointer, sql: String) throws {

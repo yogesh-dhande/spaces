@@ -44,6 +44,7 @@ public final class SQLiteStore {
     }
 
     public func upsert(project: ProjectRecord) throws {
+        let normalizedPortDefinitions = try validatedPortDefinitions(project.ports)
         try withImmediateTransaction {
             try execute(
                 sql: """
@@ -63,7 +64,7 @@ public final class SQLiteStore {
                     project.isCollapsed ? "1" : "0", project.setupScript ?? "", project.stopScript ?? "",
                 ])
             try execute(sql: "DELETE FROM project_port_definitions WHERE project_id = ?", bindings: [project.id])
-            for (index, definition) in project.ports.enumerated() {
+            for (index, definition) in normalizedPortDefinitions.enumerated() {
                 try execute(
                     sql: "INSERT INTO project_port_definitions(id, project_id, name, order_index) VALUES (?, ?, ?, ?)",
                     bindings: [definition.id, project.id, definition.name, String(index)])
@@ -296,10 +297,11 @@ public final class SQLiteStore {
     }
 
     public func setWorkspacePorts(workspaceID: String, ports: [Int], names: [String] = [], definitionIDs: [String] = []) throws {
+        let normalizedNames = try validatedPortNames(names, expectedCount: ports.count)
         try withImmediateTransaction {
             try execute(sql: "DELETE FROM workspace_ports WHERE workspace_id = ?", bindings: [workspaceID])
             for (index, port) in ports.enumerated() {
-                let name = index < names.count ? names[index] : ""
+                let name = normalizedNames[index]
                 let definitionID = index < definitionIDs.count ? definitionIDs[index] : ""
                 try execute(
                     sql: "INSERT INTO workspace_ports(workspace_id, port_index, port_number, port_name, definition_id) VALUES (?, ?, ?, ?, ?)",
@@ -333,9 +335,10 @@ public final class SQLiteStore {
     }
 
     public func setWorkspacePortDefinitions(workspaceID: String, definitions: [PortDefinition]) throws {
+        let normalizedDefinitions = try validatedPortDefinitions(definitions)
         try withImmediateTransaction {
             try execute(sql: "DELETE FROM workspace_port_definitions WHERE workspace_id = ?", bindings: [workspaceID])
-            for (index, definition) in definitions.enumerated() {
+            for (index, definition) in normalizedDefinitions.enumerated() {
                 try execute(
                     sql: "INSERT INTO workspace_port_definitions(id, workspace_id, name, order_index) VALUES (?, ?, ?, ?)",
                     bindings: [definition.id, workspaceID, definition.name, String(index)])
@@ -350,6 +353,30 @@ public final class SQLiteStore {
             guard row.count >= 2 else { return nil }
             return PortDefinition(id: row[0].isEmpty ? UUID().uuidString : row[0], name: row[1])
         }
+    }
+
+    private func validatedPortDefinitions(_ definitions: [PortDefinition]) throws -> [PortDefinition] {
+        try definitions.map { definition in
+            let trimmedName = try validatedPortName(definition.name)
+            return PortDefinition(id: definition.id, name: trimmedName)
+        }
+    }
+
+    private func validatedPortNames(_ names: [String], expectedCount: Int) throws -> [String] {
+        guard names.count == expectedCount else {
+            throw NSError(
+                domain: "spaces.store", code: 2,
+                userInfo: [NSLocalizedDescriptionKey: "Expected \(expectedCount) port names for \(expectedCount) stored ports, got \(names.count)."])
+        }
+        return try names.map(validatedPortName)
+    }
+
+    private func validatedPortName(_ name: String) throws -> String {
+        let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedName.isEmpty else {
+            throw NSError(domain: "spaces.store", code: 2, userInfo: [NSLocalizedDescriptionKey: "Port name is required."])
+        }
+        return trimmedName
     }
 
     public func setWorkspaceProcesses(workspaceID: String, processes: [ProcessTemplate]) throws {

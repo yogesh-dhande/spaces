@@ -239,6 +239,7 @@ public final class WorkspaceOrchestrator {
         let previousProcesses = existing.processes
         update(&existing)
         existing.ports = normalizePortDefinitionIDs(previous: previousPorts, updated: existing.ports)
+        existing.ports = try normalizedPortDefinitions(existing.ports)
         existing.processes = normalizeProcessTemplateIDs(previous: previousProcesses, updated: existing.processes)
         try validateProcessTemplates(existing.processes, allowedVariableNames: directProcessVariableNames(portDefinitions: existing.ports))
         try validateWorkspaceFocusNames(
@@ -418,6 +419,7 @@ public final class WorkspaceOrchestrator {
             id: normalizedID, name: record.name, dir: record.dir, isGitRepo: record.isGitRepo, defaultBranch: record.defaultBranch,
             setupScript: record.setupScript, stopScript: record.stopScript, ports: record.ports, processes: record.processes,
             browserSessions: record.browserSessions, agentLaunchers: record.agentLaunchers)
+        record.ports = try normalizedPortDefinitions(record.ports)
         try validateProcessTemplates(record.processes, allowedVariableNames: directProcessVariableNames(portDefinitions: record.ports))
         try validateUniqueConfiguredFocusNames(
             processes: record.processes, browserSessions: record.browserSessions, agentLaunchers: record.agentLaunchers)
@@ -2291,18 +2293,15 @@ public final class WorkspaceOrchestrator {
             return
                 "Process commands in Direct mode must be direct executable invocations without shell syntax: \(raw). Use Shell mode for composite commands."
         case .unsupportedVariableExpansion(let expansion):
-            return "Direct mode only supports simple Spaces variables like $PORT1 or ${PORT1}. Unsupported expansion: \(expansion). Command: \(raw)"
+            return
+                "Direct mode only supports simple Spaces variables like $API_PORT or ${API_PORT}. Unsupported expansion: \(expansion). Command: \(raw)"
         case .unknownVariable(let variable):
             return "Direct mode only supports Spaces-provided variables. Unknown variable: \(variable). Command: \(raw)"
         }
     }
 
     private func directProcessVariableNames(portDefinitions: [PortDefinition]) -> Set<String> {
-        builtInDirectProcessVariableNames.union(
-            portDefinitions.compactMap { definition in
-                let trimmed = definition.name.trimmingCharacters(in: .whitespacesAndNewlines)
-                return trimmed.isEmpty ? nil : trimmed
-            })
+        builtInDirectProcessVariableNames.union(portDefinitions.map(\.name))
     }
 
     public func directProcessVariableNamesForValidation(portDefinitions: [PortDefinition]) -> Set<String> {
@@ -3185,6 +3184,14 @@ public final class WorkspaceOrchestrator {
         }
     }
 
+    private func normalizedPortDefinitions(_ definitions: [PortDefinition]) throws -> [PortDefinition] {
+        try definitions.map { definition in
+            let trimmedName = definition.name.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmedName.isEmpty else { throw WorkspaceError.invalidArgument(message: "Port name is required.") }
+            return PortDefinition(id: definition.id, name: trimmedName)
+        }
+    }
+
     private func normalizeProcessTemplateIDs(previous: [ProcessTemplate], updated: [ProcessTemplate]) -> [ProcessTemplate] {
         let previousByID = Dictionary(uniqueKeysWithValues: previous.map { ($0.id, $0) })
         let previousNames = previous.compactMap { template -> String? in
@@ -3368,7 +3375,8 @@ public final class WorkspaceOrchestrator {
     func buildWorkspaceEnv(project: ProjectRecord, workspace: WorkspaceRecord, namedPorts: [(port: Int, name: String)]) -> [String: String] {
         var env: [String: String] = [:]
         for namedPort in namedPorts {
-            let key = namedPort.name.isEmpty ? "PORT\(env.count)" : namedPort.name
+            let key = namedPort.name.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !key.isEmpty else { continue }
             env[key] = String(namedPort.port)
         }
         env["SPACES_WORKSPACE_DIR"] = workspace.dir
