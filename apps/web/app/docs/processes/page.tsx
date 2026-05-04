@@ -34,11 +34,14 @@ export default function ProcessesDocsPage() {
           <li>• <strong>Shell</strong> &mdash; Spaces hands the full command string to the shell selected in Spaces Settings. Use this when the command depends on shell syntax instead of a single executable plus arguments.</li>
         </ul>
         <p className="mt-3 text-sm leading-7 text-foreground-soft">
-          Use Direct mode for commands like <code>npm run dev</code>, <code>python manage.py runserver</code>, or <code>scripts/swiftpm.sh build</code>. Use Shell mode when you need shell composition such as <code>cd</code>, <code>&amp;&amp;</code>, pipes, redirects, or shell expansion.
+          Use Direct mode for commands like <code>npm run dev</code>, <code>python manage.py runserver</code>, or <code>scripts/swiftpm.sh build</code>. Use Shell mode when you need shell composition such as <code>cd</code>, <code>&amp;&amp;</code>, pipes, redirects, or general shell expansion.
         </p>
         <pre className="mt-3 w-full max-w-full min-w-0 overflow-x-auto whitespace-pre-wrap break-words rounded-lg border border-line/70 bg-background-soft/60 p-3 text-xs leading-6 text-foreground">
           <code>{`# Direct mode
 PORT=$FRONTEND_PORT npm run dev
+
+# Direct mode with braces
+PORT=\${FRONTEND_PORT} npm run dev
 
 # Shell mode
 cd frontend && PORT=$FRONTEND_PORT npm run dev
@@ -47,7 +50,7 @@ cd frontend && PORT=$FRONTEND_PORT npm run dev
 npm run dev | tee .logs/frontend.log`}</code>
         </pre>
         <p className="mt-3 text-sm leading-7 text-foreground-soft">
-          Direct mode rejects shell-only syntax such as <code>&amp;&amp;</code>, pipes, redirects, command substitution, backticks, and raw shell expansion. Shell mode only requires a non-empty command and leaves parsing to the configured shell.
+          Direct mode rejects shell-only syntax such as <code>&amp;&amp;</code>, pipes, redirects, command substitution, backticks, and unsupported shell expansion. In Direct mode, Spaces only expands its own variables using <code>$NAME</code> or <code>${"{NAME}"}</code>. Forms like <code>${"{NAME:-fallback}"}</code>, <code>$$</code>, and <code>$?</code> require Shell mode. Shell mode only requires a non-empty command and leaves parsing to the configured shell.
         </p>
         <p className="mt-3 text-sm leading-7 text-foreground-soft">
           Shell mode uses the global shell selected in Spaces Settings. The default is <code>zsh</code>, and you can switch it globally if your team standardizes on a different shell.
@@ -77,7 +80,7 @@ SPACES_PROJECT_DIR                # project directory
 SPACES_WORKSPACE_DIR              # this workspace's directory`}</code>
         </pre>
         <p className="mt-3 text-sm leading-7 text-foreground-soft">
-          Reference them directly in your command, for example <code>PORT=$FRONTEND_PORT npm run dev</code>.
+          Reference them directly in your command, for example <code>PORT=$FRONTEND_PORT npm run dev</code>. Direct mode accepts only Spaces-provided variables and keeps the original command text in validation errors when a variable name or expansion form is unsupported.
         </p>
       </article>
 

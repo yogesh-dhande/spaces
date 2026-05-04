@@ -34,16 +34,94 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertNil(try store.appConfig().editor)
     }
 
-    func testValidateDirectProcessTemplateRejectsShellSyntaxBeforeLaunch() throws {
+    func testValidateDirectProcessTemplateAcceptsWorkspaceVariableInterpolation() throws {
+        let store = try makeTemporaryStore()
+        let orchestrator = WorkspaceOrchestrator(store: store)
+
+        XCTAssertNoThrow(
+            try orchestrator.validateProcessTemplate(ProcessTemplate(name: "web", command: "PORT=$FRONTEND_PORT npm run dev", executionMode: .direct))
+        )
+    }
+
+    func testValidateDirectProcessTemplateRejectsUnsupportedExpansionWithRawCommand() throws {
         let store = try makeTemporaryStore()
         let orchestrator = WorkspaceOrchestrator(store: store)
 
         XCTAssertThrowsError(
-            try orchestrator.validateProcessTemplate(ProcessTemplate(name: "web", command: "PORT=$FRONTEND_PORT npm run dev", executionMode: .direct))
+            try orchestrator.validateProcessTemplate(
+                ProcessTemplate(name: "web", command: "PORT=${FRONTEND_PORT:-3000} npm run dev", executionMode: .direct))
         ) { error in
             XCTAssertEqual(
                 error.localizedDescription,
-                "Invalid argument: Process commands in Direct mode must be direct executable invocations without shell syntax: PORT=$FRONTEND_PORT npm run dev. Use Shell mode for composite commands."
+                "Invalid argument: Direct mode only supports simple Spaces variables like $PORT1 or ${PORT1}. Unsupported expansion: ${FRONTEND_PORT:-3000}. Command: PORT=${FRONTEND_PORT:-3000} npm run dev"
+            )
+        }
+    }
+
+    func testValidateDirectProcessTemplateStillRejectsShellSyntaxBeforeLaunch() throws {
+        let store = try makeTemporaryStore()
+        let orchestrator = WorkspaceOrchestrator(store: store)
+
+        XCTAssertThrowsError(
+            try orchestrator.validateProcessTemplate(ProcessTemplate(name: "web", command: "npm run dev | tee log.txt", executionMode: .direct))
+        ) { error in
+            XCTAssertEqual(
+                error.localizedDescription,
+                "Invalid argument: Process commands in Direct mode must be direct executable invocations without shell syntax: npm run dev | tee log.txt. Use Shell mode for composite commands."
+            )
+        }
+    }
+
+    func testValidateDirectProcessTemplateRejectsUnknownVariableWhenWorkspaceEnvIsKnown() throws {
+        let store = try makeTemporaryStore()
+        let orchestrator = WorkspaceOrchestrator(store: store)
+
+        XCTAssertThrowsError(
+            try orchestrator.validateProcessTemplate(
+                ProcessTemplate(name: "web", command: "PORT=$MISSING_PORT npm run dev", executionMode: .direct), env: ["FRONTEND_PORT": "24001"])
+        ) { error in
+            XCTAssertEqual(
+                error.localizedDescription,
+                "Invalid argument: Direct mode only supports Spaces-provided variables. Unknown variable: $MISSING_PORT. Command: PORT=$MISSING_PORT npm run dev"
+            )
+        }
+    }
+
+    func testUpdateProjectConfigRejectsUnknownDirectProcessVariableAtSaveTime() throws {
+        let root = try makeTempDirectory()
+        let store = try makeTemporaryStore()
+        let orchestrator = WorkspaceOrchestrator(store: store)
+        let project = try orchestrator.addProject(dir: root.path)
+
+        XCTAssertThrowsError(
+            try orchestrator.updateProjectConfig(projectID: project.id) { project in
+                project.ports = [PortDefinition(name: "FRONTEND_PORT")]
+                project.processes = [ProcessTemplate(name: "web", command: "PORT=$TYPO_PORT npm run dev", executionMode: .direct)]
+            }
+        ) { error in
+            XCTAssertEqual(
+                error.localizedDescription,
+                "Invalid argument: Direct mode only supports Spaces-provided variables. Unknown variable: $TYPO_PORT. Command: PORT=$TYPO_PORT npm run dev"
+            )
+        }
+    }
+
+    func testUpdateWorkspaceSettingsRejectsUnknownDirectProcessVariableAtSaveTime() throws {
+        let root = try makeTempDirectory()
+        let store = try makeTemporaryStore()
+        let orchestrator = WorkspaceOrchestrator(store: store)
+        let project = try orchestrator.addProject(dir: root.path)
+        let workspace = try XCTUnwrap(try store.workspaces(projectID: project.id).first)
+
+        XCTAssertThrowsError(
+            try orchestrator.updateWorkspaceSettings(workspaceID: workspace.id) { settings in
+                settings.ports = [PortDefinition(name: "FRONTEND_PORT")]
+                settings.processes = [ProcessTemplate(name: "web", command: "PORT=$TYPO_PORT npm run dev", executionMode: .direct)]
+            }
+        ) { error in
+            XCTAssertEqual(
+                error.localizedDescription,
+                "Invalid argument: Direct mode only supports Spaces-provided variables. Unknown variable: $TYPO_PORT. Command: PORT=$TYPO_PORT npm run dev"
             )
         }
     }
@@ -2423,6 +2501,33 @@ final class OrchestratorTests: XCTestCase {
 
         XCTAssertEqual(mockTmux.lastStartedCommand, ["npm", "run", "dev"])
         XCTAssertEqual(mockTmux.lastStartedEnv["WORKSPACE"], "workspace")
+        XCTAssertTrue(mockIterm.lastCommand?.contains("tmux attach-session -t") == true)
+        XCTAssertFalse(mockIterm.lastCommand?.contains("bash -lc") == true)
+    }
+
+    func testLaunchWorkspaceProcessesResolveWorkspaceVariableInterpolationWithoutShellWrapping() throws {
+        let (orchestrator, _, _, workspace, _, mockIterm, mockTmux) = try makeMockItermOrchestratorWithWorkspace()
+
+        try orchestrator.updateWorkspaceSettings(workspaceID: workspace.id) { settings in
+            settings.ports = [PortDefinition(name: "PORT1")]
+            settings.processes = [ProcessTemplate(name: "web", command: "PORT=$PORT1 npm run dev")]
+        }
+
+        try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) {
+            try withEnv(
+                name: "YABAI_WINDOWS_JSON",
+                value:
+                    #"[{"id":447,"pid":11,"app":"iTerm2","title":"web","space":1,"display":1,"is-sticky":false,"is-hidden":false,"is-visible":true,"is-native-fullscreen":false}]"#
+            ) {
+                try withEnv(name: "YABAI_FOCUSED_ID", value: "447") {
+                    try withEnv(name: "YABAI_FOCUSED_APP", value: "iTerm2") { try orchestrator.launchWorkspace(workspaceID: workspace.id) }
+                }
+            }
+        }
+
+        XCTAssertEqual(mockTmux.lastStartedCommand, ["npm", "run", "dev"])
+        XCTAssertEqual(mockTmux.lastStartedEnv["PORT"], mockTmux.lastStartedEnv["PORT1"])
+        XCTAssertNotNil(mockTmux.lastStartedEnv["PORT1"])
         XCTAssertTrue(mockIterm.lastCommand?.contains("tmux attach-session -t") == true)
         XCTAssertFalse(mockIterm.lastCommand?.contains("bash -lc") == true)
     }

@@ -2979,7 +2979,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             self?.presentProjectPortRemoveConfirmation(port: port, confirm: confirm)
         }
         processesSection.onCommit = { [weak self] _ in self?.projectHasUnsavedChanges = true }
-        processesSection.validateProcess = { [weak self] process in try self?.orchestrator.validateProcessTemplate(process) }
+        processesSection.validateProcess = { [weak self] process in
+            try self?.orchestrator.validateProcessTemplate(
+                process, allowedVariableNames: self?.orchestrator.directProcessVariableNamesForValidation(portDefinitions: fullProject?.ports ?? []))
+        }
         processesSection.presentValidationError = { [weak self] error in self?.showError(error) }
         processesSection.presentRemoveConfirmation = { [weak self] process, confirm in
             self?.presentProjectProcessRemoveConfirmation(process: process, confirm: confirm)
@@ -3828,7 +3831,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let runningProcesses = (try? orchestrator.runningProcesses(workspaceID: workspace.id)) ?? []
         let runningProcessIDByName = Dictionary(uniqueKeysWithValues: runningProcesses.map { (Self.processRuntimeKey(name: $0.templateName), $0.id) })
         let section = ProcessesSection(processes: config.processes)
-        section.validateProcess = { [weak self] process in try self?.orchestrator.validateProcessTemplate(process) }
+        section.validateProcess = { [weak self] process in
+            try self?.orchestrator.validateProcessTemplate(
+                process, allowedVariableNames: self?.orchestrator.directProcessVariableNamesForValidation(portDefinitions: config.ports))
+        }
         section.presentValidationError = { [weak self] error in self?.showError(error) }
         section.onCommit = { [weak self] updated in
             guard let self else { return }

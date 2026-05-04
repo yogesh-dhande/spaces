@@ -130,6 +130,8 @@ Spaces focuses those windows; it does not decide their geometry.
 - Editing workspace settings while a workspace is already running must not start or stop browser sessions or coding agents as part of save-time reconciliation. Process name and on-exit edits should update tracked running processes immediately, while command edits should require explicit confirmation to restart the affected running processes; canceling that prompt should leave the existing process configuration unchanged. New configured rows should appear immediately with their non-running status so the user can decide what to open or recover.
 - Process commands support two execution modes: `Direct` runs an executable with arguments, while `Shell` runs the command through the app-wide shell setting.
 - Direct mode is the recommended deterministic path for plain executable commands such as `scripts/swiftpm.sh build`.
+- Direct mode also supports deterministic interpolation of Spaces-provided environment variables such as named ports and `SPACES_*` paths inside executable arguments and leading env assignments, for example `PORT=$PORT1 npm run dev`.
+- Direct mode accepts only simple Spaces variable references such as `$PORT1` or `${PORT1}`. Other shell expansions such as `${PORT1:-3000}`, `$$`, or `$?` must be rejected and require Shell mode instead.
 - Shell mode supports composite shell behavior such as `cd x && y`, pipes, redirection, and shell expansion.
 - The global shell choice for shell-mode processes is configurable in Settings and through `spaces config process-shell`; the default is `zsh`.
 - The project and workspace editors validate process commands when they are saved. Direct mode rejects shell-only syntax, while Shell mode requires only a non-empty command.
