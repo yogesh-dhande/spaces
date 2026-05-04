@@ -337,15 +337,15 @@ extension ProcessRowView {
         ) {
             commandField.stringValue = command
         }
-        if let modePopup = allFields.compactMap({ $0 as? NSPopUpButton }).first(where: {
+        if let modeSegmented = allFields.compactMap({ $0 as? NSSegmentedControl }).first(where: {
             $0.accessibilityIdentifier() == "process-row-edit-execution-mode"
-        }) {
-            modePopup.selectItem(withTitle: executionMode.displayName)
+        }), let idx = ProcessExecutionMode.allCases.firstIndex(of: executionMode) {
+            modeSegmented.selectedSegment = idx
         }
-        if let onExitPopup = allFields.compactMap({ $0 as? NSPopUpButton }).first(where: {
+        if let onExitSegmented = allFields.compactMap({ $0 as? NSSegmentedControl }).first(where: {
             $0.accessibilityIdentifier() == "process-row-edit-on-exit"
-        }) {
-            onExitPopup.selectItem(withTitle: onExit.rawValue)
+        }), let idx = ProcessExitAction.allCases.firstIndex(of: onExit) {
+            onExitSegmented.selectedSegment = idx
         }
     }
 
