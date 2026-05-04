@@ -4121,6 +4121,17 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertEqual(env["SPACES_PROJECT_DIR"], "/tmp/project")
     }
 
+    func testBuildWorkspaceEnvDoesNotIncludePath() throws {
+        let store = try makeTemporaryStore()
+        let orchestrator = WorkspaceOrchestrator(store: store)
+        let project = makeProjectRecord(dir: "/tmp/project")
+        let workspace = makeWorkspaceRecord(projectID: project.id, title: "dev", dir: "/tmp/project/ws")
+
+        let env = orchestrator.buildWorkspaceEnv(project: project, workspace: workspace, namedPorts: [])
+
+        XCTAssertNil(env["PATH"])
+    }
+
     func testBuildWorkspaceEnvSkipsUnnamedPortsAndDoesNotSynthesizeFallbackKeys() throws {
         let store = try makeTemporaryStore()
         let orchestrator = WorkspaceOrchestrator(store: store)
