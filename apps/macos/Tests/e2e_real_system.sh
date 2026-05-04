@@ -2490,7 +2490,7 @@ run_hotkey_visibility_profiling() {
   wait_for_condition "frontmost_app" "Google Chrome"
   for (( iteration = 1; iteration <= REAL_SYSTEM_PROFILE_REPETITIONS; iteration++ )); do
     send_spaces_command_palette_hotkey_with_ack
-    wait_for_spaces_command_palette_presented
+    wait_for_spaces_command_palette_presented "0"
     record_toggle_palette_metric "external_app.keyboard_toggle_palette.palette" "show" "0" "$host" "single"
 
     send_spaces_command_palette_hotkey_with_ack

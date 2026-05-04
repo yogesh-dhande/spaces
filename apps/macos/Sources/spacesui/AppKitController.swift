@@ -2497,10 +2497,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         } else {
             overlay = NSView()
             overlay.wantsLayer = true
-            overlay.layer?.cornerRadius = UIRadius.large
-            overlay.layer?.borderWidth = 1
-            overlay.layer?.borderColor = NSColor.systemRed.withAlphaComponent(0.35).cgColor
-            overlay.layer?.backgroundColor = NSColor.windowBackgroundColor.withAlphaComponent(0.96).cgColor
             overlay.translatesAutoresizingMaskIntoConstraints = false
 
             let stack = NSStackView()
@@ -2546,6 +2542,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             windowIssueToastActionButton = actionButton
         }
 
+        refreshWindowIssueToastAppearance()
         titleLabel.stringValue = title
         detailLabel.stringValue = detail
         actionButton.title = actionTitle ?? ""
@@ -2568,6 +2565,17 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         windowIssueToastDismissTask = nil
         windowIssueToastActionHandler = nil
         windowIssueToastOverlay?.isHidden = true
+    }
+
+    private func refreshWindowIssueToastAppearance() {
+        guard let layer = windowIssueToastOverlay?.layer else { return }
+        layer.cornerRadius = UIRadius.large
+        layer.borderWidth = 1
+        let appearance = window?.contentView?.effectiveAppearance ?? window?.effectiveAppearance ?? NSApp.effectiveAppearance
+        appearance.performAsCurrentDrawingAppearance {
+            layer.borderColor = NSColor.systemRed.withAlphaComponent(0.35).cgColor
+            layer.backgroundColor = NSColor.windowBackgroundColor.withAlphaComponent(0.96).cgColor
+        }
     }
 
     @objc private func handleWindowIssueToastAction() {
