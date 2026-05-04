@@ -11,7 +11,6 @@ public struct SpacesCommand: ParsableCommand {
               - All settings are stored in ~/.spaces/spaces.db.
               - Runtime state is stored in ~/.spaces/spaces.db and migrated in place with additive schema changes.
               - Paths default to the current directory when omitted.
-              - `config process-shell [zsh|bash|sh]` reads or updates the global shell used for shell-mode processes.
               - `import` registers the current directory by default and can apply `--title` or `--notes` when creating or re-importing a workspace.
               - `update` mutates workspace metadata after creation.
               - `start` waits for pending/running setup to complete and fails with the setup error if setup failed. It ensures a workspace and all its processes are running: launches when stopped; when already running, restarts any exited processes. Windows open without activating the app.
@@ -19,9 +18,7 @@ public struct SpacesCommand: ParsableCommand {
               - `open <name>` resolves one named tracked browser, process, or coding-agent target in the workspace and brings it to the foreground.
               - Agent events stay explicit. `import`, `start`, and `restart` do not imply agent lifecycle. `signal <event>` records those lifecycle transitions. Events from unsupported terminal hosts are dropped. Agent events fired from tmux are rejected because Spaces does not support coding agents running inside tmux.
             """, version: AppVersion.current,
-        subcommands: [
-            ImportCommand.self, UpdateCommand.self, StartCommand.self, RestartCommand.self, OpenCommand.self, ConfigCommand.self, SignalCommand.self,
-        ])
+        subcommands: [ImportCommand.self, UpdateCommand.self, StartCommand.self, RestartCommand.self, OpenCommand.self, SignalCommand.self])
 
     public init() {}
 }
@@ -150,39 +147,6 @@ struct OpenCommand: ParsableCommand {
         try context.output.emit(
             text: "Opened workspace target \(name)\tworkspace=\(workspace.id)",
             json: MutationResultPayload(message: "Opened workspace target.", resource: updatedWorkspace))
-    }
-}
-
-struct ConfigCommand: ParsableCommand {
-    static let configuration = CommandConfiguration(
-        commandName: "config", abstract: "Read or update global Spaces configuration.", subcommands: [ProcessShellConfigCommand.self])
-}
-
-struct ProcessShellConfigCommand: ParsableCommand {
-    static let configuration = CommandConfiguration(
-        commandName: "process-shell", abstract: "Read or set the global shell used for shell-mode processes.")
-
-    @Argument(help: ArgumentHelp("Shell to use for shell-mode processes.", discussion: "Allowed values: zsh, bash, sh.")) var shell: String?
-
-    func run() throws {
-        let context = CLIContext()
-        let orchestrator = try context.makeOrchestrator()
-
-        if let shell {
-            guard let parsedShell = ProcessShell(rawValue: shell) else {
-                throw ValidationError("Unsupported shell '\(shell)'. Allowed values: zsh, bash, sh.")
-            }
-            let updated = try orchestrator.updateProcessShell(parsedShell)
-            try context.output.emit(
-                text: "process-shell\t\(updated.processShell.rawValue)",
-                json: MutationResultPayload(message: "Updated process shell.", resource: ["processShell": updated.processShell.rawValue]))
-            return
-        }
-
-        let config = try orchestrator.appConfig()
-        try context.output.emit(
-            text: "process-shell\t\(config.processShell.rawValue)",
-            json: MutationResultPayload(message: "Read process shell.", resource: ["processShell": config.processShell.rawValue]))
     }
 }
 
