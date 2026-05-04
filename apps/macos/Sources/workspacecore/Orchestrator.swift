@@ -240,7 +240,7 @@ public final class WorkspaceOrchestrator {
         update(&existing)
         existing.ports = normalizePortDefinitionIDs(previous: previousPorts, updated: existing.ports)
         existing.processes = normalizeProcessTemplateIDs(previous: previousProcesses, updated: existing.processes)
-        try validateProcessTemplates(existing.processes)
+        try validateProcessTemplates(existing.processes, allowedVariableNames: directProcessVariableNames(portDefinitions: existing.ports))
         try validateWorkspaceFocusNames(
             workspaceID: workspace.id, processes: existing.processes, browserSessions: existing.browserSessions,
             agentLaunchers: existing.agentLaunchers, agentWindows: try store.agentWindows(workspaceID: workspace.id))
@@ -260,7 +260,7 @@ public final class WorkspaceOrchestrator {
             throw WorkspaceError.missingProject(dir: project.dir)
         }
         let normalizedProcesses = normalizeProcessTemplateIDs(previous: existing.processes, updated: processes)
-        try validateProcessTemplates(normalizedProcesses)
+        try validateProcessTemplates(normalizedProcesses, allowedVariableNames: directProcessVariableNames(portDefinitions: existing.ports))
         try validateWorkspaceFocusNames(
             workspaceID: workspace.id, processes: normalizedProcesses, browserSessions: existing.browserSessions,
             agentLaunchers: existing.agentLaunchers, agentWindows: try store.agentWindows(workspaceID: workspace.id))
@@ -418,7 +418,7 @@ public final class WorkspaceOrchestrator {
             id: normalizedID, name: record.name, dir: record.dir, isGitRepo: record.isGitRepo, defaultBranch: record.defaultBranch,
             setupScript: record.setupScript, stopScript: record.stopScript, ports: record.ports, processes: record.processes,
             browserSessions: record.browserSessions, agentLaunchers: record.agentLaunchers)
-        try validateProcessTemplates(record.processes)
+        try validateProcessTemplates(record.processes, allowedVariableNames: directProcessVariableNames(portDefinitions: record.ports))
         try validateUniqueConfiguredFocusNames(
             processes: record.processes, browserSessions: record.browserSessions, agentLaunchers: record.agentLaunchers)
         try store.upsert(project: record)
@@ -2137,6 +2137,14 @@ public final class WorkspaceOrchestrator {
         var argv: [String] { [executable] + arguments }
     }
 
+    private enum DirectProcessCommandValidationError: Error {
+        case unsupportedSyntax
+        case unsupportedVariableExpansion(String)
+        case unknownVariable(String)
+    }
+
+    private let builtInDirectProcessVariableNames: Set<String> = ["SPACES_PROJECT_DIR", "SPACES_WORKSPACE_DIR"]
+
     private func shellQuoted(_ token: String) -> String {
         guard !token.isEmpty else { return "''" }
         let safe = CharacterSet(charactersIn: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-._/:")
@@ -2175,7 +2183,7 @@ public final class WorkspaceOrchestrator {
                     current = ""
                 }
             case "\\": if let escaped = iterator.next() { current.append(escaped) } else { current.append(char) }
-            case "|", "&", ";", "<", ">", "(", ")", "$", "`": return nil
+            case "|", "&", ";", "<", ">", "(", ")", "`": return nil
             default: current.append(char)
             }
         }
@@ -2186,9 +2194,14 @@ public final class WorkspaceOrchestrator {
         return DirectTerminalCommand(executable: executable, arguments: Array(tokens.dropFirst()))
     }
 
-    private func parseDirectProcessCommand(_ raw: String) -> DirectProcessCommand? {
-        guard let parsed = parseDirectTerminalCommand(raw) else { return nil }
-        let tokens = [parsed.executable] + parsed.arguments
+    private func parseDirectProcessCommand(_ raw: String, env: [String: String], allowedVariableNames: Set<String>? = nil) throws
+        -> DirectProcessCommand
+    {
+        guard let parsed = parseDirectTerminalCommand(raw) else { throw DirectProcessCommandValidationError.unsupportedSyntax }
+        let knownVariableNames = allowedVariableNames ?? (env.isEmpty ? nil : Set(env.keys))
+        let tokens = try ([parsed.executable] + parsed.arguments).map {
+            try interpolateDirectToken($0, env: env, allowedVariableNames: knownVariableNames)
+        }
         var commandEnvironment: [String: String] = [:]
         var executableIndex: Int?
 
@@ -2206,38 +2219,117 @@ public final class WorkspaceOrchestrator {
             break
         }
 
-        guard let executableIndex else { return nil }
+        guard let executableIndex else { throw DirectProcessCommandValidationError.unsupportedSyntax }
         return DirectProcessCommand(
             executable: tokens[executableIndex], arguments: Array(tokens.dropFirst(executableIndex + 1)), environment: commandEnvironment)
     }
 
-    private func invalidDirectProcessCommandMessage(_ raw: String, env: [String: String]) -> String {
-        let resolved = applyEnvVars(raw, env: env)
-        return
-            "Process commands in Direct mode must be direct executable invocations without shell syntax: \(resolved). Use Shell mode for composite commands."
+    private func interpolateDirectToken(_ token: String, env: [String: String], allowedVariableNames: Set<String>?) throws -> String {
+        guard token.contains("$") else { return token }
+
+        var output = ""
+        var index = token.startIndex
+
+        while index < token.endIndex {
+            guard token[index] == "$" else {
+                output.append(token[index])
+                index = token.index(after: index)
+                continue
+            }
+
+            let dollarIndex = index
+            let nextIndex = token.index(after: index)
+            guard nextIndex < token.endIndex else { throw DirectProcessCommandValidationError.unsupportedVariableExpansion("$") }
+
+            if token[nextIndex] == "{" {
+                guard let closingIndex = token[token.index(after: nextIndex)...].firstIndex(of: "}") else {
+                    throw DirectProcessCommandValidationError.unsupportedVariableExpansion(String(token[dollarIndex...]))
+                }
+                let keyStart = token.index(after: nextIndex)
+                let key = String(token[keyStart..<closingIndex])
+                guard isDirectInterpolationVariableName(key) else {
+                    throw DirectProcessCommandValidationError.unsupportedVariableExpansion(String(token[dollarIndex...closingIndex]))
+                }
+                if let allowedVariableNames, !allowedVariableNames.contains(key) {
+                    throw DirectProcessCommandValidationError.unknownVariable("${\(key)}")
+                }
+                if let value = env[key] { output.append(value) } else { output.append(contentsOf: token[dollarIndex...closingIndex]) }
+                index = token.index(after: closingIndex)
+                continue
+            }
+
+            let first = token[nextIndex]
+            guard first.isLetter || first == "_" else {
+                let endIndex = token.index(after: nextIndex)
+                throw DirectProcessCommandValidationError.unsupportedVariableExpansion(String(token[dollarIndex..<endIndex]))
+            }
+
+            var variableEnd = token.index(after: nextIndex)
+            while variableEnd < token.endIndex {
+                let char = token[variableEnd]
+                guard char.isLetter || char.isNumber || char == "_" else { break }
+                variableEnd = token.index(after: variableEnd)
+            }
+
+            let key = String(token[nextIndex..<variableEnd])
+            if let allowedVariableNames, !allowedVariableNames.contains(key) { throw DirectProcessCommandValidationError.unknownVariable("$\(key)") }
+            if let value = env[key] { output.append(value) } else { output.append(contentsOf: token[dollarIndex..<variableEnd]) }
+            index = variableEnd
+        }
+
+        return output
     }
 
-    private func processLaunchCommand(template: ProcessTemplate, env: [String: String], processShell: ProcessShell) throws -> ProcessLaunchCommand {
+    private func isDirectInterpolationVariableName(_ key: String) -> Bool {
+        guard let first = key.first, first.isLetter || first == "_" else { return false }
+        return key.dropFirst().allSatisfy { $0.isLetter || $0.isNumber || $0 == "_" }
+    }
+
+    private func invalidDirectProcessCommandMessage(_ raw: String, error: DirectProcessCommandValidationError) -> String {
+        switch error {
+        case .unsupportedSyntax:
+            return
+                "Process commands in Direct mode must be direct executable invocations without shell syntax: \(raw). Use Shell mode for composite commands."
+        case .unsupportedVariableExpansion(let expansion):
+            return "Direct mode only supports simple Spaces variables like $PORT1 or ${PORT1}. Unsupported expansion: \(expansion). Command: \(raw)"
+        case .unknownVariable(let variable):
+            return "Direct mode only supports Spaces-provided variables. Unknown variable: \(variable). Command: \(raw)"
+        }
+    }
+
+    private func directProcessVariableNames(portDefinitions: [PortDefinition]) -> Set<String> {
+        builtInDirectProcessVariableNames.union(
+            portDefinitions.compactMap { definition in
+                let trimmed = definition.name.trimmingCharacters(in: .whitespacesAndNewlines)
+                return trimmed.isEmpty ? nil : trimmed
+            })
+    }
+
+    public func directProcessVariableNamesForValidation(portDefinitions: [PortDefinition]) -> Set<String> {
+        directProcessVariableNames(portDefinitions: portDefinitions)
+    }
+
+    private func processLaunchCommand(
+        template: ProcessTemplate, env: [String: String], processShell: ProcessShell, allowedVariableNames: Set<String>? = nil
+    ) throws -> ProcessLaunchCommand {
         let trimmed = template.command.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { throw WorkspaceError.invalidArgument(message: "Process command is required.") }
 
         switch template.executionMode {
         case .direct:
-            guard let command = parseDirectProcessCommand(trimmed) else {
-                throw WorkspaceError.invalidArgument(message: invalidDirectProcessCommandMessage(template.command, env: env))
-            }
-            return .direct(command)
+            do { return .direct(try parseDirectProcessCommand(trimmed, env: env, allowedVariableNames: allowedVariableNames)) } catch let error
+                as DirectProcessCommandValidationError
+            { throw WorkspaceError.invalidArgument(message: invalidDirectProcessCommandMessage(template.command, error: error)) }
         case .shell: return .shell(shell: processShell, command: trimmed)
         }
     }
 
-    public func validateProcessTemplate(_ template: ProcessTemplate, env: [String: String] = [:]) throws {
-        _ = try processLaunchCommand(template: template, env: env, processShell: .zsh)
+    public func validateProcessTemplate(_ template: ProcessTemplate, env: [String: String] = [:], allowedVariableNames: Set<String>? = nil) throws {
+        _ = try processLaunchCommand(template: template, env: env, processShell: .zsh, allowedVariableNames: allowedVariableNames)
     }
 
-    public func validateProcessTemplates(_ templates: [ProcessTemplate], env: [String: String] = [:]) throws {
-        for template in templates { try validateProcessTemplate(template, env: env) }
-    }
+    public func validateProcessTemplates(_ templates: [ProcessTemplate], env: [String: String] = [:], allowedVariableNames: Set<String>? = nil) throws
+    { for template in templates { try validateProcessTemplate(template, env: env, allowedVariableNames: allowedVariableNames) } }
 
     private func configuredProcessTemplate(for process: RunningProcessRecord, workspace: WorkspaceRecord, project: ProjectRecord) throws
         -> ProcessTemplate
