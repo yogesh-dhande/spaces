@@ -1569,6 +1569,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let rect = NSRect(x: 200, y: 200, width: 1100, height: 700)
         window = NSWindow(contentRect: rect, styleMask: [.titled, .resizable, .closable], backing: .buffered, defer: false)
         window.title = "Spaces"
+        window.backgroundColor = Theme.bg
+        window.titlebarAppearsTransparent = true
         window.center()
         window.delegate = self
         window.makeKeyAndOrderFront(nil)
