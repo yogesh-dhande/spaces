@@ -112,7 +112,7 @@ Build and deploy a release from the repository root with:
 scripts/release-and-deploy.sh <version> [build-number]
 ```
 
-That script syncs the shared version metadata, builds the release binaries, signs them, creates a signed manual-download DMG plus a Sparkle update zip, verifies the final DMG and bundled apps, refreshes the stable appcast, stages Sparkle files into the website static assets, and publishes the DMG to GitHub Releases.
+That script syncs the shared version metadata, builds universal `arm64` + `x86_64` release binaries for the app and CLI, signs them, creates a signed manual-download DMG plus a Sparkle update zip, verifies the final DMG and bundled apps, refreshes the stable appcast, stages Sparkle files into the website static assets, and publishes the DMG to GitHub Releases.
 
 GitHub Actions release publishing requires these repository secrets:
 - `CODESIGN_IDENTITY`

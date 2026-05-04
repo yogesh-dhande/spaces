@@ -80,13 +80,13 @@ echo "✓ Release metadata synced"
 echo ""
 
 echo "📦 Step 2/8: Building macOS app..."
-"$SCRIPTS_DIR/swiftpm.sh" build -c release
+"$SCRIPTS_DIR/swiftpm.sh" build -c release --arch arm64 --arch x86_64
 echo "✓ Build complete"
 echo ""
 
 # Step 3: Code sign binaries
 echo "🔐 Step 3/8: Code signing binaries..."
-BUILD_DIR="$MACOS_DIR/.build/release"
+BUILD_DIR="$MACOS_DIR/.build/apple/Products/Release"
 SPACES_APP="$BUILD_DIR/SpacesApp"
 SPACES_CLI="$BUILD_DIR/spaces"
 

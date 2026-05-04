@@ -82,7 +82,7 @@ scripts/release-and-deploy.sh <version> [build-number]
 
 This workflow:
 - syncs the checked-in version metadata used by the CLI, app menu, and bundle plist
-- builds the release binaries
+- builds universal `arm64` + `x86_64` release binaries for both the app and CLI
 - code-signs the app and CLI
 - creates a signed manual-download DMG
 - creates a Sparkle-served `Spaces.app` zip archive
@@ -110,6 +110,7 @@ Important environment variables:
 For GitHub Actions releases, `CODESIGN_CERTIFICATE_P12` must be the base64-encoded Developer ID Application `.p12` bundle that matches `CODESIGN_IDENTITY`, and `CODESIGN_CERTIFICATE_PASSWORD` must be the password used when exporting that `.p12`.
 
 Sparkle update hosting lives under `https://usespaces.dev/releases/` on the static Firebase site. The update feed and Sparkle archives are staged into `apps/web/public/releases`, which Next.js exports as real static files before Firebase deploy.
+The release pipeline keeps a single DMG, a single Sparkle zip, and one stable `appcast.xml`, all backed by those universal binaries.
 
 ### Website deploy
 Firebase Hosting deploys from [`.github/workflows/firebase-hosting-merge.yml`](/Users/yogesh/projects/spaces/.github/workflows/firebase-hosting-merge.yml:1). It builds `apps/web` and deploys the static export on pushes to `main` that touch the site or on manual dispatch.
