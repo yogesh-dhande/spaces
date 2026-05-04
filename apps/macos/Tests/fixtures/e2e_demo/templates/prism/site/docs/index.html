@@ -3,17 +3,17 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Atlas Docs</title>
+  <title>Prism Docs</title>
   <style>
     :root {
       color-scheme: light;
-      --bg: #f4f1ea;
+      --bg: #f5f3ff;
       --panel: rgba(255, 255, 255, 0.9);
-      --ink: #1c242b;
-      --muted: #62717d;
-      --line: rgba(28, 36, 43, 0.1);
-      --accent: #0f766e;
-      --accent-soft: rgba(15, 118, 110, 0.12);
+      --ink: #1a1033;
+      --muted: #6b5f8a;
+      --line: rgba(26, 16, 51, 0.1);
+      --accent: #6d28d9;
+      --accent-soft: rgba(109, 40, 217, 0.1);
     }
     * { box-sizing: border-box; }
     body {
@@ -21,8 +21,8 @@
       font-family: "SF Pro Text", "Inter", sans-serif;
       color: var(--ink);
       background:
-        radial-gradient(circle at top left, rgba(15, 118, 110, 0.16), transparent 32rem),
-        linear-gradient(180deg, #fbfaf7 0%, var(--bg) 100%);
+        radial-gradient(circle at top left, rgba(109, 40, 217, 0.16), transparent 32rem),
+        linear-gradient(180deg, #faf8ff 0%, var(--bg) 100%);
     }
     .shell { max-width: 1180px; margin: 0 auto; padding: 40px 32px 56px; }
     .topbar {
@@ -51,7 +51,7 @@
       border-radius: 24px;
       background: var(--panel);
       backdrop-filter: blur(16px);
-      box-shadow: 0 18px 40px rgba(28, 36, 43, 0.08);
+      box-shadow: 0 18px 40px rgba(26, 16, 51, 0.08);
     }
     .hero-copy { padding: 32px; }
     h1 {
@@ -95,7 +95,7 @@
     .stat {
       padding: 16px 18px;
       border-radius: 18px;
-      background: rgba(15, 118, 110, 0.08);
+      background: rgba(109, 40, 217, 0.07);
     }
     .stat span {
       display: block;
@@ -137,38 +137,38 @@
 <body>
   <div class="shell">
     <div class="topbar">
-      <div>Atlas Platform · Product docs</div>
-      <div class="badge">Atlas docs sentinel</div>
+      <div>Prism Analytics · Developer docs</div>
+      <div class="badge">Prism docs sentinel</div>
     </div>
     <section class="hero">
       <div class="card hero-copy">
-        <h1>Launch the Customer Alerts without losing the operator context.</h1>
-        <p>Atlas Docs centralizes release checklists, environment conventions, workspace recipes, and incident handoff notes for the launch team.</p>
+        <h1>Understand every user action, in context.</h1>
+        <p>Prism captures and surfaces user behavior across your product. Build funnels, track cohorts, and close the loop between what users do and what engineers ship.</p>
         <div class="grid">
-          <div class="tile"><strong>Quickstart</strong>Workspace launch presets, browser sessions, and terminal mappings.</div>
-          <div class="tile"><strong>Operations</strong>Runbooks for handoff, rollback, and on-call escalations.</div>
-          <div class="tile"><strong>Release</strong>Ship-room checklist for alerts cutovers and smoke tests.</div>
+          <div class="tile"><strong>Tracking</strong>Instrument any event in minutes with a typed SDK. No schema migrations, no data loss on deploy.</div>
+          <div class="tile"><strong>Funnels</strong>Visualize conversion step-by-step and pinpoint exactly where users drop off in your flows.</div>
+          <div class="tile"><strong>Exports</strong>Stream raw events to your data warehouse or query them live via the Prism SQL interface.</div>
         </div>
       </div>
       <div class="card hero-side">
-        <div class="stat"><span>Active workspaces</span><strong>12</strong></div>
-        <div class="stat"><span>Median launch time</span><strong>18s</strong></div>
-        <div class="stat"><span>Docs freshness</span><strong>Updated today</strong></div>
+        <div class="stat"><span>Active integrations</span><strong>89</strong></div>
+        <div class="stat"><span>Events per day</span><strong>2.4 M</strong></div>
+        <div class="stat"><span>Uptime (30 days)</span><strong>99.98%</strong></div>
       </div>
     </section>
     <section class="card docs-list">
       <h2>Popular guides</h2>
       <div class="row">
-        <div><b>Workspace templates for customer launch</b><small>Focus docs, frontend, and incident command windows in one flow.</small></div>
-        <div class="pill">7 min</div>
+        <div><b>Event tracking setup</b><small>Install the Prism SDK, define your event schema, and validate your first event in under 5 minutes.</small></div>
+        <div class="pill">5 min</div>
       </div>
       <div class="row">
-        <div><b>Browser session naming conventions</b><small>Use durable labels that map cleanly to `spaces open &lt;name&gt;`.</small></div>
-        <div class="pill">4 min</div>
+        <div><b>Funnel analysis walkthrough</b><small>Build a signup funnel, identify the highest drop-off step, and create a targeted cohort for A/B testing.</small></div>
+        <div class="pill">8 min</div>
       </div>
       <div class="row">
-        <div><b>Operator handoff checklist</b><small>Capture release context before switching to the Harbor Ops workspace.</small></div>
-        <div class="pill">9 min</div>
+        <div><b>Cohort retention deep-dive</b><small>Compare 30-day and 90-day retention curves across acquisition channels and feature cohorts.</small></div>
+        <div class="pill">11 min</div>
       </div>
     </section>
   </div>

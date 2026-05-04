@@ -1,0 +1,176 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Beacon Docs</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #f0fdf4;
+      --panel: rgba(255, 255, 255, 0.9);
+      --ink: #14211a;
+      --muted: #4d7060;
+      --line: rgba(20, 33, 26, 0.1);
+      --accent: #059669;
+      --accent-soft: rgba(5, 150, 105, 0.12);
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: "SF Pro Text", "Inter", sans-serif;
+      color: var(--ink);
+      background:
+        radial-gradient(circle at top left, rgba(5, 150, 105, 0.18), transparent 32rem),
+        linear-gradient(180deg, #f7fdf9 0%, var(--bg) 100%);
+    }
+    .shell { max-width: 1180px; margin: 0 auto; padding: 40px 32px 56px; }
+    .topbar {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 28px;
+      color: var(--muted);
+      font-size: 14px;
+    }
+    .badge {
+      padding: 8px 12px;
+      border-radius: 999px;
+      background: var(--accent-soft);
+      color: var(--accent);
+      font-weight: 600;
+    }
+    .hero {
+      display: grid;
+      grid-template-columns: 1.2fr 0.8fr;
+      gap: 24px;
+      margin-bottom: 24px;
+    }
+    .card {
+      border: 1px solid var(--line);
+      border-radius: 24px;
+      background: var(--panel);
+      backdrop-filter: blur(16px);
+      box-shadow: 0 18px 40px rgba(14, 33, 26, 0.08);
+    }
+    .hero-copy { padding: 32px; }
+    h1 {
+      margin: 0 0 12px;
+      font-size: 44px;
+      line-height: 1.02;
+      letter-spacing: -0.04em;
+    }
+    p {
+      margin: 0;
+      font-size: 17px;
+      line-height: 1.6;
+      color: var(--muted);
+    }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 18px;
+      margin-top: 28px;
+    }
+    .tile {
+      padding: 18px;
+      border-radius: 18px;
+      background: rgba(255, 255, 255, 0.72);
+      border: 1px solid var(--line);
+    }
+    .tile strong {
+      display: block;
+      margin-bottom: 8px;
+      font-size: 14px;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: var(--accent);
+    }
+    .hero-side {
+      padding: 24px;
+      display: grid;
+      gap: 14px;
+      align-content: start;
+    }
+    .stat {
+      padding: 16px 18px;
+      border-radius: 18px;
+      background: rgba(5, 150, 105, 0.08);
+    }
+    .stat span {
+      display: block;
+      color: var(--muted);
+      font-size: 13px;
+      margin-bottom: 4px;
+    }
+    .stat strong {
+      font-size: 28px;
+      letter-spacing: -0.03em;
+    }
+    .docs-list { padding: 28px 32px; }
+    .docs-list h2 {
+      margin: 0 0 18px;
+      font-size: 22px;
+      letter-spacing: -0.03em;
+    }
+    .row {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 16px 0;
+      border-top: 1px solid var(--line);
+    }
+    .row:first-of-type { border-top: 0; }
+    .row b { display: block; margin-bottom: 4px; }
+    .row small { color: var(--muted); font-size: 13px; }
+    .pill {
+      padding: 6px 10px;
+      border-radius: 999px;
+      background: #ffffff;
+      border: 1px solid var(--line);
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 600;
+    }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <div class="topbar">
+      <div>Beacon · Status page docs</div>
+      <div class="badge">Beacon docs sentinel</div>
+    </div>
+    <section class="hero">
+      <div class="card hero-copy">
+        <h1>Keep your customers informed, automatically.</h1>
+        <p>Beacon publishes real-time service health to your customers. Set up components, incident templates, and subscriber notifications without losing your engineering context.</p>
+        <div class="grid">
+          <div class="tile"><strong>Components</strong>Group services into components and set independent health thresholds per tier.</div>
+          <div class="tile"><strong>Incidents</strong>Open, update, and resolve incidents with templated communications your team can reuse.</div>
+          <div class="tile"><strong>Notifications</strong>Subscribe customers to email or webhook alerts the moment a component degrades.</div>
+        </div>
+      </div>
+      <div class="card hero-side">
+        <div class="stat"><span>Uptime (30 days)</span><strong>99.98%</strong></div>
+        <div class="stat"><span>Active incidents</span><strong>0</strong></div>
+        <div class="stat"><span>Components tracked</span><strong>6</strong></div>
+      </div>
+    </section>
+    <section class="card docs-list">
+      <h2>Popular guides</h2>
+      <div class="row">
+        <div><b>Incident template setup</b><small>Pre-write customer-facing updates so your on-call can post in seconds, not minutes.</small></div>
+        <div class="pill">5 min</div>
+      </div>
+      <div class="row">
+        <div><b>Component grouping strategy</b><small>Organize services so degradations surface at the right level of detail for subscribers.</small></div>
+        <div class="pill">3 min</div>
+      </div>
+      <div class="row">
+        <div><b>Subscriber webhook integration</b><small>Push status events to PagerDuty, Slack, or your own endpoint as incidents open and resolve.</small></div>
+        <div class="pill">7 min</div>
+      </div>
+    </section>
+  </div>
+</body>
+</html>

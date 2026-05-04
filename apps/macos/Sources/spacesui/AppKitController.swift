@@ -221,7 +221,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     private var operationProgressOverlay: NSVisualEffectView?
     private var operationProgressOverlayTitleLabel: NSTextField?
     private var operationProgressOverlayDetailLabel: NSTextField?
-    private var windowIssueToastOverlay: NSVisualEffectView?
+    private var windowIssueToastOverlay: NSView?
     private var windowIssueToastTitleLabel: NSTextField?
     private var windowIssueToastDetailLabel: NSTextField?
     private var windowIssueToastActionButton: NSButton?
@@ -2483,7 +2483,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
     private func showWindowIssueToast(title: String, detail: String, actionTitle: String? = nil, action: (() -> Void)? = nil) {
         guard let contentView = window?.contentView else { return }
-        let overlay: NSVisualEffectView
+        let overlay: NSView
         let titleLabel: NSTextField
         let detailLabel: NSTextField
         let actionButton: NSButton
@@ -2495,14 +2495,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             detailLabel = existingDetailLabel
             actionButton = existingActionButton
         } else {
-            overlay = NSVisualEffectView()
-            overlay.material = .hudWindow
-            overlay.blendingMode = .withinWindow
-            overlay.state = .active
+            overlay = NSView()
             overlay.wantsLayer = true
-            overlay.layer?.cornerRadius = UIRadius.large
-            overlay.layer?.borderWidth = 1
-            overlay.layer?.borderColor = NSColor.systemRed.withAlphaComponent(0.35).cgColor
             overlay.translatesAutoresizingMaskIntoConstraints = false
 
             let stack = NSStackView()
@@ -2548,6 +2542,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             windowIssueToastActionButton = actionButton
         }
 
+        refreshWindowIssueToastAppearance()
         titleLabel.stringValue = title
         detailLabel.stringValue = detail
         actionButton.title = actionTitle ?? ""
@@ -2570,6 +2565,17 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         windowIssueToastDismissTask = nil
         windowIssueToastActionHandler = nil
         windowIssueToastOverlay?.isHidden = true
+    }
+
+    private func refreshWindowIssueToastAppearance() {
+        guard let layer = windowIssueToastOverlay?.layer else { return }
+        layer.cornerRadius = UIRadius.large
+        layer.borderWidth = 1
+        let appearance = window?.contentView?.effectiveAppearance ?? window?.effectiveAppearance ?? NSApp.effectiveAppearance
+        appearance.performAsCurrentDrawingAppearance {
+            layer.borderColor = NSColor.systemRed.withAlphaComponent(0.35).cgColor
+            layer.backgroundColor = NSColor.windowBackgroundColor.withAlphaComponent(0.96).cgColor
+        }
     }
 
     @objc private func handleWindowIssueToastAction() {
@@ -6035,10 +6041,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             }
             if let windowIndex = windowShortcutIndex(for: event) {
                 self.logWindowShortcutProfile("stage=monitor_schedule index=\(windowIndex)")
+                let startedAt = Date()
                 Task { @MainActor [weak self] in
                     guard let self else { return }
                     self.logWindowShortcutProfile("stage=monitor_dispatch index=\(windowIndex)")
-                    self.focusWindowShortcut(index: windowIndex)
+                    await self.runWindowShortcut(index: windowIndex, startedAt: startedAt)
                     self.logWindowShortcutProfile("stage=monitor_after_handler index=\(windowIndex)")
                 }
                 return nil
@@ -6434,11 +6441,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             hideAfterSuccessfulExternalWindowAction(.open)
         case .failure(let error): showError(error)
         }
-    }
-
-    private func focusWindowShortcut(index: Int) {
-        let startedAt = Date()
-        Task { @MainActor [weak self] in await self?.runWindowShortcut(index: index, startedAt: startedAt) }
     }
 
     private func runWindowShortcut(index: Int, startedAt: Date) async {

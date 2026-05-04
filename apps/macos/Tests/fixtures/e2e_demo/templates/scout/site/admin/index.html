@@ -3,18 +3,19 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Atlas Admin</title>
+  <title>Scout Admin</title>
   <style>
     :root {
       color-scheme: light;
-      --bg: #f5f7fb;
+      --bg: #faf8f8;
       --panel: #ffffff;
-      --ink: #18212b;
+      --ink: #1c0f11;
       --muted: #64748b;
       --line: #e2e8f0;
-      --accent: #2563eb;
+      --accent: #e11d48;
       --good: #059669;
       --warn: #d97706;
+      --open: #e11d48;
     }
     * { box-sizing: border-box; }
     body {
@@ -22,8 +23,8 @@
       font-family: "SF Pro Text", "Inter", sans-serif;
       color: var(--ink);
       background:
-        radial-gradient(circle at top right, rgba(37, 99, 235, 0.14), transparent 26rem),
-        linear-gradient(180deg, #fbfdff 0%, var(--bg) 100%);
+        radial-gradient(circle at top right, rgba(225, 29, 72, 0.1), transparent 26rem),
+        linear-gradient(180deg, #fff8f9 0%, var(--bg) 100%);
     }
     .shell { max-width: 1240px; margin: 0 auto; padding: 28px; }
     .bar {
@@ -41,7 +42,7 @@
     .chip {
       border-radius: 999px;
       padding: 8px 12px;
-      background: rgba(37, 99, 235, 0.12);
+      background: rgba(225, 29, 72, 0.1);
       color: var(--accent);
       font-weight: 700;
       font-size: 12px;
@@ -66,11 +67,12 @@
     .metric {
       border-radius: 18px;
       padding: 18px;
-      background: #f8fbff;
+      background: #fff8f9;
       border: 1px solid var(--line);
     }
     .metric span { display: block; color: var(--muted); font-size: 13px; margin-bottom: 6px; }
     .metric strong { font-size: 30px; letter-spacing: -0.04em; }
+    .metric.alert strong { color: var(--accent); }
     .table { padding: 20px 22px 10px; }
     .table h2, .side h2 { margin: 0 0 14px; font-size: 19px; letter-spacing: -0.03em; }
     table { width: 100%; border-collapse: collapse; }
@@ -86,8 +88,8 @@
       font-size: 12px;
       font-weight: 700;
     }
-    .healthy { background: rgba(5, 150, 105, 0.12); color: var(--good); }
-    .review { background: rgba(217, 119, 6, 0.12); color: var(--warn); }
+    .open { background: rgba(225, 29, 72, 0.1); color: var(--open); }
+    .investigating { background: rgba(217, 119, 6, 0.1); color: var(--warn); }
     .side {
       padding: 20px 22px;
       display: grid;
@@ -106,9 +108,10 @@
       margin-top: 18px;
       padding: 18px 20px;
       border-radius: 18px;
-      background: #f8fbff;
+      background: #fff8f9;
       border: 1px solid var(--line);
     }
+    .api-card h2 { margin: 0 0 8px; font-size: 16px; }
     .api-card code {
       display: block;
       margin-top: 8px;
@@ -122,28 +125,43 @@
   <div class="shell">
     <div class="bar">
       <div>
-        <h1>Atlas Admin</h1>
-        <small>Release control room for launch-day operators</small>
+        <h1>Scout Admin</h1>
+        <small>Error console</small>
       </div>
-      <div class="chip">Atlas admin sentinel</div>
+      <div class="chip">Scout admin sentinel</div>
     </div>
     <div class="layout">
       <section class="panel">
         <div class="metrics">
-          <div class="metric"><span>Live workspaces</span><strong>8</strong></div>
-          <div class="metric"><span>Open incidents</span><strong>1</strong></div>
-          <div class="metric"><span>Queue latency</span><strong>94ms</strong></div>
+          <div class="metric alert"><span>Open errors</span><strong>3</strong></div>
+          <div class="metric"><span>Total occurrences</span><strong>1,062</strong></div>
+          <div class="metric"><span>Affected users</span><strong>443</strong></div>
         </div>
         <div class="table">
-          <h2>Launch checks</h2>
+          <h2>Active errors</h2>
           <table>
             <thead>
-              <tr><th>Check</th><th>Owner</th><th>Status</th></tr>
+              <tr><th>Error</th><th>Occurrences</th><th>Users</th><th>Status</th></tr>
             </thead>
             <tbody>
-              <tr><td>Customer alerts deploy</td><td>Frontend</td><td><span class="status healthy">Healthy</span></td></tr>
-              <tr><td>Billing webhook replay</td><td>Platform</td><td><span class="status review">Review</span></td></tr>
-              <tr><td>Status page publish</td><td>Ops</td><td><span class="status healthy">Healthy</span></td></tr>
+              <tr>
+                <td>TypeError: cannot read null</td>
+                <td>847</td>
+                <td>340</td>
+                <td><span class="status open">Open</span></td>
+              </tr>
+              <tr>
+                <td>404 /api/alerts</td>
+                <td>203</td>
+                <td>91</td>
+                <td><span class="status open">Open</span></td>
+              </tr>
+              <tr>
+                <td>DB connection timeout</td>
+                <td>12</td>
+                <td>12</td>
+                <td><span class="status investigating">Investigating</span></td>
+              </tr>
             </tbody>
           </table>
           <div class="api-card">
@@ -153,14 +171,14 @@
         </div>
       </section>
       <aside class="panel side">
-        <h2>Operator notes</h2>
+        <h2>Triage notes</h2>
         <div class="note">
-          <b>Launch window</b>
-          <p>Customer Alerts and Operations Console stay paired so docs and incident controls are one shortcut away.</p>
+          <b>Top priority</b>
+          <p>The TypeError: null spike maps to the alert-worker route. Likely related to the Beacon pipeline degradation — open an alert-worker workspace to debug.</p>
         </div>
         <div class="note">
-          <b>Fallback plan</b>
-          <p>If latency exceeds the threshold, hand off to Harbor Ops and pause the rollout checklist before retry.</p>
+          <b>Context</b>
+          <p>Prism shows a 12% signup funnel drop in the same window. The 404 /api/alerts errors are the likely cause — users hitting a broken endpoint on the landing flow.</p>
         </div>
       </aside>
     </div>

@@ -1,0 +1,178 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Scout Docs</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #fff1f2;
+      --panel: rgba(255, 255, 255, 0.9);
+      --ink: #1c0f11;
+      --muted: #7f5059;
+      --line: rgba(28, 15, 17, 0.1);
+      --accent: #e11d48;
+      --accent-soft: rgba(225, 29, 72, 0.1);
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: "SF Pro Text", "Inter", sans-serif;
+      color: var(--ink);
+      background:
+        radial-gradient(circle at top left, rgba(225, 29, 72, 0.14), transparent 32rem),
+        linear-gradient(180deg, #fff8f9 0%, var(--bg) 100%);
+    }
+    .shell { max-width: 1180px; margin: 0 auto; padding: 40px 32px 56px; }
+    .topbar {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 28px;
+      color: var(--muted);
+      font-size: 14px;
+    }
+    .badge {
+      padding: 8px 12px;
+      border-radius: 999px;
+      background: var(--accent-soft);
+      color: var(--accent);
+      font-weight: 600;
+    }
+    /* Redesigned hero — dark full-bleed panel */
+    .hero-dark {
+      border-radius: 24px;
+      background: #0f172a;
+      padding: 52px 48px 44px;
+      margin-bottom: 24px;
+      position: relative;
+      overflow: hidden;
+    }
+    .hero-dark::before {
+      content: "";
+      position: absolute;
+      inset: 0;
+      background: radial-gradient(ellipse at top left, rgba(225, 29, 72, 0.2), transparent 60%);
+    }
+    .hero-dark h1 {
+      position: relative;
+      margin: 0 0 10px;
+      font-size: 48px;
+      line-height: 1.0;
+      letter-spacing: -0.04em;
+      color: #ffffff;
+    }
+    .hero-dark .sub {
+      position: relative;
+      margin: 0 0 28px;
+      font-size: 15px;
+      color: #9ca3af;
+      font-style: italic;
+    }
+    .metrics-bar {
+      position: relative;
+      display: flex;
+      gap: 24px;
+      flex-wrap: wrap;
+    }
+    .metrics-bar span {
+      font-size: 14px;
+      font-weight: 600;
+      color: rgba(255, 255, 255, 0.75);
+    }
+    .metrics-bar .sep { color: rgba(255, 255, 255, 0.25); }
+    .card {
+      border: 1px solid var(--line);
+      border-radius: 24px;
+      background: var(--panel);
+      backdrop-filter: blur(16px);
+      box-shadow: 0 18px 40px rgba(28, 15, 17, 0.08);
+    }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 18px;
+      margin-bottom: 24px;
+    }
+    .tile {
+      padding: 18px;
+      border-radius: 18px;
+      background: rgba(255, 255, 255, 0.72);
+      border: 1px solid var(--line);
+    }
+    .tile strong {
+      display: block;
+      margin-bottom: 8px;
+      font-size: 14px;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: var(--accent);
+    }
+    .docs-list { padding: 28px 32px; }
+    .docs-list h2 {
+      margin: 0 0 18px;
+      font-size: 22px;
+      letter-spacing: -0.03em;
+    }
+    .row {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 16px 0;
+      border-top: 1px solid var(--line);
+    }
+    .row:first-of-type { border-top: 0; }
+    .row b { display: block; margin-bottom: 4px; }
+    .row small { color: var(--muted); font-size: 13px; }
+    .pill {
+      padding: 6px 10px;
+      border-radius: 999px;
+      background: #ffffff;
+      border: 1px solid var(--line);
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 600;
+    }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <div class="topbar">
+      <div>Scout · Error tracking docs</div>
+      <div class="badge">Scout redesign-hero docs sentinel</div>
+    </div>
+    <div class="hero-dark">
+      <h1>CATCH IT.<br>BEFORE THEY DO.</h1>
+      <p class="sub">Hero redesign — in review</p>
+      <div class="metrics-bar">
+        <span>3 open</span>
+        <span class="sep">·</span>
+        <span>14 resolved</span>
+        <span class="sep">·</span>
+        <span>P99: 142 ms</span>
+      </div>
+    </div>
+    <div class="grid">
+      <div class="tile"><strong>Errors</strong>Group by fingerprint, filter by release, and link stack frames directly to your source.</div>
+      <div class="tile"><strong>Releases</strong>Tag errors to the exact deploy that introduced them so rollback decisions are instant.</div>
+      <div class="tile"><strong>Alerts</strong>Route high-impact errors to PagerDuty, Slack, or your on-call rotation automatically.</div>
+    </div>
+    <section class="card docs-list">
+      <h2>Popular guides</h2>
+      <div class="row">
+        <div><b>Source map setup</b><small>Upload minified build artifacts so Scout unminifies stack traces automatically on ingest.</small></div>
+        <div class="pill">6 min</div>
+      </div>
+      <div class="row">
+        <div><b>Alerting rules and thresholds</b><small>Set per-project rate and impact thresholds before Scout pages your team.</small></div>
+        <div class="pill">4 min</div>
+      </div>
+      <div class="row">
+        <div><b>Release tracking integration</b><small>Hook Scout into your deploy pipeline so every error is tagged to a commit SHA automatically.</small></div>
+        <div class="pill">8 min</div>
+      </div>
+    </section>
+  </div>
+</body>
+</html>
