@@ -652,8 +652,10 @@ install_demo_fixture_branch() {
     cd "$repo_dir"
     git checkout -q -b "$branch_name"
     rm -rf .spaces-e2e-demo/site
+    rm -rf .spaces-e2e-demo/api
     cp -R "$FIXTURE_TEMPLATE_DIR/templates/$variant/site" .spaces-e2e-demo/site
-    git add .spaces-e2e-demo/site
+    cp -R "$FIXTURE_TEMPLATE_DIR/templates/$variant/api" .spaces-e2e-demo/api
+    git add .spaces-e2e-demo/site .spaces-e2e-demo/api
     git commit -q -m "redesign hero section"
     git checkout -q main
   )

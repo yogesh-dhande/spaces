@@ -685,10 +685,11 @@ public final class WorkspaceOrchestrator {
     }
 
     private func launchWorkspaceUnlocked(workspaceID: String, background: Bool = false) throws {
+        let (_, initialWorkspace) = try resolveWorkspace(id: workspaceID)
+        guard !initialWorkspace.isArchived else { throw WorkspaceError.invalidArgument(message: "Workspace is archived.") }
         try triggerDeferredWorkspaceSetupIfNeeded(workspaceID: workspaceID)
         try waitForWorkspaceSetupToComplete(workspaceID: workspaceID)
         let (project, workspace) = try resolveWorkspace(id: workspaceID)
-        guard !workspace.isArchived else { throw WorkspaceError.invalidArgument(message: "Workspace is archived.") }
         let hasTrackedRuntime = try hasTrackedRuntimeIndicators(workspaceID: workspace.id)
         guard !(workspace.isRunning || hasTrackedRuntime) else {
             throw WorkspaceError.invalidArgument(message: "Workspace is already running. Use restart.")

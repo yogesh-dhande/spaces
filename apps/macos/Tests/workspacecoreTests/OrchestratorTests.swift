@@ -540,6 +540,26 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertTrue(try store.workspace(id: workspace.id)?.isRunning ?? false)
     }
 
+    func testLaunchWorkspaceArchivedPendingSetupThrowsArchivedWithoutMutatingSetupState() throws {
+        let root = try makeTempDirectory()
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let store = try makeTemporaryStore()
+        let orchestrator = WorkspaceOrchestrator(store: store)
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        try orchestrator.updateProjectConfig(projectID: project.id) { config in config.setupScript = "echo ready > .spaces-launch-marker" }
+
+        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature", runSetupScript: false)
+        XCTAssertEqual(try orchestrator.workspaceSetupState(workspaceID: workspace.id).status, .pending)
+
+        try orchestrator.archiveWorkspace(workspaceID: workspace.id)
+
+        XCTAssertThrowsError(try orchestrator.launchWorkspace(workspaceID: workspace.id)) { error in
+            XCTAssertTrue(error.localizedDescription.contains("archived"))
+        }
+        XCTAssertEqual(try orchestrator.workspaceSetupState(workspaceID: workspace.id).status, .pending)
+    }
+
     // Tests list workspaces includes branch metadata by arranging representative inputs and asserting the expected result.
     func testListWorkspacesIncludesBranchMetadata() throws {
         let repo = try makeTempGitRepo(name: "workspace-branch-list")
