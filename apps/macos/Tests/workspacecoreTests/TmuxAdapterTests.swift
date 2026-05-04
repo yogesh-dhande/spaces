@@ -17,4 +17,33 @@ final class TmuxAdapterTests: XCTestCase {
         XCTAssertEqual(window?.isActive, true)
         XCTAssertEqual(window?.panePID, 4242)
     }
+
+    func testParseWindowIDTrimsWhitespace() {
+        let adapter = TmuxAdapter()
+
+        let windowID = adapter.parseWindowID(output: "  @7 \n")
+
+        XCTAssertEqual(windowID, "@7")
+    }
+
+    func testParseWindowIDReturnsUnderscoreDelimitedOutputVerbatim() {
+        let adapter = TmuxAdapter()
+
+        let windowID = adapter.parseWindowID(output: "@0_1_dev server_session_1_4242\n")
+
+        XCTAssertEqual(windowID, "@0_1_dev server_session_1_4242")
+    }
+
+    func testParseCreatedWindowHandlesSanitizedUnderscoreDelimiters() {
+        let adapter = TmuxAdapter()
+
+        let window = adapter.parseCreatedWindow(output: "@0_1_1_4242\n", fallbackName: "dev server", sessionName: "spaces-session")
+
+        XCTAssertEqual(window?.id, "@0")
+        XCTAssertEqual(window?.index, 1)
+        XCTAssertEqual(window?.name, "dev server")
+        XCTAssertEqual(window?.sessionName, "spaces-session")
+        XCTAssertEqual(window?.isActive, true)
+        XCTAssertEqual(window?.panePID, 4242)
+    }
 }

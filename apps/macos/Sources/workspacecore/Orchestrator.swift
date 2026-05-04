@@ -2081,14 +2081,15 @@ public final class WorkspaceOrchestrator {
     ) throws -> ManagedTerminalHandle {
         let sessionName = processTmuxSessionName(workspaceID: workspace.id, processName: processName)
         if replaceExistingSession, tmux.hasSession(named: sessionName) { try? tmux.killSession(named: sessionName) }
+        let runtimeEnv = terminalLaunchEnvironment(base: env, terminalHost: terminalHost)
         let commandEnv: [String: String]
         let argv: [String]
         switch command {
         case .direct(let direct):
-            commandEnv = env.merging(direct.environment) { _, new in new }
+            commandEnv = runtimeEnv.merging(direct.environment) { _, new in new }
             argv = direct.argv
         case .shell(let shell, let commandString):
-            commandEnv = env
+            commandEnv = runtimeEnv
             argv = [shell.rawValue, "-lc", commandString]
         }
         _ = try tmux.startSession(named: sessionName, windowName: processName, cwd: workspace.dir, env: commandEnv, command: argv)
@@ -2111,6 +2112,7 @@ public final class WorkspaceOrchestrator {
 
     private func terminalLaunchEnvironment(base: [String: String], terminalHost: TerminalHost) -> [String: String] {
         var env = base
+        if let path = Shell.currentProcessEnvironment()["PATH"], !path.isEmpty { env["PATH"] = path }
         for key in [DatabaseLocator.databasePathEnvironmentVariable, "SPACES_RUNTIME_DIR", "SPACES_E2E_EVENTS_LOG", "DEBUG"] {
             if let value = ProcessInfo.processInfo.environment[key]?.trimmingCharacters(in: .whitespacesAndNewlines), !value.isEmpty {
                 env[key] = value

@@ -218,11 +218,13 @@ public enum Shell {
                 discoveredState.record(path: path)
             }
             let stderrReader = PipeCollector(handle: error.fileHandleForReading)
-            // Use a login shell so PATH matches the user's configured shell
-            // environment, but keep it non-interactive. Interactive shells may
-            // try to take foreground TTY control during app launch and hang the
-            // caller in job-control setup before PATH is printed.
-            let arguments = ["-l", "-c", "printf '\\n__SPACES_PATH__'; /usr/bin/printenv PATH"]
+            // Keep the outer probe argument shape as `-l -c` so wrapper shells
+            // that key off those first two arguments continue taking their
+            // login-shell path. Re-exec into an interactive shell inside that
+            // login shell so version-manager hooks commonly sourced from
+            // interactive startup files can still contribute to PATH.
+            let interactiveProbeCommand = #"exec "$SHELL" -ic "printf '\n__SPACES_PATH__'; /usr/bin/printenv PATH""#
+            let arguments = ["-l", "-c", interactiveProbeCommand, shellPath]
             var loginEnvironment: [String: String] = [:]
             for key in ["HOME", "USER", "LOGNAME", "TMPDIR", "ZDOTDIR", "XDG_CONFIG_HOME", "XDG_CONFIG_DIRS"] {
                 if let value = environment[key], !value.isEmpty { loginEnvironment[key] = value }
@@ -601,4 +603,6 @@ public enum Shell {
 
         return String(data: data, encoding: .utf8) ?? ""
     }
+
+    public static func currentProcessEnvironment() -> [String: String] { processEnvironment() }
 }
