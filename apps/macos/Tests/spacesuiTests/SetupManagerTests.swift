@@ -1,3 +1,4 @@
+import AppKit
 import Testing
 import systembridge
 
@@ -16,10 +17,10 @@ import systembridge
                 ]))
         var completed = false
 
-        _ = manager.makeContentView()
         manager.onComplete = { completed = true }
-        manager.start()
+        let view = manager.begin()
 
+        #expect(view == nil)
         #expect(completed)
         #expect(!manager.isShowingSetupFlow)
         #expect(manager.currentStepTitleForTesting == nil)
@@ -37,13 +38,33 @@ import systembridge
                 ]))
         var completed = false
 
-        _ = manager.makeContentView()
         manager.onComplete = { completed = true }
-        manager.start(preferredInitialCheckID: .yabaiServiceRunning)
+        let view = manager.begin(preferredInitialCheckID: .yabaiServiceRunning)
 
+        #expect(view != nil)
         #expect(!completed)
         #expect(manager.isShowingSetupFlow)
         #expect(manager.currentStepTitleForTesting == "Set up yabai")
+    }
+
+    @Test func startupBlockingFailureShowsSetupScreenWithCheckingStatus() {
+        let manager = SetupManager(
+            checker: MockSetupChecker(
+                startupBlockingResults: [
+                    .init(id: .terminalInstalled, passed: true), .init(id: .tmuxInstalled, passed: false), .init(id: .yabaiInstalled, passed: true),
+                ],
+                allResults: [
+                    .init(id: .terminalInstalled, passed: true), .init(id: .tmuxInstalled, passed: false), .init(id: .yabaiInstalled, passed: true),
+                    .init(id: .yabaiServiceRunning, passed: true), .init(id: .yabaiAccessibility, passed: true),
+                ]))
+
+        let view = manager.begin()
+
+        #expect(view != nil)
+        #expect(manager.isShowingSetupFlow)
+        #expect(manager.currentStepTitleForTesting == "Install tmux")
+        #expect(viewTextContent(view).contains("Install tmux"))
+        #expect(viewTextContent(view).contains("Checking..."))
     }
 }
 
@@ -56,4 +77,15 @@ private struct MockSetupChecker: SetupChecking {
     func runAll() -> [SetupCheckResult] { allResults }
 
     func runStartupBlockingChecks() -> [SetupCheckResult] { startupBlockingResults }
+}
+
+@MainActor private func viewTextContent(_ view: NSView?) -> [String] {
+    guard let view else { return [] }
+    var text: [String] = []
+    if let label = view as? NSTextField {
+        let value = label.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !value.isEmpty { text.append(value) }
+    }
+    for subview in view.subviews { text.append(contentsOf: viewTextContent(subview)) }
+    return text
 }

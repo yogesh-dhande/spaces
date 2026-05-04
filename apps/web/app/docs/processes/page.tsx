@@ -30,11 +30,11 @@ export default function ProcessesDocsPage() {
           Every process row has an <strong>Execution mode</strong>:
         </p>
         <ul className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
-          <li>• <strong>Direct</strong> &mdash; Spaces parses the command into an executable plus arguments. This is the recommended deterministic path for plain commands.</li>
-          <li>• <strong>Shell</strong> &mdash; Spaces runs the command through the app-wide shell setting with <code>&lt;shell&gt; -lc &lt;command&gt;</code>.</li>
+          <li>• <strong>Direct</strong> &mdash; Spaces launches the executable and arguments exactly as entered. This is the recommended path for most dev servers, workers, watchers, and agent commands.</li>
+          <li>• <strong>Shell</strong> &mdash; Spaces hands the full command string to the shell selected in Spaces Settings. Use this when the command depends on shell syntax instead of a single executable plus arguments.</li>
         </ul>
         <p className="mt-3 text-sm leading-7 text-foreground-soft">
-          Use Direct mode for commands like <code>npm run dev</code>, <code>python manage.py runserver</code>, or <code>scripts/swiftpm.sh build</code>. Use Shell mode when you need shell composition such as <code>cd</code>, pipes, redirects, or expansion.
+          Use Direct mode for commands like <code>npm run dev</code>, <code>python manage.py runserver</code>, or <code>scripts/swiftpm.sh build</code>. Use Shell mode when you need shell composition such as <code>cd</code>, <code>&amp;&amp;</code>, pipes, redirects, or shell expansion.
         </p>
         <pre className="mt-3 w-full max-w-full min-w-0 overflow-x-auto whitespace-pre-wrap break-words rounded-lg border border-line/70 bg-background-soft/60 p-3 text-xs leading-6 text-foreground">
           <code>{`# Direct mode
@@ -47,10 +47,10 @@ cd frontend && PORT=$FRONTEND_PORT npm run dev
 npm run dev | tee .logs/frontend.log`}</code>
         </pre>
         <p className="mt-3 text-sm leading-7 text-foreground-soft">
-          Direct mode rejects shell-only syntax such as <code>&amp;&amp;</code>, pipes, redirects, command substitution, backticks, and raw shell expansion. Shell mode only requires a non-empty command and lets the configured shell do the parsing.
+          Direct mode rejects shell-only syntax such as <code>&amp;&amp;</code>, pipes, redirects, command substitution, backticks, and raw shell expansion. Shell mode only requires a non-empty command and leaves parsing to the configured shell.
         </p>
         <p className="mt-3 text-sm leading-7 text-foreground-soft">
-          Shell mode uses the global shell selected in Spaces Settings. The default is <code>zsh</code>, and you can change it globally to <code>bash</code> or <code>sh</code>.
+          Shell mode uses the global shell selected in Spaces Settings. The default is <code>zsh</code>, and you can switch it globally if your team standardizes on a different shell.
         </p>
       </article>
 

@@ -1,7 +1,14 @@
 import Foundation
 
 open class TmuxAdapter: @unchecked Sendable {
-    private let windowFormat = "#{window_id}\t#{window_index}\t#{window_name}\t#{session_name}\t#{window_active}\t#{pane_pid}"
+    private let windowFieldSeparator = "\u{1F}"
+    private var windowFormat: String {
+        // tmux can preserve tabs and printable user input inside names, so use
+        // an ASCII unit separator rather than a visible token that could collide
+        // with workspace, window, or session names.
+        ["#{window_id}", "#{window_index}", "#{window_name}", "#{session_name}", "#{window_active}", "#{pane_pid}"].joined(
+            separator: windowFieldSeparator)
+    }
 
     public init() {}
 
@@ -67,9 +74,9 @@ open class TmuxAdapter: @unchecked Sendable {
 
     open func killWindow(windowID: String) throws { _ = try Shell.run(["tmux", "kill-window", "-t", windowID]) }
 
-    private func parseWindow(line: String) -> TmuxWindowInfo? {
+    func parseWindow(line: String) -> TmuxWindowInfo? {
         guard !line.isEmpty else { return nil }
-        let parts = line.split(separator: "\t", omittingEmptySubsequences: false).map(String.init)
+        let parts = line.components(separatedBy: windowFieldSeparator)
         guard parts.count >= 5, let index = Int(parts[1]) else { return nil }
         return TmuxWindowInfo(
             id: parts[0], index: index, name: parts[2], sessionName: parts[3], isActive: parts[4] == "1",

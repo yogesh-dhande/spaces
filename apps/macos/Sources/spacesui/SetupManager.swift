@@ -122,18 +122,22 @@ private enum SetupStepAction {
         return container
     }
 
-    func start(preferredInitialCheckID: SetupCheckID? = nil) {
+    /// Runs setup checks and returns the setup content view only when onboarding must be shown.
+    /// Returning `nil` lets the caller continue directly into the main UI without
+    /// flashing the setup screen on healthy launches.
+    func begin(preferredInitialCheckID: SetupCheckID? = nil) -> NSView? {
         let results = if preferredInitialCheckID == nil { checker.runStartupBlockingChecks() } else { checker.runAll() }
         for result in results { stepStatuses[result.id] = result.passed }
 
         guard let firstFailIndex = initialFailIndex(preferredInitialCheckID: preferredInitialCheckID) else {
             isShowingSetupFlow = false
             onComplete?()
-            return
+            return nil
         }
 
         isShowingSetupFlow = true
         currentIndex = firstFailIndex
+        let contentView = makeContentView()
         updateChecklistDisplay()
         updateDetailDisplay()
 
@@ -142,6 +146,7 @@ private enum SetupStepAction {
         }
 
         startPolling()
+        return contentView
     }
 
     func stop() {

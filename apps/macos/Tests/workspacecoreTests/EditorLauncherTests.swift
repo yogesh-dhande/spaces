@@ -21,7 +21,7 @@ final class EditorLauncherTests: XCTestCase {
         // Mocked dependency: `open` binary.
         // Why: assert app-selection arguments without launching GUI apps during tests.
         // Remaining risk: does not validate Finder/LaunchServices behavior or real app bundle availability.
-        try withMockOpen {
+        try withMockCommands(["open": Self.openScript]) {
             try withEnv(name: "OPEN_LOG_FILE", value: logFile.path) {
                 try EditorLauncher.open(editor: .vscode, directory: directory)
                 try EditorLauncher.open(editor: .cursor, directory: directory)
@@ -43,28 +43,9 @@ final class EditorLauncherTests: XCTestCase {
         // Mocked dependency: failing `open` command exit code.
         // Why: document and assert current behavior (Shell.run status is ignored by EditorLauncher).
         // Remaining risk: callers may assume launch success because failures are intentionally non-throwing today.
-        try withMockOpen {
+        try withMockCommands(["open": Self.openScript]) {
             try withEnv(name: "OPEN_FAIL", value: "1") { XCTAssertNoThrow(try EditorLauncher.open(editor: .cursor, directory: "/tmp/workspace")) }
         }
-    }
-
-    private func withMockOpen(run: () throws -> Void) throws {
-        // Mock mechanism: PATH shim with a scripted `open` replacement.
-        // Why: isolate argument construction and failure handling from OS GUI side effects.
-        // Remaining risk: integration with real `open` semantics is outside unit scope.
-        let directory = try makeTempDirectory()
-        let open = directory.appendingPathComponent("open")
-        try Self.openScript.write(to: open, atomically: true, encoding: .utf8)
-        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: open.path)
-
-        sharedPathMutationLock.lock()
-        defer { sharedPathMutationLock.unlock() }
-        let originalPath = ProcessInfo.processInfo.environment["PATH"] ?? ""
-        let updatedPath = originalPath.isEmpty ? directory.path : "\(directory.path):\(originalPath)"
-        setenv("PATH", updatedPath, 1)
-        defer { setenv("PATH", originalPath, 1) }
-
-        try run()
     }
 
     private func withEnv(name: String, value: String, run: () throws -> Void) throws {

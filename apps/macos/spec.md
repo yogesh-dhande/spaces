@@ -82,7 +82,10 @@ A workspace owns a tracked set of dedicated windows, such as:
 Spaces focuses those windows; it does not decide their geometry.
 
 ## Onboarding
+- On launch, the main window should immediately show a neutral loading state while Spaces checks prerequisites and loads workspace data, so startup never presents a blank window.
 - On launch, Spaces blocks only on the cheap prerequisite checks: a supported terminal host installed (`iTerm2` or `Ghostty`), tmux installed, and yabai installed.
+- Startup prerequisite checks may enrich command lookup from the user's login-shell PATH, but that lookup must stay bounded and fall back automatically to the inherited PATH plus standard package-manager locations so shell startup files cannot stall app launch indefinitely.
+- When command lookup is enriched from the login-shell PATH, the app's inherited `PATH` remains authoritative. Login-shell entries should only fill gaps that are missing from the launch environment, and built-in package-manager fallbacks should remain last.
 - During first-run setup, either `iTerm2` or `Ghostty` satisfies the terminal prerequisite. If both are installed, Spaces should default the terminal host preference to `Ghostty`. If neither is installed, setup should direct the user to install `Ghostty` via Homebrew or the Ghostty website.
 - The slower yabai readiness step, including service-running and Accessibility validation, should be deferred until the setup flow is actually shown or another yabai-backed action needs it.
 - If a deferred yabai readiness check fails during startup, Spaces should switch into the setup flow at the yabai step instead of surfacing a raw shell error dialog.
@@ -123,6 +126,7 @@ Spaces focuses those windows; it does not decide their geometry.
 - Browser sessions stay configured while the workspace is running, but Spaces should leave them unopened until the user explicitly focuses that browser session.
 - Unopened browser sessions should not degrade runtime health or show missing-window warnings for an otherwise running workspace.
 - Workspace processes should be launched inside tmux so Spaces can recover the terminal view without losing the underlying process when a supported terminal-host window closes.
+- tmux-backed workspace and session management must treat workspace titles, tmux window names, and tmux session names as user-controlled text that may contain visible separator-like substrings without breaking window creation, listing, or focus recovery.
 - Editing workspace settings while a workspace is already running must not start or stop browser sessions or coding agents as part of save-time reconciliation. Process name and on-exit edits should update tracked running processes immediately, while command edits should require explicit confirmation to restart the affected running processes; canceling that prompt should leave the existing process configuration unchanged. New configured rows should appear immediately with their non-running status so the user can decide what to open or recover.
 - Process commands support two execution modes: `Direct` runs an executable with arguments, while `Shell` runs the command through the app-wide shell setting.
 - Direct mode is the recommended deterministic path for plain executable commands such as `scripts/swiftpm.sh build`.

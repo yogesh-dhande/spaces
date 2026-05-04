@@ -162,28 +162,6 @@ final class AppctlAdapterTests: XCTestCase {
         // Remaining risk: only one failure shape is covered; localized/structured osascript errors remain untested.
         try withMockCommands(["osascript": Self.osaScriptFailureMock]) { XCTAssertThrowsError(try AppleScript.run("FAIL_APPLESCRIPT")) }
     }
-
-    private func withMockCommands(_ commands: [String: String], run: () throws -> Void) throws {
-        // Mock mechanism: PATH shim that injects executable stubs ahead of system binaries.
-        // Why: keep tests fast and deterministic while targeting adapter behavior instead of external tools.
-        // Remaining risk: integration with real binaries is not validated here; that belongs in smoke/e2e testing.
-        let directory = try makeTempDirectory()
-        for (name, script) in commands {
-            let file = directory.appendingPathComponent(name)
-            try script.write(to: file, atomically: true, encoding: .utf8)
-            try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: file.path)
-        }
-
-        sharedPathMutationLock.lock()
-        defer { sharedPathMutationLock.unlock() }
-        let originalPath = ProcessInfo.processInfo.environment["PATH"] ?? ""
-        let updatedPath = originalPath.isEmpty ? directory.path : "\(directory.path):\(originalPath)"
-        setenv("PATH", updatedPath, 1)
-        defer { setenv("PATH", originalPath, 1) }
-
-        try withTestAppleScriptOptIn(enabled: commands.keys.contains("osascript")) { try run() }
-    }
-
     private func withEnv(name: String, value: String, run: () throws -> Void) throws {
         let original = ProcessInfo.processInfo.environment[name]
         setenv(name, value, 1)
