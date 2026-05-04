@@ -49,10 +49,11 @@ echo "Preparing base build $BASE_VERSION ($BASE_BUILD)..."
   --build "$BASE_BUILD" \
   --feed-url "$LOCAL_FEED_URL" \
   --public-ed-key "$SPARKLE_PUBLIC_ED_KEY"
-"$REPO_ROOT/scripts/swiftpm.sh" build -c release
+BUILD_DIR="$REPO_ROOT/apps/macos/.build/apple/Products/Release"
+"$REPO_ROOT/scripts/swiftpm.sh" build -c release --arch arm64 --arch x86_64
 "$REPO_ROOT/scripts/create-dmg.sh" \
-  "$REPO_ROOT/apps/macos/.build/release/SpacesApp" \
-  "$REPO_ROOT/apps/macos/.build/release/spaces" \
+  "$BUILD_DIR/SpacesApp" \
+  "$BUILD_DIR/spaces" \
   "$BASE_VERSION"
 
 echo "Preparing update build $UPDATE_VERSION ($UPDATE_BUILD)..."
@@ -61,10 +62,10 @@ echo "Preparing update build $UPDATE_VERSION ($UPDATE_BUILD)..."
   --build "$UPDATE_BUILD" \
   --feed-url "$LOCAL_FEED_URL" \
   --public-ed-key "$SPARKLE_PUBLIC_ED_KEY"
-"$REPO_ROOT/scripts/swiftpm.sh" build -c release
+"$REPO_ROOT/scripts/swiftpm.sh" build -c release --arch arm64 --arch x86_64
 "$REPO_ROOT/scripts/create-sparkle-archive.sh" \
-  "$REPO_ROOT/apps/macos/.build/release/SpacesApp" \
-  "$REPO_ROOT/apps/macos/.build/release/spaces" \
+  "$BUILD_DIR/SpacesApp" \
+  "$BUILD_DIR/spaces" \
   "$UPDATE_VERSION"
 
 SPARKLE_DOWNLOAD_URL_PREFIX="$LOCAL_DOWNLOAD_URL_PREFIX" \

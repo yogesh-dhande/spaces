@@ -117,23 +117,23 @@ jobs:
             --public-ed-key "$SPARKLE_PUBLIC_ED_KEY"
 
       - name: Build release
-        run: scripts/swiftpm.sh build -c release
+        run: scripts/swiftpm.sh build -c release --arch arm64 --arch x86_64
 
       - name: Code sign binaries
         env:
           CODESIGN_IDENTITY: ${{ secrets.CODESIGN_IDENTITY }}
         run: |
           scripts/codesign.sh \
-            apps/macos/.build/release/SpacesApp \
-            apps/macos/.build/release/spaces
+            apps/macos/.build/apple/Products/Release/SpacesApp \
+            apps/macos/.build/apple/Products/Release/spaces
 
       - name: Package DMG
         env:
           CODESIGN_IDENTITY: ${{ secrets.CODESIGN_IDENTITY }}
         run: |
           scripts/create-dmg.sh \
-            apps/macos/.build/release/SpacesApp \
-            apps/macos/.build/release/spaces \
+            apps/macos/.build/apple/Products/Release/SpacesApp \
+            apps/macos/.build/apple/Products/Release/spaces \
             ${{ steps.version.outputs.version }}
           dmg_name="Spaces-${{ steps.version.outputs.version }}.dmg"
           echo "DMG_NAME=$dmg_name" >> "$GITHUB_ENV"
@@ -144,8 +144,8 @@ jobs:
           CODESIGN_IDENTITY: ${{ secrets.CODESIGN_IDENTITY }}
         run: |
           scripts/create-sparkle-archive.sh \
-            apps/macos/.build/release/SpacesApp \
-            apps/macos/.build/release/spaces \
+            apps/macos/.build/apple/Products/Release/SpacesApp \
+            apps/macos/.build/apple/Products/Release/spaces \
             ${{ steps.version.outputs.version }}
           zip_name="Spaces-${{ steps.version.outputs.version }}.zip"
           echo "ZIP_NAME=$zip_name" >> "$GITHUB_ENV"

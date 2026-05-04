@@ -31,6 +31,36 @@ if [[ ! -f "$DMG_PATH" ]]; then
   exit 1
 fi
 
+require_universal_binary() {
+  local binary_path="$1"
+  local label="$2"
+  local archs
+
+  if [[ ! -f "$binary_path" ]]; then
+    echo "Error: Missing $label at $binary_path" >&2
+    exit 1
+  fi
+
+  archs="$(lipo -archs "$binary_path")"
+  echo "$label architectures: $archs"
+
+  case " $archs " in
+    *" arm64 "* ) ;;
+    *)
+      echo "Error: $label is missing arm64 support." >&2
+      exit 1
+      ;;
+  esac
+
+  case " $archs " in
+    *" x86_64 "* ) ;;
+    *)
+      echo "Error: $label is missing x86_64 support." >&2
+      exit 1
+      ;;
+  esac
+}
+
 echo "Verifying signed DMG..."
 codesign --verify --verbose=2 "$DMG_PATH"
 
@@ -65,5 +95,13 @@ for app_path in "$mountpoint/Install Spaces.app" "$mountpoint/Spaces.app"; do
     spctl -a -vvv -t exec "$app_path"
   fi
 done
+
+echo "Verifying bundled binary architectures..."
+require_universal_binary \
+  "$mountpoint/Spaces.app/Contents/MacOS/SpacesApp" \
+  "Spaces.app main executable"
+require_universal_binary \
+  "$mountpoint/Spaces.app/Contents/Resources/spaces" \
+  "Spaces.app bundled CLI"
 
 echo "✓ Release artifacts verified"
