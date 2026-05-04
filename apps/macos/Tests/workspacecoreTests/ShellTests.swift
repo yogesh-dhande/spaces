@@ -51,11 +51,14 @@ final class ShellTests: XCTestCase {
 
         let originalShell = ProcessInfo.processInfo.environment["SHELL"]
         let originalPath = ProcessInfo.processInfo.environment["PATH"] ?? ""
+        let originalHome = ProcessInfo.processInfo.environment["HOME"] ?? ""
         setenv("SHELL", shellFile.path, 1)
         setenv("PATH", "/usr/bin:/bin:/usr/sbin:/sbin", 1)
+        setenv("HOME", root.path, 1)
         defer {
             if let originalShell { setenv("SHELL", originalShell, 1) } else { unsetenv("SHELL") }
             setenv("PATH", originalPath, 1)
+            setenv("HOME", originalHome, 1)
         }
 
         let output = try Shell.runAndCapture(["mockcmd"])
@@ -88,11 +91,14 @@ final class ShellTests: XCTestCase {
 
         let originalShell = ProcessInfo.processInfo.environment["SHELL"]
         let originalPath = ProcessInfo.processInfo.environment["PATH"] ?? ""
+        let originalHome = ProcessInfo.processInfo.environment["HOME"] ?? ""
         setenv("SHELL", shellFile.path, 1)
         setenv("PATH", "", 1)
+        setenv("HOME", root.path, 1)
         defer {
             if let originalShell { setenv("SHELL", originalShell, 1) } else { unsetenv("SHELL") }
             setenv("PATH", originalPath, 1)
+            setenv("HOME", originalHome, 1)
         }
 
         let output = try Shell.runAndCapture(["mockcmd"])
@@ -107,6 +113,21 @@ final class ShellTests: XCTestCase {
         }
 
         XCTAssertEqual(Shell.resolvedLoginShellExecutablePath(environment: [:]), shellPath)
+    }
+
+    func testResolvedLoginShellExecutablePathPrefersAccountShellOverStaleEnvironmentShell() throws {
+        let accountInfo = currentUserAccountInfo()
+        guard let shellPath = accountInfo?.shellPath, !shellPath.isEmpty, let homePath = accountInfo?.homePath, !homePath.isEmpty else {
+            XCTFail("Expected current user account info to include a login shell and home path")
+            return
+        }
+
+        let root = try makeTempDirectory()
+        let staleShell = root.appendingPathComponent("stale-shell")
+        try "#!/bin/sh\nexit 0\n".write(to: staleShell, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: staleShell.path)
+
+        XCTAssertEqual(Shell.resolvedLoginShellExecutablePath(environment: ["SHELL": staleShell.path, "HOME": homePath]), shellPath)
     }
 
     func testRunAndCaptureSeedsLoginShellProbeWithSystemPathWhenInheritedPathIsEmpty() throws {
@@ -136,11 +157,14 @@ final class ShellTests: XCTestCase {
 
         let originalShell = ProcessInfo.processInfo.environment["SHELL"]
         let originalPath = ProcessInfo.processInfo.environment["PATH"] ?? ""
+        let originalHome = ProcessInfo.processInfo.environment["HOME"] ?? ""
         setenv("SHELL", shellFile.path, 1)
         setenv("PATH", "", 1)
+        setenv("HOME", root.path, 1)
         defer {
             if let originalShell { setenv("SHELL", originalShell, 1) } else { unsetenv("SHELL") }
             setenv("PATH", originalPath, 1)
+            setenv("HOME", originalHome, 1)
         }
 
         let output = try Shell.runAndCapture(["mockcmd"])
@@ -183,11 +207,14 @@ final class ShellTests: XCTestCase {
 
         let originalShell = ProcessInfo.processInfo.environment["SHELL"]
         let originalPath = ProcessInfo.processInfo.environment["PATH"] ?? ""
+        let originalHome = ProcessInfo.processInfo.environment["HOME"] ?? ""
         setenv("SHELL", shellFile.path, 1)
         setenv("PATH", "\(firstDirectory.path):\(secondDirectory.path):/usr/bin:/bin", 1)
+        setenv("HOME", root.path, 1)
         defer {
             if let originalShell { setenv("SHELL", originalShell, 1) } else { unsetenv("SHELL") }
             setenv("PATH", originalPath, 1)
+            setenv("HOME", originalHome, 1)
         }
 
         let output = try Shell.runAndCapture(["mockcmd"])
@@ -221,11 +248,14 @@ final class ShellTests: XCTestCase {
 
         let originalShell = ProcessInfo.processInfo.environment["SHELL"]
         let originalPath = ProcessInfo.processInfo.environment["PATH"] ?? ""
+        let originalHome = ProcessInfo.processInfo.environment["HOME"] ?? ""
         setenv("SHELL", shellFile.path, 1)
         setenv("PATH", "/usr/bin:/bin:/usr/sbin:/sbin", 1)
+        setenv("HOME", root.path, 1)
         defer {
             if let originalShell { setenv("SHELL", originalShell, 1) } else { unsetenv("SHELL") }
             setenv("PATH", originalPath, 1)
+            setenv("HOME", originalHome, 1)
         }
 
         let output = try Shell.runAndCapture(["mockcmd"])
@@ -258,11 +288,14 @@ final class ShellTests: XCTestCase {
 
         let originalShell = ProcessInfo.processInfo.environment["SHELL"]
         let originalPath = ProcessInfo.processInfo.environment["PATH"] ?? ""
+        let originalHome = ProcessInfo.processInfo.environment["HOME"] ?? ""
         setenv("SHELL", shellFile.path, 1)
         setenv("PATH", "/usr/bin:/bin:/usr/sbin:/sbin", 1)
+        setenv("HOME", root.path, 1)
         defer {
             if let originalShell { setenv("SHELL", originalShell, 1) } else { unsetenv("SHELL") }
             setenv("PATH", originalPath, 1)
+            setenv("HOME", originalHome, 1)
         }
 
         let output = try Shell.runAndCapture(["mockcmd"])
@@ -301,11 +334,14 @@ final class ShellTests: XCTestCase {
 
         let originalShell = ProcessInfo.processInfo.environment["SHELL"]
         let originalPath = ProcessInfo.processInfo.environment["PATH"] ?? ""
+        let originalHome = ProcessInfo.processInfo.environment["HOME"] ?? ""
         setenv("SHELL", shellFile.path, 1)
         setenv("PATH", "\(inheritedDirectory.path):/usr/bin:/bin", 1)
+        setenv("HOME", root.path, 1)
         defer {
             if let originalShell { setenv("SHELL", originalShell, 1) } else { unsetenv("SHELL") }
             setenv("PATH", originalPath, 1)
+            setenv("HOME", originalHome, 1)
         }
 
         let output = try Shell.runAndCapture(["mockcmd"])
@@ -340,11 +376,14 @@ final class ShellTests: XCTestCase {
 
         let originalShell = ProcessInfo.processInfo.environment["SHELL"]
         let originalPath = ProcessInfo.processInfo.environment["PATH"] ?? ""
+        let originalHome = ProcessInfo.processInfo.environment["HOME"] ?? ""
         setenv("SHELL", shellFile.path, 1)
         setenv("PATH", ":/usr/bin:/bin", 1)
+        setenv("HOME", root.path, 1)
         defer {
             if let originalShell { setenv("SHELL", originalShell, 1) } else { unsetenv("SHELL") }
             setenv("PATH", originalPath, 1)
+            setenv("HOME", originalHome, 1)
         }
 
         let output = try Shell.runAndCapture(["mockcmd"], cwd: workingDirectory.path)
@@ -488,17 +527,20 @@ final class ShellTests: XCTestCase {
 
         let originalShell = ProcessInfo.processInfo.environment["SHELL"]
         let originalPath = ProcessInfo.processInfo.environment["PATH"] ?? ""
+        let originalHome = ProcessInfo.processInfo.environment["HOME"] ?? ""
         let originalZdotdir = ProcessInfo.processInfo.environment["ZDOTDIR"]
         let originalXdgConfigHome = ProcessInfo.processInfo.environment["XDG_CONFIG_HOME"]
         let originalXdgConfigDirs = ProcessInfo.processInfo.environment["XDG_CONFIG_DIRS"]
         setenv("SHELL", shellFile.path, 1)
         setenv("PATH", "/usr/bin:/bin:/usr/sbin:/sbin", 1)
+        setenv("HOME", root.path, 1)
         setenv("ZDOTDIR", "\(root.path)/zdotdir", 1)
         setenv("XDG_CONFIG_HOME", "\(root.path)/xdg-home", 1)
         setenv("XDG_CONFIG_DIRS", "\(root.path)/xdg-dirs", 1)
         defer {
             if let originalShell { setenv("SHELL", originalShell, 1) } else { unsetenv("SHELL") }
             setenv("PATH", originalPath, 1)
+            setenv("HOME", originalHome, 1)
             if let originalZdotdir { setenv("ZDOTDIR", originalZdotdir, 1) } else { unsetenv("ZDOTDIR") }
             if let originalXdgConfigHome { setenv("XDG_CONFIG_HOME", originalXdgConfigHome, 1) } else { unsetenv("XDG_CONFIG_HOME") }
             if let originalXdgConfigDirs { setenv("XDG_CONFIG_DIRS", originalXdgConfigDirs, 1) } else { unsetenv("XDG_CONFIG_DIRS") }
@@ -578,13 +620,16 @@ final class ShellTests: XCTestCase {
 
         let originalShell = ProcessInfo.processInfo.environment["SHELL"]
         let originalPath = ProcessInfo.processInfo.environment["PATH"] ?? ""
+        let originalHome = ProcessInfo.processInfo.environment["HOME"] ?? ""
         let originalTimeout = ProcessInfo.processInfo.environment["SPACES_LOGIN_SHELL_PATH_TIMEOUT_SECONDS"]
         setenv("SHELL", shellFile.path, 1)
         setenv("PATH", "\(commandDirectory.path):/usr/bin:/bin:/usr/sbin:/sbin", 1)
+        setenv("HOME", root.path, 1)
         setenv("SPACES_LOGIN_SHELL_PATH_TIMEOUT_SECONDS", "0.05", 1)
         defer {
             if let originalShell { setenv("SHELL", originalShell, 1) } else { unsetenv("SHELL") }
             setenv("PATH", originalPath, 1)
+            setenv("HOME", originalHome, 1)
             if let originalTimeout {
                 setenv("SPACES_LOGIN_SHELL_PATH_TIMEOUT_SECONDS", originalTimeout, 1)
             } else {
@@ -598,7 +643,7 @@ final class ShellTests: XCTestCase {
         XCTAssertLessThan(Date().timeIntervalSince(startedAt), 2.0)
     }
 
-    func testRunAndCaptureReapsTimedOutLoginShellProbe() throws {
+    func testRunAndCaptureReapsTimedOutLoginShellProbeAndImmediateHelper() throws {
         let root = try makeTempDirectory()
         let commandDirectory = root.appendingPathComponent("commands", isDirectory: true)
         try FileManager.default.createDirectory(at: commandDirectory, withIntermediateDirectories: true)
@@ -607,10 +652,21 @@ final class ShellTests: XCTestCase {
         try "#!/bin/sh\nprintf 'reaped-timeout'\n".write(to: commandFile, atomically: true, encoding: .utf8)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: commandFile.path)
 
+        let helperFile = root.appendingPathComponent("probe-helper")
+        try """
+        #!/bin/sh
+        trap '' INT TERM
+        while :; do sleep 1; done
+        """.write(to: helperFile, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: helperFile.path)
+
         let shellFile = root.appendingPathComponent("mock-shell")
         let shellScript = """
             #!/bin/sh
             if [ "$1" = "-l" ] && [ "$2" = "-c" ]; then
+              # Spawn the helper before doing any other shell-side setup so the
+              # probe launch must already be isolated for group reaping to work.
+              "\(helperFile.path)" &
               trap '' INT TERM
               while :; do sleep 1; done
             fi
@@ -624,13 +680,16 @@ final class ShellTests: XCTestCase {
 
         let originalShell = ProcessInfo.processInfo.environment["SHELL"]
         let originalPath = ProcessInfo.processInfo.environment["PATH"] ?? ""
+        let originalHome = ProcessInfo.processInfo.environment["HOME"] ?? ""
         let originalTimeout = ProcessInfo.processInfo.environment["SPACES_LOGIN_SHELL_PATH_TIMEOUT_SECONDS"]
         setenv("SHELL", shellFile.path, 1)
         setenv("PATH", "\(commandDirectory.path):/usr/bin:/bin:/usr/sbin:/sbin", 1)
+        setenv("HOME", root.path, 1)
         setenv("SPACES_LOGIN_SHELL_PATH_TIMEOUT_SECONDS", "0.05", 1)
         defer {
             if let originalShell { setenv("SHELL", originalShell, 1) } else { unsetenv("SHELL") }
             setenv("PATH", originalPath, 1)
+            setenv("HOME", originalHome, 1)
             if let originalTimeout {
                 setenv("SPACES_LOGIN_SHELL_PATH_TIMEOUT_SECONDS", originalTimeout, 1)
             } else {
@@ -641,6 +700,7 @@ final class ShellTests: XCTestCase {
         let output = try Shell.runAndCapture(["mockcmd"])
         XCTAssertEqual(output, "reaped-timeout")
         XCTAssertFalse(processListContains(argumentFragment: shellFile.path), "Timed-out login-shell probe should be reaped")
+        XCTAssertFalse(processListContains(argumentFragment: helperFile.path), "Timed-out login-shell helper should be reaped")
     }
 
     func testRunAndCaptureFallsBackWhenTimedOutShellLeavesInheritedPipesOpen() throws {
@@ -669,13 +729,16 @@ final class ShellTests: XCTestCase {
 
         let originalShell = ProcessInfo.processInfo.environment["SHELL"]
         let originalPath = ProcessInfo.processInfo.environment["PATH"] ?? ""
+        let originalHome = ProcessInfo.processInfo.environment["HOME"] ?? ""
         let originalTimeout = ProcessInfo.processInfo.environment["SPACES_LOGIN_SHELL_PATH_TIMEOUT_SECONDS"]
         setenv("SHELL", shellFile.path, 1)
         setenv("PATH", "\(commandDirectory.path):/usr/bin:/bin:/usr/sbin:/sbin", 1)
+        setenv("HOME", root.path, 1)
         setenv("SPACES_LOGIN_SHELL_PATH_TIMEOUT_SECONDS", "0.05", 1)
         defer {
             if let originalShell { setenv("SHELL", originalShell, 1) } else { unsetenv("SHELL") }
             setenv("PATH", originalPath, 1)
+            setenv("HOME", originalHome, 1)
             if let originalTimeout {
                 setenv("SPACES_LOGIN_SHELL_PATH_TIMEOUT_SECONDS", originalTimeout, 1)
             } else {
@@ -715,13 +778,16 @@ final class ShellTests: XCTestCase {
 
         let originalShell = ProcessInfo.processInfo.environment["SHELL"]
         let originalPath = ProcessInfo.processInfo.environment["PATH"] ?? ""
+        let originalHome = ProcessInfo.processInfo.environment["HOME"] ?? ""
         let originalTimeout = ProcessInfo.processInfo.environment["SPACES_LOGIN_SHELL_PATH_TIMEOUT_SECONDS"]
         setenv("SHELL", shellFile.path, 1)
         setenv("PATH", "\(commandDirectory.path):/usr/bin:/bin:/usr/sbin:/sbin", 1)
+        setenv("HOME", root.path, 1)
         setenv("SPACES_LOGIN_SHELL_PATH_TIMEOUT_SECONDS", "2.0", 1)
         defer {
             if let originalShell { setenv("SHELL", originalShell, 1) } else { unsetenv("SHELL") }
             setenv("PATH", originalPath, 1)
+            setenv("HOME", originalHome, 1)
             if let originalTimeout {
                 setenv("SPACES_LOGIN_SHELL_PATH_TIMEOUT_SECONDS", originalTimeout, 1)
             } else {

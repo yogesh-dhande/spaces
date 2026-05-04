@@ -118,6 +118,28 @@ public enum Shell {
         }
     }
 
+    private final class ProbeProcess: @unchecked Sendable {
+        let pid: pid_t
+        private let lock = NSLock()
+        private var cachedTerminationStatus: Int32?
+
+        init(pid: pid_t) { self.pid = pid }
+
+        var processGroupID: pid_t { pid }
+
+        func cachedTerminationStatusValue() -> Int32? {
+            lock.lock()
+            defer { lock.unlock() }
+            return cachedTerminationStatus
+        }
+
+        func recordTerminationStatus(_ status: Int32) {
+            lock.lock()
+            cachedTerminationStatus = status
+            lock.unlock()
+        }
+    }
+
     private static let loginShellPathCache = LoginShellPathCache()
     private static let loginShellPathTimeoutFallbackSeconds: TimeInterval = 2
     private static let loginShellPathFailureCacheFallbackSeconds: TimeInterval = 10
@@ -188,7 +210,6 @@ public enum Shell {
             xdgConfigHomePath: environment["XDG_CONFIG_HOME"]?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "",
             xdgConfigDirsPath: environment["XDG_CONFIG_DIRS"]?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "")
         return loginShellPathCache.value(for: cacheKey) {
-            let process = Process()
             let output = Pipe()
             let error = Pipe()
             let discoveredState = DiscoveredPathState()
@@ -197,12 +218,11 @@ public enum Shell {
                 discoveredState.record(path: path)
             }
             let stderrReader = PipeCollector(handle: error.fileHandleForReading)
-            process.executableURL = URL(fileURLWithPath: shellPath)
             // Use a login shell so PATH matches the user's configured shell
             // environment, but keep it non-interactive. Interactive shells may
             // try to take foreground TTY control during app launch and hang the
             // caller in job-control setup before PATH is printed.
-            process.arguments = ["-l", "-c", "printf '\\n__SPACES_PATH__'; /usr/bin/printenv PATH"]
+            let arguments = ["-l", "-c", "printf '\\n__SPACES_PATH__'; /usr/bin/printenv PATH"]
             var loginEnvironment: [String: String] = [:]
             for key in ["HOME", "USER", "LOGNAME", "TMPDIR", "ZDOTDIR", "XDG_CONFIG_HOME", "XDG_CONFIG_DIRS"] {
                 if let value = environment[key], !value.isEmpty { loginEnvironment[key] = value }
@@ -210,13 +230,11 @@ public enum Shell {
             loginEnvironment["PATH"] = loginShellProbeSeedPath(currentPath: currentPath)
             loginEnvironment["SHELL"] = shellPath
             loginEnvironment["TERM"] = environment["TERM"]?.isEmpty == false ? environment["TERM"] : "xterm-256color"
-            process.environment = loginEnvironment
-            process.standardOutput = output
-            process.standardError = error
 
-            guard (try? process.run()) != nil else {
-                return LoginShellPathResolution(path: "", cachePolicy: .cacheFailure(until: failureCacheExpiry(environment: environment)))
-            }
+            guard
+                let process = spawnIsolatedProbeProcess(
+                    executablePath: shellPath, arguments: arguments, environment: loginEnvironment, output: output, error: error)
+            else { return LoginShellPathResolution(path: "", cachePolicy: .cacheFailure(until: failureCacheExpiry(environment: environment))) }
             let probeTimeout = loginShellPathTimeoutSeconds(environment: environment)
             guard waitForProcessExit(process, timeout: probeTimeout) else {
                 let discoveredPath = discoveredState.path(from: stdoutReader.collectedData())
@@ -240,7 +258,7 @@ public enum Shell {
                 return LoginShellPathResolution(path: "", cachePolicy: .cacheFailure(until: failureCacheExpiry(environment: environment)))
             }
             if let discoveredPath { return LoginShellPathResolution(path: discoveredPath, cachePolicy: .cacheSuccess) }
-            guard process.terminationStatus == 0 else {
+            guard process.cachedTerminationStatusValue() == 0 else {
                 return LoginShellPathResolution(path: "", cachePolicy: .cacheFailure(until: failureCacheExpiry(environment: environment)))
             }
             return LoginShellPathResolution(path: "", cachePolicy: .cacheFailure(until: failureCacheExpiry(environment: environment)))
@@ -249,8 +267,17 @@ public enum Shell {
 
     static func resolvedLoginShellExecutablePath(environment: [String: String]) -> String? {
         let configuredShell = environment["SHELL"]?.trimmingCharacters(in: .whitespacesAndNewlines)
-        if let configuredShell, !configuredShell.isEmpty { return configuredShell }
-        return currentUserAccountInfo()?.shellPath
+        let accountInfo = currentUserAccountInfo()
+        if let accountShell = accountInfo?.shellPath, !accountShell.isEmpty {
+            let configuredHome = environment["HOME"]?.trimmingCharacters(in: .whitespacesAndNewlines)
+            if let configuredShell, !configuredShell.isEmpty, let configuredHome, !configuredHome.isEmpty, let accountHome = accountInfo?.homePath,
+                configuredHome != accountHome
+            {
+                return configuredShell
+            }
+            return accountShell
+        }
+        return configuredShell
     }
 
     private static func resolvedHomePath(environment: [String: String]) -> String? {
@@ -328,37 +355,101 @@ public enum Shell {
         }
     }
 
-    private static func waitForProcessExit(_ process: Process, timeout: TimeInterval) -> Bool {
+    private static func spawnIsolatedProbeProcess(
+        executablePath: String, arguments: [String], environment: [String: String], output: Pipe, error: Pipe
+    ) -> ProbeProcess? {
+        var fileActions: posix_spawn_file_actions_t? = nil
+        guard posix_spawn_file_actions_init(&fileActions) == 0 else { return nil }
+        defer { posix_spawn_file_actions_destroy(&fileActions) }
+
+        let outputFD = output.fileHandleForWriting.fileDescriptor
+        let errorFD = error.fileHandleForWriting.fileDescriptor
+        guard posix_spawn_file_actions_adddup2(&fileActions, outputFD, STDOUT_FILENO) == 0,
+            posix_spawn_file_actions_adddup2(&fileActions, errorFD, STDERR_FILENO) == 0,
+            posix_spawn_file_actions_addclose(&fileActions, outputFD) == 0, posix_spawn_file_actions_addclose(&fileActions, errorFD) == 0
+        else { return nil }
+
+        var attributes: posix_spawnattr_t? = nil
+        guard posix_spawnattr_init(&attributes) == 0 else { return nil }
+        defer { posix_spawnattr_destroy(&attributes) }
+
+        let processGroupID: pid_t = 0
+        let spawnFlags = Int16(POSIX_SPAWN_SETPGROUP)
+        guard posix_spawnattr_setpgroup(&attributes, processGroupID) == 0,
+            // With POSIX_SPAWN_SETPGROUP and a zero pgroup value, Darwin starts
+            // the child as the leader of its own process group before shell init
+            // runs. Any helper spawned immediately by shell startup inherits that
+            // isolated group and can be reaped with a single group signal later.
+            posix_spawnattr_setflags(&attributes, spawnFlags) == 0
+        else { return nil }
+
+        var argv: [UnsafeMutablePointer<CChar>?] = ([executablePath] + arguments).map { strdup($0) }
+        argv.append(nil)
+        defer { for case let pointer? in argv { free(pointer) } }
+
+        var envp: [UnsafeMutablePointer<CChar>?] = environment.map { strdup("\($0.key)=\($0.value)") }
+        envp.append(nil)
+        defer { for case let pointer? in envp { free(pointer) } }
+
+        var pid: pid_t = 0
+        let spawnResult = posix_spawn(&pid, executablePath, &fileActions, &attributes, &argv, &envp)
+        output.fileHandleForWriting.closeFile()
+        error.fileHandleForWriting.closeFile()
+        guard spawnResult == 0, pid > 0 else { return nil }
+        return ProbeProcess(pid: pid)
+    }
+
+    private static func waitForProcessExit(_ process: ProbeProcess, timeout: TimeInterval) -> Bool {
         let deadline = Date().addingTimeInterval(timeout)
-        while process.isRunning {
+        while true {
+            if reapIfTerminated(process) { return true }
             if Date() >= deadline {
                 terminateAndReap(process, timeout: 0.2)
-                return !process.isRunning
+                return process.cachedTerminationStatusValue() != nil
             }
             Thread.sleep(forTimeInterval: 0.01)
         }
-        return true
     }
 
-    private static func terminateAndReap(_ process: Process, timeout: TimeInterval) {
-        process.interrupt()
+    private static func terminateAndReap(_ process: ProbeProcess, timeout: TimeInterval) {
+        signalProbeProcessGroup(process, signal: SIGINT)
         if waitForTermination(of: process, timeout: timeout / 4) { return }
 
-        process.terminate()
+        signalProbeProcessGroup(process, signal: SIGTERM)
         if waitForTermination(of: process, timeout: timeout / 4) { return }
 
-        let pid = process.processIdentifier
-        if pid > 0 { kill(pid, SIGKILL) }
+        signalProbeProcessGroup(process, signal: SIGKILL)
         _ = waitForTermination(of: process, timeout: timeout / 2)
     }
 
-    private static func waitForTermination(of process: Process, timeout: TimeInterval) -> Bool {
+    private static func signalProbeProcessGroup(_ process: ProbeProcess, signal: Int32) {
+        let processGroupID = process.processGroupID
+        guard processGroupID > 0 else { return }
+        _ = kill(-processGroupID, signal)
+    }
+
+    private static func reapIfTerminated(_ process: ProbeProcess) -> Bool {
+        if process.cachedTerminationStatusValue() != nil { return true }
+        var status: Int32 = 0
+        let result = waitpid(process.pid, &status, WNOHANG)
+        if result == process.pid {
+            process.recordTerminationStatus(waitStatus(status))
+            return true
+        }
+        if result == -1, errno == ECHILD {
+            process.recordTerminationStatus(0)
+            return true
+        }
+        return false
+    }
+
+    private static func waitForTermination(of process: ProbeProcess, timeout: TimeInterval) -> Bool {
         let deadline = Date().addingTimeInterval(timeout)
-        while process.isRunning {
+        while true {
+            if reapIfTerminated(process) { return true }
             if Date() >= deadline { return false }
             Thread.sleep(forTimeInterval: 0.01)
         }
-        return true
     }
 
     private static func resolvedExecutablePath(for executable: String, environment: [String: String]) -> String? {
