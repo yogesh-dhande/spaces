@@ -1569,7 +1569,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let rect = NSRect(x: 200, y: 200, width: 1100, height: 700)
         window = NSWindow(contentRect: rect, styleMask: [.titled, .resizable, .closable], backing: .buffered, defer: false)
         window.title = "Spaces"
-        window.backgroundColor = Theme.bg
+        window.backgroundColor = sidebarPanelBackgroundColor()
         window.titlebarAppearsTransparent = true
         window.center()
         window.delegate = self
@@ -7843,9 +7843,9 @@ struct CommandPaletteItem: Sendable {
     func update(item: CommandPaletteItem, isSelected: Bool, shortcutText: String?, onClick: (() -> Void)? = nil) {
         if let onClick { clickHandler = onClick }
         isSelectedState = isSelected
-        effectiveAppearance.performAsCurrentDrawingAppearance { layer?.backgroundColor = (isSelected ? Theme.rowSelected : .clear).cgColor }
-        layer?.borderWidth = 1
-        layer?.borderColor = (isSelected ? Theme.accent.withAlphaComponent(0.18) : NSColor.clear).cgColor
+        effectiveAppearance.performAsCurrentDrawingAppearance { layer?.backgroundColor = (isSelected ? Theme.rowSelectedCard : .clear).cgColor }
+        layer?.borderWidth = isSelected ? 1 : 0
+        layer?.borderColor = (isSelected ? Theme.rowSelectedCardBorder : NSColor.clear).cgColor
 
         labelField.stringValue = item.label
         workspaceField.stringValue = item.workspaceTitle
@@ -7919,7 +7919,7 @@ struct CommandPaletteItem: Sendable {
     override func viewDidChangeEffectiveAppearance() {
         super.viewDidChangeEffectiveAppearance()
         effectiveAppearance.performAsCurrentDrawingAppearance {
-            layer?.backgroundColor = isSelectedState ? Theme.rowSelected.cgColor : NSColor.clear.cgColor
+            layer?.backgroundColor = isSelectedState ? Theme.rowSelectedCard.cgColor : NSColor.clear.cgColor
         }
     }
 }
@@ -8240,7 +8240,7 @@ extension AppKitController {
         if let zoomButton = panel.standardWindowButton(.zoomButton) { zoomButton.isHidden = true }
 
         let root = ColoredBackgroundView()
-        root.fillColor = Theme.surface
+        root.fillColor = Theme.paletteSurface
         root.cornerRadius = 12
         root.translatesAutoresizingMaskIntoConstraints = false
         root.wantsLayer = true
