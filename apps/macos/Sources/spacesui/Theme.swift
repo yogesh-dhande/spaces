@@ -15,6 +15,8 @@ enum Theme {
     static let surface = dynamic(light: (255, 255, 255), dark: (29, 42, 45))
     /// Secondary surface used inside cards (editing forms, stop script).
     static let surface2 = dynamic(light: (241, 239, 230), dark: (23, 33, 36))
+    /// Floating palette background — slightly darker than surface so selection tints read lighter.
+    static let paletteSurface = dynamic(light: (250, 249, 244), dark: (25, 37, 40))
     /// Sidebar background (matches `--sidebar-bg`).
     static let sidebarBg = dynamic(light: (241, 239, 230), dark: (15, 21, 23))
 
@@ -68,6 +70,10 @@ enum Theme {
         let isDark = appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
         return isDark ? color(89, 219, 205, alpha: 0.18) : color(15, 122, 118, alpha: 0.14)
     }
+    /// Muted selected-row tint for the command palette — same hue as rowSelected but lower alpha.
+    static let rowSelectedCard = dynamic(light: (15, 122, 118), dark: (89, 219, 205), alpha: 0.07)
+    /// Subtle teal border for a selected palette row.
+    static let rowSelectedCardBorder = dynamic(light: (13, 95, 93), dark: (61, 198, 184), alpha: 0.28)
     /// Neutral chip background (project chip, shortcut chip, branch chip).
     static let chipBg = NSColor(name: nil) { appearance in
         let isDark = appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua

@@ -352,8 +352,8 @@ import workspacecore
     // Fields that appear in the editing subtree.
     private var nameField: NSTextField?
     private var commandField: NSTextField?
-    private var executionModePopup: NSPopUpButton?
-    private var onExitPopup: NSPopUpButton?
+    private var executionModeSegmented: NSSegmentedControl?
+    private var onExitSegmented: NSSegmentedControl?
 
     init(
         process: ProcessTemplate, shortcut: String?, status: RowPrimitives.StatusKind, onFocus: (() -> Void)? = nil, showsRuntimeControls: Bool = true
@@ -428,8 +428,8 @@ import workspacecore
             process: seed, onCancel: { [weak self] in self?.onCancel?() }, onSave: { [weak self] edited in self?.onSave?(edited) })
         nameField = fields.name
         commandField = fields.command
-        executionModePopup = fields.executionMode
-        onExitPopup = fields.onExit
+        executionModeSegmented = fields.executionMode
+        onExitSegmented = fields.onExit
         editingContainer = form
 
         let run = { [self] in
@@ -470,8 +470,8 @@ import workspacecore
         editingContainer = nil
         nameField = nil
         commandField = nil
-        executionModePopup = nil
-        onExitPopup = nil
+        executionModeSegmented = nil
+        onExitSegmented = nil
     }
 
     // MARK: Identity + snapshot helpers (for refresh reconciliation)
@@ -485,8 +485,8 @@ import workspacecore
     func formSnapshot() -> ProcessTemplate {
         ProcessTemplate(
             id: currentProcess.id, name: (nameField?.stringValue).flatMap { $0.isEmpty ? nil : $0 }, command: commandField?.stringValue ?? "",
-            onExit: ProcessExitAction(rawValue: onExitPopup?.selectedItem?.representedObject as? String ?? "") ?? .none,
-            executionMode: ProcessExecutionMode(rawValue: executionModePopup?.selectedItem?.representedObject as? String ?? "") ?? .direct)
+            onExit: ProcessExitAction.allCases[safe: onExitSegmented?.selectedSegment ?? 0] ?? .none,
+            executionMode: ProcessExecutionMode.allCases[safe: executionModeSegmented?.selectedSegment ?? 0] ?? .direct)
     }
 
     // MARK: Builders
@@ -563,7 +563,7 @@ import workspacecore
     }
 
     private static func makeEditingForm(process: ProcessTemplate, onCancel: @escaping () -> Void, onSave: @escaping (ProcessTemplate) -> Void) -> (
-        NSStackView, (name: NSTextField, command: NSTextField, executionMode: NSPopUpButton, onExit: NSPopUpButton)
+        NSStackView, (name: NSTextField, command: NSTextField, executionMode: NSSegmentedControl, onExit: NSSegmentedControl)
     ) {
         let nameField = NSTextField(string: process.name ?? "")
         nameField.placeholderString = "Name"
@@ -573,21 +573,15 @@ import workspacecore
         commandField.placeholderString = "Command"
         commandField.setAccessibilityIdentifier("process-row-edit-command")
 
-        let executionModePopup = NSPopUpButton(frame: .zero, pullsDown: false)
-        for mode in ProcessExecutionMode.allCases {
-            executionModePopup.addItem(withTitle: mode.displayName)
-            executionModePopup.lastItem?.representedObject = mode.rawValue
-        }
-        executionModePopup.selectItem(at: ProcessExecutionMode.allCases.firstIndex(of: process.executionMode) ?? 0)
-        executionModePopup.setAccessibilityIdentifier("process-row-edit-execution-mode")
+        let executionModeSegmented = NSSegmentedControl(
+            labels: ProcessExecutionMode.allCases.map(\.displayName), trackingMode: .selectOne, target: nil, action: nil)
+        executionModeSegmented.selectedSegment = ProcessExecutionMode.allCases.firstIndex(of: process.executionMode) ?? 0
+        executionModeSegmented.setAccessibilityIdentifier("process-row-edit-execution-mode")
 
-        let onExitPopup = NSPopUpButton(frame: .zero, pullsDown: false)
-        for action in ProcessExitAction.allCases {
-            onExitPopup.addItem(withTitle: action.rawValue)
-            onExitPopup.lastItem?.representedObject = action.rawValue
-        }
-        onExitPopup.selectItem(withTitle: process.onExit.rawValue)
-        onExitPopup.setAccessibilityIdentifier("process-row-edit-on-exit")
+        let onExitSegmented = NSSegmentedControl(
+            labels: ProcessExitAction.allCases.map { $0.rawValue.capitalized }, trackingMode: .selectOne, target: nil, action: nil)
+        onExitSegmented.selectedSegment = ProcessExitAction.allCases.firstIndex(of: process.onExit) ?? 0
+        onExitSegmented.setAccessibilityIdentifier("process-row-edit-on-exit")
 
         func labeled(_ title: String, _ field: NSView) -> NSStackView {
             let label = NSTextField(labelWithString: title)
@@ -605,8 +599,8 @@ import workspacecore
             return row
         }
 
-        let executionModeRow = labeled("Execution mode", executionModePopup)
-        let onExitRow = labeled("On exit", onExitPopup)
+        let executionModeRow = labeled("Execution mode", executionModeSegmented)
+        let onExitRow = labeled("On exit", onExitSegmented)
         executionModeRow.setContentHuggingPriority(.defaultLow, for: .horizontal)
         onExitRow.setContentHuggingPriority(.defaultLow, for: .horizontal)
 
@@ -630,12 +624,11 @@ import workspacecore
         // a lightweight target helper tied to the form's lifetime.
         let target = ClosureTarget()
         target.onCancel = onCancel
-        target.onSave = { [weak nameField, weak commandField, weak executionModePopup, weak onExitPopup] in
+        target.onSave = { [weak nameField, weak commandField, weak executionModeSegmented, weak onExitSegmented] in
             let edited = ProcessTemplate(
                 id: process.id, name: nameField?.stringValue.isEmpty == false ? nameField?.stringValue : nil,
-                command: commandField?.stringValue ?? "",
-                onExit: ProcessExitAction(rawValue: onExitPopup?.selectedItem?.representedObject as? String ?? "") ?? .none,
-                executionMode: ProcessExecutionMode(rawValue: executionModePopup?.selectedItem?.representedObject as? String ?? "") ?? .direct)
+                command: commandField?.stringValue ?? "", onExit: ProcessExitAction.allCases[safe: onExitSegmented?.selectedSegment ?? 0] ?? .none,
+                executionMode: ProcessExecutionMode.allCases[safe: executionModeSegmented?.selectedSegment ?? 0] ?? .direct)
             onSave(edited)
         }
         let refreshSaveEnabled = { [weak saveButton, weak nameField, weak commandField] in
@@ -669,7 +662,7 @@ import workspacecore
         // Anchor the target to the form so it lives as long as the form does.
         objc_setAssociatedObject(form, &Self.targetKey, target, .OBJC_ASSOCIATION_RETAIN)
 
-        return (form, (nameField, commandField, executionModePopup, onExitPopup))
+        return (form, (nameField, commandField, executionModeSegmented, onExitSegmented))
     }
 
     private static func buildActionButton(symbol: String, tooltip: String, onClick: @escaping (NSButton) -> Void) -> NSButton {

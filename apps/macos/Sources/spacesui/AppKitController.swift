@@ -129,7 +129,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     private let outlineView = SidebarOutlineView()
     private let detailContainer = NSView()
     private weak var workspaceShortcutFooterRowView: NSStackView?
-    private var workspaceShortcutFooterLabels: [NSTextField] = []
+    // workspaceShortcutFooterLabels removed — footer rebuilt on each refresh
     private var orchestrator: WorkspaceOrchestrator!
     private var projects: [ProjectSummary] = []
     private var outlineItemRefCache: [String: OutlineItemRef] = [:]
@@ -1569,6 +1569,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let rect = NSRect(x: 200, y: 200, width: 1100, height: 700)
         window = NSWindow(contentRect: rect, styleMask: [.titled, .resizable, .closable], backing: .buffered, defer: false)
         window.title = "Spaces"
+        window.backgroundColor = sidebarPanelBackgroundColor()
+        window.titlebarAppearsTransparent = true
         window.center()
         window.delegate = self
         window.makeKeyAndOrderFront(nil)
@@ -4754,44 +4756,51 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let row = NSStackView()
         row.orientation = .horizontal
         row.alignment = .centerY
-        row.spacing = 10
+        row.spacing = 5
         workspaceShortcutFooterRowView = row
-        workspaceShortcutFooterLabels = []
-
-        for index in workspaceDetailShortcutFooterSegments().indices {
-            if index > 0 {
-                let separator = NSTextField(labelWithString: "•")
-                separator.font = .systemFont(ofSize: 11, weight: .medium)
-                separator.textColor = .tertiaryLabelColor
-                row.addArrangedSubview(separator)
-            }
-
-            let label = NSTextField(labelWithString: "")
-            label.font = .systemFont(ofSize: 11, weight: .regular)
-            label.textColor = .secondaryLabelColor
-            label.lineBreakMode = .byTruncatingTail
-            label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-            workspaceShortcutFooterLabels.append(label)
-            row.addArrangedSubview(label)
-        }
-
-        row.addArrangedSubview(NSView())
+        populateWorkspaceShortcutFooterRow(row)
         return row
     }
 
-    private func refreshWorkspaceShortcutFooterRow() {
-        let segments = workspaceDetailShortcutFooterSegments()
-        guard workspaceShortcutFooterLabels.count == segments.count else { return }
-        for (index, label) in workspaceShortcutFooterLabels.enumerated() { label.stringValue = segments[index] }
-        workspaceShortcutFooterRowView?.needsLayout = true
+    private func populateWorkspaceShortcutFooterRow(_ row: NSStackView) {
+        for view in row.arrangedSubviews {
+            row.removeArrangedSubview(view)
+            view.removeFromSuperview()
+        }
+        for (index, segment) in workspaceDetailShortcutFooterSegments().enumerated() {
+            if index > 0 {
+                let sep = NSTextField(labelWithString: "|")
+                sep.font = .systemFont(ofSize: 10, weight: .thin)
+                sep.textColor = .quaternaryLabelColor
+                row.addArrangedSubview(sep)
+            }
+            let group = NSStackView()
+            group.orientation = .horizontal
+            group.alignment = .centerY
+            group.spacing = 3
+            let chip = footerShortcutHint(for: segment.setting)
+            if !chip.isEmpty { group.addArrangedSubview(RowPrimitives.shortcutChip(chip)) }
+            let lbl = NSTextField(labelWithString: segment.label)
+            lbl.font = .systemFont(ofSize: 10.5, weight: .regular)
+            lbl.textColor = .secondaryLabelColor
+            lbl.lineBreakMode = .byTruncatingTail
+            lbl.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+            group.addArrangedSubview(lbl)
+            row.addArrangedSubview(group)
+        }
+        row.addArrangedSubview(NSView())
     }
 
-    private func workspaceDetailShortcutFooterSegments() -> [String] {
+    private func refreshWorkspaceShortcutFooterRow() {
+        guard let row = workspaceShortcutFooterRowView else { return }
+        populateWorkspaceShortcutFooterRow(row)
+    }
+
+    private func workspaceDetailShortcutFooterSegments() -> [(label: String, setting: ShortcutSetting)] {
         [
-            "Toggle app \(footerShortcutHint(for: .guiHotkey))", "Palette \(footerShortcutHint(for: .guiCommandPaletteHotkey))",
-            "Alerts \(footerShortcutHint(for: .guiAlertsShortcut))", "Settings \(footerShortcutHint(for: .guiOpenSettingsShortcut))",
-            "Open editor \(footerShortcutHint(for: .guiOpenEditorShortcut))", "New terminal \(footerShortcutHint(for: .guiOpenTerminalShortcut))",
-            "Next window \(footerShortcutHint(for: .guiNextShortcut))", "Prev window \(footerShortcutHint(for: .guiPreviousShortcut))",
+            ("Toggle app", .guiHotkey), ("Palette", .guiCommandPaletteHotkey), ("Alerts", .guiAlertsShortcut), ("Settings", .guiOpenSettingsShortcut),
+            ("Open editor", .guiOpenEditorShortcut), ("New terminal", .guiOpenTerminalShortcut), ("Next window", .guiNextShortcut),
+            ("Prev window", .guiPreviousShortcut),
         ]
     }
 
@@ -4828,7 +4837,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             row.addArrangedSubview(group)
         }
 
-        let jumpKey = footerShortcutHint(for: .guiWindowShortcut).components(separatedBy: " ").filter { !$0.isEmpty }.joined()
+        let jumpKey = footerShortcutHint(for: .guiWindowShortcut)
         addSegment(keys: ["↑", "↓"], label: "Move")
         addSep()
         addSegment(keys: ["↵"], label: "Open")
@@ -4837,7 +4846,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         addSep()
         addSegment(keys: [jumpKey], label: "Jump")
         addSep()
-        addSegment(keys: ["⌘X"], label: "Dismiss alert")
+        addSegment(keys: ["⌘ X"], label: "Dismiss alert")
         row.addArrangedSubview(NSView())
         return row
     }
@@ -7841,9 +7850,9 @@ struct CommandPaletteItem: Sendable {
     func update(item: CommandPaletteItem, isSelected: Bool, shortcutText: String?, onClick: (() -> Void)? = nil) {
         if let onClick { clickHandler = onClick }
         isSelectedState = isSelected
-        effectiveAppearance.performAsCurrentDrawingAppearance { layer?.backgroundColor = (isSelected ? Theme.rowSelected : .clear).cgColor }
-        layer?.borderWidth = 1
-        layer?.borderColor = (isSelected ? Theme.accent.withAlphaComponent(0.18) : NSColor.clear).cgColor
+        effectiveAppearance.performAsCurrentDrawingAppearance { layer?.backgroundColor = (isSelected ? Theme.rowSelectedCard : .clear).cgColor }
+        layer?.borderWidth = isSelected ? 1 : 0
+        layer?.borderColor = (isSelected ? Theme.rowSelectedCardBorder : NSColor.clear).cgColor
 
         labelField.stringValue = item.label
         workspaceField.stringValue = item.workspaceTitle
@@ -7917,7 +7926,7 @@ struct CommandPaletteItem: Sendable {
     override func viewDidChangeEffectiveAppearance() {
         super.viewDidChangeEffectiveAppearance()
         effectiveAppearance.performAsCurrentDrawingAppearance {
-            layer?.backgroundColor = isSelectedState ? Theme.rowSelected.cgColor : NSColor.clear.cgColor
+            layer?.backgroundColor = isSelectedState ? Theme.rowSelectedCard.cgColor : NSColor.clear.cgColor
         }
     }
 }
@@ -8238,7 +8247,7 @@ extension AppKitController {
         if let zoomButton = panel.standardWindowButton(.zoomButton) { zoomButton.isHidden = true }
 
         let root = ColoredBackgroundView()
-        root.fillColor = Theme.surface
+        root.fillColor = Theme.paletteSurface
         root.cornerRadius = 12
         root.translatesAutoresizingMaskIntoConstraints = false
         root.wantsLayer = true
