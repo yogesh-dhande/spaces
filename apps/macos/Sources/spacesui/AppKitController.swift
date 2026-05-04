@@ -6035,12 +6035,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             }
             if let windowIndex = windowShortcutIndex(for: event) {
                 self.logWindowShortcutProfile("stage=monitor_schedule index=\(windowIndex)")
-                Task { @MainActor [weak self] in
-                    guard let self else { return }
-                    self.logWindowShortcutProfile("stage=monitor_dispatch index=\(windowIndex)")
-                    self.focusWindowShortcut(index: windowIndex)
-                    self.logWindowShortcutProfile("stage=monitor_after_handler index=\(windowIndex)")
-                }
+                self.logWindowShortcutProfile("stage=monitor_dispatch index=\(windowIndex)")
+                let startedAt = Date()
+                Task { @MainActor [weak self] in await self?.runWindowShortcut(index: windowIndex, startedAt: startedAt) }
+                self.logWindowShortcutProfile("stage=monitor_after_handler index=\(windowIndex)")
                 return nil
             }
             return event
@@ -6434,11 +6432,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             hideAfterSuccessfulExternalWindowAction(.open)
         case .failure(let error): showError(error)
         }
-    }
-
-    private func focusWindowShortcut(index: Int) {
-        let startedAt = Date()
-        Task { @MainActor [weak self] in await self?.runWindowShortcut(index: index, startedAt: startedAt) }
     }
 
     private func runWindowShortcut(index: Int, startedAt: Date) async {

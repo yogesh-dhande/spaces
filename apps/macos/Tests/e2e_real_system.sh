@@ -23,6 +23,7 @@ ACTION_TIMEOUT_SECONDS="${ACTION_TIMEOUT_SECONDS:-20}"
 HOSTS_CSV="${HOSTS_CSV:-iterm2,ghostty}"
 SEED_FILE="${SEED_FILE:-/tmp/spaces-e2e-seed.json}"
 SECOND_SEED_FILE="${SECOND_SEED_FILE:-/tmp/spaces-e2e-seed-2.json}"
+THIRD_SEED_FILE="${THIRD_SEED_FILE:-/tmp/spaces-e2e-seed-3.json}"
 TRANSITION_PAUSE_SECONDS="${TRANSITION_PAUSE_SECONDS:-0}"
 RECORD_VIDEO_PATH="${RECORD_VIDEO_PATH:-}"
 RECORD_VIDEO_CAPTURE_DEVICE="${RECORD_VIDEO_CAPTURE_DEVICE:-}"
@@ -42,13 +43,18 @@ TMP_HOME="$TMP_ROOT/home"
 TMP_DB="$TMP_ROOT/spaces.db"
 TMP_RUNTIME_DIR="$TMP_ROOT/runtime"
 FIXTURE_TEMPLATE_DIR="$ROOT_DIR/apps/macos/Tests/fixtures/e2e_demo"
-TEST_REPO="$TMP_ROOT/atlas-alerts"
-TEST_REPO_2="$TMP_ROOT/harbor-ops"
-WORKSPACE_TITLE="Release Readiness"
-WORKSPACE_BRANCH="release-readiness"
-WORKSPACE_NOTES="Polish the launch checklist and QA follow-ups"
-PRIMARY_WORKSPACE_TITLE="Customer Alerts"
-SECONDARY_WORKSPACE_TITLE="Operations Console"
+TEST_REPO="$TMP_ROOT/beacon-status"
+TEST_REPO_2="$TMP_ROOT/scout-errors"
+TEST_REPO_3="${TEST_REPO_3:-$TMP_ROOT/prism-analytics}"
+WORKSPACE_TITLE="Hero Redesign"
+WORKSPACE_BRANCH="redesign-hero"
+WORKSPACE_NOTES="Redesign the landing page hero for clarity and impact"
+PRIMARY_WORKSPACE_TITLE="System Status"
+SECONDARY_WORKSPACE_TITLE="Error Console"
+TERTIARY_WORKSPACE_TITLE="User Analytics"
+SCOUT_BRANCH_WORKSPACE_TITLE="Hero Redesign"
+SCOUT_BRANCH_WORKSPACE_BRANCH="redesign-hero"
+SCOUT_BRANCH_WORKSPACE_NOTES="Redesign the error console hero section"
 MOCK_AGENT_LABEL="Mock Agent"
 SPACES_PID=""
 RECORDER_PID=""
@@ -67,9 +73,18 @@ PRIMARY_BACKEND_STATUS_URL=""
 SECONDARY_DOCS_URL=""
 SECONDARY_ADMIN_URL=""
 SECONDARY_BACKEND_STATUS_URL=""
+TERTIARY_DOCS_URL=""
+TERTIARY_ADMIN_URL=""
+TERTIARY_BACKEND_STATUS_URL=""
 CREATED_DOCS_URL=""
 CREATED_ADMIN_URL=""
 CREATED_BACKEND_STATUS_URL=""
+BEACON_BRANCH_DOCS_URL=""
+BEACON_BRANCH_ADMIN_URL=""
+BEACON_BRANCH_BACKEND_STATUS_URL=""
+SCOUT_BRANCH_DOCS_URL=""
+SCOUT_BRANCH_ADMIN_URL=""
+SCOUT_BRANCH_BACKEND_STATUS_URL=""
 
 mkdir -p "$TMP_HOME" "$TMP_RUNTIME_DIR"
 : >"$EVENT_LOG"
@@ -96,6 +111,7 @@ cleanup() {
   close_fixture_chrome_windows
   if [[ -n "${SPACES_PID}" ]]; then
     kill "${SPACES_PID}" >/dev/null 2>&1 || true
+    wait "${SPACES_PID}" >/dev/null 2>&1 || true
   fi
   pkill -x SpacesApp >/dev/null 2>&1 || true
   print_run_summary "$exit_code"
@@ -252,7 +268,7 @@ build_binaries() {
 }
 
 stop_stale_fixture_port_listeners() {
-  local ports=(20000 20001 20002 20003 20004 20005)
+  local ports=(20000 20001 20002 20003 20004 20005 20006 20007 20008 20009 20010 20011)
   local pid
   local parent_pid
   local parent_command
@@ -276,7 +292,7 @@ stop_stale_fixture_port_listeners() {
 }
 
 ensure_fixture_ports_free() {
-  local ports=(20000 20001 20002 20003 20004 20005)
+  local ports=(20000 20001 20002 20003 20004 20005 20006 20007 20008 20009 20010 20011)
   local port
   local deadline=$((SECONDS + ACTION_TIMEOUT_SECONDS))
   while (( SECONDS < deadline )); do
@@ -314,7 +330,7 @@ cleanup_existing_fixture_projects() {
 reset_fixture_runtime() {
   local workspace_dir="$1"
   log_step "resetting tracked workspace runtime"
-  "$MX_E2E_BIN" stop-workspace --workspace-dir "$workspace_dir" >/tmp/spaces-e2e-stop-workspace.json || true
+  "$MX_E2E_BIN" stop-workspace --workspace-dir "$workspace_dir" >/tmp/spaces-e2e-stop-workspace.json 2>/dev/null || true
   close_fixture_chrome_windows
   stop_stale_fixture_port_listeners
   sleep 1
@@ -628,11 +644,29 @@ return 0
 APPLESCRIPT
 }
 
+install_demo_fixture_branch() {
+  local variant="$1"
+  local repo_dir="$2"
+  local branch_name="$3"
+  (
+    cd "$repo_dir"
+    git checkout -q -b "$branch_name"
+    rm -rf .spaces-e2e-demo/site
+    cp -R "$FIXTURE_TEMPLATE_DIR/templates/$variant/site" .spaces-e2e-demo/site
+    git add .spaces-e2e-demo/site
+    git commit -q -m "redesign hero section"
+    git checkout -q main
+  )
+}
+
 setup_git_fixture() {
-  log_step "creating git fixture repo"
-  mkdir -p "$TEST_REPO" "$TEST_REPO_2"
-  install_demo_fixture "atlas" "$TEST_REPO" "# Atlas Alerts"
-  install_demo_fixture "harbor" "$TEST_REPO_2" "# Harbor Ops"
+  log_step "creating git fixture repos"
+  mkdir -p "$TEST_REPO" "$TEST_REPO_2" "$TEST_REPO_3"
+  install_demo_fixture "beacon"  "$TEST_REPO"  "# Beacon Status"
+  install_demo_fixture_branch "beacon-redesign-hero" "$TEST_REPO" "redesign-hero"
+  install_demo_fixture "scout"   "$TEST_REPO_2" "# Scout Errors"
+  install_demo_fixture_branch "scout-redesign-hero" "$TEST_REPO_2" "redesign-hero"
+  install_demo_fixture "prism"   "$TEST_REPO_3" "# Prism Analytics"
 }
 
 install_demo_fixture() {
@@ -656,7 +690,7 @@ install_demo_fixture() {
 }
 
 seed_fixture() {
-  log_step "seeding project fixture"
+  log_step "seeding project fixture (beacon-status)"
   # spacese2e seeds deterministic project/workspace templates through the real
   # workspacecore layer so the manual test is reproducible.
   "$MX_E2E_BIN" seed-fixture \
@@ -667,12 +701,21 @@ seed_fixture() {
 }
 
 seed_second_fixture() {
-  log_step "seeding second project fixture"
+  log_step "seeding second project fixture (scout-errors)"
   "$MX_E2E_BIN" seed-fixture \
     --project-dir "$TEST_REPO_2" \
     --workspace-title "$SECONDARY_WORKSPACE_TITLE" \
     --docs-url "http://localhost:\$${APP_PORT_NAME}/docs/" \
     --admin-url "http://localhost:\$${APP_PORT_NAME}/admin/" >"$SECOND_SEED_FILE"
+}
+
+seed_third_fixture() {
+  log_step "seeding third project fixture (prism-analytics)"
+  "$MX_E2E_BIN" seed-fixture \
+    --project-dir "$TEST_REPO_3" \
+    --workspace-title "$TERTIARY_WORKSPACE_TITLE" \
+    --docs-url "http://localhost:\$${APP_PORT_NAME}/docs/" \
+    --admin-url "http://localhost:\$${APP_PORT_NAME}/admin/" >"$THIRD_SEED_FILE"
 }
 
 workspace_named_port() {
@@ -1119,10 +1162,9 @@ APPLESCRIPT
 }
 
 create_workspace_via_gui() {
-  log_step "creating additional workspace through real orchestrator helper"
-  # Workspace creation is still part of the manual E2E coverage, but this path
-  # avoids fragile sidebar-selection dependencies while continuing to exercise
-  # the real store, git worktree creation, and workspace initialization logic.
+  log_step "creating beacon hero-redesign branch workspace through real orchestrator helper"
+  # Workspace creation exercises the real store, git worktree creation, and
+  # workspace initialization logic against a branch with distinct HTML content.
   "$MX_E2E_BIN" create-workspace \
     --project-dir "$TEST_REPO" \
     --title "$WORKSPACE_TITLE" \
@@ -1130,6 +1172,17 @@ create_workspace_via_gui() {
     --target-branch main \
     --notes "$WORKSPACE_NOTES" >"$TMP_ROOT/created-workspace.json"
   transition_pause "workspace creation"
+}
+
+create_scout_branch_workspace() {
+  log_step "creating scout hero-redesign branch workspace"
+  "$MX_E2E_BIN" create-workspace \
+    --project-dir "$TEST_REPO_2" \
+    --title "$SCOUT_BRANCH_WORKSPACE_TITLE" \
+    --branch "$SCOUT_BRANCH_WORKSPACE_BRANCH" \
+    --target-branch main \
+    --notes "$SCOUT_BRANCH_WORKSPACE_NOTES" >"$TMP_ROOT/scout-branch-workspace.json"
+  transition_pause "scout branch workspace creation"
 }
 
 set_workspace_browser_urls() {
@@ -1214,7 +1267,7 @@ restart_workspace_via_gui() {
   sleep 0.5
   if ! ui_click_workspace_detail_header_button "Restart"; then
     log_debug "restart_workspace_via_gui fallback=spaces-workspace-up-restart"
-    run_mx_logged /tmp/spaces-e2e-restart-workspace-fallback.log restart "$workspace_dir"
+    run_spaces_logged /tmp/spaces-e2e-restart-workspace-fallback.log restart "$workspace_dir"
     transition_pause "workspace restart fallback"
     return 0
   fi
@@ -2067,7 +2120,7 @@ APPLESCRIPT
   } >>"$DEBUG_LOG" 2>&1 || true
 }
 
-run_mx_logged() {
+run_spaces_logged() {
   local stdout_file="$1"
   shift
   env DEBUG=1 "$MX_BIN" "$@" >"$stdout_file" 2>>"$APP_LOG"
@@ -2165,8 +2218,8 @@ run_launch_and_focus_assertions() {
   transition_pause "switch terminal host to $host"
 
   begin_case "$host: launch workspace and persist terminal host"
-  run_mx_logged /tmp/spaces-e2e-launch.log start "$workspace_dir"
-  run_mx_logged /tmp/spaces-e2e-launch-focus.log open docs "$workspace_dir"
+  run_spaces_logged /tmp/spaces-e2e-launch.log start "$workspace_dir"
+  run_spaces_logged /tmp/spaces-e2e-launch-focus.log open docs "$workspace_dir"
   wait_for_workspace_running_state "$workspace_dir" "true"
   transition_pause "$host launch workspace"
   dump_chrome_state "$host docs-focus after-launch"
@@ -2191,7 +2244,7 @@ run_launch_and_focus_assertions() {
   else
     assert_equals "Ghostty" "$terminal_app" "Ghostty launch"
   fi
-  ensure_workspace_http_ready "$workspace_dir" "$PRIMARY_DOCS_URL" "Atlas docs sentinel" "$PRIMARY_BACKEND_STATUS_URL" '"workspace": "atlas-alerts"'
+  ensure_workspace_http_ready "$workspace_dir" "$PRIMARY_DOCS_URL" "Beacon docs sentinel" "$PRIMARY_BACKEND_STATUS_URL" '"workspace": "beacon-status"'
   pass_case
 
   begin_case "$host: focus tracked Chrome tab with extra user tab present"
@@ -2206,7 +2259,7 @@ run_launch_and_focus_assertions() {
   dump_chrome_state "$host after-extra-tab"
   wait_for_condition "chrome_front_window_id" "$docs_window_id"
   wait_for_condition "chrome_window_active_url $docs_window_id" "$extra_user_tab_url"
-  run_mx_logged /tmp/spaces-e2e-focus-docs.log open docs "$workspace_dir"
+  run_spaces_logged /tmp/spaces-e2e-focus-docs.log open docs "$workspace_dir"
   transition_pause "$host refocus docs"
   record_browser_focus_metric "browser_untracked_tab.cli_window_focus.browser_tracked_tab" "$PRIMARY_DOCS_URL" "docs" "$host" "single"
   dump_chrome_state "$host after-refocus-docs"
@@ -2264,7 +2317,7 @@ PY
     transition_pause "$host add extra iTerm2 tab"
     wait_for_condition "frontmost_app" "iTerm2"
     [[ "$(iterm_front_session)" != "$frontend_session_id" ]] || fail "expected extra iTerm2 tab to be selected"
-    run_mx_logged /tmp/spaces-e2e-focus-frontend.log open frontend "$workspace_dir"
+    run_spaces_logged /tmp/spaces-e2e-focus-frontend.log open frontend "$workspace_dir"
     transition_pause "$host focus frontend terminal"
     record_process_focus_metric "terminal_untracked_tab.cli_window_focus.process_tracked_tab" "frontend" "$host" "single"
     frontend_session_id="$(wait_for_workspace_terminal_tracking_id "$workspace_dir" "frontend" "$dump_file")"
@@ -2293,13 +2346,13 @@ for window in data["windows"]:
         break
 PY
 )"
-    run_mx_logged /tmp/spaces-e2e-focus-frontend.log open frontend "$workspace_dir"
+    run_spaces_logged /tmp/spaces-e2e-focus-frontend.log open frontend "$workspace_dir"
     wait_for_condition "frontmost_app" "ghostty"
     ghostty_open_extra_tab
     sleep 1
     transition_pause "$host add extra Ghostty tab"
     [[ "$(ghostty_focused_terminal)" != "$frontend_terminal_id" ]] || fail "expected extra Ghostty tab to be selected"
-    run_mx_logged /tmp/spaces-e2e-focus-frontend-2.log open frontend "$workspace_dir"
+    run_spaces_logged /tmp/spaces-e2e-focus-frontend-2.log open frontend "$workspace_dir"
     transition_pause "$host refocus frontend terminal"
     record_process_focus_metric "terminal_untracked_tab.cli_window_focus.process_tracked_tab" "frontend" "$host" "single"
     wait_for_condition "ghostty_focused_terminal" "$frontend_terminal_id"
@@ -2340,7 +2393,7 @@ PY
   begin_case "$host: workspace window cycling stays on tracked windows"
   # This validates forward/back workspace cycling from the live desktop state.
   ensure_single_spaces_instance "$SPACES_PID"
-  run_mx_logged /tmp/spaces-e2e-cycle-seed.log open docs "$workspace_dir"
+  run_spaces_logged /tmp/spaces-e2e-cycle-seed.log open docs "$workspace_dir"
   transition_pause "$host seed docs focus for cycling"
   wait_for_condition "chrome_front_url" "$PRIMARY_DOCS_URL"
   send_cycle_hotkey next
@@ -2380,7 +2433,7 @@ PY
     fi
     sleep 0.2
   done
-  run_mx_logged /tmp/spaces-e2e-recover.log start "$workspace_dir"
+  run_spaces_logged /tmp/spaces-e2e-recover.log start "$workspace_dir"
   transition_pause "$host recover dead process"
   local recovery_state recovered_pid recovered_status
   recovery_state="$(wait_for_process_running_recovery "$workspace_dir" "frontend" "$frontend_pid")"
@@ -2410,8 +2463,8 @@ run_hotkey_visibility_profiling() {
   begin_case "$host: profile repeated app visibility toggle"
   ensure_single_spaces_instance "$SPACES_PID"
   reset_fixture_runtime "$workspace_dir"
-  run_mx_logged /tmp/spaces-e2e-profile-window-toggle-start.log start "$workspace_dir"
-  run_mx_logged /tmp/spaces-e2e-profile-window-toggle.log open docs "$workspace_dir"
+  run_spaces_logged /tmp/spaces-e2e-profile-window-toggle-start.log start "$workspace_dir"
+  run_spaces_logged /tmp/spaces-e2e-profile-window-toggle.log open docs "$workspace_dir"
   transition_pause "$host seed docs focus for app toggle profiling"
   wait_for_condition "chrome_front_url" "$PRIMARY_DOCS_URL"
   wait_for_condition "frontmost_app" "Google Chrome"
@@ -2428,14 +2481,14 @@ run_hotkey_visibility_profiling() {
   begin_case "$host: profile repeated command palette toggle states"
   ensure_single_spaces_instance "$SPACES_PID"
   reset_fixture_runtime "$workspace_dir"
-  run_mx_logged /tmp/spaces-e2e-profile-command-palette-start.log start "$workspace_dir"
-  run_mx_logged /tmp/spaces-e2e-profile-command-palette.log open docs "$workspace_dir"
+  run_spaces_logged /tmp/spaces-e2e-profile-command-palette-start.log start "$workspace_dir"
+  run_spaces_logged /tmp/spaces-e2e-profile-command-palette.log open docs "$workspace_dir"
   transition_pause "$host seed docs focus for command palette profiling"
   wait_for_condition "chrome_front_url" "$PRIMARY_DOCS_URL"
   wait_for_condition "frontmost_app" "Google Chrome"
   for (( iteration = 1; iteration <= REAL_SYSTEM_PROFILE_REPETITIONS; iteration++ )); do
     send_spaces_command_palette_hotkey_with_ack
-    wait_for_spaces_command_palette_presented "0"
+    wait_for_spaces_command_palette_presented
     record_toggle_palette_metric "external_app.keyboard_toggle_palette.palette" "show" "0" "$host" "single"
 
     send_spaces_command_palette_hotkey_with_ack
@@ -2474,13 +2527,13 @@ run_multi_workspace_focus_and_cycle_assertions() {
   reset_fixture_runtime "$primary_workspace_dir"
   reset_fixture_runtime "$secondary_workspace_dir"
 
-  run_mx_logged /tmp/spaces-e2e-multi-primary-launch.log start "$primary_workspace_dir"
-  run_mx_logged /tmp/spaces-e2e-multi-primary-launch-focus.log open docs "$primary_workspace_dir"
+  run_spaces_logged /tmp/spaces-e2e-multi-primary-launch.log start "$primary_workspace_dir"
+  run_spaces_logged /tmp/spaces-e2e-multi-primary-launch-focus.log open docs "$primary_workspace_dir"
   transition_pause "$host launch primary workspace"
   log_debug "$host multi primary launch complete"
   dump_workspace "$primary_workspace_dir" "$primary_dump"
-  run_mx_logged /tmp/spaces-e2e-multi-secondary-launch.log start "$secondary_workspace_dir"
-  run_mx_logged /tmp/spaces-e2e-multi-secondary-launch-focus.log open docs "$secondary_workspace_dir"
+  run_spaces_logged /tmp/spaces-e2e-multi-secondary-launch.log start "$secondary_workspace_dir"
+  run_spaces_logged /tmp/spaces-e2e-multi-secondary-launch-focus.log open docs "$secondary_workspace_dir"
   transition_pause "$host launch secondary workspace"
   log_debug "$host multi secondary launch complete"
   dump_workspace "$secondary_workspace_dir" "$secondary_dump"
@@ -2592,7 +2645,7 @@ for window in data["windows"]:
 PY
 )"
 
-  run_mx_logged /tmp/spaces-e2e-multi-primary-focus.log open docs "$primary_workspace_dir"
+  run_spaces_logged /tmp/spaces-e2e-multi-primary-focus.log open docs "$primary_workspace_dir"
   transition_pause "$host focus primary docs"
   log_debug "$host multi primary docs focus complete"
   wait_for_condition "chrome_front_url" "$primary_docs_url"
@@ -2615,7 +2668,7 @@ PY
   record_cycle_metric "browser_tracked_tab.keyboard_cycle_previous.terminal_tracked_tab" "previous" "$host" "primary"
   wait_for_condition "chrome_front_url" "$primary_docs_url"
 
-  run_mx_logged /tmp/spaces-e2e-multi-secondary-focus.log open docs "$secondary_workspace_dir"
+  run_spaces_logged /tmp/spaces-e2e-multi-secondary-focus.log open docs "$secondary_workspace_dir"
   transition_pause "$host focus secondary docs"
   log_debug "$host multi secondary docs focus complete"
   wait_for_condition "chrome_front_url" "$secondary_docs_url"
@@ -2663,7 +2716,7 @@ run_agent_status_assertions() {
   if [[ -f "$EVENT_LOG" ]]; then
     event_start_line=$(( $(wc -l <"$EVENT_LOG") + 1 ))
   fi
-  run_mx_logged "/tmp/spaces-e2e-$host-agent-launch.log" start "$workspace_dir"
+  run_spaces_logged "/tmp/spaces-e2e-$host-agent-launch.log" start "$workspace_dir"
   transition_pause "$host launch workspace with agent"
 
   wait_for_event_log_contains_since_line "agent-waiting:$workspace_dir" "$event_start_line"
@@ -2701,12 +2754,14 @@ main() {
   setup_git_fixture
   seed_fixture
   seed_second_fixture
+  seed_third_fixture
   if [[ -n "$RECORD_VIDEO_PATH" ]]; then
     hide_all_visible_windows
     start_screen_recording
   fi
   launch_spaces
   create_workspace_via_gui
+  create_scout_branch_workspace
 
   local lookup_file="$TMP_ROOT/workspace.json"
   wait_for_workspace_lookup "$WORKSPACE_TITLE" "$lookup_file"
@@ -2715,15 +2770,28 @@ main() {
   workspace_dir="$(json_get "$SEED_FILE" "defaultWorkspace.dir")"
   local second_workspace_dir
   second_workspace_dir="$(json_get "$SECOND_SEED_FILE" "defaultWorkspace.dir")"
+  local third_workspace_dir
+  third_workspace_dir="$(json_get "$THIRD_SEED_FILE" "defaultWorkspace.dir")"
+  local scout_branch_workspace_dir
+  scout_branch_workspace_dir="$(json_get "$TMP_ROOT/scout-branch-workspace.json" "dir")"
   PRIMARY_DOCS_URL="$(frontend_url_for_workspace "$workspace_dir" "/docs/")"
   PRIMARY_ADMIN_URL="$(frontend_url_for_workspace "$workspace_dir" "/admin/")"
   PRIMARY_BACKEND_STATUS_URL="$(backend_url_for_workspace "$workspace_dir" "/api/launch-status")"
   SECONDARY_DOCS_URL="$(frontend_url_for_workspace "$second_workspace_dir" "/docs/")"
   SECONDARY_ADMIN_URL="$(frontend_url_for_workspace "$second_workspace_dir" "/admin/")"
   SECONDARY_BACKEND_STATUS_URL="$(backend_url_for_workspace "$second_workspace_dir" "/api/launch-status")"
+  TERTIARY_DOCS_URL="$(frontend_url_for_workspace "$third_workspace_dir" "/docs/")"
+  TERTIARY_ADMIN_URL="$(frontend_url_for_workspace "$third_workspace_dir" "/admin/")"
+  TERTIARY_BACKEND_STATUS_URL="$(backend_url_for_workspace "$third_workspace_dir" "/api/launch-status")"
   CREATED_DOCS_URL="$(frontend_url_for_workspace "$created_workspace_dir" "/docs/")"
   CREATED_ADMIN_URL="$(frontend_url_for_workspace "$created_workspace_dir" "/admin/")"
   CREATED_BACKEND_STATUS_URL="$(backend_url_for_workspace "$created_workspace_dir" "/api/launch-status")"
+  BEACON_BRANCH_DOCS_URL="$CREATED_DOCS_URL"
+  BEACON_BRANCH_ADMIN_URL="$CREATED_ADMIN_URL"
+  BEACON_BRANCH_BACKEND_STATUS_URL="$CREATED_BACKEND_STATUS_URL"
+  SCOUT_BRANCH_DOCS_URL="$(frontend_url_for_workspace "$scout_branch_workspace_dir" "/docs/")"
+  SCOUT_BRANCH_ADMIN_URL="$(frontend_url_for_workspace "$scout_branch_workspace_dir" "/admin/")"
+  SCOUT_BRANCH_BACKEND_STATUS_URL="$(backend_url_for_workspace "$scout_branch_workspace_dir" "/api/launch-status")"
   local stop_marker="workspace-stop-override"
 
   set_workspace_stop_script_via_gui "$stop_marker" "$workspace_dir"
@@ -2736,13 +2804,19 @@ main() {
 Manual fixture environment is ready:
   HOME=$TMP_HOME
   DB=$TMP_DB
-  Primary workspace: $workspace_dir
-  Secondary workspace: $second_workspace_dir
-  Created workspace: $created_workspace_dir
-  Primary docs: $PRIMARY_DOCS_URL
-  Primary backend: $PRIMARY_BACKEND_STATUS_URL
-  Secondary docs: $SECONDARY_DOCS_URL
-  Secondary backend: $SECONDARY_BACKEND_STATUS_URL
+  Workspace 1 (beacon main):       $workspace_dir
+  Workspace 2 (beacon redesign):   $created_workspace_dir
+  Workspace 3 (scout main):        $second_workspace_dir
+  Workspace 4 (scout redesign):    $scout_branch_workspace_dir
+  Workspace 5 (prism main):        $third_workspace_dir
+  Beacon docs:       $PRIMARY_DOCS_URL
+  Beacon backend:    $PRIMARY_BACKEND_STATUS_URL
+  Scout docs:        $SECONDARY_DOCS_URL
+  Scout backend:     $SECONDARY_BACKEND_STATUS_URL
+  Prism docs:        $TERTIARY_DOCS_URL
+  Prism backend:     $TERTIARY_BACKEND_STATUS_URL
+  Beacon redesign docs: $BEACON_BRANCH_DOCS_URL
+  Scout redesign docs:  $SCOUT_BRANCH_DOCS_URL
   Spaces PID: $SPACES_PID
 EOF
     return 0
@@ -2761,10 +2835,28 @@ EOF
       skip_case "$host: host availability" "terminal host not installed"
     fi
   done
-  begin_case "archive created workspace"
-  "$MX_E2E_BIN" archive-workspace --workspace-dir "$created_workspace_dir" >/tmp/spaces-e2e-archive-created-workspace.json
+
+  begin_case "branch and tertiary workspaces serve correct content"
+  local branch_check_out="$TMP_ROOT/branch-content-check.json"
+  run_spaces_logged /tmp/spaces-e2e-beacon-branch-start.log start "$created_workspace_dir"
+  wait_for_workspace_running_state "$created_workspace_dir" "true"
+  wait_for_http_body_contains "$BEACON_BRANCH_DOCS_URL" "Beacon redesign-hero docs sentinel"
+  run_spaces_logged /tmp/spaces-e2e-scout-branch-start.log start "$scout_branch_workspace_dir"
+  wait_for_workspace_running_state "$scout_branch_workspace_dir" "true"
+  wait_for_http_body_contains "$SCOUT_BRANCH_DOCS_URL" "Scout redesign-hero docs sentinel"
+  run_spaces_logged /tmp/spaces-e2e-prism-start.log start "$third_workspace_dir"
+  wait_for_workspace_running_state "$third_workspace_dir" "true"
+  wait_for_http_body_contains "$TERTIARY_DOCS_URL" "Prism docs sentinel"
+  reset_fixture_runtime "$created_workspace_dir"
+  reset_fixture_runtime "$scout_branch_workspace_dir"
+  reset_fixture_runtime "$third_workspace_dir"
+  pass_case
+
+  begin_case "archive branch workspaces"
+  "$MX_E2E_BIN" archive-workspace --workspace-dir "$created_workspace_dir" >/tmp/spaces-e2e-archive-beacon-branch.json
+  "$MX_E2E_BIN" archive-workspace --workspace-dir "$scout_branch_workspace_dir" >/tmp/spaces-e2e-archive-scout-branch.json
   wait_for_workspace_lookup "$WORKSPACE_TITLE" "$lookup_file"
-  assert_equals "true" "$(json_get "$lookup_file" "isArchived")" "workspace archived"
+  assert_equals "true" "$(json_get "$lookup_file" "isArchived")" "beacon branch workspace archived"
   pass_case
 }
 

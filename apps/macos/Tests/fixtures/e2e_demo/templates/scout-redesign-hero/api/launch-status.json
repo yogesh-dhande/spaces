@@ -1,0 +1,6 @@
+{
+  "workspace": "scout-errors",
+  "status": "warning",
+  "open_errors": 3,
+  "next_action": "Investigate the TypeError: null spike on the alert pipeline route."
+}

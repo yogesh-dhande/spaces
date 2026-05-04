@@ -1,6 +1,0 @@
-{
-  "workspace": "atlas-alerts",
-  "status": "healthy",
-  "queue_latency_ms": 94,
-  "next_action": "Publish the customer alerts release notes."
-}

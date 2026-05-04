@@ -1,0 +1,6 @@
+{
+  "workspace": "prism-analytics",
+  "status": "healthy",
+  "event_rate": 2400000,
+  "next_action": "Review the funnel drop-off on the signup flow."
+}

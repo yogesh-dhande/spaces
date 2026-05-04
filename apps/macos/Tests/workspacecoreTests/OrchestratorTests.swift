@@ -519,6 +519,27 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertTrue(FileManager.default.fileExists(atPath: markerURL.path))
     }
 
+    // Tests first launch runs deferred workspace setup automatically by arranging a pending setup state and asserting launch completes setup.
+    func testLaunchWorkspaceRunsDeferredSetupAutomatically() throws {
+        let root = try makeTempDirectory()
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let store = try makeTemporaryStore()
+        let orchestrator = WorkspaceOrchestrator(store: store)
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        try orchestrator.updateProjectConfig(projectID: project.id) { config in config.setupScript = "echo ready > .spaces-launch-marker" }
+
+        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature", runSetupScript: false)
+        XCTAssertEqual(try orchestrator.workspaceSetupState(workspaceID: workspace.id).status, .pending)
+
+        try orchestrator.launchWorkspace(workspaceID: workspace.id)
+
+        let markerURL = URL(fileURLWithPath: workspace.dir, isDirectory: true).appending(path: ".spaces-launch-marker")
+        XCTAssertEqual(try orchestrator.workspaceSetupState(workspaceID: workspace.id).status, .succeeded)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: markerURL.path))
+        XCTAssertTrue(try store.workspace(id: workspace.id)?.isRunning ?? false)
+    }
+
     // Tests list workspaces includes branch metadata by arranging representative inputs and asserting the expected result.
     func testListWorkspacesIncludesBranchMetadata() throws {
         let repo = try makeTempGitRepo(name: "workspace-branch-list")

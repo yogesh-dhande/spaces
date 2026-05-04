@@ -1,0 +1,6 @@
+{
+  "workspace": "beacon-status",
+  "status": "degraded",
+  "incident_count": 1,
+  "next_action": "Draft the postmortem for the alert pipeline degradation."
+}

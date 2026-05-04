@@ -685,6 +685,7 @@ public final class WorkspaceOrchestrator {
     }
 
     private func launchWorkspaceUnlocked(workspaceID: String, background: Bool = false) throws {
+        try triggerDeferredWorkspaceSetupIfNeeded(workspaceID: workspaceID)
         try waitForWorkspaceSetupToComplete(workspaceID: workspaceID)
         let (project, workspace) = try resolveWorkspace(id: workspaceID)
         guard !workspace.isArchived else { throw WorkspaceError.invalidArgument(message: "Workspace is archived.") }
@@ -757,6 +758,15 @@ public final class WorkspaceOrchestrator {
 
         try store.updateWorkspaceRunning(id: workspace.id, isRunning: true, launchedAt: nowISO8601())
         shouldRestoreReservedPorts = false
+    }
+
+    private func triggerDeferredWorkspaceSetupIfNeeded(workspaceID: String) throws {
+        let setupState = try workspaceSetupState(workspaceID: workspaceID)
+        guard setupState.status == .pending else { return }
+        do { try runWorkspaceSetup(workspaceID: workspaceID) } catch let error as WorkspaceError {
+            if case .invalidArgument(let message) = error, message == "Workspace setup is already in progress." { return }
+            throw error
+        }
     }
 
     @discardableResult public func stopWorkspace(workspaceID: String) throws -> WorkspaceStopOutcome {
