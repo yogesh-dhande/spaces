@@ -221,7 +221,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     private var operationProgressOverlay: NSVisualEffectView?
     private var operationProgressOverlayTitleLabel: NSTextField?
     private var operationProgressOverlayDetailLabel: NSTextField?
-    private var windowIssueToastOverlay: NSVisualEffectView?
+    private var windowIssueToastOverlay: NSView?
     private var windowIssueToastTitleLabel: NSTextField?
     private var windowIssueToastDetailLabel: NSTextField?
     private var windowIssueToastActionButton: NSButton?
@@ -2483,7 +2483,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
     private func showWindowIssueToast(title: String, detail: String, actionTitle: String? = nil, action: (() -> Void)? = nil) {
         guard let contentView = window?.contentView else { return }
-        let overlay: NSVisualEffectView
+        let overlay: NSView
         let titleLabel: NSTextField
         let detailLabel: NSTextField
         let actionButton: NSButton
@@ -2495,14 +2495,12 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             detailLabel = existingDetailLabel
             actionButton = existingActionButton
         } else {
-            overlay = NSVisualEffectView()
-            overlay.material = .hudWindow
-            overlay.blendingMode = .withinWindow
-            overlay.state = .active
+            overlay = NSView()
             overlay.wantsLayer = true
             overlay.layer?.cornerRadius = UIRadius.large
             overlay.layer?.borderWidth = 1
             overlay.layer?.borderColor = NSColor.systemRed.withAlphaComponent(0.35).cgColor
+            overlay.layer?.backgroundColor = NSColor.windowBackgroundColor.withAlphaComponent(0.96).cgColor
             overlay.translatesAutoresizingMaskIntoConstraints = false
 
             let stack = NSStackView()
@@ -6035,10 +6033,13 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             }
             if let windowIndex = windowShortcutIndex(for: event) {
                 self.logWindowShortcutProfile("stage=monitor_schedule index=\(windowIndex)")
-                self.logWindowShortcutProfile("stage=monitor_dispatch index=\(windowIndex)")
                 let startedAt = Date()
-                Task { @MainActor [weak self] in await self?.runWindowShortcut(index: windowIndex, startedAt: startedAt) }
-                self.logWindowShortcutProfile("stage=monitor_after_handler index=\(windowIndex)")
+                Task { @MainActor [weak self] in
+                    guard let self else { return }
+                    self.logWindowShortcutProfile("stage=monitor_dispatch index=\(windowIndex)")
+                    await self.runWindowShortcut(index: windowIndex, startedAt: startedAt)
+                    self.logWindowShortcutProfile("stage=monitor_after_handler index=\(windowIndex)")
+                }
                 return nil
             }
             return event
