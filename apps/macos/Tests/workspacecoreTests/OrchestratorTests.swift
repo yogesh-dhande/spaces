@@ -1402,6 +1402,31 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertEqual(terminalWindow.terminalNativeID, "ghostty-terminal-22")
     }
 
+    func testOpenWorkspaceTerminalUsesResolvedLoginShellWithoutBashWrapper() throws {
+        let root = try makeTempDirectory()
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let store = try makeTemporaryStore()
+        let mockGhostty = MockGhosttyAdapter()
+        mockGhostty.openWindowInfos = [GhosttyWindowInfo(windowID: "ghostty-window-23", tabID: "ghostty-tab-23", terminalID: "ghostty-terminal-23")]
+        let orchestrator = WorkspaceOrchestrator(store: store, ghostty: mockGhostty, tmux: MockTmuxAdapter())
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
+        try orchestrator.updateTerminalHost(.ghostty)
+
+        try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) {
+            try withEnv(name: "YABAI_FOCUSED_ID", value: "42") {
+                try withEnv(name: "YABAI_FOCUSED_APP", value: "Ghostty") { try orchestrator.openWorkspaceTerminal(workspaceID: workspace.id) }
+            }
+        }
+
+        XCTAssertNotNil(mockGhostty.lastCommand)
+        XCTAssertTrue(mockGhostty.lastCommand?.contains("exec '") ?? false)
+        XCTAssertTrue(mockGhostty.lastCommand?.hasSuffix("' -l") ?? false)
+        XCTAssertFalse(mockGhostty.lastCommand?.contains("bash -lc") ?? false)
+        XCTAssertFalse(mockGhostty.lastCommand?.contains("export PATH=") ?? false)
+    }
+
     // Tests open workspace terminal opens a new tab in an existing tracked iTerm2 workspace window.
 
     // Tests open workspace terminal throws when i term is unavailable by arranging representative inputs and asserting the expected result.
