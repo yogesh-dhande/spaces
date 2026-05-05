@@ -34,26 +34,35 @@ final class ProcessOnExitTests: XCTestCase {
 
     // Tests process on exit notify shows notification by arranging representative inputs and asserting the expected result.
     func testProcessOnExitNotifyShowsNotification() throws {
+        var deliveredNotifications: [(title: String, body: String, subtitle: String?)] = []
         let root = try makeTempDirectory()
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store)
+        let orchestrator = WorkspaceOrchestrator(
+            store: store,
+            notificationDeliverer: { title, body, subtitle in deliveredNotifications.append((title: title, body: body, subtitle: subtitle)) })
 
         let project = try orchestrator.addProject(dir: projectDir.path)
         let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
         try orchestrator.updateProjectConfig(projectID: project.id) { config in
-            config.processes.append(ProcessTemplate(name: "api", command: "echo api", onExit: .notify))
+            config.processes.append(ProcessTemplate(name: "api", command: "sleep 1", onExit: .notify))
         }
         try store.touchWorkspaceSettings(workspaceID: workspace.id, updatedAt: "now")
-        try store.setWorkspaceProcesses(workspaceID: workspace.id, processes: [ProcessTemplate(name: "api", command: "echo api", onExit: .notify)])
+        try store.setWorkspaceProcesses(workspaceID: workspace.id, processes: [ProcessTemplate(name: "api", command: "sleep 1", onExit: .notify)])
         let runningProcess = RunningProcessRecord(
-            id: UUID().uuidString, workspaceID: workspace.id, templateName: "api", command: "echo api", terminalApp: nil, windowID: nil, pid: 9000,
-            status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil)
+            id: UUID().uuidString, workspaceID: workspace.id, templateName: "api", command: "sleep 1", terminalApp: "Terminal", windowID: nil,
+            terminalTrackingID: nil, terminalNativeID: nil, itermTabIndex: nil, tmuxWindowID: nil, pid: 2_000_000, status: .running, logPath: nil,
+            lastOutputAt: nil, startedAt: "2020-01-01T00:00:00Z", exitedAt: nil)
         try store.upsert(runningProcess: runningProcess)
 
-        let currentProcess = try store.runningProcesses(workspaceID: workspace.id).first!
-        XCTAssertEqual(currentProcess.status, .running)
+        let didUpdate = try orchestrator.checkAndUpdateProcessStatuses()
+        XCTAssertTrue(didUpdate)
+        let currentProcess = try XCTUnwrap(store.runningProcesses(workspaceID: workspace.id).first)
+        XCTAssertEqual(currentProcess.status, .exited)
+        XCTAssertEqual(deliveredNotifications.count, 1)
+        XCTAssertEqual(deliveredNotifications.first?.title, "Process Exited")
+        XCTAssertEqual(deliveredNotifications.first?.body, "Process 'api' has exited")
     }
 
     // Tests process on exit restart restarts process by arranging representative inputs and asserting the expected result.

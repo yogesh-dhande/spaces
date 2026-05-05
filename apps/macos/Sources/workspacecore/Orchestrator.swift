@@ -93,6 +93,7 @@ public final class WorkspaceOrchestrator {
     private let chrome: ChromeAdapter
     private let browserWindowScanDebounceInterval: TimeInterval
     private let currentDate: () -> Date
+    private let notificationDeliverer: (String, String, String?) -> Void
     private let projectsRootDirectoryURL: URL?
     private let workspacesRootDirectoryURL: URL?
     private let terminalAdaptersByHost: [TerminalHost: any TerminalAdapter]
@@ -116,7 +117,8 @@ public final class WorkspaceOrchestrator {
         store: SQLiteStore, projectsRootDirectory: URL? = nil, workspacesRootDirectory: URL? = nil, git: GitClient = .init(),
         yabai: YabaiAdapter = .init(), iterm: Iterm2Adapter = .init(), ghostty: GhosttyAdapter = .init(), tmux: TmuxAdapter = .init(),
         chrome: ChromeAdapter = .init(), browserWindowScanDebounceInterval: TimeInterval = PollingConstants.browserWindowScanDebounceInterval,
-        terminalFocusPulseController: TerminalFocusPulseControlling = TerminalFocusPulseController(), currentDate: @escaping () -> Date = Date.init
+        terminalFocusPulseController: TerminalFocusPulseControlling = TerminalFocusPulseController(),
+        notificationDeliverer: ((String, String, String?) -> Void)? = nil, currentDate: @escaping () -> Date = Date.init
     ) {
         self.store = store
         projectsRootDirectoryURL = projectsRootDirectory
@@ -130,6 +132,7 @@ public final class WorkspaceOrchestrator {
         terminalAdaptersByHost = [.iterm2: iterm, .ghostty: ghostty]
         self.browserWindowScanDebounceInterval = browserWindowScanDebounceInterval
         self.terminalFocusPulseController = terminalFocusPulseController
+        self.notificationDeliverer = notificationDeliverer ?? Self.deliverUserNotification
         self.currentDate = currentDate
         if ProcessInfo.processInfo.environment["DEBUG"] == "1" { fputs("spaces: DEBUG=1 enabled (browser/cycle profiling active)\n", stderr) }
     }
@@ -977,7 +980,7 @@ public final class WorkspaceOrchestrator {
         }
         return didUpdate
     }
-    private func deliverNotification(title: String, body: String, subtitle: String? = nil) {
+    private static func deliverUserNotification(title: String, body: String, subtitle: String? = nil) {
         guard NSClassFromString("XCTest") == nil else { return }
         let content = UNMutableNotificationContent()
         content.title = title
@@ -985,12 +988,43 @@ public final class WorkspaceOrchestrator {
         if let subtitle { content.subtitle = subtitle }
         let request = UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil)
         let center = UNUserNotificationCenter.current()
-        center.requestAuthorization(options: [.alert, .sound]) { granted, error in
-            if granted {
-                center.add(request) { error in
-                    if let error { fputs("spaces: Failed to deliver notification: \(error.localizedDescription)\n", stderr) }
-                }
+        let timeout = DispatchTime.now() + .seconds(5)
+        final class AuthorizationState: @unchecked Sendable {
+            private let lock = NSLock()
+            private var granted = false
+
+            func set(granted: Bool) {
+                lock.lock()
+                self.granted = granted
+                lock.unlock()
             }
+
+            func isGranted() -> Bool {
+                lock.lock()
+                defer { lock.unlock() }
+                return granted
+            }
+        }
+        let authorizationState = AuthorizationState()
+        let authorizationSemaphore = DispatchSemaphore(value: 0)
+        center.requestAuthorization(options: [.alert, .sound]) { granted, error in
+            if let error { fputs("spaces: Failed to request notification authorization: \(error.localizedDescription)\n", stderr) }
+            authorizationState.set(granted: granted)
+            authorizationSemaphore.signal()
+        }
+        guard authorizationSemaphore.wait(timeout: timeout) == .success else {
+            fputs("spaces: Timed out waiting for notification authorization\n", stderr)
+            return
+        }
+        guard authorizationState.isGranted() else { return }
+        let addSemaphore = DispatchSemaphore(value: 0)
+        center.add(request) { error in
+            if let error { fputs("spaces: Failed to deliver notification: \(error.localizedDescription)\n", stderr) }
+            addSemaphore.signal()
+        }
+        guard addSemaphore.wait(timeout: timeout) == .success else {
+            fputs("spaces: Timed out waiting for notification delivery\n", stderr)
+            return
         }
     }
     private func handleProcessExit(workspaceID: String, process: RunningProcessRecord, project: ProjectRecord, workspace: WorkspaceRecord) throws {
@@ -1001,11 +1035,11 @@ public final class WorkspaceOrchestrator {
         case .none:
             // Do nothing - just log the exit
             break
-        case .notify: deliverNotification(title: "Process Exited", body: "Process '\(process.templateName)' has exited", subtitle: nil)
+        case .notify: notificationDeliverer("Process Exited", "Process '\(process.templateName)' has exited", nil)
         case .restart:
             // Restart the process
             fputs("spaces: Restarting process '\(process.templateName)' due to exit\n", stderr)
-            deliverNotification(title: "Process Restarting", body: "Process '\(process.templateName)' is being restarted", subtitle: nil)
+            notificationDeliverer("Process Restarting", "Process '\(process.templateName)' is being restarted", nil)
             try restartProcessInTerminal(workspaceID: workspaceID, process: process)
         }
     }
