@@ -983,6 +983,35 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertFalse(didUpdate)
     }
 
+    // Tests tmux runtime sync revives an exited managed process when the tracked pane is still alive by arranging representative inputs and asserting the expected result.
+    func testCheckAndUpdateProcessStatusesRevivesExitedManagedProcessWithLiveTmuxPane() throws {
+        let root = try makeTempDirectory()
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let store = try makeTemporaryStore()
+        let mockTmux = MockTmuxAdapter()
+        mockTmux.nextPanePID = Int(ProcessInfo.processInfo.processIdentifier)
+        let orchestrator = WorkspaceOrchestrator(store: store, tmux: mockTmux)
+
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
+        let liveWindow = mockTmux.addWindow(sessionName: "spaces-\(workspace.id)", id: "@1", name: "api", index: 0, isActive: true)
+        let exitedProcess = RunningProcessRecord(
+            id: UUID().uuidString, workspaceID: workspace.id, templateName: "api", command: "npm start", terminalApp: "iTerm2", windowID: 123,
+            terminalTrackingID: "workspace-session", itermTabIndex: nil, tmuxWindowID: liveWindow.id, pid: 99999, status: .exited, logPath: nil,
+            lastOutputAt: nil, startedAt: ISO8601DateFormatter().string(from: Date().addingTimeInterval(-20)),
+            exitedAt: ISO8601DateFormatter().string(from: Date()))
+        try store.upsert(runningProcess: exitedProcess)
+
+        let didUpdate = try orchestrator.checkAndUpdateProcessStatuses()
+
+        XCTAssertTrue(didUpdate)
+        let revived = try XCTUnwrap(store.runningProcesses(workspaceID: workspace.id).first)
+        XCTAssertEqual(revived.status, .running)
+        XCTAssertEqual(revived.pid, liveWindow.panePID)
+        XCTAssertNil(revived.exitedAt)
+    }
+
     // Tests create workspace throws for unknown project by arranging representative inputs and asserting the expected result.
     func testCreateWorkspaceThrowsForUnknownProject() throws {
         let store = try makeTemporaryStore()
@@ -3454,6 +3483,27 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertEqual(processes.count, 1)
         XCTAssertEqual(processes.first?.status, .running)
         XCTAssertEqual(processes.first?.templateName, "web")
+    }
+
+    // Tests up workspace keeps a newly started process running during startup grace by arranging a dead-looking recent pid and asserting no restart occurs.
+    func testUpWorkspaceKeepsRecentRunningProcessDuringStartupGrace() throws {
+        let (orchestrator, store, _, workspace, _, _, mockTmux) = try makeMockItermOrchestratorWithWorkspace()
+        try store.touchWorkspaceSettings(workspaceID: workspace.id, updatedAt: "now")
+        try store.setWorkspaceProcesses(workspaceID: workspace.id, processes: [ProcessTemplate(name: "web", command: "echo web")])
+        try store.updateWorkspaceRunning(id: workspace.id, isRunning: true, launchedAt: "now")
+        try store.upsert(
+            runningProcess: RunningProcessRecord(
+                id: UUID().uuidString, workspaceID: workspace.id, templateName: "web", command: "echo web", terminalApp: "iTerm2", windowID: nil,
+                pid: 9_999_999, status: .running, logPath: nil, lastOutputAt: nil,
+                startedAt: ISO8601DateFormatter().string(from: Date().addingTimeInterval(-1)), exitedAt: nil))
+
+        try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) { try orchestrator.upWorkspace(workspaceID: workspace.id) }
+
+        let processes = try orchestrator.runningProcesses(workspaceID: workspace.id)
+        XCTAssertEqual(processes.count, 1)
+        XCTAssertEqual(processes.first?.status, .running)
+        XCTAssertEqual(processes.first?.pid, 9_999_999)
+        XCTAssertEqual(mockTmux.startSessionCallCount, 0)
     }
 
     // Tests up workspace restarts when runtime indicators exist and restart is enabled by arranging representative inputs and asserting the expected result.

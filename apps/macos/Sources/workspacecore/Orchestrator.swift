@@ -677,7 +677,7 @@ public final class WorkspaceOrchestrator {
                     _ = try stopWorkspaceUnlocked(workspaceID: workspaceID)
                     try launchWorkspaceUnlocked(workspaceID: workspaceID, background: background)
                 } else {
-                    try refreshProcessStatuses(workspaceID: workspaceID, ignoreStartupGracePeriod: true)
+                    try refreshProcessStatuses(workspaceID: workspaceID)
                     try restartExitedProcesses(workspaceID: workspaceID, background: background)
                 }
                 return
@@ -2501,7 +2501,7 @@ public final class WorkspaceOrchestrator {
 
         for process in try store.runningProcesses(workspaceID: workspaceID) where isManagedTerminalApp(process.terminalApp) {
             guard let tmuxWindowID = process.tmuxWindowID else { continue }
-            guard liveTmuxWindowIDs.contains(tmuxWindowID) else {
+            guard let liveTmuxWindow = liveWindowsByID[tmuxWindowID] else {
                 guard process.status != .exited else { continue }
                 // Preserve configured process rows when their tmux window vanishes so an
                 // explicit `spaces start` can still restart just the dead process.
@@ -2514,6 +2514,16 @@ public final class WorkspaceOrchestrator {
                         exitedAt: process.exitedAt ?? now))
                 didMutate = true
                 continue
+            }
+            if process.status == .exited, let panePID = liveTmuxWindow.panePID, panePID > 0, isProcessAlive(pid: panePID) {
+                try store.upsert(
+                    runningProcess: RunningProcessRecord(
+                        id: process.id, workspaceID: process.workspaceID, templateName: process.templateName, command: process.command,
+                        terminalApp: process.terminalApp, windowID: process.windowID, terminalTrackingID: process.terminalTrackingID,
+                        terminalNativeID: process.terminalNativeID, itermTabIndex: process.itermTabIndex, tmuxWindowID: process.tmuxWindowID,
+                        pid: panePID, status: .running, logPath: process.logPath, lastOutputAt: process.lastOutputAt, startedAt: process.startedAt,
+                        exitedAt: nil))
+                didMutate = true
             }
         }
 
