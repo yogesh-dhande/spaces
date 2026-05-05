@@ -1186,7 +1186,8 @@ public final class WorkspaceOrchestrator {
         }
         let namedPorts = try store.workspacePortsNamed(workspaceID: workspaceID)
         let env = terminalLaunchEnvironment(
-            base: buildWorkspaceEnv(project: project, workspace: workspace, namedPorts: namedPorts), terminalHost: terminalHost)
+            base: buildWorkspaceEnv(project: project, workspace: workspace, namedPorts: namedPorts), terminalHost: terminalHost,
+            includeInheritedPath: false)
         let snapshot = bestEffortYabaiWindowSnapshot()
         let terminalHandle = try openManagedTerminalWindow(
             terminalHost: terminalHost, command: interactiveShellCommand(cwd: workspace.dir), cwd: workspace.dir, environment: env, background: false)
@@ -2139,14 +2140,16 @@ public final class WorkspaceOrchestrator {
         try tmux.currentWindow(sessionName: processTmuxSessionName(workspaceID: workspaceID, processName: processName))
     }
 
-    private func interactiveShellCommand(cwd: String) -> String {
-        let escapedDir = cwd.replacingOccurrences(of: "\"", with: "\\\"")
-        return #"bash -lc 'cd "\#(escapedDir)" && exec "${SHELL:-/bin/zsh}" -l'"#
+    private func interactiveShellCommand(cwd _: String) -> String {
+        let configuredShell = Shell.currentProcessEnvironment()["SHELL"]?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let shellPath = configuredShell.flatMap { $0.isEmpty ? nil : $0 } ?? "/bin/zsh"
+        return "exec \(shellSingleQuoted(shellPath)) -l"
     }
 
-    private func terminalLaunchEnvironment(base: [String: String], terminalHost: TerminalHost) -> [String: String] {
+    private func terminalLaunchEnvironment(base: [String: String], terminalHost: TerminalHost, includeInheritedPath: Bool = true) -> [String: String]
+    {
         var env = base
-        if let path = Shell.currentProcessEnvironment()["PATH"], !path.isEmpty { env["PATH"] = path }
+        if includeInheritedPath, let path = Shell.currentProcessEnvironment()["PATH"], !path.isEmpty { env["PATH"] = path }
         for key in [DatabaseLocator.databasePathEnvironmentVariable, "SPACES_RUNTIME_DIR", "SPACES_E2E_EVENTS_LOG", "DEBUG"] {
             if let value = ProcessInfo.processInfo.environment[key]?.trimmingCharacters(in: .whitespacesAndNewlines), !value.isEmpty {
                 env[key] = value
@@ -4591,7 +4594,7 @@ public final class WorkspaceOrchestrator {
         let namedPorts = try store.workspacePortsNamed(workspaceID: workspace.id)
         let env = buildWorkspaceEnv(project: project, workspace: workspace, namedPorts: namedPorts)
         let launchEnv = terminalLaunchEnvironment(
-            base: env.merging([Self.agentLabelEnvVar: launcher.name]) { _, new in new }, terminalHost: terminalHost)
+            base: env.merging([Self.agentLabelEnvVar: launcher.name]) { _, new in new }, terminalHost: terminalHost, includeInheritedPath: false)
         let snapshot = bestEffortYabaiWindowSnapshot()
         let terminalHandle = try openManagedTerminalWindow(
             terminalHost: terminalHost, command: wrappedAgentLauncherCommand(name: launcher.name, command: applyEnvVars(launcher.command, env: env)),
