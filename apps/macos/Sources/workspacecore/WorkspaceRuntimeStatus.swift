@@ -44,9 +44,6 @@ public struct WorkspaceRuntimeStatus: Sendable {
             case .healthy: break
             case .missing: parts.append("no tracked runtime remains")
             case .partial:
-                if missingConfiguredProcessCount > 0 {
-                    parts.append(summaryCount(missingConfiguredProcessCount, singular: "missing process", plural: "missing processes"))
-                }
                 if exitedProcessCount > 0 { parts.append(summaryCount(exitedProcessCount, singular: "exited process", plural: "exited processes")) }
                 if waitingAgentWindowCount > 0 {
                     parts.append(summaryCount(waitingAgentWindowCount, singular: "waiting agent", plural: "waiting agents"))

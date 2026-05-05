@@ -125,6 +125,7 @@ Spaces focuses those windows; it does not decide their geometry.
 - Launch starts the workspace's configured processes and captures the resulting windows.
 - Browser sessions stay configured while the workspace is running, but Spaces should leave them unopened until the user explicitly focuses that browser session.
 - Unopened browser sessions should not degrade runtime health or show missing-window warnings for an otherwise running workspace.
+- Configured processes that have never been started, or that were explicitly stopped by the user, should remain idle and directly runnable without degrading runtime health or creating Alerts attention.
 - Workspace processes should be launched inside tmux so Spaces can recover the terminal view without losing the underlying process when a supported terminal-host window closes.
 - tmux-backed workspace and session management must treat workspace titles, tmux window names, and tmux session names as user-controlled text that may contain visible separator-like substrings without breaking window creation, listing, or focus recovery.
 - Editing workspace settings while a workspace is already running must not start or stop browser sessions or coding agents as part of save-time reconciliation. Process name and on-exit edits should update tracked running processes immediately, while command edits should require explicit confirmation to restart the affected running processes; canceling that prompt should leave the existing process configuration unchanged. New configured rows should appear immediately with their non-running status so the user can decide what to open or recover.
@@ -175,9 +176,8 @@ Spaces focuses those windows; it does not decide their geometry.
 
 ## Alerts and Health
 - The app should surface attention items across workspaces in one place.
-- Attention includes exited processes, missing configured processes in running workspaces, and coding-agent states such as waiting or done.
+- Attention includes exited processes and coding-agent states such as waiting or done.
 - A stopped workspace can still contribute attention items when that helps the user notice something actionable.
-- Missing configured processes in running workspaces should appear in Alerts with the same direct recovery path offered from the Run tab.
 - Alerts rows should support direct window focus by click and by the numbered window shortcuts.
 - The Alerts sidebar badge and dock badge should reflect the number of visible Alerts attention rows after dismissals are applied.
 - Users should be able to dismiss individual Alerts attention items so they disappear from the Alerts list and dock badge until that specific attention event changes.
@@ -207,7 +207,7 @@ Spaces focuses those windows; it does not decide their geometry.
 - Opening a configured browser session, process, or coding agent from a stopped workspace should move that workspace out of the stopped state immediately.
 - Partial runtime is a first-class workspace state: some configured targets may be live and focusable while others remain directly openable.
 - Window focus actions must operate on one target only and must not route through full-workspace `Launch` or `Restart` semantics.
-- Missing configured processes in Alerts should open that one configured process directly and reuse the same configured row instead of creating a duplicate row.
+- Starting one configured process must not create Alerts attention for sibling configured processes that were never started or were explicitly stopped. Those rows should stay directly openable in place and reuse the same configured row instead of creating duplicates.
 - Alerts rows should show the tracked window or process name as the primary label and the target detail, such as a browser URL or process command, as secondary text.
 - Ad-hoc terminal rows should keep their generated focus name as the primary label and use the live terminal window title as secondary text.
 - CLI-driven focus through `spaces open <name>` should require an explicit tracked window target instead of picking an arbitrary window.
