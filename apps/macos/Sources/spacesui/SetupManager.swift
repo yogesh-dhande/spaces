@@ -44,7 +44,9 @@ private enum SetupStepAction {
             body: "Spaces uses tmux to keep process sessions recoverable when terminal windows close.", action: .copyCommand("brew install tmux")),
         SetupStep(
             ids: [.yabaiInstalled], icon: "hammer", title: "Install yabai",
-            body: "yabai is a window manager Spaces uses to capture and focus windows.", action: .copyCommand("brew install yabai")),
+            body: "yabai is a window manager Spaces uses to capture and focus windows.",
+            action: .commandAndURL(
+                command: "brew install asmvik/formulae/yabai", url: URL(string: "https://github.com/asmvik/yabai")!, urlLabel: "Open yabai Project")),
         SetupStep(
             ids: [.yabaiServiceRunning, .yabaiAccessibility], icon: "hand.raised", title: "Set up yabai",
             body:

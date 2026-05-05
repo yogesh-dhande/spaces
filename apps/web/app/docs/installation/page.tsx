@@ -63,7 +63,17 @@ export default function InstallationDocsPage() {
         <ul className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
           <li>
             • <strong>yabai</strong> — used to focus workspace windows.
-            <pre className="mt-1 rounded-lg bg-background-soft p-3 text-xs leading-6">brew install koekeishiya/formulae/yabai</pre>
+            <div className="mt-1 space-y-2">
+              <pre className="rounded-lg bg-background-soft p-3 text-xs leading-6">brew install asmvik/formulae/yabai</pre>
+              <a
+                href="https://github.com/asmvik/yabai"
+                className="text-accent hover:underline"
+                target="_blank"
+                rel="noopener noreferrer"
+              >
+                Open yabai project
+              </a>
+            </div>
           </li>
           <li>• <strong>tmux</strong> — keeps workspace processes alive when their terminal window is closed. Install with <code className="rounded bg-background-soft px-1.5 py-0.5 text-xs">brew install tmux</code>.</li>
           <li>• <strong>Ghostty or iTerm2</strong> — the terminal app Spaces uses for workspace processes. If both are installed, Spaces defaults to Ghostty. Install Ghostty with <code className="rounded bg-background-soft px-1.5 py-0.5 text-xs">brew install --cask ghostty</code> or iTerm2 from <a href="https://iterm2.com" className="text-accent hover:underline" target="_blank" rel="noopener noreferrer">iterm2.com</a> / <code className="rounded bg-background-soft px-1.5 py-0.5 text-xs">brew install --cask iterm2</code>.</li>
