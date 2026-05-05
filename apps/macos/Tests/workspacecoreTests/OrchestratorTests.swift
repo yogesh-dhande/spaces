@@ -2192,6 +2192,8 @@ final class OrchestratorTests: XCTestCase {
 
         let runtimeStatus = try orchestrator.workspaceRuntimeStatus(workspaceID: workspace.id)
         XCTAssertEqual(runtimeStatus.missingConfiguredProcessCount, 1)
+        XCTAssertEqual(runtimeStatus.runtimeHealth, .healthy)
+        XCTAssertNil(runtimeStatus.warningSummary)
 
         PortReserver.shared.releasePorts(workspaceID: workspace.id)
     }
@@ -2866,6 +2868,36 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertEqual(runtimeStatus.lifecycleState, .running)
         XCTAssertEqual(runtimeStatus.runtimeHealth, .healthy)
         XCTAssertEqual(runtimeStatus.missingConfiguredBrowserSessionCount, 1)
+        XCTAssertNil(runtimeStatus.warningSummary)
+    }
+
+    func testWorkspaceRuntimeStatusIgnoresNeverStartedConfiguredProcessesForRunningWorkspace() throws {
+        let (orchestrator, store, _, workspace, _) = try makeOrchestratorWithWorkspace()
+        try store.touchWorkspaceSettings(workspaceID: workspace.id, updatedAt: "now")
+        try store.setWorkspaceProcesses(
+            workspaceID: workspace.id,
+            processes: [ProcessTemplate(name: "api", command: "npm run api"), ProcessTemplate(name: "web", command: "npm run web")])
+        try store.updateWorkspaceRunning(id: workspace.id, isRunning: true, launchedAt: "now")
+        try store.upsert(
+            runningProcess: RunningProcessRecord(
+                id: UUID().uuidString, workspaceID: workspace.id, templateName: "web", command: "npm run web", terminalApp: "iTerm2", windowID: 501,
+                pid: 999, status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil))
+
+        let runtimeStatus = try orchestrator.workspaceRuntimeStatus(workspaceID: workspace.id)
+        XCTAssertEqual(runtimeStatus.missingConfiguredProcessCount, 1)
+        XCTAssertEqual(runtimeStatus.runtimeHealth, .healthy)
+        XCTAssertNil(runtimeStatus.warningSummary)
+    }
+
+    func testWorkspaceRuntimeStatusIgnoresExplicitlyStoppedConfiguredProcesses() throws {
+        let (orchestrator, store, _, workspace, _) = try makeOrchestratorWithWorkspace()
+        try store.touchWorkspaceSettings(workspaceID: workspace.id, updatedAt: "now")
+        try store.setWorkspaceProcesses(workspaceID: workspace.id, processes: [ProcessTemplate(name: "api", command: "npm run api")])
+
+        let runtimeStatus = try orchestrator.workspaceRuntimeStatus(workspaceID: workspace.id)
+        XCTAssertEqual(runtimeStatus.lifecycleState, .stopped)
+        XCTAssertEqual(runtimeStatus.missingConfiguredProcessCount, 1)
+        XCTAssertEqual(runtimeStatus.runtimeHealth, .healthy)
         XCTAssertNil(runtimeStatus.warningSummary)
     }
 

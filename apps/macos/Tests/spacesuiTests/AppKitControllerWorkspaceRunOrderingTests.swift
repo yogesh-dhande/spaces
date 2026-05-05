@@ -338,27 +338,6 @@ import workspacecore
         #expect(shortcutTargets.first?.processKey == "api")
     }
 
-    @Test func missingConfiguredProcessesBecomeAlertsAttentionItems() {
-        let processEntries = [
-            AppKitController.WorkspaceRunProcessEntry(
-                kind: .missingConfiguredProcess, processID: nil, windowListIndex: nil, processKey: "api", processLabel: "API",
-                processCommand: "bin/api"),
-            AppKitController.WorkspaceRunProcessEntry(
-                kind: .process, processID: "process-web", windowListIndex: nil, processKey: "web", processLabel: "Web", processCommand: "bin/web"),
-            AppKitController.WorkspaceRunProcessEntry(
-                kind: .missingConfiguredProcess, processID: nil, windowListIndex: nil, processKey: "worker", processLabel: "Worker",
-                processCommand: "bin/worker"),
-        ]
-
-        let items = AppKitController.alertsMissingConfiguredProcessItems(workspaceID: "workspace-1", processEntries: processEntries)
-
-        #expect(items.count == 2)
-        #expect(items.map(\.attentionID) == ["process-missing:workspace-1:api", "process-missing:workspace-1:worker"])
-        #expect(items.map(\.label) == ["API", "Worker"])
-        #expect(items.map(\.detail) == ["bin/api", "bin/worker"])
-        #expect(items.map(\.processKey) == ["api", "worker"])
-    }
-
     @Test func doneAndWaitingAgentsRemainAlertsAttentionItems() {
         let agents = [
             AgentWindowRecord(

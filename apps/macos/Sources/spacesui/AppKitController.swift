@@ -658,16 +658,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         agentWindows.filter { $0.status == .waiting || $0.status == .done }
     }
 
-    nonisolated static func alertsMissingConfiguredProcessItems(workspaceID: String, processEntries: [WorkspaceRunProcessEntry])
-        -> [MissingConfiguredProcessAlertsItem]
-    {
-        processEntries.compactMap { entry in
-            guard entry.kind == .missingConfiguredProcess, let processKey = entry.processKey, let label = entry.processLabel else { return nil }
-            return MissingConfiguredProcessAlertsItem(
-                attentionID: "process-missing:\(workspaceID):\(processKey)", label: label, detail: entry.processCommand, processKey: processKey)
-        }
-    }
-
     nonisolated private static func alertsFocusRequest(window: WindowRecord, windowListIndex: Int, process: RunningProcessRecord, workspaceID: String)
         -> WindowFocusRequest
     {
@@ -1023,14 +1013,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
                 let processes = workspace.isRunning ? ((try? orchestrator.runningProcesses(workspaceID: workspace.id)) ?? []) : []
                 let windows = workspace.isRunning ? ((try? orchestrator.windows(workspaceID: workspace.id)) ?? []) : []
-                let configuredProcesses =
-                    workspace.isRunning ? ((try? orchestrator.workspaceSettings(workspaceID: workspace.id)?.processes) ?? []) : []
                 let configuredSessions: [BrowserSession] = {
                     guard workspace.isRunning else { return [] }
                     return (try? orchestrator.resolvedWorkspaceBrowserSessions(workspaceID: workspace.id)) ?? []
                 }()
-                let processEntries = orderedWorkspaceRunProcessEntries(
-                    configuredProcesses: configuredProcesses, windows: windows, processes: processes, agentWindows: agentWindowsList)
                 var processByWindowID: [Int: RunningProcessRecord] = [:]
                 for process in processes { if let wid = process.windowID { processByWindowID[wid] = process } }
                 var items: [AlertsAttentionEntry] = []
@@ -1083,14 +1069,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                             attentionID: Self.alertsAttentionID(process: process), icon: "terminal", iconTint: .terminal, label: process.templateName,
                             detail: process.command, shortcut: "", processStatus: process.status, agentStatus: nil, countsTowardBadge: true,
                             eventDate: eventDate, focusRequest: .workspaceProcess(workspaceID: workspace.id, processID: process.id)))
-                }
-
-                for item in alertsMissingConfiguredProcessItems(workspaceID: workspace.id, processEntries: processEntries) {
-                    items.append(
-                        AlertsAttentionEntry(
-                            attentionID: item.attentionID, icon: "terminal", iconTint: .warning, label: item.label, detail: item.detail, shortcut: "",
-                            processStatus: .idle, agentStatus: nil, countsTowardBadge: true, eventDate: nil,
-                            focusRequest: .workspaceMissingConfiguredProcess(workspaceID: workspace.id, processKey: item.processKey)))
                 }
 
                 for agentWin in attentionAgentWindows {

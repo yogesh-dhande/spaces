@@ -878,7 +878,7 @@ public final class WorkspaceOrchestrator {
             case .running:
                 if !hasTrackedRuntimeIndicators {
                     expectsManagedRuntime ? .missing : .healthy
-                } else if exitedProcessCount > 0 || waitingAgentWindowCount > 0 || missingConfiguredProcessCount > 0 {
+                } else if exitedProcessCount > 0 || waitingAgentWindowCount > 0 {
                     .partial
                 } else {
                     .healthy
