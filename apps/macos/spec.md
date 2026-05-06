@@ -112,6 +112,9 @@ Spaces focuses those windows; it does not decide their geometry.
 - Users can create, update, focus, stop, restart, and archive workspaces from the GUI.
 - The CLI should stay minimal and support `import`, `update`, `start`, `restart`, `open`, and `signal`.
 - For git projects, new workspaces are branch-oriented and should support an existing-branch picker, a new-branch entry path, target branch, directory name, title, and notes inputs.
+- Git workspace creation must require an explicit branch choice. `Create branch` must reject any branch name that already exists, while `Use existing` is the only path allowed to attach or revive a workspace on an existing branch.
+- Workspace titles are display labels and may repeat within a project. Git branch identity, rather than title text, determines whether a workspace is revived or conflicts with an existing archived record.
+- Archiving a git workspace should offer optional local-branch and remote-branch deletion checkboxes so the user can clean up branch names when the workspace is no longer needed.
 - Workspace creation should feel fast in the GUI, with visible progress during setup.
 - Workspace settings used for launch must remain editable after creation.
 

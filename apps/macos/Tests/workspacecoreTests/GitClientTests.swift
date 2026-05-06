@@ -253,8 +253,17 @@ final class GitClientTests: XCTestCase {
         try runGit(["checkout", "main"], cwd: destination.path)
         XCTAssertTrue(client.branchExists(path: destination.path, branch: "delete-me"))
 
-        client.deleteBranch(path: destination.path, branch: "delete-me")
+        XCTAssertTrue(try client.deleteBranch(path: destination.path, branch: "delete-me"))
         XCTAssertFalse(client.branchExists(path: destination.path, branch: "delete-me"))
+    }
+
+    func testDeleteRemoteBranchRemovesRemoteHead() throws {
+        let fixture = try makeRemoteFixture()
+        let client = GitClient()
+
+        XCTAssertTrue(client.remoteBranchExists(path: fixture.clone.path, branch: "remote-feature"))
+        XCTAssertTrue(try client.deleteRemoteBranch(path: fixture.clone.path, branch: "remote-feature"))
+        XCTAssertFalse(client.remoteBranchExists(path: fixture.clone.path, branch: "remote-feature"))
     }
 
     // Tests createWorktree throws when target branch does not exist locally or remotely by arranging representative inputs and asserting the expected result.

@@ -45,7 +45,7 @@ private final class CommandPalettePanel: NSPanel {
 
 @MainActor
 public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineViewDataSource, NSOutlineViewDelegate, NSSplitViewDelegate,
-    NSWindowDelegate, NSTextFieldDelegate, NSSearchFieldDelegate, NSTableViewDelegate, NSTableViewDataSource
+    NSWindowDelegate, NSTextFieldDelegate, NSSearchFieldDelegate, NSComboBoxDelegate, NSTableViewDelegate, NSTableViewDataSource
 {
     private enum AlertsIconTint: Sendable {
         case browser
@@ -529,7 +529,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         case launch
         case restart
         case stop
-        case archive
+        case archive(deleteLocalBranch: Bool, deleteRemoteBranch: Bool)
     }
 
     private enum AddWorkspaceBranchMode: String {
@@ -554,6 +554,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let directoryName: String?
         let notes: String?
         let allowRemoteBranchLookup: Bool
+        let allowExistingBranchReuse: Bool
     }
 
     private struct ProjectCreateInput: Sendable {
@@ -712,7 +713,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                     if outcome.skippedStopScriptBecauseWorkspaceDirectoryMissing {
                         notice = "Workspace directory is missing. Spaces stopped the workspace and skipped its stop script."
                     }
-                case .archive: try orchestrator.archiveWorkspace(workspaceID: workspaceID)
+                case .archive(let deleteLocalBranch, let deleteRemoteBranch):
+                    let outcome = try orchestrator.archiveWorkspace(
+                        workspaceID: workspaceID, deleteLocalBranch: deleteLocalBranch, deleteRemoteBranch: deleteRemoteBranch)
+                    notice = outcome.notice
                 }
                 return .success(.init(notice: notice))
             } catch { return .failure(error) }
@@ -727,7 +731,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 let orchestrator = WorkspaceOrchestrator(store: store)
                 var workspace = try orchestrator.createWorkspace(
                     projectID: input.projectID, name: input.name, branch: input.branch, targetBranch: input.targetBranch,
-                    directoryName: input.directoryName, runSetupScript: false, allowRemoteBranchLookup: input.allowRemoteBranchLookup)
+                    directoryName: input.directoryName, runSetupScript: false, allowRemoteBranchLookup: input.allowRemoteBranchLookup,
+                    allowExistingBranchReuse: input.allowExistingBranchReuse)
                 if let notes = input.notes {
                     try orchestrator.updateWorkspaceNotes(workspaceID: workspace.id, notes: notes)
                     if let updated = try orchestrator.store.workspace(id: workspace.id) { workspace = updated }
@@ -969,7 +974,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 let db = try DatabaseLocator.defaultPath()
                 let store = try SQLiteStore(path: db)
                 let orchestrator = WorkspaceOrchestrator(store: store)
-                let options = try orchestrator.gitBranchOptions(projectID: projectID, includeLiveRemoteHeads: false)
+                let options = try orchestrator.gitBranchOptions(projectID: projectID, includeLiveRemoteHeads: true)
                 return .success(options)
             } catch { return .failure(error) }
         }.value
@@ -3376,15 +3381,12 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let headerSubtitle = NSTextField(labelWithString: "Create a new workspace for \(project.name).")
         headerSubtitle.font = .systemFont(ofSize: 12)
         headerSubtitle.textColor = .secondaryLabelColor
-        let headerHint = helpTextLabel("Tip: Press Cmd+N to quickly create a workspace with an auto-generated name.")
 
         stack.addArrangedSubview(headerRow)
         stack.addArrangedSubview(headerSubtitle)
-        stack.addArrangedSubview(headerHint)
 
         // --- Fields ---
-        let suggestedName = suggestedWorkspaceNameFast(projectID: project.id)
-        let nameField = NSTextField(string: project.isGitRepo ? "" : suggestedName)
+        let nameField = NSTextField(string: "")
         nameField.placeholderString = "workspace title"
         nameField.setAccessibilityIdentifier("add-workspace-title")
         let targetBranchField = NSComboBox()
@@ -3403,10 +3405,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         existingBranchField.numberOfVisibleItems = 10
         existingBranchField.placeholderString = "search branches"
         existingBranchField.setAccessibilityIdentifier("add-workspace-existing-branch")
+        existingBranchField.target = self
+        existingBranchField.action = #selector(addWorkspaceBranchFieldChanged(_:))
+        existingBranchField.delegate = self
         existingBranchField.addItems(withObjectValues: targetBranches)
-        if let defaultBranch = defaultWorkspaceTargetBranch(project: project, branches: targetBranches) {
-            existingBranchField.stringValue = defaultBranch
-        }
         let newBranchField = NSTextField(string: "")
         newBranchField.placeholderString = "new branch name"
         newBranchField.setAccessibilityIdentifier("add-workspace-new-branch")
@@ -3570,11 +3572,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 let existingValue = existingBranchField.stringValue
                 existingBranchField.removeAllItems()
                 existingBranchField.addItems(withObjectValues: options)
-                if !existingValue.isEmpty {
-                    existingBranchField.stringValue = existingValue
-                } else if let suggested = options.first {
-                    existingBranchField.stringValue = suggested
-                }
+                if !existingValue.isEmpty { existingBranchField.stringValue = existingValue }
             }
             if let refs = AddWorkspaceFieldCache.shared.cache[formTag] {
                 self.updateAddWorkspaceProgressiveDisclosure(refs: refs, branchValue: self.currentAddWorkspaceBranchValue(refs))
@@ -5317,39 +5315,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         return nil
     }
 
-    private func createWorkspaceWithDefaults(project: ProjectSummary) {
-        let name = suggestedWorkspaceNameFast(projectID: project.id)
-        guard !name.isEmpty else {
-            showError(WorkspaceError.invalidArgument(message: "No available workspace names remain for project \(project.name)."))
-            return
-        }
-        let targetBranch: String?
-        if project.isGitRepo { targetBranch = defaultWorkspaceTargetBranchFast(project: project) } else { targetBranch = nil }
-        let input = WorkspaceCreateInput(
-            projectID: project.id, name: name, branch: project.isGitRepo ? name : nil, targetBranch: targetBranch, directoryName: nil, notes: nil,
-            allowRemoteBranchLookup: false)
-        showOperationProgressOverlay(message: "Creating workspace...", detail: "Generating defaults and creating the workspace record.")
-        Task { @MainActor [weak self] in
-            guard let self else { return }
-            defer { hideOperationProgressOverlay() }
-            let result = await Self.createWorkspaceSnapshot(input: input)
-            switch result {
-            case .success(let workspace):
-                activeAddWorkspaceFormTag = nil
-                activeAddProjectFormTag = nil
-                selectedProjectID = project.id
-                selectedWorkspaceID = workspace.id
-                lastSelectedRow = -1
-                reloadData()
-                showOperationProgressOverlay(message: "Preparing workspace...", detail: "Running setup for the new workspace.")
-                let setupResult = await Self.runWorkspaceSetupSnapshot(workspaceID: workspace.id)
-                reloadData()
-                if case .failure(let error) = setupResult { showError(error) }
-            case .failure(let error): showError(error)
-            }
-        }
-    }
-
     @objc private func saveProject(_ sender: NSButton) {
         commitEditing()
         guard let refs = ProjectFieldCache.shared.cache[sender.tag] else { return }
@@ -5501,12 +5466,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         return "main"
     }
 
-    private func suggestedWorkspaceNameFast(projectID: String) -> String {
-        let existingNames = Set((workspacesByProject[projectID] ?? []).map(\.title))
-        if let suggestion = WorkspaceOrchestrator.suggestWorkspaceName(existingNames: existingNames) { return suggestion }
-        return ""
-    }
-
     private func addWorkspaceBranchMode(refs: AddWorkspaceFieldRefs) -> AddWorkspaceBranchMode {
         refs.branchModeSegmented?.selectedSegment == 0 ? .create : .existing
     }
@@ -5520,14 +5479,16 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
     private func updateAddWorkspaceBranchDerivedFields(refs: AddWorkspaceFieldRefs, branchValue: String) {
         guard let autoNameState = refs.autoNameState else { return }
+        let trimmedBranch = branchValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedBranch.isEmpty else { return }
         let currentName = refs.nameField.stringValue
         if currentName.isEmpty || currentName == autoNameState.lastAutoWorkspaceName {
-            refs.nameField.stringValue = branchValue
-            autoNameState.lastAutoWorkspaceName = branchValue
+            refs.nameField.stringValue = trimmedBranch
+            autoNameState.lastAutoWorkspaceName = trimmedBranch
         }
         if let dirField = refs.directoryNameField {
             let currentDir = dirField.stringValue
-            let sanitized = branchValue.replacing(/[^A-Za-z0-9\-_]/, with: "-").replacing(/\-{2,}/, with: "-").trimmingCharacters(
+            let sanitized = trimmedBranch.replacing(/[^A-Za-z0-9\-_]/, with: "-").replacing(/\-{2,}/, with: "-").trimmingCharacters(
                 in: CharacterSet(charactersIn: "-"))
             if currentDir.isEmpty || currentDir == autoNameState.lastAutoDirName {
                 dirField.stringValue = sanitized
@@ -5551,14 +5512,19 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
     @objc private func addWorkspaceBranchModeChanged(_ sender: NSSegmentedControl) {
         guard let refs = AddWorkspaceFieldCache.shared.cache[sender.tag] else { return }
-        updateAddWorkspaceBranchInputUI(refs: refs)
-        let branchValue = currentAddWorkspaceBranchValue(refs)
-        updateAddWorkspaceProgressiveDisclosure(refs: refs, branchValue: branchValue)
-        updateAddWorkspaceBranchDerivedFields(refs: refs, branchValue: branchValue)
+        handleAddWorkspaceBranchFieldChange(refs: refs)
         if addWorkspaceBranchMode(refs: refs) == .create {
             window.makeFirstResponder(refs.newBranchField)
         } else {
             window.makeFirstResponder(refs.existingBranchField)
+        }
+    }
+
+    @objc private func addWorkspaceBranchFieldChanged(_ sender: NSControl) {
+        for refs in AddWorkspaceFieldCache.shared.cache.values {
+            guard refs.existingBranchField === sender || refs.newBranchField === sender else { continue }
+            handleAddWorkspaceBranchFieldChange(refs: refs)
+            return
         }
     }
 
@@ -5593,7 +5559,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             }
             let input = WorkspaceCreateInput(
                 projectID: refs.projectID, name: name, branch: branch, targetBranch: targetBranch, directoryName: resolvedDirectoryName,
-                notes: resolvedNotes, allowRemoteBranchLookup: true)
+                notes: resolvedNotes, allowRemoteBranchLookup: true, allowExistingBranchReuse: addWorkspaceBranchMode(refs: refs) == .existing)
             let originalTitle = sender.title
             sender.isEnabled = false
             sender.title = "Creating..."
@@ -5642,11 +5608,25 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         }
         for refs in AddWorkspaceFieldCache.shared.cache.values {
             guard refs.existingBranchField === changedField || refs.newBranchField === changedField else { continue }
-            let branchValue = currentAddWorkspaceBranchValue(refs)
-            updateAddWorkspaceProgressiveDisclosure(refs: refs, branchValue: branchValue)
-            updateAddWorkspaceBranchDerivedFields(refs: refs, branchValue: branchValue)
+            handleAddWorkspaceBranchFieldChange(refs: refs)
             return
         }
+    }
+
+    public func comboBoxSelectionDidChange(_ notification: Notification) {
+        guard let comboBox = notification.object as? NSComboBox else { return }
+        for refs in AddWorkspaceFieldCache.shared.cache.values {
+            guard refs.existingBranchField === comboBox else { continue }
+            handleAddWorkspaceBranchFieldChange(refs: refs)
+            return
+        }
+    }
+
+    private func handleAddWorkspaceBranchFieldChange(refs: AddWorkspaceFieldRefs) {
+        updateAddWorkspaceBranchInputUI(refs: refs)
+        let branchValue = currentAddWorkspaceBranchValue(refs)
+        updateAddWorkspaceProgressiveDisclosure(refs: refs, branchValue: branchValue)
+        updateAddWorkspaceBranchDerivedFields(refs: refs, branchValue: branchValue)
     }
 
     public func control(_ control: NSControl, textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
@@ -5776,8 +5756,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
     @objc private func archiveWorkspace(_ sender: Any) {
         guard let id = Self.senderIdentifier(sender) else { return }
-        let workspace = workspacesByProject.values.flatMap({ $0 }).first(where: { $0.id == id })
-        if workspace?.isDefault == true {
+        guard let (project, workspace) = findWorkspace(id: id) else { return }
+        if workspace.isDefault {
             showInfoMessage(
                 title: "Default Workspace",
                 message: "Default workspaces cannot be archived. Delete the project instead to remove all of its workspaces.")
@@ -5787,11 +5767,30 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         alert.alertStyle = .warning
         alert.messageText = "Archive workspace?"
         alert.informativeText =
-            "Are you sure you want to archive \"\(workspace?.title ?? id)\"? This will remove its git worktree and stop all running processes."
+            "Are you sure you want to archive \"\(workspace.title)\"? This will remove its git worktree and stop all running processes."
+        let deleteLocalBranchCheckbox = NSButton(checkboxWithTitle: "Delete local branch", target: nil, action: nil)
+        let deleteRemoteBranchCheckbox = NSButton(checkboxWithTitle: "Delete remote branch", target: nil, action: nil)
+        if project.isGitRepo, let branch = workspace.branch, !branch.isEmpty {
+            deleteLocalBranchCheckbox.title = "Delete local branch (\(branch))"
+            deleteRemoteBranchCheckbox.title = "Delete remote branch (\(branch))"
+            let checkboxStack = NSStackView(views: [deleteLocalBranchCheckbox, deleteRemoteBranchCheckbox])
+            checkboxStack.orientation = .vertical
+            checkboxStack.alignment = .leading
+            checkboxStack.spacing = 6
+            checkboxStack.edgeInsets = NSEdgeInsets(top: 8, left: 0, bottom: 0, right: 0)
+            checkboxStack.frame = NSRect(origin: .zero, size: checkboxStack.fittingSize)
+
+            let accessoryFrame = NSRect(origin: .zero, size: checkboxStack.fittingSize)
+            let accessoryView = NSView(frame: accessoryFrame)
+            accessoryView.addSubview(checkboxStack)
+            alert.accessoryView = accessoryView
+        }
         alert.addButton(withTitle: "Archive")
         alert.addButton(withTitle: "Cancel")
         let response = alert.runModal()
         guard response == .alertFirstButtonReturn else { return }
+        let deleteLocalBranch = project.isGitRepo && deleteLocalBranchCheckbox.state == .on
+        let deleteRemoteBranch = project.isGitRepo && deleteRemoteBranchCheckbox.state == .on
         let button = sender as? NSButton
         let didOptimisticallyArchive = optimisticallyArchiveWorkspaceInSidebar(workspaceID: id)
         if !didOptimisticallyArchive { button?.isEnabled = false }
@@ -5799,15 +5798,17 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         Task { @MainActor [weak self, weak button] in
             guard let self else { return }
             defer { hideOperationProgressOverlay() }
-            let result = await Self.runWorkspaceLifecycleAction(.archive, workspaceID: id)
+            let result = await Self.runWorkspaceLifecycleAction(
+                .archive(deleteLocalBranch: deleteLocalBranch, deleteRemoteBranch: deleteRemoteBranch), workspaceID: id)
             switch result {
-            case .success:
+            case .success(let outcome):
                 if didOptimisticallyArchive {
                     requestSidebarReload()
                 } else {
                     button?.isEnabled = true
                     reloadData()
                 }
+                if let notice = outcome.notice { showInfoMessage(title: "Workspace Archived", message: notice) }
             case .failure(let error):
                 reloadData()
                 button?.isEnabled = true
@@ -6115,12 +6116,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     private func handleNewWorkspaceShortcut(event: NSEvent) -> Bool {
         guard let addWorkspaceShortcutSpec, matches(event: event, spec: addWorkspaceShortcutSpec) else { return false }
         if showingAlerts, windowShortcutIndex(for: event) != nil { return false }
-        if let activeAddWorkspaceFormTag, let refs = AddWorkspaceFieldCache.shared.cache[activeAddWorkspaceFormTag],
-            let project = projects.first(where: { $0.id == refs.projectID })
-        {
-            createWorkspaceWithDefaults(project: project)
-            return true
-        }
+        if activeAddWorkspaceFormTag != nil { return true }
         addWorkspaceFromShortcut()
         return true
     }
