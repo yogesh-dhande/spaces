@@ -2,6 +2,11 @@ import Foundation
 import systembridge
 
 public final class GitClient {
+    public enum RemoteBranchLookupStatus {
+        case exists
+        case missing
+    }
+
     private let gitExecutable: String
     private let environmentOverrides: [String: String]
     private let metadataCommandTimeout: TimeInterval
@@ -31,9 +36,29 @@ public final class GitClient {
         return status == 0
     }
 
-    public func remoteBranchExists(path: String, branch: String) -> Bool {
-        let status = (try? runGit(["-C", path, "ls-remote", "--exit-code", "--heads", "origin", branch], timeout: metadataCommandTimeout)) ?? 1
+    public func hasRemote(path: String, name: String = "origin") -> Bool {
+        let status = (try? runGit(["-C", path, "remote", "get-url", name], timeout: metadataCommandTimeout)) ?? 1
         return status == 0
+    }
+
+    public func remoteBranchExists(path: String, branch: String) -> Bool { (try? remoteBranchLookupStatus(path: path, branch: branch)) == .exists }
+
+    public func remoteBranchLookupStatus(path: String, branch: String) throws -> RemoteBranchLookupStatus {
+        guard hasRemote(path: path) else { return .missing }
+        let arguments = ["-C", path, "ls-remote", "--exit-code", "--heads", "origin", branch]
+        let process = makeGitProcess(arguments)
+        let err = Pipe()
+        process.standardError = err
+        try process.run()
+        try waitForProcess(process, timeout: metadataCommandTimeout, arguments: arguments)
+        switch process.terminationStatus {
+        case 0: return .exists
+        case 2: return .missing
+        default:
+            let errData = err.fileHandleForReading.readDataToEndOfFile()
+            let message = String(data: errData, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "unknown"
+            throw WorkspaceError.gitCommandFailed(message: message)
+        }
     }
 
     public func branchOptions(path: String, includeLiveRemoteHeads: Bool = true) -> [String] {
@@ -79,10 +104,14 @@ public final class GitClient {
             try runGitOrThrow(["-C", repoPath, "worktree", "add", "-b", branch, worktreePath, "origin/\(branch)"])
             return
         }
-        if allowRemoteBranchLookup, remoteBranchExists(path: repoPath, branch: branch) {
-            try fetchRemoteBranch(path: repoPath, branch: branch)
-            try runGitOrThrow(["-C", repoPath, "worktree", "add", "-b", branch, worktreePath, "origin/\(branch)"])
-            return
+        if allowRemoteBranchLookup {
+            switch try remoteBranchLookupStatus(path: repoPath, branch: branch) {
+            case .exists:
+                try fetchRemoteBranch(path: repoPath, branch: branch)
+                try runGitOrThrow(["-C", repoPath, "worktree", "add", "-b", branch, worktreePath, "origin/\(branch)"])
+                return
+            case .missing: break
+            }
         }
         if let startPoint = try resolveStartPoint(path: repoPath, targetBranch: targetBranch, allowRemoteBranchLookup: allowRemoteBranchLookup) {
             try runGitOrThrow(["-C", repoPath, "worktree", "add", "-b", branch, worktreePath, startPoint])
@@ -132,7 +161,17 @@ public final class GitClient {
         try runGitOrThrow(["clone", url, destination])
     }
 
-    public func deleteBranch(path repoPath: String, branch: String) { _ = try? runGit(["-C", repoPath, "branch", "-D", branch]) }
+    @discardableResult public func deleteBranch(path repoPath: String, branch: String) throws -> Bool {
+        guard branchExists(path: repoPath, branch: branch) else { return false }
+        try runGitOrThrow(["-C", repoPath, "branch", "-D", branch])
+        return true
+    }
+
+    @discardableResult public func deleteRemoteBranch(path repoPath: String, branch: String) throws -> Bool {
+        guard try remoteBranchLookupStatus(path: repoPath, branch: branch) == .exists else { return false }
+        try runGitOrThrow(["-C", repoPath, "push", "origin", "--delete", branch])
+        return true
+    }
 
     public func renameCurrentBranch(path worktreePath: String, to branch: String) throws {
         let trimmedBranch = branch.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -190,9 +229,13 @@ public final class GitClient {
         guard let targetBranch = targetBranch?.trimmingCharacters(in: .whitespacesAndNewlines), !targetBranch.isEmpty else { return nil }
         if branchExists(path: path, branch: targetBranch) { return targetBranch }
         if remoteTrackingBranchExists(path: path, branch: targetBranch) { return "origin/\(targetBranch)" }
-        if allowRemoteBranchLookup, remoteBranchExists(path: path, branch: targetBranch) {
-            try fetchRemoteBranch(path: path, branch: targetBranch)
-            return "origin/\(targetBranch)"
+        if allowRemoteBranchLookup {
+            switch try remoteBranchLookupStatus(path: path, branch: targetBranch) {
+            case .exists:
+                try fetchRemoteBranch(path: path, branch: targetBranch)
+                return "origin/\(targetBranch)"
+            case .missing: break
+            }
         }
         throw WorkspaceError.invalidArgument(message: "Target branch not found: \(targetBranch)")
     }

@@ -205,7 +205,10 @@ public final class SQLiteStore {
             let row = try queryRow(
                 sql: """
                     SELECT id, project_id, title, dir, dirname, branch, target_branch, is_default, is_archived, is_hidden, is_running, last_launched_at, notes
-                    FROM workspaces WHERE dir = ?
+                    FROM workspaces
+                    WHERE dir = ?
+                    ORDER BY is_archived ASC
+                    LIMIT 1
                     """, bindings: [dir])
         else { return nil }
         return decodeWorkspace(row: row)

@@ -351,7 +351,7 @@ private struct ArchiveWorkspaceCommand: ParsableCommand {
         guard let workspace = try orchestrator.store.workspace(dir: normalizedWorkspaceDir) else {
             throw ValidationError("Workspace not found at: \(normalizedWorkspaceDir)")
         }
-        try orchestrator.archiveWorkspace(workspaceID: workspace.id)
+        _ = try orchestrator.archiveWorkspace(workspaceID: workspace.id)
         guard let updated = try orchestrator.store.workspace(id: workspace.id) else {
             throw ValidationError("Workspace disappeared: \(workspace.id)")
         }

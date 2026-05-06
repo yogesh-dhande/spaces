@@ -74,6 +74,7 @@ Projects persist:
 Workspaces persist:
 - directory identity
 - title, notes, and branch metadata
+- branch identity as the unique git-workspace key, while titles remain non-unique display text
 - default and archived flags
 - hidden sidebar visibility state
 - explicit lifecycle state (`running` vs `stopped`)
@@ -97,10 +98,11 @@ It also lets lifecycle state stay explicit while runtime health is derived from 
 
 ### Workspace Creation
 1. Resolve the target project and workspace identity.
-2. Create or import the workspace directory.
-3. Persist the workspace and seed per-workspace settings from project templates.
-4. Allocate named ports.
-5. Run setup logic.
+2. For git projects, treat `Create branch` as a strictly new-branch flow and reject any branch name that already exists locally, remotely, or in an archived workspace record; only the explicit existing-branch path may reuse that branch and revive its archived workspace.
+3. Create or import the workspace directory.
+4. Persist the workspace and seed per-workspace settings from project templates.
+5. Allocate named ports.
+6. Run setup logic.
 
 ### Workspace Launch
 1. Validate that the workspace is launchable.
@@ -116,6 +118,7 @@ It also lets lifecycle state stay explicit while runtime health is derived from 
 4. Clear runtime state.
 5. Release ports.
 6. Archive git worktrees when the action requires it.
+7. When the user opted in during archive confirmation, attempt remote-branch deletion first and local-branch deletion second, then surface any skipped or failed branch cleanup as a post-archive notice instead of rolling back the archive.
 
 ### Discovery and Reconciliation
 - Background worktree discovery imports valid unmanaged worktrees for known projects.
