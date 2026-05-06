@@ -320,9 +320,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         setupSelectWorkspaceDetailIPCObserver()
         setupAppActivationObservers()
         logStartupProfile("ipc_observers_ready")
-
         enterSetupFlow()
         logStartupProfile("setup_started")
+        Task { @MainActor in WorkspaceOrchestrator.prepareUserNotificationAuthorization() }
     }
 
     public func applicationWillTerminate(_ notification: Notification) {

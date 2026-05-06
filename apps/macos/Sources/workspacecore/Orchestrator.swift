@@ -4,8 +4,26 @@ import Foundation
 import systembridge
 
 public final class WorkspaceOrchestrator {
+    private final class NotificationAuthorizationCache: @unchecked Sendable {
+        private let lock = NSLock()
+        private var status: UNAuthorizationStatus?
+
+        func set(_ status: UNAuthorizationStatus) {
+            lock.lock()
+            self.status = status
+            lock.unlock()
+        }
+
+        func get() -> UNAuthorizationStatus? {
+            lock.lock()
+            defer { lock.unlock() }
+            return status
+        }
+    }
+
     public static let terminalTrackingIDEnvVar = "SPACES_TERMINAL_TRACKING_ID"
     public static let agentLabelEnvVar = "SPACES_AGENT_LABEL"
+    private static let notificationAuthorizationCache = NotificationAuthorizationCache()
 
     public struct WorkspaceStopOutcome: Sendable {
         public let skippedStopScriptBecauseWorkspaceDirectoryMissing: Bool
@@ -982,41 +1000,25 @@ public final class WorkspaceOrchestrator {
     }
     private static func deliverUserNotification(title: String, body: String, subtitle: String? = nil) {
         guard NSClassFromString("XCTest") == nil else { return }
+        let center = UNUserNotificationCenter.current()
+        guard let authorizationStatus = currentNotificationAuthorizationStatus(center: center) else {
+            fputs("spaces: Timed out waiting for notification settings\n", stderr)
+            return
+        }
+        guard authorizationStatus == .authorized || authorizationStatus == .provisional else {
+            switch authorizationStatus {
+            case .denied: fputs("spaces: Notification authorization denied; skipping delivery\n", stderr)
+            case .notDetermined: fputs("spaces: Notification authorization not determined; skipping delivery\n", stderr)
+            default: fputs("spaces: Notification authorization unavailable (\(authorizationStatus.rawValue)); skipping delivery\n", stderr)
+            }
+            return
+        }
         let content = UNMutableNotificationContent()
         content.title = title
         content.body = body
         if let subtitle { content.subtitle = subtitle }
         let request = UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil)
-        let center = UNUserNotificationCenter.current()
         let timeout = DispatchTime.now() + .seconds(5)
-        final class AuthorizationState: @unchecked Sendable {
-            private let lock = NSLock()
-            private var granted = false
-
-            func set(granted: Bool) {
-                lock.lock()
-                self.granted = granted
-                lock.unlock()
-            }
-
-            func isGranted() -> Bool {
-                lock.lock()
-                defer { lock.unlock() }
-                return granted
-            }
-        }
-        let authorizationState = AuthorizationState()
-        let authorizationSemaphore = DispatchSemaphore(value: 0)
-        center.requestAuthorization(options: [.alert, .sound]) { granted, error in
-            if let error { fputs("spaces: Failed to request notification authorization: \(error.localizedDescription)\n", stderr) }
-            authorizationState.set(granted: granted)
-            authorizationSemaphore.signal()
-        }
-        guard authorizationSemaphore.wait(timeout: timeout) == .success else {
-            fputs("spaces: Timed out waiting for notification authorization\n", stderr)
-            return
-        }
-        guard authorizationState.isGranted() else { return }
         let addSemaphore = DispatchSemaphore(value: 0)
         center.add(request) { error in
             if let error { fputs("spaces: Failed to deliver notification: \(error.localizedDescription)\n", stderr) }
@@ -1025,6 +1027,66 @@ public final class WorkspaceOrchestrator {
         guard addSemaphore.wait(timeout: timeout) == .success else {
             fputs("spaces: Timed out waiting for notification delivery\n", stderr)
             return
+        }
+    }
+
+    public static func prepareUserNotificationAuthorization() {
+        guard NSClassFromString("XCTest") == nil else { return }
+        Task { @MainActor in
+            let center = UNUserNotificationCenter.current()
+            let settings = await notificationSettings(center: center)
+            notificationAuthorizationCache.set(settings.authorizationStatus)
+            guard settings.authorizationStatus == .notDetermined else { return }
+            do {
+                let granted = try await requestNotificationAuthorization(center: center)
+                let updatedSettings = await notificationSettings(center: center)
+                let resolvedStatus =
+                    updatedSettings.authorizationStatus == .notDetermined
+                    ? (granted ? UNAuthorizationStatus.authorized : .denied) : updatedSettings.authorizationStatus
+                notificationAuthorizationCache.set(resolvedStatus)
+            } catch { fputs("spaces: Failed to request notification authorization: \(error.localizedDescription)\n", stderr) }
+        }
+    }
+
+    private static func currentNotificationAuthorizationStatus(center: UNUserNotificationCenter) -> UNAuthorizationStatus? {
+        if let cached = notificationAuthorizationCache.get(), cached != .notDetermined { return cached }
+        let statusBox = LockedNotificationAuthorizationStatus()
+        let semaphore = DispatchSemaphore(value: 0)
+        center.getNotificationSettings { settings in
+            notificationAuthorizationCache.set(settings.authorizationStatus)
+            statusBox.set(settings.authorizationStatus)
+            semaphore.signal()
+        }
+        guard semaphore.wait(timeout: .now() + .seconds(5)) == .success else { return nil }
+        return statusBox.get()
+    }
+
+    private static func notificationSettings(center: UNUserNotificationCenter) async -> UNNotificationSettings {
+        await withCheckedContinuation { continuation in center.getNotificationSettings { settings in continuation.resume(returning: settings) } }
+    }
+
+    private static func requestNotificationAuthorization(center: UNUserNotificationCenter) async throws -> Bool {
+        try await withCheckedThrowingContinuation { continuation in
+            center.requestAuthorization(options: [.alert, .sound]) { granted, error in
+                if let error { continuation.resume(throwing: error) } else { continuation.resume(returning: granted) }
+            }
+        }
+    }
+
+    private final class LockedNotificationAuthorizationStatus: @unchecked Sendable {
+        private let lock = NSLock()
+        private var status: UNAuthorizationStatus?
+
+        func set(_ status: UNAuthorizationStatus) {
+            lock.lock()
+            self.status = status
+            lock.unlock()
+        }
+
+        func get() -> UNAuthorizationStatus? {
+            lock.lock()
+            defer { lock.unlock() }
+            return status
         }
     }
     private func handleProcessExit(workspaceID: String, process: RunningProcessRecord, project: ProjectRecord, workspace: WorkspaceRecord) throws {
