@@ -6054,6 +6054,41 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertEqual(persisted.branch, "feature-branch")
     }
 
+    func testCreateWorkspaceAllowsReusingArchivedGitDirname() throws {
+        let repo = try makeTempGitRepo(name: "reuse-archived-git-dirname")
+        let root = try makeTempDirectory()
+        let workspacesRoot = root.appendingPathComponent("workspaces", isDirectory: true)
+        let store = try makeTemporaryStore()
+        let orchestrator = WorkspaceOrchestrator(store: store, workspacesRootDirectory: workspacesRoot)
+
+        let project = try orchestrator.addProject(dir: repo.path)
+        let original = try orchestrator.createWorkspace(projectID: project.id, name: "docs old", branch: "docs-old", directoryName: "docs")
+        _ = try orchestrator.archiveWorkspace(workspaceID: original.id)
+
+        let replacement = try orchestrator.createWorkspace(projectID: project.id, name: "docs new", branch: "docs-new", directoryName: "docs")
+        XCTAssertEqual(replacement.dirname, "docs")
+        XCTAssertEqual(replacement.branch, "docs-new")
+    }
+
+    func testCreateWorkspaceRevivesArchivedGitWorkspaceWithFreshDirnameWhenOldDirnameIsTaken() throws {
+        let repo = try makeTempGitRepo(name: "revive-git-fresh-dirname")
+        let root = try makeTempDirectory()
+        let workspacesRoot = root.appendingPathComponent("workspaces", isDirectory: true)
+        let store = try makeTemporaryStore()
+        let orchestrator = WorkspaceOrchestrator(store: store, workspacesRootDirectory: workspacesRoot)
+
+        let project = try orchestrator.addProject(dir: repo.path)
+        let archived = try orchestrator.createWorkspace(projectID: project.id, name: "docs old", branch: "docs-old", directoryName: "docs")
+        _ = try orchestrator.archiveWorkspace(workspaceID: archived.id)
+        let replacement = try orchestrator.createWorkspace(projectID: project.id, name: "docs new", branch: "docs-new", directoryName: "docs")
+
+        let revived = try orchestrator.createWorkspace(
+            projectID: project.id, name: "docs restored", branch: "docs-old", allowExistingBranchReuse: true)
+        XCTAssertEqual(revived.id, archived.id)
+        XCTAssertNotEqual(revived.dirname, "docs")
+        XCTAssertNotEqual(revived.dirname, replacement.dirname)
+    }
+
     func testCreateWorkspaceRejectsExistingBranchInCreateMode() throws {
         let repo = try makeTempGitRepo(name: "reject-existing-branch")
         try runGit(["checkout", "-b", "existing-branch"], cwd: repo.path)

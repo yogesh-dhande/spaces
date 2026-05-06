@@ -513,7 +513,8 @@ public final class WorkspaceOrchestrator {
             let revivedDir: String
             let revivedDirname: String?
             let revivedBranch: String?
-            let dirname = try makeWorkspaceDirname(project: project, existingDirname: existing.dirname, requestedDirname: trimmedDirectoryName)
+            let dirname = try makeWorkspaceDirname(
+                project: project, preferredExistingDirname: existing.dirname, requestedDirname: trimmedDirectoryName, excludingDirname: nil)
             revivedDirname = dirname
             let worktreeRoot = try worktreeRoot(project: project)
             try FileManager.default.createDirectory(at: worktreeRoot, withIntermediateDirectories: true)
@@ -547,7 +548,8 @@ public final class WorkspaceOrchestrator {
         let workspaceBranch: String?
         if project.isGitRepo {
             guard let branchName = resolvedBranch else { throw WorkspaceError.invalidArgument(message: "Branch name is required for git projects.") }
-            let dirname = try makeWorkspaceDirname(project: project, existingDirname: nil, requestedDirname: trimmedDirectoryName)
+            let dirname = try makeWorkspaceDirname(
+                project: project, preferredExistingDirname: nil, requestedDirname: trimmedDirectoryName, excludingDirname: nil)
             workspaceDirname = dirname
             let worktreeRoot = try worktreeRoot(project: project)
             try FileManager.default.createDirectory(at: worktreeRoot, withIntermediateDirectories: true)
@@ -4297,17 +4299,21 @@ public final class WorkspaceOrchestrator {
         return workspaceRootDirectory().appending(path: projectDirname, directoryHint: .isDirectory)
     }
 
-    private func makeWorkspaceDirname(project: ProjectRecord, existingDirname: String?, requestedDirname: String?) throws -> String {
+    private func makeWorkspaceDirname(project: ProjectRecord, preferredExistingDirname: String?, requestedDirname: String?, excludingDirname: String?)
+        throws -> String
+    {
         if let requestedDirname, !requestedDirname.isEmpty {
             try validateWorkspaceDirname(requestedDirname)
-            let used = try usedWorkspaceDirnames(project: project, excludingDirname: existingDirname)
+            let used = try usedWorkspaceDirnames(project: project, excludingDirname: excludingDirname)
             guard !used.contains(requestedDirname) else {
                 throw WorkspaceError.invalidArgument(message: "Workspace directory name is already in use: \(requestedDirname)")
             }
             return requestedDirname
         }
-        if let existingDirname, !existingDirname.isEmpty { return existingDirname }
-        let used = try usedWorkspaceDirnames(project: project, excludingDirname: nil)
+        let used = try usedWorkspaceDirnames(project: project, excludingDirname: excludingDirname)
+        if let preferredExistingDirname, !preferredExistingDirname.isEmpty, !used.contains(preferredExistingDirname) {
+            return preferredExistingDirname
+        }
         if let available = WorkspaceOrchestrator.workspaceFoodNames.first(where: { !used.contains($0) }) { return available }
         throw WorkspaceError.invalidArgument(message: "No available workspace dirnames remain for project \(project.name).")
     }
@@ -4315,7 +4321,10 @@ public final class WorkspaceOrchestrator {
     private func usedWorkspaceDirnames(project: ProjectRecord, excludingDirname: String?) throws -> Set<String> {
         let records = try store.workspaces(projectID: project.id, includeArchived: true)
         var used = Set<String>()
-        for record in records { if let dirname = record.dirname, !dirname.isEmpty, dirname != excludingDirname { used.insert(dirname) } }
+        for record in records {
+            if project.isGitRepo, record.isArchived { continue }
+            if let dirname = record.dirname, !dirname.isEmpty, dirname != excludingDirname { used.insert(dirname) }
+        }
         let root = try worktreeRoot(project: project)
         if let entries = try? FileManager.default.contentsOfDirectory(atPath: root.path) {
             for entry in entries where entry != excludingDirname { used.insert(entry) }

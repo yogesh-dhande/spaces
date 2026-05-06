@@ -2,7 +2,7 @@ import Foundation
 import SQLite3
 
 enum DatabaseSchema {
-    static let currentVersion = 8
+    static let currentVersion = 7
 
     static let migrationSteps: [DatabaseMigrationStep] = [
         DatabaseMigrationStep(
@@ -23,9 +23,6 @@ enum DatabaseSchema {
         DatabaseMigrationStep(
             fromVersion: 6, toVersion: 7, description: "Allow duplicate workspace titles within a project", requiresBackup: true,
             apply: { db in try migrateV6ToV7(db: db) }),
-        DatabaseMigrationStep(
-            fromVersion: 7, toVersion: 8, description: "Enforce unique git branches within a project", requiresBackup: true,
-            apply: { db in try migrateV7ToV8(db: db) }),
     ]
 
     static let latestSchemaSQL = """
@@ -528,6 +525,7 @@ enum DatabaseSchema {
                   window_id INTEGER,
                   terminal_tracking_id TEXT,
                   terminal_native_id TEXT,
+                  terminal_container_id TEXT,
                   iterm_tab_index INTEGER,
                   tmux_window_id TEXT,
                   pid INTEGER,
@@ -688,8 +686,12 @@ enum DatabaseSchema {
     }
 
     private static func migrateV5ToV6(db: OpaquePointer) throws {
-        try exec(db: db, sql: "ALTER TABLE running_processes ADD COLUMN terminal_container_id TEXT;")
-        try exec(db: db, sql: "ALTER TABLE windows ADD COLUMN terminal_container_id TEXT;")
+        if try tableColumnExists(db: db, tableName: "running_processes", columnName: "terminal_container_id") == false {
+            try exec(db: db, sql: "ALTER TABLE running_processes ADD COLUMN terminal_container_id TEXT;")
+        }
+        if try tableColumnExists(db: db, tableName: "windows", columnName: "terminal_container_id") == false {
+            try exec(db: db, sql: "ALTER TABLE windows ADD COLUMN terminal_container_id TEXT;")
+        }
     }
 
     private static func exec(db: OpaquePointer, sql: String) throws {
@@ -867,6 +869,7 @@ enum DatabaseSchema {
                   window_id INTEGER,
                   terminal_tracking_id TEXT,
                   terminal_native_id TEXT,
+                  terminal_container_id TEXT,
                   iterm_tab_index INTEGER,
                   tmux_window_id TEXT,
                   pid INTEGER,
@@ -879,8 +882,8 @@ enum DatabaseSchema {
                 )
                 """,
             copySQL: """
-                INSERT INTO running_processes(id, workspace_id, template_name, command, terminal_app, window_id, terminal_tracking_id, terminal_native_id, iterm_tab_index, tmux_window_id, pid, status, log_path, last_output_at, started_at, exited_at)
-                SELECT id, workspace_id, template_name, command, terminal_app, window_id, terminal_tracking_id, terminal_native_id, iterm_tab_index, tmux_window_id, pid, status, log_path, last_output_at, started_at, exited_at
+                INSERT INTO running_processes(id, workspace_id, template_name, command, terminal_app, window_id, terminal_tracking_id, terminal_native_id, terminal_container_id, iterm_tab_index, tmux_window_id, pid, status, log_path, last_output_at, started_at, exited_at)
+                SELECT id, workspace_id, template_name, command, terminal_app, window_id, terminal_tracking_id, terminal_native_id, terminal_container_id, iterm_tab_index, tmux_window_id, pid, status, log_path, last_output_at, started_at, exited_at
                 FROM running_processes_v6
                 """, previousVersionSuffix: "v6")
         try rebuildTable(
@@ -913,6 +916,7 @@ enum DatabaseSchema {
                   window_id INTEGER,
                   terminal_tracking_id TEXT,
                   terminal_native_id TEXT,
+                  terminal_container_id TEXT,
                   iterm_tab_index INTEGER,
                   tmux_window_id TEXT,
                   role TEXT NOT NULL,
@@ -922,8 +926,8 @@ enum DatabaseSchema {
                 )
                 """,
             copySQL: """
-                INSERT INTO windows(id, workspace_id, app, name, detail, target_url, window_id, terminal_tracking_id, terminal_native_id, iterm_tab_index, tmux_window_id, role, order_index, last_seen_at)
-                SELECT id, workspace_id, app, name, detail, target_url, window_id, terminal_tracking_id, terminal_native_id, iterm_tab_index, tmux_window_id, role, order_index, last_seen_at
+                INSERT INTO windows(id, workspace_id, app, name, detail, target_url, window_id, terminal_tracking_id, terminal_native_id, terminal_container_id, iterm_tab_index, tmux_window_id, role, order_index, last_seen_at)
+                SELECT id, workspace_id, app, name, detail, target_url, window_id, terminal_tracking_id, terminal_native_id, terminal_container_id, iterm_tab_index, tmux_window_id, role, order_index, last_seen_at
                 FROM windows_v6
                 """, previousVersionSuffix: "v6")
         try rebuildTable(
@@ -953,9 +957,6 @@ enum DatabaseSchema {
                 """, previousVersionSuffix: "v6")
 
         try execute(db: db, sql: "DROP TABLE workspaces_v6;")
-    }
-
-    private static func migrateV7ToV8(db: OpaquePointer) throws {
         try execute(
             db: db,
             sql: """
@@ -980,5 +981,21 @@ enum DatabaseSchema {
             let message = String(cString: sqlite3_errmsg(db))
             throw NSError(domain: "spaces.store", code: 44, userInfo: [NSLocalizedDescriptionKey: message])
         }
+    }
+
+    private static func tableColumnExists(db: OpaquePointer, tableName: String, columnName: String) throws -> Bool {
+        var statement: OpaquePointer?
+        let sql = "PRAGMA table_info(\(tableName));"
+        guard sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK else {
+            let message = String(cString: sqlite3_errmsg(db))
+            throw NSError(domain: "spaces.store", code: 45, userInfo: [NSLocalizedDescriptionKey: message])
+        }
+        defer { sqlite3_finalize(statement) }
+
+        while sqlite3_step(statement) == SQLITE_ROW {
+            guard let namePointer = sqlite3_column_text(statement, 1) else { continue }
+            if String(cString: namePointer) == columnName { return true }
+        }
+        return false
     }
 }

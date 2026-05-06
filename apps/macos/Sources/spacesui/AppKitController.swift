@@ -45,7 +45,7 @@ private final class CommandPalettePanel: NSPanel {
 
 @MainActor
 public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineViewDataSource, NSOutlineViewDelegate, NSSplitViewDelegate,
-    NSWindowDelegate, NSTextFieldDelegate, NSSearchFieldDelegate, NSTableViewDelegate, NSTableViewDataSource
+    NSWindowDelegate, NSTextFieldDelegate, NSSearchFieldDelegate, NSComboBoxDelegate, NSTableViewDelegate, NSTableViewDataSource
 {
     private enum AlertsIconTint: Sendable {
         case browser
@@ -3405,10 +3405,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         existingBranchField.numberOfVisibleItems = 10
         existingBranchField.placeholderString = "search branches"
         existingBranchField.setAccessibilityIdentifier("add-workspace-existing-branch")
+        existingBranchField.target = self
+        existingBranchField.action = #selector(addWorkspaceBranchFieldChanged(_:))
+        existingBranchField.delegate = self
         existingBranchField.addItems(withObjectValues: targetBranches)
-        if let defaultBranch = defaultWorkspaceTargetBranch(project: project, branches: targetBranches) {
-            existingBranchField.stringValue = defaultBranch
-        }
         let newBranchField = NSTextField(string: "")
         newBranchField.placeholderString = "new branch name"
         newBranchField.setAccessibilityIdentifier("add-workspace-new-branch")
@@ -3572,11 +3572,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 let existingValue = existingBranchField.stringValue
                 existingBranchField.removeAllItems()
                 existingBranchField.addItems(withObjectValues: options)
-                if !existingValue.isEmpty {
-                    existingBranchField.stringValue = existingValue
-                } else if let suggested = options.first {
-                    existingBranchField.stringValue = suggested
-                }
+                if !existingValue.isEmpty { existingBranchField.stringValue = existingValue }
             }
             if let refs = AddWorkspaceFieldCache.shared.cache[formTag] {
                 self.updateAddWorkspaceProgressiveDisclosure(refs: refs, branchValue: self.currentAddWorkspaceBranchValue(refs))
@@ -5483,14 +5479,16 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
     private func updateAddWorkspaceBranchDerivedFields(refs: AddWorkspaceFieldRefs, branchValue: String) {
         guard let autoNameState = refs.autoNameState else { return }
+        let trimmedBranch = branchValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedBranch.isEmpty else { return }
         let currentName = refs.nameField.stringValue
         if currentName.isEmpty || currentName == autoNameState.lastAutoWorkspaceName {
-            refs.nameField.stringValue = branchValue
-            autoNameState.lastAutoWorkspaceName = branchValue
+            refs.nameField.stringValue = trimmedBranch
+            autoNameState.lastAutoWorkspaceName = trimmedBranch
         }
         if let dirField = refs.directoryNameField {
             let currentDir = dirField.stringValue
-            let sanitized = branchValue.replacing(/[^A-Za-z0-9\-_]/, with: "-").replacing(/\-{2,}/, with: "-").trimmingCharacters(
+            let sanitized = trimmedBranch.replacing(/[^A-Za-z0-9\-_]/, with: "-").replacing(/\-{2,}/, with: "-").trimmingCharacters(
                 in: CharacterSet(charactersIn: "-"))
             if currentDir.isEmpty || currentDir == autoNameState.lastAutoDirName {
                 dirField.stringValue = sanitized
@@ -5514,14 +5512,19 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
     @objc private func addWorkspaceBranchModeChanged(_ sender: NSSegmentedControl) {
         guard let refs = AddWorkspaceFieldCache.shared.cache[sender.tag] else { return }
-        updateAddWorkspaceBranchInputUI(refs: refs)
-        let branchValue = currentAddWorkspaceBranchValue(refs)
-        updateAddWorkspaceProgressiveDisclosure(refs: refs, branchValue: branchValue)
-        updateAddWorkspaceBranchDerivedFields(refs: refs, branchValue: branchValue)
+        handleAddWorkspaceBranchFieldChange(refs: refs)
         if addWorkspaceBranchMode(refs: refs) == .create {
             window.makeFirstResponder(refs.newBranchField)
         } else {
             window.makeFirstResponder(refs.existingBranchField)
+        }
+    }
+
+    @objc private func addWorkspaceBranchFieldChanged(_ sender: NSControl) {
+        for refs in AddWorkspaceFieldCache.shared.cache.values {
+            guard refs.existingBranchField === sender || refs.newBranchField === sender else { continue }
+            handleAddWorkspaceBranchFieldChange(refs: refs)
+            return
         }
     }
 
@@ -5605,11 +5608,25 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         }
         for refs in AddWorkspaceFieldCache.shared.cache.values {
             guard refs.existingBranchField === changedField || refs.newBranchField === changedField else { continue }
-            let branchValue = currentAddWorkspaceBranchValue(refs)
-            updateAddWorkspaceProgressiveDisclosure(refs: refs, branchValue: branchValue)
-            updateAddWorkspaceBranchDerivedFields(refs: refs, branchValue: branchValue)
+            handleAddWorkspaceBranchFieldChange(refs: refs)
             return
         }
+    }
+
+    public func comboBoxSelectionDidChange(_ notification: Notification) {
+        guard let comboBox = notification.object as? NSComboBox else { return }
+        for refs in AddWorkspaceFieldCache.shared.cache.values {
+            guard refs.existingBranchField === comboBox else { continue }
+            handleAddWorkspaceBranchFieldChange(refs: refs)
+            return
+        }
+    }
+
+    private func handleAddWorkspaceBranchFieldChange(refs: AddWorkspaceFieldRefs) {
+        updateAddWorkspaceBranchInputUI(refs: refs)
+        let branchValue = currentAddWorkspaceBranchValue(refs)
+        updateAddWorkspaceProgressiveDisclosure(refs: refs, branchValue: branchValue)
+        updateAddWorkspaceBranchDerivedFields(refs: refs, branchValue: branchValue)
     }
 
     public func control(_ control: NSControl, textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
