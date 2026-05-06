@@ -3,6 +3,36 @@ import XCTest
 @testable import systembridge
 
 final class TmuxAdapterTests: XCTestCase {
+    func testExecutableLocatorPrefersPATHBeforeAbsoluteFallbacks() throws {
+        let root = try makeTempDirectory()
+        let preferred = root.appending(path: "preferred-tmux")
+        let pathDir = root.appending(path: "bin", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: pathDir, withIntermediateDirectories: true)
+        let pathCandidate = pathDir.appending(path: "tmux")
+
+        try "#!/bin/sh\nexit 0\n".write(to: preferred, atomically: true, encoding: .utf8)
+        try "#!/bin/sh\nexit 0\n".write(to: pathCandidate, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: preferred.path)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: pathCandidate.path)
+
+        let resolved = ExecutableLocator.resolve(commandName: "tmux", preferredAbsolutePaths: [preferred.path], environment: ["PATH": pathDir.path])
+
+        XCTAssertEqual(resolved, pathCandidate.path)
+    }
+
+    func testExecutableLocatorFallsBackToPATHSearch() throws {
+        let root = try makeTempDirectory()
+        let pathDir = root.appending(path: "bin", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: pathDir, withIntermediateDirectories: true)
+        let pathCandidate = pathDir.appending(path: "tmux")
+        try "#!/bin/sh\nexit 0\n".write(to: pathCandidate, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: pathCandidate.path)
+
+        let resolved = ExecutableLocator.resolve(commandName: "tmux", preferredAbsolutePaths: [], environment: ["PATH": pathDir.path])
+
+        XCTAssertEqual(resolved, pathCandidate.path)
+    }
+
     func testParseWindowPreservesVisibleSentinelInsideWindowName() {
         let adapter = TmuxAdapter()
         let separator = "\u{1F}"
@@ -16,6 +46,19 @@ final class TmuxAdapterTests: XCTestCase {
         XCTAssertEqual(window?.sessionName, "workspace <<<SPACES_FIELD>>> session")
         XCTAssertEqual(window?.isActive, true)
         XCTAssertEqual(window?.panePID, 4242)
+    }
+
+    func testParseWindowHandlesSanitizedUnderscoreDelimiters() {
+        let adapter = TmuxAdapter()
+
+        let window = adapter.parseWindow(line: "@1_0_dev server_spaces-session_1_46074")
+
+        XCTAssertEqual(window?.id, "@1")
+        XCTAssertEqual(window?.index, 0)
+        XCTAssertEqual(window?.name, "dev server")
+        XCTAssertEqual(window?.sessionName, "spaces-session")
+        XCTAssertEqual(window?.isActive, true)
+        XCTAssertEqual(window?.panePID, 46074)
     }
 
     func testParseWindowIDTrimsWhitespace() {

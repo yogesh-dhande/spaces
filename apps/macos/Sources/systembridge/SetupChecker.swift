@@ -80,15 +80,20 @@ public final class SetupChecker {
 
     private func isTmuxInstalled() -> Bool { tmux.isAvailable() }
 
-    private func isYabaiInstalled() -> Bool { (try? Shell.runAndCapture(["yabai", "--version"])) != nil }
+    private func isYabaiInstalled() -> Bool {
+        guard let yabai = ExecutableLocator.resolve(.yabai) else { return false }
+        return (try? Shell.runAndCapture([yabai, "--version"])) != nil
+    }
 
     private func isYabaiServiceRunning() -> Bool {
-        guard (try? Shell.runAndCapture(["yabai", "-m", "signal", "--list"])) != nil else { return false }
+        guard let yabai = ExecutableLocator.resolve(.yabai) else { return false }
+        guard (try? Shell.runAndCapture([yabai, "-m", "signal", "--list"])) != nil else { return false }
         return true
     }
 
     private func hasYabaiAccessibility() -> Bool {
-        guard let output = try? Shell.runAndCapture(["yabai", "-m", "query", "--windows"]) else { return false }
+        guard let yabai = ExecutableLocator.resolve(.yabai) else { return false }
+        guard let output = try? Shell.runAndCapture([yabai, "-m", "query", "--windows"]) else { return false }
         let trimmed = output.trimmingCharacters(in: .whitespacesAndNewlines)
         // An empty array means AX is not granted; Finder always has windows when permission is granted.
         return trimmed != "[]" && trimmed.hasPrefix("[")
