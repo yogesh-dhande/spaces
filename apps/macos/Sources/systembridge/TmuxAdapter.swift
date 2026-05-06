@@ -16,15 +16,15 @@ open class TmuxAdapter: @unchecked Sendable {
 
     public init() {}
 
-    open func isAvailable() -> Bool { (try? Shell.runAndCapture(["tmux", "-V"])) != nil }
+    open func isAvailable() -> Bool { (try? runAndCapture(["-V"])) != nil }
 
-    open func hasSession(named sessionName: String) -> Bool { (try? Shell.runAndCapture(["tmux", "has-session", "-t", sessionName])) != nil }
+    open func hasSession(named sessionName: String) -> Bool { (try? runAndCapture(["has-session", "-t", sessionName])) != nil }
 
-    open func killSession(named sessionName: String) throws { _ = try Shell.run(["tmux", "kill-session", "-t", sessionName]) }
+    open func killSession(named sessionName: String) throws { _ = try run(["kill-session", "-t", sessionName]) }
 
     open func listWindows(sessionName: String) throws -> [TmuxWindowInfo] {
         guard hasSession(named: sessionName) else { return [] }
-        let output = try Shell.runAndCapture(["tmux", "list-windows", "-t", sessionName, "-F", windowFormat])
+        let output = try runAndCapture(["list-windows", "-t", sessionName, "-F", windowFormat])
         return output.split(separator: "\n", omittingEmptySubsequences: true).compactMap { parseWindow(line: String($0)) }
     }
 
@@ -40,11 +40,11 @@ open class TmuxAdapter: @unchecked Sendable {
     }
 
     open func createWindow(sessionName: String, name: String, command: String? = nil, detached: Bool = true) throws -> TmuxWindowInfo {
-        var arguments = ["tmux", "new-window"]
+        var arguments = ["new-window"]
         if detached { arguments.append("-d") }
         arguments += ["-P", "-F", createdWindowFormat, "-t", sessionName, "-n", name]
         if let command, !command.isEmpty { arguments.append(command) }
-        let output = try Shell.runAndCapture(arguments)
+        let output = try runAndCapture(arguments)
         guard let window = parseCreatedWindow(output: output, fallbackName: name, sessionName: sessionName) else {
             throw NSError(domain: "spaces.tmux", code: 1, userInfo: [NSLocalizedDescriptionKey: "Failed to create tmux window."])
         }
@@ -54,29 +54,27 @@ open class TmuxAdapter: @unchecked Sendable {
     open func startSession(named sessionName: String, windowName: String, cwd: String, env: [String: String] = [:], command: [String]) throws
         -> TmuxWindowInfo
     {
-        var arguments = ["tmux", "new-session", "-d", "-P", "-F", createdWindowFormat, "-s", sessionName, "-n", windowName, "-c", cwd]
+        var arguments = ["new-session", "-d", "-P", "-F", createdWindowFormat, "-s", sessionName, "-n", windowName, "-c", cwd]
         for (key, value) in env.sorted(by: { $0.key < $1.key }) { arguments += ["-e", "\(key)=\(value)"] }
         arguments.append(contentsOf: command)
-        let output = try Shell.runAndCapture(arguments)
+        let output = try runAndCapture(arguments)
         guard let window = parseCreatedWindow(output: output, fallbackName: windowName, sessionName: sessionName) else {
             throw NSError(domain: "spaces.tmux", code: 1, userInfo: [NSLocalizedDescriptionKey: "Failed to create tmux session."])
         }
         return bestEffortRefinedCreatedWindow(window)
     }
 
-    open func renameWindow(windowID: String, name: String) throws { _ = try Shell.run(["tmux", "rename-window", "-t", windowID, name]) }
+    open func renameWindow(windowID: String, name: String) throws { _ = try run(["rename-window", "-t", windowID, name]) }
 
-    open func respawnWindow(windowID: String, command: String) throws {
-        _ = try Shell.run(["tmux", "respawn-window", "-k", "-t", windowID, command])
-    }
+    open func respawnWindow(windowID: String, command: String) throws { _ = try run(["respawn-window", "-k", "-t", windowID, command]) }
 
     open func setRemainOnExit(windowID: String, enabled: Bool) throws {
-        _ = try Shell.run(["tmux", "set-option", "-t", windowID, "remain-on-exit", enabled ? "on" : "off"])
+        _ = try run(["set-option", "-t", windowID, "remain-on-exit", enabled ? "on" : "off"])
     }
 
-    open func selectWindow(windowID: String) throws -> Bool { (try? Shell.run(["tmux", "select-window", "-t", windowID])) == 0 }
+    open func selectWindow(windowID: String) throws -> Bool { (try? run(["select-window", "-t", windowID])) == 0 }
 
-    open func killWindow(windowID: String) throws { _ = try Shell.run(["tmux", "kill-window", "-t", windowID]) }
+    open func killWindow(windowID: String) throws { _ = try run(["kill-window", "-t", windowID]) }
 
     func parseWindowID(output: String) -> String? {
         let trimmed = output.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -107,10 +105,10 @@ open class TmuxAdapter: @unchecked Sendable {
     }
 
     private func displayMessage(target: String?, format: String) throws -> String {
-        var arguments = ["tmux", "display-message", "-p"]
+        var arguments = ["display-message", "-p"]
         if let target, !target.isEmpty { arguments += ["-t", target] }
         arguments.append(format)
-        return try Shell.runAndCapture(arguments).trimmingCharacters(in: .whitespacesAndNewlines)
+        return try runAndCapture(arguments).trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     private func windowInfo(target: String) throws -> TmuxWindowInfo {
@@ -128,9 +126,34 @@ open class TmuxAdapter: @unchecked Sendable {
     func parseWindow(line: String) -> TmuxWindowInfo? {
         guard !line.isEmpty else { return nil }
         let parts = line.components(separatedBy: windowFieldSeparator)
+        if let window = parseWindow(parts: parts) { return window }
+        let underscoreSeparated = line.components(separatedBy: "_")
+        return parseWindow(parts: underscoreSeparated)
+    }
+
+    private func parseWindow(parts: [String]) -> TmuxWindowInfo? {
         guard parts.count >= 5, let index = Int(parts[1]) else { return nil }
         return TmuxWindowInfo(
             id: parts[0], index: index, name: parts[2], sessionName: parts[3], isActive: parts[4] == "1",
             panePID: parts.count > 5 ? Int(parts[5]) : nil)
+    }
+
+    open func executablePath() -> String? { ExecutableLocator.resolve(.tmux) }
+
+    private func run(_ arguments: [String]) throws -> Int32 {
+        let command = try command(arguments)
+        return try Shell.run(command)
+    }
+
+    private func runAndCapture(_ arguments: [String]) throws -> String {
+        let command = try command(arguments)
+        return try Shell.runAndCapture(command)
+    }
+
+    private func command(_ arguments: [String]) throws -> [String] {
+        guard let executablePath = executablePath() else {
+            throw NSError(domain: "spaces.tmux", code: 127, userInfo: [NSLocalizedDescriptionKey: "tmux executable not found"])
+        }
+        return [executablePath] + arguments
     }
 }

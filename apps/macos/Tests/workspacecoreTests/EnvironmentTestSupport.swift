@@ -36,11 +36,14 @@ func withMockCommands(_ commands: [String: String], run: () throws -> Void) thro
 
     let originalPath = ProcessInfo.processInfo.environment["PATH"] ?? ""
     let originalShell = ProcessInfo.processInfo.environment["SHELL"]
+    let originalHome = ProcessInfo.processInfo.environment["HOME"]
     let updatedPath = originalPath.isEmpty ? directory.path : "\(directory.path):\(originalPath)"
     setenv("PATH", updatedPath, 1)
     setenv("SHELL", shellFile.path, 1)
+    setenv("HOME", directory.path, 1)
     defer {
         setenv("PATH", originalPath, 1)
+        if let originalHome { setenv("HOME", originalHome, 1) } else { unsetenv("HOME") }
         if let originalShell { setenv("SHELL", originalShell, 1) } else { unsetenv("SHELL") }
     }
 

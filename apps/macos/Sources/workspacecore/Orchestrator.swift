@@ -2552,7 +2552,8 @@ public final class WorkspaceOrchestrator {
                 didMutate = true
                 continue
             }
-            if process.status == .exited, let panePID = liveTmuxWindow.panePID, panePID > 0, isProcessAlive(pid: panePID) {
+            let paneAlive = liveTmuxWindow.panePID.flatMap { $0 > 0 ? isProcessAlive(pid: $0) : false } ?? false
+            if process.status == .exited, let panePID = liveTmuxWindow.panePID, panePID > 0, paneAlive {
                 try store.upsert(
                     runningProcess: RunningProcessRecord(
                         id: process.id, workspaceID: process.workspaceID, templateName: process.templateName, command: process.command,

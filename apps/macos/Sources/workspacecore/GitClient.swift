@@ -6,8 +6,8 @@ public final class GitClient {
     private let environmentOverrides: [String: String]
     private let metadataCommandTimeout: TimeInterval
 
-    public init(gitExecutable: String = "git", environmentOverrides: [String: String] = [:], metadataCommandTimeout: TimeInterval = 2) {
-        self.gitExecutable = gitExecutable
+    public init(gitExecutable: String? = nil, environmentOverrides: [String: String] = [:], metadataCommandTimeout: TimeInterval = 2) {
+        self.gitExecutable = gitExecutable ?? ExecutableLocator.resolve(.git) ?? "git"
         self.environmentOverrides = environmentOverrides
         self.metadataCommandTimeout = metadataCommandTimeout
     }
@@ -208,8 +208,13 @@ public final class GitClient {
 
     private func makeGitProcess(_ arguments: [String]) -> Process {
         let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-        process.arguments = [gitExecutable] + arguments
+        if gitExecutable.contains("/") {
+            process.executableURL = URL(fileURLWithPath: gitExecutable)
+            process.arguments = arguments
+        } else {
+            process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+            process.arguments = [gitExecutable] + arguments
+        }
         process.environment = gitEnvironment()
         return process
     }
