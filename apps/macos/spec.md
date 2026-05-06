@@ -227,8 +227,8 @@ Spaces focuses those windows; it does not decide their geometry.
 - Agent events from unsupported terminal hosts should be dropped instead of recorded. Coding agents run from tmux are not supported by Spaces and should return an explicit error instead of being inferred onto workspace process terminals.
 - `init` should identify the originating terminal and either attach to an already tracked terminal row or create a tracked terminal row for that coding agent.
 - Terminal identity should be adapter-driven and consistent across supported hosts: prefer tmux window identity when present, otherwise prefer a stable session/token identity, and only fall back to a yabai window identity when no durable session-like identity exists.
-- iTerm2 should use `ITERM_SESSION_ID` as both its hook identity and its durable native terminal identity when available.
-- When `ITERM_SESSION_ID` is present, iTerm2 agent events should bind to that session identity directly and must not borrow whichever yabai window happens to be frontmost at event time.
+- iTerm2 should use `ITERM_SESSION_ID` as both its hook identity and its durable native terminal identity.
+- iTerm2 agent events without `ITERM_SESSION_ID` should be dropped instead of borrowing whichever yabai window happens to be frontmost at event time.
 - Ghostty agent tracking should keep two separate identities: a Spaces-issued terminal tracking token for CLI hook attribution and the real Ghostty terminal ID for focus, liveness, and retab rebinding.
 - Ghostty agent events without a Spaces-issued tracking token should be dropped instead of being rebound to whichever Ghostty tab or window happens to be frontmost.
 - Ghostty focus may fall back from `terminalNativeID` to the stored hook token only when resolving an already tracked terminal row in the same workspace; it must not guess from the frontmost Ghostty tab/window.

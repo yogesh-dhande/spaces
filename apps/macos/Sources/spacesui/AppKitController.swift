@@ -3769,12 +3769,16 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let processEntries = Self.orderedWorkspaceRunProcessEntries(
             configuredProcesses: configuredProcesses, windows: trackedWindows, processes: runningProcesses, agentWindows: agentWindows)
         let processesByID = Dictionary(uniqueKeysWithValues: runningProcesses.map { ($0.id, $0) })
+        let shortcutTargets = Self.orderedWorkspaceRunShortcutTargets(
+            browserSessions: browserSessions, processEntries: processEntries, processesByID: processesByID,
+            configuredAgentLaunchers: configuredAgentLaunchers, agentWindows: agentWindows)
         let shortcutIndices = Self.workspaceDetailShortcutIndices(
             browserSessions: browserSessions, processEntries: processEntries, processesByID: processesByID,
             configuredAgentLaunchers: configuredAgentLaunchers, agentWindows: agentWindows)
         let processStatusByName = Self.workspaceProcessStatusByName(runningProcesses)
         let processesSection = workspaceProcessesSection(
-            workspace: workspace, shortcutIndicesByName: shortcutIndices.processesByName, statusByName: processStatusByName)
+            workspace: workspace, trackedWindows: trackedWindows, processEntries: processEntries, shortcutTargets: shortcutTargets,
+            shortcutIndicesByName: shortcutIndices.processesByName, statusByName: processStatusByName)
         let agentLaunchersSection = workspaceAgentLaunchersSection(
             workspace: workspace, shortcutIndicesByName: shortcutIndices.codingAgentsByName, agentWindows: agentWindows,
             trackedWindows: trackedWindows)
@@ -3805,7 +3809,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     }
 
     private func workspaceProcessesSection(
-        workspace: WorkspaceSummary, shortcutIndicesByName: [String: Int], statusByName: [String: RowPrimitives.StatusKind]
+        workspace: WorkspaceSummary, trackedWindows: [WindowRecord], processEntries: [WorkspaceRunProcessEntry],
+        shortcutTargets: [WorkspaceRunShortcutTarget], shortcutIndicesByName: [String: Int], statusByName: [String: RowPrimitives.StatusKind]
     ) -> NSView? {
         guard let config = try? orchestrator.workspaceSettings(workspaceID: workspace.id) else { return nil }
         let runningProcesses = (try? orchestrator.runningProcesses(workspaceID: workspace.id)) ?? []
@@ -3887,6 +3892,28 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         section.onFocus = { [weak self] process in
             guard let self, let name = process.name, let index = nameToIndex[name] else { return }
             Task { @MainActor [weak self] in await self?.runWindowShortcut(index: index, startedAt: Date()) }
+        }
+        let windowShortcutByListIndex: [Int: Int] = Dictionary(
+            uniqueKeysWithValues: shortcutTargets.enumerated().compactMap { offset, target in
+                guard target.kind == .window, let windowListIndex = target.windowListIndex else { return nil }
+                return (windowListIndex, offset + 1)
+            })
+        section.supplementalRows = processEntries.compactMap { entry in
+            guard entry.kind == .window, let windowListIndex = entry.windowListIndex, trackedWindows.indices.contains(windowListIndex) else {
+                return nil
+            }
+            let window = trackedWindows[windowListIndex]
+            guard window.role == "terminal" else { return nil }
+            let fallback = Self.terminalFallbackRowText(name: window.name, detail: window.detail, app: window.app)
+            let shortcut = windowShortcutByListIndex[windowListIndex].map(windowShortcutBadgeText(index:))
+            return ProcessesSection.SupplementalRuntimeRow(
+                id: window.id, label: fallback.label, detail: fallback.detail, shortcut: shortcut, status: .idle,
+                onFocus: { [weak self] in
+                    guard let self else { return }
+                    Task { @MainActor [weak self] in
+                        await self?.runWindowShortcut(index: windowShortcutByListIndex[windowListIndex] ?? 0, startedAt: Date())
+                    }
+                })
         }
         section.statusByName = statusByName
         section.shortcutsByName = shortcutMap

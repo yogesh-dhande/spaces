@@ -119,13 +119,13 @@ final class AppctlAdapterTests: XCTestCase {
             XCTAssertNil(ghosttyLaunch.fallbackWindowID)
             XCTAssertEqual(ghosttyLaunch.trackingIdentity, .session("ghostty-terminal-1"))
             XCTAssertEqual(ghosttyLaunch.hookSessionID, "tracking-ghostty-1")
-            XCTAssertEqual(ghosttyLaunch.containerID, "ghostty-window-1")
+            XCTAssertEqual(ghosttyLaunch.containerID, "ghostty-tab-1")
             XCTAssertTrue(
                 try ghosttyTerminalAdapter.focusTrackedTerminal(
                     TerminalFocusTarget(trackingIdentity: .session("ghostty-terminal-1"), windowID: nil, tabIndex: nil)))
             XCTAssertEqual(try ghosttyTerminalAdapter.listLiveTrackingIdentities(), [.session("ghostty-terminal-1"), .session("ghostty-terminal-2")])
             XCTAssertEqual(try ghostty.focusTerminal(id: "ghostty-terminal-1"), "ghostty-window-1")
-            XCTAssertNoThrow(try ghostty.closeWindow(id: "ghostty-window-1"))
+            XCTAssertNoThrow(try ghostty.closeTab(id: "ghostty-tab-1"))
             XCTAssertEqual(try ghostty.listWindowTabAndTerminalIDs().count, 2)
         }
     }
@@ -357,7 +357,7 @@ final class AppctlAdapterTests: XCTestCase {
           exit 0
         fi
 
-        if [[ "$script" == *'tell window id "ghostty-window-1" to close window'* ]]; then
+        if [[ "$script" == *'tell tab id "ghostty-tab-1" to close tab'* ]]; then
           echo 'ok'
           exit 0
         fi

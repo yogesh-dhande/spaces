@@ -2,7 +2,7 @@ import Foundation
 import SQLite3
 
 enum DatabaseSchema {
-    static let currentVersion = 5
+    static let currentVersion = 6
 
     static let migrationSteps: [DatabaseMigrationStep] = [
         DatabaseMigrationStep(
@@ -17,6 +17,9 @@ enum DatabaseSchema {
         DatabaseMigrationStep(
             fromVersion: 4, toVersion: 5, description: "Require explicit non-empty port names", requiresBackup: true,
             apply: { db in try migrateV4ToV5(db: db) }),
+        DatabaseMigrationStep(
+            fromVersion: 5, toVersion: 6, description: "Persist terminal container IDs for managed terminal hosts", requiresBackup: true,
+            apply: { db in try migrateV5ToV6(db: db) }),
     ]
 
     static let latestSchemaSQL = """
@@ -183,6 +186,7 @@ enum DatabaseSchema {
           window_id INTEGER,
           terminal_tracking_id TEXT,
           terminal_native_id TEXT,
+          terminal_container_id TEXT,
           iterm_tab_index INTEGER,
           tmux_window_id TEXT,
           pid INTEGER,
@@ -214,6 +218,7 @@ enum DatabaseSchema {
           window_id INTEGER,
           terminal_tracking_id TEXT,
           terminal_native_id TEXT,
+          terminal_container_id TEXT,
           iterm_tab_index INTEGER,
           tmux_window_id TEXT,
           role TEXT NOT NULL,
@@ -671,6 +676,11 @@ enum DatabaseSchema {
                 INSERT INTO workspace_port_definitions(id, workspace_id, name, order_index)
                 SELECT id, workspace_id, name, order_index FROM workspace_port_definitions_v1
                 """)
+    }
+
+    private static func migrateV5ToV6(db: OpaquePointer) throws {
+        try exec(db: db, sql: "ALTER TABLE running_processes ADD COLUMN terminal_container_id TEXT;")
+        try exec(db: db, sql: "ALTER TABLE windows ADD COLUMN terminal_container_id TEXT;")
     }
 
     private static func exec(db: OpaquePointer, sql: String) throws {

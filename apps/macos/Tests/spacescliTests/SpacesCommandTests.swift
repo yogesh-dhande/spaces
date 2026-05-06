@@ -109,12 +109,13 @@ final class MXCommandTests: XCTestCase {
         XCTAssertEqual(result?.payload.message, "Dropped untracked Ghostty agent event.")
     }
 
-    func testAgentEventDropResultAcceptsItermTermProgramWithoutBundleIdentifier() {
+    func testAgentEventDropResultRejectsUntrackedItermTermProgramWithoutSessionIdentifier() {
         let context = CLIContext()
 
         let result = agentEventDropResult(type: .start, environment: ["TERM_PROGRAM": "iTerm.app"], context: context)
 
-        XCTAssertNil(result)
+        XCTAssertEqual(result?.text, "Dropped agent event start: untracked iTerm2 terminal")
+        XCTAssertEqual(result?.payload.message, "Dropped untracked iTerm2 agent event.")
     }
 
     func testAgentEventDropResultAcceptsItermSessionIdentifierWithoutTermProgram() {
@@ -226,6 +227,21 @@ final class MXCommandTests: XCTestCase {
             XCTAssertEqual(agentContext?.provider, .iterm2)
             XCTAssertEqual(agentContext?.terminalTrackingID, "ABC123")
             XCTAssertNil(agentContext?.yabaiWindowID)
+        }
+    }
+
+    func testResolveAgentInvocationContextDropsItermEventWithoutSessionIdentifier() throws {
+        let store = try makeTemporaryStore()
+        let workspace = try makeWorkspace(store: store)
+        let orchestrator = WorkspaceOrchestrator(store: store)
+
+        try withMockCommands(["yabai": Self.yabaiFocusedWindowMock]) {
+            let context = CLIContext()
+            let agentContext = try resolveAgentInvocationContext(
+                workspaceID: workspace.id, environment: ["TERM_PROGRAM": "iTerm.app", "CLAUDE_CODE_ENTRYPOINT": "1"], orchestrator: orchestrator,
+                context: context)
+
+            XCTAssertNil(agentContext)
         }
     }
 
