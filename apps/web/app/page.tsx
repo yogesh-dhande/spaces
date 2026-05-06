@@ -160,6 +160,42 @@ const faqItems: FaqItem[] = [
     ),
   },
   {
+    question: "Who is Spaces not for?",
+    answer: (
+      <>
+        <p className="mb-3">
+          Spaces makes opinionated tradeoffs to prioritize speed and
+          flexibility. They may not suit everyone.
+        </p>
+        <ul className="ml-4 list-disc space-y-2">
+          <li>
+            <span className="font-semibold text-foreground">
+              If you keep your window count low.
+            </span>{" "}
+            Spaces opens a dedicated window for every tab, terminal, and
+            editor instance so it can lay them out across your screens and
+            recall them on demand. The upside is speed and flexibility —
+            focusing a window takes 20–30 ms, versus 200 ms to a full second
+            to reconcile and focus a specific tab in Chrome as you add or
+            move them. It also lets you view any two windows side by side
+            (even from different workspaces) with your favorite tiling window
+            manager. If a sparse desktop matters more to you than instant
+            recall, Spaces will feel like clutter.
+          </li>
+          <li>
+            <span className="font-semibold text-foreground">
+              If you must use macOS full-screen mode.
+            </span>{" "}
+            macOS puts each full-screen window in its own desktop space, so
+            focusing another window forces the OS to transition between
+            desktops. Spaces still works, but it shines when you stay in
+            windowed mode.
+          </li>
+        </ul>
+      </>
+    ),
+  },
+  {
     question: "Do you collect any data?",
     answer: (
       <>
@@ -172,20 +208,11 @@ const faqItems: FaqItem[] = [
     question: "Where do I send bug reports?",
     answer: (
       <>
-        Email{" "}
-        <a href="mailto:support@spaces.dev" className="text-accent hover:underline">
-          support@spaces.dev
+        Open a GitHub issue at{" "}
+        <a href="https://github.com/yogesh-dhande/spaces/issues" className="text-accent hover:underline">
+          https://github.com/yogesh-dhande/spaces/issues
         </a>
         .
-      </>
-    ),
-  },
-  {
-    question: "What does Spaces mean?",
-    answer: (
-      <>
-        Multiplex your work? Or something like that. I needed a name and a
-        domain. You know how it goes.
       </>
     ),
   },
