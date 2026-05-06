@@ -79,6 +79,16 @@ open class GhosttyAdapter: @unchecked Sendable {
         _ = try AppleScript.run(script)
     }
 
+    open func closeTab(id: String) throws {
+        let escapedID = appleScriptEscaped(id)
+        let script = """
+            tell application id "com.mitchellh.ghostty"
+              tell tab id "\(escapedID)" to close tab
+            end tell
+            """
+        _ = try AppleScript.run(script)
+    }
+
     open func listWindowTabAndTerminalIDs() throws -> [(windowID: String, tabID: String, terminalID: String)] {
         let script = terminalTraversalScript(lines: [
             "set out to out & (id of w as string) & \"|\" & (id of t as string) & \"|\" & (id of term as string) & linefeed"
@@ -94,7 +104,7 @@ open class GhosttyAdapter: @unchecked Sendable {
         let window: GhosttyWindowInfo = try self.openWindowAndRun(
             command: commandApplyingEnvironment(command, environment: environment), cwd: cwd, background: background)
         return TerminalLaunchResult(
-            trackingIdentity: .session(window.terminalID), hookSessionID: environment["SPACES_TERMINAL_TRACKING_ID"], containerID: window.windowID,
+            trackingIdentity: .session(window.terminalID), hookSessionID: environment["SPACES_TERMINAL_TRACKING_ID"], containerID: window.tabID,
             fallbackWindowID: nil)
     }
 }

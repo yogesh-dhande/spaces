@@ -239,6 +239,7 @@ func resolveAgentInvocationContext(workspaceID: String, environment: [String: St
     let trackingIdentity = try adapter?.resolveCurrentTrackingIdentity(environment: environment, yabaiFocusedWindowID: focusedWindowID)
     let splitIdentity = splitTrackingIdentity(trackingIdentity)
     if resolvedProvider == .ghostty, splitIdentity.sessionID?.isEmpty != false { return nil }
+    if resolvedProvider == .iterm2, splitIdentity.sessionID?.isEmpty != false { return nil }
     let terminalNativeID =
         resolvedProvider == .ghostty
         ? try resolveTrackedGhosttyNativeTerminalID(workspaceID: workspaceID, terminalTrackingID: splitIdentity.sessionID, orchestrator: orchestrator)
@@ -312,6 +313,12 @@ func agentEventDropResult(type: AgentEventType, environment: [String: String], c
         return (
             "Dropped agent event \(type.rawValue): untracked Ghostty terminal",
             MutationResultPayload<[String: String]>(message: "Dropped untracked Ghostty agent event.", resource: nil)
+        )
+    }
+    if provider == .iterm2, environment["ITERM_SESSION_ID"]?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty != false {
+        return (
+            "Dropped agent event \(type.rawValue): untracked iTerm2 terminal",
+            MutationResultPayload<[String: String]>(message: "Dropped untracked iTerm2 agent event.", resource: nil)
         )
     }
     return nil

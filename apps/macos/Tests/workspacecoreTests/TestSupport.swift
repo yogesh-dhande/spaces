@@ -142,11 +142,11 @@ class MockGhosttyAdapter: GhosttyAdapter, @unchecked Sendable {
     var available = true
     var openWindowAndRunCallCount = 0
     var focusTerminalCallCount = 0
-    var closeWindowCallCount = 0
+    var closeTabCallCount = 0
     var lastCommand: String?
     var lastCwd: String?
     var lastFocusedTerminalID: String?
-    var lastClosedWindowID: String?
+    var lastClosedTabID: String?
     var nextWindowID = "ghostty-window-1"
     var nextTabID = "ghostty-tab-1"
     var nextTerminalID = "ghostty-terminal-1"
@@ -175,9 +175,9 @@ class MockGhosttyAdapter: GhosttyAdapter, @unchecked Sendable {
         return nextWindowID
     }
 
-    override func closeWindow(id: String) throws {
-        closeWindowCallCount += 1
-        lastClosedWindowID = id
+    override func closeTab(id: String) throws {
+        closeTabCallCount += 1
+        lastClosedTabID = id
     }
 
     override func listWindowTabAndTerminalIDs() throws -> [(windowID: String, tabID: String, terminalID: String)] {

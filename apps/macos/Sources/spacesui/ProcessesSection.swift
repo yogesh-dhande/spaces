@@ -12,6 +12,15 @@ import workspacecore
 /// for persisting that array back through the orchestrator — the section
 /// itself is pure UI + local state.
 @MainActor final class ProcessesSection {
+    struct SupplementalRuntimeRow {
+        let id: String
+        let label: String
+        let detail: String?
+        let shortcut: String?
+        let status: RowPrimitives.StatusKind
+        let onFocus: (() -> Void)?
+    }
+
     // MARK: Public surface
 
     let view: NSView
@@ -111,6 +120,8 @@ import workspacecore
 
     /// Exposed for tests — current row count.
     var rowCount: Int { rows.count }
+
+    var supplementalRows: [SupplementalRuntimeRow] = [] { didSet { refreshRows(animated: false) } }
 
     /// Exposed for tests — whether row at index is in its editing state.
     func isEditing(at index: Int) -> Bool {
@@ -220,7 +231,16 @@ import workspacecore
             if let snapshot = existingEditing[row.identity(from: process)] { row.enterEditing(prefill: snapshot, animated: false) }
         }
 
-        countLabel.stringValue = "\(processes.count)"
+        for supplemental in supplementalRows {
+            let row = ProcessRowView(
+                displayName: supplemental.label, detailText: supplemental.detail, shortcut: supplemental.shortcut, status: supplemental.status,
+                onFocus: supplemental.onFocus, showsRuntimeControls: false, allowsEditing: false, allowsRemoval: false)
+            rows.append(row)
+            rowsStack.addArrangedSubview(row)
+            row.widthAnchor.constraint(equalTo: rowsStack.widthAnchor).isActive = true
+        }
+
+        countLabel.stringValue = "\(processes.count + supplementalRows.count)"
         _ = animated  // animation polish deferred to 2b.2 — see prototype notes
     }
 
@@ -343,11 +363,15 @@ import workspacecore
     private var runButton: NSButton?
     private var stopButton: NSButton?
     private var restartButton: NSButton?
+    private var editButton: NSButton?
+    private var removeButton: NSButton?
     private var onFocus: (() -> Void)?
 
     private var currentProcess: ProcessTemplate
     private var currentStatus: RowPrimitives.StatusKind
     private let showsRuntimeControls: Bool
+    private let allowsEditing: Bool
+    private let allowsRemoval: Bool
 
     // Fields that appear in the editing subtree.
     private var nameField: NSTextField?
@@ -364,6 +388,8 @@ import workspacecore
         self.statusDot = RowPrimitives.statusDot(status)
         self.currentStatus = status
         self.showsRuntimeControls = showsRuntimeControls
+        self.allowsEditing = true
+        self.allowsRemoval = true
         super.init(frame: .zero)
 
         body.orientation = .vertical
@@ -387,8 +413,51 @@ import workspacecore
         runButton = collapsedLine.runButton
         stopButton = collapsedLine.stopButton
         restartButton = collapsedLine.restartButton
+        editButton = collapsedLine.editButton
+        removeButton = collapsedLine.removeButton
 
         rebindCollapsedContent(from: process, shortcut: shortcut, status: status)
+    }
+
+    init(
+        displayName: String, detailText: String?, shortcut: String?, status: RowPrimitives.StatusKind, onFocus: (() -> Void)? = nil,
+        showsRuntimeControls: Bool = false, allowsEditing: Bool = false, allowsRemoval: Bool = false
+    ) {
+        self.currentProcess = ProcessTemplate(name: displayName, command: detailText ?? "")
+        self.onFocus = onFocus
+        self.shortcutChip = shortcut.map { RowPrimitives.shortcutChip($0) }
+        self.statusDot = RowPrimitives.statusDot(status)
+        self.currentStatus = status
+        self.showsRuntimeControls = showsRuntimeControls
+        self.allowsEditing = allowsEditing
+        self.allowsRemoval = allowsRemoval
+        super.init(frame: .zero)
+
+        body.orientation = .vertical
+        body.alignment = .leading
+        body.spacing = 0
+        body.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(body)
+        NSLayoutConstraint.activate([
+            body.leadingAnchor.constraint(equalTo: leadingAnchor), body.trailingAnchor.constraint(equalTo: trailingAnchor),
+            body.topAnchor.constraint(equalTo: topAnchor), body.bottomAnchor.constraint(equalTo: bottomAnchor),
+        ])
+
+        let collapsedLine = Self.makeCollapsedLine(
+            shortcut: shortcutChip, statusDot: statusDot, nameLabel: nameLabel, detailLabel: detailLabel, onRun: { [weak self] in self?.onRun?() },
+            onStop: { [weak self] in self?.onStop?() }, onRestart: { [weak self] in self?.onRestart?() },
+            onEdit: { [weak self] in self?.onBeginEdit?() }, onRemove: { [weak self] in self?.onRemove?() }, onFocus: onFocus)
+        collapsedContainer = collapsedLine.row
+        body.addArrangedSubview(collapsedContainer)
+        collapsedContainer.widthAnchor.constraint(equalTo: body.widthAnchor).isActive = true
+        configureActionButtonsForHover(collapsedLine.actionButtons)
+        runButton = collapsedLine.runButton
+        stopButton = collapsedLine.stopButton
+        restartButton = collapsedLine.restartButton
+        editButton = collapsedLine.editButton
+        removeButton = collapsedLine.removeButton
+
+        rebindDisplayContent(name: displayName, detail: detailText, status: status)
     }
 
     @available(*, unavailable) required init?(coder: NSCoder) { fatalError("init(coder:) not available") }
@@ -398,16 +467,21 @@ import workspacecore
     func rebindCollapsedContent(from process: ProcessTemplate, shortcut: String?, status: RowPrimitives.StatusKind) {
         currentProcess = process
         currentStatus = status
-        nameLabel.stringValue = process.name?.isEmpty == false ? (process.name ?? "") : "(unnamed)"
+        rebindDisplayContent(name: process.name?.isEmpty == false ? (process.name ?? "") : "(unnamed)", detail: process.command, status: status)
+        _ = shortcut
+    }
+
+    private func rebindDisplayContent(name: String, detail: String?, status: RowPrimitives.StatusKind) {
+        nameLabel.stringValue = name
         nameLabel.font = .systemFont(ofSize: 13, weight: .medium)
         nameLabel.textColor = Theme.text
-        detailLabel.stringValue = process.command
+        detailLabel.stringValue = detail ?? ""
         detailLabel.font = .systemFont(ofSize: 12, weight: .regular)
         detailLabel.textColor = Theme.muted
         detailLabel.lineBreakMode = .byTruncatingTail
+        detailLabel.isHidden = (detail ?? "").isEmpty
         statusDot.kind = status
         updateRuntimeActionVisibility()
-        _ = shortcut
     }
 
     func refreshStatus(from statusByName: [String: RowPrimitives.StatusKind]) {
@@ -550,12 +624,14 @@ import workspacecore
     }
 
     private func updateRuntimeActionVisibility() {
-        guard showsRuntimeControls else {
+        if !showsRuntimeControls {
             runButton?.isHidden = true
             stopButton?.isHidden = true
             restartButton?.isHidden = true
-            return
         }
+        editButton?.isHidden = !allowsEditing
+        removeButton?.isHidden = !allowsRemoval
+        guard showsRuntimeControls else { return }
         let showsRuntimeButtons = currentStatus == .running
         runButton?.isHidden = showsRuntimeButtons
         stopButton?.isHidden = !showsRuntimeButtons

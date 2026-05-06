@@ -20,6 +20,15 @@ import workspacecore
         #expect(section.rowCount == 0)
     }
 
+    @Test func supplementalRuntimeRowsRenderAlongsideConfiguredProcesses() {
+        let section = ProcessesSection(processes: [ProcessTemplate(name: "api", command: "bun run dev")])
+        section.supplementalRows = [
+            .init(id: "window-1", label: "shell-1", detail: "~/projects/frontend-demo", shortcut: "⌘2", status: .idle, onFocus: nil)
+        ]
+
+        #expect(section.rowCount == 2)
+    }
+
     @Test func collapsedIsTheDefaultState() {
         let section = ProcessesSection(processes: [ProcessTemplate(name: "api", command: "bun run dev")])
         #expect(section.isEditing(at: 0) == false)

@@ -38,7 +38,7 @@ final class StoreTests: XCTestCase {
         let workspaceProcessColumns = try readTableColumns(dbURL: dbURL, table: "workspace_processes")
         let projectProcessColumns = try readTableColumns(dbURL: dbURL, table: "project_processes")
         let workspaceForeignKeys = try readSingleInteger(dbURL: dbURL, sql: "SELECT COUNT(*) FROM pragma_foreign_key_list('workspaces')")
-        XCTAssertEqual(version, 5)
+        XCTAssertEqual(version, 6)
         XCTAssertTrue(workspaceColumns.contains("title"))
         XCTAssertTrue(workspaceColumns.contains("notes"))
         XCTAssertTrue(workspaceColumns.contains("is_hidden"))
@@ -49,6 +49,7 @@ final class StoreTests: XCTestCase {
         XCTAssertFalse(workspaceStatusColumns.contains("on_exit"))
         XCTAssertTrue(windowColumns.contains("name"))
         XCTAssertTrue(windowColumns.contains("detail"))
+        XCTAssertTrue(windowColumns.contains("terminal_container_id"))
         XCTAssertTrue(workspacePortColumns.contains("definition_id"))
         XCTAssertTrue(workspacePortDefinitionColumns.contains("id"))
         XCTAssertTrue(projectPortDefinitionColumns.contains("id"))
@@ -64,7 +65,7 @@ final class StoreTests: XCTestCase {
         _ = try SQLiteStore(path: dbURL.path)
         _ = try SQLiteStore(path: dbURL.path)
 
-        XCTAssertEqual(try readSingleInteger(dbURL: dbURL, sql: "SELECT current_version FROM migration_state"), 5)
+        XCTAssertEqual(try readSingleInteger(dbURL: dbURL, sql: "SELECT current_version FROM migration_state"), 6)
         XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent("backups").path))
     }
 
@@ -104,7 +105,7 @@ final class StoreTests: XCTestCase {
 
         let store = try SQLiteStore(path: dbURL.path)
 
-        XCTAssertEqual(try readSingleInteger(dbURL: dbURL, sql: "SELECT current_version FROM migration_state"), 5)
+        XCTAssertEqual(try readSingleInteger(dbURL: dbURL, sql: "SELECT current_version FROM migration_state"), 6)
         XCTAssertEqual(try readSingleText(dbURL: dbURL, sql: "PRAGMA integrity_check"), "ok")
         XCTAssertEqual(try readSingleInteger(dbURL: dbURL, sql: "SELECT COUNT(*) FROM pragma_foreign_key_list('workspace_processes')"), 1)
         XCTAssertEqual(try store.projects().count, 1)
@@ -118,7 +119,7 @@ final class StoreTests: XCTestCase {
 
         let backups = try FileManager.default.contentsOfDirectory(at: root.appendingPathComponent("backups"), includingPropertiesForKeys: nil)
         XCTAssertEqual(backups.count, 1)
-        XCTAssertTrue(backups[0].lastPathComponent.contains("-v1-to-v5.sqlite3"))
+        XCTAssertTrue(backups[0].lastPathComponent.contains("-v1-to-v6.sqlite3"))
     }
 
     // Tests unsupported future schemas fail closed by arranging a DB ahead of the current code and asserting the startup error avoids reset instructions.

@@ -422,8 +422,8 @@ extension Iterm2Adapter: TerminalAdapter {
             containerID: String(window.id), fallbackWindowID: window.id, tabIndex: window.tabIndex)
     }
 
-    public func resolveCurrentTrackingIdentity(environment: [String: String], yabaiFocusedWindowID: Int?) throws -> TerminalTrackingIdentity? {
-        guard let raw = environment["ITERM_SESSION_ID"], !raw.isEmpty else { return yabaiFocusedWindowID.map(TerminalTrackingIdentity.window) }
+    public func resolveCurrentTrackingIdentity(environment: [String: String], yabaiFocusedWindowID _: Int?) throws -> TerminalTrackingIdentity? {
+        guard let raw = environment["ITERM_SESSION_ID"], !raw.isEmpty else { return nil }
         guard let colonIndex = raw.lastIndex(of: ":") else { return .session(raw) }
         return .session(String(raw[raw.index(after: colonIndex)...]))
     }

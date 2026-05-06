@@ -9,6 +9,7 @@ public struct RunningProcessRecord: Codable, Sendable {
     public let windowID: Int?
     public let terminalTrackingID: String?
     public let terminalNativeID: String?
+    public let terminalContainerID: String?
     public let itermTabIndex: Int?
     public let tmuxWindowID: String?
     public let pid: Int?
@@ -20,8 +21,9 @@ public struct RunningProcessRecord: Codable, Sendable {
 
     public init(
         id: String, workspaceID: String, templateName: String, command: String, terminalApp: String?, windowID: Int?,
-        terminalTrackingID: String? = nil, terminalNativeID: String? = nil, itermTabIndex: Int? = nil, tmuxWindowID: String? = nil, pid: Int?,
-        status: RunningProcessState, logPath: String?, lastOutputAt: String?, startedAt: String?, exitedAt: String?
+        terminalTrackingID: String? = nil, terminalNativeID: String? = nil, terminalContainerID: String? = nil, itermTabIndex: Int? = nil,
+        tmuxWindowID: String? = nil, pid: Int?, status: RunningProcessState, logPath: String?, lastOutputAt: String?, startedAt: String?,
+        exitedAt: String?
     ) {
         self.id = id
         self.workspaceID = workspaceID
@@ -31,6 +33,7 @@ public struct RunningProcessRecord: Codable, Sendable {
         self.windowID = windowID
         self.terminalTrackingID = terminalTrackingID
         self.terminalNativeID = terminalNativeID
+        self.terminalContainerID = terminalContainerID
         self.itermTabIndex = itermTabIndex
         self.tmuxWindowID = tmuxWindowID
         self.pid = pid
