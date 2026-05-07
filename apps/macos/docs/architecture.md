@@ -63,11 +63,14 @@ flowchart LR
 
 ### Projects
 Projects persist:
+- opaque project identity separate from filesystem paths
 - source directory and git status
 - sidebar collapsed state
 - setup and stop scripts
 - port definitions
 - process templates
+
+Managed clone directories under `~/spaces/repos` and managed worktree roots under `~/spaces/workspaces` must be keyed by project identity rather than project name so cleanup, retries, and same-name projects cannot collide on disk ownership.
 - browser-session templates
 
 ### Workspaces

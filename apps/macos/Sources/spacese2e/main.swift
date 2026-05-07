@@ -127,7 +127,7 @@ private struct SeedFixtureCommand: ParsableCommand {
     func run() throws {
         let orchestrator = try makeOrchestrator()
         let normalizedProjectDir = normalizePath(projectDir)
-        let project = try orchestrator.project(id: normalizedProjectDir) ?? orchestrator.addProject(dir: normalizedProjectDir)
+        let project = try orchestrator.project(dir: normalizedProjectDir) ?? orchestrator.addProject(dir: normalizedProjectDir)
         let uvExecutable = try resolveExecutablePath(named: "uv")
         let frontendCommand =
             "\(uvExecutable) run --project .spaces-e2e-demo spaces-e2e-demo frontend --port $APP_PORT --site-dir .spaces-e2e-demo/site --backend-url http://127.0.0.1:$API_PORT"
@@ -147,7 +147,7 @@ private struct SeedFixtureCommand: ParsableCommand {
 
         if let workspaceTitle {
             let trimmedWorkspaceTitle = workspaceTitle.trimmingCharacters(in: .whitespacesAndNewlines)
-            if !trimmedWorkspaceTitle.isEmpty, let workspace = try orchestrator.store.workspace(dir: project.id) {
+            if !trimmedWorkspaceTitle.isEmpty, let workspace = try orchestrator.store.workspace(dir: project.dir) {
                 try orchestrator.updateWorkspaceName(workspaceID: workspace.id, name: trimmedWorkspaceTitle)
             }
         }
@@ -155,13 +155,13 @@ private struct SeedFixtureCommand: ParsableCommand {
         // The default workspace inherits project port definitions lazily, but
         // the manual shell harness needs the concrete reserved port numbers
         // immediately so it can start localhost fixture servers before launch.
-        if let workspace = try orchestrator.store.workspace(dir: project.id) {
+        if let workspace = try orchestrator.store.workspace(dir: project.dir) {
             try orchestrator.updateWorkspaceSettings(workspaceID: workspace.id) { _ in }
         }
 
         let payload = SeedFixturePayload(
             projectID: project.id,
-            defaultWorkspace: try orchestrator.store.workspace(dir: project.id).map {
+            defaultWorkspace: try orchestrator.store.workspace(dir: project.dir).map {
                 WorkspaceSummaryPayload(id: $0.id, title: $0.title, dir: $0.dir, isArchived: $0.isArchived, isRunning: $0.isRunning, notes: $0.notes)
             })
         try emitJSON(payload)
@@ -220,7 +220,7 @@ private struct CreateWorkspaceCommand: ParsableCommand {
     func run() throws {
         let orchestrator = try makeOrchestrator()
         let normalizedProjectDir = normalizePath(projectDir)
-        guard let project = try orchestrator.project(id: normalizedProjectDir) else {
+        guard let project = try orchestrator.project(dir: normalizedProjectDir) else {
             throw ValidationError("Project not found: \(normalizedProjectDir)")
         }
         var workspace = try orchestrator.createWorkspace(
@@ -543,7 +543,7 @@ private struct AgentWindowPayload: Codable {
 /// visible naming semantics rather than internal IDs.
 private func workspaceSummary(orchestrator: WorkspaceOrchestrator, projectDir: String, title: String) throws -> WorkspaceSummaryPayload? {
     let normalizedProjectDir = normalizePath(projectDir)
-    guard let project = try orchestrator.project(id: normalizedProjectDir) else { return nil }
+    guard let project = try orchestrator.project(dir: normalizedProjectDir) else { return nil }
     guard let workspace = try orchestrator.listWorkspaces(projectID: project.id, includeArchived: true).first(where: { $0.title == title }) else {
         return nil
     }

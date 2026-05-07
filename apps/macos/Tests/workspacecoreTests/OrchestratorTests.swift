@@ -1,3 +1,4 @@
+import CryptoKit
 import XCTest
 import systembridge
 
@@ -13,6 +14,21 @@ private final class WorkspaceSetupThread: Thread {
     }
 
     override func main() { try? orchestrator.runWorkspaceSetup(workspaceID: workspaceID) }
+}
+
+private func managedProjectStorageDirname(namespace: String, source: String, preferredName: String) -> String {
+    let digest = SHA256.hash(data: Data("\(namespace)\u{0}\(source)".utf8)).map { String(format: "%02x", $0) }.joined()
+    let cleaned = preferredName.map { char -> String in
+        if char.isLetter || char.isNumber { return String(char) }
+        if char == "-" || char == "_" { return String(char) }
+        return "-"
+    }.joined()
+    let trimmed = cleaned.trimmingCharacters(in: CharacterSet(charactersIn: "-_"))
+    let sanitizedName = trimmed.isEmpty ? "project" : trimmed
+    let hashSuffix = String(digest.prefix(16))
+    let maxNameLength = max(1, 255 - hashSuffix.count - 1)
+    let truncatedName = String(sanitizedName.prefix(maxNameLength))
+    return "\(truncatedName)-\(hashSuffix)"
 }
 
 final class OrchestratorTests: XCTestCase {
@@ -297,16 +313,85 @@ final class OrchestratorTests: XCTestCase {
 
         let project = try orchestrator.addProject(gitURL: fixture.path)
 
-        let expected = reposRoot.appendingPathComponent("sample-repo", isDirectory: true).path
-        XCTAssertEqual(project.dir, expected)
-        XCTAssertTrue(FileManager.default.fileExists(atPath: expected))
+        XCTAssertTrue(project.dir.hasPrefix(reposRoot.path))
+        XCTAssertTrue(URL(fileURLWithPath: project.dir).lastPathComponent.hasSuffix("-sample-repo"))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: project.dir))
         XCTAssertEqual(
             try runGitAndCapture(["rev-parse", "--is-bare-repository"], cwd: project.dir).trimmingCharacters(in: .whitespacesAndNewlines), "true")
         let defaultWorkspace = try XCTUnwrap(try orchestrator.listWorkspaces(projectID: project.id).first(where: \.isDefault))
         XCTAssertEqual(defaultWorkspace.title, "main")
         XCTAssertEqual(defaultWorkspace.branch, "main")
-        XCTAssertEqual(defaultWorkspace.dir, workspacesRoot.appendingPathComponent("sample-repo/main", isDirectory: true).path)
+        XCTAssertTrue(defaultWorkspace.dir.hasPrefix(workspacesRoot.path))
+        XCTAssertEqual(URL(fileURLWithPath: defaultWorkspace.dir).lastPathComponent, "main")
         XCTAssertTrue(FileManager.default.fileExists(atPath: "\(defaultWorkspace.dir)/README.md"))
+    }
+
+    func testRollbackFailedImportedProjectCreationRemovesManagedRepoAndWorktreeDirectories() throws {
+        let root = try makeTempDirectory()
+        let reposRoot = root.appendingPathComponent("repos", isDirectory: true)
+        let workspacesRoot = root.appendingPathComponent("workspaces", isDirectory: true)
+        let store = try makeTemporaryStore()
+        let orchestrator = WorkspaceOrchestrator(store: store, projectsRootDirectory: reposRoot, workspacesRootDirectory: workspacesRoot)
+        let managedDirname = managedProjectStorageDirname(
+            namespace: "git", source: "12345678-1234-1234-1234-123456789ABC", preferredName: "sample-repo")
+
+        let project = ProjectRecord(
+            id: "12345678-1234-1234-1234-123456789ABC", name: "sample-repo",
+            dir: reposRoot.appendingPathComponent(managedDirname, isDirectory: true).path, isGitRepo: true, defaultBranch: "main")
+        let projectDir = project.dir
+        let workspaceRoot = workspacesRoot.appendingPathComponent(managedDirname, isDirectory: true).path
+        let workspaceDir = URL(fileURLWithPath: workspaceRoot).appendingPathComponent("main", isDirectory: true).path
+        try FileManager.default.createDirectory(atPath: projectDir, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(atPath: workspaceDir, withIntermediateDirectories: true)
+
+        try store.upsert(project: project)
+        try store.upsert(
+            workspace: WorkspaceRecord(
+                id: UUID().uuidString, projectID: project.id, title: "main", dir: workspaceDir, dirname: "main", branch: "main", targetBranch: "main",
+                isDefault: true, isArchived: false, isRunning: false, lastLaunchedAt: nil))
+
+        try orchestrator.rollbackFailedImportedProjectCreation(project: project, workspaceDirectory: workspaceDir)
+
+        XCTAssertNil(try store.project(dir: projectDir))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: projectDir))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: workspaceDir))
+        let workspaceRootContents = try FileManager.default.contentsOfDirectory(atPath: workspaceRoot)
+        XCTAssertTrue(workspaceRootContents.isEmpty)
+    }
+
+    func testRollbackFailedImportedProjectCreationPreservesSiblingWorkspaceDirectoriesWithSameSanitizedName() throws {
+        let root = try makeTempDirectory()
+        let reposRoot = root.appendingPathComponent("repos", isDirectory: true)
+        let workspacesRoot = root.appendingPathComponent("workspaces", isDirectory: true)
+        let store = try makeTemporaryStore()
+        let orchestrator = WorkspaceOrchestrator(store: store, projectsRootDirectory: reposRoot, workspacesRootDirectory: workspacesRoot)
+        let managedDirname = managedProjectStorageDirname(
+            namespace: "git", source: "12345678-1234-1234-1234-123456789ABC", preferredName: "sample-repo")
+
+        let importedProject = ProjectRecord(
+            id: "12345678-1234-1234-1234-123456789ABC", name: "sample-repo",
+            dir: reposRoot.appendingPathComponent(managedDirname, isDirectory: true).path, isGitRepo: true, defaultBranch: "main")
+        let sharedWorkspaceRoot = workspacesRoot.appendingPathComponent(managedDirname, isDirectory: true)
+        let importedWorkspaceDir = sharedWorkspaceRoot.appendingPathComponent("main", isDirectory: true).path
+        let siblingWorkspaceDir = sharedWorkspaceRoot.appendingPathComponent("feature", isDirectory: true).path
+        let importedProjectDir = importedProject.dir
+
+        try FileManager.default.createDirectory(atPath: importedWorkspaceDir, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(atPath: siblingWorkspaceDir, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(atPath: importedProjectDir, withIntermediateDirectories: true)
+
+        try store.upsert(project: importedProject)
+        try store.upsert(
+            workspace: WorkspaceRecord(
+                id: UUID().uuidString, projectID: importedProject.id, title: "main", dir: importedWorkspaceDir, dirname: "main", branch: "main",
+                targetBranch: "main", isDefault: true, isArchived: false, isRunning: false, lastLaunchedAt: nil))
+
+        try orchestrator.rollbackFailedImportedProjectCreation(project: importedProject, workspaceDirectory: importedWorkspaceDir)
+
+        XCTAssertFalse(FileManager.default.fileExists(atPath: importedProjectDir))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: importedWorkspaceDir))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: siblingWorkspaceDir))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: sharedWorkspaceRoot.path))
     }
 
     // Tests add project by cloning strips git suffix from repo name by arranging representative inputs and asserting the expected result.
@@ -320,8 +405,8 @@ final class OrchestratorTests: XCTestCase {
 
         let project = try orchestrator.addProject(gitURL: fixture.path)
 
-        let expected = reposRoot.appendingPathComponent("source", isDirectory: true).path
-        XCTAssertEqual(project.dir, expected)
+        XCTAssertTrue(project.dir.hasPrefix(reposRoot.path))
+        XCTAssertTrue(URL(fileURLWithPath: project.dir).lastPathComponent.hasSuffix("-source"))
         XCTAssertEqual(project.name, "source")
         XCTAssertEqual(
             try runGitAndCapture(["rev-parse", "--is-bare-repository"], cwd: project.dir).trimmingCharacters(in: .whitespacesAndNewlines), "true")
@@ -373,7 +458,9 @@ final class OrchestratorTests: XCTestCase {
         let orchestrator = WorkspaceOrchestrator(store: store, projectsRootDirectory: projectsRoot, workspacesRootDirectory: workspacesRoot)
 
         let project = try orchestrator.addProject(gitURL: fixture.path)
-        let projectWorkspaceRoot = workspacesRoot.appendingPathComponent(project.name, isDirectory: true)
+        let projectWorkspaceRoot = URL(
+            fileURLWithPath: try XCTUnwrap(try orchestrator.listWorkspaces(projectID: project.id).first(where: \.isDefault)).dir
+        ).deletingLastPathComponent()
         let workspaceDir = projectWorkspaceRoot.appendingPathComponent("main", isDirectory: true)
         XCTAssertTrue(FileManager.default.fileExists(atPath: workspaceDir.path))
         XCTAssertTrue(workspaceDir.path.hasPrefix(workspacesRoot.path))
@@ -400,7 +487,7 @@ final class OrchestratorTests: XCTestCase {
 
         let project = try orchestrator.addProject(dir: projectDir.path)
         let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature", branch: "feature")
-        let projectWorkspaceRoot = workspacesRoot.appendingPathComponent(project.name, isDirectory: true)
+        let projectWorkspaceRoot = URL(fileURLWithPath: workspace.dir).deletingLastPathComponent()
         XCTAssertTrue(FileManager.default.fileExists(atPath: workspace.dir))
         XCTAssertTrue(workspace.dir.hasPrefix(workspacesRoot.path))
 
@@ -5942,7 +6029,8 @@ final class OrchestratorTests: XCTestCase {
         let orchestrator = WorkspaceOrchestrator(store: store, projectsRootDirectory: reposRoot, workspacesRootDirectory: workspacesRoot)
 
         // Pre-create the destination directory so it already exists on disk.
-        let existingDir = reposRoot.appendingPathComponent("my-repo", isDirectory: true)
+        let existingDir = reposRoot.appendingPathComponent(
+            managedProjectStorageDirname(namespace: "git", source: "https://example.com/my-repo.git", preferredName: "my-repo"), isDirectory: true)
         try FileManager.default.createDirectory(at: existingDir, withIntermediateDirectories: true)
 
         // addProject(gitURL:) should throw because the destination directory is already present.
@@ -6682,6 +6770,27 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertThrowsError(try orchestrator.addProject(dir: projectDir.path)) { error in
             guard case WorkspaceError.projectAlreadyExists = error else { return XCTFail("Expected projectAlreadyExists, got \(error)") }
         }
+    }
+
+    func testAddProjectDirWithInvalidConfigDoesNotPersistPartialProject() throws {
+        let root = try makeTempDirectory()
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let store = try makeTemporaryStore()
+        let orchestrator = WorkspaceOrchestrator(store: store)
+
+        XCTAssertThrowsError(try orchestrator.addProject(dir: projectDir.path) { project in project.ports = [PortDefinition(name: "   ")] }) {
+            error in XCTAssertEqual(error.localizedDescription, "Invalid argument: Port name is required.")
+        }
+
+        XCTAssertNil(try store.project(dir: projectDir.path))
+        XCTAssertTrue(try store.projects().isEmpty)
+
+        let project = try orchestrator.addProject(dir: projectDir.path) { project in project.ports = [PortDefinition(name: "API_PORT")] }
+
+        let stored = try XCTUnwrap(store.project(id: project.id))
+        XCTAssertEqual(stored.ports.map(\.name), ["API_PORT"])
+        XCTAssertEqual(try store.workspaces(projectID: project.id).count, 1)
     }
 
     // Tests updateWorkspaceName throws invalidArgument when the new name is empty or whitespace-only.
