@@ -314,7 +314,9 @@ final class OrchestratorTests: XCTestCase {
         let project = try orchestrator.addProject(gitURL: fixture.path)
 
         XCTAssertTrue(project.dir.hasPrefix(reposRoot.path))
-        XCTAssertTrue(URL(fileURLWithPath: project.dir).lastPathComponent.hasSuffix("-sample-repo"))
+        XCTAssertEqual(
+            URL(fileURLWithPath: project.dir).lastPathComponent,
+            managedProjectStorageDirname(namespace: "git", source: fixture.path, preferredName: "sample-repo"))
         XCTAssertTrue(FileManager.default.fileExists(atPath: project.dir))
         XCTAssertEqual(
             try runGitAndCapture(["rev-parse", "--is-bare-repository"], cwd: project.dir).trimmingCharacters(in: .whitespacesAndNewlines), "true")
@@ -406,7 +408,9 @@ final class OrchestratorTests: XCTestCase {
         let project = try orchestrator.addProject(gitURL: fixture.path)
 
         XCTAssertTrue(project.dir.hasPrefix(reposRoot.path))
-        XCTAssertTrue(URL(fileURLWithPath: project.dir).lastPathComponent.hasSuffix("-source"))
+        XCTAssertEqual(
+            URL(fileURLWithPath: project.dir).lastPathComponent,
+            managedProjectStorageDirname(namespace: "git", source: fixture.path, preferredName: "source"))
         XCTAssertEqual(project.name, "source")
         XCTAssertEqual(
             try runGitAndCapture(["rev-parse", "--is-bare-repository"], cwd: project.dir).trimmingCharacters(in: .whitespacesAndNewlines), "true")
