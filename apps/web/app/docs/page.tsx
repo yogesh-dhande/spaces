@@ -35,11 +35,6 @@ const terms = [
     description:
       "Named port definitions allocated per workspace so parallel work never collides on the same local port.",
   },
-  {
-    name: "Status Check",
-    description:
-      "A periodic check for the running process that surfaces its health.",
-  },
 ];
 
 export default function DocsPage() {

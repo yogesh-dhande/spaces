@@ -265,7 +265,7 @@ const withSpaces: ComparisonStep[] = [
   {
     n: "4",
     title: "See what needs you",
-    body: "Failed processes, failed checks, and agents waiting on a human all surface in one Alerts view.",
+    body: "Exited processes and agents waiting on a human all surface in one Alerts view.",
   },
 ];
 

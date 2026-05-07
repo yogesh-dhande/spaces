@@ -103,7 +103,7 @@ export const cookbookGuides: CookbookGuideLink[] = [
     href: "/docs/guides/nextjs-docker",
     title: "Next.js (Docker Compose)",
     summary:
-      "Single frontend service in Compose, with notes on stop vs down and container-level health checks.",
+      "Single frontend service in Compose, with workspace-isolated host ports and notes on stop vs down.",
     stack: ["Next.js", "Docker"],
   },
   {
