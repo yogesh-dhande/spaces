@@ -2,10 +2,11 @@
 
 ## Purpose
 - Use this file for coding workflow, verification, and implementation guardrails.
-- Put product behavior in `apps/macos/spec.md`.
-- Put data flow, persistence, and module structure in `apps/macos/docs/architecture.md`.
+- Put product behavior from the user's point of view in `apps/macos/spec.md`.
+- Put implementation details and the rationale behind design choices in `apps/macos/docs/architecture.md`.
 - Put UI design and interaction guidelines in `design.md`.
-- Put repository development and deploy commands in `README.md`.
+- Put product overview and adoption pitch in `README.md`.
+- Put repository development, build, and deploy workflows in `dev.md`.
 
 ## Product Constraints
 - `Spaces` is a macOS Swift app for orchestration of coding tools
@@ -31,11 +32,12 @@
 
 ## Documentation Rules
 - Keep docs short and non-overlapping.
-- Treat `README.md`, `apps/macos/spec.md`, `apps/macos/docs/architecture.md`, and `design.md` as current-state references, not changelogs; avoid temporal wording like "now", "previously", "new", or "changed" when describing the intended steady state.
+- Treat `README.md`, `dev.md`, `apps/macos/spec.md`, `apps/macos/docs/architecture.md`, and `design.md` as current-state references, not changelogs; avoid temporal wording like "now", "previously", "new", or "changed" when describing the intended steady state.
 - Update `apps/macos/spec.md` when UX or user-visible behavior changes.
-- Update `apps/macos/docs/architecture.md` when data flow, persistence, or implementation structure changes.
+- Update `apps/macos/docs/architecture.md` when data flow, persistence, implementation structure, or the rationale behind a design choice changes.
 - Update `design.md` when the visual system, reusable interaction patterns, or UI styling guidance changes.
-- Update `apps/macos/README.md` when development or release workflow changes.
+- Update `README.md` when the product overview, feature list, or adoption pitch changes.
+- Update `dev.md` when development, build, deploy, or manual E2E workflows change.
 - Update `apps/web/app/docs/content.ts` when docs navigation or summaries need to reflect new product docs.
 - When behavior is added through the CLI, update CLI help and architecture docs in the same change.
 

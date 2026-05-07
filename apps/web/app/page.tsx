@@ -1,5 +1,4 @@
 import Link from "next/link";
-import { ParallelStackIllustration } from "./components/parallel-stack-illustration";
 import { AppHeroPreview } from "./components/app-hero-preview";
 import { SiteHeader } from "./components/site-header";
 import { SiteFooter } from "./components/site-footer";
@@ -276,7 +275,7 @@ export default function HomePage() {
       <SiteHeader />
 
       {/* ── Hero ── */}
-      <section className="relative">
+      <section className="relative overflow-hidden">
         <div
           aria-hidden
           className="pointer-events-none absolute left-[-8rem] top-8 h-80 w-80 rounded-full bg-accent/16 blur-3xl"
@@ -286,65 +285,68 @@ export default function HomePage() {
           className="pointer-events-none absolute right-[-6rem] top-0 h-72 w-72 rounded-full bg-accent/20 blur-3xl"
         />
 
-        <div className="mx-auto grid w-full max-w-7xl grid-cols-1 items-center gap-10 px-6 pb-16 pt-16 md:pt-24 lg:grid-cols-12 lg:gap-12">
-          <div className="lg:col-span-7">
-            <p className="inline-flex items-center gap-2 font-mono text-[0.7rem] uppercase tracking-[0.18em] text-foreground-soft">
-              <span className="h-1.5 w-1.5 rounded-full bg-accent" />
-              Build faster with Spaces
-            </p>
-            <h1 className="mt-5 text-4xl font-semibold leading-[1.05] tracking-tight md:text-5xl lg:text-[3.75rem]">
-              Instant context switching
-              <br />
-              <span className="text-foreground-soft">for faster development.</span>
-            </h1>
-            <p className="mt-6 max-w-xl text-base leading-7 text-foreground-soft md:text-lg md:leading-8">
-              A MacOS app designed to reduce context hunting, app hopping, port
-              conflicts, and accidental interruptions.
-            </p>
-            <div className="mt-8 flex flex-wrap items-center gap-3">
-              <Link
-                href={githubReleasesURL}
-                className="btn-primary inline-flex items-center gap-2 rounded-full px-6 py-3 text-sm font-semibold"
-                target="_blank"
-                rel="noopener noreferrer"
-              >
-                Download
-              </Link>
-              <Link
-                href="#solution"
-                className="inline-flex items-center gap-1.5 rounded-full px-5 py-3 text-sm font-semibold text-foreground-soft transition-colors hover:text-accent"
-              >
-                See how it works
-                <span aria-hidden>→</span>
-              </Link>
-            </div>
+        <div className="pb-16 pt-16 md:pt-24 lg:flex lg:items-center">
+          <div className="mx-auto w-full max-w-7xl lg:flex lg:flex-1 lg:justify-end lg:pr-12">
+            <div className="w-full px-6 lg:max-w-2xl">
+              <p className="inline-flex items-center gap-2 font-mono text-[0.7rem] uppercase tracking-[0.18em] text-foreground-soft">
+                <span className="h-1.5 w-1.5 rounded-full bg-accent" />
+                Build faster with Spaces
+              </p>
+              <h1 className="mt-5 text-4xl font-semibold leading-[1.05] tracking-tight md:text-5xl lg:text-[4rem]">
+                Multiplex work
+                <br />
+                <span className="text-foreground-soft">Not just the terminal</span>
+              </h1>
+              <p className="mt-6 max-w-xl text-base leading-7 text-foreground-soft md:text-lg md:leading-8">
+                A MacOS app designed to reduce context hunting, app hopping, port
+                conflicts, and accidental interruptions.
+              </p>
+              <div className="mt-8 flex flex-wrap items-center gap-3">
+                <Link
+                  href={githubReleasesURL}
+                  className="btn-primary inline-flex items-center gap-2 rounded-full px-6 py-3 text-sm font-semibold"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                >
+                  Download
+                </Link>
+                <Link
+                  href="#solution"
+                  className="inline-flex items-center gap-1.5 rounded-full px-5 py-3 text-sm font-semibold text-foreground-soft transition-colors hover:text-accent"
+                >
+                  See how it works
+                  <span aria-hidden>→</span>
+                </Link>
+              </div>
 
-            <dl className="mt-12 grid max-w-xl grid-cols-3 gap-4 border-t border-line/70 pt-6 text-left">
-              <div>
-                <dt className="font-mono text-[0.62rem] uppercase tracking-[0.14em] text-foreground-soft">
-                  Size
-                </dt>
-                <dd className="mt-1 text-lg font-semibold tracking-tight">&lt; 5 MB</dd>
-              </div>
-              <div>
-                <dt className="font-mono text-[0.62rem] uppercase tracking-[0.14em] text-foreground-soft">
-                  Runtime
-                </dt>
-                <dd className="mt-1 text-lg font-semibold tracking-tight">Native Swift</dd>
-              </div>
-              <div>
-                <dt className="font-mono text-[0.62rem] uppercase tracking-[0.14em] text-foreground-soft">
-                  Price
-                </dt>
-                <dd className="mt-1 text-lg font-semibold tracking-tight">Free</dd>
-              </div>
-            </dl>
+              <dl className="mt-12 grid max-w-xl grid-cols-3 gap-4 border-t border-line/70 pt-6 text-left">
+                <div>
+                  <dt className="font-mono text-[0.62rem] uppercase tracking-[0.14em] text-foreground-soft">
+                    Size
+                  </dt>
+                  <dd className="mt-1 text-lg font-semibold tracking-tight">&lt; 5 MB</dd>
+                </div>
+                <div>
+                  <dt className="font-mono text-[0.62rem] uppercase tracking-[0.14em] text-foreground-soft">
+                    Runtime
+                  </dt>
+                  <dd className="mt-1 text-lg font-semibold tracking-tight">Native Swift</dd>
+                </div>
+                <div>
+                  <dt className="font-mono text-[0.62rem] uppercase tracking-[0.14em] text-foreground-soft">
+                    Price
+                  </dt>
+                  <dd className="mt-1 text-lg font-semibold tracking-tight">Free</dd>
+                </div>
+              </dl>
+            </div>
           </div>
 
-          <div className="lg:col-span-5">
-            <div className="rounded-[1.8rem] border border-line/80 bg-surface/70 p-3 shadow-[0_30px_80px_-40px_color-mix(in_oklab,var(--ink)_55%,transparent)] backdrop-blur-sm">
-              <ParallelStackIllustration />
+          <div className="relative mt-10 w-full px-6 lg:mt-0 lg:w-1/2 lg:flex-1 lg:pl-0 lg:pr-0">
+            <div className="rounded-[1rem] border border-line/80 bg-surface/70 shadow-[0_30px_80px_-40px_color-mix(in_oklab,var(--ink)_55%,transparent)] backdrop-blur-sm overflow-hidden">
+              <img src="/media/hero2.png" alt="Spaces GUI" className="w-full h-auto" />
             </div>
+            <div className="absolute inset-y-0 right-0 w-64 bg-gradient-to-l from-background via-background/80 to-transparent pointer-events-none" />
           </div>
         </div>
       </section>
