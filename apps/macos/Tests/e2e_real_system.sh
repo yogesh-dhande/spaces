@@ -65,8 +65,8 @@ SUMMARY_PRINTED=0
 APP_LOG_SEARCH_FROM_LINE=1
 SETUP_FIXTURES_ONLY=0
 PRESERVE_FIXTURES_ON_EXIT=0
-APP_PORT_NAME="SPACES_E2E_APP_PORT"
-API_PORT_NAME="SPACES_E2E_API_PORT"
+APP_PORT_NAME="APP_PORT"
+API_PORT_NAME="API_PORT"
 PRIMARY_DOCS_URL=""
 PRIMARY_ADMIN_URL=""
 PRIMARY_BACKEND_STATUS_URL=""
@@ -1170,6 +1170,7 @@ create_workspace_via_gui() {
   "$MX_E2E_BIN" create-workspace \
     --project-dir "$TEST_REPO" \
     --title "$WORKSPACE_TITLE" \
+    --existing-branch \
     --branch "$WORKSPACE_BRANCH" \
     --target-branch main \
     --notes "$WORKSPACE_NOTES" >"$TMP_ROOT/created-workspace.json"
@@ -1181,6 +1182,7 @@ create_scout_branch_workspace() {
   "$MX_E2E_BIN" create-workspace \
     --project-dir "$TEST_REPO_2" \
     --title "$SCOUT_BRANCH_WORKSPACE_TITLE" \
+    --existing-branch \
     --branch "$SCOUT_BRANCH_WORKSPACE_BRANCH" \
     --target-branch main \
     --notes "$SCOUT_BRANCH_WORKSPACE_NOTES" >"$TMP_ROOT/scout-branch-workspace.json"

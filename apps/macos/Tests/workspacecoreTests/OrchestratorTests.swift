@@ -1162,7 +1162,7 @@ final class OrchestratorTests: XCTestCase {
         let orchestrator = WorkspaceOrchestrator(store: store)
 
         let project = try orchestrator.addProject(dir: projectDir.path)
-        let defaultWorkspace = try XCTUnwrap(store.workspace(projectID: project.id, name: "default"))
+        let defaultWorkspace = try XCTUnwrap(store.workspace(projectID: project.id, title: "default"))
 
         XCTAssertNoThrow(try orchestrator.updateWorkspaceName(workspaceID: defaultWorkspace.id, name: "renamed-default"))
         let updated = try XCTUnwrap(store.workspace(id: defaultWorkspace.id))
@@ -1206,7 +1206,7 @@ final class OrchestratorTests: XCTestCase {
         let orchestrator = WorkspaceOrchestrator(store: store)
 
         let project = try orchestrator.addProject(dir: projectDir.path)
-        let defaultWorkspace = try XCTUnwrap(store.workspace(projectID: project.id, name: "default"))
+        let defaultWorkspace = try XCTUnwrap(store.workspace(projectID: project.id, title: "default"))
 
         try orchestrator.updateWorkspaceMetadata(workspaceID: defaultWorkspace.id, title: "Codex Task", notes: .some("Imported from agent"))
 
@@ -1262,7 +1262,7 @@ final class OrchestratorTests: XCTestCase {
         let store = try makeTemporaryStore()
         let orchestrator = WorkspaceOrchestrator(store: store, workspacesRootDirectory: workspacesRoot)
         let project = try orchestrator.addProject(dir: repo.path)
-        let mainWorkspace = try XCTUnwrap(store.workspace(projectID: project.id, name: "default"))
+        let mainWorkspace = try XCTUnwrap(store.workspace(projectID: project.id, title: "default"))
 
         XCTAssertEqual(mainWorkspace.branch, "main")
         XCTAssertThrowsError(try orchestrator.updateWorkspaceMetadata(workspaceID: mainWorkspace.id, branch: "main-renamed")) { error in
@@ -1284,7 +1284,7 @@ final class OrchestratorTests: XCTestCase {
         let store = try makeTemporaryStore()
         let orchestrator = WorkspaceOrchestrator(store: store, workspacesRootDirectory: workspacesRoot)
         let project = try orchestrator.addProject(dir: repo.path)
-        let masterWorkspace = try XCTUnwrap(store.workspace(projectID: project.id, name: "default"))
+        let masterWorkspace = try XCTUnwrap(store.workspace(projectID: project.id, title: "default"))
 
         XCTAssertEqual(masterWorkspace.branch, "master")
         XCTAssertThrowsError(try orchestrator.updateWorkspaceMetadata(workspaceID: masterWorkspace.id, branch: "master-renamed")) { error in
