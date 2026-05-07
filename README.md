@@ -48,7 +48,7 @@ Coding agents emit `spaces signal` events from their terminals so the GUI knows 
 - Per-workspace window cycling — focus stays inside the current workspace.
 - Workspace notes — coding agents can write context (what's pending, where things broke) into a per-workspace notes field, surfaced inline in the workspace detail pane.
 - One-click workspace teardown closes tracked windows and shuts down processes; relaunching restores them.
-- Native AppKit binary, under 5 MB.
+- Native AppKit binary, under 10 MB.
 
 ## How it works
 
