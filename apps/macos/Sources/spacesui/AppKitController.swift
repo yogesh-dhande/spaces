@@ -762,19 +762,25 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 let orchestrator = WorkspaceOrchestrator(store: store)
                 let record: ProjectRecord
                 if let gitURL = input.gitURL {
-                    record = try orchestrator.addProject(gitURL: gitURL)
+                    record = try orchestrator.addProject(gitURL: gitURL) { project in
+                        project.setupScript = input.setupScript
+                        project.stopScript = input.stopScript
+                        project.ports = input.ports
+                        project.processes = input.processes
+                        project.browserSessions = input.browserSessions
+                        project.agentLaunchers = input.agentLaunchers
+                    }
                 } else if let directoryPath = input.directoryPath {
-                    record = try orchestrator.addProject(dir: directoryPath)
+                    record = try orchestrator.addProject(dir: directoryPath) { project in
+                        project.setupScript = input.setupScript
+                        project.stopScript = input.stopScript
+                        project.ports = input.ports
+                        project.processes = input.processes
+                        project.browserSessions = input.browserSessions
+                        project.agentLaunchers = input.agentLaunchers
+                    }
                 } else {
                     throw WorkspaceError.invalidArgument(message: "Project source is required.")
-                }
-                try orchestrator.updateProjectConfig(projectID: record.id) { project in
-                    project.setupScript = input.setupScript
-                    project.stopScript = input.stopScript
-                    project.ports = input.ports
-                    project.processes = input.processes
-                    project.browserSessions = input.browserSessions
-                    project.agentLaunchers = input.agentLaunchers
                 }
                 return .success(record)
             } catch { return .failure(error) }

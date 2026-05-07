@@ -1,3 +1,4 @@
+import CryptoKit
 import Darwin
 import Foundation
 @preconcurrency import UserNotifications
@@ -195,6 +196,8 @@ public final class WorkspaceOrchestrator {
     }
 
     public func project(id: String) throws -> ProjectRecord? { try store.project(id: id) }
+
+    public func project(dir: String) throws -> ProjectRecord? { try store.project(dir: dir) }
 
     public func setProjectCollapsed(projectID: String, isCollapsed: Bool) throws {
         try store.updateProjectCollapsed(id: projectID, isCollapsed: isCollapsed)
@@ -399,24 +402,34 @@ public final class WorkspaceOrchestrator {
         try store.upsert(workspace: updatedWorkspace)
     }
 
-    public func addProject(dir: String) throws -> ProjectRecord {
+    public func addProject(dir: String) throws -> ProjectRecord { try addProject(dir: dir) { _ in } }
+
+    public func addProject(dir: String, configure: (inout ProjectRecord) -> Void) throws -> ProjectRecord {
         let normalizedDir = normalizePath(dir)
         var isDir: ObjCBool = false
         guard FileManager.default.fileExists(atPath: normalizedDir, isDirectory: &isDir), isDir.boolValue else {
             throw WorkspaceError.invalidArgument(message: "Project directory not found: \(normalizedDir)")
         }
         if try store.project(dir: normalizedDir) != nil { throw WorkspaceError.projectAlreadyExists(dir: normalizedDir) }
-        let record = try normalizeDir(normalizedDir)
+        let record = try configuredProjectRecord(
+            baseRecord: normalizeDir(id: projectID(namespace: "dir", source: normalizedDir), normalizedDir), update: configure)
         try store.upsert(project: record)
-        try ensureDefaultWorkspace(for: record)
+        do { try ensureDefaultWorkspace(for: record) } catch {
+            try? store.deleteProject(id: record.id)
+            throw error
+        }
         return record
     }
 
-    public func addProject(gitURL: String) throws -> ProjectRecord {
+    public func addProject(gitURL: String) throws -> ProjectRecord { try addProject(gitURL: gitURL) { _ in } }
+
+    public func addProject(gitURL: String, configure: (inout ProjectRecord) -> Void) throws -> ProjectRecord {
         let trimmedURL = gitURL.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedURL.isEmpty else { throw WorkspaceError.invalidArgument(message: "Git repository URL is required.") }
         let inferredName = inferredProjectName(from: trimmedURL)
-        let projectDirname = sanitizeDirname(inferredName, fallback: "project")
+        let projectID = projectID(namespace: "git", source: trimmedURL)
+        let projectName = sanitizeDirname(inferredName, fallback: "project")
+        let projectDirname = managedProjectStorageDirectoryName(projectID: projectID, preferredName: projectName)
         let destination = repositoriesRootDirectory().appending(path: projectDirname, directoryHint: .isDirectory)
         let normalizedDestination = normalizePath(destination.path)
 
@@ -427,27 +440,30 @@ public final class WorkspaceOrchestrator {
         try FileManager.default.createDirectory(at: destination.deletingLastPathComponent(), withIntermediateDirectories: true)
         try git.clone(url: trimmedURL, destination: destination.path, bare: true)
 
-        let defaultBranch = try preferredImportedDefaultBranch(path: destination.path)
-        let record = ProjectRecord(
-            id: normalizedDestination, name: destination.lastPathComponent, dir: normalizedDestination, isGitRepo: true, defaultBranch: defaultBranch)
-        try store.upsert(project: record)
-        try ensureImportedGitDefaultWorkspace(for: record, branch: defaultBranch)
-        return record
+        var shouldCleanupDestination = true
+        do {
+            let defaultBranch = try preferredImportedDefaultBranch(path: destination.path)
+            let baseRecord = ProjectRecord(
+                id: projectID, name: projectName, dir: normalizedDestination, isGitRepo: true, defaultBranch: defaultBranch)
+            let record = try configuredProjectRecord(baseRecord: baseRecord, update: configure)
+            let defaultWorkspaceDirectory = try importedDefaultWorkspaceDirectory(project: record, branch: defaultBranch)
+            try store.upsert(project: record)
+            do { try ensureImportedGitDefaultWorkspace(for: record, branch: defaultBranch) } catch {
+                try? rollbackFailedImportedProjectCreation(project: record, workspaceDirectory: defaultWorkspaceDirectory)
+                throw error
+            }
+            shouldCleanupDestination = false
+            return record
+        } catch {
+            if shouldCleanupDestination { try? FileManager.default.removeItem(at: destination) }
+            throw error
+        }
     }
 
     public func updateProjectConfig(projectID: String, update: (inout ProjectRecord) -> Void) throws {
-        let normalizedID = normalizePath(projectID)
-        guard var record = try store.project(id: normalizedID) else { throw WorkspaceError.missingProject(dir: normalizedID) }
+        guard var record = try store.project(id: projectID) else { throw WorkspaceError.missingProject(dir: projectID) }
         let previousRecord = record
-        update(&record)
-        record = ProjectRecord(
-            id: normalizedID, name: record.name, dir: record.dir, isGitRepo: record.isGitRepo, defaultBranch: record.defaultBranch,
-            setupScript: record.setupScript, stopScript: record.stopScript, ports: record.ports, processes: record.processes,
-            browserSessions: record.browserSessions, agentLaunchers: record.agentLaunchers)
-        record.ports = try normalizedPortDefinitions(record.ports)
-        try validateProcessTemplates(record.processes, allowedVariableNames: directProcessVariableNames(portDefinitions: record.ports))
-        try validateUniqueConfiguredFocusNames(
-            processes: record.processes, browserSessions: record.browserSessions, agentLaunchers: record.agentLaunchers)
+        record = try configuredProjectRecord(baseRecord: record, update: update)
         try store.upsert(project: record)
         try ensureDefaultWorkspace(for: record)
         try syncDefaultWorkspaceSettingsIfTemplateBased(project: record, previousRecord: previousRecord, updatedRecord: record)
@@ -592,9 +608,8 @@ public final class WorkspaceOrchestrator {
         let gitCommonDirOutput = try git.runGitAndCapture(["-C", normalizedWorktreePath, "rev-parse", "--git-common-dir"])
         let gitCommonDir = gitCommonDirOutput.trimmingCharacters(in: .whitespacesAndNewlines)
         let gitCommonDirURL = URL(fileURLWithPath: gitCommonDir, relativeTo: URL(fileURLWithPath: normalizedWorktreePath)).standardized
-        let gitRoot = gitCommonDirURL.deletingLastPathComponent().path
-        let projectID = normalizePath(gitRoot)
-        guard let project = try store.project(id: projectID) else {
+        let gitRoot = normalizePath(gitCommonDirURL.deletingLastPathComponent().path)
+        guard let project = try store.project(dir: gitRoot) else {
             throw WorkspaceError.invalidArgument(
                 message: "Project not found for git root: \(gitRoot). Add the project in the app before importing this workspace.")
         }
@@ -613,7 +628,7 @@ public final class WorkspaceOrchestrator {
         } else {
             inferredName = branch
         }
-        if let existing = try workspaceForBranch(projectID: projectID, branch: branch) {
+        if let existing = try workspaceForBranch(projectID: project.id, branch: branch) {
             if existing.isArchived {
                 throw WorkspaceError.invalidArgument(
                     message: "Workspace already exists for archived branch '\(branch)': \(existing.title). Unarchive it or use a different worktree.")
@@ -720,7 +735,7 @@ public final class WorkspaceOrchestrator {
             let gitCommonDir = gitCommonDirOutput.trimmingCharacters(in: .whitespacesAndNewlines)
             let gitCommonDirURL = URL(fileURLWithPath: gitCommonDir, relativeTo: URL(fileURLWithPath: path)).standardized
             let gitRoot = normalizePath(gitCommonDirURL.deletingLastPathComponent().path)
-            return gitRoot == project.id
+            return gitRoot == project.dir
         } catch { return false }
     }
 
@@ -3312,7 +3327,7 @@ public final class WorkspaceOrchestrator {
 
     public func setActiveWorkspace(id: String?) throws { try store.setSetting(key: "active_workspace_id", value: id) }
 
-    private func normalizeDir(_ dir: String) throws -> ProjectRecord {
+    private func normalizeDir(id: String, _ dir: String) throws -> ProjectRecord {
         var isDir: ObjCBool = false
         guard FileManager.default.fileExists(atPath: dir, isDirectory: &isDir), isDir.boolValue else {
             throw WorkspaceError.invalidArgument(message: "Project directory not found: \(dir)")
@@ -3320,7 +3335,25 @@ public final class WorkspaceOrchestrator {
         let isGit = git.isRepo(path: dir)
         let branch = isGit ? git.defaultBranch(path: dir) : nil
         let name = URL(fileURLWithPath: dir).lastPathComponent
-        return ProjectRecord(id: dir, name: name, dir: dir, isGitRepo: isGit, defaultBranch: branch)
+        return ProjectRecord(id: id, name: name, dir: dir, isGitRepo: isGit, defaultBranch: branch)
+    }
+
+    private func configuredProjectRecord(baseRecord: ProjectRecord, update: (inout ProjectRecord) -> Void) throws -> ProjectRecord {
+        var record = baseRecord
+        update(&record)
+        let previousPorts = baseRecord.ports
+        let previousProcesses = baseRecord.processes
+        record = ProjectRecord(
+            id: baseRecord.id, name: baseRecord.name, dir: baseRecord.dir, isGitRepo: baseRecord.isGitRepo, defaultBranch: baseRecord.defaultBranch,
+            isCollapsed: baseRecord.isCollapsed, setupScript: record.setupScript, stopScript: record.stopScript, ports: record.ports,
+            processes: record.processes, browserSessions: record.browserSessions, agentLaunchers: record.agentLaunchers)
+        record.ports = normalizePortDefinitionIDs(previous: previousPorts, updated: record.ports)
+        record.processes = normalizeProcessTemplateIDs(previous: previousProcesses, updated: record.processes)
+        record.ports = try normalizedPortDefinitions(record.ports)
+        try validateProcessTemplates(record.processes, allowedVariableNames: directProcessVariableNames(portDefinitions: record.ports))
+        try validateUniqueConfiguredFocusNames(
+            processes: record.processes, browserSessions: record.browserSessions, agentLaunchers: record.agentLaunchers)
+        return record
     }
 
     private func ensureDefaultWorkspace(for project: ProjectRecord) throws {
@@ -4295,7 +4328,7 @@ public final class WorkspaceOrchestrator {
     ]
 
     private func worktreeRoot(project: ProjectRecord) throws -> URL {
-        let projectDirname = sanitizeDirname(project.name, fallback: "project")
+        let projectDirname = managedProjectStorageDirectoryName(projectID: project.id, preferredName: project.name)
         return workspaceRootDirectory().appending(path: projectDirname, directoryHint: .isDirectory)
     }
 
@@ -4382,6 +4415,19 @@ public final class WorkspaceOrchestrator {
         return trimmed.isEmpty ? fallback : trimmed
     }
 
+    private func managedProjectStorageDirectoryName(projectID: String, preferredName: String) -> String {
+        let sanitizedName = sanitizeDirname(preferredName, fallback: "project")
+        let hashSuffix = String(projectID.lowercased().prefix(16))
+        let maxNameLength = max(1, 255 - hashSuffix.count - 1)
+        let truncatedName = String(sanitizedName.prefix(maxNameLength))
+        return "\(truncatedName)-\(hashSuffix)"
+    }
+
+    private func projectID(namespace: String, source: String) -> String {
+        let data = Data("\(namespace)\u{0}\(source)".utf8)
+        return SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+    }
+
     private func repositoriesRootDirectory() -> URL {
         if let projectsRootDirectoryURL { return projectsRootDirectoryURL }
         let home = FileManager.default.homeDirectoryForCurrentUser
@@ -4424,6 +4470,12 @@ public final class WorkspaceOrchestrator {
         try FileManager.default.removeItem(atPath: project.dir)
     }
 
+    func rollbackFailedImportedProjectCreation(project: ProjectRecord, workspaceDirectory: String) throws {
+        try store.deleteProject(id: project.id)
+        try removeManagedWorkspaceDirectoryIfNeeded(path: workspaceDirectory)
+        try removeManagedProjectDirectoryIfNeeded(project: project)
+    }
+
     private func isManagedRepositoryDirectory(path: String) -> Bool { isPath(path, inside: repositoriesRootDirectory().path) }
 
     private func defaultWorkspace(projectID: String) throws -> WorkspaceRecord? {
@@ -4436,8 +4488,21 @@ public final class WorkspaceOrchestrator {
         throw WorkspaceError.invalidArgument(message: "Imported git repository must contain a main or master branch.")
     }
 
+    private func importedDefaultWorkspaceDirectory(project: ProjectRecord, branch: String) throws -> String {
+        let root = try worktreeRoot(project: project)
+        return root.appendingPathComponent(branch, isDirectory: true).path
+    }
+
     private func isManagedWorkspacesDirectory(path: String, allowEqual: Bool = false) -> Bool {
         isPath(path, inside: workspaceRootDirectory().path, allowEqual: allowEqual)
+    }
+
+    private func removeManagedWorkspaceDirectoryIfNeeded(path: String) throws {
+        let normalizedPath = normalizePath(path)
+        guard isManagedWorkspacesDirectory(path: normalizedPath) else { return }
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: normalizedPath, isDirectory: &isDirectory), isDirectory.boolValue else { return }
+        try FileManager.default.removeItem(atPath: normalizedPath)
     }
 
     private func isPath(_ path: String, inside rootPath: String, allowEqual: Bool = false) -> Bool {
