@@ -22,7 +22,7 @@ Launching a workspace starts its processes, opens its windows, and tracks them. 
 
 Worktrees, clones, and concurrent process trees stay isolated — ports are reserved by name and automatically assigned to processes when they start. You can reference them by env vars in your shell and use in browser URLs so you don't need to remember which port each service is running on.
 
-![Workspace detail](apps/web/public/media/workspace.png)
+![Workspace detail](apps/web/public/media/demo_setup.gif)
 
 ## CLI
 
@@ -45,7 +45,11 @@ Coding agents emit `spaces signal` events from their terminals so the GUI knows 
 - Workspaces backed by Git worktrees or separate clones.
 - Per-workspace named-port reservation surfaced to processes via env vars.
 - Global command palette (`⌘⌥-` by default) for any window across any workspace.
-- Per-workspace window cycling — focus stays inside the current workspace.
+
+![Global command palette](apps/web/public/media/demo_palette.gif)
+- Per-workspace navigation and window cycling — focus stays inside the current workspace.
+
+![Workspace navigation](apps/web/public/media/demo_nav.gif)
 - Workspace notes — coding agents can write context (what's pending, where things broke) into a per-workspace notes field, surfaced inline in the workspace detail pane.
 - One-click workspace teardown closes tracked windows and shuts down processes; relaunching restores them.
 - Native AppKit binary, under 10 MB.

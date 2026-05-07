@@ -481,17 +481,17 @@ export default function HomePage() {
             In Action
           </p>
           <h2 className="mt-4 text-3xl font-semibold leading-tight tracking-tight md:text-5xl">
-            Switching workspaces is one shortcut.
+            Get to any window with a few keystrokes
           </h2>
           <p className="mt-5 text-base leading-7 text-foreground-soft md:text-lg md:leading-8">
-            Numbered shortcuts focus any window in the active workspace. The
-            global command palette pulls any window across any workspace.
-            Cycling windows keeps you within the same workspace.
+            Numbered shortcuts focus any window in the active workspace. 
+            Cycle through windows of the same workspace or use the
+            global command palette to pull any window across any workspace.
           </p>
         </div>
 
         <div className="mt-12 rounded-3xl border border-line/80 bg-surface/70 p-3 shadow-[0_40px_80px_-50px_color-mix(in_oklab,var(--ink)_55%,transparent)] md:p-5">
-          <AppHeroPreview />
+          <video src="/media/demo_nav_palette.mp4" autoPlay loop muted playsInline className="w-full h-auto rounded-2xl" />
         </div>
       </section>
 
