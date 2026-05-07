@@ -24,8 +24,8 @@ export default function NextjsDockerGuidePage() {
       <article className={card}>
         <h2 className="text-2xl font-semibold tracking-tight">Use Case</h2>
         <p className={prose}>
-          Your Next.js service runs via Compose. You need branch-isolated environments,
-          deterministic port mapping, and health checks that detect individual service failure.
+          Your Next.js service runs via Compose. You need branch-isolated environments
+          and deterministic port mapping per workspace.
         </p>
       </article>
 
@@ -88,23 +88,6 @@ docker compose down`}</code>
           <li>• Use <code>stop</code> for day-to-day pause/resume; use <code>down</code> when you need a clean teardown.</li>
         </ul>
 
-        <h3 className="mt-4 text-sm font-semibold text-foreground">Status Checks</h3>
-        <pre className={code}>
-          <code>{`curl -fsS http://localhost:$FRONTEND_PORT`}</code>
-        </pre>
-        <p className={prose}>
-          An HTTP probe against the workspace-reserved host port is the most reliable signal: it succeeds only when Compose is up and the container is serving traffic. Status checks make service health explicit in the UI and can notify or restart on failure.
-        </p>
-      </article>
-
-      <article className={card}>
-        <h2 className="text-2xl font-semibold tracking-tight">Why Status Checks Matter in Compose</h2>
-        <ul className={list}>
-          <li>• Key use case: one service in multi-service Compose goes down, but you do not want Compose auto-restart; you still want an immediate notification.</li>
-          <li>• Detect partial outage where frontend is up but backend/cache/worker has failed.</li>
-          <li>• Alert when a container exists but endpoint is unhealthy (liveness differs from readiness).</li>
-          <li>• Trigger controlled restart in Spaces rather than always-on container restart loops.</li>
-        </ul>
       </article>
 
       <Link

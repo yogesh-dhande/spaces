@@ -66,13 +66,13 @@ body {
 }
 
 .btn-primary {
-  background: var(--accent-strong);
-  color: #fff;
+  background: #3dc6b8;
+  color: #0f1517;
   box-shadow: inset 0 0 0 1px color-mix(in oklab, #fff 16%, transparent);
 }
 
 .btn-primary:hover {
-  background: color-mix(in oklab, var(--accent-strong) 88%, var(--ink));
+  background: color-mix(in oklab, #3dc6b8 88%, white);
 }
 
 @keyframes questionDrift {

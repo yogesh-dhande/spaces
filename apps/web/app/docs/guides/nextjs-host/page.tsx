@@ -59,7 +59,7 @@ cp .env.example .env`}</code>
           <code>{`PORT=$FRONTEND_PORT npm run dev`}</code>
         </pre>
         <p className={prose}>
-          This binds Next.js to the workspace-reserved host port, so browser sessions and checks target the correct workspace instance.
+          This binds Next.js to the workspace-reserved host port, so browser sessions target the correct workspace instance.
         </p>
 
         <h3 className="mt-4 text-sm font-semibold text-foreground">Browser Sessions</h3>
@@ -70,23 +70,6 @@ cp .env.example .env`}</code>
           Browser session URLs should use named ports so each workspace opens its own app tab reliably.
         </p>
 
-        <h3 className="mt-4 text-sm font-semibold text-foreground">Status Checks</h3>
-        <pre className={code}>
-          <code>{`curl -fsS http://localhost:$FRONTEND_PORT`}</code>
-        </pre>
-        <p className={prose}>
-          Status checks give early signal when the server is down, hung, or failed after startup.
-          Useful for restart policies and for quickly seeing run health in the Spaces UI.
-        </p>
-      </article>
-
-      <article className={card}>
-        <h2 className="text-2xl font-semibold tracking-tight">Other Status Check Use Cases</h2>
-        <ul className={list}>
-          <li>• Detect API readiness with health endpoints before opening dependent frontend pages.</li>
-          <li>• Alert when background workers die but terminal windows remain open.</li>
-          <li>• Detect auth/certificate errors by running a command that validates expected response content.</li>
-        </ul>
       </article>
 
       <Link

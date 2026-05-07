@@ -39,14 +39,6 @@ spaces open frontend /path/to/workspace`}</code>
       </article>
 
       <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
-        <h2 className="text-2xl font-semibold tracking-tight">Status Check Issues</h2>
-        <ul className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
-          <li>• <strong>Check is red</strong> &mdash; run the command yourself inside the workspace directory to see what it prints.</li>
-          <li>• <strong>Times out</strong> &mdash; raise the timeout if your service is slow to start.</li>
-        </ul>
-      </article>
-
-      <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
         <h2 className="text-2xl font-semibold tracking-tight">Keyboard Shortcut Issues</h2>
         <ul className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
           <li>• <strong>Global toggle (<code>cmd+alt+=</code>) or another global shortcut does nothing</strong> &mdash; another app may own the combo. Rebind it in Settings.</li>

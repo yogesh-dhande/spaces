@@ -1,6 +1,6 @@
 # Spaces Spec
 
-This document defines how Spaces should behave from the user's point of view. It is the source of truth for UX and product semantics, not implementation details.
+This document defines how Spaces should behave from the user's point of view. It is the source of truth for UX and product semantics. Implementation choices and the rationale behind them belong in [docs/architecture.md](docs/architecture.md).
 
 ## Product Intent
 Spaces is a local macOS control plane for switching between coding contexts quickly.
@@ -28,8 +28,8 @@ Spaces provides a desktop app and a CLI for power users and coding agents.
   Some workspaces may carry many useful URLs, but opening all of them during launch or restart is wasteful when the user may only need a subset in a given session.
 - Focus a browser session by activating its tracked Chrome window and reselecting tab `1`.
   The first tab is unlikely to be reordered by the user, while additional tabs are much more likely to be appended during normal browsing in that window.
-- Launch workspace processes inside tmux.
-  This lets Spaces recover the terminal view without losing the underlying process when a supported terminal-host window is closed or needs to be recreated.
+- Process lifetime survives terminal-window closure.
+  Closing or losing a process terminal window must not kill the underlying process; Spaces should recover the terminal view and reattach without restarting the work.
 - Keep workspace lifecycle separate from runtime health.
   `Running` and `Stopped` should stay easy to explain, while failed processes or stale tracked windows surface as warnings on top of that lifecycle state.
 - Require explicit tracked-window targets for CLI-driven focus.
@@ -129,8 +129,8 @@ Spaces focuses those windows; it does not decide their geometry.
 - Browser sessions stay configured while the workspace is running, but Spaces should leave them unopened until the user explicitly focuses that browser session.
 - Unopened browser sessions should not degrade runtime health or show missing-window warnings for an otherwise running workspace.
 - Configured processes that have never been started, or that were explicitly stopped by the user, should remain idle and directly runnable without degrading runtime health or creating Alerts attention.
-- Workspace processes should be launched inside tmux so Spaces can recover the terminal view without losing the underlying process when a supported terminal-host window closes.
-- tmux-backed workspace and session management must treat workspace titles, tmux window names, and tmux session names as user-controlled text that may contain visible separator-like substrings without breaking window creation, listing, or focus recovery.
+- Closing a process terminal window must not kill the underlying process. Spaces should recover the terminal view and reattach to the running process when the user opens a new window for it.
+- Workspace titles and tracked-process names are user-controlled text. They may contain visible separator-like substrings without breaking window creation, listing, or focus recovery.
 - Editing workspace settings while a workspace is already running must not start or stop browser sessions or coding agents as part of save-time reconciliation. Process name and on-exit edits should update tracked running processes immediately, while command edits should require explicit confirmation to restart the affected running processes; canceling that prompt should leave the existing process configuration unchanged. New configured rows should appear immediately with their non-running status so the user can decide what to open or recover.
 - Process commands support two execution modes: `Direct` runs an executable with arguments, while `Shell` runs the command through the app-wide shell setting.
 - Direct mode is the recommended deterministic path for plain executable commands such as `scripts/swiftpm.sh build`.
@@ -227,14 +227,8 @@ Spaces focuses those windows; it does not decide their geometry.
 - Coding agents can explicitly report lifecycle events through `spaces signal`.
 - Agent status events are not implied by `import`, `start`, or `restart`, but workspace launch should open any configured coding-agent rows so they appear alongside runtime-managed agents under one `Coding Agents` section.
 - `spaces signal` should support explicit `init`, `start`, `waiting`, `done`, and `exit` events.
-- Agent events from unsupported terminal hosts should be dropped instead of recorded. Coding agents run from tmux are not supported by Spaces and should return an explicit error instead of being inferred onto workspace process terminals.
-- `init` should identify the originating terminal and either attach to an already tracked terminal row or create a tracked terminal row for that coding agent.
-- Terminal identity should be adapter-driven and consistent across supported hosts: prefer tmux window identity when present, otherwise prefer a stable session/token identity, and only fall back to a yabai window identity when no durable session-like identity exists.
-- iTerm2 should use `ITERM_SESSION_ID` as both its hook identity and its durable native terminal identity.
-- iTerm2 agent events without `ITERM_SESSION_ID` should be dropped instead of borrowing whichever yabai window happens to be frontmost at event time.
-- Ghostty agent tracking should keep two separate identities: a Spaces-issued terminal tracking token for CLI hook attribution and the real Ghostty terminal ID for focus, liveness, and retab rebinding.
-- Ghostty agent events without a Spaces-issued tracking token should be dropped instead of being rebound to whichever Ghostty tab or window happens to be frontmost.
-- Ghostty focus may fall back from `terminalNativeID` to the stored hook token only when resolving an already tracked terminal row in the same workspace; it must not guess from the frontmost Ghostty tab/window.
+- Agent events that cannot be reliably attributed to a terminal must be dropped, not guessed onto the frontmost window. Events from unsupported hosts should also be dropped, and coding agents run from tmux are explicitly unsupported and should return a clear error.
+- `init` should identify the originating terminal and either attach to an already tracked terminal row or create a new tracked terminal row for that coding agent.
 - Coding-agent rows should render after browser and process rows so non-agent shortcut ordering stays stable when agents appear or disappear.
 - Configured and ad-hoc coding agents should share the same `Coding Agents` section rather than rendering as separate launcher and runtime sections.
 - Every tracked window row should have a unique visible name within its workspace. Two coding-agent rows must not share the same name.

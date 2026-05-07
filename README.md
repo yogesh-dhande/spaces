@@ -1,127 +1,82 @@
-# Spaces Monorepo
+# Spaces
 
-Spaces is a macOS workspace orchestrator with a Swift app and CLI (`spaces`) plus a static Next.js marketing and docs site.
+Multiplex your work. Not just the terminal.
 
-## Repo Layout
-- `apps/macos`: macOS app, `spaces` CLI, Swift sources, tests, product docs
-- `apps/web`: static marketing site and user-facing docs
-- `scripts`: root wrappers for build, test, coverage, release, and deploy workflows
+Native macOS app and CLI for orchestrating parallel coding sessions. Groups terminals, editors, browser windows, and CLI coding agents (Claude Code, Codex, etc.) into per-branch workspaces with isolated ports, environment, and process trees.
 
-## Documentation Map
-- `README.md`: repository development and deploy workflows
-- `AGENTS.md`: how coding agents should write, verify, and document changes
-- `apps/macos/spec.md`: expected product behavior and UX
-- `apps/macos/docs/architecture.md`: data model, module boundaries, and implementation structure
-- `apps/web/app/docs`: user-facing product and CLI documentation
+[usespaces.dev](https://usespaces.dev) · [Download](https://github.com/yogesh-dhande/spaces/releases/latest) · [Docs](https://usespaces.dev/docs)
+
+![GUI](apps/web/public/media/gui.png)
+![Command palette](apps/web/public/media/palette.png)
+
+## What it does
+
+A workspace is one feature, branch, or experiment with:
+
+- a directory (Git worktree or separate clone)
+- reserved ports exposed as named env vars (`$FRONTEND_PORT`, `$BACKEND_PORT`, ...)
+- configured processes, browser URLs, and coding-agent terminals
+- a tracked set of windows managed through [yabai](https://github.com/koekeishiya/yabai)
+
+Launching a workspace starts its processes, opens its windows, and tracks them. Keyboard shortcuts focus or cycle windows scoped to the current workspace. Stopping shuts down processes and closes windows. Reopening restores state.
+
+Worktrees, clones, and concurrent process trees stay isolated — ports are reserved by name and automatically assigned to processes when they start. You can reference them by env vars in your shell and use in browser URLs so you don't need to remember which port each service is running on.
+
+![Workspace detail](apps/web/public/media/demo_setup.gif)
+
+## CLI
+
+The `spaces` CLI is workspace-oriented and path-based. From inside a workspace directory:
+
+```
+spaces import              # register the current directory as a workspace
+spaces start               # launch configured processes
+spaces restart             # full stop + launch
+spaces open <name>         # focus a tracked window by name
+spaces signal <event>      # coding-agent lifecycle: init|start|waiting|done|exit
+spaces update --notes "…"  # edit workspace metadata
+```
+
+Coding agents emit `spaces signal` events from their terminals so the GUI knows which agents are working, waiting on a human, or done. See [coding-agent integration](https://usespaces.dev/docs/coding-agents).
+
+## Features
+
+- Alerts view aggregating exited processes and waiting/done coding agents across all workspaces.
+- Workspaces backed by Git worktrees or separate clones.
+- Per-workspace named-port reservation surfaced to processes via env vars.
+- Global command palette (`⌘⌥-` by default) for any window across any workspace.
+
+![Global command palette](apps/web/public/media/demo_palette.gif)
+- Per-workspace navigation and window cycling — focus stays inside the current workspace.
+
+![Workspace navigation](apps/web/public/media/demo_nav.gif)
+- Workspace notes — coding agents can write context (what's pending, where things broke) into a per-workspace notes field, surfaced inline in the workspace detail pane.
+- One-click workspace teardown closes tracked windows and shuts down processes; relaunching restores them.
+- Native AppKit binary, under 10 MB.
+
+## How it works
+
+- [yabai](https://github.com/koekeishiya/yabai) is the source of truth for window IDs and cross-app focus.
+- Process terminals run under [tmux](https://github.com/tmux/tmux) so closing a terminal window does not kill the process; Spaces reattaches on demand when you need to look at the process output.
+- Supported terminal hosts: [iTerm2](https://iterm2.com) and [Ghostty](https://ghostty.org).
+- Browser sessions automate Google Chrome so you can quickly switch to view output without typing the URL or clicking through tabs.
+
+## Requirements
+
+- macOS 14+
+- [`yabai`](https://github.com/koekeishiya/yabai), [`tmux`](https://github.com/tmux/tmux)
+- [iTerm2](https://iterm2.com) or [Ghostty](https://ghostty.org)
+- Google Chrome (for browser-session focus)
+- Accessibility permission, granted via the in-app setup flow on first launch
+
+## Install
+
+Download the signed DMG from [GitHub Releases](https://github.com/yogesh-dhande/spaces/releases/latest). The installer drops `Spaces.app` and the `spaces` CLI together. In-app updates are delivered via Sparkle.
 
 ## Development
 
-### macOS app and CLI
-Run from the repository root:
+Full build, test, lint, coverage, manual E2E, and release workflows: [`dev.md`](dev.md).
 
-```bash
-scripts/swiftpm.sh build
-scripts/swiftpm.sh test --parallel
-scripts/format-staged-swift.sh
-scripts/lint.sh
-scripts/coverage.sh
-```
+## License
 
-`scripts/lint.sh` auto-formats `apps/macos/Sources` and `apps/macos/Tests` with `swift format` before running lint so formatter-driven warnings do not drown out real issues.
-
-Git commits can use the repo hook in `.githooks/pre-commit`, which auto-formats staged Swift files under `apps/macos/Sources` and `apps/macos/Tests` before running lint and coverage.
-
-Enable the repo-managed hooks once per clone:
-
-```bash
-git config core.hooksPath .githooks
-```
-
-Verify the setting:
-
-```bash
-git config --get core.hooksPath
-```
-
-Expected output:
-
-```text
-.githooks
-```
-
-The pre-commit hook currently does three things:
-- formats staged macOS Swift source and test files with `swift format`
-- runs `scripts/lint.sh`, which also auto-formats the full macOS Swift source and test tree before linting
-- runs `scripts/coverage.sh`
-
-Pull requests are checked in GitHub Actions with [`.github/workflows/pr-checks.yml`](/Users/yogesh/projects/spaces/.github/workflows/pr-checks.yml), which runs the same Swift lint/build/coverage flow plus the static website build.
-
-Useful local entry points:
-
-```bash
-apps/macos/.build/debug/SpacesApp
-apps/macos/.build/debug/spaces --help
-```
-
-### Website
-Run from `apps/web`:
-
-```bash
-npm run dev
-npm run build
-```
-
-## Deploys
-
-### macOS release
-Publish macOS releases to GitHub Releases with:
-
-```bash
-scripts/release-and-deploy.sh <version> [build-number]
-```
-
-This workflow:
-- syncs the checked-in version metadata used by the CLI, app menu, and bundle plist
-- builds universal `arm64` + `x86_64` release binaries for both the app and CLI
-- code-signs the app and CLI
-- creates a signed manual-download DMG
-- creates a Sparkle-served `Spaces.app` zip archive
-- updates `dist/updates/stable/appcast.xml` plus any Sparkle delta files
-- stages the Sparkle feed and Sparkle archives into `apps/web/public/releases`
-- builds the static site so Firebase can serve `https://usespaces.dev/releases/*`
-- optionally notarizes the DMG when `NOTARIZE=1`
-- verifies the final DMG signature plus the bundled installer and app before publish
-- publishes the DMG to GitHub Releases
-
-Important environment variables:
-- `CODESIGN_IDENTITY`
-- `CODESIGN_CERTIFICATE_P12`
-- `CODESIGN_CERTIFICATE_PASSWORD`
-- `SPARKLE_PUBLIC_ED_KEY`
-- `SPARKLE_PRIVATE_ED_KEY`
-- `SPARKLE_FEED_URL`
-- `SPARKLE_DOWNLOAD_URL_PREFIX`
-- `NOTARIZE`
-- `APPLE_ID`
-- `TEAM_ID`
-- `APP_PASSWORD`
-- `GH_TOKEN`
-
-For GitHub Actions releases, `CODESIGN_CERTIFICATE_P12` must be the base64-encoded Developer ID Application `.p12` bundle that matches `CODESIGN_IDENTITY`, and `CODESIGN_CERTIFICATE_PASSWORD` must be the password used when exporting that `.p12`.
-
-Sparkle update hosting lives under `https://usespaces.dev/releases/` on the static Firebase site. The update feed and Sparkle archives are staged into `apps/web/public/releases`, which Next.js exports as real static files before Firebase deploy.
-The release pipeline keeps a single DMG, a single Sparkle zip, and one stable `appcast.xml`, all backed by those universal binaries.
-
-### Website deploy
-Firebase Hosting deploys from [`.github/workflows/firebase-hosting-merge.yml`](/Users/yogesh/projects/spaces/.github/workflows/firebase-hosting-merge.yml:1). It builds `apps/web` and deploys the static export on pushes to `main` that touch the site or on manual dispatch.
-
-The workflow authenticates with GitHub OIDC through Google Workload Identity Federation, then deploys through the Firebase Hosting REST API. This avoids `firebase-tools` service-account-key assumptions while keeping the deploy keyless.
-
-Required GitHub secret:
-- `FIREBASE_PROJECT_ID`
-- `GCP_WORKLOAD_IDENTITY_PROVIDER`
-- `GCP_SERVICE_ACCOUNT_EMAIL`
-
-## Additional Readmes
-- `apps/macos/README.md` covers day-to-day development for the macOS app and CLI.
-- `apps/web/README.md` covers the website-specific workflow.
+See [LICENSE](LICENSE).

@@ -9,6 +9,7 @@ apps/web/.next
 
 # Firebase Hosting - generated files (deployed, not committed)
 apps/web/public/*
+!apps/web/public/media
 !apps/web/public/.gitkeep
 !apps/web/public/releases/
 apps/web/public/releases/*

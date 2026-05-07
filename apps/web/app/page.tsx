@@ -1,5 +1,4 @@
 import Link from "next/link";
-import { ParallelStackIllustration } from "./components/parallel-stack-illustration";
 import { AppHeroPreview } from "./components/app-hero-preview";
 import { SiteHeader } from "./components/site-header";
 import { SiteFooter } from "./components/site-footer";
@@ -47,7 +46,7 @@ const keyFeatures: Feature[] = [
   {
     title: "Workspace notes",
     description:
-      "Let your coding agent leave a note about what it did, what's pending, or where things broke. Press cmd+shift+i on any window in the workspace to read it — the context is always one shortcut away.",
+      "Coding agents can write context (what's pending, what broke, where they left off) into a per-workspace notes field, surfaced inline in the workspace detail pane.",
   },
   {
     title: "Launch and teardown on demand",
@@ -56,9 +55,9 @@ const keyFeatures: Feature[] = [
     span: "wide",
   },
   {
-    title: "Native MacOS app under 5 MB",
+    title: "Native MacOS app under 10 MB",
     description:
-      "Built with Swift and AppKit — not Electron. No 200MB runtime, no sluggish UI, no fan spinning up just to show you a window list. Spaces stays out of your way and off your CPU.",
+      "Built with Swift and AppKit — not Electron. No 200 MB runtime, no sluggish UI, no fan spinning up just to show you a window list.",
   },
 ];
 
@@ -160,6 +159,42 @@ const faqItems: FaqItem[] = [
     ),
   },
   {
+    question: "Who is Spaces not for?",
+    answer: (
+      <>
+        <p className="mb-3">
+          Spaces makes opinionated tradeoffs to prioritize speed and
+          flexibility. They may not suit everyone.
+        </p>
+        <ul className="ml-4 list-disc space-y-2">
+          <li>
+            <span className="font-semibold text-foreground">
+              If you keep your window count low.
+            </span>{" "}
+            Spaces opens a dedicated window for every tab, terminal, and
+            editor instance so it can lay them out across your screens and
+            recall them on demand. The upside is speed and flexibility —
+            focusing a window takes 20–30 ms, versus 200 ms to a full second
+            to reconcile and focus a specific tab in Chrome as you add or
+            move them. It also lets you view any two windows side by side
+            (even from different workspaces) with your favorite tiling window
+            manager. If a sparse desktop matters more to you than instant
+            recall, Spaces will feel like clutter.
+          </li>
+          <li>
+            <span className="font-semibold text-foreground">
+              If you must use macOS full-screen mode.
+            </span>{" "}
+            macOS puts each full-screen window in its own desktop space, so
+            focusing another window forces the OS to transition between
+            desktops. Spaces still works, but it shines when you stay in
+            windowed mode.
+          </li>
+        </ul>
+      </>
+    ),
+  },
+  {
     question: "Do you collect any data?",
     answer: (
       <>
@@ -172,20 +207,11 @@ const faqItems: FaqItem[] = [
     question: "Where do I send bug reports?",
     answer: (
       <>
-        Email{" "}
-        <a href="mailto:support@spaces.dev" className="text-accent hover:underline">
-          support@spaces.dev
+        Open a GitHub issue at{" "}
+        <a href="https://github.com/yogesh-dhande/spaces/issues" className="text-accent hover:underline">
+          https://github.com/yogesh-dhande/spaces/issues
         </a>
         .
-      </>
-    ),
-  },
-  {
-    question: "What does Spaces mean?",
-    answer: (
-      <>
-        Multiplex your work? Or something like that. I needed a name and a
-        domain. You know how it goes.
       </>
     ),
   },
@@ -239,7 +265,7 @@ const withSpaces: ComparisonStep[] = [
   {
     n: "4",
     title: "See what needs you",
-    body: "Failed processes, failed checks, and agents waiting on a human all surface in one Alerts view.",
+    body: "Exited processes and agents waiting on a human all surface in one Alerts view.",
   },
 ];
 
@@ -249,7 +275,7 @@ export default function HomePage() {
       <SiteHeader />
 
       {/* ── Hero ── */}
-      <section className="relative">
+      <section className="relative overflow-hidden">
         <div
           aria-hidden
           className="pointer-events-none absolute left-[-8rem] top-8 h-80 w-80 rounded-full bg-accent/16 blur-3xl"
@@ -259,65 +285,70 @@ export default function HomePage() {
           className="pointer-events-none absolute right-[-6rem] top-0 h-72 w-72 rounded-full bg-accent/20 blur-3xl"
         />
 
-        <div className="mx-auto grid w-full max-w-7xl grid-cols-1 items-center gap-10 px-6 pb-16 pt-16 md:pt-24 lg:grid-cols-12 lg:gap-12">
-          <div className="lg:col-span-7">
-            <p className="inline-flex items-center gap-2 font-mono text-[0.7rem] uppercase tracking-[0.18em] text-foreground-soft">
-              <span className="h-1.5 w-1.5 rounded-full bg-accent" />
-              Build faster with Spaces
-            </p>
-            <h1 className="mt-5 text-4xl font-semibold leading-[1.05] tracking-tight md:text-5xl lg:text-[3.75rem]">
-              Instant context switching
-              <br />
-              <span className="text-foreground-soft">for faster development.</span>
-            </h1>
-            <p className="mt-6 max-w-xl text-base leading-7 text-foreground-soft md:text-lg md:leading-8">
-              A MacOS app designed to reduce context hunting, app hopping, port
-              conflicts, and accidental interruptions.
-            </p>
-            <div className="mt-8 flex flex-wrap items-center gap-3">
-              <Link
-                href={githubReleasesURL}
-                className="btn-primary inline-flex items-center gap-2 rounded-full px-6 py-3 text-sm font-semibold"
-                target="_blank"
-                rel="noopener noreferrer"
-              >
-                Download
-              </Link>
-              <Link
-                href="#solution"
-                className="inline-flex items-center gap-1.5 rounded-full px-5 py-3 text-sm font-semibold text-foreground-soft transition-colors hover:text-accent"
-              >
-                See how it works
-                <span aria-hidden>→</span>
-              </Link>
-            </div>
+        <div className="pb-16 pt-16 md:pt-24 lg:flex lg:items-center">
+          <div className="mx-auto w-full max-w-7xl lg:flex lg:flex-1 lg:justify-end lg:pr-12">
+            <div className="w-full px-6 lg:max-w-2xl">
+              <p className="inline-flex items-center gap-2 font-mono text-[0.7rem] uppercase tracking-[0.18em] text-foreground-soft">
+                <span className="h-1.5 w-1.5 rounded-full bg-accent" />
+                macOS · open source
+              </p>
+              <h1 className="mt-5 text-4xl font-semibold leading-[1.05] tracking-tight md:text-5xl lg:text-[4rem]">
+                Multiplex work
+                <br />
+                <span className="text-foreground-soft">Not just the terminal</span>
+              </h1>
+              <p className="mt-6 max-w-xl text-base leading-7 text-foreground-soft md:text-lg md:leading-8">
+                Native macOS app and CLI for orchestrating parallel coding
+                sessions across worktrees, branches, and projects. Each
+                workspace gets isolated ports, environment, and a tracked
+                window set.
+              </p>
+              <div className="mt-8 flex flex-wrap items-center gap-3">
+                <Link
+                  href={githubReleasesURL}
+                  className="btn-primary inline-flex items-center gap-2 rounded-full px-6 py-3 text-sm font-semibold"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                >
+                  Download
+                </Link>
+                <Link
+                  href="#solution"
+                  className="inline-flex items-center gap-1.5 rounded-full px-5 py-3 text-sm font-semibold text-foreground-soft transition-colors hover:text-accent"
+                >
+                  See how it works
+                  <span aria-hidden>→</span>
+                </Link>
+              </div>
 
-            <dl className="mt-12 grid max-w-xl grid-cols-3 gap-4 border-t border-line/70 pt-6 text-left">
-              <div>
-                <dt className="font-mono text-[0.62rem] uppercase tracking-[0.14em] text-foreground-soft">
-                  Size
-                </dt>
-                <dd className="mt-1 text-lg font-semibold tracking-tight">&lt; 5 MB</dd>
-              </div>
-              <div>
-                <dt className="font-mono text-[0.62rem] uppercase tracking-[0.14em] text-foreground-soft">
-                  Runtime
-                </dt>
-                <dd className="mt-1 text-lg font-semibold tracking-tight">Native Swift</dd>
-              </div>
-              <div>
-                <dt className="font-mono text-[0.62rem] uppercase tracking-[0.14em] text-foreground-soft">
-                  Price
-                </dt>
-                <dd className="mt-1 text-lg font-semibold tracking-tight">Free</dd>
-              </div>
-            </dl>
+              <dl className="mt-12 grid max-w-xl grid-cols-3 gap-4 border-t border-line/70 pt-6 text-left">
+                <div>
+                  <dt className="font-mono text-[0.62rem] uppercase tracking-[0.14em] text-foreground-soft">
+                    Size
+                  </dt>
+                  <dd className="mt-1 text-lg font-semibold tracking-tight">&lt; 10 MB</dd>
+                </div>
+                <div>
+                  <dt className="font-mono text-[0.62rem] uppercase tracking-[0.14em] text-foreground-soft">
+                    Runtime
+                  </dt>
+                  <dd className="mt-1 text-lg font-semibold tracking-tight">Native Swift</dd>
+                </div>
+                <div>
+                  <dt className="font-mono text-[0.62rem] uppercase tracking-[0.14em] text-foreground-soft">
+                    Price
+                  </dt>
+                  <dd className="mt-1 text-lg font-semibold tracking-tight">Free</dd>
+                </div>
+              </dl>
+            </div>
           </div>
 
-          <div className="lg:col-span-5">
-            <div className="rounded-[1.8rem] border border-line/80 bg-surface/70 p-3 shadow-[0_30px_80px_-40px_color-mix(in_oklab,var(--ink)_55%,transparent)] backdrop-blur-sm">
-              <ParallelStackIllustration />
+          <div className="relative mt-10 w-full px-6 lg:mt-0 lg:w-1/2 lg:flex-1 lg:pl-0 lg:pr-0">
+            <div className="rounded-[1rem] border border-line/80 bg-surface/70 shadow-[0_30px_80px_-40px_color-mix(in_oklab,var(--ink)_55%,transparent)] backdrop-blur-sm overflow-hidden">
+              <img src="/media/hero2.png" alt="Spaces GUI" className="w-full h-auto" />
             </div>
+            <div className="absolute inset-y-0 right-0 w-64 bg-gradient-to-l from-background via-background/80 to-transparent pointer-events-none" />
           </div>
         </div>
       </section>
@@ -333,9 +364,10 @@ export default function HomePage() {
               Speed is no longer about typing code faster.
             </h2>
             <p className="mt-5 text-base leading-7 text-foreground-soft md:text-lg md:leading-8">
-              The bottleneck moved. It&apos;s not the code — it&apos;s
-              everything around the code: the workspaces, the ports, the
-              windows, the branches, the agents. Managing that is the job now.
+              The bottleneck isn&apos;t typing — it&apos;s the surrounding
+              state: which terminal owns the dev server, which Chrome tab is
+              the staging admin, which worktree is bound to port 3000, which
+              agent is waiting on you. Managing that is the job now.
             </p>
           </div>
 
@@ -363,16 +395,17 @@ export default function HomePage() {
       <section className="mx-auto w-full max-w-7xl px-6 py-20 md:py-28">
         <div className="mx-auto max-w-3xl text-center">
           <p className="font-mono text-[0.7rem] uppercase tracking-[0.18em] text-foreground-soft">
-            Introducing Spaces
+            How a workspace works
           </p>
           <h2 className="mt-4 text-3xl font-semibold leading-tight tracking-tight md:text-5xl">
-            The command center for parallel development.
+            One workspace per task. Open, switch, and close as a unit.
           </h2>
           <p className="mt-5 text-base leading-7 text-foreground-soft md:text-lg md:leading-8">
-            Spaces groups the tabs, terminals, editors, and agents for each task
-            into a workspace you can open, switch, and close as one unit. Move
-            between projects and features without losing your place — or
-            colliding with yourself.
+            A workspace is one feature, branch, or experiment with its own
+            directory, named ports, processes, browser sessions, and
+            coding-agent terminals. Launching it starts every process and
+            tracks every window. Stopping it shuts everything down. Reopening
+            restores the state.
           </p>
         </div>
 
@@ -403,12 +436,12 @@ export default function HomePage() {
               How It Works
             </p>
             <h2 className="mt-4 text-3xl font-semibold leading-tight tracking-tight md:text-5xl">
-              Three primitives. One mental model.
+              Project, workspace, runtime.
             </h2>
             <p className="mt-5 text-base leading-7 text-foreground-soft md:text-lg md:leading-8">
-              Spaces works the way you already think about coding — projects
-              contain tasks, tasks have their own windows and state. It just
-              makes those layers real.
+              Configure each repo once at the project level. Create one
+              workspace per task. Runtime opens or closes processes and
+              windows as a unit.
             </p>
           </div>
 
@@ -448,15 +481,17 @@ export default function HomePage() {
             In Action
           </p>
           <h2 className="mt-4 text-3xl font-semibold leading-tight tracking-tight md:text-5xl">
-            A repeatable loop, not a window hunt.
+            Get to any window with a few keystrokes
           </h2>
           <p className="mt-5 text-base leading-7 text-foreground-soft md:text-lg md:leading-8">
-            Workspace boundaries stay clear. Switching between them stays fast.
+            Numbered shortcuts focus any window in the active workspace. 
+            Cycle through windows of the same workspace or use the
+            global command palette to pull any window across any workspace.
           </p>
         </div>
 
         <div className="mt-12 rounded-3xl border border-line/80 bg-surface/70 p-3 shadow-[0_40px_80px_-50px_color-mix(in_oklab,var(--ink)_55%,transparent)] md:p-5">
-          <AppHeroPreview />
+          <video src="/media/demo_nav_palette.mp4" autoPlay loop muted playsInline className="w-full h-auto rounded-2xl" />
         </div>
       </section>
 
@@ -471,11 +506,8 @@ export default function HomePage() {
               Key Features
             </p>
             <h2 className="mt-4 text-3xl font-semibold leading-tight tracking-tight md:text-5xl">
-              Your whole dev loop, in one place
+              Capabilities
             </h2>
-            <p className="mt-5 text-base leading-7 text-foreground-soft md:text-lg md:leading-8">
-              Spaces turns the scattered terminals, tabs, editors, agents, and worktrees into logical workspaces you can open, switch, and close as one.
-            </p>
           </div>
 
           <div className="mt-12 grid auto-rows-[1fr] grid-flow-dense gap-4 md:grid-cols-6">
@@ -541,14 +573,14 @@ export default function HomePage() {
           />
           <div className="relative">
             <p className="font-mono text-[0.7rem] uppercase tracking-[0.18em] text-foreground-soft">
-              Ready to build faster?
+              Get Spaces
             </p>
             <h2 className="mt-4 text-3xl font-semibold tracking-tight md:text-5xl">
-              Stop hunting. Start shipping.
+              Try it on your repo.
             </h2>
             <p className="mx-auto mt-4 max-w-2xl text-base leading-7 text-foreground-soft md:text-lg">
-              Spaces helps you build faster by managing context and reducing
-              chaos.
+              Native macOS, signed DMG, in-app updates via Sparkle. Free and
+              open source.
             </p>
             <div className="mt-8 flex flex-wrap justify-center gap-3">
               <Link
