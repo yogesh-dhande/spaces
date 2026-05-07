@@ -130,12 +130,11 @@ private struct SeedFixtureCommand: ParsableCommand {
         let project = try orchestrator.project(id: normalizedProjectDir) ?? orchestrator.addProject(dir: normalizedProjectDir)
         let uvExecutable = try resolveExecutablePath(named: "uv")
         let frontendCommand =
-            "\(uvExecutable) run --project .spaces-e2e-demo spaces-e2e-demo frontend --port $SPACES_E2E_APP_PORT --site-dir .spaces-e2e-demo/site --backend-url http://127.0.0.1:$SPACES_E2E_API_PORT"
-        let backendCommand =
-            "\(uvExecutable) run --project .spaces-e2e-demo spaces-e2e-demo backend --port $SPACES_E2E_API_PORT --data-dir .spaces-e2e-demo/api"
+            "\(uvExecutable) run --project .spaces-e2e-demo spaces-e2e-demo frontend --port $APP_PORT --site-dir .spaces-e2e-demo/site --backend-url http://127.0.0.1:$API_PORT"
+        let backendCommand = "\(uvExecutable) run --project .spaces-e2e-demo spaces-e2e-demo backend --port $API_PORT --data-dir .spaces-e2e-demo/api"
 
         try orchestrator.updateProjectConfig(projectID: project.id) { config in
-            config.ports = [.init(name: "SPACES_E2E_APP_PORT"), .init(name: "SPACES_E2E_API_PORT")]
+            config.ports = [.init(name: "APP_PORT"), .init(name: "API_PORT")]
             config.stopScript =
                 #"bash -lc 'printf "project-stop:%s\n" "${SPACES_WORKSPACE_DIR}" >> "${SPACES_E2E_EVENTS_LOG:-/tmp/spaces-e2e-events.log}"'"#
             config.processes = [
@@ -212,10 +211,12 @@ private struct CreateWorkspaceCommand: ParsableCommand {
     @Option(name: .long) var targetBranch: String?
     @Option(name: .long) var directoryName: String?
     @Option(name: .long) var notes: String?
+    @Flag(name: .long) var existingBranch = false
 
     /// Creates a real workspace record and worktree through the production
     /// orchestrator so the shell harness can validate add/remove flows without
-    /// depending on fragile GUI-only form automation.
+    /// depending on fragile GUI-only form automation. `--existing-branch`
+    /// mirrors the app's Existing branch flow for fixture-backed worktrees.
     func run() throws {
         let orchestrator = try makeOrchestrator()
         let normalizedProjectDir = normalizePath(projectDir)
@@ -224,7 +225,7 @@ private struct CreateWorkspaceCommand: ParsableCommand {
         }
         var workspace = try orchestrator.createWorkspace(
             projectID: project.id, name: title, branch: branch, targetBranch: targetBranch, directoryName: directoryName, runSetupScript: false,
-            allowRemoteBranchLookup: false)
+            allowRemoteBranchLookup: false, allowExistingBranchReuse: existingBranch)
         if let notes {
             try orchestrator.updateWorkspaceNotes(workspaceID: workspace.id, notes: notes)
             workspace = try orchestrator.store.workspace(dir: workspace.dir) ?? workspace

@@ -45,7 +45,7 @@ flowchart LR
 - Path: `~/.spaces/spaces.db`
 - SQLite stores projects, workspaces, runtime state, and global settings.
 - SQLite should run in WAL mode with a busy timeout so overlapping GUI, CLI, and background work does not produce avoidable lock failures.
-- `migration_state.current_version` is the authoritative forward-only schema marker.
+- `migration_state.current_version` is the authoritative forward-only schema marker. The release baseline schema starts at version `1`.
 - `PRAGMA user_version` is not used by Spaces for migration control; if present, treat it as informational only and keep it aligned with `migration_state` when inspecting or repairing a database manually.
 - Migration safety snapshots are stored in `~/.spaces/backups/` and retained as a rolling set of the newest 10 migration backups.
 

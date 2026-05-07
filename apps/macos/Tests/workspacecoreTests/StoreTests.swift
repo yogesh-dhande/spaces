@@ -30,15 +30,18 @@ final class StoreTests: XCTestCase {
         let workspaceColumns = try readTableColumns(dbURL: dbURL, table: "workspaces")
         let projectColumns = try readTableColumns(dbURL: dbURL, table: "projects")
         let workspaceSettingsColumns = try readTableColumns(dbURL: dbURL, table: "workspace_settings")
-        let workspaceStatusColumns = try readTableColumns(dbURL: dbURL, table: "workspace_status_checks")
         let windowColumns = try readTableColumns(dbURL: dbURL, table: "windows")
         let workspacePortColumns = try readTableColumns(dbURL: dbURL, table: "workspace_ports")
         let workspacePortDefinitionColumns = try readTableColumns(dbURL: dbURL, table: "workspace_port_definitions")
         let projectPortDefinitionColumns = try readTableColumns(dbURL: dbURL, table: "project_port_definitions")
         let workspaceProcessColumns = try readTableColumns(dbURL: dbURL, table: "workspace_processes")
         let projectProcessColumns = try readTableColumns(dbURL: dbURL, table: "project_processes")
+        let workspaceBrowserSessionColumns = try readTableColumns(dbURL: dbURL, table: "workspace_browser_sessions")
+        let projectBrowserSessionColumns = try readTableColumns(dbURL: dbURL, table: "project_browser_sessions")
+        let workspaceAgentLauncherColumns = try readTableColumns(dbURL: dbURL, table: "workspace_agent_launchers")
+        let projectAgentLauncherColumns = try readTableColumns(dbURL: dbURL, table: "project_agent_launchers")
         let workspaceForeignKeys = try readSingleInteger(dbURL: dbURL, sql: "SELECT COUNT(*) FROM pragma_foreign_key_list('workspaces')")
-        XCTAssertEqual(version, 7)
+        XCTAssertEqual(version, 1)
         XCTAssertTrue(workspaceColumns.contains("title"))
         XCTAssertTrue(workspaceColumns.contains("notes"))
         XCTAssertTrue(workspaceColumns.contains("is_hidden"))
@@ -46,14 +49,20 @@ final class StoreTests: XCTestCase {
         XCTAssertTrue(workspaceProcessColumns.contains("execution_mode"))
         XCTAssertTrue(projectProcessColumns.contains("execution_mode"))
         XCTAssertFalse(workspaceSettingsColumns.contains("updated_at"))
-        XCTAssertFalse(workspaceStatusColumns.contains("on_exit"))
         XCTAssertTrue(windowColumns.contains("name"))
         XCTAssertTrue(windowColumns.contains("detail"))
         XCTAssertTrue(windowColumns.contains("terminal_container_id"))
         XCTAssertTrue(workspacePortColumns.contains("definition_id"))
         XCTAssertTrue(workspacePortDefinitionColumns.contains("id"))
         XCTAssertTrue(projectPortDefinitionColumns.contains("id"))
+        XCTAssertFalse(workspaceBrowserSessionColumns.contains("id"))
+        XCTAssertFalse(projectBrowserSessionColumns.contains("id"))
+        XCTAssertFalse(workspaceAgentLauncherColumns.contains("id"))
+        XCTAssertFalse(projectAgentLauncherColumns.contains("id"))
         XCTAssertEqual(workspaceForeignKeys, 1)
+        XCTAssertFalse(try tableExists(dbURL: dbURL, table: "project_status_checks"))
+        XCTAssertFalse(try tableExists(dbURL: dbURL, table: "workspace_status_checks"))
+        XCTAssertFalse(try tableExists(dbURL: dbURL, table: "status_results"))
         XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent("backups").path))
     }
 
@@ -65,7 +74,7 @@ final class StoreTests: XCTestCase {
         _ = try SQLiteStore(path: dbURL.path)
         _ = try SQLiteStore(path: dbURL.path)
 
-        XCTAssertEqual(try readSingleInteger(dbURL: dbURL, sql: "SELECT current_version FROM migration_state"), 7)
+        XCTAssertEqual(try readSingleInteger(dbURL: dbURL, sql: "SELECT current_version FROM migration_state"), 1)
         XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent("backups").path))
     }
 
@@ -95,33 +104,6 @@ final class StoreTests: XCTestCase {
                 sql:
                     "INSERT INTO workspace_ports(workspace_id, port_index, port_number, port_name, definition_id) VALUES ('workspace-1', 0, 3000, char(9), 'wpd-1');"
             ))
-    }
-
-    // Tests a released v1 database migrates in place by arranging representative data and asserting current state, backup creation, and integrity validation.
-    func testSchemaV1MigratesToCurrentVersionAndPreservesData() throws {
-        let root = try makeTempDirectory()
-        let dbURL = root.appendingPathComponent("migrating.db")
-        try createSchemaV1Fixture(dbURL: dbURL)
-
-        let store = try SQLiteStore(path: dbURL.path)
-
-        XCTAssertEqual(try readSingleInteger(dbURL: dbURL, sql: "SELECT current_version FROM migration_state"), 7)
-        XCTAssertEqual(try readSingleText(dbURL: dbURL, sql: "PRAGMA integrity_check"), "ok")
-        XCTAssertEqual(try readSingleInteger(dbURL: dbURL, sql: "SELECT COUNT(*) FROM pragma_foreign_key_list('workspace_processes')"), 1)
-        XCTAssertTrue(try readTableColumns(dbURL: dbURL, table: "running_processes").contains("terminal_container_id"))
-        XCTAssertTrue(try readTableColumns(dbURL: dbURL, table: "windows").contains("terminal_container_id"))
-        XCTAssertEqual(try store.projects().count, 1)
-        XCTAssertEqual(try store.project(id: "project-1")?.ports.first?.name, "API_PORT")
-        XCTAssertEqual(try store.workspace(id: "workspace-1")?.notes, "Feature tooltip")
-        XCTAssertEqual(try store.workspaceProcesses(workspaceID: "workspace-1").first?.name, "api")
-        XCTAssertEqual(try store.workspaceProcesses(workspaceID: "workspace-1").first?.executionMode, .direct)
-        XCTAssertEqual(try store.workspaceBrowserSessions(workspaceID: "workspace-1").first?.url, "https://example.com")
-        XCTAssertEqual(try store.agentWindows(workspaceID: "workspace-1").first?.label, "Codex")
-        XCTAssertEqual(try store.runningProcesses(workspaceID: "workspace-1").first?.terminalTrackingID, "session-1")
-
-        let backups = try FileManager.default.contentsOfDirectory(at: root.appendingPathComponent("backups"), includingPropertiesForKeys: nil)
-        XCTAssertEqual(backups.count, 1)
-        XCTAssertTrue(backups[0].lastPathComponent.contains("-v1-to-v7.sqlite3"))
     }
 
     // Tests unsupported future schemas fail closed by arranging a DB ahead of the current code and asserting the startup error avoids reset instructions.
@@ -636,8 +618,8 @@ final class StoreTests: XCTestCase {
         try store.upsert(workspace: archivedWorkspace)
         try store.upsert(workspace: defaultWorkspace)
 
-        XCTAssertEqual(try store.workspace(projectID: aProject.id, name: "feature")?.id, "archived")
-        XCTAssertEqual(try store.workspace(projectID: aProject.id, name: "feature")?.targetBranch, "develop")
+        XCTAssertEqual(try store.workspace(projectID: aProject.id, title: "feature")?.id, "archived")
+        XCTAssertEqual(try store.workspace(projectID: aProject.id, title: "feature")?.targetBranch, "develop")
         XCTAssertEqual(try store.workspaces(projectID: aProject.id, includeArchived: false).map(\.id), ["default"])
         XCTAssertEqual(Set(try store.workspaces(projectID: aProject.id, includeArchived: true).map(\.id)), Set(["default", "archived"]))
     }
@@ -1156,243 +1138,7 @@ final class StoreTests: XCTestCase {
         return rows
     }
 
-    private func createSchemaV1Fixture(dbURL: URL) throws {
-        try runSQLiteExec(
-            dbURL: dbURL,
-            sql: """
-                CREATE TABLE projects (
-                  id TEXT PRIMARY KEY,
-                  name TEXT NOT NULL,
-                  dir TEXT NOT NULL UNIQUE,
-                  is_git INTEGER NOT NULL,
-                  default_branch TEXT,
-                  is_collapsed INTEGER NOT NULL DEFAULT 0,
-                  setup_script TEXT,
-                  stop_script TEXT
-                );
-                CREATE TABLE project_port_definitions (
-                  id TEXT NOT NULL,
-                  project_id TEXT NOT NULL,
-                  name TEXT NOT NULL,
-                  order_index INTEGER NOT NULL,
-                  PRIMARY KEY (project_id, order_index)
-                );
-                CREATE TABLE project_processes (
-                  id TEXT PRIMARY KEY,
-                  project_id TEXT NOT NULL,
-                  name TEXT,
-                  command TEXT NOT NULL,
-                  on_exit TEXT NOT NULL DEFAULT 'none',
-                  order_index INTEGER NOT NULL
-                );
-                CREATE TABLE project_status_checks (
-                  id TEXT PRIMARY KEY,
-                  project_id TEXT NOT NULL,
-                  name TEXT,
-                  process TEXT NOT NULL,
-                  command TEXT NOT NULL,
-                  interval INTEGER NOT NULL,
-                  timeout INTEGER NOT NULL,
-                  on_fail TEXT NOT NULL,
-                  order_index INTEGER NOT NULL
-                );
-                CREATE TABLE project_browser_sessions (
-                  id TEXT PRIMARY KEY,
-                  project_id TEXT NOT NULL,
-                  name TEXT,
-                  url TEXT,
-                  order_index INTEGER NOT NULL
-                );
-                CREATE TABLE project_agent_launchers (
-                  id TEXT PRIMARY KEY,
-                  project_id TEXT NOT NULL,
-                  name TEXT NOT NULL,
-                  command TEXT NOT NULL,
-                  order_index INTEGER NOT NULL
-                );
-                CREATE TABLE workspaces (
-                  id TEXT PRIMARY KEY,
-                  project_id TEXT NOT NULL,
-                  title TEXT NOT NULL,
-                  dir TEXT NOT NULL,
-                  dirname TEXT,
-                  branch TEXT,
-                  target_branch TEXT,
-                  is_default INTEGER NOT NULL,
-                  is_archived INTEGER NOT NULL,
-                  is_hidden INTEGER NOT NULL DEFAULT 0,
-                  is_running INTEGER NOT NULL,
-                  last_launched_at TEXT,
-                  tooltip TEXT,
-                  UNIQUE(project_id, title)
-                );
-                CREATE TABLE workspace_ports (
-                  workspace_id TEXT NOT NULL,
-                  port_index INTEGER NOT NULL,
-                  port_number INTEGER NOT NULL,
-                  port_name TEXT NOT NULL DEFAULT '',
-                  definition_id TEXT NOT NULL DEFAULT '',
-                  PRIMARY KEY (workspace_id, port_index)
-                );
-                CREATE TABLE workspace_port_definitions (
-                  id TEXT NOT NULL,
-                  workspace_id TEXT NOT NULL,
-                  name TEXT NOT NULL,
-                  order_index INTEGER NOT NULL,
-                  PRIMARY KEY (workspace_id, order_index)
-                );
-                CREATE TABLE workspace_settings (
-                  workspace_id TEXT PRIMARY KEY,
-                  stop_script TEXT,
-                  setup_status TEXT NOT NULL DEFAULT 'succeeded',
-                  setup_error TEXT,
-                  setup_started_at TEXT,
-                  setup_finished_at TEXT
-                );
-                CREATE TABLE workspace_processes (
-                  id TEXT PRIMARY KEY,
-                  workspace_id TEXT NOT NULL,
-                  name TEXT,
-                  command TEXT NOT NULL,
-                  on_exit TEXT NOT NULL DEFAULT 'none',
-                  order_index INTEGER NOT NULL
-                );
-                CREATE TABLE workspace_status_checks (
-                  id TEXT PRIMARY KEY,
-                  workspace_id TEXT NOT NULL,
-                  name TEXT,
-                  process TEXT NOT NULL,
-                  command TEXT NOT NULL,
-                  interval INTEGER NOT NULL,
-                  timeout INTEGER NOT NULL,
-                  on_fail TEXT NOT NULL DEFAULT 'none',
-                  order_index INTEGER NOT NULL
-                );
-                CREATE TABLE workspace_browser_sessions (
-                  id TEXT PRIMARY KEY,
-                  workspace_id TEXT NOT NULL,
-                  name TEXT,
-                  url TEXT,
-                  extracted_target_url TEXT,
-                  extracted_window_id INTEGER,
-                  extracted_window_valid INTEGER NOT NULL DEFAULT 0,
-                  order_index INTEGER NOT NULL
-                );
-                CREATE TABLE workspace_agent_launchers (
-                  id TEXT PRIMARY KEY,
-                  workspace_id TEXT NOT NULL,
-                  name TEXT NOT NULL,
-                  command TEXT NOT NULL,
-                  order_index INTEGER NOT NULL
-                );
-                CREATE TABLE running_processes (
-                  id TEXT PRIMARY KEY,
-                  workspace_id TEXT NOT NULL,
-                  template_name TEXT NOT NULL,
-                  command TEXT NOT NULL,
-                  terminal_app TEXT,
-                  window_id INTEGER,
-                  terminal_tracking_id TEXT,
-                  terminal_native_id TEXT,
-                  iterm_tab_index INTEGER,
-                  tmux_window_id TEXT,
-                  pid INTEGER,
-                  status TEXT NOT NULL,
-                  log_path TEXT,
-                  last_output_at TEXT,
-                  started_at TEXT,
-                  exited_at TEXT
-                );
-                CREATE TABLE status_results (
-                  process_id TEXT NOT NULL,
-                  check_name TEXT NOT NULL,
-                  status TEXT NOT NULL,
-                  message TEXT,
-                  last_run_at TEXT,
-                  PRIMARY KEY (process_id, check_name)
-                );
-                CREATE TABLE windows (
-                  id TEXT PRIMARY KEY,
-                  workspace_id TEXT NOT NULL,
-                  app TEXT NOT NULL,
-                  name TEXT,
-                  detail TEXT,
-                  target_url TEXT,
-                  window_id INTEGER,
-                  terminal_tracking_id TEXT,
-                  terminal_native_id TEXT,
-                  iterm_tab_index INTEGER,
-                  tmux_window_id TEXT,
-                  role TEXT NOT NULL,
-                  order_index INTEGER,
-                  last_seen_at TEXT
-                );
-                CREATE TABLE settings (
-                  key TEXT PRIMARY KEY,
-                  value TEXT NOT NULL
-                );
-                CREATE TABLE ignored_worktrees (
-                  worktree_dir TEXT PRIMARY KEY,
-                  project_id TEXT NOT NULL
-                );
-                CREATE TABLE agent_windows (
-                  id TEXT PRIMARY KEY,
-                  workspace_id TEXT NOT NULL,
-                  provider TEXT NOT NULL,
-                  label TEXT,
-                  terminal_tracking_id TEXT,
-                  terminal_native_id TEXT,
-                  tmux_window_id TEXT,
-                  codex_thread_id TEXT,
-                  window_id INTEGER,
-                  status TEXT NOT NULL DEFAULT 'idle',
-                  created_at TEXT NOT NULL,
-                  updated_at TEXT NOT NULL,
-                  yabai_window_id INTEGER
-                );
-                CREATE TABLE migration_state (
-                  current_version INTEGER NOT NULL
-                );
-                INSERT INTO projects(id, name, dir, is_git, default_branch, is_collapsed, setup_script, stop_script)
-                VALUES ('project-1', 'Project', '/tmp/project', 1, 'main', 1, 'echo setup', 'echo stop');
-                INSERT INTO project_port_definitions(id, project_id, name, order_index)
-                VALUES ('project-port-1', 'project-1', 'API_PORT', 0);
-                INSERT INTO project_processes(id, project_id, name, command, on_exit, order_index)
-                VALUES ('project-process-1', 'project-1', 'api', 'npm run api', 'none', 0);
-                INSERT INTO project_status_checks(id, project_id, name, process, command, interval, timeout, on_fail, order_index)
-                VALUES ('project-check-1', 'project-1', 'API Health', 'api', 'curl localhost', 10, 5, 'restart', 0);
-                INSERT INTO project_browser_sessions(id, project_id, name, url, order_index)
-                VALUES ('project-browser-1', 'project-1', 'Docs', 'https://example.com/docs', 0);
-                INSERT INTO project_agent_launchers(id, project_id, name, command, order_index)
-                VALUES ('project-agent-1', 'project-1', 'Codex', 'codex', 0);
-                INSERT INTO workspaces(id, project_id, title, dir, dirname, branch, target_branch, is_default, is_archived, is_hidden, is_running, last_launched_at, tooltip)
-                VALUES ('workspace-1', 'project-1', 'feature', '/tmp/project/feature', 'feature', 'feature', 'main', 0, 0, 0, 1, '2026-01-01T00:00:00Z', 'Feature tooltip');
-                INSERT INTO workspace_ports(workspace_id, port_index, port_number, port_name, definition_id)
-                VALUES ('workspace-1', 0, 3000, 'API_PORT', 'workspace-port-definition-1');
-                INSERT INTO workspace_port_definitions(id, workspace_id, name, order_index)
-                VALUES ('workspace-port-definition-1', 'workspace-1', 'API_PORT', 0);
-                INSERT INTO workspace_settings(workspace_id, stop_script, setup_status, setup_error, setup_started_at, setup_finished_at)
-                VALUES ('workspace-1', 'echo stop', 'failed', 'boom', 'start', 'end');
-                INSERT INTO workspace_processes(id, workspace_id, name, command, on_exit, order_index)
-                VALUES ('workspace-process-1', 'workspace-1', 'api', 'npm run api', 'none', 0);
-                INSERT INTO workspace_status_checks(id, workspace_id, name, process, command, interval, timeout, on_fail, order_index)
-                VALUES ('workspace-check-1', 'workspace-1', 'API Health', 'api', 'curl localhost', 10, 5, 'restart', 0);
-                INSERT INTO workspace_browser_sessions(id, workspace_id, name, url, extracted_target_url, extracted_window_id, extracted_window_valid, order_index)
-                VALUES ('workspace-browser-1', 'workspace-1', 'Docs', 'https://example.com', 'https://example.com', 303, 1, 0);
-                INSERT INTO workspace_agent_launchers(id, workspace_id, name, command, order_index)
-                VALUES ('workspace-agent-1', 'workspace-1', 'Codex', 'codex', 0);
-                INSERT INTO running_processes(id, workspace_id, template_name, command, terminal_app, window_id, terminal_tracking_id, terminal_native_id, iterm_tab_index, tmux_window_id, pid, status, log_path, last_output_at, started_at, exited_at)
-                VALUES ('running-process-1', 'workspace-1', 'api', 'npm run api', 'iTerm2', 101, 'session-1', 'native-1', 1, '@1', 12345, 'running', '/tmp/api.log', '2026-01-01T00:00:01Z', '2026-01-01T00:00:00Z', '');
-                INSERT INTO status_results(process_id, check_name, status, message, last_run_at)
-                VALUES ('running-process-1', 'API Health', 'passing', 'ok', '2026-01-01T00:00:02Z');
-                INSERT INTO windows(id, workspace_id, app, name, detail, target_url, window_id, terminal_tracking_id, terminal_native_id, iterm_tab_index, tmux_window_id, role, order_index, last_seen_at)
-                VALUES ('window-1', 'workspace-1', 'Google Chrome', 'Docs', 'docs', 'https://example.com', 303, '', '', NULL, '', 'browser', 0, '2026-01-01T00:00:03Z');
-                INSERT INTO settings(key, value) VALUES ('terminalHost', 'iterm2');
-                INSERT INTO ignored_worktrees(worktree_dir, project_id) VALUES ('/tmp/project/ignored', 'project-1');
-                INSERT INTO agent_windows(id, workspace_id, provider, label, terminal_tracking_id, terminal_native_id, tmux_window_id, codex_thread_id, window_id, status, created_at, updated_at, yabai_window_id)
-                VALUES ('agent-window-1', 'workspace-1', 'iterm2', 'Codex', 'session-1', 'native-1', '', 'thread-1', 101, 'running', '2026-01-01T00:00:00Z', '2026-01-01T00:00:03Z', 101);
-                INSERT INTO migration_state(current_version) VALUES (1);
-                """)
+    private func tableExists(dbURL: URL, table: String) throws -> Bool {
+        try readSingleInteger(dbURL: dbURL, sql: "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = '\(table)'") == 1
     }
-
 }

@@ -82,14 +82,14 @@ public final class SQLiteStore {
             try execute(sql: "DELETE FROM project_browser_sessions WHERE project_id = ?", bindings: [project.id])
             for (index, session) in project.browserSessions.enumerated() {
                 try execute(
-                    sql: "INSERT INTO project_browser_sessions(id, project_id, name, url, order_index) VALUES (?, ?, ?, ?, ?)",
-                    bindings: [UUID().uuidString, project.id, session.name ?? "", session.url ?? "", String(index)])
+                    sql: "INSERT INTO project_browser_sessions(project_id, name, url, order_index) VALUES (?, ?, ?, ?)",
+                    bindings: [project.id, session.name ?? "", session.url ?? "", String(index)])
             }
             try execute(sql: "DELETE FROM project_agent_launchers WHERE project_id = ?", bindings: [project.id])
             for (index, launcher) in project.agentLaunchers.enumerated() {
                 try execute(
-                    sql: "INSERT INTO project_agent_launchers(id, project_id, name, command, order_index) VALUES (?, ?, ?, ?, ?)",
-                    bindings: [UUID().uuidString, project.id, launcher.name, launcher.command, String(index)])
+                    sql: "INSERT INTO project_agent_launchers(project_id, name, command, order_index) VALUES (?, ?, ?, ?)",
+                    bindings: [project.id, launcher.name, launcher.command, String(index)])
             }
         }
     }
@@ -124,15 +124,9 @@ public final class SQLiteStore {
             try execute(sql: "DELETE FROM workspace_settings WHERE workspace_id IN (SELECT id FROM workspaces WHERE project_id = ?)", bindings: [id])
             try execute(sql: "DELETE FROM workspace_processes WHERE workspace_id IN (SELECT id FROM workspaces WHERE project_id = ?)", bindings: [id])
             try execute(
-                sql: "DELETE FROM workspace_status_checks WHERE workspace_id IN (SELECT id FROM workspaces WHERE project_id = ?)", bindings: [id])
-            try execute(
                 sql: "DELETE FROM workspace_browser_sessions WHERE workspace_id IN (SELECT id FROM workspaces WHERE project_id = ?)", bindings: [id])
             try execute(
                 sql: "DELETE FROM workspace_agent_launchers WHERE workspace_id IN (SELECT id FROM workspaces WHERE project_id = ?)", bindings: [id])
-            try execute(
-                sql:
-                    "DELETE FROM status_results WHERE process_id IN (SELECT id FROM running_processes WHERE workspace_id IN (SELECT id FROM workspaces WHERE project_id = ?))",
-                bindings: [id])
             try execute(sql: "DELETE FROM running_processes WHERE workspace_id IN (SELECT id FROM workspaces WHERE project_id = ?)", bindings: [id])
             try execute(sql: "DELETE FROM workspace_ports WHERE workspace_id IN (SELECT id FROM workspaces WHERE project_id = ?)", bindings: [id])
             try execute(
@@ -140,7 +134,6 @@ public final class SQLiteStore {
             try execute(sql: "DELETE FROM workspaces WHERE project_id = ?", bindings: [id])
             try execute(sql: "DELETE FROM project_port_definitions WHERE project_id = ?", bindings: [id])
             try execute(sql: "DELETE FROM project_processes WHERE project_id = ?", bindings: [id])
-            try execute(sql: "DELETE FROM project_status_checks WHERE project_id = ?", bindings: [id])
             try execute(sql: "DELETE FROM project_browser_sessions WHERE project_id = ?", bindings: [id])
             try execute(sql: "DELETE FROM project_agent_launchers WHERE project_id = ?", bindings: [id])
             try execute(sql: "DELETE FROM ignored_worktrees WHERE project_id = ?", bindings: [id])
@@ -187,8 +180,6 @@ public final class SQLiteStore {
         return decodeWorkspace(row: row)
     }
 
-    public func workspace(projectID: String, name: String) throws -> WorkspaceRecord? { try workspace(projectID: projectID, title: name) }
-
     public func workspace(projectID: String, title: String) throws -> WorkspaceRecord? {
         guard
             let row = try queryRow(
@@ -231,11 +222,8 @@ public final class SQLiteStore {
             try execute(sql: "DELETE FROM windows WHERE workspace_id = ?", bindings: [id])
             try execute(sql: "DELETE FROM workspace_settings WHERE workspace_id = ?", bindings: [id])
             try execute(sql: "DELETE FROM workspace_processes WHERE workspace_id = ?", bindings: [id])
-            try execute(sql: "DELETE FROM workspace_status_checks WHERE workspace_id = ?", bindings: [id])
             try execute(sql: "DELETE FROM workspace_browser_sessions WHERE workspace_id = ?", bindings: [id])
             try execute(sql: "DELETE FROM workspace_agent_launchers WHERE workspace_id = ?", bindings: [id])
-            try execute(
-                sql: "DELETE FROM status_results WHERE process_id IN (SELECT id FROM running_processes WHERE workspace_id = ?)", bindings: [id])
             try execute(sql: "DELETE FROM running_processes WHERE workspace_id = ?", bindings: [id])
             try execute(sql: "DELETE FROM workspace_ports WHERE workspace_id = ?", bindings: [id])
             try execute(sql: "DELETE FROM workspace_port_definitions WHERE workspace_id = ?", bindings: [id])
@@ -424,12 +412,12 @@ public final class SQLiteStore {
                 let extractedTargetURL = session.extractedWindow?.targetURL ?? ""
                 try execute(
                     sql: """
-                        INSERT INTO workspace_browser_sessions(id, workspace_id, name, url, extracted_target_url, extracted_window_id, extracted_window_valid, order_index)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                        INSERT INTO workspace_browser_sessions(workspace_id, name, url, extracted_target_url, extracted_window_id, extracted_window_valid, order_index)
+                        VALUES (?, ?, ?, ?, ?, ?, ?)
                         """,
                     bindings: [
-                        UUID().uuidString, workspaceID, session.name ?? "", session.url ?? "", extractedTargetURL, extractedWindowID,
-                        extractedWindowValid, String(index),
+                        workspaceID, session.name ?? "", session.url ?? "", extractedTargetURL, extractedWindowID, extractedWindowValid,
+                        String(index),
                     ])
             }
         }
@@ -441,9 +429,9 @@ public final class SQLiteStore {
             for (index, launcher) in launchers.enumerated() {
                 try execute(
                     sql: """
-                        INSERT INTO workspace_agent_launchers(id, workspace_id, name, command, order_index)
-                        VALUES (?, ?, ?, ?, ?)
-                        """, bindings: [UUID().uuidString, workspaceID, launcher.name, launcher.command, String(index)])
+                        INSERT INTO workspace_agent_launchers(workspace_id, name, command, order_index)
+                        VALUES (?, ?, ?, ?)
+                        """, bindings: [workspaceID, launcher.name, launcher.command, String(index)])
             }
         }
     }
@@ -591,10 +579,7 @@ public final class SQLiteStore {
     }
 
     public func deleteRunningProcess(id: String) throws {
-        try withImmediateTransaction {
-            try execute(sql: "DELETE FROM status_results WHERE process_id = ?", bindings: [id])
-            try execute(sql: "DELETE FROM running_processes WHERE id = ?", bindings: [id])
-        }
+        try withImmediateTransaction { try execute(sql: "DELETE FROM running_processes WHERE id = ?", bindings: [id]) }
     }
 
     public func deleteRunningProcesses(workspaceID: String) throws {
