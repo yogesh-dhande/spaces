@@ -210,6 +210,9 @@ class MockTmuxAdapter: TmuxAdapter, @unchecked Sendable {
     var respawnedWindowIDs: [String] = []
     var respawnedCommandsByWindowID: [String: String] = [:]
     var remainOnExitByWindowID: [String: Bool] = [:]
+    var paneDeadByWindowID: [String: Bool] = [:]
+    var paneExitStatusByWindowID: [String: Int] = [:]
+    var capturedPaneByWindowID: [String: String] = [:]
     var selectWindowCallCount = 0
     var lastSelectedWindowID: String?
     var selectedWindowIDs: [String] = []
@@ -306,6 +309,12 @@ class MockTmuxAdapter: TmuxAdapter, @unchecked Sendable {
     }
 
     override func setRemainOnExit(windowID: String, enabled: Bool) throws { remainOnExitByWindowID[windowID] = enabled }
+
+    override func isPaneDead(windowID: String) throws -> Bool { paneDeadByWindowID[windowID] ?? false }
+
+    override func paneExitStatus(windowID: String) throws -> Int? { paneExitStatusByWindowID[windowID] }
+
+    override func capturePane(windowID: String) throws -> String { capturedPaneByWindowID[windowID] ?? "" }
 
     override func selectWindow(windowID: String) throws -> Bool {
         selectWindowCallCount += 1

@@ -3867,7 +3867,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             guard let self else { return }
             let key = Self.processTemplateKey(for: process)
             do {
-                try orchestrator.recoverMissingConfiguredProcess(workspaceID: workspace.id, processKey: key)
+                try orchestrator.runConfiguredProcess(workspaceID: workspace.id, processKey: key)
                 reloadData()
             } catch {
                 reloadData()
