@@ -762,7 +762,7 @@ public final class WorkspaceOrchestrator {
                     _ = try stopWorkspaceUnlocked(workspaceID: workspaceID)
                     try launchWorkspaceUnlocked(workspaceID: workspaceID, background: background)
                 } else {
-                    try refreshProcessStatuses(workspaceID: workspaceID)
+                    try refreshProcessStatuses(workspaceID: workspaceID, ignoreStartupGracePeriod: true)
                     try restartExitedProcesses(workspaceID: workspaceID, background: background)
                 }
                 return
@@ -819,6 +819,8 @@ public final class WorkspaceOrchestrator {
                     workspaceID: workspace.id, agentWindows: try store.agentWindows(workspaceID: workspace.id)))
         }
 
+        let runningProcessesToRelink = try store.runningProcesses(workspaceID: workspace.id)
+        let agentWindowsToRelink = try store.agentWindows(workspaceID: workspace.id)
         try store.deleteWindows(workspaceID: workspace.id)
         var index = 0
         let browserWindowIDsWithTarget = Set(
@@ -843,6 +845,8 @@ public final class WorkspaceOrchestrator {
             index += 1
             try store.upsert(window: stored)
         }
+        for process in runningProcessesToRelink { try store.upsert(runningProcess: process) }
+        for agentWindow in agentWindowsToRelink { try store.upsertAgentWindow(agentWindow) }
 
         try store.updateWorkspaceRunning(id: workspace.id, isRunning: true, launchedAt: nowISO8601())
         shouldRestoreReservedPorts = false
@@ -1107,10 +1111,11 @@ public final class WorkspaceOrchestrator {
             if !isProcessAlive(pid: pid) {
                 let updatedProcess = RunningProcessRecord(
                     id: process.id, workspaceID: process.workspaceID, templateName: process.templateName, command: process.command,
-                    terminalApp: process.terminalApp, windowID: process.windowID, terminalTrackingID: process.terminalTrackingID,
-                    terminalNativeID: process.terminalNativeID, terminalContainerID: process.terminalContainerID,
-                    itermTabIndex: process.itermTabIndex, tmuxWindowID: process.tmuxWindowID, pid: process.pid, status: .exited,
-                    logPath: process.logPath, lastOutputAt: process.lastOutputAt, startedAt: process.startedAt, exitedAt: nowISO8601())
+                    runtimeTargetID: process.runtimeTargetID, terminalApp: process.terminalApp, windowID: process.windowID,
+                    terminalTrackingID: process.terminalTrackingID, terminalNativeID: process.terminalNativeID,
+                    terminalContainerID: process.terminalContainerID, itermTabIndex: process.itermTabIndex, tmuxWindowID: process.tmuxWindowID,
+                    pid: process.pid, status: .exited, logPath: process.logPath, lastOutputAt: process.lastOutputAt, startedAt: process.startedAt,
+                    exitedAt: nowISO8601())
                 try store.upsert(runningProcess: updatedProcess)
                 didUpdate = true
                 try handleProcessExit(workspaceID: workspace.id, process: updatedProcess, project: project, workspace: workspace)
@@ -1262,9 +1267,9 @@ public final class WorkspaceOrchestrator {
         let terminalContainerID = storedTerminalContainerID(terminalHost: terminalHost, handle: terminalHandle)
         let restartedProcess = RunningProcessRecord(
             id: process.id, workspaceID: process.workspaceID, templateName: process.templateName, command: template.command,
-            terminalApp: terminalAppName(for: terminalHost), windowID: capturedWindowID, terminalTrackingID: hookSessionID,
-            terminalNativeID: terminalNativeID, terminalContainerID: terminalContainerID, itermTabIndex: nil, tmuxWindowID: tmuxWindow?.id,
-            pid: newPID, status: .running, logPath: nil, lastOutputAt: nil, startedAt: nowISO8601(), exitedAt: nil)
+            runtimeTargetID: process.runtimeTargetID, terminalApp: terminalAppName(for: terminalHost), windowID: capturedWindowID,
+            terminalTrackingID: hookSessionID, terminalNativeID: terminalNativeID, terminalContainerID: terminalContainerID, itermTabIndex: nil,
+            tmuxWindowID: tmuxWindow?.id, pid: newPID, status: .running, logPath: nil, lastOutputAt: nil, startedAt: nowISO8601(), exitedAt: nil)
         try store.upsert(runningProcess: restartedProcess)
         let existingWindows = try store.windows(workspaceID: workspace.id)
         let existingWindow = existingWindows.first(where: { matchesTrackedTerminalWindow($0, process: process) })
@@ -1795,9 +1800,20 @@ public final class WorkspaceOrchestrator {
         }
     }
 
+    private func fallbackAgentFocusName(_ record: AgentWindowRecord) throws -> String? {
+        let trackedWindow = try matchedTrackedWindowForAgent(
+            workspaceID: record.workspaceID, provider: record.provider, terminalTrackingID: record.terminalTrackingID,
+            yabaiWindowID: record.yabaiWindowID ?? record.windowID, tmuxWindowID: record.tmuxWindowID)
+        if let title = sanitizedFocusName(trackedWindow?.name) { return sanitizedFocusName("Coding Agent \(title)") ?? title }
+        if let detail = sanitizedFocusName(trackedWindow?.detail) { return sanitizedFocusName("Coding Agent \(detail)") ?? detail }
+        return sanitizedFocusName("Coding Agent")
+    }
+
     private func focusName(for target: WorkspaceNavigationTarget, workspaceID: String) throws -> String? {
         switch target {
-        case .agent(let record): return sanitizedFocusName(record.label)
+        case .agent(let record):
+            if let label = sanitizedFocusName(record.label) { return label }
+            return try fallbackAgentFocusName(record)
         case .browser(let window): return sanitizedFocusName(window.name)
         case .process(let process): return sanitizedFocusName(process.templateName)
         case .window(let window): return sanitizedFocusName(window.name)
@@ -2724,18 +2740,19 @@ public final class WorkspaceOrchestrator {
             try store.upsert(
                 runningProcess: RunningProcessRecord(
                     id: process.id, workspaceID: process.workspaceID, templateName: process.templateName, command: process.command,
-                    terminalApp: process.terminalApp, windowID: windowID, terminalTrackingID: sessionID ?? process.terminalTrackingID,
-                    terminalNativeID: process.terminalNativeID, terminalContainerID: process.terminalContainerID, itermTabIndex: nil,
-                    tmuxWindowID: process.tmuxWindowID, pid: process.pid, status: process.status, logPath: process.logPath,
-                    lastOutputAt: process.lastOutputAt, startedAt: process.startedAt, exitedAt: process.exitedAt))
+                    runtimeTargetID: process.runtimeTargetID, terminalApp: process.terminalApp, windowID: windowID,
+                    terminalTrackingID: sessionID ?? process.terminalTrackingID, terminalNativeID: process.terminalNativeID,
+                    terminalContainerID: process.terminalContainerID, itermTabIndex: nil, tmuxWindowID: process.tmuxWindowID, pid: process.pid,
+                    status: process.status, logPath: process.logPath, lastOutputAt: process.lastOutputAt, startedAt: process.startedAt,
+                    exitedAt: process.exitedAt))
         }
         for agent in try store.agentWindows(workspaceID: workspaceID) where TerminalHost(rawValue: agent.provider.rawValue) != nil {
             try store.upsertAgentWindow(
                 AgentWindowRecord(
                     id: agent.id, workspaceID: agent.workspaceID, provider: agent.provider, label: agent.label,
-                    terminalTrackingID: sessionID ?? agent.terminalTrackingID, terminalNativeID: agent.terminalNativeID,
-                    tmuxWindowID: agent.tmuxWindowID, codexThreadID: agent.codexThreadID, windowID: windowID, yabaiWindowID: windowID,
-                    status: agent.status, createdAt: agent.createdAt, updatedAt: now))
+                    runtimeTargetID: agent.runtimeTargetID, terminalTrackingID: sessionID ?? agent.terminalTrackingID,
+                    terminalNativeID: agent.terminalNativeID, tmuxWindowID: agent.tmuxWindowID, codexThreadID: agent.codexThreadID,
+                    windowID: windowID, yabaiWindowID: windowID, status: agent.status, createdAt: agent.createdAt, updatedAt: now))
         }
         setItermTerminalSessionMetadata(workspaceID: workspaceID, windowID: windowID, sessionID: sessionID, tabIndex: nil)
     }
@@ -2827,11 +2844,11 @@ public final class WorkspaceOrchestrator {
                 try store.upsert(
                     runningProcess: RunningProcessRecord(
                         id: process.id, workspaceID: process.workspaceID, templateName: process.templateName, command: process.command,
-                        terminalApp: process.terminalApp, windowID: process.windowID, terminalTrackingID: process.terminalTrackingID,
-                        terminalNativeID: process.terminalNativeID, terminalContainerID: process.terminalContainerID,
-                        itermTabIndex: process.itermTabIndex, tmuxWindowID: process.tmuxWindowID, pid: process.pid, status: .exited,
-                        logPath: process.logPath, lastOutputAt: process.lastOutputAt, startedAt: process.startedAt, exitedAt: process.exitedAt ?? now)
-                )
+                        runtimeTargetID: process.runtimeTargetID, terminalApp: process.terminalApp, windowID: process.windowID,
+                        terminalTrackingID: process.terminalTrackingID, terminalNativeID: process.terminalNativeID,
+                        terminalContainerID: process.terminalContainerID, itermTabIndex: process.itermTabIndex, tmuxWindowID: process.tmuxWindowID,
+                        pid: process.pid, status: .exited, logPath: process.logPath, lastOutputAt: process.lastOutputAt, startedAt: process.startedAt,
+                        exitedAt: process.exitedAt ?? now))
                 didMutate = true
                 continue
             }
@@ -2840,10 +2857,11 @@ public final class WorkspaceOrchestrator {
                 try store.upsert(
                     runningProcess: RunningProcessRecord(
                         id: process.id, workspaceID: process.workspaceID, templateName: process.templateName, command: process.command,
-                        terminalApp: process.terminalApp, windowID: process.windowID, terminalTrackingID: process.terminalTrackingID,
-                        terminalNativeID: process.terminalNativeID, terminalContainerID: process.terminalContainerID,
-                        itermTabIndex: process.itermTabIndex, tmuxWindowID: process.tmuxWindowID, pid: panePID, status: .running,
-                        logPath: process.logPath, lastOutputAt: process.lastOutputAt, startedAt: process.startedAt, exitedAt: nil))
+                        runtimeTargetID: process.runtimeTargetID, terminalApp: process.terminalApp, windowID: process.windowID,
+                        terminalTrackingID: process.terminalTrackingID, terminalNativeID: process.terminalNativeID,
+                        terminalContainerID: process.terminalContainerID, itermTabIndex: process.itermTabIndex, tmuxWindowID: process.tmuxWindowID,
+                        pid: panePID, status: .running, logPath: process.logPath, lastOutputAt: process.lastOutputAt, startedAt: process.startedAt,
+                        exitedAt: nil))
                 didMutate = true
             }
         }
@@ -3789,11 +3807,12 @@ public final class WorkspaceOrchestrator {
             if edit.commandChanged || edit.modeChanged {
                 let restartedProcess = RunningProcessRecord(
                     id: runningProcess.id, workspaceID: runningProcess.workspaceID, templateName: edit.updatedKey, command: edit.updated.command,
-                    terminalApp: runningProcess.terminalApp, windowID: runningProcess.windowID, terminalTrackingID: runningProcess.terminalTrackingID,
-                    terminalNativeID: runningProcess.terminalNativeID, terminalContainerID: runningProcess.terminalContainerID,
-                    itermTabIndex: runningProcess.itermTabIndex, tmuxWindowID: runningProcess.tmuxWindowID, pid: runningProcess.pid,
-                    status: runningProcess.status, logPath: runningProcess.logPath, lastOutputAt: runningProcess.lastOutputAt,
-                    startedAt: runningProcess.startedAt, exitedAt: runningProcess.exitedAt)
+                    runtimeTargetID: runningProcess.runtimeTargetID, terminalApp: runningProcess.terminalApp, windowID: runningProcess.windowID,
+                    terminalTrackingID: runningProcess.terminalTrackingID, terminalNativeID: runningProcess.terminalNativeID,
+                    terminalContainerID: runningProcess.terminalContainerID, itermTabIndex: runningProcess.itermTabIndex,
+                    tmuxWindowID: runningProcess.tmuxWindowID, pid: runningProcess.pid, status: runningProcess.status,
+                    logPath: runningProcess.logPath, lastOutputAt: runningProcess.lastOutputAt, startedAt: runningProcess.startedAt,
+                    exitedAt: runningProcess.exitedAt)
                 try restartProcessInTerminal(workspaceID: workspace.id, process: restartedProcess, templateOverride: edit.updated)
             } else if edit.keyChanged {
                 try relabelRunningProcess(
@@ -3817,11 +3836,11 @@ public final class WorkspaceOrchestrator {
 
     private func relabelRunningProcess(workspaceID: String, process: RunningProcessRecord, templateName: String, command: String) throws {
         let updatedProcess = RunningProcessRecord(
-            id: process.id, workspaceID: process.workspaceID, templateName: templateName, command: command, terminalApp: process.terminalApp,
-            windowID: process.windowID, terminalTrackingID: process.terminalTrackingID, terminalNativeID: process.terminalNativeID,
-            terminalContainerID: process.terminalContainerID, itermTabIndex: process.itermTabIndex, tmuxWindowID: process.tmuxWindowID,
-            pid: process.pid, status: process.status, logPath: process.logPath, lastOutputAt: process.lastOutputAt, startedAt: process.startedAt,
-            exitedAt: process.exitedAt)
+            id: process.id, workspaceID: process.workspaceID, templateName: templateName, command: command, runtimeTargetID: process.runtimeTargetID,
+            terminalApp: process.terminalApp, windowID: process.windowID, terminalTrackingID: process.terminalTrackingID,
+            terminalNativeID: process.terminalNativeID, terminalContainerID: process.terminalContainerID, itermTabIndex: process.itermTabIndex,
+            tmuxWindowID: process.tmuxWindowID, pid: process.pid, status: process.status, logPath: process.logPath,
+            lastOutputAt: process.lastOutputAt, startedAt: process.startedAt, exitedAt: process.exitedAt)
         try store.upsert(runningProcess: updatedProcess)
         if let terminalWindow = try store.windows(workspaceID: workspaceID).first(where: {
             $0.role == "terminal"
@@ -3901,10 +3920,11 @@ public final class WorkspaceOrchestrator {
         for (desired, process) in toRelabel {
             let updated = RunningProcessRecord(
                 id: process.id, workspaceID: workspace.id, templateName: desired.desiredKey, command: process.command,
-                terminalApp: process.terminalApp, windowID: process.windowID, terminalTrackingID: process.terminalTrackingID,
-                terminalNativeID: process.terminalNativeID, terminalContainerID: process.terminalContainerID, itermTabIndex: process.itermTabIndex,
-                tmuxWindowID: process.tmuxWindowID, pid: process.pid, status: process.status, logPath: process.logPath,
-                lastOutputAt: process.lastOutputAt, startedAt: process.startedAt, exitedAt: process.exitedAt)
+                runtimeTargetID: process.runtimeTargetID, terminalApp: process.terminalApp, windowID: process.windowID,
+                terminalTrackingID: process.terminalTrackingID, terminalNativeID: process.terminalNativeID,
+                terminalContainerID: process.terminalContainerID, itermTabIndex: process.itermTabIndex, tmuxWindowID: process.tmuxWindowID,
+                pid: process.pid, status: process.status, logPath: process.logPath, lastOutputAt: process.lastOutputAt, startedAt: process.startedAt,
+                exitedAt: process.exitedAt)
             try store.upsert(runningProcess: updated)
             if let terminalWindow = try store.windows(workspaceID: workspace.id).first(where: {
                 $0.role == "terminal"
@@ -3926,10 +3946,11 @@ public final class WorkspaceOrchestrator {
             let name = desired.desiredKey
             let updatedProcess = RunningProcessRecord(
                 id: process.id, workspaceID: process.workspaceID, templateName: name, command: desired.template.command,
-                terminalApp: process.terminalApp, windowID: process.windowID, terminalTrackingID: process.terminalTrackingID,
-                terminalNativeID: process.terminalNativeID, terminalContainerID: process.terminalContainerID, itermTabIndex: process.itermTabIndex,
-                tmuxWindowID: process.tmuxWindowID, pid: process.pid, status: process.status, logPath: process.logPath,
-                lastOutputAt: process.lastOutputAt, startedAt: process.startedAt, exitedAt: process.exitedAt)
+                runtimeTargetID: process.runtimeTargetID, terminalApp: process.terminalApp, windowID: process.windowID,
+                terminalTrackingID: process.terminalTrackingID, terminalNativeID: process.terminalNativeID,
+                terminalContainerID: process.terminalContainerID, itermTabIndex: process.itermTabIndex, tmuxWindowID: process.tmuxWindowID,
+                pid: process.pid, status: process.status, logPath: process.logPath, lastOutputAt: process.lastOutputAt, startedAt: process.startedAt,
+                exitedAt: process.exitedAt)
             try restartProcessInTerminal(workspaceID: workspace.id, process: updatedProcess, templateOverride: desired.template)
         }
 
@@ -4126,7 +4147,7 @@ public final class WorkspaceOrchestrator {
             try store.upsert(runningProcess: running)
             terminalWindows.append(
                 WindowRecord(
-                    id: UUID().uuidString, workspaceID: workspace.id, app: terminalAppName(for: terminalHost), name: name, detail: template.command,
+                    id: running.id, workspaceID: workspace.id, app: terminalAppName(for: terminalHost), name: name, detail: template.command,
                     targetURL: nil, windowID: windowID, terminalTrackingID: hookSessionID, terminalNativeID: terminalNativeID,
                     terminalContainerID: terminalContainerID, itermTabIndex: nil, tmuxWindowID: tmuxWindow?.id, role: "terminal",
                     orderIndex: 200 + index, lastSeenAt: nowISO8601()))
@@ -4747,10 +4768,37 @@ public final class WorkspaceOrchestrator {
         if !processUsesWindow { try store.deleteWindow(id: trackedWindow.id) }
     }
 
+    private func agentSessionEventMessage(
+        provider: AgentProvider, label: String?, terminalTrackingID: String?, terminalNativeID: String?, codexThreadID: String?, yabaiWindowID: Int?,
+        environmentKeys: [String]? = nil
+    ) -> String {
+        func normalizedValue(_ value: String?) -> String {
+            guard let value = value?.trimmingCharacters(in: .whitespacesAndNewlines), !value.isEmpty else { return "<nil>" }
+            return value
+        }
+
+        let normalizedLabel = label?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let labelValue = (normalizedLabel?.isEmpty == false ? normalizedLabel : nil) ?? "<nil>"
+        let trackingValue = normalizedValue(terminalTrackingID)
+        let nativeValue = normalizedValue(terminalNativeID)
+        let threadValue = normalizedValue(codexThreadID)
+        let windowValue = yabaiWindowID.map(String.init) ?? "<nil>"
+        let envKeysValue = environmentKeys.map { $0.isEmpty ? "<none>" : $0.joined(separator: ",") } ?? "<nil>"
+        return
+            "provider=\(provider.rawValue) label=\(labelValue) tracking_id=\(trackingValue) native_id=\(nativeValue) codex_thread_id=\(threadValue) yabai_window_id=\(windowValue) env_keys=\(envKeysValue)"
+    }
+
+    private func appendAgentSessionEvent(agentSessionID: String, eventType: String, source: String, message: String?, createdAt: String) {
+        let runtimeTargetID = try? store.agentSessionRuntimeTargetID(id: agentSessionID)
+        try? store.appendAgentSessionEvent(
+            agentSessionID: agentSessionID, eventType: eventType, source: source, message: message, runtimeTargetID: runtimeTargetID,
+            createdAt: createdAt)
+    }
+
     @discardableResult public func registerAgentWindow(
         workspaceID: String, provider: AgentProvider, label: String? = nil, terminalTrackingID: String? = nil, tmuxWindowID: String? = nil,
         terminalNativeID: String? = nil, codexThreadID: String? = nil, yabaiWindowID: Int? = nil, status: AgentWindowStatus = .idle,
-        claimedLauncherName: String? = nil
+        claimedLauncherName: String? = nil, eventType: String = "register", eventSource: String = "orchestrator", environmentKeys: [String]? = nil
     ) throws -> AgentWindowRecord {
         let now = nowISO8601()
         let existingAgentWindows = try store.agentWindows(workspaceID: workspaceID)
@@ -4773,7 +4821,7 @@ public final class WorkspaceOrchestrator {
                 claimedLauncherName: claimedLauncherName ?? existing.label)
             let updated = AgentWindowRecord(
                 id: existing.id, workspaceID: existing.workspaceID, provider: existing.provider, label: resolvedLabel,
-                terminalTrackingID: terminalTrackingID ?? existing.terminalTrackingID,
+                runtimeTargetID: existing.runtimeTargetID ?? trackedWindow?.id, terminalTrackingID: terminalTrackingID ?? existing.terminalTrackingID,
                 terminalNativeID: finalTerminalNativeID ?? existing.terminalNativeID, tmuxWindowID: resolvedTmuxWindowID ?? existing.tmuxWindowID,
                 codexThreadID: codexThreadID ?? existing.codexThreadID, windowID: resolvedWindowID ?? existing.windowID,
                 yabaiWindowID: resolvedWindowID ?? existing.yabaiWindowID, status: status, createdAt: existing.createdAt, updatedAt: now)
@@ -4782,24 +4830,36 @@ public final class WorkspaceOrchestrator {
                 browserSessions: try store.workspaceBrowserSessions(workspaceID: workspaceID),
                 agentWindows: existingAgentWindows.map { $0.id == existing.id ? updated : $0 })
             try store.upsertAgentWindow(updated)
+            appendAgentSessionEvent(
+                agentSessionID: updated.id, eventType: eventType, source: eventSource,
+                message: agentSessionEventMessage(
+                    provider: updated.provider, label: updated.label, terminalTrackingID: updated.terminalTrackingID,
+                    terminalNativeID: updated.terminalNativeID, codexThreadID: updated.codexThreadID, yabaiWindowID: updated.yabaiWindowID,
+                    environmentKeys: environmentKeys), createdAt: now)
             return updated
         }
         let resolvedLabel = try uniqueAgentFocusLabel(workspaceID: workspaceID, preferredLabel: label, claimedLauncherName: claimedLauncherName)
         let record = AgentWindowRecord(
-            id: UUID().uuidString, workspaceID: workspaceID, provider: provider, label: resolvedLabel, terminalTrackingID: terminalTrackingID,
-            terminalNativeID: finalTerminalNativeID, tmuxWindowID: resolvedTmuxWindowID, codexThreadID: codexThreadID, windowID: resolvedWindowID,
-            yabaiWindowID: resolvedWindowID, status: status, createdAt: now, updatedAt: now)
+            id: UUID().uuidString, workspaceID: workspaceID, provider: provider, label: resolvedLabel, runtimeTargetID: trackedWindow?.id,
+            terminalTrackingID: terminalTrackingID, terminalNativeID: finalTerminalNativeID, tmuxWindowID: resolvedTmuxWindowID,
+            codexThreadID: codexThreadID, windowID: resolvedWindowID, yabaiWindowID: resolvedWindowID, status: status, createdAt: now, updatedAt: now)
         try validateWorkspaceFocusNames(
             workspaceID: workspaceID, processes: try store.workspaceProcesses(workspaceID: workspaceID),
             browserSessions: try store.workspaceBrowserSessions(workspaceID: workspaceID), agentWindows: existingAgentWindows + [record])
         try store.upsertAgentWindow(record)
+        appendAgentSessionEvent(
+            agentSessionID: record.id, eventType: eventType, source: eventSource,
+            message: agentSessionEventMessage(
+                provider: record.provider, label: record.label, terminalTrackingID: record.terminalTrackingID,
+                terminalNativeID: record.terminalNativeID, codexThreadID: record.codexThreadID, yabaiWindowID: record.yabaiWindowID,
+                environmentKeys: environmentKeys), createdAt: now)
         return record
     }
 
     @discardableResult public func updateAgentWindowStatus(
         workspaceID: String, provider: AgentProvider, terminalTrackingID: String? = nil, codexThreadID: String? = nil, tmuxWindowID: String? = nil,
         terminalNativeID: String? = nil, yabaiWindowID: Int? = nil, label: String? = nil, status: AgentWindowStatus,
-        claimedLauncherName: String? = nil
+        claimedLauncherName: String? = nil, eventType: String? = nil, eventSource: String = "orchestrator", environmentKeys: [String]? = nil
     ) throws -> AgentWindowRecord {
         let now = nowISO8601()
         let allAgentWindows = try store.agentWindows(workspaceID: workspaceID)
@@ -4822,7 +4882,7 @@ public final class WorkspaceOrchestrator {
                 claimedLauncherName: claimedLauncherName ?? existing.label)
             let updated = AgentWindowRecord(
                 id: existing.id, workspaceID: existing.workspaceID, provider: existing.provider, label: resolvedLabel,
-                terminalTrackingID: terminalTrackingID ?? existing.terminalTrackingID,
+                runtimeTargetID: existing.runtimeTargetID ?? trackedWindow?.id, terminalTrackingID: terminalTrackingID ?? existing.terminalTrackingID,
                 terminalNativeID: finalTerminalNativeID ?? existing.terminalNativeID, tmuxWindowID: resolvedTmuxWindowID ?? existing.tmuxWindowID,
                 codexThreadID: codexThreadID ?? existing.codexThreadID, windowID: resolvedWindowID ?? existing.windowID,
                 yabaiWindowID: resolvedWindowID ?? existing.yabaiWindowID, status: status, createdAt: existing.createdAt, updatedAt: now)
@@ -4831,17 +4891,25 @@ public final class WorkspaceOrchestrator {
                 browserSessions: try store.workspaceBrowserSessions(workspaceID: workspaceID),
                 agentWindows: allAgentWindows.map { $0.id == existing.id ? updated : $0 })
             try store.upsertAgentWindow(updated)
+            appendAgentSessionEvent(
+                agentSessionID: updated.id, eventType: eventType ?? status.rawValue, source: eventSource,
+                message: agentSessionEventMessage(
+                    provider: updated.provider, label: updated.label, terminalTrackingID: updated.terminalTrackingID,
+                    terminalNativeID: updated.terminalNativeID, codexThreadID: updated.codexThreadID, yabaiWindowID: updated.yabaiWindowID,
+                    environmentKeys: environmentKeys), createdAt: now)
             return updated
         }
         return try registerAgentWindow(
             workspaceID: workspaceID, provider: provider, label: label, terminalTrackingID: terminalTrackingID, tmuxWindowID: resolvedTmuxWindowID,
             terminalNativeID: resolvedTerminalNativeID, codexThreadID: codexThreadID, yabaiWindowID: yabaiWindowID, status: status,
-            claimedLauncherName: claimedLauncherName)
+            claimedLauncherName: claimedLauncherName, eventType: eventType ?? status.rawValue, eventSource: eventSource,
+            environmentKeys: environmentKeys)
     }
 
     @discardableResult public func handleAgentExit(
         workspaceID: String, provider: AgentProvider, terminalTrackingID: String? = nil, tmuxWindowID: String? = nil, codexThreadID: String? = nil,
-        terminalNativeID: String? = nil, yabaiWindowID: Int? = nil, label: String? = nil
+        terminalNativeID: String? = nil, yabaiWindowID: Int? = nil, label: String? = nil, eventType: String = "exit",
+        eventSource: String = "orchestrator", environmentKeys: [String]? = nil
     ) throws -> AgentWindowRecord? {
         guard
             let existing = try matchingAgentWindow(
@@ -4858,8 +4926,14 @@ public final class WorkspaceOrchestrator {
                 workspaceID: workspaceID, provider: provider, terminalTrackingID: terminalTrackingID ?? existing.terminalTrackingID,
                 codexThreadID: codexThreadID ?? existing.codexThreadID, tmuxWindowID: tmuxWindowID ?? existing.tmuxWindowID,
                 terminalNativeID: terminalNativeID ?? existing.terminalNativeID, yabaiWindowID: resolvedWindowID, label: label ?? existing.label,
-                status: .idle)
+                status: .idle, eventType: eventType, eventSource: eventSource, environmentKeys: environmentKeys)
         }
+        appendAgentSessionEvent(
+            agentSessionID: existing.id, eventType: eventType, source: eventSource,
+            message: agentSessionEventMessage(
+                provider: existing.provider, label: label ?? existing.label, terminalTrackingID: terminalTrackingID ?? existing.terminalTrackingID,
+                terminalNativeID: terminalNativeID ?? existing.terminalNativeID, codexThreadID: codexThreadID ?? existing.codexThreadID,
+                yabaiWindowID: resolvedWindowID, environmentKeys: environmentKeys), createdAt: nowISO8601())
         try store.deleteAgentWindow(id: existing.id)
         try removeAdHocTrackedWindowForAgent(
             workspaceID: workspaceID, provider: provider, terminalTrackingID: terminalTrackingID ?? existing.terminalTrackingID,
@@ -5087,9 +5161,10 @@ public final class WorkspaceOrchestrator {
         try store.upsert(
             runningProcess: RunningProcessRecord(
                 id: process.id, workspaceID: process.workspaceID, templateName: process.templateName, command: process.command,
-                terminalApp: process.terminalApp, windowID: capturedWindowID, terminalTrackingID: hookSessionID, terminalNativeID: terminalNativeID,
-                terminalContainerID: terminalContainerID, itermTabIndex: nil, tmuxWindowID: process.tmuxWindowID, pid: pid, status: .running,
-                logPath: process.logPath, lastOutputAt: process.lastOutputAt, startedAt: process.startedAt, exitedAt: nil))
+                runtimeTargetID: process.runtimeTargetID, terminalApp: process.terminalApp, windowID: capturedWindowID,
+                terminalTrackingID: hookSessionID, terminalNativeID: terminalNativeID, terminalContainerID: terminalContainerID, itermTabIndex: nil,
+                tmuxWindowID: process.tmuxWindowID, pid: pid, status: .running, logPath: process.logPath, lastOutputAt: process.lastOutputAt,
+                startedAt: process.startedAt, exitedAt: nil))
 
         let existingWindow = try store.windows(workspaceID: workspace.id).first(where: { window in
             window.role == "terminal"
@@ -5131,7 +5206,7 @@ public final class WorkspaceOrchestrator {
         let nextOrder = Self.nextWindowOrderIndex(existing: try store.windows(workspaceID: workspace.id), role: "terminal", orderOffset: 200)
         try store.upsert(
             window: WindowRecord(
-                id: UUID().uuidString, workspaceID: workspace.id, app: terminalAppName(for: terminalHost), name: name, detail: template.command,
+                id: record.id, workspaceID: workspace.id, app: terminalAppName(for: terminalHost), name: name, detail: template.command,
                 targetURL: nil, windowID: capturedWindowID, terminalTrackingID: hookSessionID, terminalNativeID: terminalNativeID,
                 terminalContainerID: terminalContainerID, itermTabIndex: nil, tmuxWindowID: tmuxWindow?.id, role: "terminal", orderIndex: nextOrder,
                 lastSeenAt: nowISO8601()))

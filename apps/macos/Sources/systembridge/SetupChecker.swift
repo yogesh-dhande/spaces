@@ -27,11 +27,13 @@ public struct SetupCheckResult {
 public final class SetupChecker {
     public static var startupBlockingCheckIDs: [SetupCheckID] { [.terminalInstalled, .tmuxInstalled, .yabaiInstalled] }
 
-    private let terminalAdapters: [any TerminalAdapter]
+    private let iterm2: Iterm2Adapter
+    private let ghostty: GhosttyAdapter
     private let tmux: TmuxAdapter
 
     public init(iterm2: Iterm2Adapter = Iterm2Adapter(), ghostty: GhosttyAdapter = GhosttyAdapter(), tmux: TmuxAdapter = TmuxAdapter()) {
-        terminalAdapters = [iterm2, ghostty]
+        self.iterm2 = iterm2
+        self.ghostty = ghostty
         self.tmux = tmux
     }
 
@@ -76,7 +78,15 @@ public final class SetupChecker {
 
     // MARK: - Individual checks
 
-    private func isTerminalInstalled() -> Bool { terminalAdapters.contains { $0.isAvailable() } }
+    public func isTerminalHostAvailable(named host: String) -> Bool {
+        switch host.lowercased() {
+        case "iterm2": iterm2.isAvailable()
+        case "ghostty": ghostty.isAvailable()
+        default: false
+        }
+    }
+
+    private func isTerminalInstalled() -> Bool { isTerminalHostAvailable(named: "iterm2") || isTerminalHostAvailable(named: "ghostty") }
 
     private func isTmuxInstalled() -> Bool { tmux.isAvailable() }
 

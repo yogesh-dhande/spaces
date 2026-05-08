@@ -303,6 +303,21 @@ import workspacecore
         #expect(shortcutIndices.browserSessionsByURL["http://localhost:3000"] == 1)
         #expect(shortcutIndices.processesByName["web"] == 2)
         #expect(shortcutIndices.codingAgentsByName["claude"] == 4)
+        #expect(shortcutIndices.codingAgentsByIdentity[AppKitController.codingAgentShortcutIdentity(launcherName: "claude")] == 4)
+    }
+
+    @Test func unlabeledAgentRowsStillReceiveShortcutIdentity() {
+        let agentWindows = [
+            AgentWindowRecord(
+                id: "agent-unlabeled", workspaceID: "workspace", provider: .ghostty, label: nil, terminalTrackingID: "ghostty-hook-1",
+                terminalNativeID: "ghostty-terminal-1", tmuxWindowID: nil, codexThreadID: nil, windowID: 202, yabaiWindowID: 202, status: .waiting,
+                createdAt: "now", updatedAt: "now")
+        ]
+
+        let shortcutIndices = AppKitController.workspaceDetailShortcutIndices(
+            browserSessions: [], processEntries: [], processesByID: [:], configuredAgentLaunchers: [], agentWindows: agentWindows)
+
+        #expect(shortcutIndices.codingAgentsByIdentity[AppKitController.codingAgentShortcutIdentity(agentWindowID: "agent-unlabeled")] == 1)
     }
 
     @Test func resolvedCodingAgentEntriesKeepConfiguredSlotsBeforeAdHocAgents() {

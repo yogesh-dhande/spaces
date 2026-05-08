@@ -180,17 +180,19 @@ struct SignalCommand: ParsableCommand {
             try orchestrator.registerAgentWindow(
                 workspaceID: workspace.id, provider: agentContext.provider, label: agentContext.label,
                 terminalTrackingID: agentContext.terminalTrackingID, terminalNativeID: agentContext.terminalNativeID,
-                codexThreadID: agentContext.codexThreadID, yabaiWindowID: agentContext.yabaiWindowID, status: .idle)
+                codexThreadID: agentContext.codexThreadID, yabaiWindowID: agentContext.yabaiWindowID, status: .idle, eventType: type.rawValue,
+                eventSource: "spaces_signal", environmentKeys: agentContext.environmentKeys)
         case .start, .waiting, .done:
             try orchestrator.updateAgentWindowStatus(
                 workspaceID: workspace.id, provider: agentContext.provider, terminalTrackingID: agentContext.terminalTrackingID,
                 codexThreadID: agentContext.codexThreadID, terminalNativeID: agentContext.terminalNativeID, yabaiWindowID: agentContext.yabaiWindowID,
-                label: agentContext.label, status: type.status)
+                label: agentContext.label, status: type.status, eventType: type.rawValue, eventSource: "spaces_signal",
+                environmentKeys: agentContext.environmentKeys)
         case .exit:
             try orchestrator.handleAgentExit(
                 workspaceID: workspace.id, provider: agentContext.provider, terminalTrackingID: agentContext.terminalTrackingID,
                 codexThreadID: agentContext.codexThreadID, terminalNativeID: agentContext.terminalNativeID, yabaiWindowID: agentContext.yabaiWindowID,
-                label: agentContext.label)
+                label: agentContext.label, eventType: type.rawValue, eventSource: "spaces_signal", environmentKeys: agentContext.environmentKeys)
         }
 
         try context.output.emit(
@@ -228,6 +230,7 @@ struct AgentInvocationContext {
     let terminalNativeID: String?
     let codexThreadID: String?
     let yabaiWindowID: Int?
+    let environmentKeys: [String]
 }
 
 func resolveAgentInvocationContext(workspaceID: String, environment: [String: String], orchestrator: WorkspaceOrchestrator, context: CLIContext)
@@ -257,7 +260,8 @@ func resolveAgentInvocationContext(workspaceID: String, environment: [String: St
     }
     return AgentInvocationContext(
         provider: resolvedProvider, label: inferredAgentLabel(environment: environment), terminalTrackingID: splitIdentity.sessionID,
-        terminalNativeID: terminalNativeID, codexThreadID: environment["CODEX_THREAD_ID"], yabaiWindowID: resolvedYabaiWindowID)
+        terminalNativeID: terminalNativeID, codexThreadID: environment["CODEX_THREAD_ID"], yabaiWindowID: resolvedYabaiWindowID,
+        environmentKeys: environment.keys.sorted())
 }
 
 private func requireWorkspace(id: String, orchestrator: WorkspaceOrchestrator) throws -> WorkspaceRecord {
@@ -329,6 +333,7 @@ private func inferredAgentLabel(environment: [String: String]) -> String? {
         return label
     }
     if environment["CODEX_THREAD_ID"] != nil { return "Codex CLI" }
+    if environment["CODEX_MANAGED_BY_NPM"] != nil { return "Codex CLI" }
     if environment["CLAUDE_CODE_ENTRYPOINT"] != nil { return "Claude Code CLI" }
 
     return nil

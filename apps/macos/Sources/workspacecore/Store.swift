@@ -552,34 +552,31 @@ public final class SQLiteStore {
     }
 
     public func upsert(runningProcess: RunningProcessRecord) throws {
+        let runtimeTargetID =
+            try runningProcess.runtimeTargetID
+            ?? matchingRuntimeTargetID(
+                workspaceID: runningProcess.workspaceID, trackingID: runningProcess.terminalTrackingID, nativeID: runningProcess.terminalNativeID,
+                tmuxWindowID: runningProcess.tmuxWindowID, windowID: runningProcess.windowID)
+        let resolvedRuntimeTargetID = try ensureRuntimeTargetForRunningProcess(runningProcess, runtimeTargetID: runtimeTargetID)
         try execute(
             sql: """
-                INSERT INTO running_processes(
-                  id, workspace_id, template_name, command, terminal_app, window_id, terminal_tracking_id, terminal_native_id, terminal_container_id,
-                  iterm_tab_index, tmux_window_id, pid, status, log_path, last_output_at, started_at, exited_at
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(id) DO UPDATE SET
-                  template_name = excluded.template_name,
-                  command = excluded.command,
-                  terminal_app = excluded.terminal_app,
-                  window_id = excluded.window_id,
-                  terminal_tracking_id = excluded.terminal_tracking_id,
-                  terminal_native_id = excluded.terminal_native_id,
-                  terminal_container_id = excluded.terminal_container_id,
-                  iterm_tab_index = excluded.iterm_tab_index,
-                  tmux_window_id = excluded.tmux_window_id,
-                  pid = excluded.pid,
-                  status = excluded.status,
-                  log_path = excluded.log_path,
-                  last_output_at = excluded.last_output_at,
-                  started_at = excluded.started_at,
-                  exited_at = excluded.exited_at
+                    INSERT INTO running_processes(
+                      id, workspace_id, template_name, command, runtime_target_id, pid, status, log_path, last_output_at, started_at, exited_at
+                    )
+                    VALUES (?, ?, ?, ?, NULLIF(?, ''), ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(id) DO UPDATE SET
+                      template_name = excluded.template_name,
+                      command = excluded.command,
+                      runtime_target_id = excluded.runtime_target_id,
+                      pid = excluded.pid,
+                      status = excluded.status,
+                      log_path = excluded.log_path,
+                      last_output_at = excluded.last_output_at,
+                      started_at = excluded.started_at,
+                      exited_at = excluded.exited_at
                 """,
             bindings: [
-                runningProcess.id, runningProcess.workspaceID, runningProcess.templateName, runningProcess.command, runningProcess.terminalApp ?? "",
-                runningProcess.windowID.map(String.init) ?? "", runningProcess.terminalTrackingID ?? "", runningProcess.terminalNativeID ?? "",
-                runningProcess.terminalContainerID ?? "", runningProcess.itermTabIndex.map(String.init) ?? "", runningProcess.tmuxWindowID ?? "",
+                runningProcess.id, runningProcess.workspaceID, runningProcess.templateName, runningProcess.command, resolvedRuntimeTargetID ?? "",
                 runningProcess.pid.map(String.init) ?? "", runningProcess.status.rawValue, runningProcess.logPath ?? "",
                 runningProcess.lastOutputAt ?? "", runningProcess.startedAt ?? "", runningProcess.exitedAt ?? "",
             ])
@@ -588,9 +585,32 @@ public final class SQLiteStore {
     public func runningProcesses(workspaceID: String) throws -> [RunningProcessRecord] {
         let rows = try queryRows(
             sql: """
-                SELECT id, workspace_id, template_name, command, terminal_app, window_id, terminal_tracking_id, terminal_native_id,
-                       terminal_container_id, iterm_tab_index, tmux_window_id, pid, status, log_path, last_output_at, started_at, exited_at
-                FROM running_processes WHERE workspace_id = ?
+                SELECT
+                  rp.id,
+                  rp.workspace_id,
+                  rp.template_name,
+                  rp.command,
+                  COALESCE(rp.runtime_target_id, ''),
+                  COALESCE(rt.app, ''),
+                  COALESCE(rt.name, ''),
+                  COALESCE(rt.detail, ''),
+                  COALESCE(rt.window_id, ''),
+                  COALESCE(tt.provider, ''),
+                  COALESCE(tt.tracking_id, ''),
+                  COALESCE(tt.native_id, ''),
+                  COALESCE(tt.container_id, ''),
+                  COALESCE(tt.iterm_tab_index, ''),
+                  COALESCE(tt.tmux_window_id, ''),
+                  COALESCE(rp.pid, ''),
+                  rp.status,
+                  COALESCE(rp.log_path, ''),
+                  COALESCE(rp.last_output_at, ''),
+                  COALESCE(rp.started_at, ''),
+                  COALESCE(rp.exited_at, '')
+                FROM running_processes rp
+                LEFT JOIN runtime_targets rt ON rt.id = rp.runtime_target_id
+                LEFT JOIN terminal_targets tt ON tt.runtime_target_id = rt.id
+                WHERE rp.workspace_id = ?
                 ORDER BY started_at
                 """, bindings: [workspaceID])
         return rows.compactMap { decodeRunningProcess(row: $0) }
@@ -607,9 +627,22 @@ public final class SQLiteStore {
     public func upsert(window: WindowRecord) throws {
         try withImmediateTransaction {
             let targetType = window.role == "browser" ? "browser" : "terminal"
+            let hasExistingTargetID =
+                (try queryRow(sql: "SELECT id FROM runtime_targets WHERE id = ? AND workspace_id = ?", bindings: [window.id, window.workspaceID]))
+                != nil
+            let runtimeTargetID =
+                if targetType == "terminal" {
+                    if hasExistingTargetID {
+                        window.id
+                    } else {
+                        try matchingRuntimeTargetID(
+                            workspaceID: window.workspaceID, trackingID: window.terminalTrackingID, nativeID: window.terminalNativeID,
+                            tmuxWindowID: window.tmuxWindowID, windowID: window.windowID) ?? window.id
+                    }
+                } else { window.id }
             let baseBindings: [Any] = [
-                window.id, window.workspaceID, targetType, window.name ?? "", window.detail ?? "", window.app, window.windowID.map(String.init) ?? "",
-                String(window.orderIndex), window.lastSeenAt, window.lastSeenAt,
+                runtimeTargetID, window.workspaceID, targetType, window.name ?? "", window.detail ?? "", window.app,
+                window.windowID.map(String.init) ?? "", String(window.orderIndex), window.lastSeenAt, window.lastSeenAt,
             ]
             try execute(
                 sql: """
@@ -628,9 +661,9 @@ public final class SQLiteStore {
                       updated_at = excluded.updated_at
                     """, bindings: baseBindings)
             if targetType == "terminal" {
-                try execute(sql: "DELETE FROM browser_targets WHERE runtime_target_id = ?", bindings: [window.id])
+                try execute(sql: "DELETE FROM browser_targets WHERE runtime_target_id = ?", bindings: [runtimeTargetID])
                 let terminalBindings: [Any] = [
-                    window.id, runtimeTargetProvider(app: window.app), window.terminalTrackingID ?? "", window.terminalNativeID ?? "",
+                    runtimeTargetID, runtimeTargetProvider(app: window.app), window.terminalTrackingID ?? "", window.terminalNativeID ?? "",
                     window.terminalContainerID ?? "", window.itermTabIndex.map(String.init) ?? "", window.tmuxWindowID ?? "",
                 ]
                 try execute(
@@ -648,7 +681,7 @@ public final class SQLiteStore {
                           tmux_window_id = excluded.tmux_window_id
                         """, bindings: terminalBindings)
             } else {
-                try execute(sql: "DELETE FROM terminal_targets WHERE runtime_target_id = ?", bindings: [window.id])
+                try execute(sql: "DELETE FROM terminal_targets WHERE runtime_target_id = ?", bindings: [runtimeTargetID])
                 try execute(
                     sql: """
                         INSERT INTO browser_targets(runtime_target_id, target_url, resolved_url)
@@ -656,7 +689,7 @@ public final class SQLiteStore {
                         ON CONFLICT(runtime_target_id) DO UPDATE SET
                           target_url = excluded.target_url,
                           resolved_url = excluded.resolved_url
-                        """, bindings: [window.id, window.targetURL ?? "", window.detail ?? ""])
+                        """, bindings: [runtimeTargetID, window.targetURL ?? "", window.detail ?? ""])
             }
         }
     }
@@ -728,13 +761,11 @@ public final class SQLiteStore {
             sql: """
                 SELECT agent_sessions.workspace_id
                 FROM agent_sessions
-                LEFT JOIN runtime_targets ON runtime_targets.id = agent_sessions.terminal_target_id
-                WHERE agent_sessions.yabai_window_id = ?
-                   OR agent_sessions.window_id = ?
-                   OR runtime_targets.window_id = ?
+                JOIN runtime_targets ON runtime_targets.id = agent_sessions.runtime_target_id
+                WHERE runtime_targets.window_id = ?
                 ORDER BY agent_sessions.updated_at DESC
                 LIMIT 1
-                """, bindings: [String(yabaiWindowID), String(yabaiWindowID), String(yabaiWindowID)])
+                """, bindings: [String(yabaiWindowID)])
         return row?.first
     }
 
@@ -794,36 +825,27 @@ public final class SQLiteStore {
     // MARK: - Agent Windows
 
     public func upsertAgentWindow(_ record: AgentWindowRecord) throws {
+        let runtimeTargetID = try ensureRuntimeTargetForAgentWindow(record)
         try withImmediateTransaction {
-            let terminalTargetID = try matchingRuntimeTargetID(
-                workspaceID: record.workspaceID, trackingID: record.terminalTrackingID, nativeID: record.terminalNativeID,
-                tmuxWindowID: record.tmuxWindowID, windowID: record.yabaiWindowID ?? record.windowID)
             try execute(
                 sql: """
-                    INSERT INTO agent_sessions(
-                      id, workspace_id, provider, label, status, terminal_target_id, terminal_tracking_id, terminal_native_id, tmux_window_id,
-                      window_id, yabai_window_id, session_key, claimed_launcher_name, created_at, updated_at
-                    )
-                    VALUES (?, ?, ?, ?, ?, NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), ?, ?)
-                    ON CONFLICT(id) DO UPDATE SET
-                      workspace_id = excluded.workspace_id,
-                      provider = excluded.provider,
-                      label = excluded.label,
-                      status = excluded.status,
-                      terminal_target_id = excluded.terminal_target_id,
-                      terminal_tracking_id = excluded.terminal_tracking_id,
-                      terminal_native_id = excluded.terminal_native_id,
-                      tmux_window_id = excluded.tmux_window_id,
-                      window_id = excluded.window_id,
-                      yabai_window_id = excluded.yabai_window_id,
-                      session_key = excluded.session_key,
-                      claimed_launcher_name = excluded.claimed_launcher_name,
-                      updated_at = excluded.updated_at
+                        INSERT INTO agent_sessions(
+                          id, workspace_id, provider, label, status, runtime_target_id, session_key, claimed_launcher_name, created_at, updated_at
+                        )
+                        VALUES (?, ?, ?, ?, ?, NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), ?, ?)
+                        ON CONFLICT(id) DO UPDATE SET
+                          workspace_id = excluded.workspace_id,
+                          provider = excluded.provider,
+                          label = excluded.label,
+                          status = excluded.status,
+                          runtime_target_id = excluded.runtime_target_id,
+                          session_key = excluded.session_key,
+                          claimed_launcher_name = excluded.claimed_launcher_name,
+                          updated_at = excluded.updated_at
                     """,
                 bindings: [
-                    record.id, record.workspaceID, record.provider.rawValue, record.label ?? "", record.status.rawValue, terminalTargetID ?? "",
-                    record.terminalTrackingID ?? "", record.terminalNativeID ?? "", record.tmuxWindowID ?? "", record.windowID.map(String.init) ?? "",
-                    record.yabaiWindowID.map(String.init) ?? "", record.codexThreadID ?? "", "", record.createdAt, record.updatedAt,
+                    record.id, record.workspaceID, record.provider.rawValue, record.label ?? "", record.status.rawValue, runtimeTargetID ?? "",
+                    record.sessionKey ?? "", record.claimedLauncherName ?? "", record.createdAt, record.updatedAt,
                 ])
         }
     }
@@ -836,17 +858,24 @@ public final class SQLiteStore {
                   agent_sessions.workspace_id,
                   agent_sessions.provider,
                   agent_sessions.label,
-                  COALESCE(agent_sessions.terminal_tracking_id, terminal_targets.tracking_id, ''),
-                  COALESCE(agent_sessions.terminal_native_id, terminal_targets.native_id, ''),
-                  COALESCE(agent_sessions.tmux_window_id, terminal_targets.tmux_window_id, ''),
+                  COALESCE(agent_sessions.runtime_target_id, ''),
+                  COALESCE(runtime_targets.app, ''),
+                  COALESCE(runtime_targets.name, ''),
+                  COALESCE(runtime_targets.detail, ''),
+                  COALESCE(runtime_targets.window_id, ''),
+                  COALESCE(terminal_targets.provider, ''),
+                  COALESCE(terminal_targets.tracking_id, ''),
+                  COALESCE(terminal_targets.native_id, ''),
+                  COALESCE(terminal_targets.container_id, ''),
+                  COALESCE(terminal_targets.iterm_tab_index, ''),
+                  COALESCE(terminal_targets.tmux_window_id, ''),
                   COALESCE(agent_sessions.session_key, ''),
-                  COALESCE(agent_sessions.window_id, runtime_targets.window_id, ''),
+                  COALESCE(agent_sessions.claimed_launcher_name, ''),
                   agent_sessions.status,
                   agent_sessions.created_at,
-                  agent_sessions.updated_at,
-                  COALESCE(agent_sessions.yabai_window_id, runtime_targets.window_id, '')
+                  agent_sessions.updated_at
                 FROM agent_sessions
-                LEFT JOIN runtime_targets ON runtime_targets.id = agent_sessions.terminal_target_id
+                LEFT JOIN runtime_targets ON runtime_targets.id = agent_sessions.runtime_target_id
                 LEFT JOIN terminal_targets ON terminal_targets.runtime_target_id = runtime_targets.id
                 WHERE agent_sessions.workspace_id = ?
                 ORDER BY agent_sessions.created_at
@@ -863,21 +892,28 @@ public final class SQLiteStore {
                       agent_sessions.workspace_id,
                       agent_sessions.provider,
                       agent_sessions.label,
-                      COALESCE(agent_sessions.terminal_tracking_id, terminal_targets.tracking_id, ''),
-                      COALESCE(agent_sessions.terminal_native_id, terminal_targets.native_id, ''),
-                      COALESCE(agent_sessions.tmux_window_id, terminal_targets.tmux_window_id, ''),
+                      COALESCE(agent_sessions.runtime_target_id, ''),
+                      COALESCE(runtime_targets.app, ''),
+                      COALESCE(runtime_targets.name, ''),
+                      COALESCE(runtime_targets.detail, ''),
+                      COALESCE(runtime_targets.window_id, ''),
+                      COALESCE(terminal_targets.provider, ''),
+                      COALESCE(terminal_targets.tracking_id, ''),
+                      COALESCE(terminal_targets.native_id, ''),
+                      COALESCE(terminal_targets.container_id, ''),
+                      COALESCE(terminal_targets.iterm_tab_index, ''),
+                      COALESCE(terminal_targets.tmux_window_id, ''),
                       COALESCE(agent_sessions.session_key, ''),
-                      COALESCE(agent_sessions.window_id, runtime_targets.window_id, ''),
+                      COALESCE(agent_sessions.claimed_launcher_name, ''),
                       agent_sessions.status,
                       agent_sessions.created_at,
-                      agent_sessions.updated_at,
-                      COALESCE(agent_sessions.yabai_window_id, runtime_targets.window_id, '')
+                      agent_sessions.updated_at
                     FROM agent_sessions
-                    LEFT JOIN runtime_targets ON runtime_targets.id = agent_sessions.terminal_target_id
+                    LEFT JOIN runtime_targets ON runtime_targets.id = agent_sessions.runtime_target_id
                     LEFT JOIN terminal_targets ON terminal_targets.runtime_target_id = runtime_targets.id
                     WHERE agent_sessions.workspace_id = ?
-                      AND (agent_sessions.terminal_tracking_id = ? OR terminal_targets.tracking_id = ?)
-                    """, bindings: [workspaceID, terminalTrackingID, terminalTrackingID])
+                      AND terminal_targets.tracking_id = ?
+                    """, bindings: [workspaceID, terminalTrackingID])
         else { return nil }
         return decodeAgentWindow(row: row)
     }
@@ -891,21 +927,28 @@ public final class SQLiteStore {
                       agent_sessions.workspace_id,
                       agent_sessions.provider,
                       agent_sessions.label,
-                      COALESCE(agent_sessions.terminal_tracking_id, terminal_targets.tracking_id, ''),
-                      COALESCE(agent_sessions.terminal_native_id, terminal_targets.native_id, ''),
-                      COALESCE(agent_sessions.tmux_window_id, terminal_targets.tmux_window_id, ''),
+                      COALESCE(agent_sessions.runtime_target_id, ''),
+                      COALESCE(runtime_targets.app, ''),
+                      COALESCE(runtime_targets.name, ''),
+                      COALESCE(runtime_targets.detail, ''),
+                      COALESCE(runtime_targets.window_id, ''),
+                      COALESCE(terminal_targets.provider, ''),
+                      COALESCE(terminal_targets.tracking_id, ''),
+                      COALESCE(terminal_targets.native_id, ''),
+                      COALESCE(terminal_targets.container_id, ''),
+                      COALESCE(terminal_targets.iterm_tab_index, ''),
+                      COALESCE(terminal_targets.tmux_window_id, ''),
                       COALESCE(agent_sessions.session_key, ''),
-                      COALESCE(agent_sessions.window_id, runtime_targets.window_id, ''),
+                      COALESCE(agent_sessions.claimed_launcher_name, ''),
                       agent_sessions.status,
                       agent_sessions.created_at,
-                      agent_sessions.updated_at,
-                      COALESCE(agent_sessions.yabai_window_id, runtime_targets.window_id, '')
+                      agent_sessions.updated_at
                     FROM agent_sessions
-                    LEFT JOIN runtime_targets ON runtime_targets.id = agent_sessions.terminal_target_id
+                    LEFT JOIN runtime_targets ON runtime_targets.id = agent_sessions.runtime_target_id
                     LEFT JOIN terminal_targets ON terminal_targets.runtime_target_id = runtime_targets.id
                     WHERE agent_sessions.workspace_id = ?
-                      AND (agent_sessions.tmux_window_id = ? OR terminal_targets.tmux_window_id = ?)
-                    """, bindings: [workspaceID, tmuxWindowID, tmuxWindowID])
+                      AND terminal_targets.tmux_window_id = ?
+                    """, bindings: [workspaceID, tmuxWindowID])
         else { return nil }
         return decodeAgentWindow(row: row)
     }
@@ -918,17 +961,24 @@ public final class SQLiteStore {
                   agent_sessions.workspace_id,
                   agent_sessions.provider,
                   agent_sessions.label,
-                  COALESCE(agent_sessions.terminal_tracking_id, terminal_targets.tracking_id, ''),
-                  COALESCE(agent_sessions.terminal_native_id, terminal_targets.native_id, ''),
-                  COALESCE(agent_sessions.tmux_window_id, terminal_targets.tmux_window_id, ''),
+                  COALESCE(agent_sessions.runtime_target_id, ''),
+                  COALESCE(runtime_targets.app, ''),
+                  COALESCE(runtime_targets.name, ''),
+                  COALESCE(runtime_targets.detail, ''),
+                  COALESCE(runtime_targets.window_id, ''),
+                  COALESCE(terminal_targets.provider, ''),
+                  COALESCE(terminal_targets.tracking_id, ''),
+                  COALESCE(terminal_targets.native_id, ''),
+                  COALESCE(terminal_targets.container_id, ''),
+                  COALESCE(terminal_targets.iterm_tab_index, ''),
+                  COALESCE(terminal_targets.tmux_window_id, ''),
                   COALESCE(agent_sessions.session_key, ''),
-                  COALESCE(agent_sessions.window_id, runtime_targets.window_id, ''),
+                  COALESCE(agent_sessions.claimed_launcher_name, ''),
                   agent_sessions.status,
                   agent_sessions.created_at,
-                  agent_sessions.updated_at,
-                  COALESCE(agent_sessions.yabai_window_id, runtime_targets.window_id, '')
+                  agent_sessions.updated_at
                 FROM agent_sessions
-                LEFT JOIN runtime_targets ON runtime_targets.id = agent_sessions.terminal_target_id
+                LEFT JOIN runtime_targets ON runtime_targets.id = agent_sessions.runtime_target_id
                 LEFT JOIN terminal_targets ON terminal_targets.runtime_target_id = runtime_targets.id
                 WHERE agent_sessions.workspace_id = ?
                 AND agent_sessions.provider = ?
@@ -939,6 +989,22 @@ public final class SQLiteStore {
 
     public func updateAgentWindowStatus(id: String, status: AgentWindowStatus, updatedAt: String) throws {
         try execute(sql: "UPDATE agent_sessions SET status = ?, updated_at = ? WHERE id = ?", bindings: [status.rawValue, updatedAt, id])
+    }
+
+    public func agentSessionRuntimeTargetID(id: String) throws -> String? {
+        let row = try queryRow(sql: "SELECT COALESCE(runtime_target_id, '') FROM agent_sessions WHERE id = ?", bindings: [id])
+        guard let value = row?.first, !value.isEmpty else { return nil }
+        return value
+    }
+
+    public func appendAgentSessionEvent(
+        agentSessionID: String, eventType: String, source: String, message: String?, runtimeTargetID: String?, createdAt: String
+    ) throws {
+        try execute(
+            sql: """
+                INSERT INTO agent_session_events(id, agent_session_id, event_type, source, message, runtime_target_id, created_at)
+                VALUES (?, ?, ?, ?, ?, NULLIF(?, ''), ?)
+                """, bindings: [UUID().uuidString, agentSessionID, eventType, source, message ?? "", runtimeTargetID ?? "", createdAt])
     }
 
     public func deleteAgentWindows(workspaceID: String) throws {
@@ -963,15 +1029,16 @@ public final class SQLiteStore {
     }
 
     private func decodeAgentWindow(row: [String]) -> AgentWindowRecord? {
-        guard row.count >= 13 else { return nil }
+        guard row.count >= 20 else { return nil }
         guard let provider = AgentProvider(rawValue: row[2]) else { return nil }
-        let status = AgentWindowStatus(rawValue: row[9]) ?? .idle
-        let yabaiWindowID = row.count > 12 ? (row[12].isEmpty ? nil : Int(row[12])) : nil
+        let status = AgentWindowStatus(rawValue: row[17]) ?? .idle
+        let terminalTarget = decodeTerminalTarget(
+            runtimeTargetID: row[4], app: row[5], name: row[6], detail: row[7], windowID: row[8], provider: row[9], trackingID: row[10],
+            nativeID: row[11], containerID: row[12], itermTabIndex: row[13], tmuxWindowID: row[14])
         return AgentWindowRecord(
-            id: row[0], workspaceID: row[1], provider: provider, label: row[3].isEmpty ? nil : row[3],
-            terminalTrackingID: row[4].isEmpty ? nil : row[4], terminalNativeID: row[5].isEmpty ? nil : row[5],
-            tmuxWindowID: row[6].isEmpty ? nil : row[6], codexThreadID: row[7].isEmpty ? nil : row[7], windowID: row[8].isEmpty ? nil : Int(row[8]),
-            yabaiWindowID: yabaiWindowID, status: status, createdAt: row[10], updatedAt: row[11])
+            id: row[0], workspaceID: row[1], provider: provider, label: row[3].isEmpty ? nil : row[3], runtimeTargetID: row[4].isEmpty ? nil : row[4],
+            terminalTarget: terminalTarget, sessionKey: row[15].isEmpty ? nil : row[15], claimedLauncherName: row[16].isEmpty ? nil : row[16],
+            status: status, createdAt: row[18], updatedAt: row[19])
     }
 
     private func createSchema() throws { try executeBatch(sql: DatabaseSchema.latestSchemaSQL) }
@@ -1051,13 +1118,29 @@ public final class SQLiteStore {
     }
 
     private func decodeRunningProcess(row: [String]) -> RunningProcessRecord? {
-        guard row.count >= 17 else { return nil }
+        guard row.count >= 21 else { return nil }
+        let terminalTarget = decodeTerminalTarget(
+            runtimeTargetID: row[4], app: row[5], name: row[6], detail: row[7], windowID: row[8], provider: row[9], trackingID: row[10],
+            nativeID: row[11], containerID: row[12], itermTabIndex: row[13], tmuxWindowID: row[14])
         return RunningProcessRecord(
-            id: row[0], workspaceID: row[1], templateName: row[2], command: row[3], terminalApp: row[4].isEmpty ? nil : row[4], windowID: Int(row[5]),
-            terminalTrackingID: row[6].isEmpty ? nil : row[6], terminalNativeID: row[7].isEmpty ? nil : row[7],
-            terminalContainerID: row[8].isEmpty ? nil : row[8], itermTabIndex: Int(row[9]), tmuxWindowID: row[10].isEmpty ? nil : row[10],
-            pid: Int(row[11]), status: RunningProcessState(rawValue: row[12]) ?? .running, logPath: row[13].isEmpty ? nil : row[13],
-            lastOutputAt: row[14].isEmpty ? nil : row[14], startedAt: row[15].isEmpty ? nil : row[15], exitedAt: row[16].isEmpty ? nil : row[16])
+            id: row[0], workspaceID: row[1], templateName: row[2], command: row[3], runtimeTargetID: row[4].isEmpty ? nil : row[4],
+            terminalTarget: terminalTarget, pid: Int(row[15]), status: RunningProcessState(rawValue: row[16]) ?? .running,
+            logPath: row[17].isEmpty ? nil : row[17], lastOutputAt: row[18].isEmpty ? nil : row[18], startedAt: row[19].isEmpty ? nil : row[19],
+            exitedAt: row[20].isEmpty ? nil : row[20])
+    }
+
+    private func decodeTerminalTarget(
+        runtimeTargetID: String, app: String, name: String, detail: String, windowID: String, provider: String, trackingID: String, nativeID: String,
+        containerID: String, itermTabIndex: String, tmuxWindowID: String
+    ) -> TerminalTargetRecord? {
+        guard !runtimeTargetID.isEmpty || !app.isEmpty || !trackingID.isEmpty || !nativeID.isEmpty || !tmuxWindowID.isEmpty || !windowID.isEmpty
+        else { return nil }
+        return TerminalTargetRecord(
+            runtimeTargetID: runtimeTargetID.isEmpty ? nil : runtimeTargetID, app: app, name: name.isEmpty ? nil : name,
+            detail: detail.isEmpty ? nil : detail, windowID: Int(windowID), provider: provider.isEmpty ? nil : provider,
+            trackingID: trackingID.isEmpty ? nil : trackingID, nativeID: nativeID.isEmpty ? nil : nativeID,
+            containerID: containerID.isEmpty ? nil : containerID, itermTabIndex: Int(itermTabIndex),
+            tmuxWindowID: tmuxWindowID.isEmpty ? nil : tmuxWindowID)
     }
 
     private func decodeWindow(row: [String]) -> WindowRecord? {
@@ -1075,6 +1158,53 @@ public final class SQLiteStore {
         case "iTerm2": return "iterm2"
         default: return app.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         }
+    }
+
+    private func ensureRuntimeTargetForRunningProcess(_ process: RunningProcessRecord, runtimeTargetID: String?) throws -> String? {
+        guard let terminalTarget = process.terminalTarget else { return runtimeTargetID }
+        let targetID = runtimeTargetID ?? terminalTarget.runtimeTargetID ?? process.id
+        let existingWindows = try windows(workspaceID: process.workspaceID)
+        let existingWindow = existingWindows.first(where: { $0.id == targetID })
+        let now = ISO8601DateFormatter().string(from: Date())
+        try upsert(
+            window: WindowRecord(
+                id: targetID, workspaceID: process.workspaceID, app: terminalTarget.app, name: terminalTarget.name ?? process.templateName,
+                detail: terminalTarget.detail ?? process.command, targetURL: nil, windowID: terminalTarget.windowID,
+                terminalTrackingID: terminalTarget.trackingID, terminalNativeID: terminalTarget.nativeID,
+                terminalContainerID: terminalTarget.containerID, itermTabIndex: terminalTarget.itermTabIndex,
+                tmuxWindowID: terminalTarget.tmuxWindowID, role: "terminal",
+                orderIndex: existingWindow?.orderIndex ?? nextRuntimeTargetOrderIndex(existing: existingWindows, role: "terminal", orderOffset: 100),
+                lastSeenAt: now))
+        return targetID
+    }
+
+    private func ensureRuntimeTargetForAgentWindow(_ record: AgentWindowRecord) throws -> String? {
+        let runtimeTargetID =
+            try record.runtimeTargetID
+            ?? matchingRuntimeTargetID(
+                workspaceID: record.workspaceID, trackingID: record.terminalTrackingID, nativeID: record.terminalNativeID,
+                tmuxWindowID: record.tmuxWindowID, windowID: record.yabaiWindowID ?? record.windowID)
+        guard let terminalTarget = record.terminalTarget else { return runtimeTargetID }
+        let targetID = runtimeTargetID ?? terminalTarget.runtimeTargetID ?? record.id
+        let existingWindows = try windows(workspaceID: record.workspaceID)
+        let existingWindow = existingWindows.first(where: { $0.id == targetID })
+        let now = ISO8601DateFormatter().string(from: Date())
+        try upsert(
+            window: WindowRecord(
+                id: targetID, workspaceID: record.workspaceID, app: terminalTarget.app,
+                name: terminalTarget.name ?? record.label ?? "Coding Agent CLI", detail: terminalTarget.detail, targetURL: nil,
+                windowID: terminalTarget.windowID, terminalTrackingID: terminalTarget.trackingID, terminalNativeID: terminalTarget.nativeID,
+                terminalContainerID: terminalTarget.containerID, itermTabIndex: terminalTarget.itermTabIndex,
+                tmuxWindowID: terminalTarget.tmuxWindowID, role: "terminal",
+                orderIndex: existingWindow?.orderIndex ?? nextRuntimeTargetOrderIndex(existing: existingWindows, role: "terminal", orderOffset: 200),
+                lastSeenAt: now))
+        return targetID
+    }
+
+    private func nextRuntimeTargetOrderIndex(existing: [WindowRecord], role: String, orderOffset: Int) -> Int {
+        let roleWindows = existing.filter { $0.role == role }
+        let maxIndex = roleWindows.map(\.orderIndex).max() ?? (orderOffset - 1)
+        return maxIndex + 1
     }
 
     private func matchingRuntimeTargetID(workspaceID: String, trackingID: String?, nativeID: String?, tmuxWindowID: String?, windowID: Int?) throws
@@ -1100,7 +1230,8 @@ public final class SQLiteStore {
         if let tmuxWindowID, !tmuxWindowID.isEmpty, let match = firstMatch({ $0[1] == tmuxWindowID }) { return match }
         if let nativeID, !nativeID.isEmpty, let match = firstMatch({ $0[2] == nativeID }) { return match }
         if let trackingID, !trackingID.isEmpty, let match = firstMatch({ $0[3] == trackingID }) { return match }
-        if let windowID, let match = firstMatch({ $0[4] == String(windowID) }) { return match }
+        let hasExplicitTerminalIdentity = (tmuxWindowID?.isEmpty == false) || (nativeID?.isEmpty == false) || (trackingID?.isEmpty == false)
+        if !hasExplicitTerminalIdentity, let windowID, let match = firstMatch({ $0[4] == String(windowID) }) { return match }
         return nil
     }
 

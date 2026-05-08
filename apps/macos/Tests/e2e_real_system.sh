@@ -259,6 +259,40 @@ transition_pause() {
   sleep "$TRANSITION_PAUSE_SECONDS"
 }
 
+process_is_alive() {
+  local pid="$1"
+  [[ -n "$pid" ]] || return 1
+  if ! kill -0 "$pid" >/dev/null 2>&1; then
+    return 1
+  fi
+  local state
+  state="$(ps -o state= -p "$pid" 2>/dev/null | tr -d '[:space:]' || true)"
+  [[ -n "$state" && "${state:0:1}" == "Z" ]] && return 1
+  return 0
+}
+
+terminate_process_group_for_recovery() {
+  local pid="$1"
+  [[ -n "$pid" ]] || fail "missing pid for recovery kill"
+  kill -- "-$pid" >/dev/null 2>&1 || true
+  local deadline=$((SECONDS + ACTION_TIMEOUT_SECONDS))
+  while (( SECONDS < deadline )); do
+    if ! process_is_alive "$pid"; then
+      return 0
+    fi
+    sleep 0.2
+  done
+  kill -9 -- "-$pid" >/dev/null 2>&1 || true
+  local kill_deadline=$((SECONDS + ACTION_TIMEOUT_SECONDS))
+  while (( SECONDS < kill_deadline )); do
+    if ! process_is_alive "$pid"; then
+      return 0
+    fi
+    sleep 0.2
+  done
+  fail "process group for pid $pid did not terminate"
+}
+
 build_binaries() {
   log_step "building macOS binaries"
   (cd "$ROOT_DIR" && eval "$BUILD_CMD") >/dev/null
@@ -2428,22 +2462,15 @@ for process in data["runningProcesses"]:
         print(process["pid"] or "")
         break
 PY
-)"
-  kill "$frontend_pid"
-  local dead_pid_deadline=$((SECONDS + ACTION_TIMEOUT_SECONDS))
-  while (( SECONDS < dead_pid_deadline )); do
-    if ! kill -0 "$frontend_pid" >/dev/null 2>&1; then
-      break
-    fi
-    sleep 0.2
-  done
+  )"
+  terminate_process_group_for_recovery "$frontend_pid"
   run_spaces_logged /tmp/spaces-e2e-recover.log start "$workspace_dir"
   transition_pause "$host recover dead process"
   local recovery_state recovered_pid recovered_status
   recovery_state="$(wait_for_process_running_recovery "$workspace_dir" "frontend" "$frontend_pid")"
   recovered_pid="${recovery_state%%$'\t'*}"
   recovered_status="${recovery_state#*$'\t'}"
-  ! kill -0 "$frontend_pid" >/dev/null 2>&1 || fail "killed frontend pid is still alive after recovery"
+  ! process_is_alive "$frontend_pid" || fail "killed frontend pid is still alive after recovery"
   pass_case
 
   begin_case "$host: workspace restart and stop lifecycle"

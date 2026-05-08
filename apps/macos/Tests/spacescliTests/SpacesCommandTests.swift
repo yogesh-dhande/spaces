@@ -184,6 +184,28 @@ final class MXCommandTests: XCTestCase {
             XCTAssertEqual(agentContext?.terminalTrackingID, "ghostty-hook-token-1")
             XCTAssertNil(agentContext?.terminalNativeID)
             XCTAssertNil(agentContext?.yabaiWindowID)
+            XCTAssertEqual(agentContext?.environmentKeys, ["CLAUDE_CODE_ENTRYPOINT", "SPACES_TERMINAL_TRACKING_ID", "__CFBundleIdentifier"])
+        }
+    }
+
+    func testResolveAgentInvocationContextInfersCodexLabelFromManagedByNpmFallback() throws {
+        let store = try makeTemporaryStore()
+        let workspace = try makeWorkspace(store: store)
+        let orchestrator = WorkspaceOrchestrator(store: store)
+
+        try withMockCommands(["yabai": Self.yabaiFocusedWindowMock, "osascript": Self.ghosttyFocusedTerminalMock]) {
+            let context = CLIContext()
+            let agentContext = try resolveAgentInvocationContext(
+                workspaceID: workspace.id,
+                environment: [
+                    "__CFBundleIdentifier": "com.mitchellh.ghostty", "CODEX_MANAGED_BY_NPM": "1",
+                    WorkspaceOrchestrator.terminalTrackingIDEnvVar: "ghostty-hook-token-1",
+                ], orchestrator: orchestrator, context: context)
+
+            XCTAssertEqual(agentContext?.provider, .ghostty)
+            XCTAssertEqual(agentContext?.label, "Codex CLI")
+            XCTAssertEqual(agentContext?.codexThreadID, nil)
+            XCTAssertEqual(agentContext?.environmentKeys, ["CODEX_MANAGED_BY_NPM", "SPACES_TERMINAL_TRACKING_ID", "__CFBundleIdentifier"])
         }
     }
 

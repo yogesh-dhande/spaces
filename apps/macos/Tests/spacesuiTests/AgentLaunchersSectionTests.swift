@@ -51,6 +51,20 @@ import workspacecore
         #expect(section.row(at: 0)?.displayDetailForTesting == "review notes")
     }
 
+    @Test func unlabeledRuntimeRowsUseFallbackDisplayName() {
+        let section = AgentLaunchersSection()
+        section.runtimeAgentWindows = [
+            AgentWindowRecord(
+                id: "adhoc", workspaceID: "workspace", provider: .ghostty, label: nil, terminalTrackingID: "ghostty-hook-1",
+                terminalNativeID: "ghostty-terminal-1", codexThreadID: nil, windowID: 202, yabaiWindowID: 202, status: .waiting, createdAt: "now",
+                updatedAt: "now")
+        ]
+        section.runtimeWindowTitleByAgentWindowID = ["adhoc": "shell-1"]
+
+        #expect(section.rowCount == 1)
+        #expect(section.row(at: 0)?.displayNameForTesting == "Coding Agent shell-1")
+    }
+
     @Test func launcherEditFormUsesPlainActionLabels() {
         let row = AgentLauncherRowView(launcher: AgentLauncher(name: "claude", command: "claude"))
         row.enterEditing(prefill: nil, animated: false)

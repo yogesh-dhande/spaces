@@ -112,15 +112,13 @@ classDiagram
     +workspace_id
     +template_name
     +command
-    +terminal_app
-    +window_id
-    +terminal_tracking_id
-    +terminal_native_id
-    +terminal_container_id
-    +iterm_tab_index
-    +tmux_window_id
+    +runtime_target_id
     +pid
     +status
+    +log_path
+    +last_output_at
+    +started_at
+    +exited_at
   }
 
   class RuntimeTarget {
@@ -158,12 +156,7 @@ classDiagram
     +provider
     +label
     +status
-    +terminal_target_id
-    +terminal_tracking_id
-    +terminal_native_id
-    +tmux_window_id
-    +window_id
-    +yabai_window_id
+    +runtime_target_id
     +session_key
     +claimed_launcher_name
     +created_at
@@ -186,7 +179,7 @@ classDiagram
     +event_type
     +source
     +message
-    +terminal_target_id
+    +runtime_target_id
     +created_at
   }
 
@@ -196,12 +189,13 @@ classDiagram
   Workspace "1" --> "*" RunningProcess
   Workspace "1" --> "*" RuntimeTarget
   Workspace "1" --> "*" AgentSession
+  RunningProcess "*" --> "0..1" RuntimeTarget : runtime_target_id
   RuntimeTarget "1" --> "0..1" TerminalTarget
   RuntimeTarget "1" --> "0..1" BrowserTarget
   RuntimeTarget "1" --> "*" RuntimeTargetEvent
-  AgentSession "*" --> "0..1" RuntimeTarget : terminal_target_id
+  AgentSession "*" --> "0..1" RuntimeTarget : runtime_target_id
   AgentSession "1" --> "*" AgentSessionEvent
-  AgentSessionEvent "*" --> "0..1" RuntimeTarget : terminal_target_id
+  AgentSessionEvent "*" --> "0..1" RuntimeTarget : runtime_target_id
 ```
 
 ### Projects
@@ -242,8 +236,21 @@ It also lets lifecycle state stay explicit while runtime health is derived from 
 - `runtime_targets` is the canonical inventory of focusable runtime items for a workspace. Each row stores only shared fields such as `type`, host app, current yabai `window_id`, ordering, and display metadata.
 - `terminal_targets` extends terminal runtime targets with terminal-host identity. Current fields are the terminal provider, the hook attribution ID, the provider-native terminal ID, the provider container ID, optional iTerm tab index, and tmux window ID.
 - `browser_targets` extends browser runtime targets with the configured target URL and the last resolved URL.
-- `agent_sessions` models logical coding-agent sessions separately from focusable windows. Each session may point at a current `terminal_target_id`, but it also keeps the last known terminal identities (`terminal_tracking_id`, `terminal_native_id`, `tmux_window_id`, `window_id`, `yabai_window_id`) so the session can survive a missing or pruned target row long enough to be detached, rebound, or cleaned up correctly.
-- `running_processes` still stores process runtime plus terminal metadata used by the current process-management flows. `runtime_targets` is the canonical focus inventory, while `running_processes` remains the canonical process-status record.
+- `agent_sessions` models logical coding-agent sessions separately from focusable windows. Each row links to a `runtime_target` and stores only agent-session state: provider, display label, status, provider session key, claimed launcher name, and timestamps.
+- `agent_session_events` records signal-driven lifecycle updates and launcher-driven agent transitions. Each event keeps the resolved runtime-target link plus a compact message containing the provider, label, tracking token, native terminal ID, provider session key, yabai window ID, and the full set of environment key names seen by `spaces signal` for that event.
+- `running_processes` is the canonical process-status record. Each row links to a `runtime_target` and stores only process runtime state such as command, PID, status, log path, and timestamps.
+- Runtime targets are seeded as soon as a process or agent terminal is known, even before a separate window-reconciliation pass fills in a live yabai `window_id`. That keeps process and agent rows linked to a single canonical target instead of caching terminal identity on the base row.
+
+### Data Modeling Guidelines
+- Base tables should stay generic. If a field only makes sense for one target type or one provider, it should live on a subtype table or adapter-specific runtime path rather than on a cross-cutting base record.
+- `runtime_targets` is the shared focus inventory. New target kinds should extend it through subtype tables rather than by adding more nullable type-specific columns to the base row.
+- Agent-session records should describe logical session state, not terminal implementation details. Terminal identity belongs on `terminal_targets`, and agent sessions should relate to that state through `runtime_targets` instead of copying terminal fields onto the session row.
+- Running-process records should describe process runtime, not terminal identity. Terminal identity belongs on `terminal_targets`, and process rows should link to the relevant runtime target instead of owning terminal-specific fields.
+- When a process or agent needs terminal identity before yabai has reconciled a live window, seed or reuse a `runtime_target` plus `terminal_target` record rather than persisting terminal identity on the base process or session row.
+- Provider-specific naming should be avoided in shared schema. Generic fields such as `provider` and `session_key` are acceptable when the same concept exists across providers; fields named for one product should be treated as transitional and refactored away.
+- Add abstractions only when current behavior needs them. Extensibility matters, but speculative tables or fields should not be added before a real workflow requires them.
+- Prefer event history for debugging destructive transitions over piling more `last_*` and `*_reason` fields onto canonical state rows. When a target or session is rebound, detached, or pruned, the system should leave an inspectable event trail.
+- Distinguish hook attribution identity from provider-native identity. Some hosts use one value for both, while others need separate identities for “which shell emitted this event?” and “which live host object should be focused or checked for liveness?”
 
 ### Referential Integrity
 - SQLite foreign keys stay enabled for persisted parent-child relationships.
