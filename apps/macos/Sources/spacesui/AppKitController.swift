@@ -5488,9 +5488,28 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         refs.branchModeSegmented?.selectedSegment == 0 ? .create : .existing
     }
 
+    static func resolvedExistingWorkspaceBranchValue(existingBranchField: NSComboBox?) -> String {
+        guard let existingBranchField else { return "" }
+        if existingBranchField.indexOfSelectedItem >= 0, let selectedValue = existingBranchField.objectValueOfSelectedItem as? String {
+            return selectedValue
+        }
+        return existingBranchField.stringValue
+    }
+
+    static func syncExistingWorkspaceBranchSelection(existingBranchField: NSComboBox?) {
+        guard let existingBranchField else { return }
+        let currentText = existingBranchField.stringValue
+        let selectedIndex = existingBranchField.indexOfSelectedItem
+        guard selectedIndex >= 0, let selectedValue = existingBranchField.objectValueOfSelectedItem as? String, selectedValue != currentText else {
+            return
+        }
+        existingBranchField.deselectItem(at: selectedIndex)
+        existingBranchField.stringValue = currentText
+    }
+
     private func currentAddWorkspaceBranchValue(_ refs: AddWorkspaceFieldRefs) -> String {
         switch addWorkspaceBranchMode(refs: refs) {
-        case .existing: refs.existingBranchField?.stringValue ?? ""
+        case .existing: Self.resolvedExistingWorkspaceBranchValue(existingBranchField: refs.existingBranchField)
         case .create: refs.newBranchField?.stringValue ?? ""
         }
     }
@@ -5626,6 +5645,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         }
         for refs in AddWorkspaceFieldCache.shared.cache.values {
             guard refs.existingBranchField === changedField || refs.newBranchField === changedField else { continue }
+            if let existingBranchField = refs.existingBranchField, existingBranchField === changedField {
+                Self.syncExistingWorkspaceBranchSelection(existingBranchField: existingBranchField)
+            }
             handleAddWorkspaceBranchFieldChange(refs: refs)
             return
         }
@@ -5635,14 +5657,16 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         guard let comboBox = notification.object as? NSComboBox else { return }
         for refs in AddWorkspaceFieldCache.shared.cache.values {
             guard refs.existingBranchField === comboBox else { continue }
-            handleAddWorkspaceBranchFieldChange(refs: refs)
+            let selectedBranchValue = (comboBox.objectValueOfSelectedItem as? String) ?? comboBox.stringValue
+            comboBox.stringValue = selectedBranchValue
+            handleAddWorkspaceBranchFieldChange(refs: refs, branchValueOverride: selectedBranchValue)
             return
         }
     }
 
-    private func handleAddWorkspaceBranchFieldChange(refs: AddWorkspaceFieldRefs) {
+    private func handleAddWorkspaceBranchFieldChange(refs: AddWorkspaceFieldRefs, branchValueOverride: String? = nil) {
         updateAddWorkspaceBranchInputUI(refs: refs)
-        let branchValue = currentAddWorkspaceBranchValue(refs)
+        let branchValue = branchValueOverride ?? currentAddWorkspaceBranchValue(refs)
         updateAddWorkspaceProgressiveDisclosure(refs: refs, branchValue: branchValue)
         updateAddWorkspaceBranchDerivedFields(refs: refs, branchValue: branchValue)
     }
