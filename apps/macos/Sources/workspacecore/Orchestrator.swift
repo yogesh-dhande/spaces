@@ -138,6 +138,7 @@ public final class WorkspaceOrchestrator {
     private let terminalFocusPulseController: TerminalFocusPulseControlling
     private let windowNavigationCycleSessionTimeout: TimeInterval = 2
     private let windowNavigationHistoryLimit = 64
+    private let processStartupVerificationTimeout: TimeInterval = 1
 
     public init(
         store: SQLiteStore, projectsRootDirectory: URL? = nil, workspacesRootDirectory: URL? = nil, git: GitClient = .init(),
@@ -1232,10 +1233,11 @@ public final class WorkspaceOrchestrator {
     }
 
     private func restartProcessInTerminal(
-        workspaceID: String, process: RunningProcessRecord, templateOverride: ProcessTemplate? = nil, background: Bool = false
+        workspaceID: String, process: RunningProcessRecord, templateOverride: ProcessTemplate? = nil, terminalHostOverride: TerminalHost? = nil,
+        background: Bool = false
     ) throws {
         let (project, workspace) = try resolveWorkspace(id: workspaceID)
-        let terminalHost = try terminalHost(for: process.terminalApp) ?? configuredTerminalHost()
+        let terminalHost = try terminalHostOverride ?? terminalHost(for: process.terminalApp) ?? configuredTerminalHost()
         guard terminalAdapterAvailable(terminalHost) else {
             throw WorkspaceError.dependencyMissing(message: missingTerminalDependencyMessage(for: terminalHost, operation: "launch processes"))
         }
@@ -2315,6 +2317,65 @@ public final class WorkspaceOrchestrator {
         "cd \(shellSingleQuoted(cwd)) && exec tmux attach-session -t \(shellSingleQuoted(sessionName))"
     }
 
+    private func startupFailureSummary(from paneOutput: String) -> String? {
+        let lines = paneOutput.split(separator: "\n").map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
+        guard let summary = lines.last else { return nil }
+        return String(summary.prefix(240))
+    }
+
+    private func processStartupFailureMessage(processName: String, commandDescription: String?, exitStatus: Int?, paneOutput: String?) -> String {
+        let trimmedProcessName = processName.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedCommand = commandDescription?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let label: String
+        if !trimmedProcessName.isEmpty, let trimmedCommand, !trimmedCommand.isEmpty {
+            label = "Process '\(trimmedProcessName)' failed to start (\(trimmedCommand))."
+        } else if !trimmedProcessName.isEmpty {
+            label = "Process '\(trimmedProcessName)' failed to start."
+        } else if let trimmedCommand, !trimmedCommand.isEmpty {
+            label = "Command failed to start (\(trimmedCommand))."
+        } else {
+            label = "Process failed to start."
+        }
+
+        if let paneOutput, let summary = startupFailureSummary(from: paneOutput) { return "\(label) \(summary)" }
+        if let exitStatus { return "\(label) Exit status \(exitStatus)." }
+        return label
+    }
+
+    private func surfacedProcessStartupError(sessionName: String, windowID: String, processName: String, commandDescription: String?)
+        -> WorkspaceError
+    {
+        let paneOutput = try? tmux.capturePane(windowID: windowID)
+        let exitStatus = try? tmux.paneExitStatus(windowID: windowID)
+        if tmux.hasSession(named: sessionName) { try? tmux.killSession(named: sessionName) }
+        return .invalidArgument(
+            message: processStartupFailureMessage(
+                processName: processName, commandDescription: commandDescription, exitStatus: exitStatus, paneOutput: paneOutput))
+    }
+
+    private func verifyProcessSessionStarted(sessionName: String, windowID: String, processName: String, commandDescription: String?) throws {
+        let deadline = currentDate().addingTimeInterval(processStartupVerificationTimeout)
+        var sawLiveWindow = false
+        while currentDate() < deadline {
+            if let window = try? tmux.currentWindow(sessionName: sessionName) {
+                if (try? tmux.isPaneDead(windowID: window.id)) == true {
+                    throw surfacedProcessStartupError(
+                        sessionName: sessionName, windowID: window.id, processName: processName, commandDescription: commandDescription)
+                }
+                sawLiveWindow = true
+            } else if !tmux.hasSession(named: sessionName) {
+                throw surfacedProcessStartupError(
+                    sessionName: sessionName, windowID: windowID, processName: processName, commandDescription: commandDescription)
+            }
+            Thread.sleep(forTimeInterval: 0.05)
+        }
+
+        if sawLiveWindow { return }
+        if !waitForTmuxSession(named: sessionName) {
+            throw WorkspaceError.invalidArgument(message: tmuxSessionTimeoutMessage(processName: processName, commandDescription: commandDescription))
+        }
+    }
+
     @discardableResult private func attachProcessTmuxSession(
         workspace: WorkspaceRecord, processName: String, commandDescription: String? = nil, terminalHost: TerminalHost, background: Bool = false
     ) throws -> ManagedTerminalHandle {
@@ -2345,7 +2406,10 @@ public final class WorkspaceOrchestrator {
             commandEnv = runtimeEnv
             argv = [shell.rawValue, "-lc", commandString]
         }
-        _ = try tmux.startSession(named: sessionName, windowName: processName, cwd: workspace.dir, env: commandEnv, command: argv)
+        let startedWindow = try tmux.startSession(named: sessionName, windowName: processName, cwd: workspace.dir, env: commandEnv, command: argv)
+        try? tmux.setRemainOnExit(windowID: startedWindow.id, enabled: true)
+        try verifyProcessSessionStarted(
+            sessionName: sessionName, windowID: startedWindow.id, processName: processName, commandDescription: rawCommand)
         let windowInfo = try attachProcessTmuxSession(
             workspace: workspace, processName: processName, commandDescription: rawCommand, terminalHost: terminalHost, background: background)
         guard waitForTmuxSession(named: sessionName) else {
@@ -4278,13 +4342,26 @@ public final class WorkspaceOrchestrator {
     private func isProcessAlive(pid: Int) -> Bool {
         guard pid > 0 else { return false }
         // First check if the specific PID is alive
-        if Darwin.kill(pid_t(pid), 0) == 0 { return true }
-        if errno == EPERM { return true }
+        if Darwin.kill(pid_t(pid), 0) == 0 {
+            if let state = processState(pid: pid), state.first == "Z" { return false }
+            return true
+        }
+        if errno == EPERM {
+            if let state = processState(pid: pid), state.first == "Z" { return false }
+            return true
+        }
         // If the PID is dead, check if any child processes are still alive
         // This handles cases where the shell exits but the actual command continues
         guard let output = try? Shell.runAndCapture(["pgrep", "-P", "\(pid)"]) else { return false }
         let trimmed = output.trimmingCharacters(in: .whitespacesAndNewlines)
         return !trimmed.isEmpty
+    }
+
+    private func processState(pid: Int) -> String? {
+        guard pid > 0 else { return nil }
+        guard let output = try? Shell.runAndCapture(["ps", "-o", "state=", "-p", "\(pid)"]) else { return nil }
+        let trimmed = output.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
     }
 
     private func waitForProcessExit(pid: Int, timeout: TimeInterval) {
@@ -4803,22 +4880,20 @@ public final class WorkspaceOrchestrator {
         try restartProcessInTerminal(workspaceID: workspaceID, process: process)
     }
 
-    public func stopWorkspaceProcess(workspaceID: String, processID: String) throws {
-        try withWorkspaceLifecycleLock(workspaceID: workspaceID) {
-            guard let process = try store.runningProcesses(workspaceID: workspaceID).first(where: { $0.id == processID }) else { return }
-            try stopRunningProcess(process, workspaceID: workspaceID)
-        }
-    }
-
-    public func recoverMissingConfiguredProcess(workspaceID: String, processKey: String) throws {
+    public func runConfiguredProcess(workspaceID: String, processKey: String) throws {
         let (project, workspace) = try resolveWorkspace(id: workspaceID)
         let settings = try loadWorkspaceSettings(project: project, workspace: workspace)
         guard let template = (settings?.processes ?? []).first(where: { configuredProcessMatchesKey($0, key: processKey) }) else {
-            throw WorkspaceError.invalidArgument(message: "Configured process not found for recovery.")
+            throw WorkspaceError.invalidArgument(message: "Configured process not found.")
         }
+
         let running = try store.runningProcesses(workspaceID: workspaceID)
         let expectedKey = configuredProcessMatchKey(name: template.name)
-        guard !running.contains(where: { runningProcessMatchKey(name: $0.templateName) == expectedKey }) else {
+        if let existing = running.first(where: { runningProcessMatchKey(name: $0.templateName) == expectedKey }) {
+            if existing.status == .exited {
+                try restartProcessInTerminal(
+                    workspaceID: workspaceID, process: existing, templateOverride: template, terminalHostOverride: try configuredTerminalHost())
+            }
             try markWorkspaceRunningIfNeeded(workspace)
             return
         }
@@ -4832,6 +4907,17 @@ public final class WorkspaceOrchestrator {
         guard tmux.isAvailable() else { throw WorkspaceError.dependencyMissing(message: "tmux is required to launch processes.") }
         _ = try launchConfiguredProcess(template: template, workspace: workspace, env: env, terminalHost: terminalHost)
         try markWorkspaceRunningIfNeeded(workspace)
+    }
+
+    public func stopWorkspaceProcess(workspaceID: String, processID: String) throws {
+        try withWorkspaceLifecycleLock(workspaceID: workspaceID) {
+            guard let process = try store.runningProcesses(workspaceID: workspaceID).first(where: { $0.id == processID }) else { return }
+            try stopRunningProcess(process, workspaceID: workspaceID)
+        }
+    }
+
+    public func recoverMissingConfiguredProcess(workspaceID: String, processKey: String) throws {
+        try runConfiguredProcess(workspaceID: workspaceID, processKey: processKey)
     }
 
     @discardableResult public func launchAgentLauncher(workspaceID: String, name: String, background: Bool = false) throws -> AgentWindowRecord {

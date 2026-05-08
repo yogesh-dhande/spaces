@@ -1084,6 +1084,71 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertEqual(unchanged?.status, .running)
         XCTAssertNil(unchanged?.exitedAt)
     }
+
+    func testCheckAndUpdateProcessStatusesTreatsZombiePIDAsExited() throws {
+        let root = try makeTempDirectory()
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let store = try makeTemporaryStore()
+        let mockTmux = MockTmuxAdapter()
+        let orchestrator = WorkspaceOrchestrator(store: store, tmux: mockTmux)
+
+        let python = "/usr/bin/python3"
+        guard FileManager.default.isExecutableFile(atPath: python) else {
+            throw XCTSkip("python3 is required to create a real zombie process fixture")
+        }
+        let pidFile = root.appendingPathComponent("zombie-pid.txt")
+
+        let zombieParent = Process()
+        zombieParent.executableURL = URL(fileURLWithPath: python)
+        zombieParent.arguments = [
+            "-c",
+            """
+            import os, pathlib, time
+            path = pathlib.Path(\(String(reflecting: pidFile.path)))
+            pid = os.fork()
+            if pid == 0:
+                os._exit(0)
+            path.write_text(str(pid))
+            time.sleep(30)
+            """,
+        ]
+        try zombieParent.run()
+        defer {
+            if zombieParent.isRunning {
+                zombieParent.terminate()
+                zombieParent.waitUntilExit()
+            }
+        }
+
+        var zombiePIDText: String?
+        let deadline = Date().addingTimeInterval(2)
+        while Date() < deadline {
+            zombiePIDText = try? String(contentsOf: pidFile, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines)
+            if zombiePIDText?.isEmpty == false { break }
+            usleep(50_000)
+        }
+        let zombiePID = try XCTUnwrap(zombiePIDText.flatMap(Int.init))
+        usleep(200_000)
+
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
+        let liveWindow = mockTmux.addWindow(sessionName: "spaces-\(workspace.id)", id: "@1", name: "api", index: 0, isActive: true)
+        let zombieProcess = RunningProcessRecord(
+            id: UUID().uuidString, workspaceID: workspace.id, templateName: "api", command: "npm start", terminalApp: "Ghostty", windowID: 123,
+            terminalTrackingID: "workspace-session", terminalNativeID: "ghostty-terminal", terminalContainerID: "ghostty-tab",
+            tmuxWindowID: liveWindow.id, pid: zombiePID, status: .running, logPath: nil, lastOutputAt: nil,
+            startedAt: ISO8601DateFormatter().string(from: Date().addingTimeInterval(-20)), exitedAt: nil)
+        try store.upsert(runningProcess: zombieProcess)
+
+        let didUpdate = try orchestrator.checkAndUpdateProcessStatuses()
+
+        XCTAssertTrue(didUpdate)
+        let updated = try store.runningProcesses(workspaceID: workspace.id).first
+        XCTAssertEqual(updated?.status, .exited)
+        XCTAssertNotNil(updated?.exitedAt)
+    }
+
     // Tests check and update process statuses skips processes without pid by arranging representative inputs and asserting the expected result.
     func testCheckAndUpdateProcessStatusesSkipsProcessesWithoutPID() throws {
         let root = try makeTempDirectory()
@@ -2564,6 +2629,85 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertEqual(try store.runningProcesses(workspaceID: workspace.id).map(\.templateName), ["api"])
     }
 
+    func testRunConfiguredProcessRestartsExitedProcessRow() throws {
+        let (orchestrator, store, _, workspace, _, mockIterm, mockTmux) = try makeMockItermOrchestratorWithWorkspace()
+        try store.touchWorkspaceSettings(workspaceID: workspace.id, updatedAt: "now")
+        try store.setWorkspaceProcesses(workspaceID: workspace.id, processes: [ProcessTemplate(name: "api", command: "npm run api")])
+        try store.updateWorkspaceRunning(id: workspace.id, isRunning: true, launchedAt: "now")
+
+        let exitedProcess = RunningProcessRecord(
+            id: "process-api", workspaceID: workspace.id, templateName: "api", command: "npm run api", terminalApp: "iTerm2", windowID: 222,
+            terminalTrackingID: "session-api-old", terminalNativeID: nil, terminalContainerID: nil, itermTabIndex: nil, tmuxWindowID: "@2", pid: 2222,
+            status: .exited, logPath: nil, lastOutputAt: nil, startedAt: "earlier", exitedAt: "now")
+        try store.upsert(runningProcess: exitedProcess)
+        try store.upsert(
+            window: WindowRecord(
+                id: "window-api", workspaceID: workspace.id, app: "iTerm2", name: "api", detail: "npm run api", targetURL: nil, windowID: 222,
+                terminalTrackingID: "session-api-old", terminalNativeID: nil, terminalContainerID: nil, itermTabIndex: nil, tmuxWindowID: "@2",
+                role: "terminal", orderIndex: 200, lastSeenAt: "now"))
+        _ = mockTmux.addWindow(sessionName: "spaces-\(workspace.id)-api", id: "@2", name: "api", isActive: true)
+        mockIterm.nextWindowID = 601
+        mockIterm.nextSessionID = "session-api-new"
+
+        try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) {
+            try withEnv(name: "YABAI_WINDOWS_JSON", value: "[]") {
+                try orchestrator.runConfiguredProcess(workspaceID: workspace.id, processKey: "api")
+            }
+        }
+
+        XCTAssertEqual(mockIterm.openWindowAndRunCallCount, 1)
+        XCTAssertEqual(mockTmux.startSessionCallCount, 1)
+        let restarted = try XCTUnwrap(try store.runningProcesses(workspaceID: workspace.id).first(where: { $0.id == exitedProcess.id }))
+        XCTAssertEqual(restarted.status, .running)
+        XCTAssertNil(restarted.exitedAt)
+        XCTAssertEqual(restarted.terminalTrackingID, "session-api-new")
+        XCTAssertEqual(try store.runningProcesses(workspaceID: workspace.id).count, 1)
+    }
+
+    func testRunConfiguredProcessRestartsExitedRowUsingCurrentTerminalHost() throws {
+        let store = try makeTemporaryStore()
+        let mockIterm = MockIterm2Adapter()
+        let mockGhostty = MockGhosttyAdapter()
+        mockGhostty.openWindowInfos = [GhosttyWindowInfo(windowID: "ghostty-window-7", tabID: "ghostty-tab-7", terminalID: "ghostty-terminal-7")]
+        let mockTmux = MockTmuxAdapter()
+        let orchestrator = WorkspaceOrchestrator(store: store, iterm: mockIterm, ghostty: mockGhostty, tmux: mockTmux)
+        let root = try makeTempDirectory()
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
+        _ = project
+        try orchestrator.updateTerminalHost(.ghostty)
+        try store.touchWorkspaceSettings(workspaceID: workspace.id, updatedAt: "now")
+        try store.setWorkspaceProcesses(workspaceID: workspace.id, processes: [ProcessTemplate(name: "api", command: "npm run api")])
+        try store.updateWorkspaceRunning(id: workspace.id, isRunning: true, launchedAt: "now")
+
+        let exitedProcess = RunningProcessRecord(
+            id: "process-api", workspaceID: workspace.id, templateName: "api", command: "npm run api", terminalApp: "iTerm2", windowID: 222,
+            terminalTrackingID: "session-api-old", terminalNativeID: nil, terminalContainerID: nil, itermTabIndex: nil, tmuxWindowID: "@2", pid: 2222,
+            status: .exited, logPath: nil, lastOutputAt: nil, startedAt: "earlier", exitedAt: "now")
+        try store.upsert(runningProcess: exitedProcess)
+        try store.upsert(
+            window: WindowRecord(
+                id: "window-api", workspaceID: workspace.id, app: "iTerm2", name: "api", detail: "npm run api", targetURL: nil, windowID: 222,
+                terminalTrackingID: "session-api-old", terminalNativeID: nil, terminalContainerID: nil, itermTabIndex: nil, tmuxWindowID: "@2",
+                role: "terminal", orderIndex: 200, lastSeenAt: "now"))
+        _ = mockTmux.addWindow(sessionName: "spaces-\(workspace.id)-api", id: "@2", name: "api", isActive: true)
+
+        try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) {
+            try withEnv(name: "YABAI_WINDOWS_JSON", value: "[]") {
+                try orchestrator.runConfiguredProcess(workspaceID: workspace.id, processKey: "api")
+            }
+        }
+
+        XCTAssertEqual(mockGhostty.openWindowAndRunCallCount, 1)
+        XCTAssertEqual(mockIterm.openWindowAndRunCallCount, 0)
+        let restarted = try XCTUnwrap(try store.runningProcesses(workspaceID: workspace.id).first(where: { $0.id == exitedProcess.id }))
+        XCTAssertEqual(restarted.terminalApp, "Ghostty")
+        XCTAssertEqual(restarted.terminalNativeID, "ghostty-terminal-7")
+        XCTAssertEqual(restarted.terminalContainerID, "ghostty-tab-7")
+    }
+
     // Tests no-op settings saves do not restart a recovered named process.
     func testUpdateWorkspaceSettingsDoesNotRestartRecoveredNamedProcess() throws {
         let (orchestrator, store, _, workspace, _, mockIterm, mockTmux) = try makeMockItermOrchestratorWithWorkspace()
@@ -3896,6 +4040,93 @@ final class OrchestratorTests: XCTestCase {
             guard case WorkspaceError.invalidArgument(let message) = error else { return XCTFail("Unexpected error: \(error)") }
             XCTAssertEqual(message, "Timed out waiting for tmux session to become available for process 'which' (which).")
         }
+    }
+
+    func testLaunchWorkspaceSurfacesImmediateProcessStartFailureWithoutAttachingTmux() throws {
+        final class ImmediateExitTmuxAdapter: MockTmuxAdapter, @unchecked Sendable {
+            override func startSession(named sessionName: String, windowName: String, cwd: String, env: [String: String] = [:], command: [String])
+                throws -> TmuxWindowInfo
+            {
+                let window = try super.startSession(named: sessionName, windowName: windowName, cwd: cwd, env: env, command: command)
+                paneDeadByWindowID[window.id] = true
+                paneExitStatusByWindowID[window.id] = 127
+                capturedPaneByWindowID[window.id] = "zsh:1: command not found: missing-dev-server"
+                return window
+            }
+        }
+
+        let root = try makeTempDirectory()
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let store = try makeTemporaryStore()
+        let mockIterm = MockIterm2Adapter()
+        let mockTmux = ImmediateExitTmuxAdapter()
+        let orchestrator = WorkspaceOrchestrator(store: store, iterm: mockIterm, tmux: mockTmux)
+
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
+        try orchestrator.updateWorkspaceSettings(workspaceID: workspace.id) { settings in
+            settings.processes = [ProcessTemplate(name: "server", command: "missing-dev-server")]
+        }
+
+        XCTAssertThrowsError(
+            try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) { try orchestrator.launchWorkspace(workspaceID: workspace.id) }
+        ) { error in
+            guard case WorkspaceError.invalidArgument(let message) = error else { return XCTFail("Unexpected error: \(error)") }
+            XCTAssertEqual(message, "Process 'server' failed to start (missing-dev-server). zsh:1: command not found: missing-dev-server")
+        }
+        XCTAssertEqual(mockIterm.openWindowAndRunCallCount, 0)
+        XCTAssertEqual(try orchestrator.runningProcesses(workspaceID: workspace.id).count, 0)
+        XCTAssertFalse(try store.workspace(id: workspace.id)?.isRunning ?? true)
+    }
+
+    func testLaunchWorkspaceSurfacesProcessFailureThatHappensShortlyAfterSessionAppears() throws {
+        final class DelayedExitTmuxAdapter: MockTmuxAdapter, @unchecked Sendable {
+            private var deadChecksByWindowID: [String: Int] = [:]
+
+            override func startSession(named sessionName: String, windowName: String, cwd: String, env: [String: String] = [:], command: [String])
+                throws -> TmuxWindowInfo
+            {
+                let window = try super.startSession(named: sessionName, windowName: windowName, cwd: cwd, env: env, command: command)
+                paneExitStatusByWindowID[window.id] = 127
+                capturedPaneByWindowID[window.id] = "sh: next: command not found"
+                return window
+            }
+
+            override func isPaneDead(windowID: String) throws -> Bool {
+                let count = deadChecksByWindowID[windowID, default: 0] + 1
+                deadChecksByWindowID[windowID] = count
+                if count >= 2 {
+                    paneDeadByWindowID[windowID] = true
+                    return true
+                }
+                return false
+            }
+        }
+
+        let root = try makeTempDirectory()
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let store = try makeTemporaryStore()
+        let mockIterm = MockIterm2Adapter()
+        let mockTmux = DelayedExitTmuxAdapter()
+        let orchestrator = WorkspaceOrchestrator(store: store, iterm: mockIterm, tmux: mockTmux)
+
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
+        try orchestrator.updateWorkspaceSettings(workspaceID: workspace.id) { settings in
+            settings.processes = [ProcessTemplate(name: "web server", command: "cd apps/web && npm run dev", executionMode: .shell)]
+        }
+
+        XCTAssertThrowsError(
+            try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) { try orchestrator.launchWorkspace(workspaceID: workspace.id) }
+        ) { error in
+            guard case WorkspaceError.invalidArgument(let message) = error else { return XCTFail("Unexpected error: \(error)") }
+            XCTAssertEqual(message, "Process 'web server' failed to start (cd apps/web && npm run dev). sh: next: command not found")
+        }
+        XCTAssertEqual(mockIterm.openWindowAndRunCallCount, 0)
+        XCTAssertEqual(try orchestrator.runningProcesses(workspaceID: workspace.id).count, 0)
+        XCTAssertFalse(try store.workspace(id: workspace.id)?.isRunning ?? true)
     }
 
     // Tests launch workspace waits for pending setup to finish by arranging a deferred setup run and asserting launch completes afterwards.
