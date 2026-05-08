@@ -1842,7 +1842,7 @@ final class OrchestratorTests: XCTestCase {
 
         XCTAssertEqual(try orchestrator.activeWorkspaceID(), workspace.id)
         let itermFocusEntry = try String(contentsOf: itermFocusLog).trimmingCharacters(in: .whitespacesAndNewlines)
-        XCTAssertEqual(itermFocusEntry, "session-101|1|101")
+        XCTAssertEqual(itermFocusEntry, "session-101|-1|101")
         if FileManager.default.fileExists(atPath: yabaiFocusLog.path) {
             let yabaiFocusEntries = try String(contentsOf: yabaiFocusLog).trimmingCharacters(in: .whitespacesAndNewlines)
             XCTAssertTrue(yabaiFocusEntries.isEmpty)
@@ -2114,7 +2114,7 @@ final class OrchestratorTests: XCTestCase {
 
         XCTAssertEqual(try orchestrator.activeWorkspaceID(), workspace.id)
         let focusEntry = try String(contentsOf: itermFocusLog).trimmingCharacters(in: .whitespacesAndNewlines)
-        XCTAssertEqual(focusEntry, "session-101|1|101")
+        XCTAssertEqual(focusEntry, "session-101|-1|101")
     }
 
     func testFocusWorkspaceWindowByNameRecoversConfiguredBrowserSession() throws {

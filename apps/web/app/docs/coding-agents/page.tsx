@@ -14,7 +14,7 @@ reports its state to Spaces.
 Use an empty matcher ("") for every entry. Do not add or remove any
 other keys. After writing the file, show me the diff.`;
 
-const CODEX_PROMPT = `Enable Codex hooks and add global Spaces lifecycle hooks so this agent
+const CODEX_PROMPT = `Enable Codex hooks with [features].hooks in ~/.codex/config.toml and add global Spaces lifecycle hooks so this agent
 reports its state to Spaces.
 
   SessionStart      ->  spaces signal init
@@ -88,7 +88,7 @@ export default function CodingAgentsDocsPage() {
       <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
         <h2 className="text-2xl font-semibold tracking-tight">Setup Prompt for Codex</h2>
         <p className="mt-2 text-sm leading-7 text-foreground-soft">
-          Paste this into Codex from any directory. It edits <code>~/.codex/hooks.json</code> and <code>~/.codex/config.toml</code>, and leaves unrelated settings untouched.
+          Paste this into Codex from any directory. It edits <code>~/.codex/hooks.json</code> and <code>~/.codex/config.toml</code>, enables hooks with <code>[features].hooks</code>, and leaves unrelated settings untouched.
         </p>
         <CopyablePrompt label="Prompt for Codex" text={CODEX_PROMPT} />
       </article>

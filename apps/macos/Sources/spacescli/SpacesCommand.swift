@@ -236,8 +236,8 @@ func resolveAgentInvocationContext(workspaceID: String, environment: [String: St
     guard let resolvedProvider = resolveProvider(environment: environment) else { return nil }
     let focusedWindowID = context.currentYabaiWindowID()
     let adapter = terminalAdapter(for: resolvedProvider)
-    let trackingIdentity = try adapter?.resolveCurrentTrackingIdentity(environment: environment, yabaiFocusedWindowID: focusedWindowID)
-    let splitIdentity = splitTrackingIdentity(trackingIdentity)
+    let attributionIdentity = try adapter?.resolveCurrentAttributionIdentity(environment: environment, yabaiFocusedWindowID: focusedWindowID)
+    let splitIdentity = splitTrackingIdentity(attributionIdentity)
     if resolvedProvider == .ghostty, splitIdentity.sessionID?.isEmpty != false { return nil }
     if resolvedProvider == .iterm2, splitIdentity.sessionID?.isEmpty != false { return nil }
     let terminalNativeID =

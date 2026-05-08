@@ -104,8 +104,8 @@ open class GhosttyAdapter: @unchecked Sendable {
         let window: GhosttyWindowInfo = try self.openWindowAndRun(
             command: commandApplyingEnvironment(command, environment: environment), cwd: cwd, background: background)
         return TerminalLaunchResult(
-            trackingIdentity: .session(window.terminalID), hookSessionID: environment["SPACES_TERMINAL_TRACKING_ID"], containerID: window.tabID,
-            fallbackWindowID: nil)
+            providerIdentity: .session(window.terminalID), hookAttributionID: environment["SPACES_TERMINAL_TRACKING_ID"],
+            containerIdentity: window.tabID, fallbackWindowID: nil)
     }
 }
 
@@ -113,7 +113,7 @@ extension GhosttyAdapter: TerminalAdapter {
     public var appName: String { "Ghostty" }
     public var bundleIdentifier: String { "com.mitchellh.ghostty" }
 
-    public func resolveCurrentTrackingIdentity(environment: [String: String], yabaiFocusedWindowID: Int?) throws -> TerminalTrackingIdentity? {
+    public func resolveCurrentAttributionIdentity(environment: [String: String], yabaiFocusedWindowID: Int?) throws -> TerminalTrackingIdentity? {
         // Ghostty hook attribution must come from the injected shell token. Falling back to a
         // frontmost terminal or window here misattributes background hooks to whichever Ghostty
         // tab the user happens to be viewing when `spaces signal` runs.
@@ -122,7 +122,7 @@ extension GhosttyAdapter: TerminalAdapter {
     }
 
     public func focusTrackedTerminal(_ target: TerminalFocusTarget) throws -> Bool {
-        switch target.trackingIdentity {
+        switch target.providerIdentity {
         case .session(let id):
             // Focus is intentionally more permissive than event attribution: once Spaces already
             // knows which Ghostty terminal it wants, a direct terminal focus is preferred, but
@@ -138,7 +138,7 @@ extension GhosttyAdapter: TerminalAdapter {
         }
     }
 
-    public func listLiveTrackingIdentities() throws -> Set<TerminalTrackingIdentity> {
+    public func listLiveProviderIdentities() throws -> Set<TerminalTrackingIdentity> {
         Set(try listWindowTabAndTerminalIDs().map { .session($0.terminalID) })
     }
 }

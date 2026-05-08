@@ -75,9 +75,9 @@ public final class WorkspaceOrchestrator {
 
     private struct ManagedTerminalHandle {
         let fallbackWindowID: Int?
-        let trackingIdentity: TerminalTrackingIdentity?
-        let hookSessionID: String?
-        let containerID: String?
+        let providerIdentity: TerminalTrackingIdentity?
+        let hookAttributionID: String?
+        let containerIdentity: String?
     }
 
     private enum WorkspaceNavigationCursor: Hashable {
@@ -2070,9 +2070,8 @@ public final class WorkspaceOrchestrator {
             if focusedWindow, chrome.isAvailable() { _ = try? chrome.focusFirstTabOfFrontWindow() }
             focused = focusedWindow
         } else {
-            let trackingIdentity = resolvedFocusIdentity(for: window, workspaceID: workspaceID)
-            let adapterFocused = focusManagedTerminal(
-                terminalApp: window.app, trackingIdentity: trackingIdentity, windowID: window.windowID, tabIndex: window.itermTabIndex)
+            let providerIdentity = resolvedFocusIdentity(for: window, workspaceID: workspaceID)
+            let adapterFocused = focusManagedTerminal(terminalApp: window.app, providerIdentity: providerIdentity, windowID: window.windowID)
             focused = adapterFocused == true ? true : ((window.windowID.flatMap { try? yabai.focusWindow(id: $0) }) ?? false)
         }
         guard let id = window.windowID else { return focused }
@@ -2198,19 +2197,19 @@ public final class WorkspaceOrchestrator {
 
     private func storedTerminalHookSessionID(terminalHost: TerminalHost, handle: ManagedTerminalHandle) -> String? {
         switch terminalHost {
-        case .ghostty: return handle.hookSessionID ?? handle.trackingIdentity?.sessionID
-        case .iterm2: return handle.trackingIdentity?.sessionID
+        case .ghostty: return handle.hookAttributionID ?? handle.providerIdentity?.sessionID
+        case .iterm2: return handle.hookAttributionID ?? handle.providerIdentity?.sessionID
         }
     }
 
     private func storedTerminalNativeID(terminalHost: TerminalHost, handle: ManagedTerminalHandle) -> String? {
         guard terminalHost == .ghostty else { return nil }
-        return handle.trackingIdentity?.sessionID
+        return handle.providerIdentity?.sessionID
     }
 
     private func storedTerminalContainerID(terminalHost: TerminalHost, handle: ManagedTerminalHandle) -> String? {
         guard terminalHost == .ghostty else { return nil }
-        return handle.containerID
+        return handle.containerIdentity
     }
 
     private func resolvedFocusIdentity(for window: WindowRecord, workspaceID: String) -> TerminalTrackingIdentity? {
@@ -2237,11 +2236,11 @@ public final class WorkspaceOrchestrator {
         return nil
     }
 
-    private func focusManagedTerminal(terminalApp: String?, trackingIdentity: TerminalTrackingIdentity?, windowID: Int?, tabIndex: Int?) -> Bool? {
+    private func focusManagedTerminal(terminalApp: String?, providerIdentity: TerminalTrackingIdentity?, windowID: Int?) -> Bool? {
         guard let terminalHost = terminalHost(for: terminalApp), let terminalAdapter = terminalAdapter(for: terminalHost) else { return nil }
-        let hasPreciseTarget = trackingIdentity != nil || tabIndex != nil
+        let hasPreciseTarget = providerIdentity != nil || windowID != nil
         guard hasPreciseTarget else { return nil }
-        let target = TerminalFocusTarget(trackingIdentity: trackingIdentity, windowID: windowID, tabIndex: tabIndex)
+        let target = TerminalFocusTarget(providerIdentity: providerIdentity, windowID: windowID)
         return try? terminalAdapter.focusTrackedTerminal(target)
     }
 
@@ -2265,8 +2264,8 @@ public final class WorkspaceOrchestrator {
         }
         let result = try terminalAdapter.openWindowAndRun(command: command, cwd: cwd, environment: environment, background: background)
         return ManagedTerminalHandle(
-            fallbackWindowID: result.fallbackWindowID, trackingIdentity: result.trackingIdentity, hookSessionID: result.hookSessionID,
-            containerID: result.containerID)
+            fallbackWindowID: result.fallbackWindowID, providerIdentity: result.providerIdentity, hookAttributionID: result.hookAttributionID,
+            containerIdentity: result.containerIdentity)
     }
 
     private func workspaceTerminalWindowID(workspaceID: String) throws -> Int? {
@@ -3320,7 +3319,7 @@ public final class WorkspaceOrchestrator {
     /// Returns nil if iTerm2 is not running or the query fails.
     public func liveItermSessionIDs() -> Set<String>? {
         guard let terminalAdapter = terminalAdapter(for: .iterm2) else { return nil }
-        return try? Set(terminalAdapter.listLiveTrackingIdentities().compactMap(\.sessionID))
+        return try? Set(terminalAdapter.listLiveProviderIdentities().compactMap(\.sessionID))
     }
 
     public func activeWorkspaceID() throws -> String? { try store.setting(key: "active_workspace_id") }
@@ -3910,8 +3909,9 @@ public final class WorkspaceOrchestrator {
     @discardableResult private func pruneMissingWindows(workspaceID: String) throws -> Int {
         let existingIDs = Set(try yabai.listWindows().map(\.id))
         let windows = try store.windows(workspaceID: workspaceID)
+        let agentWindows = try store.agentWindows(workspaceID: workspaceID)
         let liveTmuxWindowIDs = Set(try tmuxWindows(workspaceID: workspaceID).map(\.id))
-        let liveGhosttyTrackingIdentities = (try? ghostty.listLiveTrackingIdentities()) ?? []
+        let liveGhosttyTrackingIdentities = (try? ghostty.listLiveProviderIdentities()) ?? []
         var prunedTerminalTrackingKeys = Set<String>()
         var prunedTerminalWindowIDs = Set<Int>()
         var pruned = 0
@@ -3937,7 +3937,8 @@ public final class WorkspaceOrchestrator {
             }
         }
         pruned += try pruneOrphanedAgentWindows(
-            workspaceID: workspaceID, prunedTerminalTrackingKeys: prunedTerminalTrackingKeys, prunedTerminalWindowIDs: prunedTerminalWindowIDs)
+            workspaceID: workspaceID, agents: agentWindows, prunedTerminalTrackingKeys: prunedTerminalTrackingKeys,
+            prunedTerminalWindowIDs: prunedTerminalWindowIDs)
         return pruned
     }
 
@@ -3948,12 +3949,12 @@ public final class WorkspaceOrchestrator {
     }
 
     @discardableResult private func pruneOrphanedAgentWindows(
-        workspaceID: String, prunedTerminalTrackingKeys: Set<String>, prunedTerminalWindowIDs: Set<Int>
+        workspaceID: String, agents: [AgentWindowRecord], prunedTerminalTrackingKeys: Set<String>, prunedTerminalWindowIDs: Set<Int>
     ) throws -> Int {
         guard !prunedTerminalTrackingKeys.isEmpty || !prunedTerminalWindowIDs.isEmpty else { return 0 }
         let runningProcessTrackingKeys = Set(try store.runningProcesses(workspaceID: workspaceID).compactMap(\.terminalTrackingKey))
         var pruned = 0
-        for agent in try store.agentWindows(workspaceID: workspaceID) where TerminalHost(rawValue: agent.provider.rawValue) != nil {
+        for agent in agents where TerminalHost(rawValue: agent.provider.rawValue) != nil {
             if let tmuxWindowID = agent.tmuxWindowID, !tmuxWindowID.isEmpty { continue }
             let trackingKey = agent.terminalTrackingKey
             let windowID = agent.yabaiWindowID ?? agent.windowID
@@ -5055,7 +5056,7 @@ public final class WorkspaceOrchestrator {
         guard isManagedTerminalApp(process.terminalApp) else { return false }
         let target = try resolvedProcessTerminalFocusTarget(process, workspaceID: workspaceID)
         let adapterFocused = focusManagedTerminal(
-            terminalApp: process.terminalApp, trackingIdentity: target.trackingIdentity, windowID: target.windowID, tabIndex: target.tabIndex)
+            terminalApp: process.terminalApp, providerIdentity: target.providerIdentity, windowID: target.windowID)
         let focused: Bool
         if adapterFocused == true {
             focused = true
@@ -5074,13 +5075,11 @@ public final class WorkspaceOrchestrator {
         let trackedWindow = windows.first(where: { matchesTrackedTerminalWindow($0, process: process) })
         let trackedSessionIdentity = trackedWindow?.terminalFocusIdentity
         let processSessionIdentity = process.terminalFocusIdentity
-        let trackingIdentity =
+        let providerIdentity =
             trackedSessionIdentity ?? processSessionIdentity ?? trackedWindow?.windowID.map(TerminalTrackingIdentity.window) ?? process.windowID.map(
                 TerminalTrackingIdentity.window) ?? trackedWindow?.tmuxWindowID.map(TerminalTrackingIdentity.tmux)
             ?? process.tmuxWindowID.map(TerminalTrackingIdentity.tmux)
-        return TerminalFocusTarget(
-            trackingIdentity: trackingIdentity, windowID: trackedWindow?.windowID ?? process.windowID,
-            tabIndex: trackedWindow?.itermTabIndex ?? process.itermTabIndex)
+        return TerminalFocusTarget(providerIdentity: providerIdentity, windowID: trackedWindow?.windowID ?? process.windowID)
     }
 
     private func matchesTrackedTerminalWindow(_ window: WindowRecord, process: RunningProcessRecord) -> Bool {
@@ -5125,8 +5124,7 @@ public final class WorkspaceOrchestrator {
     private func focusAgentWindowRecord(_ record: AgentWindowRecord) throws -> Bool {
         let windowID = try trackedAgentWindowID(record) ?? record.yabaiWindowID ?? record.windowID
         let terminalApp = TerminalHost(rawValue: record.provider.rawValue)?.appName
-        let adapterFocused = focusManagedTerminal(
-            terminalApp: terminalApp, trackingIdentity: record.terminalFocusIdentity, windowID: windowID, tabIndex: nil)
+        let adapterFocused = focusManagedTerminal(terminalApp: terminalApp, providerIdentity: record.terminalFocusIdentity, windowID: windowID)
         let focused: Bool
         if adapterFocused == true {
             focused = true

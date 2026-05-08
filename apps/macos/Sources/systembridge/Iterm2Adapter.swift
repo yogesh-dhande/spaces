@@ -418,11 +418,11 @@ extension Iterm2Adapter: TerminalAdapter {
         let launchedCommand = commandApplyingWorkingDirectory(commandApplyingEnvironment(command, environment: environment), cwd: cwd)
         let window = try openWindowAndRun(command: launchedCommand, background: background)
         return TerminalLaunchResult(
-            trackingIdentity: window.sessionID.map(TerminalTrackingIdentity.session) ?? .window(window.id), hookSessionID: window.sessionID,
-            containerID: String(window.id), fallbackWindowID: window.id, tabIndex: window.tabIndex)
+            providerIdentity: window.sessionID.map(TerminalTrackingIdentity.session) ?? .window(window.id), hookAttributionID: window.sessionID,
+            containerIdentity: String(window.id), fallbackWindowID: window.id)
     }
 
-    public func resolveCurrentTrackingIdentity(environment: [String: String], yabaiFocusedWindowID _: Int?) throws -> TerminalTrackingIdentity? {
+    public func resolveCurrentAttributionIdentity(environment: [String: String], yabaiFocusedWindowID _: Int?) throws -> TerminalTrackingIdentity? {
         guard let raw = environment["ITERM_SESSION_ID"], !raw.isEmpty else { return nil }
         guard let colonIndex = raw.lastIndex(of: ":") else { return .session(raw) }
         return .session(String(raw[raw.index(after: colonIndex)...]))
@@ -431,7 +431,7 @@ extension Iterm2Adapter: TerminalAdapter {
     public func focusTrackedTerminal(_ target: TerminalFocusTarget) throws -> Bool {
         let sessionID: String?
         let windowID: Int?
-        switch target.trackingIdentity {
+        switch target.providerIdentity {
         case .session(let id):
             sessionID = id
             windowID = target.windowID
@@ -442,10 +442,10 @@ extension Iterm2Adapter: TerminalAdapter {
             sessionID = nil
             windowID = target.windowID
         }
-        return try focusSessionOrTab(preferredSessionID: sessionID, tabIndex: target.tabIndex, windowID: windowID)
+        return try focusSessionOrTab(preferredSessionID: sessionID, tabIndex: nil, windowID: windowID)
     }
 
-    public func listLiveTrackingIdentities() throws -> Set<TerminalTrackingIdentity> {
+    public func listLiveProviderIdentities() throws -> Set<TerminalTrackingIdentity> {
         Set(try listSessionIDs().map(TerminalTrackingIdentity.session))
     }
 }
