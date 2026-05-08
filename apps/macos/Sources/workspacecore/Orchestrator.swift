@@ -138,6 +138,7 @@ public final class WorkspaceOrchestrator {
     private let terminalFocusPulseController: TerminalFocusPulseControlling
     private let windowNavigationCycleSessionTimeout: TimeInterval = 2
     private let windowNavigationHistoryLimit = 64
+    private let processStartupVerificationTimeout: TimeInterval = 1
 
     public init(
         store: SQLiteStore, projectsRootDirectory: URL? = nil, workspacesRootDirectory: URL? = nil, git: GitClient = .init(),
@@ -2316,6 +2317,65 @@ public final class WorkspaceOrchestrator {
         "cd \(shellSingleQuoted(cwd)) && exec tmux attach-session -t \(shellSingleQuoted(sessionName))"
     }
 
+    private func startupFailureSummary(from paneOutput: String) -> String? {
+        let lines = paneOutput.split(separator: "\n").map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
+        guard let summary = lines.last else { return nil }
+        return String(summary.prefix(240))
+    }
+
+    private func processStartupFailureMessage(processName: String, commandDescription: String?, exitStatus: Int?, paneOutput: String?) -> String {
+        let trimmedProcessName = processName.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedCommand = commandDescription?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let label: String
+        if !trimmedProcessName.isEmpty, let trimmedCommand, !trimmedCommand.isEmpty {
+            label = "Process '\(trimmedProcessName)' failed to start (\(trimmedCommand))."
+        } else if !trimmedProcessName.isEmpty {
+            label = "Process '\(trimmedProcessName)' failed to start."
+        } else if let trimmedCommand, !trimmedCommand.isEmpty {
+            label = "Command failed to start (\(trimmedCommand))."
+        } else {
+            label = "Process failed to start."
+        }
+
+        if let paneOutput, let summary = startupFailureSummary(from: paneOutput) { return "\(label) \(summary)" }
+        if let exitStatus { return "\(label) Exit status \(exitStatus)." }
+        return label
+    }
+
+    private func surfacedProcessStartupError(sessionName: String, windowID: String, processName: String, commandDescription: String?)
+        -> WorkspaceError
+    {
+        let paneOutput = try? tmux.capturePane(windowID: windowID)
+        let exitStatus = try? tmux.paneExitStatus(windowID: windowID)
+        if tmux.hasSession(named: sessionName) { try? tmux.killSession(named: sessionName) }
+        return .invalidArgument(
+            message: processStartupFailureMessage(
+                processName: processName, commandDescription: commandDescription, exitStatus: exitStatus, paneOutput: paneOutput))
+    }
+
+    private func verifyProcessSessionStarted(sessionName: String, windowID: String, processName: String, commandDescription: String?) throws {
+        let deadline = currentDate().addingTimeInterval(processStartupVerificationTimeout)
+        var sawLiveWindow = false
+        while currentDate() < deadline {
+            if let window = try? tmux.currentWindow(sessionName: sessionName) {
+                if (try? tmux.isPaneDead(windowID: window.id)) == true {
+                    throw surfacedProcessStartupError(
+                        sessionName: sessionName, windowID: window.id, processName: processName, commandDescription: commandDescription)
+                }
+                sawLiveWindow = true
+            } else if !tmux.hasSession(named: sessionName) {
+                throw surfacedProcessStartupError(
+                    sessionName: sessionName, windowID: windowID, processName: processName, commandDescription: commandDescription)
+            }
+            Thread.sleep(forTimeInterval: 0.05)
+        }
+
+        if sawLiveWindow { return }
+        if !waitForTmuxSession(named: sessionName) {
+            throw WorkspaceError.invalidArgument(message: tmuxSessionTimeoutMessage(processName: processName, commandDescription: commandDescription))
+        }
+    }
+
     @discardableResult private func attachProcessTmuxSession(
         workspace: WorkspaceRecord, processName: String, commandDescription: String? = nil, terminalHost: TerminalHost, background: Bool = false
     ) throws -> ManagedTerminalHandle {
@@ -2346,7 +2406,10 @@ public final class WorkspaceOrchestrator {
             commandEnv = runtimeEnv
             argv = [shell.rawValue, "-lc", commandString]
         }
-        _ = try tmux.startSession(named: sessionName, windowName: processName, cwd: workspace.dir, env: commandEnv, command: argv)
+        let startedWindow = try tmux.startSession(named: sessionName, windowName: processName, cwd: workspace.dir, env: commandEnv, command: argv)
+        try? tmux.setRemainOnExit(windowID: startedWindow.id, enabled: true)
+        try verifyProcessSessionStarted(
+            sessionName: sessionName, windowID: startedWindow.id, processName: processName, commandDescription: rawCommand)
         let windowInfo = try attachProcessTmuxSession(
             workspace: workspace, processName: processName, commandDescription: rawCommand, terminalHost: terminalHost, background: background)
         guard waitForTmuxSession(named: sessionName) else {

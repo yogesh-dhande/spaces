@@ -3898,6 +3898,93 @@ final class OrchestratorTests: XCTestCase {
         }
     }
 
+    func testLaunchWorkspaceSurfacesImmediateProcessStartFailureWithoutAttachingTmux() throws {
+        final class ImmediateExitTmuxAdapter: MockTmuxAdapter, @unchecked Sendable {
+            override func startSession(named sessionName: String, windowName: String, cwd: String, env: [String: String] = [:], command: [String])
+                throws -> TmuxWindowInfo
+            {
+                let window = try super.startSession(named: sessionName, windowName: windowName, cwd: cwd, env: env, command: command)
+                paneDeadByWindowID[window.id] = true
+                paneExitStatusByWindowID[window.id] = 127
+                capturedPaneByWindowID[window.id] = "zsh:1: command not found: missing-dev-server"
+                return window
+            }
+        }
+
+        let root = try makeTempDirectory()
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let store = try makeTemporaryStore()
+        let mockIterm = MockIterm2Adapter()
+        let mockTmux = ImmediateExitTmuxAdapter()
+        let orchestrator = WorkspaceOrchestrator(store: store, iterm: mockIterm, tmux: mockTmux)
+
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
+        try orchestrator.updateWorkspaceSettings(workspaceID: workspace.id) { settings in
+            settings.processes = [ProcessTemplate(name: "server", command: "missing-dev-server")]
+        }
+
+        XCTAssertThrowsError(
+            try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) { try orchestrator.launchWorkspace(workspaceID: workspace.id) }
+        ) { error in
+            guard case WorkspaceError.invalidArgument(let message) = error else { return XCTFail("Unexpected error: \(error)") }
+            XCTAssertEqual(message, "Process 'server' failed to start (missing-dev-server). zsh:1: command not found: missing-dev-server")
+        }
+        XCTAssertEqual(mockIterm.openWindowAndRunCallCount, 0)
+        XCTAssertEqual(try orchestrator.runningProcesses(workspaceID: workspace.id).count, 0)
+        XCTAssertFalse(try store.workspace(id: workspace.id)?.isRunning ?? true)
+    }
+
+    func testLaunchWorkspaceSurfacesProcessFailureThatHappensShortlyAfterSessionAppears() throws {
+        final class DelayedExitTmuxAdapter: MockTmuxAdapter, @unchecked Sendable {
+            private var deadChecksByWindowID: [String: Int] = [:]
+
+            override func startSession(named sessionName: String, windowName: String, cwd: String, env: [String: String] = [:], command: [String])
+                throws -> TmuxWindowInfo
+            {
+                let window = try super.startSession(named: sessionName, windowName: windowName, cwd: cwd, env: env, command: command)
+                paneExitStatusByWindowID[window.id] = 127
+                capturedPaneByWindowID[window.id] = "sh: next: command not found"
+                return window
+            }
+
+            override func isPaneDead(windowID: String) throws -> Bool {
+                let count = deadChecksByWindowID[windowID, default: 0] + 1
+                deadChecksByWindowID[windowID] = count
+                if count >= 2 {
+                    paneDeadByWindowID[windowID] = true
+                    return true
+                }
+                return false
+            }
+        }
+
+        let root = try makeTempDirectory()
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let store = try makeTemporaryStore()
+        let mockIterm = MockIterm2Adapter()
+        let mockTmux = DelayedExitTmuxAdapter()
+        let orchestrator = WorkspaceOrchestrator(store: store, iterm: mockIterm, tmux: mockTmux)
+
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
+        try orchestrator.updateWorkspaceSettings(workspaceID: workspace.id) { settings in
+            settings.processes = [ProcessTemplate(name: "web server", command: "cd apps/web && npm run dev", executionMode: .shell)]
+        }
+
+        XCTAssertThrowsError(
+            try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) { try orchestrator.launchWorkspace(workspaceID: workspace.id) }
+        ) { error in
+            guard case WorkspaceError.invalidArgument(let message) = error else { return XCTFail("Unexpected error: \(error)") }
+            XCTAssertEqual(message, "Process 'web server' failed to start (cd apps/web && npm run dev). sh: next: command not found")
+        }
+        XCTAssertEqual(mockIterm.openWindowAndRunCallCount, 0)
+        XCTAssertEqual(try orchestrator.runningProcesses(workspaceID: workspace.id).count, 0)
+        XCTAssertFalse(try store.workspace(id: workspace.id)?.isRunning ?? true)
+    }
+
     // Tests launch workspace waits for pending setup to finish by arranging a deferred setup run and asserting launch completes afterwards.
     func testLaunchWorkspaceWaitsForPendingSetupToFinish() throws {
         let root = try makeTempDirectory()

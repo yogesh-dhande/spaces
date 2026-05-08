@@ -72,6 +72,14 @@ open class TmuxAdapter: @unchecked Sendable {
         _ = try run(["set-option", "-t", windowID, "remain-on-exit", enabled ? "on" : "off"])
     }
 
+    open func isPaneDead(windowID: String) throws -> Bool { try displayMessage(target: windowID, format: "#{pane_dead}") == "1" }
+
+    open func paneExitStatus(windowID: String) throws -> Int? { Int(try displayMessage(target: windowID, format: "#{pane_dead_status}")) }
+
+    open func capturePane(windowID: String) throws -> String {
+        try runAndCapture(["capture-pane", "-p", "-t", windowID]).trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
     open func selectWindow(windowID: String) throws -> Bool { (try? run(["select-window", "-t", windowID])) == 0 }
 
     open func killWindow(windowID: String) throws { _ = try run(["kill-window", "-t", windowID]) }
