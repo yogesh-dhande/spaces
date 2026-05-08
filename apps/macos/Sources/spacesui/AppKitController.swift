@@ -3637,6 +3637,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         workspaceTitleLabel.font = .systemFont(ofSize: 20, weight: .semibold)
         workspaceTitleLabel.textColor = sidebarPrimaryTextColor(isSelected: false, isArchived: false)
         workspaceTitleLabel.lineBreakMode = .byTruncatingTail
+        workspaceTitleLabel.setContentHuggingPriority(.defaultLow, for: .horizontal)
         workspaceTitleLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         workspaceTitleLabel.setAccessibilityIdentifier("workspace-detail-title-label")
 
@@ -3654,8 +3655,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         workspaceTitleField.delegate = self
         workspaceTitleField.font = .systemFont(ofSize: 18, weight: .semibold)
         workspaceTitleField.isHidden = true
+        workspaceTitleField.setContentHuggingPriority(.defaultLow, for: .horizontal)
         workspaceTitleField.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         workspaceTitleField.setAccessibilityIdentifier("workspace-detail-title-input")
+
+        let workspaceTitleSlot = Self.makeInlineEditorSlot(label: workspaceTitleLabel, editor: workspaceTitleField)
 
         let titleSaveButton = NSButton(title: "Save (↩)", target: self, action: #selector(saveInlineWorkspaceMetadata(_:)))
         titleSaveButton.controlSize = .small
@@ -3675,9 +3679,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         headerRow.alignment = .centerY
         headerRow.spacing = 8
         headerRow.addArrangedSubview(statusDot)
-        headerRow.addArrangedSubview(workspaceTitleLabel)
+        headerRow.addArrangedSubview(workspaceTitleSlot)
         headerRow.addArrangedSubview(runtimeWarningIcon)
-        headerRow.addArrangedSubview(workspaceTitleField)
         headerRow.addArrangedSubview(titleSaveButton)
         headerRow.addArrangedSubview(titleCancelButton)
         headerRow.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
@@ -3951,6 +3954,24 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     static func orderedWorkspaceDetailSections(
         processesSection: NSView?, browserSessionsSection: NSView?, agentLaunchersSection: NSView?, portsSection: NSView?, stopScriptSection: NSView?
     ) -> [NSView] { [browserSessionsSection, processesSection, agentLaunchersSection, portsSection, stopScriptSection].compactMap { $0 } }
+
+    static func makeInlineEditorSlot(label: NSView, editor: NSView) -> NSView {
+        let slot = NSView()
+        slot.translatesAutoresizingMaskIntoConstraints = false
+        slot.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        slot.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+
+        for subview in [label, editor] {
+            subview.translatesAutoresizingMaskIntoConstraints = false
+            slot.addSubview(subview)
+            NSLayoutConstraint.activate([
+                subview.leadingAnchor.constraint(equalTo: slot.leadingAnchor), subview.trailingAnchor.constraint(equalTo: slot.trailingAnchor),
+                subview.topAnchor.constraint(equalTo: slot.topAnchor), subview.bottomAnchor.constraint(equalTo: slot.bottomAnchor),
+            ])
+        }
+
+        return slot
+    }
 
     nonisolated static func codingAgentWindowTitleByAgentID(agentWindows: [AgentWindowRecord], trackedWindows: [WindowRecord]) -> [String: String] {
         agentWindows.reduce(into: [:]) { result, agentWindow in

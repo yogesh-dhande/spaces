@@ -164,6 +164,17 @@ import workspacecore
         #expect(row.editingURLValueForTesting == "http://localhost:$FRONTEND_PORT")
     }
 
+    @Test func browserSessionEditFormUsesPlainActionLabels() {
+        let row = BrowserSessionRowView(session: BrowserSession(name: "docs", url: "https://example.com"))
+        row.enterEditing(prefill: nil, animated: false)
+
+        let cancelButton = row.buttonForTesting(accessibilityID: "browser-session-row-edit-cancel")
+        let saveButton = row.buttonForTesting(accessibilityID: "browser-session-row-edit-save")
+
+        #expect(cancelButton?.title == "Cancel")
+        #expect(saveButton?.title == "Save")
+    }
+
     // MARK: Edit + Save + Cancel mechanics
 
     @Test func enterEditingSwapsTheRowSubtreeToAForm() {
@@ -200,6 +211,17 @@ import workspacecore
         #expect(committed.first?.executionMode == .shell)
         #expect(committed.first?.onExit == .restart)
         #expect(row.isEditing == false)
+    }
+
+    @Test func processEditFormUsesPlainActionLabels() {
+        let row = ProcessRowView(process: ProcessTemplate(name: "api", command: "bun run dev"), shortcut: nil, status: .idle)
+        row.enterEditing(prefill: nil, animated: false)
+
+        let cancelButton = row.buttonForTesting(accessibilityID: "process-row-edit-cancel")
+        let saveButton = row.buttonForTesting(accessibilityID: "process-row-edit-save")
+
+        #expect(cancelButton?.title == "Cancel")
+        #expect(saveButton?.title == "Save")
     }
 
     @Test func invalidSavePresentsErrorAndKeepsEditing() {
@@ -368,10 +390,26 @@ extension ProcessRowView {
     func triggerRemove() { onRemove?() }
 
     func shortcutChipMinXForTesting(shortcut: String) -> CGFloat? { shortcutChipFrameForTesting(shortcut: shortcut)?.minX }
+
+    func textFieldForTesting(accessibilityID: String) -> NSTextField? {
+        subviews.flatMap { $0.subviewsRecursive() }.compactMap { $0 as? NSTextField }.first { $0.accessibilityIdentifier() == accessibilityID }
+    }
+
+    func buttonForTesting(accessibilityID: String) -> NSButton? {
+        subviews.flatMap { $0.subviewsRecursive() }.compactMap { $0 as? NSButton }.first { $0.accessibilityIdentifier() == accessibilityID }
+    }
 }
 
 extension BrowserSessionRowView {
     func shortcutChipMinXForTesting(shortcut: String) -> CGFloat? { shortcutChipFrameForTesting(shortcut: shortcut)?.minX }
+
+    func textFieldForTesting(accessibilityID: String) -> NSTextField? {
+        subviews.flatMap { $0.subviewsRecursive() }.compactMap { $0 as? NSTextField }.first { $0.accessibilityIdentifier() == accessibilityID }
+    }
+
+    func buttonForTesting(accessibilityID: String) -> NSButton? {
+        subviews.flatMap { $0.subviewsRecursive() }.compactMap { $0 as? NSButton }.first { $0.accessibilityIdentifier() == accessibilityID }
+    }
 }
 
 extension BrowserSessionsSection {

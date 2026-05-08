@@ -50,6 +50,17 @@ import workspacecore
         #expect(section.row(at: 0)?.hasRemoveButtonForTesting == false)
         #expect(section.row(at: 0)?.displayDetailForTesting == "review notes")
     }
+
+    @Test func launcherEditFormUsesPlainActionLabels() {
+        let row = AgentLauncherRowView(launcher: AgentLauncher(name: "claude", command: "claude"))
+        row.enterEditing(prefill: nil, animated: false)
+
+        let cancelButton = row.buttonForTesting(accessibilityID: "agent-launcher-row-edit-cancel")
+        let saveButton = row.buttonForTesting(accessibilityID: "agent-launcher-row-edit-save")
+
+        #expect(cancelButton?.title == "Cancel")
+        #expect(saveButton?.title == "Save")
+    }
 }
 
 extension AgentLaunchersSection {
@@ -76,6 +87,14 @@ extension AgentLauncherRowView {
 
     var hasRemoveButtonForTesting: Bool {
         subviewsRecursiveForAgentTests().compactMap { $0 as? NSButton }.contains { $0.accessibilityIdentifier() == "agent-launcher-row-remove" }
+    }
+
+    func textFieldForTesting(accessibilityID: String) -> NSTextField? {
+        subviewsRecursiveForAgentTests().compactMap { $0 as? NSTextField }.first { $0.accessibilityIdentifier() == accessibilityID }
+    }
+
+    func buttonForTesting(accessibilityID: String) -> NSButton? {
+        subviewsRecursiveForAgentTests().compactMap { $0 as? NSButton }.first { $0.accessibilityIdentifier() == accessibilityID }
     }
 }
 
