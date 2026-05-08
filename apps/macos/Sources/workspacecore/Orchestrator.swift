@@ -1233,10 +1233,11 @@ public final class WorkspaceOrchestrator {
     }
 
     private func restartProcessInTerminal(
-        workspaceID: String, process: RunningProcessRecord, templateOverride: ProcessTemplate? = nil, background: Bool = false
+        workspaceID: String, process: RunningProcessRecord, templateOverride: ProcessTemplate? = nil, terminalHostOverride: TerminalHost? = nil,
+        background: Bool = false
     ) throws {
         let (project, workspace) = try resolveWorkspace(id: workspaceID)
-        let terminalHost = try terminalHost(for: process.terminalApp) ?? configuredTerminalHost()
+        let terminalHost = try terminalHostOverride ?? terminalHost(for: process.terminalApp) ?? configuredTerminalHost()
         guard terminalAdapterAvailable(terminalHost) else {
             throw WorkspaceError.dependencyMissing(message: missingTerminalDependencyMessage(for: terminalHost, operation: "launch processes"))
         }
@@ -4340,13 +4341,26 @@ public final class WorkspaceOrchestrator {
     private func isProcessAlive(pid: Int) -> Bool {
         guard pid > 0 else { return false }
         // First check if the specific PID is alive
-        if Darwin.kill(pid_t(pid), 0) == 0 { return true }
-        if errno == EPERM { return true }
+        if Darwin.kill(pid_t(pid), 0) == 0 {
+            if let state = processState(pid: pid), state.first == "Z" { return false }
+            return true
+        }
+        if errno == EPERM {
+            if let state = processState(pid: pid), state.first == "Z" { return false }
+            return true
+        }
         // If the PID is dead, check if any child processes are still alive
         // This handles cases where the shell exits but the actual command continues
         guard let output = try? Shell.runAndCapture(["pgrep", "-P", "\(pid)"]) else { return false }
         let trimmed = output.trimmingCharacters(in: .whitespacesAndNewlines)
         return !trimmed.isEmpty
+    }
+
+    private func processState(pid: Int) -> String? {
+        guard pid > 0 else { return nil }
+        guard let output = try? Shell.runAndCapture(["ps", "-o", "state=", "-p", "\(pid)"]) else { return nil }
+        let trimmed = output.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
     }
 
     private func waitForProcessExit(pid: Int, timeout: TimeInterval) {
@@ -4865,22 +4879,20 @@ public final class WorkspaceOrchestrator {
         try restartProcessInTerminal(workspaceID: workspaceID, process: process)
     }
 
-    public func stopWorkspaceProcess(workspaceID: String, processID: String) throws {
-        try withWorkspaceLifecycleLock(workspaceID: workspaceID) {
-            guard let process = try store.runningProcesses(workspaceID: workspaceID).first(where: { $0.id == processID }) else { return }
-            try stopRunningProcess(process, workspaceID: workspaceID)
-        }
-    }
-
-    public func recoverMissingConfiguredProcess(workspaceID: String, processKey: String) throws {
+    public func runConfiguredProcess(workspaceID: String, processKey: String) throws {
         let (project, workspace) = try resolveWorkspace(id: workspaceID)
         let settings = try loadWorkspaceSettings(project: project, workspace: workspace)
         guard let template = (settings?.processes ?? []).first(where: { configuredProcessMatchesKey($0, key: processKey) }) else {
-            throw WorkspaceError.invalidArgument(message: "Configured process not found for recovery.")
+            throw WorkspaceError.invalidArgument(message: "Configured process not found.")
         }
+
         let running = try store.runningProcesses(workspaceID: workspaceID)
         let expectedKey = configuredProcessMatchKey(name: template.name)
-        guard !running.contains(where: { runningProcessMatchKey(name: $0.templateName) == expectedKey }) else {
+        if let existing = running.first(where: { runningProcessMatchKey(name: $0.templateName) == expectedKey }) {
+            if existing.status == .exited {
+                try restartProcessInTerminal(
+                    workspaceID: workspaceID, process: existing, templateOverride: template, terminalHostOverride: try configuredTerminalHost())
+            }
             try markWorkspaceRunningIfNeeded(workspace)
             return
         }
@@ -4894,6 +4906,17 @@ public final class WorkspaceOrchestrator {
         guard tmux.isAvailable() else { throw WorkspaceError.dependencyMissing(message: "tmux is required to launch processes.") }
         _ = try launchConfiguredProcess(template: template, workspace: workspace, env: env, terminalHost: terminalHost)
         try markWorkspaceRunningIfNeeded(workspace)
+    }
+
+    public func stopWorkspaceProcess(workspaceID: String, processID: String) throws {
+        try withWorkspaceLifecycleLock(workspaceID: workspaceID) {
+            guard let process = try store.runningProcesses(workspaceID: workspaceID).first(where: { $0.id == processID }) else { return }
+            try stopRunningProcess(process, workspaceID: workspaceID)
+        }
+    }
+
+    public func recoverMissingConfiguredProcess(workspaceID: String, processKey: String) throws {
+        try runConfiguredProcess(workspaceID: workspaceID, processKey: processKey)
     }
 
     @discardableResult public func launchAgentLauncher(workspaceID: String, name: String, background: Bool = false) throws -> AgentWindowRecord {
