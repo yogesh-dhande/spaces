@@ -395,6 +395,7 @@ import workspacecore
         } else {
             run()
         }
+        window?.makeFirstResponder(fields.name)
     }
 
     func exitEditing(animated: Bool) {
@@ -538,7 +539,6 @@ import workspacecore
         Theme.applySecondaryStyle(to: cancelButton)
 
         let saveButton = NSButton(title: "Save", target: nil, action: nil)
-        saveButton.keyEquivalent = "\r"
         saveButton.setAccessibilityIdentifier("agent-launcher-row-edit-save")
         Theme.applyPrimaryStyle(to: saveButton)
 
@@ -561,6 +561,10 @@ import workspacecore
         cancelButton.action = #selector(AgentLauncherFormTarget.triggerCancel)
         saveButton.target = target
         saveButton.action = #selector(AgentLauncherFormTarget.triggerSave)
+        nameField.nextKeyView = commandField
+        commandField.nextKeyView = cancelButton
+        cancelButton.nextKeyView = saveButton
+        saveButton.nextKeyView = nameField
         refreshSaveEnabled()
 
         let trailingButtons = NSStackView(views: [NSView(), cancelButton, saveButton])

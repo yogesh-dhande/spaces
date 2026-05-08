@@ -131,7 +131,7 @@ The current macOS redesign in `apps/macos/Sources/gui` and `design-mocks/workspa
 - Draft items should enter editing immediately.
 - Canceling a never-saved draft should remove the row rather than leaving placeholder data behind.
 - Detached modal editors should be reserved for edits that are too large, risky, or complex for inline treatment.
-- Inline editing forms use a labeled-field layout: right-aligned muted semibold labels (11pt, min-width `70`) paired with full-width inputs, vertical spacing `6`, edge insets `top: 10, left: 14, bottom: 10, right: 14`. Save is the default key equivalent (`\r`); Save is disabled until required fields are non-empty.
+- Inline editing forms use a labeled-field layout: right-aligned muted semibold labels (11pt, min-width `70`) paired with full-width inputs, vertical spacing `6`, edge insets `top: 10, left: 14, bottom: 10, right: 14`. Keep a predictable `Tab` key-view loop across the fields and action buttons. Save stays disabled until required fields are non-empty.
 - Multiline or code-like content (e.g., stop script) uses an `NSTextView` inside a `ColoredBackgroundView` with `Theme.surface2` fill and corner radius `8`, at a fixed height of `88pt`.
 - The collapsed/editing swap is animated with `NSAnimationContext` at `0.12s` duration.
 - Example: the current workspace list editors expand a row into a compact edit form instead of opening a separate editor.

@@ -521,6 +521,7 @@ import workspacecore
         } else {
             run()
         }
+        window?.makeFirstResponder(fields.name)
     }
 
     func exitEditing(animated: Bool) {
@@ -692,7 +693,6 @@ import workspacecore
         Theme.applySecondaryStyle(to: cancelButton)
 
         let saveButton = NSButton(title: "Save", target: nil, action: nil)
-        saveButton.keyEquivalent = "\r"
         saveButton.setAccessibilityIdentifier("process-row-edit-save")
         Theme.applyPrimaryStyle(to: saveButton)
 
@@ -720,6 +720,12 @@ import workspacecore
         cancelButton.action = #selector(ClosureTarget.triggerCancel)
         saveButton.target = target
         saveButton.action = #selector(ClosureTarget.triggerSave)
+        nameField.nextKeyView = commandField
+        commandField.nextKeyView = executionModeSegmented
+        executionModeSegmented.nextKeyView = onExitSegmented
+        onExitSegmented.nextKeyView = cancelButton
+        cancelButton.nextKeyView = saveButton
+        saveButton.nextKeyView = nameField
         refreshSaveEnabled()  // set initial state before user types
 
         let trailingButtons = NSStackView(views: [NSView(), cancelButton, saveButton])
