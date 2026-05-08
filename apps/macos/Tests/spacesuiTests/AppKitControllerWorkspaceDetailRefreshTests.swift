@@ -87,6 +87,33 @@ import workspacecore
         #expect(sections[4] === stopScript)
     }
 
+    @MainActor @Test func inlineEditorSlotKeepsEditorExpandedToAvailableWidth() {
+        let label = NSTextField(labelWithString: "default")
+        let editor = NSTextField(string: "default")
+        label.isHidden = true
+
+        let slot = AppKitController.makeInlineEditorSlot(label: label, editor: editor)
+        let button = NSButton(title: "Save", target: nil, action: nil)
+
+        let row = NSStackView(views: [NSView(), slot, button])
+        row.orientation = .horizontal
+        row.alignment = .centerY
+        row.spacing = 8
+        row.translatesAutoresizingMaskIntoConstraints = false
+
+        let host = NSView(frame: NSRect(x: 0, y: 0, width: 500, height: 60))
+        host.addSubview(row)
+        NSLayoutConstraint.activate([
+            row.leadingAnchor.constraint(equalTo: host.leadingAnchor), row.trailingAnchor.constraint(equalTo: host.trailingAnchor),
+            row.topAnchor.constraint(equalTo: host.topAnchor),
+        ])
+        slot.widthAnchor.constraint(greaterThanOrEqualToConstant: 120).isActive = true
+        host.layoutSubtreeIfNeeded()
+
+        #expect(editor.frame.width >= 120)
+        #expect(abs(editor.frame.width - slot.bounds.width) < 0.5)
+    }
+
     @Test func workspaceProcessStatusByNameReflectsRuntimeState() {
         let statuses = AppKitController.workspaceProcessStatusByName([
             RunningProcessRecord(
