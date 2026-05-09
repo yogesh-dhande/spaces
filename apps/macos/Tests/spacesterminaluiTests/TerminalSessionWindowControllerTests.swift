@@ -9,6 +9,14 @@ final class TerminalSessionWindowControllerTests: XCTestCase {
         var detachedClientID: String?
     }
 
+    private final class ValidatedItem: NSObject, NSValidatedUserInterfaceItem {
+        let action: Selector?
+
+        init(action: Selector?) { self.action = action }
+
+        var tag: Int { 0 }
+    }
+
     @MainActor func testControllerCreatesWindow() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -165,6 +173,69 @@ final class TerminalSessionWindowControllerTests: XCTestCase {
         XCTAssertFalse(controller.debugShowsRendererLabel)
         XCTAssertFalse(controller.debugShowsTitleLabel)
         XCTAssertEqual(controller.debugState, "state: running    child: 22")
+    }
+
+    @MainActor func testGhosttyOwnerRoutesCopyAndPasteThroughSessionHostActions() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+        try TerminalSessionPersistence.writeLaunchConfiguration(
+            .init(
+                sessionID: "session-copy-paste", backend: .ghosttyEmbedded, title: "owner", workingDirectory: "/tmp/work", shell: "/bin/zsh",
+                command: "cat", createdAt: "2026-05-09T00:00:00Z"), paths: paths)
+        try TerminalSessionPersistence.writeRuntimeState(
+            .init(
+                sessionID: "session-copy-paste", backend: .ghosttyEmbedded, servicePID: 1, childPID: 22, state: .running,
+                updatedAt: "2026-05-09T00:00:01Z"), paths: paths)
+
+        var copyCalls = 0
+        var pasteCalls = 0
+        let controller = TerminalSessionWindowController(
+            sessionID: "session-copy-paste", paths: paths,
+            copySelectionAction: {
+                copyCalls += 1
+                return true
+            },
+            pasteClipboardAction: {
+                pasteCalls += 1
+                return true
+            })
+
+        controller.copy(nil)
+        controller.paste(nil)
+
+        XCTAssertEqual(copyCalls, 1)
+        XCTAssertEqual(pasteCalls, 1)
+        XCTAssertTrue(controller.validateUserInterfaceItem(ValidatedItem(action: #selector(NSText.copy(_:)))))
+        XCTAssertTrue(controller.validateUserInterfaceItem(ValidatedItem(action: #selector(NSText.paste(_:)))))
+        XCTAssertFalse(controller.validateUserInterfaceItem(ValidatedItem(action: #selector(NSText.selectAll(_:)))))
+    }
+
+    @MainActor func testFallbackWindowPasteTargetsInlineInputAndSelectAllStaysEnabled() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+        try TerminalSessionPersistence.writeLaunchConfiguration(
+            .init(
+                sessionID: "session-fallback", title: "fallback", workingDirectory: "/tmp/work", shell: "/bin/zsh", command: "cat",
+                createdAt: "2026-05-09T00:00:00Z"), paths: paths)
+        try TerminalSessionPersistence.writeRuntimeState(
+            .init(sessionID: "session-fallback", servicePID: 1, childPID: 2, state: .running, updatedAt: "2026-05-09T00:00:01Z"), paths: paths)
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString("paste-from-test", forType: .string)
+
+        let controller = TerminalSessionWindowController(sessionID: "session-fallback", paths: paths)
+
+        controller.paste(nil)
+
+        XCTAssertEqual(controller.debugInputFieldValue, "paste-from-test")
+        XCTAssertTrue(controller.validateUserInterfaceItem(ValidatedItem(action: #selector(NSText.copy(_:)))))
+        XCTAssertTrue(controller.validateUserInterfaceItem(ValidatedItem(action: #selector(NSText.paste(_:)))))
+        XCTAssertTrue(controller.validateUserInterfaceItem(ValidatedItem(action: #selector(NSText.selectAll(_:)))))
     }
 
     @MainActor func testWindowCloseInvokesCleanupCallback() throws {

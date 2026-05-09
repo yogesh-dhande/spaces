@@ -29,6 +29,9 @@ import spacesterminalcore
     private var lastGeometry: SurfaceGeometry?
     private var lastFocused: Bool?
     private var lastOccluded: Bool?
+    private var trackingArea: NSTrackingArea?
+    private weak var observedWindow: NSWindow?
+    private var previousAcceptsMouseMovedEvents: Bool?
 
     public init(launchConfiguration: TerminalSessionLaunchConfiguration) {
         self.launchConfiguration = launchConfiguration
@@ -39,10 +42,7 @@ import spacesterminalcore
     @available(*, unavailable) required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
 
     deinit {
-        screenChangeObserver.flatMap { NotificationCenter.default.removeObserver($0) }
-        occlusionObserver.flatMap { NotificationCenter.default.removeObserver($0) }
-        keyObserver.flatMap { NotificationCenter.default.removeObserver($0) }
-        resignKeyObserver.flatMap { NotificationCenter.default.removeObserver($0) }
+        MainActor.assumeIsolated { teardownWindowObservation() }
         if let surface { ghostty_surface_free(surface) }
     }
 
@@ -52,16 +52,10 @@ import spacesterminalcore
     public override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
 
-        screenChangeObserver.flatMap { NotificationCenter.default.removeObserver($0) }
-        screenChangeObserver = nil
-        occlusionObserver.flatMap { NotificationCenter.default.removeObserver($0) }
-        occlusionObserver = nil
-        keyObserver.flatMap { NotificationCenter.default.removeObserver($0) }
-        keyObserver = nil
-        resignKeyObserver.flatMap { NotificationCenter.default.removeObserver($0) }
-        resignKeyObserver = nil
+        teardownWindowObservation()
 
         guard let window else { return }
+        observedWindow = window
         createSurfaceIfNeeded()
 
         screenChangeObserver = NotificationCenter.default.addObserver(forName: NSWindow.didChangeScreenNotification, object: window, queue: .main) {
@@ -79,9 +73,21 @@ import spacesterminalcore
             [weak self] _ in MainActor.assumeIsolated { self?.setSurfaceFocus(false) }
         }
 
+        if previousAcceptsMouseMovedEvents == nil { previousAcceptsMouseMovedEvents = window.acceptsMouseMovedEvents }
+        window.acceptsMouseMovedEvents = true
+
         updateSurfaceGeometry()
         updateWindowVisibility()
         setSurfaceFocus(window.isKeyWindow && window.firstResponder === self)
+    }
+
+    public override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let trackingArea { removeTrackingArea(trackingArea) }
+        let options: NSTrackingArea.Options = [.activeInKeyWindow, .mouseMoved, .mouseEnteredAndExited, .inVisibleRect, .enabledDuringMouseDrag]
+        let trackingArea = NSTrackingArea(rect: .zero, options: options, owner: self, userInfo: nil)
+        addTrackingArea(trackingArea)
+        self.trackingArea = trackingArea
     }
 
     public override func setFrameSize(_ newSize: NSSize) {
@@ -166,7 +172,9 @@ import spacesterminalcore
             return
         }
         _ = sendMousePosition(for: event)
-        ghostty_surface_mouse_scroll(surface, Double(event.scrollingDeltaX), Double(event.scrollingDeltaY), 0)
+        let horizontal = event.hasPreciseScrollingDeltas ? event.scrollingDeltaX : (event.scrollingDeltaX * 12)
+        let vertical = event.hasPreciseScrollingDeltas ? event.scrollingDeltaY : (event.scrollingDeltaY * 12)
+        ghostty_surface_mouse_scroll(surface, Double(horizontal), Double(vertical), 0)
     }
 
     public override func keyDown(with event: NSEvent) {
@@ -216,6 +224,14 @@ import spacesterminalcore
             return
         }
         sendRawBytes(Data(text.utf8))
+    }
+
+    public func copySelectionToPasteboard() -> Bool { GhosttyClipboardBridge.copySelection(from: surface) }
+
+    public func pasteClipboardContents() -> Bool {
+        guard let text = NSPasteboard.general.string(forType: .string), !text.isEmpty else { return false }
+        sendRawBytes(Data(text.utf8))
+        return true
     }
 
     public func sendRawBytes(_ data: Data) {
@@ -451,6 +467,22 @@ import spacesterminalcore
         guard lastOccluded != occluded else { return }
         lastOccluded = occluded
         ghostty_surface_set_occlusion(surface, occluded)
+    }
+
+    private func teardownWindowObservation() {
+        screenChangeObserver.flatMap { NotificationCenter.default.removeObserver($0) }
+        screenChangeObserver = nil
+        occlusionObserver.flatMap { NotificationCenter.default.removeObserver($0) }
+        occlusionObserver = nil
+        keyObserver.flatMap { NotificationCenter.default.removeObserver($0) }
+        keyObserver = nil
+        resignKeyObserver.flatMap { NotificationCenter.default.removeObserver($0) }
+        resignKeyObserver = nil
+        if let trackingArea { removeTrackingArea(trackingArea) }
+        trackingArea = nil
+        if let observedWindow, let previousAcceptsMouseMovedEvents { observedWindow.acceptsMouseMovedEvents = previousAcceptsMouseMovedEvents }
+        previousAcceptsMouseMovedEvents = nil
+        observedWindow = nil
     }
 
     private static func loginShellCommand(shell: String, command: String) -> String {

@@ -89,9 +89,15 @@ The active owner surface currently supports:
 - command-key bindings that libghostty claims
 - raw `send` and `key` from the CLI
 - mouse position and button forwarding
+- mouse-move tracking while the owner window is key
 - scroll-wheel forwarding
 - copy from terminal selection
 - paste from the macOS pasteboard
+
+The owner window controller also routes standard AppKit edit actions to the active terminal session:
+- `Copy` reads from the live libghostty selection when the window owns the session
+- `Paste` sends pasteboard text into the owner session rather than the hidden inline input field
+- fallback or viewer windows keep using the text-output or inline-input path instead of pretending they own the live terminal surface
 
 The headless `ghostty-embedded` backend runtime disables selection clipboard hooks because it is not the user-facing surface. The app-hosted owner path enables clipboard hooks through `GhosttyEmbeddedAppService`.
 

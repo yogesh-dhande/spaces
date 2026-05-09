@@ -137,6 +137,8 @@ import spacesterminalcore
     }
 
     public func hasRenderableSurface() -> Bool { terminalView.surface != nil }
+    public func copySelectionToPasteboard() -> Bool { terminalView.copySelectionToPasteboard() }
+    public func pasteClipboardContents() -> Bool { terminalView.pasteClipboardContents() }
 
     public func childPID() -> Int32? { observedChildPID() }
     public var effectiveTitle: String { currentTitle ?? launchConfiguration.title }

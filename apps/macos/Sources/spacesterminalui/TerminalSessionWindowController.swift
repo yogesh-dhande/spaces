@@ -3,7 +3,7 @@ import Foundation
 import spacesterminalcore
 import spacesterminalghostty
 
-@MainActor public final class TerminalSessionWindowController: NSWindowController, NSWindowDelegate {
+@MainActor public final class TerminalSessionWindowController: NSWindowController, NSWindowDelegate, NSUserInterfaceValidations {
     private enum VisibleRenderer {
         case ghosttyOwner
         case outputFallback
@@ -39,6 +39,8 @@ import spacesterminalghostty
     private let takeoverAction: @Sendable (String) throws -> TerminalControlResponse
     private let attachClientAction: @Sendable (TerminalClient, TerminalAttachmentMode) throws -> Void
     private let detachClientAction: @Sendable (String) throws -> Void
+    private let copySelectionAction: (@MainActor () -> Bool)?
+    private let pasteClipboardAction: (@MainActor () -> Bool)?
     private let onWindowClose: (@MainActor (String, String) -> Void)?
     private var refreshTask: Task<Void, Never>?
     private var lastRenderedOutput = ""
@@ -55,7 +57,8 @@ import spacesterminalghostty
         sendKeyAction: (@Sendable (String) throws -> TerminalControlResponse)? = nil,
         takeoverAction: (@Sendable (String) throws -> TerminalControlResponse)? = nil,
         attachClientAction: (@Sendable (TerminalClient, TerminalAttachmentMode) throws -> Void)? = nil,
-        detachClientAction: (@Sendable (String) throws -> Void)? = nil, onWindowClose: (@MainActor (String, String) -> Void)? = nil
+        detachClientAction: (@Sendable (String) throws -> Void)? = nil, copySelectionAction: (@MainActor () -> Bool)? = nil,
+        pasteClipboardAction: (@MainActor () -> Bool)? = nil, onWindowClose: (@MainActor (String, String) -> Void)? = nil
     ) {
         self.sessionID = sessionID
         self.paths = paths
@@ -94,6 +97,8 @@ import spacesterminalghostty
             detachClientAction ?? { clientID in
                 try TerminalSessionPersistence.detachClient(id: clientID, paths: paths, detachedAt: ISO8601DateFormatter().string(from: Date()))
             }
+        self.copySelectionAction = copySelectionAction
+        self.pasteClipboardAction = pasteClipboardAction
         self.onWindowClose = onWindowClose
 
         let contentRect = NSRect(x: 0, y: 0, width: 980, height: 640)
@@ -141,6 +146,74 @@ import spacesterminalghostty
     public func windowDidResignKey(_ notification: Notification) {
         guard backend == .ghosttyEmbedded else { return }
         ghosttySessionHost?.setFocused(false, for: client.id)
+    }
+
+    public func validateUserInterfaceItem(_ item: any NSValidatedUserInterfaceItem) -> Bool {
+        switch item.action {
+        case #selector(NSText.copy(_:)):
+            switch visibleRenderer {
+            case .ghosttyOwner: return preferredAttachmentMode == .owner
+            case .outputFallback: return true
+            }
+        case #selector(NSText.paste(_:)):
+            switch visibleRenderer {
+            case .ghosttyOwner: return preferredAttachmentMode == .owner
+            case .outputFallback: return !inputRowStackView.isHidden && inputField.isEnabled
+            }
+        case #selector(selectAll(_:)): return visibleRenderer == .outputFallback
+        default: return true
+        }
+    }
+
+    @objc public func copy(_ sender: Any?) {
+        switch visibleRenderer {
+        case .ghosttyOwner:
+            guard preferredAttachmentMode == .owner else {
+                updateInputStatus(message: "Viewer windows cannot copy from the active terminal. Take over ownership first.", isError: true)
+                NSSound.beep()
+                return
+            }
+            guard copySelectionAction?() ?? ghosttySessionHost?.copySelectionToPasteboard() ?? false else {
+                NSSound.beep()
+                return
+            }
+        case .outputFallback: outputView.copy(sender)
+        }
+    }
+
+    @objc public func paste(_ sender: Any?) {
+        switch visibleRenderer {
+        case .ghosttyOwner:
+            guard preferredAttachmentMode == .owner else {
+                updateInputStatus(message: "Viewer windows cannot paste into the terminal. Take over ownership first.", isError: true)
+                NSSound.beep()
+                return
+            }
+            guard pasteClipboardAction?() ?? ghosttySessionHost?.pasteClipboardContents() ?? false else {
+                NSSound.beep()
+                return
+            }
+        case .outputFallback:
+            guard !inputRowStackView.isHidden, inputField.isEnabled else {
+                NSSound.beep()
+                return
+            }
+            guard let text = NSPasteboard.general.string(forType: .string), !text.isEmpty else {
+                NSSound.beep()
+                return
+            }
+            window?.makeFirstResponder(inputField)
+            inputField.stringValue.append(text)
+        }
+    }
+
+    public override func selectAll(_ sender: Any?) {
+        guard visibleRenderer == .outputFallback else {
+            NSSound.beep()
+            return
+        }
+        window?.makeFirstResponder(outputView)
+        outputView.selectAll(sender)
     }
 
     public func takeOverOwnership() {
@@ -581,4 +654,6 @@ import spacesterminalghostty
     var debugShowsTakeoverButton: Bool { !takeoverRowStackView.isHidden }
     var debugShowsRendererLabel: Bool { !rendererLabel.isHidden }
     var debugShowsTitleLabel: Bool { !titleLabel.isHidden }
+    var debugInputStatus: String { inputStatusLabel.stringValue }
+    var debugInputFieldValue: String { inputField.stringValue }
 }
