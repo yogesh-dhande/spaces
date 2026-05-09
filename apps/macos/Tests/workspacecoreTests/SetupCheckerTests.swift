@@ -14,14 +14,14 @@ final class SetupCheckerTests: XCTestCase {
         XCTAssertTrue(checker.run(.terminalInstalled))
     }
 
-    // Tests terminalInstalled returns false when both supported terminal adapters report unavailability.
-    func testTerminalInstalled_unavailable() {
+    // Tests terminalInstalled still passes when external terminal apps are unavailable because Spaces includes a built-in host.
+    func testTerminalInstalled_passesWithBuiltInSpacesHostWhenExternalAppsUnavailable() {
         let mock = MockAvailableIterm2()
         mock.availableResult = false
         let ghostty = MockAvailableGhostty()
         ghostty.availableResult = false
         let checker = SetupChecker(iterm2: mock, ghostty: ghostty)
-        XCTAssertFalse(checker.run(.terminalInstalled))
+        XCTAssertTrue(checker.run(.terminalInstalled))
     }
 
     // Tests the terminal prerequisite passes when Ghostty is available even if iTerm2 is not.
@@ -193,17 +193,19 @@ final class SetupCheckerTests: XCTestCase {
         }
     }
 
-    // Tests runAll reports the first failing step correctly.
+    // Tests runAll reports the first failing external dependency after the built-in terminal prerequisite passes.
     func testRunAll_firstFails() throws {
         let mock = MockAvailableIterm2()
         mock.availableResult = false
-        // yabai not relevant since first check fails
-        let checker = SetupChecker(iterm2: mock, ghostty: MockAvailableGhostty())
+        let tmux = MockAvailableTmux()
+        tmux.availableResult = false
+        let checker = SetupChecker(iterm2: mock, ghostty: MockAvailableGhostty(), tmux: tmux)
         let results = checker.runAll()
-        XCTAssertFalse(results[0].passed)
+        XCTAssertTrue(results[0].passed)
         XCTAssertEqual(results[0].id, .terminalInstalled)
         let firstFailIndex = results.firstIndex(where: { !$0.passed })
-        XCTAssertEqual(firstFailIndex, 0)
+        XCTAssertEqual(firstFailIndex, 1)
+        XCTAssertEqual(results[firstFailIndex ?? 0].id, .tmuxInstalled)
     }
 
     // Tests runStartupBlockingChecks skips the deferred yabai readiness checks.

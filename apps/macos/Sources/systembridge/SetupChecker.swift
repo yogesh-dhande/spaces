@@ -80,13 +80,14 @@ public final class SetupChecker {
 
     public func isTerminalHostAvailable(named host: String) -> Bool {
         switch host.lowercased() {
+        case "spaces": true
         case "iterm2": iterm2.isAvailable()
         case "ghostty": ghostty.isAvailable()
         default: false
         }
     }
 
-    private func isTerminalInstalled() -> Bool { isTerminalHostAvailable(named: "iterm2") || isTerminalHostAvailable(named: "ghostty") }
+    private func isTerminalInstalled() -> Bool { true }
 
     private func isTmuxInstalled() -> Bool { tmux.isAvailable() }
 
