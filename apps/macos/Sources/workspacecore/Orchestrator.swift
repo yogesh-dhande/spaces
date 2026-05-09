@@ -91,6 +91,13 @@ public final class WorkspaceOrchestrator {
         let outputPath: String
     }
 
+    private enum ManagedTerminalFocusResult {
+        case existingWindow
+        case trackedTerminal
+        case reopenedSession
+        case unavailable
+    }
+
     private enum WorkspaceNavigationCursor: Hashable {
         case agent(String)
         case process(String)
@@ -2144,20 +2151,37 @@ public final class WorkspaceOrchestrator {
     private func focusTrackedWindow(_ window: WindowRecord, workspaceID: String) -> Bool {
         let focusStartedAt = currentDate()
         let focused: Bool
+        let focusedExistingWindow: Bool
         if window.role == "browser", let windowID = window.windowID {
             let focusedWindow = (try? yabai.focusWindow(id: windowID)) ?? false
             if focusedWindow, chrome.isAvailable() { _ = try? chrome.focusFirstTabOfFrontWindow() }
             focused = focusedWindow
+            focusedExistingWindow = focusedWindow
         } else {
-            let providerIdentity = resolvedFocusIdentity(for: window, workspaceID: workspaceID)
-            let adapterFocused = focusManagedTerminal(terminalApp: window.app, providerIdentity: providerIdentity, windowID: window.windowID)
-            focused = adapterFocused == true ? true : ((window.windowID.flatMap { try? yabai.focusWindow(id: $0) }) ?? false)
+            let trackingIdentity = resolvedFocusIdentity(for: window, workspaceID: workspaceID)
+            let focusResult = focusManagedTerminal(
+                terminalApp: window.app, providerIdentity: trackingIdentity, windowID: window.windowID)
+            switch focusResult {
+            case .existingWindow:
+                focused = true
+                focusedExistingWindow = true
+            case .trackedTerminal:
+                focused = true
+                focusedExistingWindow = window.windowID != nil
+            case .reopenedSession:
+                focused = true
+                focusedExistingWindow = false
+            case .unavailable:
+                let fallbackFocused = (window.windowID.flatMap { try? yabai.focusWindow(id: $0) }) ?? false
+                focused = fallbackFocused
+                focusedExistingWindow = fallbackFocused
+            }
         }
         guard let id = window.windowID else { return focused }
         if !focused, window.role == "browser", let targetURL = window.targetURL {
             try? markBrowserWindowMissing(workspaceID: workspaceID, targetURL: targetURL, windowID: id)
         }
-        if focused, window.role == "terminal" { pulseTerminalWindowIfNeeded(windowID: id) }
+        if focused, focusedExistingWindow, window.role == "terminal" { pulseTerminalWindowIfNeeded(windowID: id) }
         logBrowserFocus(
             "workspace=\(workspaceID) path=yabai window=\(id) success=\(focused ? "1" : "0") elapsed_ms=\(elapsedMS(since: focusStartedAt))")
         return focused
@@ -2329,18 +2353,21 @@ public final class WorkspaceOrchestrator {
         return nil
     }
 
-    private func focusManagedTerminal(terminalApp: String?, providerIdentity: TerminalTrackingIdentity?, windowID: Int?) -> Bool? {
-        guard let terminalHost = terminalHost(for: terminalApp) else { return nil }
+    private func focusManagedTerminal(terminalApp: String?, providerIdentity: TerminalTrackingIdentity?, windowID: Int?)
+        -> ManagedTerminalFocusResult
+    {
+        guard let terminalHost = terminalHost(for: terminalApp) else { return .unavailable }
         if terminalHost == .spaces {
-            guard case .session(let sessionID)? = providerIdentity else { return nil }
+            if let windowID, (try? yabai.focusWindow(id: windowID)) ?? false { return .existingWindow }
+            guard case .session(let sessionID)? = providerIdentity else { return .unavailable }
             builtInTerminalWindowOpener(sessionID, .owner)
-            return true
+            return .reopenedSession
         }
-        guard let terminalAdapter = terminalAdapter(for: terminalHost) else { return nil }
+        guard let terminalAdapter = terminalAdapter(for: terminalHost) else { return .unavailable }
         let hasPreciseTarget = providerIdentity != nil || windowID != nil
-        guard hasPreciseTarget else { return nil }
+        guard hasPreciseTarget else { return .unavailable }
         let target = TerminalFocusTarget(providerIdentity: providerIdentity, windowID: windowID)
-        return try? terminalAdapter.focusTrackedTerminal(target)
+        return (try? terminalAdapter.focusTrackedTerminal(target)) == true ? .trackedTerminal : .unavailable
     }
 
     private func pulseTerminalWindowIfNeeded(windowID: Int) {
@@ -5451,18 +5478,32 @@ public final class WorkspaceOrchestrator {
     private func focusWorkspaceProcessRecord(_ process: RunningProcessRecord, workspaceID: String) throws -> Bool {
         guard isManagedTerminalApp(process.terminalApp) else { return false }
         let target = try resolvedProcessTerminalFocusTarget(process, workspaceID: workspaceID)
-        let adapterFocused = focusManagedTerminal(
+        let focusResult = focusManagedTerminal(
             terminalApp: process.terminalApp, providerIdentity: target.providerIdentity, windowID: target.windowID)
         let focused: Bool
-        if adapterFocused == true {
+        let focusedExistingWindow: Bool
+        switch focusResult {
+        case .existingWindow:
             focused = true
-        } else if let trackedWindowID = target.windowID {
-            focused = ((try? yabai.focusWindow(id: trackedWindowID)) ?? false)
-        } else {
-            focused = false
+            focusedExistingWindow = true
+        case .trackedTerminal:
+            focused = true
+            focusedExistingWindow = target.windowID != nil
+        case .reopenedSession:
+            focused = true
+            focusedExistingWindow = false
+        case .unavailable:
+            if let trackedWindowID = target.windowID {
+                let fallbackFocused = ((try? yabai.focusWindow(id: trackedWindowID)) ?? false)
+                focused = fallbackFocused
+                focusedExistingWindow = fallbackFocused
+            } else {
+                focused = false
+                focusedExistingWindow = false
+            }
         }
         if focused, let tmuxWindowID = process.tmuxWindowID, !tmuxWindowID.isEmpty { _ = try? tmux.selectWindow(windowID: tmuxWindowID) }
-        if focused, let trackedWindowID = target.windowID { pulseTerminalWindowIfNeeded(windowID: trackedWindowID) }
+        if focused, focusedExistingWindow, let trackedWindowID = target.windowID { pulseTerminalWindowIfNeeded(windowID: trackedWindowID) }
         return focused
     }
 
@@ -5520,17 +5561,32 @@ public final class WorkspaceOrchestrator {
     private func focusAgentWindowRecord(_ record: AgentWindowRecord) throws -> Bool {
         let windowID = try trackedAgentWindowID(record) ?? record.yabaiWindowID ?? record.windowID
         let terminalApp = TerminalHost(rawValue: record.provider.rawValue)?.appName
-        let adapterFocused = focusManagedTerminal(terminalApp: terminalApp, providerIdentity: record.terminalFocusIdentity, windowID: windowID)
+        let focusResult = focusManagedTerminal(
+            terminalApp: terminalApp, providerIdentity: record.terminalFocusIdentity, windowID: windowID)
         let focused: Bool
-        if adapterFocused == true {
+        let focusedExistingWindow: Bool
+        switch focusResult {
+        case .existingWindow:
             focused = true
-        } else if let windowID {
-            focused = (try? yabai.focusWindow(id: windowID)) ?? false
-        } else {
-            focused = false
+            focusedExistingWindow = true
+        case .trackedTerminal:
+            focused = true
+            focusedExistingWindow = windowID != nil
+        case .reopenedSession:
+            focused = true
+            focusedExistingWindow = false
+        case .unavailable:
+            if let windowID {
+                let fallbackFocused = (try? yabai.focusWindow(id: windowID)) ?? false
+                focused = fallbackFocused
+                focusedExistingWindow = fallbackFocused
+            } else {
+                focused = false
+                focusedExistingWindow = false
+            }
         }
         if focused, let tmuxWindowID = record.tmuxWindowID, !tmuxWindowID.isEmpty { _ = try? tmux.selectWindow(windowID: tmuxWindowID) }
-        if focused, let windowID { pulseTerminalWindowIfNeeded(windowID: windowID) }
+        if focused, focusedExistingWindow, let windowID { pulseTerminalWindowIfNeeded(windowID: windowID) }
         return focused
     }
 

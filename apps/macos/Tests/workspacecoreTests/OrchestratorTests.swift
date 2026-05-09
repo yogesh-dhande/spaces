@@ -2516,6 +2516,53 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertEqual(capture.modes, [.owner])
     }
 
+    func testFocusWorkspaceProcessUsesTrackedBuiltInSpacesWindowWhenLiveWindowIDExists() throws {
+        let store = try makeTemporaryStore()
+        let capture = TerminalOpenCapture()
+        let pulseController = MockTerminalFocusPulseController()
+        let orchestrator = WorkspaceOrchestrator(
+            store: store, iterm: MockIterm2Adapter(), ghostty: MockGhosttyAdapter(), tmux: MockTmuxAdapter(),
+            terminalFocusPulseController: pulseController,
+            builtInTerminalWindowOpener: { sessionID, mode in
+                capture.sessionIDs.append(sessionID)
+                capture.modes.append(mode)
+            })
+        let root = try makeTempDirectory()
+        let focusLog = root.appendingPathComponent("spaces-built-in-focus.log")
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
+        _ = project
+
+        let process = RunningProcessRecord(
+            id: "process-spaces-live-window", workspaceID: workspace.id, templateName: "web", command: "npm run dev",
+            terminalApp: TerminalHost.spaces.appName, windowID: 777, terminalTrackingID: "spaces-session-live",
+            terminalNativeID: "spaces-session-live", terminalContainerID: nil, itermTabIndex: nil, tmuxWindowID: nil, pid: nil, status: .running,
+            logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil)
+        try store.upsert(runningProcess: process)
+        try store.upsert(
+            window: WindowRecord(
+                id: "window-spaces-live-window", workspaceID: workspace.id, app: TerminalHost.spaces.appName, name: "web", detail: "npm run dev",
+                targetURL: nil, windowID: 777, terminalTrackingID: "spaces-session-live", terminalNativeID: "spaces-session-live",
+                terminalContainerID: nil, itermTabIndex: nil, tmuxWindowID: nil, role: "terminal", orderIndex: 200, lastSeenAt: "now"))
+
+        try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) {
+            try withEnv(name: "YABAI_FOCUS_LOG_FILE", value: focusLog.path) {
+                try withEnv(
+                    name: "YABAI_WINDOWS_JSON",
+                    value:
+                        #"[{"id":777,"pid":11,"app":"Spaces","title":"web","space":1,"display":1,"is-sticky":false,"is-hidden":false,"is-visible":true,"is-native-fullscreen":false}]"#
+                ) { try orchestrator.focusWorkspaceProcess(workspaceID: workspace.id, processID: process.id) }
+            }
+        }
+
+        XCTAssertTrue(capture.sessionIDs.isEmpty)
+        let focusedIDs = try String(contentsOf: focusLog).split(separator: "\n").map(String.init)
+        XCTAssertEqual(focusedIDs, ["777"])
+        XCTAssertEqual(pulseController.pulsedWindowIDs, [777])
+    }
+
     // Tests restarting a process recreates a tracked terminal window row even if the stale window row was already pruned.
     func testRestartWorkspaceProcessRecreatesTrackedTerminalWindowWhenMissing() throws {
         let (orchestrator, store, _, workspace, _, mockIterm, mockTmux) = try makeMockItermOrchestratorWithWorkspace()
