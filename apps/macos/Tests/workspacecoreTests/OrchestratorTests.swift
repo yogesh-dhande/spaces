@@ -2952,11 +2952,33 @@ final class OrchestratorTests: XCTestCase {
         let mockTmux = MockTmuxAdapter()
         let orchestrator = WorkspaceOrchestrator(store: store, iterm: mockIterm, ghostty: mockGhostty, tmux: mockTmux)
         let root = try makeTempDirectory()
+
+    func testRecoverMissingConfiguredProcessUsesBuiltInSpacesSessionHost() throws {
+        let root = try makeTempDirectory()
+        let dbPath = root.appendingPathComponent("spaces.db").path
+        let store = try makeTemporaryStore()
+        let capture = TerminalOpenCapture()
+        let orchestrator = WorkspaceOrchestrator(
+            store: store, iterm: MockIterm2Adapter(), ghostty: MockGhosttyAdapter(), tmux: MockTmuxAdapter(),
+            builtInTerminalWindowOpener: { sessionID, mode in
+                capture.sessionIDs.append(sessionID)
+                capture.modes.append(mode)
+                if let paths = try? TerminalSessionPaths.forSession(id: sessionID) {
+                    try? paths.ensureDirectories()
+                    FileManager.default.createFile(atPath: paths.controlSocketPath, contents: Data())
+                    try? TerminalSessionPersistence.writeRuntimeState(
+                        .init(
+                            sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: getpid(), childPID: 4321, state: .running,
+                            updatedAt: "2026-05-09T21:00:00Z"), paths: paths)
+                    try? "process recovered\n".write(toFile: paths.outputPath, atomically: true, encoding: .utf8)
+                }
+            })
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
         let project = try orchestrator.addProject(dir: projectDir.path)
         let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
         _ = project
+
         try orchestrator.updateTerminalHost(.ghostty)
         try store.touchWorkspaceSettings(workspaceID: workspace.id, updatedAt: "now")
         try store.setWorkspaceProcesses(workspaceID: workspace.id, processes: [ProcessTemplate(name: "api", command: "npm run api")])
@@ -2986,6 +3008,44 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertEqual(restarted.terminalApp, "Ghostty")
         XCTAssertEqual(restarted.terminalNativeID, "ghostty-terminal-7")
         XCTAssertEqual(restarted.terminalContainerID, "ghostty-tab-7")
+
+        let existingConfig = try store.appConfig()
+        try store.setAppConfig(
+            .init(
+                editor: existingConfig.editor, portRange: existingConfig.portRange, terminalHost: .spaces, processShell: existingConfig.processShell))
+        try store.touchWorkspaceSettings(workspaceID: workspace.id, updatedAt: "now")
+        try store.setWorkspaceProcesses(
+            workspaceID: workspace.id,
+            processes: [ProcessTemplate(name: "api", command: "npm run api"), ProcessTemplate(name: "web", command: "npm run web")])
+        try store.updateWorkspaceRunning(id: workspace.id, isRunning: true, launchedAt: "now")
+        try store.upsert(
+            runningProcess: RunningProcessRecord(
+                id: "process-web", workspaceID: workspace.id, templateName: "web", command: "npm run web", terminalApp: TerminalHost.spaces.appName,
+                windowID: 222, terminalTrackingID: "session-web", terminalNativeID: "session-web", terminalContainerID: nil, itermTabIndex: nil,
+                tmuxWindowID: nil, pid: 2222, status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil))
+
+        try withEnv(name: "SPACES_DB_PATH", value: dbPath) {
+            try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) {
+                try withEnv(name: "YABAI_WINDOWS_JSON", value: "[]") {
+                    try orchestrator.recoverMissingConfiguredProcess(workspaceID: workspace.id, processKey: "api")
+                }
+            }
+        }
+
+        XCTAssertEqual(capture.modes, [.owner])
+        XCTAssertEqual(capture.sessionIDs.count, 1)
+
+        let processes = try store.runningProcesses(workspaceID: workspace.id)
+        XCTAssertEqual(Set(processes.map(\.templateName)), ["api", "web"])
+        let recoveredProcess = try XCTUnwrap(processes.first(where: { $0.templateName == "api" }))
+        XCTAssertEqual(recoveredProcess.command, "npm run api")
+        XCTAssertEqual(recoveredProcess.status, .running)
+        XCTAssertEqual(recoveredProcess.terminalApp, TerminalHost.spaces.appName)
+        XCTAssertEqual(recoveredProcess.terminalTrackingID, capture.sessionIDs.first)
+        XCTAssertEqual(recoveredProcess.terminalNativeID, capture.sessionIDs.first)
+        XCTAssertEqual(recoveredProcess.pid, 4321)
+        XCTAssertNotNil(recoveredProcess.logPath)
+        XCTAssertEqual(try store.workspace(id: workspace.id)?.isRunning, true)
     }
 
     // Tests no-op settings saves do not restart a recovered named process.

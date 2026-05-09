@@ -350,13 +350,7 @@ import spacesterminalghostty
             if let window { window.title = currentTitle }
             summaryLabel.stringValue = Self.summaryText(
                 workingDirectory: currentWorkingDirectory, shell: currentLaunchConfiguration.shell, command: currentLaunchConfiguration.command)
-            let stateText =
-                runtimeState.map { state in
-                    let clientLabel = client.identity.deviceName ?? client.identity.hostName ?? client.identity.label
-                    let ownerLabel = currentOwnerClient.map(Self.displayLabel(for:)) ?? "-"
-                    return
-                        "backend: \(state.backend.rawValue)    state: \(state.state.rawValue)    child: \(state.childPID.map(String.init) ?? "-")    owner: \(ownerLabel)    client: \(clientLabel)    updated: \(state.updatedAt)"
-                } ?? "state: unknown"
+            let stateText = runtimeStateText(runtimeState: runtimeState, ownerClient: currentOwnerClient, isOwner: isOwner)
             stateLabel.stringValue = stateText
 
             if backend == .ghosttyEmbedded {
@@ -470,6 +464,8 @@ import spacesterminalghostty
             outputScrollView.isHidden = false
             terminalContainer.isHidden = true
         }
+        let isCompactOwnerChrome = visibleRenderer == .ghosttyOwner && preferredAttachmentMode == .owner
+        rendererLabel.isHidden = isCompactOwnerChrome
     }
 
     private func updateInputOwnershipUI(isOwner: Bool) {
@@ -523,6 +519,18 @@ import spacesterminalghostty
     private func currentSummaryWorkingDirectory(fallback: String) -> String {
         guard backend == .ghosttyEmbedded else { return fallback }
         return ghosttySessionHost?.effectiveWorkingDirectory ?? fallback
+    }
+
+    private func runtimeStateText(runtimeState: TerminalSessionRuntimeState?, ownerClient: TerminalClient?, isOwner: Bool) -> String {
+        guard let runtimeState else { return "state: unknown" }
+        if backend == .ghosttyEmbedded && isOwner {
+            let childText = runtimeState.childPID.map { "    child: \($0)" } ?? ""
+            return "state: \(runtimeState.state.rawValue)\(childText)"
+        }
+        let clientLabel = client.identity.deviceName ?? client.identity.hostName ?? client.identity.label
+        let ownerLabel = ownerClient.map(Self.displayLabel(for:)) ?? "-"
+        return
+            "backend: \(runtimeState.backend.rawValue)    state: \(runtimeState.state.rawValue)    child: \(runtimeState.childPID.map(String.init) ?? "-")    owner: \(ownerLabel)    client: \(clientLabel)    updated: \(runtimeState.updatedAt)"
     }
 
     private static func summaryText(for launchConfiguration: TerminalSessionLaunchConfiguration) -> String {
@@ -582,4 +590,5 @@ import spacesterminalghostty
     public var clientID: String { client.id }
     var debugShowsInlineControls: Bool { !inputRowStackView.isHidden }
     var debugShowsTakeoverButton: Bool { !takeoverRowStackView.isHidden }
+    var debugShowsRendererLabel: Bool { !rendererLabel.isHidden }
 }

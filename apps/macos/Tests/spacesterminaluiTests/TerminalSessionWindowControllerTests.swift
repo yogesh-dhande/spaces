@@ -162,6 +162,8 @@ final class TerminalSessionWindowControllerTests: XCTestCase {
 
         XCTAssertFalse(controller.debugShowsInlineControls)
         XCTAssertFalse(controller.debugShowsTakeoverButton)
+        XCTAssertFalse(controller.debugShowsRendererLabel)
+        XCTAssertEqual(controller.debugState, "state: running    child: 22")
     }
 
     @MainActor func testWindowCloseInvokesCleanupCallback() throws {
