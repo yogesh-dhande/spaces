@@ -123,11 +123,12 @@ Current performance decisions:
   - `terminal_session_start`
   - `terminal_surface_create`
   - `terminal_window_attach`
+  - `terminal_owner_focus_sync`
   - `terminal_control_send`
   - `terminal_control_key`
   - `terminal_control_takeover`
 
-These metrics are intended to guide regressions around owner-window attach, session bring-up, control-plane latency, and ownership handoff.
+These metrics are intended to guide regressions around owner-window attach, owner-focus reassertion, session bring-up, control-plane latency, and ownership handoff.
 
 ## Current Verification Baseline
 The current branch has verified:
@@ -183,6 +184,8 @@ The profiler:
 - attaches an owner window and a viewer window
 - sends input, verifies `tail`, and performs takeover
 - aggregates the built-in terminal perf metrics into a short summary
+- writes a machine-readable `metrics.json` baseline artifact next to the text summary
+- breaks out `terminal_owner_focus_sync` samples by reason so focus churn can be tracked over time
 
 ## What This Branch Does Not Decide
 - whether external hosts are removed in a later PR

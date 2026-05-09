@@ -213,6 +213,40 @@ final class TerminalSessionWindowControllerTests: XCTestCase {
         XCTAssertFalse(controller.validateUserInterfaceItem(ValidatedItem(action: #selector(NSText.selectAll(_:)))))
     }
 
+    @MainActor func testGhosttyOwnerResyncsFocusAcrossWindowAndAppTransitions() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+        try TerminalSessionPersistence.writeLaunchConfiguration(
+            .init(
+                sessionID: "session-focus", backend: .ghosttyEmbedded, title: "owner", workingDirectory: "/tmp/work", shell: "/bin/zsh",
+                command: "cat", createdAt: "2026-05-09T00:00:00Z"), paths: paths)
+        try TerminalSessionPersistence.writeRuntimeState(
+            .init(
+                sessionID: "session-focus", backend: .ghosttyEmbedded, servicePID: 1, childPID: 22, state: .running, updatedAt: "2026-05-09T00:00:01Z"
+            ), paths: paths)
+
+        var focusWindowCalls = 0
+        var focusedStates: [Bool] = []
+        let controller = TerminalSessionWindowController(
+            sessionID: "session-focus", paths: paths, ownerWindowFocusAction: { _ in focusWindowCalls += 1 },
+            ownerSurfaceFocusAction: { focused in focusedStates.append(focused) })
+
+        controller.show()
+        controller.windowDidBecomeKey(Notification(name: NSWindow.didBecomeKeyNotification))
+        controller.windowDidBecomeMain(Notification(name: NSWindow.didBecomeMainNotification))
+        controller.windowDidEndLiveResize(Notification(name: NSWindow.didEndLiveResizeNotification))
+        controller.debugSimulateApplicationDidBecomeActive()
+        controller.windowDidResignMain(Notification(name: NSWindow.didResignMainNotification))
+        controller.windowDidResignKey(Notification(name: NSWindow.didResignKeyNotification))
+        controller.debugSimulateApplicationDidResignActive()
+
+        XCTAssertGreaterThanOrEqual(focusWindowCalls, 4)
+        XCTAssertTrue(focusedStates.contains(false))
+    }
+
     @MainActor func testFallbackWindowPasteTargetsInlineInputAndSelectAllStaysEnabled() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)

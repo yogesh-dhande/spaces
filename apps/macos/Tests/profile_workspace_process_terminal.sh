@@ -14,6 +14,7 @@ WORK_ROOT="${WORK_ROOT:-$(mktemp -d "${TMPDIR:-/tmp}/spaces-workspace-profile.XX
 DB_PATH="${SPACES_DB_PATH:-$WORK_ROOT/spaces.db}"
 APP_LOG="$WORK_ROOT/spaces-app.log"
 SUMMARY_PATH="$WORK_ROOT/summary.txt"
+METRICS_PATH="$WORK_ROOT/metrics.json"
 PROJECT_DIR="$WORK_ROOT/repo"
 WORKSPACE_INFO_JSON="$WORK_ROOT/workspace.json"
 FOCUS_LOG="$WORK_ROOT/focus-process.log"
@@ -191,10 +192,10 @@ write_workspace_dump "$WORKSPACE_DIR" "$WORK_ROOT/after-focus.json"
 FOCUS_MS="$(ms_since "$focus_started_at")"
 REOPENED_SESSION_ID="$(process_field "$WORK_ROOT/after-focus.json" backend terminalNativeID)"
 
-python3 - "$APP_LOG" "$FOCUS_LOG" "$START_MS" "$CLOSE_MS" "$FOCUS_MS" "$BACKEND_SESSION_ID" "$REOPENED_SESSION_ID" >"$SUMMARY_PATH" <<'PY'
-import re, sys
+python3 - "$APP_LOG" "$FOCUS_LOG" "$START_MS" "$CLOSE_MS" "$FOCUS_MS" "$BACKEND_SESSION_ID" "$REOPENED_SESSION_ID" "$METRICS_PATH" >"$SUMMARY_PATH" <<'PY'
+import json, re, sys
 
-app_log_path, focus_log_path, start_ms, close_ms, focus_ms, original_session, reopened_session = sys.argv[1:8]
+app_log_path, focus_log_path, start_ms, close_ms, focus_ms, original_session, reopened_session, metrics_path = sys.argv[1:9]
 pattern = re.compile(r"spaces: perf metric=(?P<metric>\S+) workspace=(?P<workspace>\S+) target=(?P<target>\S+) success=(?P<success>[01]) elapsed_ms=(?P<elapsed>\d+)(?: (?P<detail>.*))?$")
 terminal_pattern = re.compile(r"spaces: perf metric=(?P<metric>\S+) target=(?P<target>.*?) success=(?P<success>[01]) elapsed_ms=(?P<elapsed>\d+)(?: (?P<detail>.*))?$")
 samples = []
@@ -234,6 +235,27 @@ combined = [(name, elapsed, target, "shell") for name, elapsed, target in shell_
 combined.extend((sample["metric"], sample["elapsed"], sample["target"], sample["detail"]) for sample in samples)
 combined.sort(key=lambda item: item[1], reverse=True)
 
+with open(metrics_path, "w", encoding="utf-8") as handle:
+    json.dump(
+        {
+            "backend_session_stable": original_session == reopened_session,
+            "backend_session_before_close": original_session,
+            "backend_session_after_focus": reopened_session,
+            "slowest_samples": [
+                {
+                    "metric": name,
+                    "elapsed_ms": elapsed,
+                    "target": target,
+                    "detail": detail,
+                }
+                for name, elapsed, target, detail in combined[:20]
+            ],
+        },
+        handle,
+        indent=2,
+        sort_keys=True,
+    )
+
 print("Workspace process terminal profile")
 print()
 print(f"backend session stable across close/reopen: {'yes' if original_session == reopened_session else 'no'}")
@@ -252,4 +274,5 @@ echo "Artifacts:"
 echo "  app log:      $APP_LOG"
 echo "  focus log:    $FOCUS_LOG"
 echo "  summary:      $SUMMARY_PATH"
+echo "  metrics:      $METRICS_PATH"
 echo "  workspace dir: $WORKSPACE_DIR"

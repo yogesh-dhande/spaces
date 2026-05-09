@@ -96,6 +96,7 @@ ITERATIONS=3 apps/macos/Tests/profile_built_in_terminal.sh
 ```
 
 The profiler runs against an isolated `SPACES_DB_PATH`, enables `DEBUG=1`, exercises owner attach, viewer attach, send, `tail`, and takeover, then summarizes the built-in terminal perf metrics captured from the app log.
+It also writes `summary.txt` and `metrics.json` under its temp work root so baseline metric snapshots can be compared across terminal-window parity changes.
 
 ## Pre-commit Hook
 

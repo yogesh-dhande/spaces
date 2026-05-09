@@ -47,6 +47,8 @@ import spacesterminalghostty
     private let detachClientAction: @Sendable (String) throws -> Void
     private let copySelectionAction: (@MainActor () -> Bool)?
     private let pasteClipboardAction: (@MainActor () -> Bool)?
+    private let ownerWindowFocusAction: (@MainActor (NSWindow?) -> Void)?
+    private let ownerSurfaceFocusAction: (@MainActor (Bool) -> Void)?
     private let onWindowClose: (@MainActor (String, String) -> Void)?
     private var refreshTask: Task<Void, Never>?
     private var lastRenderedOutput = ""
@@ -56,6 +58,8 @@ import spacesterminalghostty
     private var ghosttySessionHost: GhosttyEmbeddedSessionHost?
     private var visibleRenderer: VisibleRenderer = .outputFallback
     private var lastObservedOwnerClientID: String?
+    private var appDidBecomeActiveObserver: NSObjectProtocol?
+    private var appDidResignActiveObserver: NSObjectProtocol?
 
     public init(
         sessionID: String, paths: TerminalSessionPaths, preferredAttachmentMode: TerminalAttachmentMode = .owner,
@@ -64,7 +68,8 @@ import spacesterminalghostty
         takeoverAction: (@Sendable (String) throws -> TerminalControlResponse)? = nil,
         attachClientAction: (@Sendable (TerminalClient, TerminalAttachmentMode) throws -> Void)? = nil,
         detachClientAction: (@Sendable (String) throws -> Void)? = nil, copySelectionAction: (@MainActor () -> Bool)? = nil,
-        pasteClipboardAction: (@MainActor () -> Bool)? = nil, onWindowClose: (@MainActor (String, String) -> Void)? = nil
+        pasteClipboardAction: (@MainActor () -> Bool)? = nil, ownerWindowFocusAction: (@MainActor (NSWindow?) -> Void)? = nil,
+        ownerSurfaceFocusAction: (@MainActor (Bool) -> Void)? = nil, onWindowClose: (@MainActor (String, String) -> Void)? = nil
     ) {
         self.sessionID = sessionID
         self.paths = paths
@@ -105,6 +110,8 @@ import spacesterminalghostty
             }
         self.copySelectionAction = copySelectionAction
         self.pasteClipboardAction = pasteClipboardAction
+        self.ownerWindowFocusAction = ownerWindowFocusAction
+        self.ownerSurfaceFocusAction = ownerSurfaceFocusAction
         self.onWindowClose = onWindowClose
 
         let contentRect = NSRect(x: 0, y: 0, width: 980, height: 640)
@@ -115,12 +122,15 @@ import spacesterminalghostty
         window.minSize = NSSize(width: 760, height: 420)
         super.init(window: window)
         window.delegate = self
+        startObservingApplicationActivation()
         buildUI()
         refreshNow()
         startRefreshing()
     }
 
     @available(*, unavailable) required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    deinit { MainActor.assumeIsolated { stopObservingApplicationActivation() } }
 
     public func show() {
         guard let window else { return }
@@ -136,23 +146,26 @@ import spacesterminalghostty
 
     public func windowWillClose(_ notification: Notification) {
         didCloseWindow = true
-        if backend == .ghosttyEmbedded { ghosttySessionHost?.setFocused(false, for: client.id) }
+        if backend == .ghosttyEmbedded { syncGhosttyOwnerFocus(reason: "window_close", requestWindowFocus: false, focused: false) }
         detachLocalClientIfNeeded()
         refreshTask?.cancel()
         refreshTask = nil
         onWindowClose?(sessionID, client.id)
     }
 
-    public func windowDidBecomeKey(_ notification: Notification) {
-        guard backend == .ghosttyEmbedded else { return }
-        if preferredAttachmentMode == .owner { ghosttySessionHost?.focusWindow(window) }
-        ghosttySessionHost?.setFocused(preferredAttachmentMode == .owner, for: client.id)
-    }
+    public func windowDidBecomeKey(_ notification: Notification) { syncGhosttyOwnerFocus(reason: "window_key", requestWindowFocus: true) }
 
     public func windowDidResignKey(_ notification: Notification) {
-        guard backend == .ghosttyEmbedded else { return }
-        ghosttySessionHost?.setFocused(false, for: client.id)
+        syncGhosttyOwnerFocus(reason: "window_key_lost", requestWindowFocus: false, focused: false)
     }
+
+    public func windowDidBecomeMain(_ notification: Notification) { syncGhosttyOwnerFocus(reason: "window_main", requestWindowFocus: true) }
+
+    public func windowDidResignMain(_ notification: Notification) {
+        syncGhosttyOwnerFocus(reason: "window_main_lost", requestWindowFocus: false, focused: false)
+    }
+
+    public func windowDidEndLiveResize(_ notification: Notification) { syncGhosttyOwnerFocus(reason: "window_resize_end", requestWindowFocus: true) }
 
     public func validateUserInterfaceItem(_ item: any NSValidatedUserInterfaceItem) -> Bool {
         switch item.action {
@@ -386,8 +399,7 @@ import spacesterminalghostty
             let host = GhosttyEmbeddedSessionRegistry.shared.host(for: launchConfiguration, paths: paths)
             ghosttySessionHost = host
             try host.attach(client: client, mode: preferredAttachmentMode, into: preferredAttachmentMode == .owner ? terminalContainer : nil)
-            host.setFocused(window?.isKeyWindow == true && preferredAttachmentMode == .owner, for: client.id)
-            if preferredAttachmentMode == .owner { host.focusWindow(window) }
+            syncGhosttyOwnerFocus(reason: "attach_owner_surface", requestWindowFocus: preferredAttachmentMode == .owner)
             updateRendererVisibility()
         } catch { updateInputStatus(message: String(describing: error), isError: true) }
     }
@@ -429,13 +441,13 @@ import spacesterminalghostty
                         if activeAttachment.mode == .owner {
                             ensureGhosttyHostAttached()
                         } else {
-                            ghosttySessionHost?.setFocused(false, for: client.id)
+                            syncGhosttyOwnerFocus(reason: "ownership_demoted", requestWindowFocus: false, focused: false)
                         }
                     }
                 }
                 if lastObservedOwnerClientID != currentOwnerClient?.id {
                     lastObservedOwnerClientID = currentOwnerClient?.id
-                    if isOwner { ghosttySessionHost?.focusWindow(window) }
+                    if isOwner { syncGhosttyOwnerFocus(reason: "ownership_promoted", requestWindowFocus: true) }
                 }
                 visibleRenderer = resolveVisibleRenderer(isOwner: isOwner)
                 updateRendererVisibility()
@@ -521,6 +533,35 @@ import spacesterminalghostty
             try detachClientAction(client.id)
             isClientAttached = false
         } catch { updateInputStatus(message: String(describing: error), isError: true) }
+    }
+
+    private func startObservingApplicationActivation() {
+        appDidBecomeActiveObserver = NotificationCenter.default.addObserver(
+            forName: NSApplication.didBecomeActiveNotification, object: NSApp, queue: .main
+        ) { [weak self] _ in MainActor.assumeIsolated { self?.syncGhosttyOwnerFocus(reason: "app_active", requestWindowFocus: true) } }
+        appDidResignActiveObserver = NotificationCenter.default.addObserver(
+            forName: NSApplication.didResignActiveNotification, object: NSApp, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { self?.syncGhosttyOwnerFocus(reason: "app_inactive", requestWindowFocus: false, focused: false) }
+        }
+    }
+
+    private func stopObservingApplicationActivation() {
+        appDidBecomeActiveObserver.flatMap { NotificationCenter.default.removeObserver($0) }
+        appDidBecomeActiveObserver = nil
+        appDidResignActiveObserver.flatMap { NotificationCenter.default.removeObserver($0) }
+        appDidResignActiveObserver = nil
+    }
+
+    private func syncGhosttyOwnerFocus(reason: String, requestWindowFocus: Bool, focused explicitFocused: Bool? = nil) {
+        guard backend == .ghosttyEmbedded, preferredAttachmentMode == .owner else { return }
+        let startedAt = Date()
+        let focused = explicitFocused ?? (NSApp.isActive && window?.isMainWindow == true && window?.isKeyWindow == true)
+        if requestWindowFocus { if let ownerWindowFocusAction { ownerWindowFocusAction(window) } else { ghosttySessionHost?.focusWindow(window) } }
+        if let ownerSurfaceFocusAction { ownerSurfaceFocusAction(focused) } else { ghosttySessionHost?.setFocused(focused, for: client.id) }
+        GhosttyEmbeddedPerformance.logMetric(
+            "terminal_owner_focus_sync", target: "session=\(sessionID)", elapsedMS: GhosttyEmbeddedPerformance.elapsedMS(since: startedAt),
+            success: true, detail: "reason=\(reason) focused=\(focused ? 1 : 0) request_window_focus=\(requestWindowFocus ? 1 : 0)")
     }
 
     private func updateRendererVisibility() {
@@ -690,6 +731,8 @@ import spacesterminalghostty
     var debugShowsTitleLabel: Bool { !titleLabel.isHidden }
     var debugInputStatus: String { inputStatusLabel.stringValue }
     var debugInputFieldValue: String { inputField.stringValue }
+    func debugSimulateApplicationDidBecomeActive() { NotificationCenter.default.post(name: NSApplication.didBecomeActiveNotification, object: NSApp) }
+    func debugSimulateApplicationDidResignActive() { NotificationCenter.default.post(name: NSApplication.didResignActiveNotification, object: NSApp) }
     func debugSelectRenderedRange(_ range: NSRange) { outputView.setSelectedRange(range) }
     var debugSelectedRange: NSRange { outputView.selectedRange() }
     func debugScrollOutputToOffsetFromBottom(_ offset: CGFloat) {
