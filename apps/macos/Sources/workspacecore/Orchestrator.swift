@@ -94,7 +94,7 @@ public final class WorkspaceOrchestrator {
     private enum ManagedTerminalFocusResult {
         case existingWindow
         case trackedTerminal
-        case reopenedSession
+        case reopenedSession(windowID: Int?)
         case unavailable
     }
 
@@ -2168,10 +2168,16 @@ public final class WorkspaceOrchestrator {
             case .trackedTerminal:
                 focused = true
                 focusedExistingWindow = window.windowID != nil
-            case .reopenedSession:
+            case .reopenedSession(let capturedWindowID):
                 focused = true
                 focusedExistingWindow = false
-                if terminalHost(for: window.app) == .spaces { try? clearStaleBuiltInTerminalWindowBinding(window) }
+                if terminalHost(for: window.app) == .spaces {
+                    if let capturedWindowID {
+                        try? persistBuiltInTerminalWindowBinding(window, windowID: capturedWindowID)
+                    } else {
+                        try? clearStaleBuiltInTerminalWindowBinding(window)
+                    }
+                }
             case .unavailable:
                 let fallbackFocused = (window.windowID.flatMap { try? yabai.focusWindow(id: $0) }) ?? false
                 focused = fallbackFocused
@@ -2361,8 +2367,10 @@ public final class WorkspaceOrchestrator {
         if terminalHost == .spaces {
             if let windowID, (try? yabai.focusWindow(id: windowID)) ?? false { return .existingWindow }
             guard case .session(let sessionID)? = providerIdentity else { return .unavailable }
+            let snapshot = bestEffortYabaiWindowSnapshot()
             builtInTerminalWindowOpener(sessionID, .owner)
-            return .reopenedSession
+            let capturedWindowID = try? captureNewAppWindowID(snapshot: snapshot, appName: terminalAppName(for: terminalHost))
+            return .reopenedSession(windowID: capturedWindowID)
         }
         guard let terminalAdapter = terminalAdapter(for: terminalHost) else { return .unavailable }
         let hasPreciseTarget = providerIdentity != nil || windowID != nil
@@ -5490,10 +5498,16 @@ public final class WorkspaceOrchestrator {
         case .trackedTerminal:
             focused = true
             focusedExistingWindow = target.windowID != nil
-        case .reopenedSession:
+        case .reopenedSession(let capturedWindowID):
             focused = true
             focusedExistingWindow = false
-            if terminalHost(for: process.terminalApp) == .spaces { try clearStaleBuiltInTerminalWindowBinding(process, workspaceID: workspaceID) }
+            if terminalHost(for: process.terminalApp) == .spaces {
+                if let capturedWindowID {
+                    try persistBuiltInTerminalWindowBinding(process, workspaceID: workspaceID, windowID: capturedWindowID)
+                } else {
+                    try clearStaleBuiltInTerminalWindowBinding(process, workspaceID: workspaceID)
+                }
+            }
         case .unavailable:
             if let trackedWindowID = target.windowID {
                 let fallbackFocused = ((try? yabai.focusWindow(id: trackedWindowID)) ?? false)
@@ -5532,6 +5546,28 @@ public final class WorkspaceOrchestrator {
         if let trackedWindow = try store.windows(workspaceID: workspaceID).first(where: { matchesTrackedTerminalWindow($0, process: process) }) {
             try clearStaleBuiltInTerminalWindowBinding(trackedWindow)
         }
+    }
+
+    private func persistBuiltInTerminalWindowBinding(_ process: RunningProcessRecord, workspaceID: String, windowID: Int) throws {
+        let reboundProcess = RunningProcessRecord(
+            id: process.id, workspaceID: process.workspaceID, templateName: process.templateName, command: process.command,
+            terminalApp: process.terminalApp, windowID: windowID, terminalTrackingID: process.terminalTrackingID,
+            terminalNativeID: process.terminalNativeID, terminalContainerID: process.terminalContainerID, itermTabIndex: process.itermTabIndex,
+            tmuxWindowID: process.tmuxWindowID, pid: process.pid, status: process.status, logPath: process.logPath,
+            lastOutputAt: process.lastOutputAt, startedAt: process.startedAt, exitedAt: process.exitedAt)
+        try store.upsert(runningProcess: reboundProcess)
+        if let trackedWindow = try store.windows(workspaceID: workspaceID).first(where: { matchesTrackedTerminalWindow($0, process: process) }) {
+            try persistBuiltInTerminalWindowBinding(trackedWindow, windowID: windowID)
+        }
+    }
+
+    private func persistBuiltInTerminalWindowBinding(_ window: WindowRecord, windowID: Int) throws {
+        let reboundWindow = WindowRecord(
+            id: window.id, workspaceID: window.workspaceID, app: window.app, name: window.name, detail: window.detail, targetURL: window.targetURL,
+            windowID: windowID, terminalTrackingID: window.terminalTrackingID, terminalNativeID: window.terminalNativeID,
+            terminalContainerID: window.terminalContainerID, itermTabIndex: window.itermTabIndex, tmuxWindowID: window.tmuxWindowID,
+            role: window.role, orderIndex: window.orderIndex, lastSeenAt: nowISO8601())
+        try store.upsert(window: reboundWindow)
     }
 
     private func clearStaleBuiltInTerminalWindowBinding(_ window: WindowRecord) throws {

@@ -2565,6 +2565,58 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertNil(updatedWindow.windowID)
     }
 
+    func testFocusWorkspaceProcessReopensBuiltInSpacesSessionAndPersistsFreshWindowBinding() throws {
+        let store = try makeTemporaryStore()
+        let capture = TerminalOpenCapture()
+        let orchestrator = WorkspaceOrchestrator(
+            store: store, iterm: MockIterm2Adapter(), ghostty: MockGhosttyAdapter(), tmux: MockTmuxAdapter(),
+            builtInTerminalWindowOpener: { sessionID, mode in
+                capture.sessionIDs.append(sessionID)
+                capture.modes.append(mode)
+            })
+        let root = try makeTempDirectory()
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
+        _ = project
+
+        let process = RunningProcessRecord(
+            id: "process-spaces-rebound-window", workspaceID: workspace.id, templateName: "web", command: "npm run dev",
+            terminalApp: TerminalHost.spaces.appName, windowID: 777, terminalTrackingID: "spaces-session-rebound",
+            terminalNativeID: "spaces-session-rebound", terminalContainerID: nil, itermTabIndex: nil, tmuxWindowID: nil, pid: nil, status: .running,
+            logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil)
+        try store.upsert(runningProcess: process)
+        try store.upsert(
+            window: WindowRecord(
+                id: "window-spaces-rebound-window", workspaceID: workspace.id, app: TerminalHost.spaces.appName, name: "web", detail: "npm run dev",
+                targetURL: nil, windowID: 777, terminalTrackingID: "spaces-session-rebound", terminalNativeID: "spaces-session-rebound",
+                terminalContainerID: nil, itermTabIndex: nil, tmuxWindowID: nil, role: "terminal", orderIndex: 200, lastSeenAt: "now"))
+
+        try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) {
+            try withEnv(name: "YABAI_WINDOWS_JSON", value: "[]") {
+                try withEnv(name: "YABAI_FOCUS_FAIL_IDS", value: "777") {
+                    try withEnv(name: "YABAI_FOCUSED_ID", value: "888") {
+                        try withEnv(name: "YABAI_FOCUSED_APP", value: TerminalHost.spaces.appName) {
+                            try withEnv(name: "YABAI_FOCUSED_TITLE", value: "web") {
+                                try orchestrator.focusWorkspaceProcess(workspaceID: workspace.id, processID: process.id)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        XCTAssertEqual(capture.sessionIDs, ["spaces-session-rebound"])
+        XCTAssertEqual(capture.modes, [.owner])
+
+        let updatedProcess = try XCTUnwrap(try store.runningProcesses(workspaceID: workspace.id).first(where: { $0.id == process.id }))
+        XCTAssertEqual(updatedProcess.windowID, 888)
+
+        let updatedWindow = try XCTUnwrap(try store.windows(workspaceID: workspace.id).first(where: { $0.id == "window-spaces-rebound-window" }))
+        XCTAssertEqual(updatedWindow.windowID, 888)
+    }
+
     func testFocusWorkspaceProcessUsesTrackedBuiltInSpacesWindowWhenLiveWindowIDExists() throws {
         let store = try makeTemporaryStore()
         let capture = TerminalOpenCapture()
