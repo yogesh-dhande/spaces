@@ -575,6 +575,7 @@ import spacesterminalghostty
     var debugSummary: String { summaryLabel.stringValue }
     var debugState: String { stateLabel.stringValue }
     var debugWindowTitle: String { window?.title ?? "" }
+    public var attachmentMode: TerminalAttachmentMode { preferredAttachmentMode }
     public var didClose: Bool { didCloseWindow }
     var debugDidCloseWindow: Bool { didCloseWindow }
     func debugForceRefresh() { refreshNow() }

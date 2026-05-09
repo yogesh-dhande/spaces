@@ -424,13 +424,16 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     }
 
     private func openTerminalSessionWindow(sessionID: String, mode: TerminalAttachmentMode) {
-        pruneClosedTerminalSessionWindowControllers(sessionID: sessionID)
-        let controller: TerminalSessionWindowController
-        if mode == .owner, let existing = terminalSessionWindowControllers[sessionID]?.first {
-            controller = existing
-        } else {
-            do {
-                let paths = try TerminalSessionPaths.forSession(id: sessionID)
+        do {
+            let paths = try TerminalSessionPaths.forSession(id: sessionID)
+            pruneClosedTerminalSessionWindowControllers(sessionID: sessionID)
+            let activeOwnerClientID = Self.activeOwnerClientID(paths: paths)
+            let controller: TerminalSessionWindowController
+            if let existing = Self.reusableTerminalSessionWindowController(
+                terminalSessionWindowControllers[sessionID] ?? [], mode: mode, activeOwnerClientID: activeOwnerClientID)
+            {
+                controller = existing
+            } else {
                 let created = TerminalSessionWindowController(
                     sessionID: sessionID, paths: paths, preferredAttachmentMode: mode,
                     onWindowClose: { [weak self] sessionID, clientID in
@@ -438,12 +441,12 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                     })
                 terminalSessionWindowControllers[sessionID, default: []].append(created)
                 controller = created
-            } catch {
-                showError(error)
-                return
             }
+            controller.show()
+        } catch {
+            showError(error)
+            return
         }
-        controller.show()
     }
 
     private func pruneClosedTerminalSessionWindowControllers(sessionID: String) {
@@ -454,6 +457,20 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         } else {
             terminalSessionWindowControllers[sessionID] = controllers
         }
+    }
+
+    static func reusableTerminalSessionWindowController(
+        _ controllers: [TerminalSessionWindowController], mode: TerminalAttachmentMode, activeOwnerClientID: String?
+    ) -> TerminalSessionWindowController? {
+        guard mode == .owner, let activeOwnerClientID else { return nil }
+        return controllers.first { !$0.didClose && $0.clientID == activeOwnerClientID }
+    }
+
+    static func activeOwnerClientID(paths: TerminalSessionPaths) -> String? {
+        guard let ownerAttachment = try? TerminalSessionPersistence.activeAttachments(paths: paths).first(where: { $0.mode == .owner }) else {
+            return nil
+        }
+        return ownerAttachment.clientID
     }
 
     private func removeTerminalSessionWindowController(sessionID: String, clientID: String) {
