@@ -424,6 +424,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     }
 
     private func openTerminalSessionWindow(sessionID: String, mode: TerminalAttachmentMode) {
+        pruneClosedTerminalSessionWindowControllers(sessionID: sessionID)
         let controller: TerminalSessionWindowController
         if mode == .owner, let existing = terminalSessionWindowControllers[sessionID]?.first {
             controller = existing
@@ -443,6 +444,16 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             }
         }
         controller.show()
+    }
+
+    private func pruneClosedTerminalSessionWindowControllers(sessionID: String) {
+        guard var controllers = terminalSessionWindowControllers[sessionID] else { return }
+        controllers.removeAll(where: \.didClose)
+        if controllers.isEmpty {
+            terminalSessionWindowControllers.removeValue(forKey: sessionID)
+        } else {
+            terminalSessionWindowControllers[sessionID] = controllers
+        }
     }
 
     private func removeTerminalSessionWindowController(sessionID: String, clientID: String) {

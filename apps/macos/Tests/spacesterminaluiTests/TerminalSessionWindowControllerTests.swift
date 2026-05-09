@@ -187,4 +187,112 @@ final class TerminalSessionWindowControllerTests: XCTestCase {
         XCTAssertEqual(closedSessionID, "session-5")
         XCTAssertEqual(closedClientID, expectedClientID)
     }
+
+    @MainActor func testGhosttyControllersRefreshOwnershipAfterTakeover() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+        try TerminalSessionPersistence.writeLaunchConfiguration(
+            .init(
+                sessionID: "session-6", backend: .ghosttyEmbedded, title: "frontend", workingDirectory: "/tmp/work", shell: "/bin/zsh",
+                command: "npm run dev", createdAt: "2026-05-09T00:00:00Z"), paths: paths)
+        try TerminalSessionPersistence.writeRuntimeState(
+            .init(
+                sessionID: "session-6", backend: .ghosttyEmbedded, servicePID: 1, childPID: 4321, state: .running, updatedAt: "2026-05-09T00:00:01Z"),
+            paths: paths)
+
+        let ownerController = TerminalSessionWindowController(sessionID: "session-6", paths: paths)
+        let viewerController = TerminalSessionWindowController(
+            sessionID: "session-6", paths: paths, preferredAttachmentMode: .viewer, attachClientAction: { _, _ in }, detachClientAction: { _ in })
+
+        let owner = TerminalClient(
+            id: ownerController.clientID, kind: .localWindow, identity: .init(label: "Spaces window", hostName: "mac", deviceName: "Owner Mac"),
+            connectedAt: "2026-05-09T00:00:00Z")
+        let viewer = TerminalClient(
+            id: viewerController.clientID, kind: .localWindow, identity: .init(label: "Spaces window", hostName: "mac", deviceName: "Viewer Mac"),
+            connectedAt: "2026-05-09T00:00:01Z")
+        try TerminalSessionPersistence.attachClient(
+            sessionID: "session-6", client: owner, mode: .owner, paths: paths, attachedAt: "2026-05-09T00:00:00Z")
+        try TerminalSessionPersistence.attachClient(
+            sessionID: "session-6", client: viewer, mode: .viewer, paths: paths, attachedAt: "2026-05-09T00:00:01Z")
+
+        ownerController.debugForceRefresh()
+        viewerController.debugForceRefresh()
+
+        XCTAssertEqual(ownerController.debugWindowTitle, "frontend")
+        XCTAssertEqual(ownerController.debugRendererSummary, "Renderer: libghostty (owner)")
+        XCTAssertFalse(ownerController.debugShowsTakeoverButton)
+        XCTAssertEqual(viewerController.debugWindowTitle, "frontend (viewer)")
+        XCTAssertEqual(viewerController.debugRendererSummary, "Renderer: viewer tail")
+        XCTAssertTrue(viewerController.debugShowsTakeoverButton)
+
+        try TerminalSessionPersistence.transferOwnership(
+            sessionID: "session-6", newOwnerClientID: viewer.id, paths: paths, transferredAt: "2026-05-09T00:00:02Z")
+
+        ownerController.debugForceRefresh()
+        viewerController.debugForceRefresh()
+
+        XCTAssertEqual(ownerController.debugWindowTitle, "frontend (viewer)")
+        XCTAssertEqual(ownerController.debugRendererSummary, "Renderer: viewer tail")
+        XCTAssertTrue(ownerController.debugShowsTakeoverButton)
+        XCTAssertEqual(viewerController.debugWindowTitle, "frontend")
+        XCTAssertEqual(viewerController.debugRendererSummary, "Renderer: libghostty (owner)")
+        XCTAssertFalse(viewerController.debugShowsTakeoverButton)
+    }
+
+    @MainActor func testGhosttyOwnerCloseMarksControllerAndReopenUsesFreshClientAttachment() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+        try TerminalSessionPersistence.writeLaunchConfiguration(
+            .init(
+                sessionID: "session-7", backend: .ghosttyEmbedded, title: "backend", workingDirectory: "/tmp/work", shell: "/bin/zsh",
+                command: "uv run api", createdAt: "2026-05-09T00:00:00Z"), paths: paths)
+        try TerminalSessionPersistence.writeRuntimeState(
+            .init(
+                sessionID: "session-7", backend: .ghosttyEmbedded, servicePID: 1, childPID: 9876, state: .running, updatedAt: "2026-05-09T00:00:01Z"),
+            paths: paths)
+
+        let firstController = TerminalSessionWindowController(
+            sessionID: "session-7", paths: paths,
+            attachClientAction: { client, mode in
+                try TerminalSessionPersistence.attachClient(
+                    sessionID: "session-7", client: client, mode: mode, paths: paths, attachedAt: "2026-05-09T00:00:00Z")
+            },
+            detachClientAction: { clientID in
+                try TerminalSessionPersistence.detachClient(id: clientID, paths: paths, detachedAt: "2026-05-09T00:00:01Z")
+            })
+        firstController.show()
+        let firstClientID = firstController.clientID
+
+        firstController.windowWillClose(Notification(name: NSWindow.willCloseNotification))
+
+        XCTAssertTrue(firstController.debugDidCloseWindow)
+
+        let reopenedController = TerminalSessionWindowController(
+            sessionID: "session-7", paths: paths,
+            attachClientAction: { client, mode in
+                try TerminalSessionPersistence.attachClient(
+                    sessionID: "session-7", client: client, mode: mode, paths: paths, attachedAt: "2026-05-09T00:00:02Z")
+            },
+            detachClientAction: { clientID in
+                try TerminalSessionPersistence.detachClient(id: clientID, paths: paths, detachedAt: "2026-05-09T00:00:03Z")
+            })
+        reopenedController.show()
+        reopenedController.debugForceRefresh()
+
+        let snapshot = try TerminalSessionPersistence.readAttachmentSnapshot(paths: paths)
+        let activeOwners = snapshot.attachments.filter { $0.mode == .owner && $0.detachedAt == nil }
+
+        XCTAssertEqual(activeOwners.count, 1)
+        XCTAssertEqual(activeOwners.first?.clientID, reopenedController.clientID)
+        XCTAssertNotEqual(reopenedController.clientID, firstClientID)
+        XCTAssertTrue(snapshot.attachments.contains { $0.clientID == firstClientID && $0.detachedAt != nil })
+        XCTAssertEqual(reopenedController.debugWindowTitle, "backend")
+        XCTAssertEqual(reopenedController.debugRendererSummary, "Renderer: libghostty (owner)")
+    }
 }

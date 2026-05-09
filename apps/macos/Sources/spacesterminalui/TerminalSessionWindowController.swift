@@ -41,6 +41,7 @@ import spacesterminalghostty
     private var refreshTask: Task<Void, Never>?
     private var lastRenderedOutput = ""
     private var isClientAttached = false
+    private var didCloseWindow = false
     private var lastObservedAttachmentMode: TerminalAttachmentMode?
     private var ghosttySessionHost: GhosttyEmbeddedSessionHost?
     private var visibleRenderer: VisibleRenderer = .outputFallback
@@ -110,6 +111,7 @@ import spacesterminalghostty
 
     public func show() {
         guard let window else { return }
+        didCloseWindow = false
         attachLocalClientIfNeeded()
         startRefreshing()
         constrainWindowToVisibleFrame(window)
@@ -120,6 +122,7 @@ import spacesterminalghostty
     }
 
     public func windowWillClose(_ notification: Notification) {
+        didCloseWindow = true
         if backend == .ghosttyEmbedded { ghosttySessionHost?.setFocused(false, for: client.id) }
         detachLocalClientIfNeeded()
         refreshTask?.cancel()
@@ -572,6 +575,9 @@ import spacesterminalghostty
     var debugSummary: String { summaryLabel.stringValue }
     var debugState: String { stateLabel.stringValue }
     var debugWindowTitle: String { window?.title ?? "" }
+    public var didClose: Bool { didCloseWindow }
+    var debugDidCloseWindow: Bool { didCloseWindow }
+    func debugForceRefresh() { refreshNow() }
     public var clientID: String { client.id }
     var debugShowsInlineControls: Bool { !inputRowStackView.isHidden }
     var debugShowsTakeoverButton: Bool { !takeoverRowStackView.isHidden }
