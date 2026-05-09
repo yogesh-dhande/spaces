@@ -110,7 +110,16 @@ Spaces focuses those windows; it does not decide their geometry.
 
 ### Creation
 - Users can create, update, focus, stop, restart, and archive workspaces from the GUI.
-- The CLI should stay minimal and support `import`, `update`, `start`, `restart`, `open`, and `signal`.
+- The CLI should stay minimal and support `import`, `update`, `start`, `restart`, `open`, `signal`, and low-level `terminal` session commands for tmux-free PTY sessions, including listing sessions with active client ownership and backend identity, sending text, sending named keys, opening native Spaces-owned session windows as an owner or viewer, and transferring input ownership between attached clients.
+- `script-pty` terminal sessions should open in a lightweight native Spaces window that shows recent output and supports text send through the session control socket.
+- `ghostty-embedded` terminal sessions should open in a native Spaces window backed by libghostty while preserving the same per-session `send`, `key`, and `tail` control behavior through the CLI.
+- Built-in process windows should keep a compact metadata header instead of expanding to fit full exported environment wrappers.
+- `ghostty-embedded` owner windows should stay on the libghostty render path. Passive viewer windows may use recent tailed output, but the owner path should not switch renderers behind the user's back.
+- `ghostty-embedded` owner windows should follow live terminal metadata where possible, including title and working directory updates emitted by the session backend instead of staying frozen at launch-time values.
+- `ghostty-embedded` owner windows should accept direct keyboard input in the terminal surface itself rather than relying on a separate send-input form.
+- A terminal session may have one active owner client and one or more passive viewer clients attached at the same time.
+- Only the active owner client may send input or control PTY size.
+- Viewer windows should remain readable, identify the current owner, and be able to take over ownership without restarting the underlying shell session.
 - For git projects, new workspaces are branch-oriented and should support an existing-branch picker, a new-branch entry path, target branch, directory name, title, and notes inputs.
 - Git workspace creation must require an explicit branch choice. `Create branch` must reject any branch name that already exists, while `Use existing` is the only path allowed to attach or revive a workspace on an existing branch.
 - Workspace titles are display labels and may repeat within a project. Git branch identity, rather than title text, determines whether a workspace is revived or conflicts with an existing archived record.

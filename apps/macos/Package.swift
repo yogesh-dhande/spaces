@@ -8,6 +8,10 @@ let package = Package(
     ],
     products: [
         .library(name: "systembridge", targets: ["systembridge"]),
+        .library(name: "spacesterminalcore", targets: ["spacesterminalcore"]),
+        .library(name: "spacesterminalghostty", targets: ["spacesterminalghostty"]),
+        .library(name: "spacesterminalruntime", targets: ["spacesterminalruntime"]),
+        .library(name: "spacesterminalui", targets: ["spacesterminalui"]),
         .library(name: "workspacecore", targets: ["workspacecore"]),
         .library(name: "spacesui", targets: ["spacesui"]),
         .library(name: "spacescli", targets: ["spacescli"]),
@@ -20,10 +24,28 @@ let package = Package(
         .package(url: "https://github.com/sparkle-project/Sparkle", from: "2.9.1")
     ],
     targets: [
+        .binaryTarget(
+            name: "GhosttyKit",
+            path: ".local/ghosttykit/GhosttyKit.xcframework"
+        ),
         .target(name: "systembridge"),
+        .target(name: "spacesterminalcore"),
+        .target(
+            name: "spacesterminalghostty",
+            dependencies: ["spacesterminalcore", "GhosttyKit"],
+            linkerSettings: [.linkedLibrary("c++")]
+        ),
+        .target(
+            name: "spacesterminalruntime",
+            dependencies: ["spacesterminalcore", "spacesterminalghostty"]
+        ),
+        .target(
+            name: "spacesterminalui",
+            dependencies: ["spacesterminalcore", "spacesterminalghostty"]
+        ),
         .target(
             name: "workspacecore",
-            dependencies: ["systembridge"],
+            dependencies: ["systembridge", "spacesterminalcore"],
             linkerSettings: [.linkedLibrary("sqlite3")]
         ),
         .target(
@@ -31,6 +53,7 @@ let package = Package(
             dependencies: [
                 "workspacecore",
                 "systembridge",
+                "spacesterminalui",
                 .product(name: "Sparkle", package: "Sparkle"),
             ]
         ),
@@ -38,6 +61,8 @@ let package = Package(
             name: "spacescli",
             dependencies: [
                 "workspacecore",
+                "spacesterminalcore",
+                "spacesterminalruntime",
                 "systembridge",
                 .product(name: "ArgumentParser", package: "swift-argument-parser")
             ]
@@ -69,6 +94,10 @@ let package = Package(
                 ])
             ]
         ),
+        .testTarget(name: "spacesterminalcoreTests", dependencies: ["spacesterminalcore"]),
+        .testTarget(name: "spacesterminalghosttyTests", dependencies: ["spacesterminalghostty"]),
+        .testTarget(name: "spacesterminalruntimeTests", dependencies: ["spacesterminalruntime"]),
+        .testTarget(name: "spacesterminaluiTests", dependencies: ["spacesterminalui"]),
         .testTarget(name: "workspacecoreTests", dependencies: ["workspacecore", "systembridge"]),
         .testTarget(name: "spacesuiTests", dependencies: ["spacesui"]),
         .testTarget(

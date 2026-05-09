@@ -49,6 +49,44 @@ apps/macos/.build/debug/spaces restart
 
 Use `scripts/dev-build-and-launch.sh` to launch the debug app without touching the installed app's database. The script sets `SPACES_DB_PATH` to `~/.spaces-dev/spaces.db` by default. Override it with `SPACES_DEV_DB_PATH=/custom/path/spaces.db` when you want a different isolated dev database.
 
+For branch-local manual testing against a clean database and terminal-runtime root, override `SPACES_DB_PATH` before launching either binary:
+
+```bash
+export SPACES_DB_PATH="$TMPDIR/spaces-branch/spaces.db"
+mkdir -p "$(dirname "$SPACES_DB_PATH")"
+env SPACES_DB_PATH="$SPACES_DB_PATH" apps/macos/.build/debug/SpacesApp
+env SPACES_DB_PATH="$SPACES_DB_PATH" apps/macos/.build/debug/spaces terminal list
+```
+
+For branch-local libghostty artifact setup, run:
+
+```bash
+apps/macos/scripts/setup_ghosttykit.sh
+```
+
+That installs `GhosttyKit.xcframework` and the Ghostty resource bundle under `apps/macos/.local/ghosttykit/`, which the current branch-local resolver will discover automatically.
+
+To verify the embedded Ghostty backend on an isolated database root:
+
+```bash
+export SPACES_DB_PATH="$TMPDIR/spaces-ghostty/spaces.db"
+apps/macos/scripts/setup_ghosttykit.sh
+env SPACES_DB_PATH="$SPACES_DB_PATH" apps/macos/.build/debug/SpacesApp
+env SPACES_DB_PATH="$SPACES_DB_PATH" apps/macos/.build/debug/spaces \
+  terminal command --backend ghostty-embedded --command cat --title verify-ghostty
+env SPACES_DB_PATH="$SPACES_DB_PATH" apps/macos/.build/debug/spaces terminal list
+env SPACES_DB_PATH="$SPACES_DB_PATH" apps/macos/.build/debug/spaces \
+  terminal send <session-id> "hello from ghostty" --newline
+env SPACES_DB_PATH="$SPACES_DB_PATH" apps/macos/.build/debug/spaces \
+  terminal tail <session-id> --lines 5
+env SPACES_DB_PATH="$SPACES_DB_PATH" apps/macos/.build/debug/spaces \
+  terminal show <session-id> --viewer
+env SPACES_DB_PATH="$SPACES_DB_PATH" apps/macos/.build/debug/spaces \
+  terminal takeover <session-id> <viewer-client-id>
+```
+
+For owner or viewer verification, keep exactly one `SpacesApp` process running for the chosen `SPACES_DB_PATH`. The current `ghostty-embedded` slice supports one live libghostty owner window plus one or more passive viewer windows that follow `output.log` and can take over ownership without restarting the session.
+
 ## Pre-commit Hook
 
 Git commits can use the repo hook in `.githooks/pre-commit`, which auto-formats staged Swift files under `apps/macos/Sources` and `apps/macos/Tests` before running lint and coverage.

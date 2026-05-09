@@ -35,6 +35,14 @@ spaces restart             # full stop + launch
 spaces open <name>         # focus a tracked window by name
 spaces signal <event>      # coding-agent lifecycle: init|start|waiting|done|exit
 spaces update --notes "…"  # edit workspace metadata
+spaces terminal command --command "cat"   # start a tmux-free PTY session
+spaces terminal list                      # inspect session state and attached clients
+spaces terminal send <session> "hello"    # write input to a session
+spaces terminal key <session> ctrl+c      # send a named key or control chord
+spaces terminal tail <session> --lines 20 # read recent output
+spaces terminal show <session>            # open the owner window for a session
+spaces terminal show <session> --viewer   # open a passive viewer window
+spaces terminal takeover <session> <id>   # hand input ownership to another client
 ```
 
 Coding agents emit `spaces signal` events from their terminals so the GUI knows which agents are working, waiting on a human, or done. See [coding-agent integration](https://usespaces.dev/docs/coding-agents).

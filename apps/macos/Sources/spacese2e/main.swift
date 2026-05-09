@@ -127,6 +127,7 @@ private struct SeedFixtureCommand: ParsableCommand {
     func run() throws {
         let orchestrator = try makeOrchestrator()
         let normalizedProjectDir = normalizePath(projectDir)
+        try materializeDemoFixtureIfNeeded(projectDir: normalizedProjectDir, variant: "beacon")
         let project = try orchestrator.project(dir: normalizedProjectDir) ?? orchestrator.addProject(dir: normalizedProjectDir)
         let uvExecutable = try resolveExecutablePath(named: "uv")
         let frontendCommand =
@@ -182,6 +183,64 @@ private struct SeedFixtureCommand: ParsableCommand {
         let path = String(data: output.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines)
         guard process.terminationStatus == 0, let path, !path.isEmpty else { throw ValidationError("Required executable not found in PATH: \(name)") }
         return path
+    }
+
+    private func materializeDemoFixtureIfNeeded(projectDir: String, variant: String) throws {
+        let fileManager = FileManager.default
+        let projectURL = URL(fileURLWithPath: projectDir, isDirectory: true)
+        let demoRoot = projectURL.appendingPathComponent(".spaces-e2e-demo", isDirectory: true)
+        let pyprojectURL = demoRoot.appendingPathComponent("pyproject.toml")
+        let mainURL = demoRoot.appendingPathComponent("src/spaces_e2e_demo/__main__.py")
+        let siteURL = demoRoot.appendingPathComponent("site", isDirectory: true)
+        let apiURL = demoRoot.appendingPathComponent("api", isDirectory: true)
+        if fileManager.fileExists(atPath: pyprojectURL.path), fileManager.fileExists(atPath: mainURL.path),
+            fileManager.fileExists(atPath: siteURL.path), fileManager.fileExists(atPath: apiURL.path)
+        {
+            return
+        }
+
+        let fixtureRoot = try resolveDemoFixtureRoot()
+        let templateRoot = fixtureRoot.appendingPathComponent("templates/\(variant)", isDirectory: true)
+        let pyprojectSource = fixtureRoot.appendingPathComponent("pyproject.toml")
+        let lockSource = fixtureRoot.appendingPathComponent("uv.lock")
+        let srcSource = fixtureRoot.appendingPathComponent("src", isDirectory: true)
+        let siteSource = templateRoot.appendingPathComponent("site", isDirectory: true)
+        let apiSource = templateRoot.appendingPathComponent("api", isDirectory: true)
+
+        guard fileManager.fileExists(atPath: pyprojectSource.path), fileManager.fileExists(atPath: srcSource.path),
+            fileManager.fileExists(atPath: siteSource.path), fileManager.fileExists(atPath: apiSource.path)
+        else { throw ValidationError("Demo fixture source is incomplete: \(fixtureRoot.path)") }
+
+        if fileManager.fileExists(atPath: demoRoot.path) { try fileManager.removeItem(at: demoRoot) }
+        try fileManager.createDirectory(at: demoRoot, withIntermediateDirectories: true)
+        try fileManager.copyItem(at: pyprojectSource, to: pyprojectURL)
+        if fileManager.fileExists(atPath: lockSource.path) {
+            try fileManager.copyItem(at: lockSource, to: demoRoot.appendingPathComponent("uv.lock"))
+        }
+        try fileManager.copyItem(at: srcSource, to: demoRoot.appendingPathComponent("src", isDirectory: true))
+        try fileManager.copyItem(at: siteSource, to: siteURL)
+        try fileManager.copyItem(at: apiSource, to: apiURL)
+    }
+
+    private func resolveDemoFixtureRoot() throws -> URL {
+        let fileManager = FileManager.default
+        var candidates: [String] = []
+        candidates.append(normalizePath("apps/macos/Tests/fixtures/e2e_demo"))
+        if let spacesProjectDir = ProcessInfo.processInfo.environment["SPACES_PROJECT_DIR"]?.trimmingCharacters(in: .whitespacesAndNewlines),
+            !spacesProjectDir.isEmpty
+        {
+            candidates.append(
+                URL(fileURLWithPath: spacesProjectDir, isDirectory: true).appendingPathComponent(
+                    "apps/macos/Tests/fixtures/e2e_demo", isDirectory: true
+                ).path)
+        }
+
+        for candidate in candidates {
+            let candidateURL = URL(fileURLWithPath: candidate, isDirectory: true)
+            if fileManager.fileExists(atPath: candidateURL.appendingPathComponent("pyproject.toml").path) { return candidateURL }
+        }
+
+        throw ValidationError("Unable to locate apps/macos/Tests/fixtures/e2e_demo. Set SPACES_PROJECT_DIR to an original checkout if needed.")
     }
 }
 

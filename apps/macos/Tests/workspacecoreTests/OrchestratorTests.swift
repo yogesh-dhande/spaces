@@ -1,5 +1,6 @@
 import CryptoKit
 import XCTest
+import spacesterminalcore
 import systembridge
 
 @testable import workspacecore
@@ -3117,6 +3118,55 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertTrue(windows.allSatisfy { $0.windowID == nil })
         XCTAssertEqual(Set(windows.compactMap(\.terminalNativeID)), ["ghostty-terminal-1", "ghostty-terminal-2"])
         XCTAssertEqual(Set(windows.compactMap(\.terminalContainerID)), ["ghostty-tab-1", "ghostty-tab-2"])
+    }
+
+    func testLaunchWorkspaceWithBuiltInSpacesHostWaitsForStableChildPID() throws {
+        let root = try makeTempDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let dbPath = root.appendingPathComponent("spaces.db").path
+
+        let store = try makeTemporaryStore(defaultTerminalHostResolver: { .spaces })
+        let orchestrator = WorkspaceOrchestrator(
+            store: store, iterm: MockIterm2Adapter(), ghostty: MockGhosttyAdapter(), tmux: MockTmuxAdapter(),
+            builtInTerminalWindowOpener: { sessionID, mode in
+                XCTAssertEqual(mode, .owner)
+                let paths = try! TerminalSessionPaths.forSession(id: sessionID)
+                try! paths.ensureDirectories()
+                FileManager.default.createFile(atPath: paths.controlSocketPath, contents: Data())
+                try! TerminalSessionPersistence.writeRuntimeState(
+                    .init(
+                        sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: 100, childPID: nil, state: .running,
+                        updatedAt: "2026-05-09T17:00:00Z"), paths: paths)
+                DispatchQueue.global().asyncAfter(deadline: .now() + 0.15) {
+                    try! TerminalSessionPersistence.writeRuntimeState(
+                        .init(
+                            sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: 100, childPID: 4321, state: .running,
+                            updatedAt: "2026-05-09T17:00:01Z"), paths: paths)
+                }
+            })
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
+        try orchestrator.updateTerminalHost(.spaces)
+        try orchestrator.updateWorkspaceSettings(workspaceID: workspace.id) { settings in
+            settings.processes = [ProcessTemplate(name: "api", command: "npm run api")]
+        }
+
+        try withEnv(name: "SPACES_DB_PATH", value: dbPath) {
+            try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) {
+                try withEnv(name: "YABAI_WINDOWS_JSON", value: "[]") { try orchestrator.launchWorkspace(workspaceID: workspace.id) }
+            }
+        }
+
+        let runningProcess = try XCTUnwrap(try store.runningProcesses(workspaceID: workspace.id).first)
+        XCTAssertEqual(runningProcess.pid, 4321)
+        XCTAssertEqual(runningProcess.terminalApp, TerminalHost.spaces.appName)
+        XCTAssertEqual(runningProcess.terminalTrackingID, runningProcess.terminalNativeID)
+
+        let window = try XCTUnwrap(try store.windows(workspaceID: workspace.id).first(where: { $0.role == "terminal" }))
+        XCTAssertEqual(window.app, TerminalHost.spaces.appName)
+        XCTAssertEqual(window.terminalTrackingID, runningProcess.terminalTrackingID)
     }
 
     func testStopWorkspaceProcessReResolvesGhosttyContainerIDFromTerminalGraphBeforeTeardown() throws {

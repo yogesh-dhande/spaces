@@ -1,6 +1,7 @@
 import ArgumentParser
 import Foundation
 import XCTest
+import spacesterminalruntime
 import systembridge
 import workspacecore
 
@@ -60,9 +61,73 @@ final class MXCommandTests: XCTestCase {
         XCTAssertNil(command.path)
     }
 
+    func testTerminalListParses() throws { XCTAssertNoThrow(try TerminalListCommand.parse([])) }
+
+    func testTerminalCommandParsesOptions() throws {
+        let command = try TerminalCommandCommand.parse(["--command", "cat", "--title", "session", "--cwd", "/tmp", "--backend", "script-pty"])
+
+        XCTAssertEqual(command.command, "cat")
+        XCTAssertEqual(command.title, "session")
+        XCTAssertEqual(command.cwd, "/tmp")
+        XCTAssertEqual(command.backend, .scriptPTY)
+    }
+
+    func testTerminalSendParsesSessionAndText() throws {
+        let command = try TerminalSendCommand.parse(["session-1", "hello", "--newline"])
+
+        XCTAssertEqual(command.sessionID, "session-1")
+        XCTAssertEqual(command.text, "hello")
+        XCTAssertTrue(command.newline)
+    }
+
+    func testTerminalKeyParsesSessionAndKeySpec() throws {
+        let command = try TerminalKeyCommand.parse(["session-1", "ctrl+c"])
+
+        XCTAssertEqual(command.sessionID, "session-1")
+        XCTAssertEqual(command.key, "ctrl+c")
+    }
+
+    func testTerminalTailParsesDefaults() throws {
+        let command = try TerminalTailCommand.parse(["session-1"])
+
+        XCTAssertEqual(command.sessionID, "session-1")
+        XCTAssertEqual(command.lines, 20)
+    }
+
+    func testTerminalShowParsesSessionID() throws {
+        let command = try TerminalShowCommand.parse(["session-1"])
+
+        XCTAssertEqual(command.sessionID, "session-1")
+        XCTAssertFalse(command.viewer)
+    }
+
+    func testTerminalShowParsesViewerFlag() throws {
+        let command = try TerminalShowCommand.parse(["session-1", "--viewer"])
+
+        XCTAssertEqual(command.sessionID, "session-1")
+        XCTAssertTrue(command.viewer)
+    }
+
+    func testTerminalTakeoverParsesSessionAndClient() throws {
+        let command = try TerminalTakeoverCommand.parse(["session-1", "client-1"])
+
+        XCTAssertEqual(command.sessionID, "session-1")
+        XCTAssertEqual(command.clientID, "client-1")
+    }
+
+    func testTerminalServeParsesBackend() throws {
+        let command = try TerminalServeCommand.parse([
+            "--session-id", "session-1", "--backend", "script-pty", "--title", "session", "--cwd", "/tmp", "--shell", "/bin/zsh",
+        ])
+
+        XCTAssertEqual(command.sessionID, "session-1")
+        XCTAssertEqual(command.backend, .scriptPTY)
+    }
+
     func testSpacesCommandListsFlattenedPublicVerbs() {
         let subcommands = SpacesCommand.configuration.subcommands.map { String(describing: $0) }
-        XCTAssertEqual(subcommands, ["ImportCommand", "UpdateCommand", "StartCommand", "RestartCommand", "OpenCommand", "SignalCommand"])
+        XCTAssertEqual(
+            subcommands, ["ImportCommand", "UpdateCommand", "StartCommand", "RestartCommand", "OpenCommand", "SignalCommand", "TerminalCommand"])
     }
 
     func testSignalRejectsUnknownEnumValue() {

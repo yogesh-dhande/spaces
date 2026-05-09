@@ -7,7 +7,9 @@ extension RunningProcessRecord {
     /// session-style identity for both correlation and focus.
     public var terminalTrackingIdentity: TerminalTrackingIdentity? {
         if let tmuxWindowID, !tmuxWindowID.isEmpty { return .tmux(tmuxWindowID) }
-        if terminalApp == TerminalHost.ghostty.appName, let terminalNativeID, !terminalNativeID.isEmpty { return .session(terminalNativeID) }
+        if [TerminalHost.ghostty.appName, TerminalHost.spaces.appName].contains(terminalApp ?? ""), let terminalNativeID, !terminalNativeID.isEmpty {
+            return .session(terminalNativeID)
+        }
         if let sessionID = terminalTrackingID, !sessionID.isEmpty { return .session(sessionID) }
         if let windowID { return .window(windowID) }
         return nil
@@ -15,7 +17,9 @@ extension RunningProcessRecord {
 
     /// Identity used when Spaces actively refocuses this terminal.
     public var terminalFocusIdentity: TerminalTrackingIdentity? {
-        if terminalApp == TerminalHost.ghostty.appName, let terminalNativeID, !terminalNativeID.isEmpty { return .session(terminalNativeID) }
+        if [TerminalHost.ghostty.appName, TerminalHost.spaces.appName].contains(terminalApp ?? ""), let terminalNativeID, !terminalNativeID.isEmpty {
+            return .session(terminalNativeID)
+        }
         if let sessionID = terminalTrackingID, !sessionID.isEmpty { return .session(sessionID) }
         if let windowID { return .window(windowID) }
         if let tmuxWindowID, !tmuxWindowID.isEmpty { return .tmux(tmuxWindowID) }
@@ -29,7 +33,9 @@ extension WindowRecord {
     /// Stable identity for reconciling this tracked window with process and agent rows.
     public var terminalTrackingIdentity: TerminalTrackingIdentity? {
         if let tmuxWindowID, !tmuxWindowID.isEmpty { return .tmux(tmuxWindowID) }
-        if app == TerminalHost.ghostty.appName, let terminalNativeID, !terminalNativeID.isEmpty { return .session(terminalNativeID) }
+        if [TerminalHost.ghostty.appName, TerminalHost.spaces.appName].contains(app), let terminalNativeID, !terminalNativeID.isEmpty {
+            return .session(terminalNativeID)
+        }
         if let sessionID = terminalTrackingID, !sessionID.isEmpty { return .session(sessionID) }
         if let windowID { return .window(windowID) }
         return nil
@@ -37,7 +43,9 @@ extension WindowRecord {
 
     /// Best-effort terminal refocus identity for this tracked window.
     public var terminalFocusIdentity: TerminalTrackingIdentity? {
-        if app == TerminalHost.ghostty.appName, let terminalNativeID, !terminalNativeID.isEmpty { return .session(terminalNativeID) }
+        if [TerminalHost.ghostty.appName, TerminalHost.spaces.appName].contains(app), let terminalNativeID, !terminalNativeID.isEmpty {
+            return .session(terminalNativeID)
+        }
         if let sessionID = terminalTrackingID, !sessionID.isEmpty { return .session(sessionID) }
         if let windowID { return .window(windowID) }
         if let tmuxWindowID, !tmuxWindowID.isEmpty { return .tmux(tmuxWindowID) }

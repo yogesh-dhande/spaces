@@ -2,6 +2,8 @@ import AppKit
 import Carbon
 import Foundation
 import Sparkle
+import spacesterminalcore
+import spacesterminalui
 import systembridge
 import workspacecore
 
@@ -201,6 +203,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     }()
     private var agentEventIPCObserver: NSObjectProtocol?
     private var selectWorkspaceDetailIPCObserver: NSObjectProtocol?
+    private var openTerminalSessionWindowIPCObserver: NSObjectProtocol?
     private var appDidBecomeActiveObserver: NSObjectProtocol?
     private var appDidResignActiveObserver: NSObjectProtocol?
     private var didStartBackgroundServices = false
@@ -242,6 +245,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     private var alertsFocusRequestMap: [Int: WindowFocusRequest] = [:]
     private var deferredExternalWindowHideTask: Task<Void, Never>?
     private var recentCommandPaletteFocusIdentities: [String] = []
+    private var terminalSessionWindowControllers: [String: [TerminalSessionWindowController]] = [:]
 
     private struct WindowShortcutProfile {
         let index: Int
@@ -322,6 +326,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         logStartupProfile("shortcut_monitor_ready")
         setupAgentEventIPCObserver()
         setupSelectWorkspaceDetailIPCObserver()
+        setupOpenTerminalSessionWindowIPCObserver()
         setupAppActivationObservers()
         logStartupProfile("ipc_observers_ready")
         enterSetupFlow()
@@ -346,6 +351,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         if let selectWorkspaceDetailIPCObserver {
             DistributedNotificationCenter.default().removeObserver(selectWorkspaceDetailIPCObserver)
             self.selectWorkspaceDetailIPCObserver = nil
+        }
+        if let openTerminalSessionWindowIPCObserver {
+            DistributedNotificationCenter.default().removeObserver(openTerminalSessionWindowIPCObserver)
+            self.openTerminalSessionWindowIPCObserver = nil
         }
         if let appDidBecomeActiveObserver {
             NotificationCenter.default.removeObserver(appDidBecomeActiveObserver)
@@ -397,6 +406,52 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 }
                 self.logWorkspaceDetailIPC("selected id=\(workspaceID) title=\(workspace.title)")
             }
+        }
+    }
+
+    private func setupOpenTerminalSessionWindowIPCObserver() {
+        openTerminalSessionWindowIPCObserver = DistributedNotificationCenter.default().addObserver(
+            forName: IPCNotification.openTerminalSessionWindow, object: nil, queue: .main
+        ) { [weak self] notification in
+            guard let sessionID = notification.userInfo?[IPCNotification.terminalSessionIDUserInfoKey] as? String else { return }
+            let modeRawValue = notification.userInfo?[IPCNotification.terminalAttachmentModeUserInfoKey] as? String
+            let mode = modeRawValue.flatMap(TerminalAttachmentMode.init(rawValue:)) ?? .owner
+            Task { @MainActor [weak self, sessionID, mode] in
+                guard let self else { return }
+                self.openTerminalSessionWindow(sessionID: sessionID, mode: mode)
+            }
+        }
+    }
+
+    private func openTerminalSessionWindow(sessionID: String, mode: TerminalAttachmentMode) {
+        let controller: TerminalSessionWindowController
+        if mode == .owner, let existing = terminalSessionWindowControllers[sessionID]?.first {
+            controller = existing
+        } else {
+            do {
+                let paths = try TerminalSessionPaths.forSession(id: sessionID)
+                let created = TerminalSessionWindowController(
+                    sessionID: sessionID, paths: paths, preferredAttachmentMode: mode,
+                    onWindowClose: { [weak self] sessionID, clientID in
+                        self?.removeTerminalSessionWindowController(sessionID: sessionID, clientID: clientID)
+                    })
+                terminalSessionWindowControllers[sessionID, default: []].append(created)
+                controller = created
+            } catch {
+                showError(error)
+                return
+            }
+        }
+        controller.show()
+    }
+
+    private func removeTerminalSessionWindowController(sessionID: String, clientID: String) {
+        guard var controllers = terminalSessionWindowControllers[sessionID] else { return }
+        controllers.removeAll { $0.clientID == clientID }
+        if controllers.isEmpty {
+            terminalSessionWindowControllers.removeValue(forKey: sessionID)
+        } else {
+            terminalSessionWindowControllers[sessionID] = controllers
         }
     }
 

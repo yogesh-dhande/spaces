@@ -1,7 +1,11 @@
 import ArgumentParser
 import Foundation
+import spacesterminalcore
+import spacesterminalruntime
 import systembridge
 import workspacecore
+
+extension TerminalSessionBackendKind: ExpressibleByArgument {}
 
 public struct SpacesCommand: ParsableCommand {
     public static let configuration = CommandConfiguration(
@@ -18,9 +22,225 @@ public struct SpacesCommand: ParsableCommand {
               - `open <name>` resolves one named tracked browser, process, or coding-agent target in the workspace and brings it to the foreground.
               - Agent events stay explicit. `import`, `start`, and `restart` do not imply agent lifecycle. `signal <event>` records those lifecycle transitions. Events from unsupported terminal hosts are dropped. Agent events fired from tmux are rejected because Spaces does not support coding agents running inside tmux.
             """, version: AppVersion.current,
-        subcommands: [ImportCommand.self, UpdateCommand.self, StartCommand.self, RestartCommand.self, OpenCommand.self, SignalCommand.self])
+        subcommands: [
+            ImportCommand.self, UpdateCommand.self, StartCommand.self, RestartCommand.self, OpenCommand.self, SignalCommand.self,
+            TerminalCommand.self,
+        ])
 
     public init() {}
+}
+
+struct TerminalCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "terminal", abstract: "Manage tmux-free Spaces terminal sessions.",
+        subcommands: [
+            TerminalListCommand.self, TerminalCommandCommand.self, TerminalSendCommand.self, TerminalKeyCommand.self, TerminalTailCommand.self,
+            TerminalShowCommand.self, TerminalTakeoverCommand.self, TerminalServeCommand.self,
+        ])
+}
+
+struct TerminalListCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "list", abstract: "List known Spaces terminal sessions.")
+
+    func run() throws {
+        let sessions = try TerminalSessionPersistence.listKnownSessions()
+        if sessions.isEmpty {
+            print("terminal\t-")
+            return
+        }
+
+        for session in sessions {
+            let paths = try TerminalSessionPaths.forSession(id: session.sessionID)
+            let state = try? TerminalSessionPersistence.readRuntimeState(paths: paths)
+            let attachments = (try? TerminalSessionPersistence.activeAttachments(paths: paths)) ?? []
+            let ownerClientID = attachments.first(where: { $0.mode == .owner })?.clientID ?? "-"
+            let viewerCount = attachments.filter { $0.mode == .viewer }.count
+            print(
+                "terminal\t\(session.sessionID)\ttitle=\(session.title)\tbackend=\(session.backend.rawValue)\tstate=\(state?.state.rawValue ?? "unknown")\tcwd=\(session.workingDirectory)\tcommand=\(session.command ?? "-")\towner=\(ownerClientID)\tclients=\(attachments.count)\tviewers=\(viewerCount)"
+            )
+        }
+    }
+}
+
+struct TerminalCommandCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "command", abstract: "Start a tmux-free terminal session in the background.")
+
+    @Option(name: .long, help: "Shell command to run inside the terminal session. If omitted, starts a login shell.") var command: String?
+
+    @Option(name: .long, help: "Window or session title to track.") var title: String?
+
+    @Option(name: .long, help: "Working directory. Defaults to the current directory.") var cwd: String?
+
+    @Option(name: .long, help: "Shell executable path. Defaults to $SHELL or /bin/zsh.") var shell: String?
+
+    @Option(name: .long, help: "Terminal backend. Defaults to script-pty.") var backend: TerminalSessionBackendKind = .scriptPTY
+
+    func run() throws {
+        guard TerminalSessionBackendSupport.isSupported(backend) else {
+            throw WorkspaceError.invalidArgument(message: "Terminal backend '\(backend.rawValue)' is not available in this build.")
+        }
+        let context = CLIContext()
+        let sessionID = UUID().uuidString
+        let workingDirectory = context.normalizePath(cwd ?? context.currentDirectoryPath())
+        let resolvedShell = terminalShellPath(shell)
+        let resolvedTitle = title ?? terminalDefaultTitle(command: command, cwd: workingDirectory)
+        let createdAt = ISO8601DateFormatter().string(from: Date())
+        let launchConfiguration = TerminalSessionLaunchConfiguration(
+            sessionID: sessionID, backend: backend, title: resolvedTitle, workingDirectory: workingDirectory, shell: resolvedShell, command: command,
+            createdAt: createdAt)
+        let paths = try TerminalSessionPaths.forSession(id: sessionID)
+        try paths.ensureDirectories()
+        try TerminalSessionPersistence.writeLaunchConfiguration(launchConfiguration, paths: paths)
+        FileManager.default.createFile(atPath: paths.serviceLogPath, contents: nil)
+
+        let executablePath = URL(fileURLWithPath: CommandLine.arguments[0], isDirectory: false)
+        if backend == .ghosttyEmbedded {
+            DistributedNotificationCenter.default().postNotificationName(
+                IPCNotification.openTerminalSessionWindow, object: nil,
+                userInfo: [
+                    IPCNotification.terminalSessionIDUserInfoKey: sessionID,
+                    IPCNotification.terminalAttachmentModeUserInfoKey: TerminalAttachmentMode.owner.rawValue,
+                ], options: [.deliverImmediately])
+        } else {
+            let process = Process()
+            process.executableURL = executablePath
+            process.arguments =
+                [
+                    "terminal", "_serve", "--session-id", sessionID, "--backend", backend.rawValue, "--title", resolvedTitle, "--cwd",
+                    workingDirectory, "--shell", resolvedShell,
+                ] + (command.map { ["--command", $0] } ?? [])
+            process.standardInput = FileHandle.nullDevice
+            let logHandle = try FileHandle(forWritingTo: URL(fileURLWithPath: paths.serviceLogPath))
+            process.standardOutput = logHandle
+            process.standardError = logHandle
+            try process.run()
+        }
+
+        let deadline = Date().addingTimeInterval(5)
+        while Date() < deadline {
+            if FileManager.default.fileExists(atPath: paths.controlSocketPath), FileManager.default.fileExists(atPath: paths.statePath) { break }
+            Thread.sleep(forTimeInterval: 0.05)
+        }
+
+        guard FileManager.default.fileExists(atPath: paths.controlSocketPath), FileManager.default.fileExists(atPath: paths.statePath) else {
+            if backend == .ghosttyEmbedded {
+                throw WorkspaceError.invalidArgument(
+                    message: "Timed out waiting for SpacesApp to create the Ghostty terminal session. Ensure the app is running.")
+            }
+            throw WorkspaceError.invalidArgument(message: "Timed out waiting for terminal session to start.")
+        }
+
+        print("Started terminal session \(sessionID)\ttitle=\(resolvedTitle)\tbackend=\(backend.rawValue)\tcwd=\(workingDirectory)")
+    }
+}
+
+struct TerminalSendCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "send", abstract: "Send text to a Spaces terminal session.")
+
+    @Argument(help: "Terminal session ID.") var sessionID: String
+    @Argument(help: "Text to send.") var text: String
+    @Flag(name: .long, help: "Append a newline after the text.") var newline = false
+
+    func run() throws {
+        let paths = try TerminalSessionPaths.forSession(id: sessionID)
+        guard FileManager.default.fileExists(atPath: paths.controlSocketPath) else {
+            throw WorkspaceError.invalidArgument(message: "Terminal session '\(sessionID)' is not available.")
+        }
+        let response = try TerminalControlClient.send(
+            request: TerminalControlRequest(command: "send", text: text, appendNewline: newline), socketPath: paths.controlSocketPath)
+        guard response.ok else { throw WorkspaceError.invalidArgument(message: response.message) }
+        print("Sent input to terminal session \(sessionID)")
+    }
+}
+
+struct TerminalKeyCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "key", abstract: "Send a named key or control chord to a Spaces terminal session.")
+
+    @Argument(help: "Terminal session ID.") var sessionID: String
+    @Argument(help: "Key spec such as enter, esc, up, down, or ctrl+c.") var key: String
+
+    func run() throws {
+        let paths = try TerminalSessionPaths.forSession(id: sessionID)
+        guard FileManager.default.fileExists(atPath: paths.controlSocketPath) else {
+            throw WorkspaceError.invalidArgument(message: "Terminal session '\(sessionID)' is not available.")
+        }
+        let response = try TerminalControlClient.send(request: TerminalControlRequest(command: "key", key: key), socketPath: paths.controlSocketPath)
+        guard response.ok else { throw WorkspaceError.invalidArgument(message: response.message) }
+        print("Sent key to terminal session \(sessionID)")
+    }
+}
+
+struct TerminalTailCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "tail", abstract: "Show recent output from a Spaces terminal session.")
+
+    @Argument(help: "Terminal session ID.") var sessionID: String
+    @Option(name: .long, help: "Number of lines to print.") var lines: Int = 20
+
+    func run() throws {
+        let paths = try TerminalSessionPaths.forSession(id: sessionID)
+        guard FileManager.default.fileExists(atPath: paths.outputPath) else {
+            throw WorkspaceError.invalidArgument(message: "Terminal session '\(sessionID)' has no output yet.")
+        }
+        let tailed = try TerminalOutputTail.tail(path: paths.outputPath, lineCount: lines)
+        print(tailed)
+    }
+}
+
+struct TerminalShowCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "show", abstract: "Open a native Spaces window for a terminal session.")
+
+    @Argument(help: "Terminal session ID.") var sessionID: String
+    @Flag(name: .long, help: "Open the window as a passive viewer instead of the active owner.") var viewer = false
+
+    func run() throws {
+        let paths = try TerminalSessionPaths.forSession(id: sessionID)
+        guard FileManager.default.fileExists(atPath: paths.metadataPath) else {
+            throw WorkspaceError.invalidArgument(message: "Terminal session '\(sessionID)' does not exist.")
+        }
+        let mode = viewer ? TerminalAttachmentMode.viewer : .owner
+        DistributedNotificationCenter.default().postNotificationName(
+            IPCNotification.openTerminalSessionWindow, object: nil,
+            userInfo: [IPCNotification.terminalSessionIDUserInfoKey: sessionID, IPCNotification.terminalAttachmentModeUserInfoKey: mode.rawValue],
+            options: [.deliverImmediately])
+        print("Requested \(mode.rawValue) terminal window for session \(sessionID)")
+    }
+}
+
+struct TerminalTakeoverCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "takeover", abstract: "Transfer terminal input ownership to a client.")
+
+    @Argument(help: "Terminal session ID.") var sessionID: String
+    @Argument(help: "Terminal client ID that should become the new owner.") var clientID: String
+
+    func run() throws {
+        let paths = try TerminalSessionPaths.forSession(id: sessionID)
+        guard FileManager.default.fileExists(atPath: paths.controlSocketPath) else {
+            throw WorkspaceError.invalidArgument(message: "Terminal session '\(sessionID)' is not available.")
+        }
+        let response = try TerminalControlClient.send(
+            request: TerminalControlRequest(command: "takeover", clientID: clientID), socketPath: paths.controlSocketPath)
+        guard response.ok else { throw WorkspaceError.invalidArgument(message: response.message) }
+        print("Transferred terminal ownership for session \(sessionID) to \(clientID)")
+    }
+}
+
+struct TerminalServeCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "_serve", abstract: "Internal terminal session daemon.", shouldDisplay: false)
+
+    @Option(name: .long) var sessionID: String
+    @Option(name: .long) var backend: TerminalSessionBackendKind = .scriptPTY
+    @Option(name: .long) var title: String
+    @Option(name: .long) var cwd: String
+    @Option(name: .long) var shell: String
+    @Option(name: .long) var command: String?
+
+    func run() throws {
+        let configuration = TerminalSessionLaunchConfiguration(
+            sessionID: sessionID, backend: backend, title: title, workingDirectory: cwd, shell: shell, command: command,
+            createdAt: ISO8601DateFormatter().string(from: Date()))
+        let paths = try TerminalSessionPaths.forSession(id: sessionID)
+        try TerminalSessionRunner.run(launchConfiguration: configuration, paths: paths)
+    }
 }
 
 struct ImportCommand: ParsableCommand {
@@ -392,4 +612,18 @@ private func resolveTrackedGhosttyNativeTerminalID(workspaceID: String, terminal
     let nativeIDs = Set(windowNativeIDs + processNativeIDs + agentNativeIDs)
     guard nativeIDs.count == 1 else { return nil }
     return nativeIDs.first
+}
+
+private func terminalShellPath(_ explicitPath: String?) -> String {
+    if let explicitPath = explicitPath?.trimmingCharacters(in: .whitespacesAndNewlines), !explicitPath.isEmpty { return explicitPath }
+    if let configured = ProcessInfo.processInfo.environment["SHELL"]?.trimmingCharacters(in: .whitespacesAndNewlines), !configured.isEmpty {
+        return configured
+    }
+    return "/bin/zsh"
+}
+
+private func terminalDefaultTitle(command: String?, cwd: String) -> String {
+    if let command = command?.trimmingCharacters(in: .whitespacesAndNewlines), !command.isEmpty { return command }
+    let name = URL(fileURLWithPath: cwd).lastPathComponent
+    return name.isEmpty ? "Terminal" : name
 }
