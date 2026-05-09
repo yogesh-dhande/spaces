@@ -45,19 +45,16 @@ flowchart LR
 - Path: `~/.spaces/spaces.db`
 - SQLite stores projects, workspaces, runtime state, and global settings.
 - SQLite should run in WAL mode with a busy timeout so overlapping GUI, CLI, and background work does not produce avoidable lock failures.
-- `migration_state.current_version` is the authoritative forward-only schema marker.
+- `migration_state.current_version` records the canonical schema version. The active schema is version `1`.
 - `PRAGMA user_version` is not used by Spaces for migration control; if present, treat it as informational only and keep it aligned with `migration_state` when inspecting or repairing a database manually.
-- Migration safety snapshots are stored in `~/.spaces/backups/` and retained as a rolling set of the newest 10 migration backups.
 
 ### Migration Rules
-- Migrations must preserve existing user data.
 - Fresh installs create the latest schema directly and record the current schema version.
-- Existing installs migrate in ordered `N -> N+1` steps until they reach the current schema version.
-- Each migration step runs inside `BEGIN IMMEDIATE ... COMMIT`, updates `migration_state` in the same transaction, and rolls back on failure.
-- Additive and compatible schema changes should use `CREATE TABLE IF NOT EXISTS`, `ALTER TABLE`, backfills, indexes, and table rebuilds with copy when SQLite requires them.
-- Before the first migration step for an open, Spaces creates a SQLite-safe backup snapshot in `~/.spaces/backups/`.
-- After migrations finish, Spaces runs `PRAGMA integrity_check` and fails startup if validation does not return `ok`.
-- Compatible changes must not require destructive resets, and startup errors must not instruct users to delete `~/.spaces/spaces.db`.
+- Existing installs should migrate in ordered `N -> N+1` steps until they reach the current schema version.
+- Each migration step should run inside `BEGIN IMMEDIATE ... COMMIT`, update `migration_state` in the same transaction, and roll back on failure.
+- Compatible schema changes should use additive techniques such as `CREATE TABLE IF NOT EXISTS`, `ALTER TABLE`, backfills, indexes, and table rebuilds with copy when SQLite requires them.
+- Store startup validates `migration_state.current_version` against the canonical schema version and fails closed when they do not match.
+- Startup runs `PRAGMA integrity_check` and fails if validation does not return `ok`.
 
 ## Data Model
 

@@ -130,7 +130,6 @@ public final class SQLiteStore {
                 bindings: [id])
             try execute(sql: "DELETE FROM agent_sessions WHERE workspace_id IN (SELECT id FROM workspaces WHERE project_id = ?)", bindings: [id])
             try execute(sql: "DELETE FROM runtime_targets WHERE workspace_id IN (SELECT id FROM workspaces WHERE project_id = ?)", bindings: [id])
-            try execute(sql: "DELETE FROM windows WHERE workspace_id IN (SELECT id FROM workspaces WHERE project_id = ?)", bindings: [id])
             try execute(sql: "DELETE FROM workspace_settings WHERE workspace_id IN (SELECT id FROM workspaces WHERE project_id = ?)", bindings: [id])
             try execute(sql: "DELETE FROM workspace_processes WHERE workspace_id IN (SELECT id FROM workspaces WHERE project_id = ?)", bindings: [id])
             try execute(
@@ -237,7 +236,6 @@ public final class SQLiteStore {
                 bindings: [id])
             try execute(sql: "DELETE FROM agent_sessions WHERE workspace_id = ?", bindings: [id])
             try execute(sql: "DELETE FROM runtime_targets WHERE workspace_id = ?", bindings: [id])
-            try execute(sql: "DELETE FROM windows WHERE workspace_id = ?", bindings: [id])
             try execute(sql: "DELETE FROM workspace_settings WHERE workspace_id = ?", bindings: [id])
             try execute(sql: "DELETE FROM workspace_processes WHERE workspace_id = ?", bindings: [id])
             try execute(sql: "DELETE FROM workspace_browser_sessions WHERE workspace_id = ?", bindings: [id])
@@ -770,18 +768,10 @@ public final class SQLiteStore {
     }
 
     public func deleteWindows(workspaceID: String) throws {
-        try withImmediateTransaction {
-            try execute(sql: "DELETE FROM runtime_targets WHERE workspace_id = ?", bindings: [workspaceID])
-            try execute(sql: "DELETE FROM windows WHERE workspace_id = ?", bindings: [workspaceID])
-        }
+        try execute(sql: "DELETE FROM runtime_targets WHERE workspace_id = ?", bindings: [workspaceID])
     }
 
-    public func deleteWindow(id: String) throws {
-        try withImmediateTransaction {
-            try execute(sql: "DELETE FROM runtime_targets WHERE id = ?", bindings: [id])
-            try execute(sql: "DELETE FROM windows WHERE id = ?", bindings: [id])
-        }
-    }
+    public func deleteWindow(id: String) throws { try execute(sql: "DELETE FROM runtime_targets WHERE id = ?", bindings: [id]) }
 
     public func setting(key: String) throws -> String? {
         let rows = try queryRows(sql: "SELECT value FROM settings WHERE key = ?", bindings: [key])
@@ -1008,24 +998,13 @@ public final class SQLiteStore {
     }
 
     public func deleteAgentWindows(workspaceID: String) throws {
-        try withImmediateTransaction {
-            try execute(sql: "DELETE FROM agent_sessions WHERE workspace_id = ?", bindings: [workspaceID])
-            try execute(sql: "DELETE FROM agent_windows WHERE workspace_id = ?", bindings: [workspaceID])
-        }
+        try execute(sql: "DELETE FROM agent_sessions WHERE workspace_id = ?", bindings: [workspaceID])
     }
 
-    public func deleteAgentWindow(id: String) throws {
-        try withImmediateTransaction {
-            try execute(sql: "DELETE FROM agent_sessions WHERE id = ?", bindings: [id])
-            try execute(sql: "DELETE FROM agent_windows WHERE id = ?", bindings: [id])
-        }
-    }
+    public func deleteAgentWindow(id: String) throws { try execute(sql: "DELETE FROM agent_sessions WHERE id = ?", bindings: [id]) }
 
     public func deleteAgentWindowsByProvider(workspaceID: String, provider: AgentProvider) throws {
-        try withImmediateTransaction {
-            try execute(sql: "DELETE FROM agent_sessions WHERE workspace_id = ? AND provider = ?", bindings: [workspaceID, provider.rawValue])
-            try execute(sql: "DELETE FROM agent_windows WHERE workspace_id = ? AND provider = ?", bindings: [workspaceID, provider.rawValue])
-        }
+        try execute(sql: "DELETE FROM agent_sessions WHERE workspace_id = ? AND provider = ?", bindings: [workspaceID, provider.rawValue])
     }
 
     private func decodeAgentWindow(row: [String]) -> AgentWindowRecord? {
