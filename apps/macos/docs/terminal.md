@@ -123,6 +123,7 @@ Current performance decisions:
   - `terminal_session_start`
   - `terminal_surface_create`
   - `terminal_window_attach`
+  - `terminal_window_summon`
   - `terminal_owner_focus_sync`
   - `terminal_control_send`
   - `terminal_control_key`

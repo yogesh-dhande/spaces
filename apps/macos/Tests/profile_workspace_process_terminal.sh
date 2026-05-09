@@ -50,6 +50,31 @@ wait_for_log_pattern() {
   done
 }
 
+log_pattern_count() {
+  local pattern="$1"
+  grep -Ec "$pattern" "$APP_LOG" || true
+}
+
+wait_for_log_pattern_count_greater_than() {
+  local pattern="$1"
+  local baseline="$2"
+  local timeout="${3:-30}"
+  local start
+  start="$(date +%s)"
+  while true; do
+    local count
+    count="$(log_pattern_count "$pattern")"
+    if (( count > baseline )); then
+      return 0
+    fi
+    if (( "$(date +%s)" - start >= timeout )); then
+      echo "Timed out waiting for log count increase: $pattern (baseline $baseline)" >&2
+      return 1
+    fi
+    sleep 0.2
+  done
+}
+
 json_get() {
   local file="$1"
   local expression="$2"
@@ -186,8 +211,10 @@ import time
 print(time.time())
 PY
 )"
+summon_pattern="spaces: perf metric=terminal_window_summon target=session=${BACKEND_SESSION_ID} success=1 .*mode=owner"
+summon_baseline="$(log_pattern_count "$summon_pattern")"
 env SPACES_DB_PATH="$DB_PATH" "$MX_E2E_BIN" focus-workspace-process --workspace-dir "$WORKSPACE_DIR" --process-name backend >/dev/null 2>"$FOCUS_LOG"
-sleep 1
+wait_for_log_pattern_count_greater_than "$summon_pattern" "$summon_baseline" 30
 write_workspace_dump "$WORKSPACE_DIR" "$WORK_ROOT/after-focus.json"
 FOCUS_MS="$(ms_since "$focus_started_at")"
 REOPENED_SESSION_ID="$(process_field "$WORK_ROOT/after-focus.json" backend terminalNativeID)"

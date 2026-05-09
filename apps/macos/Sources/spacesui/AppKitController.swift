@@ -442,15 +442,18 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     }
 
     private func openTerminalSessionWindow(sessionID: String, mode: TerminalAttachmentMode) {
+        let startedAt = Date()
         do {
             let paths = try TerminalSessionPaths.forSession(id: sessionID)
             pruneClosedTerminalSessionWindowControllers(sessionID: sessionID)
             let activeOwnerClientID = Self.activeOwnerClientID(paths: paths)
             let controller: TerminalSessionWindowController
+            let reusedExistingWindow: Bool
             if let existing = Self.reusableTerminalSessionWindowController(
                 terminalSessionWindowControllers[sessionID] ?? [], mode: mode, activeOwnerClientID: activeOwnerClientID)
             {
                 controller = existing
+                reusedExistingWindow = true
             } else {
                 let created = TerminalSessionWindowController(
                     sessionID: sessionID, paths: paths, preferredAttachmentMode: mode,
@@ -459,9 +462,16 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                     })
                 terminalSessionWindowControllers[sessionID, default: []].append(created)
                 controller = created
+                reusedExistingWindow = false
             }
             controller.show()
+            logPerfMetric(
+                "terminal_window_summon", target: "session=\(sessionID)", elapsedMS: windowShortcutElapsedMS(since: startedAt), success: true,
+                detail: "mode=\(mode.rawValue) reused=\(reusedExistingWindow ? 1 : 0)")
         } catch {
+            logPerfMetric(
+                "terminal_window_summon", target: "session=\(sessionID)", elapsedMS: windowShortcutElapsedMS(since: startedAt), success: false,
+                detail: "mode=\(mode.rawValue)")
             showError(error)
             return
         }
@@ -6763,9 +6773,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         if let perfContext = pending.perfContext { logHotkeyPerfMetric("toggle_palette", action: "show", context: perfContext) }
     }
 
-    private func logPerfMetric(_ metric: String, target: String, elapsedMS: Int, success: Bool) {
+    private func logPerfMetric(_ metric: String, target: String, elapsedMS: Int, success: Bool, detail: String = "") {
         guard ProcessInfo.processInfo.environment["DEBUG"] == "1" else { return }
-        fputs("spaces: perf metric=\(metric) target=\(target) success=\(success ? 1 : 0) elapsed_ms=\(elapsedMS)\n", stderr)
+        let suffix = detail.isEmpty ? "" : " \(detail)"
+        fputs("spaces: perf metric=\(metric) target=\(target) success=\(success ? 1 : 0) elapsed_ms=\(elapsedMS)\(suffix)\n", stderr)
     }
 
     private func windowShortcutElapsedMS(since start: Date) -> Int { max(Int(Date().timeIntervalSince(start) * 1000), 0) }
