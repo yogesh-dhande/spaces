@@ -2701,11 +2701,13 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertEqual(recoveredProcess.terminalTrackingID, sessionID)
         XCTAssertEqual(recoveredProcess.terminalNativeID, sessionID)
         XCTAssertEqual(recoveredProcess.terminalApp, TerminalHost.spaces.appName)
+        XCTAssertNil(recoveredProcess.windowID)
 
         let recoveredWindow = try XCTUnwrap(try store.windows(workspaceID: workspace.id).first(where: { $0.id == "process-spaces-recover" }))
         XCTAssertEqual(recoveredWindow.terminalTrackingID, sessionID)
         XCTAssertEqual(recoveredWindow.terminalNativeID, sessionID)
         XCTAssertEqual(recoveredWindow.app, TerminalHost.spaces.appName)
+        XCTAssertNil(recoveredWindow.windowID)
     }
 
     // Tests configured-but-missing processes can be recovered directly without restarting unrelated running processes.

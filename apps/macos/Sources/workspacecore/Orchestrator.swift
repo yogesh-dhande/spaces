@@ -5313,8 +5313,8 @@ public final class WorkspaceOrchestrator {
             try store.upsert(
                 runningProcess: RunningProcessRecord(
                     id: process.id, workspaceID: process.workspaceID, templateName: process.templateName, command: process.command,
-                    terminalApp: process.terminalApp, windowID: capturedWindowID ?? process.windowID, terminalTrackingID: sessionID,
-                    terminalNativeID: sessionID, terminalContainerID: nil, itermTabIndex: nil, tmuxWindowID: nil, pid: pid, status: .running,
+                    terminalApp: process.terminalApp, windowID: capturedWindowID, terminalTrackingID: sessionID, terminalNativeID: sessionID,
+                    terminalContainerID: nil, itermTabIndex: nil, tmuxWindowID: nil, pid: pid, status: .running,
                     logPath: process.logPath ?? paths.outputPath, lastOutputAt: process.lastOutputAt, startedAt: process.startedAt, exitedAt: nil))
 
             let existingWindow = try store.windows(workspaceID: workspace.id).first(where: { window in
@@ -5324,9 +5324,8 @@ public final class WorkspaceOrchestrator {
             try store.upsert(
                 window: WindowRecord(
                     id: existingWindow?.id ?? process.id, workspaceID: workspace.id, app: terminalAppName(for: terminalHost),
-                    name: process.templateName, detail: process.command, targetURL: nil, windowID: capturedWindowID ?? existingWindow?.windowID,
-                    terminalTrackingID: sessionID, terminalNativeID: sessionID, terminalContainerID: nil, itermTabIndex: nil, tmuxWindowID: nil,
-                    role: "terminal",
+                    name: process.templateName, detail: process.command, targetURL: nil, windowID: capturedWindowID, terminalTrackingID: sessionID,
+                    terminalNativeID: sessionID, terminalContainerID: nil, itermTabIndex: nil, tmuxWindowID: nil, role: "terminal",
                     orderIndex: existingWindow?.orderIndex
                         ?? Self.nextWindowOrderIndex(existing: try store.windows(workspaceID: workspace.id), role: "terminal", orderOffset: 200),
                     lastSeenAt: now))
