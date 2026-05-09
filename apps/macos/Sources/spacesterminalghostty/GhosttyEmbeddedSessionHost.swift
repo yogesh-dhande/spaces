@@ -32,6 +32,8 @@ import spacesterminalcore
     private var currentTitle: String?
     private var currentWorkingDirectory: String?
     private var lastKnownChildPID: Int32?
+    private var lastPersistedRuntimeState: TerminalSessionRuntimeState?
+    private var lastRuntimeStateWriteAt: Date?
 
     public init(launchConfiguration: TerminalSessionLaunchConfiguration, paths: TerminalSessionPaths) {
         self.launchConfiguration = launchConfiguration
@@ -43,49 +45,71 @@ import spacesterminalcore
 
     public func startIfNeeded() throws {
         guard !started else { return }
-        try paths.ensureDirectories()
-        try TerminalSessionPersistence.writeLaunchConfiguration(launchConfiguration, paths: paths)
-        FileManager.default.createFile(atPath: paths.outputPath, contents: nil)
-        FileManager.default.createFile(atPath: paths.serviceLogPath, contents: nil)
-        outputHandle = try FileHandle(forWritingTo: URL(fileURLWithPath: paths.outputPath))
-        try outputHandle?.seekToEnd()
-        terminalView.setOutputHandler { [weak self] data in Task { @MainActor [weak self] in self?.appendOutput(data) } }
-        try startControlServer()
-        startRuntimeStateTimer()
-        refreshRuntimeState()
-        started = true
+        let startedAt = Date()
+        do {
+            try paths.ensureDirectories()
+            try TerminalSessionPersistence.writeLaunchConfiguration(launchConfiguration, paths: paths)
+            FileManager.default.createFile(atPath: paths.outputPath, contents: nil)
+            FileManager.default.createFile(atPath: paths.serviceLogPath, contents: nil)
+            outputHandle = try FileHandle(forWritingTo: URL(fileURLWithPath: paths.outputPath))
+            try outputHandle?.seekToEnd()
+            terminalView.setOutputHandler { [weak self] data in Task { @MainActor [weak self] in self?.appendOutput(data) } }
+            try startControlServer()
+            startRuntimeStateTimer()
+            refreshRuntimeState(force: true)
+            started = true
+            GhosttyEmbeddedPerformance.logMetric(
+                "terminal_session_start", target: "session=\(launchConfiguration.sessionID) backend=\(launchConfiguration.backend.rawValue)",
+                elapsedMS: GhosttyEmbeddedPerformance.elapsedMS(since: startedAt), success: true)
+        } catch {
+            GhosttyEmbeddedPerformance.logMetric(
+                "terminal_session_start", target: "session=\(launchConfiguration.sessionID) backend=\(launchConfiguration.backend.rawValue)",
+                elapsedMS: GhosttyEmbeddedPerformance.elapsedMS(since: startedAt), success: false)
+            throw error
+        }
     }
 
     public func attach(client: TerminalClient, mode: TerminalAttachmentMode, into container: NSView?) throws {
-        try startIfNeeded()
-        let activeAttachments = (try? TerminalSessionPersistence.activeAttachments(paths: paths)) ?? []
-        let currentAttachment = activeAttachments.first { $0.clientID == client.id }
-        if currentAttachment?.mode != mode {
-            try TerminalSessionPersistence.attachClient(
-                sessionID: launchConfiguration.sessionID, client: client, mode: mode, paths: paths,
-                attachedAt: ISO8601DateFormatter().string(from: Date()))
-        }
-        if mode == .owner, let container {
-            if terminalView.superview !== container {
-                terminalView.removeFromSuperview()
-                terminalView.translatesAutoresizingMaskIntoConstraints = false
-                container.addSubview(terminalView)
-                NSLayoutConstraint.activate([
-                    terminalView.topAnchor.constraint(equalTo: container.topAnchor),
-                    terminalView.leadingAnchor.constraint(equalTo: container.leadingAnchor),
-                    terminalView.trailingAnchor.constraint(equalTo: container.trailingAnchor),
-                    terminalView.bottomAnchor.constraint(equalTo: container.bottomAnchor),
-                ])
+        let startedAt = Date()
+        do {
+            try startIfNeeded()
+            let activeAttachments = (try? TerminalSessionPersistence.activeAttachments(paths: paths)) ?? []
+            let currentAttachment = activeAttachments.first { $0.clientID == client.id }
+            if currentAttachment?.mode != mode {
+                try TerminalSessionPersistence.attachClient(
+                    sessionID: launchConfiguration.sessionID, client: client, mode: mode, paths: paths,
+                    attachedAt: ISO8601DateFormatter().string(from: Date()))
             }
-            focusWindow(container.window)
+            if mode == .owner, let container {
+                if terminalView.superview !== container {
+                    terminalView.removeFromSuperview()
+                    terminalView.translatesAutoresizingMaskIntoConstraints = false
+                    container.addSubview(terminalView)
+                    NSLayoutConstraint.activate([
+                        terminalView.topAnchor.constraint(equalTo: container.topAnchor),
+                        terminalView.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+                        terminalView.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+                        terminalView.bottomAnchor.constraint(equalTo: container.bottomAnchor),
+                    ])
+                }
+                focusWindow(container.window)
+            }
+            refreshRuntimeState(force: true)
+            GhosttyEmbeddedPerformance.logMetric(
+                "terminal_window_attach", target: "session=\(launchConfiguration.sessionID) client=\(client.id)",
+                elapsedMS: GhosttyEmbeddedPerformance.elapsedMS(since: startedAt), success: true, detail: "mode=\(mode.rawValue)")
+        } catch {
+            GhosttyEmbeddedPerformance.logMetric(
+                "terminal_window_attach", target: "session=\(launchConfiguration.sessionID) client=\(client.id)",
+                elapsedMS: GhosttyEmbeddedPerformance.elapsedMS(since: startedAt), success: false, detail: "mode=\(mode.rawValue)")
+            throw error
         }
-        refreshRuntimeState()
     }
 
     public func detach(clientID: String) throws {
         try TerminalSessionPersistence.detachClient(id: clientID, paths: paths, detachedAt: ISO8601DateFormatter().string(from: Date()))
         if !isOwner(clientID: clientID) { terminalView.setFocused(false) }
-        refreshRuntimeState()
+        refreshRuntimeState(force: true)
     }
 
     public func takeover(client: TerminalClient, into container: NSView?) throws { try attach(client: client, mode: .owner, into: container) }
@@ -125,31 +149,57 @@ import spacesterminalcore
                     guard let self else { return TerminalControlResponse(ok: false, message: "Terminal session is shutting down.") }
                     switch request.command {
                     case "send":
+                        let startedAt = Date()
                         if let clientID = request.clientID, !self.isOwner(clientID: clientID) {
+                            GhosttyEmbeddedPerformance.logMetric(
+                                "terminal_control_send", target: "session=\(self.launchConfiguration.sessionID)",
+                                elapsedMS: GhosttyEmbeddedPerformance.elapsedMS(since: startedAt), success: false)
                             return TerminalControlResponse(ok: false, message: "Only the active owner can send input.")
                         }
                         guard let text = request.text else { return TerminalControlResponse(ok: false, message: "Missing text payload.") }
                         let payload = text + (request.appendNewline ? "\n" : "")
                         self.terminalView.sendRawBytes(Data(payload.utf8))
+                        GhosttyEmbeddedPerformance.logMetric(
+                            "terminal_control_send", target: "session=\(self.launchConfiguration.sessionID)",
+                            elapsedMS: GhosttyEmbeddedPerformance.elapsedMS(since: startedAt), success: true, detail: "bytes=\(payload.utf8.count)")
                         return TerminalControlResponse(ok: true, message: "Sent input.")
                     case "key":
+                        let startedAt = Date()
                         if let clientID = request.clientID, !self.isOwner(clientID: clientID) {
+                            GhosttyEmbeddedPerformance.logMetric(
+                                "terminal_control_key", target: "session=\(self.launchConfiguration.sessionID)",
+                                elapsedMS: GhosttyEmbeddedPerformance.elapsedMS(since: startedAt), success: false)
                             return TerminalControlResponse(ok: false, message: "Only the active owner can send keys.")
                         }
                         guard let key = request.key, let bytes = TerminalKeyInput.bytes(for: key) else {
+                            GhosttyEmbeddedPerformance.logMetric(
+                                "terminal_control_key", target: "session=\(self.launchConfiguration.sessionID)",
+                                elapsedMS: GhosttyEmbeddedPerformance.elapsedMS(since: startedAt), success: false)
                             return TerminalControlResponse(ok: false, message: "Unsupported terminal key.")
                         }
                         self.terminalView.sendRawBytes(Data(bytes))
+                        GhosttyEmbeddedPerformance.logMetric(
+                            "terminal_control_key", target: "session=\(self.launchConfiguration.sessionID)",
+                            elapsedMS: GhosttyEmbeddedPerformance.elapsedMS(since: startedAt), success: true, detail: "key=\(key)")
                         return TerminalControlResponse(ok: true, message: "Sent key.")
                     case "takeover":
+                        let startedAt = Date()
                         guard let clientID = request.clientID else { return TerminalControlResponse(ok: false, message: "Missing client ID.") }
                         do {
                             try TerminalSessionPersistence.transferOwnership(
                                 sessionID: self.launchConfiguration.sessionID, newOwnerClientID: clientID, paths: self.paths,
                                 transferredAt: ISO8601DateFormatter().string(from: Date()))
-                            self.refreshRuntimeState()
+                            self.refreshRuntimeState(force: true)
+                            GhosttyEmbeddedPerformance.logMetric(
+                                "terminal_control_takeover", target: "session=\(self.launchConfiguration.sessionID) client=\(clientID)",
+                                elapsedMS: GhosttyEmbeddedPerformance.elapsedMS(since: startedAt), success: true)
                             return TerminalControlResponse(ok: true, message: "Transferred terminal ownership.")
-                        } catch { return TerminalControlResponse(ok: false, message: String(describing: error)) }
+                        } catch {
+                            GhosttyEmbeddedPerformance.logMetric(
+                                "terminal_control_takeover", target: "session=\(self.launchConfiguration.sessionID) client=\(clientID)",
+                                elapsedMS: GhosttyEmbeddedPerformance.elapsedMS(since: startedAt), success: false)
+                            return TerminalControlResponse(ok: false, message: String(describing: error))
+                        }
                     default: return TerminalControlResponse(ok: false, message: "Unsupported terminal command '\(request.command)'.")
                     }
                 }
@@ -161,18 +211,23 @@ import spacesterminalcore
 
     private func startRuntimeStateTimer() {
         runtimeStateTimer?.invalidate()
-        runtimeStateTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
+        runtimeStateTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
             guard let self else { return }
-            MainActor.assumeIsolated { self.refreshRuntimeState() }
+            MainActor.assumeIsolated { self.refreshRuntimeState(force: false) }
         }
         if let runtimeStateTimer { RunLoop.main.add(runtimeStateTimer, forMode: .common) }
     }
 
-    private func refreshRuntimeState() {
-        try? TerminalSessionPersistence.writeRuntimeState(
-            TerminalSessionRuntimeState(
-                sessionID: launchConfiguration.sessionID, backend: launchConfiguration.backend, servicePID: getpid(), childPID: observedChildPID(),
-                state: .running, updatedAt: ISO8601DateFormatter().string(from: Date())), paths: paths)
+    private func refreshRuntimeState(force: Bool) {
+        let now = Date()
+        let state = TerminalSessionRuntimeState(
+            sessionID: launchConfiguration.sessionID, backend: launchConfiguration.backend, servicePID: getpid(), childPID: observedChildPID(),
+            state: .running, updatedAt: ISO8601DateFormatter().string(from: now))
+        let shouldPersist = force || shouldPersistRuntimeState(state, now: now)
+        guard shouldPersist else { return }
+        try? TerminalSessionPersistence.writeRuntimeState(state, paths: paths)
+        lastPersistedRuntimeState = state
+        lastRuntimeStateWriteAt = now
     }
 
     private func appendOutput(_ data: Data) {
@@ -192,7 +247,7 @@ import spacesterminalcore
             let trimmed = path.trimmingCharacters(in: .whitespacesAndNewlines)
             currentWorkingDirectory = trimmed.isEmpty ? nil : trimmed
         }
-        refreshRuntimeState()
+        refreshRuntimeState(force: true)
     }
 
     private func observedChildPID() -> Int32? {
@@ -201,6 +256,16 @@ import spacesterminalcore
             return foregroundPID
         }
         return lastKnownChildPID
+    }
+
+    private func shouldPersistRuntimeState(_ state: TerminalSessionRuntimeState, now: Date) -> Bool {
+        if let lastPersistedRuntimeState, runtimeStateSignature(for: lastPersistedRuntimeState) != runtimeStateSignature(for: state) { return true }
+        guard let lastRuntimeStateWriteAt else { return true }
+        return now.timeIntervalSince(lastRuntimeStateWriteAt) >= 5
+    }
+
+    private func runtimeStateSignature(for state: TerminalSessionRuntimeState) -> String {
+        "\(state.sessionID)|\(state.backend.rawValue)|\(state.servicePID)|\(state.childPID.map(String.init) ?? "nil")|\(state.state.rawValue)|\(state.exitedAt ?? "nil")"
     }
 
     var debugCurrentTitle: String? { currentTitle }

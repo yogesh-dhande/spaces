@@ -66,6 +66,8 @@ apps/macos/scripts/setup_ghosttykit.sh
 
 That installs `GhosttyKit.xcframework` and the Ghostty resource bundle under `apps/macos/.local/ghosttykit/`, which the current branch-local resolver will discover automatically.
 
+If `SPACES_PROJECT_DIR` points at another checkout that already has `apps/macos/.local/ghosttykit/`, the setup script copies those local artifacts first and only falls back to GitHub release download when needed.
+
 To verify the embedded Ghostty backend on an isolated database root:
 
 ```bash
@@ -86,6 +88,14 @@ env SPACES_DB_PATH="$SPACES_DB_PATH" apps/macos/.build/debug/spaces \
 ```
 
 For owner or viewer verification, keep exactly one `SpacesApp` process running for the chosen `SPACES_DB_PATH`. The current `ghostty-embedded` slice supports one live libghostty owner window plus one or more passive viewer windows that follow `output.log` and can take over ownership without restarting the session.
+
+For repeatable profiling of the built-in terminal owner and viewer flows:
+
+```bash
+ITERATIONS=3 apps/macos/Tests/profile_built_in_terminal.sh
+```
+
+The profiler runs against an isolated `SPACES_DB_PATH`, enables `DEBUG=1`, exercises owner attach, viewer attach, send, `tail`, and takeover, then summarizes the built-in terminal perf metrics captured from the app log.
 
 ## Pre-commit Hook
 

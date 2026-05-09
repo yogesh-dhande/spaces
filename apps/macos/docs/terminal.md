@@ -103,6 +103,25 @@ The headless `ghostty-embedded` backend runtime disables selection clipboard hoo
 
 The host keeps the last non-nil foreground PID so transient libghostty zeroes do not erase the visible process identity for workspace-launched sessions.
 
+The host also avoids rewriting `state.json` on every timer tick. Steady-state sessions persist runtime state when the effective session state changes and on a light heartbeat, which keeps owner windows responsive during long-running sessions without dropping liveness information.
+
+## Performance Notes
+The active owner path is treated as a hot rendering path.
+
+Current performance decisions:
+- `GhosttyEmbeddedTerminalView` caches the last surface geometry, focus state, and occlusion state before calling libghostty.
+- Owner-window focus avoids unnecessary `makeKeyAndOrderFront` and repeated focus toggles when the view is already first responder.
+- Session output still streams directly to `output.log`, but session runtime-state persistence is coalesced so steady-state windows are not constantly paying synchronous metadata write costs.
+- Built-in terminal actions emit debug metrics through the shared `spaces: perf metric=...` format when `DEBUG=1`, including:
+  - `terminal_session_start`
+  - `terminal_surface_create`
+  - `terminal_window_attach`
+  - `terminal_control_send`
+  - `terminal_control_key`
+  - `terminal_control_takeover`
+
+These metrics are intended to guide regressions around owner-window attach, session bring-up, control-plane latency, and ownership handoff.
+
 ## Current Verification Baseline
 The current branch has verified:
 - `spaces terminal command`
@@ -143,6 +162,20 @@ env SPACES_DB_PATH="$SPACES_DB_PATH" apps/macos/.build/debug/spaces \
 env SPACES_DB_PATH="$SPACES_DB_PATH" apps/macos/.build/debug/spaces \
   terminal takeover <session-id> <viewer-client-id>
 ```
+
+For repeatable performance sampling of the built-in terminal owner and viewer flows:
+
+```bash
+ITERATIONS=3 apps/macos/Tests/profile_built_in_terminal.sh
+```
+
+The profiler:
+- installs or copies local Ghostty artifacts
+- launches an isolated debug `SpacesApp` with `DEBUG=1`
+- creates a `ghostty-embedded` session
+- attaches an owner window and a viewer window
+- sends input, verifies `tail`, and performs takeover
+- aggregates the built-in terminal perf metrics into a short summary
 
 ## What This Branch Does Not Decide
 - whether external hosts are removed in a later PR

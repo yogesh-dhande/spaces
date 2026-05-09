@@ -6,6 +6,7 @@ APP_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 LOCAL_ROOT="$APP_ROOT/.local/ghosttykit"
 XCFRAMEWORK_ROOT="$LOCAL_ROOT/GhosttyKit.xcframework"
 RESOURCES_ROOT="$LOCAL_ROOT/Resources"
+SOURCE_PROJECT_DIR="${SPACES_PROJECT_DIR:-}"
 FORK_REPO="muxy-app/ghostty"
 RELEASE_TAG="${1:-build-2026-04-29}"
 
@@ -20,6 +21,25 @@ download_release_asset() {
         gh release download "$RELEASE_TAG" --pattern "$pattern" --repo "$FORK_REPO"
     )
 }
+
+copy_from_existing_checkout_if_available() {
+    [[ -n "$SOURCE_PROJECT_DIR" ]] || return 0
+    local source_root="$SOURCE_PROJECT_DIR/apps/macos/.local/ghosttykit"
+    [[ -d "$source_root" ]] || return 0
+
+    if [[ ! -d "$XCFRAMEWORK_ROOT" && -d "$source_root/GhosttyKit.xcframework" ]]; then
+        echo "==> Copying GhosttyKit.xcframework from $source_root"
+        cp -R "$source_root/GhosttyKit.xcframework" "$XCFRAMEWORK_ROOT"
+    fi
+
+    if [[ ! -d "$RESOURCES_ROOT/ghostty/shell-integration" && -d "$source_root/Resources" ]]; then
+        echo "==> Copying Ghostty runtime resources from $source_root"
+        mkdir -p "$RESOURCES_ROOT"
+        cp -R "$source_root/Resources/." "$RESOURCES_ROOT/"
+    fi
+}
+
+copy_from_existing_checkout_if_available
 
 if [[ ! -d "$XCFRAMEWORK_ROOT" ]]; then
     echo "==> Downloading GhosttyKit.xcframework from $FORK_REPO ($RELEASE_TAG)"

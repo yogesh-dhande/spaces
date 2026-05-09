@@ -6,6 +6,13 @@ import spacesterminalcore
 @MainActor public final class GhosttyEmbeddedTerminalView: NSView {
     public typealias SurfaceReadyHandler = @MainActor (ghostty_surface_t?) -> Void
 
+    private struct SurfaceGeometry: Equatable {
+        let width: UInt32
+        let height: UInt32
+        let scale: Double
+        let displayID: UInt32?
+    }
+
     public var onSurfaceReady: SurfaceReadyHandler?
     public var onActionEvent: (@MainActor (GhosttyActionEvent) -> Void)?
 
@@ -19,6 +26,9 @@ import spacesterminalcore
     private nonisolated(unsafe) var resignKeyObserver: NSObjectProtocol?
     private var isWindowVisible = true
     private var outputHandler: (@Sendable (Data) -> Void)?
+    private var lastGeometry: SurfaceGeometry?
+    private var lastFocused: Bool?
+    private var lastOccluded: Bool?
 
     public init(launchConfiguration: TerminalSessionLaunchConfiguration) {
         self.launchConfiguration = launchConfiguration
@@ -70,6 +80,7 @@ import spacesterminalcore
         }
 
         updateSurfaceGeometry()
+        updateWindowVisibility()
         setSurfaceFocus(window.isKeyWindow && window.firstResponder === self)
     }
 
@@ -229,6 +240,7 @@ import spacesterminalcore
 
     private func createSurfaceIfNeeded() {
         guard surface == nil else { return }
+        let startedAt = Date()
 
         guard let backingSize = backingPixelSize() else {
             pendingSurfaceCreation = true
@@ -267,17 +279,29 @@ import spacesterminalcore
             guard let createdSurface else { throw GhosttyEmbeddedAppServiceError.configuration("ghostty_surface_new failed") }
 
             surface = createdSurface
+            lastGeometry = nil
+            lastFocused = nil
+            lastOccluded = nil
             GhosttyEmbeddedAppService.shared.registerActionHandler(for: createdSurface) { [weak self] event in
                 guard let self else { return }
                 self.onActionEvent?(event)
             }
             ghostty_surface_set_data_callback(createdSurface, Self.surfaceDataCallback, Unmanaged.passUnretained(self).toOpaque())
             updateSurfaceGeometry()
-            ghostty_surface_set_size(createdSurface, backingSize.width, backingSize.height)
+            updateWindowVisibility()
             setSurfaceFocus(window?.isKeyWindow == true && window?.firstResponder === self)
             ghostty_surface_refresh(createdSurface)
+            GhosttyEmbeddedPerformance.logMetric(
+                "terminal_surface_create", target: "session=\(launchConfiguration.sessionID)",
+                elapsedMS: GhosttyEmbeddedPerformance.elapsedMS(since: startedAt), success: true,
+                detail: "width=\(backingSize.width) height=\(backingSize.height)")
             onSurfaceReady?(createdSurface)
-        } catch { fputs("spaces: ghostty surface creation failed: \(error)\n", stderr) }
+        } catch {
+            GhosttyEmbeddedPerformance.logMetric(
+                "terminal_surface_create", target: "session=\(launchConfiguration.sessionID)",
+                elapsedMS: GhosttyEmbeddedPerformance.elapsedMS(since: startedAt), success: false)
+            fputs("spaces: ghostty surface creation failed: \(error)\n", stderr)
+        }
     }
 
     private func destroySurface() {
@@ -287,17 +311,24 @@ import spacesterminalcore
         ghostty_surface_set_data_callback(surface, nil, nil)
         ghostty_surface_free(surface)
         self.surface = nil
+        lastGeometry = nil
+        lastFocused = nil
+        lastOccluded = nil
     }
 
     private func updateSurfaceGeometry() {
         guard let surface, let window, let backingSize = backingPixelSize() else { return }
-        layer?.contentsScale = window.backingScaleFactor
         let scale = Double(window.backingScaleFactor)
-        ghostty_surface_set_content_scale(surface, scale, scale)
-        if let screen = window.screen, let displayID = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? UInt32 {
-            ghostty_surface_set_display_id(surface, displayID)
+        let displayID = (window.screen?.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value
+        let geometry = SurfaceGeometry(width: backingSize.width, height: backingSize.height, scale: scale, displayID: displayID)
+        guard geometry != lastGeometry else { return }
+        layer?.contentsScale = window.backingScaleFactor
+        if lastGeometry?.scale != geometry.scale { ghostty_surface_set_content_scale(surface, scale, scale) }
+        if lastGeometry?.displayID != geometry.displayID, let displayID { ghostty_surface_set_display_id(surface, displayID) }
+        if lastGeometry?.width != geometry.width || lastGeometry?.height != geometry.height {
+            ghostty_surface_set_size(surface, geometry.width, geometry.height)
         }
-        ghostty_surface_set_size(surface, backingSize.width, backingSize.height)
+        lastGeometry = geometry
     }
 
     private func updateWindowVisibility() {
@@ -317,8 +348,8 @@ import spacesterminalcore
 
     private func focusWindow() {
         guard let window else { return }
-        window.makeFirstResponder(self)
-        window.makeKeyAndOrderFront(nil)
+        if window.firstResponder !== self { window.makeFirstResponder(self) }
+        if !window.isKeyWindow { window.makeKeyAndOrderFront(nil) }
         setSurfaceFocus(true)
     }
 
@@ -410,11 +441,15 @@ import spacesterminalcore
 
     private func setSurfaceFocus(_ focused: Bool) {
         guard let surface else { return }
+        guard lastFocused != focused else { return }
+        lastFocused = focused
         ghostty_surface_set_focus(surface, focused)
     }
 
     private func setSurfaceOcclusion(_ occluded: Bool) {
         guard let surface else { return }
+        guard lastOccluded != occluded else { return }
+        lastOccluded = occluded
         ghostty_surface_set_occlusion(surface, occluded)
     }
 
