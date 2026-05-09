@@ -937,6 +937,30 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         }.value
     }
 
+    nonisolated private static func recoveredWorkspaceProcessSnapshot(workspaceID: String, processID: String) async -> Result<
+        RunningProcessRecord?, Error
+    > {
+        await Task.detached(priority: .userInitiated) {
+            do {
+                let db = try DatabaseLocator.defaultPath()
+                let store = try SQLiteStore(path: db)
+                let orchestrator = WorkspaceOrchestrator(store: store)
+                return .success(try orchestrator.runningProcesses(workspaceID: workspaceID).first(where: { $0.id == processID }))
+            } catch { return .failure(error) }
+        }.value
+    }
+
+    nonisolated static func recoveredProcessWindowDetail(title: String, terminalApp: String?) -> String {
+        let destination: String
+        switch terminalApp {
+        case TerminalHost.spaces.appName: destination = "a new Spaces window"
+        case TerminalHost.ghostty.appName: destination = "a new Ghostty window"
+        case TerminalHost.iterm2.appName: destination = "a new iTerm2 window"
+        default: destination = "a new terminal window"
+        }
+        return "\(title) reopened in \(destination)."
+    }
+
     nonisolated private static func recoverRunningWorkspaceProcessIfPossibleSnapshot(_ context: MissingTrackedWindowContext) async -> Result<
         Bool, Error
     > {
@@ -6864,7 +6888,16 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             switch context.kind {
             case .browserSession:
                 showWindowIssueToast(title: "Browser session recovered", detail: "\(context.title) reopened in a new Chrome window.")
-            case .process: showWindowIssueToast(title: "Process recovered", detail: "\(context.title) reopened in a new iTerm2 window.")
+            case .process:
+                let recoveredProcess: RunningProcessRecord?
+                if let processID = context.processID {
+                    recoveredProcess = try? await Self.recoveredWorkspaceProcessSnapshot(workspaceID: context.workspaceID, processID: processID).get()
+                } else {
+                    recoveredProcess = nil
+                }
+                showWindowIssueToast(
+                    title: "Process recovered",
+                    detail: Self.recoveredProcessWindowDetail(title: context.title, terminalApp: recoveredProcess?.terminalApp))
             case .codingAgent, .window: break
             }
         case .failure(let error): showError(error)
