@@ -175,6 +175,34 @@ final class TerminalSessionWindowControllerTests: XCTestCase {
         XCTAssertEqual(controller.debugState, "state: running    child: 22")
     }
 
+    @MainActor func testGhosttyOwnerUsesLiveSurfaceBodyWithoutRefreshingFallbackTail() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+        try TerminalSessionPersistence.writeLaunchConfiguration(
+            .init(
+                sessionID: "session-owner-surface", backend: .ghosttyEmbedded, title: "owner", workingDirectory: "/tmp/work", shell: "/bin/zsh",
+                command: "cat", createdAt: "2026-05-09T00:00:00Z"), paths: paths)
+        try TerminalSessionPersistence.writeRuntimeState(
+            .init(
+                sessionID: "session-owner-surface", backend: .ghosttyEmbedded, servicePID: 1, childPID: 22, state: .running,
+                updatedAt: "2026-05-09T00:00:01Z"), paths: paths)
+        try "owner output should stay on the live surface\n".write(toFile: paths.outputPath, atomically: true, encoding: .utf8)
+
+        let controller = TerminalSessionWindowController(sessionID: "session-owner-surface", paths: paths)
+        controller.show()
+        controller.window?.layoutIfNeeded()
+        controller.window?.contentView?.layoutSubtreeIfNeeded()
+        controller.debugForceRefresh()
+
+        XCTAssertEqual(controller.debugRendererSummary, "Renderer: libghostty (owner)")
+        XCTAssertEqual(controller.debugRenderedOutput, "")
+        XCTAssertGreaterThan(controller.debugTerminalContainerWidth, 0)
+        XCTAssertGreaterThanOrEqual(controller.debugTerminalContainerWidth, controller.debugBodyWidth - 2)
+    }
+
     @MainActor func testGhosttyOwnerRoutesCopyAndPasteThroughSessionHostActions() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)

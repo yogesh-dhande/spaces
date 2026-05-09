@@ -370,7 +370,7 @@ import spacesterminalghostty
 
         bodyStackView.translatesAutoresizingMaskIntoConstraints = false
         bodyStackView.orientation = .vertical
-        bodyStackView.alignment = .leading
+        bodyStackView.alignment = .width
         bodyStackView.distribution = .fill
         bodyStackView.spacing = 12
         bodyStackView.addArrangedSubview(terminalContainer)
@@ -420,7 +420,6 @@ import spacesterminalghostty
             let currentLaunchConfiguration = try TerminalSessionPersistence.readLaunchConfiguration(paths: paths)
             let runtimeState = try? TerminalSessionPersistence.readRuntimeState(paths: paths)
             updateGhosttySessionHostReference(for: currentLaunchConfiguration)
-            let output = (try? TerminalOutputTail.tail(path: paths.outputPath, lineCount: 200)) ?? ""
             let currentOwnerClient = activeOwnerClient(paths: paths)
             let isOwner = currentOwnerClient?.id == client.id || (currentOwnerClient == nil && preferredAttachmentMode == .owner)
             let currentTitle = currentWindowTitle(fallback: currentLaunchConfiguration.title, isOwner: isOwner)
@@ -460,6 +459,7 @@ import spacesterminalghostty
             }
 
             guard visibleRenderer != .ghosttyOwner else { return }
+            let output = (try? TerminalOutputTail.tail(path: paths.outputPath, lineCount: 200)) ?? ""
             if output != lastRenderedOutput {
                 let viewportState = captureOutputViewportState()
                 outputView.string = output
@@ -747,4 +747,6 @@ import spacesterminalghostty
         let visibleRect = outputScrollView.contentView.documentVisibleRect
         return max(0, outputView.bounds.height - visibleRect.maxY)
     }
+    var debugTerminalContainerWidth: CGFloat { terminalContainer.frame.width }
+    var debugBodyWidth: CGFloat { bodyStackView.frame.width }
 }
