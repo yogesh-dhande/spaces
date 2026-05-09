@@ -12,7 +12,8 @@ struct MXE2ECommand: ParsableCommand {
             SeedFixtureCommand.self, CleanupFixturesCommand.self, CreateWorkspaceCommand.self, LookupWorkspaceCommand.self,
             SelectWorkspaceDetailCommand.self, DumpWorkspaceCommand.self, FocusableWindowNamesCommand.self, ArchiveWorkspaceCommand.self,
             StopWorkspaceCommand.self, StopFixturesCommand.self, SetWorkspaceBrowserSessionURLsCommand.self, SetWorkspaceAgentLaunchersCommand.self,
-            SetWorkspaceStopScriptCommand.self, SetTerminalHostCommand.self, TerminalHostAvailableCommand.self, RecordScreenCommand.self,
+            SetWorkspaceStopScriptCommand.self, SetTerminalHostCommand.self, TerminalHostAvailableCommand.self, FocusWorkspaceProcessCommand.self,
+            RecoverWorkspaceProcessCommand.self, CloseWorkspaceProcessWindowCommand.self, RecordScreenCommand.self,
         ])
 }
 
@@ -325,7 +326,8 @@ private struct DumpWorkspaceCommand: ParsableCommand {
             runningProcesses: try orchestrator.runningProcesses(workspaceID: workspace.id).map {
                 RunningProcessPayload(
                     id: $0.id, name: $0.templateName, pid: $0.pid, status: $0.status.rawValue, terminalApp: $0.terminalApp,
-                    terminalTrackingID: $0.terminalTrackingID, terminalNativeID: $0.terminalNativeID, tmuxWindowID: $0.tmuxWindowID)
+                    terminalTrackingID: $0.terminalTrackingID, terminalNativeID: $0.terminalNativeID, tmuxWindowID: $0.tmuxWindowID,
+                    windowID: $0.windowID)
             },
             windows: try orchestrator.windows(workspaceID: workspace.id).map {
                 WindowPayload(
@@ -338,6 +340,68 @@ private struct DumpWorkspaceCommand: ParsableCommand {
                     terminalNativeID: $0.terminalNativeID, windowID: $0.windowID, yabaiWindowID: $0.yabaiWindowID)
             })
         try emitJSON(payload)
+    }
+}
+
+private struct FocusWorkspaceProcessCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "focus-workspace-process")
+
+    @Option(name: .long) var workspaceDir: String
+    @Option(name: .long) var processName: String
+
+    func run() throws {
+        let orchestrator = try makeOrchestrator()
+        let normalizedWorkspaceDir = normalizePath(workspaceDir)
+        guard let workspace = try orchestrator.store.workspace(dir: normalizedWorkspaceDir) else {
+            throw ValidationError("Workspace not found at: \(normalizedWorkspaceDir)")
+        }
+        guard let process = try orchestrator.runningProcesses(workspaceID: workspace.id).first(where: { $0.templateName == processName }) else {
+            throw ValidationError("Running process not found: \(processName)")
+        }
+        try orchestrator.focusWorkspaceProcess(workspaceID: workspace.id, processID: process.id)
+        try emitJSON(["workspaceID": workspace.id, "processID": process.id, "processName": process.templateName])
+    }
+}
+
+private struct RecoverWorkspaceProcessCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "recover-workspace-process")
+
+    @Option(name: .long) var workspaceDir: String
+    @Option(name: .long) var processName: String
+
+    func run() throws {
+        let orchestrator = try makeOrchestrator()
+        let normalizedWorkspaceDir = normalizePath(workspaceDir)
+        guard let workspace = try orchestrator.store.workspace(dir: normalizedWorkspaceDir) else {
+            throw ValidationError("Workspace not found at: \(normalizedWorkspaceDir)")
+        }
+        try orchestrator.recoverMissingConfiguredProcess(workspaceID: workspace.id, processKey: processName)
+        try emitJSON(["workspaceID": workspace.id, "processName": processName])
+    }
+}
+
+private struct CloseWorkspaceProcessWindowCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "close-workspace-process-window")
+
+    @Option(name: .long) var workspaceDir: String
+    @Option(name: .long) var processName: String
+
+    func run() throws {
+        let orchestrator = try makeOrchestrator()
+        let normalizedWorkspaceDir = normalizePath(workspaceDir)
+        guard let workspace = try orchestrator.store.workspace(dir: normalizedWorkspaceDir) else {
+            throw ValidationError("Workspace not found at: \(normalizedWorkspaceDir)")
+        }
+        guard let process = try orchestrator.runningProcesses(workspaceID: workspace.id).first(where: { $0.templateName == processName }) else {
+            throw ValidationError("Running process not found: \(processName)")
+        }
+        guard let sessionID = process.terminalNativeID ?? process.terminalTrackingID, !sessionID.isEmpty else {
+            throw ValidationError("Running process has no built-in terminal session: \(processName)")
+        }
+        DistributedNotificationCenter.default().postNotificationName(
+            IPCNotification.closeTerminalSessionWindow, object: nil, userInfo: [IPCNotification.terminalSessionIDUserInfoKey: sessionID],
+            options: [.deliverImmediately])
+        try emitJSON(["workspaceID": workspace.id, "processName": processName, "sessionID": sessionID])
     }
 }
 
@@ -569,6 +633,7 @@ private struct RunningProcessPayload: Codable {
     let terminalTrackingID: String?
     let terminalNativeID: String?
     let tmuxWindowID: String?
+    let windowID: Int?
 }
 
 private struct WindowPayload: Codable {

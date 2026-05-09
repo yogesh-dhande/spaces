@@ -98,6 +98,12 @@ public final class WorkspaceOrchestrator {
         case unavailable
     }
 
+    private struct WorkspaceProcessFocusOutcome {
+        let focused: Bool
+        let route: String
+        let focusedExistingWindow: Bool
+    }
+
     private enum WorkspaceNavigationCursor: Hashable {
         case agent(String)
         case process(String)
@@ -1577,13 +1583,14 @@ public final class WorkspaceOrchestrator {
     public func focusWorkspaceProcess(workspaceID: String, processID: String) throws {
         let focusStartedAt = currentDate()
         guard let process = try store.runningProcesses(workspaceID: workspaceID).first(where: { $0.id == processID }) else { return }
-        let focused = try focusWorkspaceProcessRecord(process, workspaceID: workspaceID)
-        guard focused else { throw missingTrackedProcessError(process, workspaceID: workspaceID) }
+        let outcome = try focusWorkspaceProcessOutcome(process, workspaceID: workspaceID)
+        guard outcome.focused else { throw missingTrackedProcessError(process, workspaceID: workspaceID) }
         rememberNavigationTarget(.process(process), workspaceID: workspaceID)
         try markWorkspaceRunningIfNeeded(workspaceID: workspaceID)
         try setActiveWorkspace(id: workspaceID)
         logPerfMetric(
-            "process_focus", workspaceID: workspaceID, target: process.templateName, elapsedMS: elapsedMS(since: focusStartedAt), success: true)
+            "process_focus", workspaceID: workspaceID, target: process.templateName, detail: "route=\(outcome.route)",
+            elapsedMS: elapsedMS(since: focusStartedAt), success: true)
     }
 
     public func focusNextWindow(workspaceID: String) throws { try focusWindowRelative(workspaceID: workspaceID, delta: 1) }
@@ -5174,7 +5181,15 @@ public final class WorkspaceOrchestrator {
         try restartProcessInTerminal(workspaceID: workspaceID, process: process)
     }
 
-    public func runConfiguredProcess(workspaceID: String, processKey: String) throws {
+    public func stopWorkspaceProcess(workspaceID: String, processID: String) throws {
+        try withWorkspaceLifecycleLock(workspaceID: workspaceID) {
+            guard let process = try store.runningProcesses(workspaceID: workspaceID).first(where: { $0.id == processID }) else { return }
+            try stopRunningProcess(process, workspaceID: workspaceID)
+        }
+    }
+
+    public func recoverMissingConfiguredProcess(workspaceID: String, processKey: String) throws {
+        let recoverStartedAt = currentDate()
         let (project, workspace) = try resolveWorkspace(id: workspaceID)
         let settings = try loadWorkspaceSettings(project: project, workspace: workspace)
         guard let template = (settings?.processes ?? []).first(where: { configuredProcessMatchesKey($0, key: processKey) }) else {
@@ -5201,6 +5216,9 @@ public final class WorkspaceOrchestrator {
         guard tmux.isAvailable() else { throw WorkspaceError.dependencyMissing(message: "tmux is required to launch processes.") }
         _ = try launchConfiguredProcess(template: template, workspace: workspace, env: env, terminalHost: terminalHost)
         try markWorkspaceRunningIfNeeded(workspace)
+        logPerfMetric(
+            "process_recover", workspaceID: workspaceID, target: configuredProcessMatchKey(name: template.name),
+            detail: "host=\(terminalHost.rawValue)", elapsedMS: elapsedMS(since: recoverStartedAt), success: true)
     }
 
     public func stopWorkspaceProcess(workspaceID: String, processID: String) throws {
@@ -5485,22 +5503,32 @@ public final class WorkspaceOrchestrator {
     }
 
     private func focusWorkspaceProcessRecord(_ process: RunningProcessRecord, workspaceID: String) throws -> Bool {
-        guard isManagedTerminalApp(process.terminalApp) else { return false }
+        try focusWorkspaceProcessOutcome(process, workspaceID: workspaceID).focused
+    }
+
+    private func focusWorkspaceProcessOutcome(_ process: RunningProcessRecord, workspaceID: String) throws -> WorkspaceProcessFocusOutcome {
+        guard isManagedTerminalApp(process.terminalApp) else {
+            return WorkspaceProcessFocusOutcome(focused: false, route: "unavailable", focusedExistingWindow: false)
+        }
         let target = try resolvedProcessTerminalFocusTarget(process, workspaceID: workspaceID)
         let focusResult = focusManagedTerminal(
             terminalApp: process.terminalApp, providerIdentity: target.providerIdentity, windowID: target.windowID)
         let focused: Bool
         let focusedExistingWindow: Bool
+        let route: String
         switch focusResult {
         case .existingWindow:
             focused = true
             focusedExistingWindow = true
+            route = "existing_window"
         case .trackedTerminal:
             focused = true
             focusedExistingWindow = target.windowID != nil
+            route = "tracked_terminal"
         case .reopenedSession(let capturedWindowID):
             focused = true
             focusedExistingWindow = false
+            route = "reopened_session"
             if terminalHost(for: process.terminalApp) == .spaces {
                 if let capturedWindowID {
                     try persistBuiltInTerminalWindowBinding(process, workspaceID: workspaceID, windowID: capturedWindowID)
@@ -5513,14 +5541,16 @@ public final class WorkspaceOrchestrator {
                 let fallbackFocused = ((try? yabai.focusWindow(id: trackedWindowID)) ?? false)
                 focused = fallbackFocused
                 focusedExistingWindow = fallbackFocused
+                route = fallbackFocused ? "fallback_window" : "unavailable"
             } else {
                 focused = false
                 focusedExistingWindow = false
+                route = "unavailable"
             }
         }
         if focused, let tmuxWindowID = process.tmuxWindowID, !tmuxWindowID.isEmpty { _ = try? tmux.selectWindow(windowID: tmuxWindowID) }
         if focused, focusedExistingWindow, let trackedWindowID = target.windowID { pulseTerminalWindowIfNeeded(windowID: trackedWindowID) }
-        return focused
+        return WorkspaceProcessFocusOutcome(focused: focused, route: route, focusedExistingWindow: focusedExistingWindow)
     }
 
     private func resolvedProcessTerminalFocusTarget(_ process: RunningProcessRecord, workspaceID: String) throws -> TerminalFocusTarget {
