@@ -17,6 +17,11 @@ private final class WorkspaceSetupThread: Thread {
     override func main() { try? orchestrator.runWorkspaceSetup(workspaceID: workspaceID) }
 }
 
+private final class TerminalOpenCapture: @unchecked Sendable {
+    var sessionIDs: [String] = []
+    var modes: [TerminalAttachmentMode] = []
+}
+
 private func managedProjectStorageDirname(namespace: String, source: String, preferredName: String) -> String {
     let digest = SHA256.hash(data: Data("\(namespace)\u{0}\(source)".utf8)).map { String(format: "%02x", $0) }.joined()
     let cleaned = preferredName.map { char -> String in
@@ -2476,6 +2481,39 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertEqual(mockTmux.lastSelectedWindowID, "@1")
     }
 
+    func testFocusWorkspaceProcessUsesBuiltInSpacesSessionWithoutTrackedYabaiWindowID() throws {
+        let store = try makeTemporaryStore()
+        let capture = TerminalOpenCapture()
+        let orchestrator = WorkspaceOrchestrator(
+            store: store, iterm: MockIterm2Adapter(), ghostty: MockGhosttyAdapter(), tmux: MockTmuxAdapter(),
+            builtInTerminalWindowOpener: { sessionID, mode in
+                capture.sessionIDs.append(sessionID)
+                capture.modes.append(mode)
+            })
+        let root = try makeTempDirectory()
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
+        _ = project
+
+        let process = RunningProcessRecord(
+            id: "process-spaces", workspaceID: workspace.id, templateName: "web", command: "npm run dev", terminalApp: TerminalHost.spaces.appName,
+            windowID: nil, terminalTrackingID: "spaces-session-1", terminalNativeID: "spaces-session-1", terminalContainerID: nil, itermTabIndex: nil,
+            tmuxWindowID: nil, pid: nil, status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil)
+        try store.upsert(runningProcess: process)
+        try store.upsert(
+            window: WindowRecord(
+                id: "window-spaces", workspaceID: workspace.id, app: TerminalHost.spaces.appName, name: "web", detail: "npm run dev", targetURL: nil,
+                windowID: nil, terminalTrackingID: "spaces-session-1", terminalNativeID: "spaces-session-1", terminalContainerID: nil,
+                itermTabIndex: nil, tmuxWindowID: nil, role: "terminal", orderIndex: 200, lastSeenAt: "now"))
+
+        try orchestrator.focusWorkspaceProcess(workspaceID: workspace.id, processID: process.id)
+
+        XCTAssertEqual(capture.sessionIDs, ["spaces-session-1"])
+        XCTAssertEqual(capture.modes, [.owner])
+    }
+
     // Tests restarting a process recreates a tracked terminal window row even if the stale window row was already pruned.
     func testRestartWorkspaceProcessRecreatesTrackedTerminalWindowWhenMissing() throws {
         let (orchestrator, store, _, workspace, _, mockIterm, mockTmux) = try makeMockItermOrchestratorWithWorkspace()
@@ -2605,6 +2643,69 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertFalse(recovered)
         XCTAssertEqual(mockIterm.openWindowAndRunCallCount, 0)
         XCTAssertTrue(mockTmux.killedSessionNames.isEmpty)
+    }
+
+    func testRecoverRunningWorkspaceProcessIfPossibleReopensBuiltInSpacesSession() throws {
+        let root = try makeTempDirectory()
+        let dbPath = root.appendingPathComponent("spaces.db").path
+        let store = try makeTemporaryStore()
+        let capture = TerminalOpenCapture()
+        let orchestrator = WorkspaceOrchestrator(
+            store: store, iterm: MockIterm2Adapter(), ghostty: MockGhosttyAdapter(), tmux: MockTmuxAdapter(),
+            builtInTerminalWindowOpener: { sessionID, mode in
+                capture.sessionIDs.append(sessionID)
+                capture.modes.append(mode)
+            })
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
+        _ = project
+
+        let sessionID = "spaces-session-recover-1"
+
+        try withEnv(name: "SPACES_DB_PATH", value: dbPath) {
+            let paths = try TerminalSessionPaths.forSession(id: sessionID)
+            try paths.ensureDirectories()
+            FileManager.default.createFile(atPath: paths.controlSocketPath, contents: Data())
+            try TerminalSessionPersistence.writeRuntimeState(
+                .init(
+                    sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: getpid(), childPID: getpid(), state: .running,
+                    updatedAt: "2026-05-09T19:00:00Z"), paths: paths)
+
+            let process = RunningProcessRecord(
+                id: "process-spaces-recover", workspaceID: workspace.id, templateName: "api", command: "npm run api",
+                terminalApp: TerminalHost.spaces.appName, windowID: 401, terminalTrackingID: sessionID, terminalNativeID: sessionID,
+                terminalContainerID: nil, itermTabIndex: nil, tmuxWindowID: nil, pid: Int(getpid()), status: .running, logPath: paths.outputPath,
+                lastOutputAt: nil, startedAt: "now", exitedAt: nil)
+            try store.upsert(runningProcess: process)
+            try store.upsert(
+                window: WindowRecord(
+                    id: process.id, workspaceID: workspace.id, app: TerminalHost.spaces.appName, name: "api", detail: "npm run api", targetURL: nil,
+                    windowID: 401, terminalTrackingID: sessionID, terminalNativeID: sessionID, terminalContainerID: nil, itermTabIndex: nil,
+                    tmuxWindowID: nil, role: "terminal", orderIndex: 200, lastSeenAt: "now"))
+
+            try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) {
+                try withEnv(name: "YABAI_WINDOWS_JSON", value: "[]") {
+                    let recovered = try orchestrator.recoverRunningWorkspaceProcessIfPossible(workspaceID: workspace.id, processID: process.id)
+                    XCTAssertTrue(recovered)
+                }
+            }
+        }
+
+        XCTAssertEqual(capture.sessionIDs, [sessionID])
+        XCTAssertEqual(capture.modes, [.owner])
+
+        let recoveredProcess = try XCTUnwrap(
+            try store.runningProcesses(workspaceID: workspace.id).first(where: { $0.id == "process-spaces-recover" }))
+        XCTAssertEqual(recoveredProcess.terminalTrackingID, sessionID)
+        XCTAssertEqual(recoveredProcess.terminalNativeID, sessionID)
+        XCTAssertEqual(recoveredProcess.terminalApp, TerminalHost.spaces.appName)
+
+        let recoveredWindow = try XCTUnwrap(try store.windows(workspaceID: workspace.id).first(where: { $0.id == "process-spaces-recover" }))
+        XCTAssertEqual(recoveredWindow.terminalTrackingID, sessionID)
+        XCTAssertEqual(recoveredWindow.terminalNativeID, sessionID)
+        XCTAssertEqual(recoveredWindow.app, TerminalHost.spaces.appName)
     }
 
     // Tests configured-but-missing processes can be recovered directly without restarting unrelated running processes.
