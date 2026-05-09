@@ -204,6 +204,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     private var agentEventIPCObserver: NSObjectProtocol?
     private var selectWorkspaceDetailIPCObserver: NSObjectProtocol?
     private var openTerminalSessionWindowIPCObserver: NSObjectProtocol?
+    private var closeTerminalSessionWindowIPCObserver: NSObjectProtocol?
     private var appDidBecomeActiveObserver: NSObjectProtocol?
     private var appDidResignActiveObserver: NSObjectProtocol?
     private var didStartBackgroundServices = false
@@ -327,6 +328,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         setupAgentEventIPCObserver()
         setupSelectWorkspaceDetailIPCObserver()
         setupOpenTerminalSessionWindowIPCObserver()
+        setupCloseTerminalSessionWindowIPCObserver()
         setupAppActivationObservers()
         logStartupProfile("ipc_observers_ready")
         enterSetupFlow()
@@ -355,6 +357,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         if let openTerminalSessionWindowIPCObserver {
             DistributedNotificationCenter.default().removeObserver(openTerminalSessionWindowIPCObserver)
             self.openTerminalSessionWindowIPCObserver = nil
+        }
+        if let closeTerminalSessionWindowIPCObserver {
+            DistributedNotificationCenter.default().removeObserver(closeTerminalSessionWindowIPCObserver)
+            self.closeTerminalSessionWindowIPCObserver = nil
         }
         if let appDidBecomeActiveObserver {
             NotificationCenter.default.removeObserver(appDidBecomeActiveObserver)
@@ -423,6 +429,18 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         }
     }
 
+    private func setupCloseTerminalSessionWindowIPCObserver() {
+        closeTerminalSessionWindowIPCObserver = DistributedNotificationCenter.default().addObserver(
+            forName: IPCNotification.closeTerminalSessionWindow, object: nil, queue: .main
+        ) { [weak self] notification in
+            guard let sessionID = notification.userInfo?[IPCNotification.terminalSessionIDUserInfoKey] as? String else { return }
+            Task { @MainActor [weak self, sessionID] in
+                guard let self else { return }
+                self.closeTerminalSessionWindows(sessionID: sessionID)
+            }
+        }
+    }
+
     private func openTerminalSessionWindow(sessionID: String, mode: TerminalAttachmentMode) {
         do {
             let paths = try TerminalSessionPaths.forSession(id: sessionID)
@@ -457,6 +475,13 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         } else {
             terminalSessionWindowControllers[sessionID] = controllers
         }
+    }
+
+    private func closeTerminalSessionWindows(sessionID: String) {
+        pruneClosedTerminalSessionWindowControllers(sessionID: sessionID)
+        guard let controllers = terminalSessionWindowControllers[sessionID], !controllers.isEmpty else { return }
+        for controller in controllers where !controller.didClose { controller.window?.close() }
+        pruneClosedTerminalSessionWindowControllers(sessionID: sessionID)
     }
 
     static func reusableTerminalSessionWindowController(

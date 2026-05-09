@@ -22,6 +22,8 @@ private final class TerminalOpenCapture: @unchecked Sendable {
     var modes: [TerminalAttachmentMode] = []
 }
 
+private final class TerminalCloseCapture: @unchecked Sendable { var sessionIDs: [String] = [] }
+
 private func managedProjectStorageDirname(namespace: String, source: String, preferredName: String) -> String {
     let digest = SHA256.hash(data: Data("\(namespace)\u{0}\(source)".utf8)).map { String(format: "%02x", $0) }.joined()
     let cleaned = preferredName.map { char -> String in
@@ -4149,6 +4151,42 @@ final class OrchestratorTests: XCTestCase {
 
         let closedIDs = try String(contentsOf: closeLog).split(separator: "\n").map(String.init)
         XCTAssertEqual(closedIDs, ["501", "502"])
+    }
+
+    func testStopWorkspaceClosesBuiltInTerminalSessionWithoutTrackedYabaiWindowID() throws {
+        let store = try makeTemporaryStore()
+        let closeCapture = TerminalCloseCapture()
+        let orchestrator = WorkspaceOrchestrator(
+            store: store, iterm: MockIterm2Adapter(), ghostty: MockGhosttyAdapter(), tmux: MockTmuxAdapter(),
+            builtInTerminalWindowCloser: { sessionID in closeCapture.sessionIDs.append(sessionID) })
+        let root = try makeTempDirectory()
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
+        _ = project
+
+        let sessionID = "spaces-session-stop-1"
+        try store.updateWorkspaceRunning(id: workspace.id, isRunning: true, launchedAt: "now")
+        try store.upsert(
+            runningProcess: RunningProcessRecord(
+                id: "running-process-spaces", workspaceID: workspace.id, templateName: "api", command: "npm run api",
+                terminalApp: TerminalHost.spaces.appName, windowID: nil, terminalTrackingID: sessionID, terminalNativeID: sessionID,
+                terminalContainerID: nil, itermTabIndex: nil, tmuxWindowID: nil, pid: nil, status: .running, logPath: nil, lastOutputAt: nil,
+                startedAt: "now", exitedAt: nil))
+        try store.upsert(
+            window: WindowRecord(
+                id: "tracked-window-spaces", workspaceID: workspace.id, app: TerminalHost.spaces.appName, name: "api", detail: "npm run api",
+                targetURL: nil, windowID: nil, terminalTrackingID: sessionID, terminalNativeID: sessionID, terminalContainerID: nil,
+                itermTabIndex: nil, tmuxWindowID: nil, role: "terminal", orderIndex: 200, lastSeenAt: "now"))
+
+        let outcome = try orchestrator.stopWorkspace(workspaceID: workspace.id)
+
+        XCTAssertFalse(outcome.skippedStopScriptBecauseWorkspaceDirectoryMissing)
+        XCTAssertEqual(closeCapture.sessionIDs, [sessionID])
+        XCTAssertTrue(try store.runningProcesses(workspaceID: workspace.id).isEmpty)
+        XCTAssertTrue(try store.windows(workspaceID: workspace.id).isEmpty)
+        XCTAssertEqual(try store.workspace(id: workspace.id)?.isRunning, false)
     }
 
     // Tests stop workspace closes tracked browser tabs without closing chrome window by arranging representative inputs and asserting the expected result.

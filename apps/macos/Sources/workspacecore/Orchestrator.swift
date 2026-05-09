@@ -7,6 +7,7 @@ import systembridge
 
 public final class WorkspaceOrchestrator {
     public typealias BuiltInTerminalWindowOpener = @Sendable (String, TerminalAttachmentMode) -> Void
+    public typealias BuiltInTerminalWindowCloser = @Sendable (String) -> Void
 
     private final class NotificationAuthorizationCache: @unchecked Sendable {
         private let lock = NSLock()
@@ -131,6 +132,7 @@ public final class WorkspaceOrchestrator {
     private let currentDate: () -> Date
     private let notificationDeliverer: (String, String, String?) -> Void
     private let builtInTerminalWindowOpener: BuiltInTerminalWindowOpener
+    private let builtInTerminalWindowCloser: BuiltInTerminalWindowCloser
     private let projectsRootDirectoryURL: URL?
     private let workspacesRootDirectoryURL: URL?
     private let terminalAdaptersByHost: [TerminalHost: any TerminalAdapter]
@@ -157,7 +159,7 @@ public final class WorkspaceOrchestrator {
         chrome: ChromeAdapter = .init(), browserWindowScanDebounceInterval: TimeInterval = PollingConstants.browserWindowScanDebounceInterval,
         terminalFocusPulseController: TerminalFocusPulseControlling = TerminalFocusPulseController(),
         notificationDeliverer: ((String, String, String?) -> Void)? = nil, builtInTerminalWindowOpener: BuiltInTerminalWindowOpener? = nil,
-        currentDate: @escaping () -> Date = Date.init
+        builtInTerminalWindowCloser: BuiltInTerminalWindowCloser? = nil, currentDate: @escaping () -> Date = Date.init
     ) {
         self.store = store
         projectsRootDirectoryURL = projectsRootDirectory
@@ -179,6 +181,12 @@ public final class WorkspaceOrchestrator {
                     userInfo: [
                         IPCNotification.terminalSessionIDUserInfoKey: sessionID, IPCNotification.terminalAttachmentModeUserInfoKey: mode.rawValue,
                     ], options: [.deliverImmediately])
+            }
+        self.builtInTerminalWindowCloser =
+            builtInTerminalWindowCloser ?? { sessionID in
+                DistributedNotificationCenter.default().postNotificationName(
+                    IPCNotification.closeTerminalSessionWindow, object: nil, userInfo: [IPCNotification.terminalSessionIDUserInfoKey: sessionID],
+                    options: [.deliverImmediately])
             }
         self.currentDate = currentDate
         if ProcessInfo.processInfo.environment["DEBUG"] == "1" { fputs("spaces: DEBUG=1 enabled (browser/cycle profiling active)\n", stderr) }
@@ -893,11 +901,17 @@ public final class WorkspaceOrchestrator {
         let settings = try loadWorkspaceSettings(project: project, workspace: workspace)
         let processes = try store.runningProcesses(workspaceID: workspace.id)
         var closedManagedTerminalWindowIDs = Set<Int>()
+        var closedBuiltInTerminalSessionIDs = Set<String>()
         var skippedStopScriptBecauseWorkspaceDirectoryMissing = false
         for process in processes {
             if isManagedTerminalApp(process.terminalApp) {
                 _ = try? closeTrackedItermTerminalContainer(process)
                 if let windowID = process.windowID { closedManagedTerminalWindowIDs.insert(windowID) }
+                if terminalHost(for: process.terminalApp) == .spaces, let sessionID = process.terminalNativeID ?? process.terminalTrackingID,
+                    !sessionID.isEmpty
+                {
+                    closedBuiltInTerminalSessionIDs.insert(sessionID)
+                }
                 if let pid = resolvedRuntimePID(for: process) { terminateProcessGroup(pid: pid) }
             } else if let pid = resolvedRuntimePID(for: process) {
                 terminateProcessGroup(pid: pid)
@@ -921,6 +935,11 @@ public final class WorkspaceOrchestrator {
             }
             if window.role == "terminal", isManagedTerminalApp(window.app) {
                 if let windowID = window.windowID, closedManagedTerminalWindowIDs.contains(windowID) { continue }
+                if terminalHost(for: window.app) == .spaces, let sessionID = window.terminalNativeID ?? window.terminalTrackingID,
+                    closedBuiltInTerminalSessionIDs.contains(sessionID)
+                {
+                    continue
+                }
                 _ = try? closeTrackedItermTerminalWindow(window)
                 continue
             }
@@ -2153,6 +2172,11 @@ public final class WorkspaceOrchestrator {
 
     private func closeTrackedItermTerminalContainer(_ process: RunningProcessRecord) throws -> Bool {
         guard isManagedTerminalApp(process.terminalApp) else { return false }
+        if terminalHost(for: process.terminalApp) == .spaces {
+            guard let sessionID = process.terminalNativeID ?? process.terminalTrackingID, !sessionID.isEmpty else { return false }
+            builtInTerminalWindowCloser(sessionID)
+            return true
+        }
         if terminalHost(for: process.terminalApp) == .ghostty {
             if let containerID = try resolvedGhosttyContainerID(
                 storedContainerID: process.terminalContainerID, terminalNativeID: process.terminalNativeID)
@@ -2168,6 +2192,11 @@ public final class WorkspaceOrchestrator {
     }
 
     private func closeTrackedItermTerminalWindow(_ trackedWindow: WindowRecord) throws -> Bool {
+        if terminalHost(for: trackedWindow.app) == .spaces {
+            guard let sessionID = trackedWindow.terminalNativeID ?? trackedWindow.terminalTrackingID, !sessionID.isEmpty else { return false }
+            builtInTerminalWindowCloser(sessionID)
+            return true
+        }
         if terminalHost(for: trackedWindow.app) == .ghostty {
             if let containerID = try resolvedGhosttyContainerID(
                 storedContainerID: trackedWindow.terminalContainerID, terminalNativeID: trackedWindow.terminalNativeID)
@@ -5277,9 +5306,7 @@ public final class WorkspaceOrchestrator {
         let sessionName = processTmuxSessionName(workspaceID: workspaceID, processName: process.templateName)
         if tmux.hasSession(named: sessionName) { try? tmux.killSession(named: sessionName) }
 
-        if let terminalWindow = try store.windows(workspaceID: workspaceID).first(where: {
-            ($0.windowID != nil && $0.windowID == process.windowID) || ($0.tmuxWindowID != nil && $0.tmuxWindowID == process.tmuxWindowID)
-        }) {
+        if let terminalWindow = try store.windows(workspaceID: workspaceID).first(where: { matchesTrackedTerminalWindow($0, process: process) }) {
             if terminalWindow.role == "terminal", isManagedTerminalApp(terminalWindow.app) {
                 if terminalWindow.windowID != closedManagedTerminalWindowID { _ = try? closeTrackedItermTerminalWindow(terminalWindow) }
             } else if let windowID = terminalWindow.windowID {
