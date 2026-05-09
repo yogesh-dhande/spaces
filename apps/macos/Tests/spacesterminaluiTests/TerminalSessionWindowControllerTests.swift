@@ -238,6 +238,38 @@ final class TerminalSessionWindowControllerTests: XCTestCase {
         XCTAssertTrue(controller.validateUserInterfaceItem(ValidatedItem(action: #selector(NSText.selectAll(_:)))))
     }
 
+    @MainActor func testFallbackWindowPreservesSelectionAndScrollOffsetWhenNewOutputArrives() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+        try TerminalSessionPersistence.writeLaunchConfiguration(
+            .init(
+                sessionID: "session-scrollback", title: "scrollback", workingDirectory: "/tmp/work", shell: "/bin/zsh", command: "tail -f log",
+                createdAt: "2026-05-09T00:00:00Z"), paths: paths)
+        try TerminalSessionPersistence.writeRuntimeState(
+            .init(sessionID: "session-scrollback", servicePID: 1, childPID: 2, state: .running, updatedAt: "2026-05-09T00:00:01Z"), paths: paths)
+        let initialOutput = (0..<240).map { "line-\($0)" }.joined(separator: "\n") + "\n"
+        try initialOutput.write(toFile: paths.outputPath, atomically: true, encoding: .utf8)
+
+        let controller = TerminalSessionWindowController(sessionID: "session-scrollback", paths: paths)
+        controller.show()
+        controller.debugSelectRenderedRange(NSRange(location: 12, length: 6))
+        controller.debugScrollOutputToOffsetFromBottom(140)
+        let initialOffset = controller.debugOutputOffsetFromBottom
+
+        let updatedOutput = initialOutput + "tail-a\ntail-b\ntail-c\n"
+        try updatedOutput.write(toFile: paths.outputPath, atomically: true, encoding: .utf8)
+
+        controller.debugForceRefresh()
+
+        XCTAssertEqual(controller.debugSelectedRange.location, 12)
+        XCTAssertEqual(controller.debugSelectedRange.length, 6)
+        XCTAssertGreaterThan(controller.debugOutputOffsetFromBottom, 64)
+        XCTAssertLessThan(abs(controller.debugOutputOffsetFromBottom - initialOffset), 48)
+    }
+
     @MainActor func testWindowCloseInvokesCleanupCallback() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)

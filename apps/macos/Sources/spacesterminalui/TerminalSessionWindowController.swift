@@ -9,6 +9,12 @@ import spacesterminalghostty
         case outputFallback
     }
 
+    private struct OutputViewportState {
+        let wasPinnedToBottom: Bool
+        let offsetFromBottom: CGFloat
+        let selectedRange: NSRange
+    }
+
     private let sessionID: String
     private let paths: TerminalSessionPaths
     private let launchConfiguration: TerminalSessionLaunchConfiguration?
@@ -443,11 +449,12 @@ import spacesterminalghostty
 
             guard visibleRenderer != .ghosttyOwner else { return }
             if output != lastRenderedOutput {
+                let viewportState = captureOutputViewportState()
                 outputView.string = output
                 if let textContainer = outputView.textContainer { outputView.layoutManager?.ensureLayout(for: textContainer) }
                 outputView.sizeToFit()
                 lastRenderedOutput = output
-                scrollOutputToBottom()
+                restoreOutputViewportState(viewportState)
             }
         } catch {
             summaryLabel.stringValue = "Unable to load terminal session metadata."
@@ -546,6 +553,33 @@ import spacesterminalghostty
     private func scrollOutputToBottom() {
         let length = outputView.string.utf16.count
         outputView.scrollRangeToVisible(NSRange(location: length, length: 0))
+    }
+
+    private func captureOutputViewportState() -> OutputViewportState {
+        let visibleRect = outputScrollView.contentView.documentVisibleRect
+        let documentHeight = outputView.bounds.height
+        let offsetFromBottom = max(0, documentHeight - visibleRect.maxY)
+        return OutputViewportState(
+            wasPinnedToBottom: offsetFromBottom <= 24, offsetFromBottom: offsetFromBottom, selectedRange: outputView.selectedRange())
+    }
+
+    private func restoreOutputViewportState(_ state: OutputViewportState) {
+        let outputLength = outputView.string.utf16.count
+        let clampedLocation = min(state.selectedRange.location, outputLength)
+        let remainingLength = max(0, outputLength - clampedLocation)
+        let clampedLength = min(state.selectedRange.length, remainingLength)
+        outputView.setSelectedRange(NSRange(location: clampedLocation, length: clampedLength))
+
+        guard !state.wasPinnedToBottom, let documentView = outputScrollView.documentView else {
+            scrollOutputToBottom()
+            return
+        }
+
+        let visibleRect = outputScrollView.contentView.documentVisibleRect
+        let maxOriginY = max(0, documentView.bounds.height - visibleRect.height)
+        let targetOriginY = max(0, maxOriginY - state.offsetFromBottom)
+        outputScrollView.contentView.scroll(to: NSPoint(x: 0, y: min(targetOriginY, maxOriginY)))
+        outputScrollView.reflectScrolledClipView(outputScrollView.contentView)
     }
 
     private func constrainWindowToVisibleFrame(_ window: NSWindow) {
@@ -656,4 +690,18 @@ import spacesterminalghostty
     var debugShowsTitleLabel: Bool { !titleLabel.isHidden }
     var debugInputStatus: String { inputStatusLabel.stringValue }
     var debugInputFieldValue: String { inputField.stringValue }
+    func debugSelectRenderedRange(_ range: NSRange) { outputView.setSelectedRange(range) }
+    var debugSelectedRange: NSRange { outputView.selectedRange() }
+    func debugScrollOutputToOffsetFromBottom(_ offset: CGFloat) {
+        guard let documentView = outputScrollView.documentView else { return }
+        let visibleRect = outputScrollView.contentView.documentVisibleRect
+        let maxOriginY = max(0, documentView.bounds.height - visibleRect.height)
+        let targetOriginY = max(0, maxOriginY - offset)
+        outputScrollView.contentView.scroll(to: NSPoint(x: 0, y: min(targetOriginY, maxOriginY)))
+        outputScrollView.reflectScrolledClipView(outputScrollView.contentView)
+    }
+    var debugOutputOffsetFromBottom: CGFloat {
+        let visibleRect = outputScrollView.contentView.documentVisibleRect
+        return max(0, outputView.bounds.height - visibleRect.maxY)
+    }
 }
