@@ -12,6 +12,7 @@ Build, test, and release workflows for the Spaces monorepo. For product overview
 - [`AGENTS.md`](AGENTS.md): how coding agents should write, verify, and document changes
 - [`apps/macos/spec.md`](apps/macos/spec.md): expected product behavior and UX
 - [`apps/macos/docs/architecture.md`](apps/macos/docs/architecture.md): module boundaries, data model, and implementation rationale
+- [`apps/macos/docs/terminal.md`](apps/macos/docs/terminal.md): built-in terminal and libghostty integration notes, constraints, and verification guidance
 - [`design.md`](design.md): visual system and interaction patterns
 - [`apps/web/app/docs`](apps/web/app/docs): user-facing product and CLI documentation
 

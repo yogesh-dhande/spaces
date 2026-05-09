@@ -1,6 +1,6 @@
 # Architecture
 
-This document describes how Spaces is built and why: module boundaries, storage, runtime flows, external integrations, and the rationale behind the major design choices. User-visible behavior belongs in [spec.md](../spec.md).
+This document describes how Spaces is built and why: module boundaries, storage, runtime flows, external integrations, and the rationale behind the major design choices. User-visible behavior belongs in [spec.md](../spec.md). Built-in terminal integration details live in [terminal.md](terminal.md).
 
 ## System Overview
 Spaces is a macOS Swift app and CLI built around a shared orchestration layer.

@@ -1,0 +1,150 @@
+# Built-in Terminal
+
+This document captures the current libghostty-backed terminal integration in Spaces: what it is, how it is wired, what constraints shaped it, and what remains intentionally out of scope for this branch. User-facing behavior belongs in [spec.md](../spec.md). Module boundaries and broader app architecture belong in [architecture.md](architecture.md).
+
+## Scope
+- Spaces supports two built-in terminal backends:
+  - `script-pty`
+  - `ghostty-embedded`
+- `ghostty-embedded` is the native terminal path for Spaces-owned windows.
+- iTerm2 and Ghostty external-host integrations still exist on this branch and remain selectable overrides.
+
+## Why libghostty Owns the Session
+- A built-in owner window cannot be just a renderer wrapped around an unrelated PTY daemon.
+- `spaces terminal send`, `spaces terminal key`, `spaces terminal tail`, takeover, and owner or viewer attachment all need one terminal runtime to own:
+  - the PTY
+  - terminal parsing and modes
+  - raw output capture
+  - raw input injection
+  - render-state updates
+- Because of that, the `ghostty-embedded` path is app-hosted and session-backed. The visible macOS owner window and the CLI control plane talk to the same underlying libghostty session.
+
+## Runtime Shape
+- `spacesterminalcore` owns session records, client records, attachment persistence, output paths, and control protocol types.
+- `spacesterminalruntime` chooses the backend runtime for a session.
+- `spacesterminalghostty` owns libghostty artifact discovery, session host behavior, clipboard hooks, runtime callbacks, and the native terminal view.
+- `spacesterminalui` owns the window controller shell and local owner or viewer attachment UX.
+
+The `ghostty-embedded` session path is:
+1. `spaces terminal command --backend ghostty-embedded` persists launch metadata.
+2. The running app creates or reuses a `GhosttyEmbeddedSessionHost`.
+3. The host starts one `GhosttyEmbeddedTerminalView`, one control socket, one output log, and one runtime-state refresh loop.
+4. Owner windows attach the live libghostty surface.
+5. Viewer windows stay passive and read from the tailed session output until they take over.
+
+## Session Files
+Each session lives under `~/.spaces/terminal/sessions/<session-id>/` and keeps:
+- `metadata.json`: launch configuration and declared backend
+- `state.json`: live runtime state, including backend and child PID
+- `output.log`: append-only terminal output used by `tail`
+- `clients.json`: known client identities
+- `attachments.json`: owner or viewer attachment history
+- `control.sock`: local control-plane socket
+
+The control socket path is shortened through `TerminalSessionPaths` so isolated `SPACES_DB_PATH` roots do not exceed Unix socket path limits.
+
+## Additive libghostty Surface
+Spaces depends on an additive patch strategy rather than a behavior fork.
+
+The current integration assumes these exported hooks exist:
+- `ghostty_surface_set_data_callback(...)`
+  Used to tee raw PTY output into `output.log` for `spaces terminal tail` and passive viewers.
+- `ghostty_surface_send_input_raw(...)`
+  Used for exact control-plane input so `send` and `key` are not forced through paste semantics.
+
+These hooks are important because snapshot-style render reads are not enough for:
+- exact owner-only input injection
+- incremental tail access
+- snapshot-plus-stream attach semantics
+- multi-client session ownership that is separate from one visible macOS window
+
+## Owner and Viewer Model
+- A session can have one active owner client and zero or more viewer clients.
+- Only the owner can:
+  - send text
+  - send keys
+  - hold the live libghostty surface
+  - drive PTY size implicitly through the live owner window
+- Viewer windows:
+  - stay passive
+  - show owner identity
+  - can request takeover
+  - continue using tailed output until ownership changes
+
+The takeover path updates `attachments.json`, moves ownership to the requested client, and rehosts the active libghostty surface without restarting the session.
+
+## Native Window Behavior
+- Active owner windows keep the libghostty surface as the primary experience.
+- Viewer and fallback windows keep more diagnostic metadata because they are not the active terminal surface.
+- The owner path intentionally collapses redundant in-window chrome:
+  - hides the in-window session ID
+  - hides renderer diagnostics
+  - hides empty status rows
+  - uses compact runtime text such as `state` and `child`
+- The native window titlebar remains the primary place for the live terminal title.
+
+## Input, Mouse, and Clipboard
+The active owner surface currently supports:
+- direct keyboard input through the terminal view
+- command-key bindings that libghostty claims
+- raw `send` and `key` from the CLI
+- mouse position and button forwarding
+- scroll-wheel forwarding
+- copy from terminal selection
+- paste from the macOS pasteboard
+
+The headless `ghostty-embedded` backend runtime disables selection clipboard hooks because it is not the user-facing surface. The app-hosted owner path enables clipboard hooks through `GhosttyEmbeddedAppService`.
+
+## Metadata and Runtime State
+`GhosttyEmbeddedSessionHost` persists live runtime state derived from the active surface, including:
+- foreground child PID
+- live title
+- live working directory
+
+The host keeps the last non-nil foreground PID so transient libghostty zeroes do not erase the visible process identity for workspace-launched sessions.
+
+## Current Verification Baseline
+The current branch has verified:
+- `spaces terminal command`
+- `spaces terminal list`
+- `spaces terminal send`
+- `spaces terminal key`
+- `spaces terminal tail`
+- `spaces terminal show`
+- `spaces terminal takeover`
+- owner or viewer attachment persistence
+- owner-window reopen and reuse
+- workspace-process launch into `Spaces` terminal sessions
+- built-in process recovery when only the process row remains
+- built-in process focus and reopen when stale yabai window IDs must be cleared or replaced
+
+## Known Constraints
+- Passive viewer windows still use tailed output rather than a second live libghostty surface.
+- iPhone or VPN clients are intentionally out of scope for this branch.
+- External iTerm2 and Ghostty hosts remain supported overrides on this branch.
+- The Ghostty static archive still emits non-fatal linker warnings about ImGui-related symbols during build.
+
+## Manual Verification
+For branch-local manual checks:
+
+```bash
+export SPACES_DB_PATH="$TMPDIR/spaces-ghostty/spaces.db"
+apps/macos/scripts/setup_ghosttykit.sh
+env SPACES_DB_PATH="$SPACES_DB_PATH" apps/macos/.build/debug/SpacesApp
+env SPACES_DB_PATH="$SPACES_DB_PATH" apps/macos/.build/debug/spaces \
+  terminal command --backend ghostty-embedded --command cat --title verify-ghostty
+env SPACES_DB_PATH="$SPACES_DB_PATH" apps/macos/.build/debug/spaces terminal list
+env SPACES_DB_PATH="$SPACES_DB_PATH" apps/macos/.build/debug/spaces \
+  terminal send <session-id> "hello from ghostty" --newline
+env SPACES_DB_PATH="$SPACES_DB_PATH" apps/macos/.build/debug/spaces \
+  terminal tail <session-id> --lines 10
+env SPACES_DB_PATH="$SPACES_DB_PATH" apps/macos/.build/debug/spaces \
+  terminal show <session-id> --viewer
+env SPACES_DB_PATH="$SPACES_DB_PATH" apps/macos/.build/debug/spaces \
+  terminal takeover <session-id> <viewer-client-id>
+```
+
+## What This Branch Does Not Decide
+- whether external hosts are removed in a later PR
+- whether remote viewer clients should render via libghostty cells, byte streams, or another transport
+- whether one session should ever have more than one simultaneously renderable libghostty surface on macOS
