@@ -2580,6 +2580,7 @@ final class OrchestratorTests: XCTestCase {
         let project = try orchestrator.addProject(dir: projectDir.path)
         let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
         _ = project
+        let queryLog = root.appendingPathComponent("yabai-query.log")
 
         let process = RunningProcessRecord(
             id: "process-spaces-rebound-window", workspaceID: workspace.id, templateName: "web", command: "npm run dev",
@@ -2599,7 +2600,9 @@ final class OrchestratorTests: XCTestCase {
                     try withEnv(name: "YABAI_FOCUSED_ID", value: "888") {
                         try withEnv(name: "YABAI_FOCUSED_APP", value: TerminalHost.spaces.appName) {
                             try withEnv(name: "YABAI_FOCUSED_TITLE", value: "web") {
-                                try orchestrator.focusWorkspaceProcess(workspaceID: workspace.id, processID: process.id)
+                                try withEnv(name: "YABAI_QUERY_LOG_FILE", value: queryLog.path) {
+                                    try orchestrator.focusWorkspaceProcess(workspaceID: workspace.id, processID: process.id)
+                                }
                             }
                         }
                     }
@@ -2615,6 +2618,10 @@ final class OrchestratorTests: XCTestCase {
 
         let updatedWindow = try XCTUnwrap(try store.windows(workspaceID: workspace.id).first(where: { $0.id == "window-spaces-rebound-window" }))
         XCTAssertEqual(updatedWindow.windowID, 888)
+
+        let queryLines = try String(contentsOf: queryLog, encoding: .utf8).split(separator: "\n").map(String.init)
+        XCTAssertEqual(queryLines.filter { $0 == "query --windows --window" }.count, 1)
+        XCTAssertFalse(queryLines.contains("query --windows"))
     }
 
     func testFocusWorkspaceProcessUsesTrackedBuiltInSpacesWindowWhenLiveWindowIDExists() throws {
@@ -4935,18 +4942,28 @@ final class OrchestratorTests: XCTestCase {
         focused_app="${YABAI_FOCUSED_APP:-iTerm2}"
         focused_title="${YABAI_FOCUSED_TITLE:-focused}"
         focused_json="{\\"id\\":${focused_id},\\"pid\\":11,\\"app\\":\\"${focused_app}\\",\\"title\\":\\"${focused_title}\\",\\"space\\":1,\\"display\\":1,\\"is-sticky\\":false,\\"is-hidden\\":false,\\"is-visible\\":true,\\"is-native-fullscreen\\":false}"
+        query_log_file="${YABAI_QUERY_LOG_FILE:-}"
 
         if [[ "$args" == *"query --displays"* ]]; then
+          if [[ -n "$query_log_file" ]]; then
+            echo "query --displays" >> "$query_log_file"
+          fi
           echo '[{"index":1},{"index":2}]'
           exit 0
         fi
 
         if [[ "$args" == *"query --spaces"* ]]; then
+          if [[ -n "$query_log_file" ]]; then
+            echo "query --spaces" >> "$query_log_file"
+          fi
           echo '[{"index":3,"display":2},{"index":2,"display":1},{"index":1,"display":1}]'
           exit 0
         fi
 
         if [[ "$args" == *"query --windows --window"* ]]; then
+          if [[ -n "$query_log_file" ]]; then
+            echo "query --windows --window" >> "$query_log_file"
+          fi
           if [[ "${YABAI_FOCUSED_NONE:-}" == "1" ]]; then
             echo "no focused window" >&2
             exit 1
@@ -4956,6 +4973,9 @@ final class OrchestratorTests: XCTestCase {
         fi
 
         if [[ "$args" == *"query --windows"* ]]; then
+          if [[ -n "$query_log_file" ]]; then
+            echo "query --windows" >> "$query_log_file"
+          fi
           if [[ -n "${YABAI_WINDOWS_JSON:-}" ]]; then
             echo "$YABAI_WINDOWS_JSON"
           else

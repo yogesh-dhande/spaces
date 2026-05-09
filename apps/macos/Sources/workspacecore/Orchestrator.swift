@@ -2374,9 +2374,8 @@ public final class WorkspaceOrchestrator {
         if terminalHost == .spaces {
             if let windowID, (try? yabai.focusWindow(id: windowID)) ?? false { return .existingWindow }
             guard case .session(let sessionID)? = providerIdentity else { return .unavailable }
-            let snapshot = bestEffortYabaiWindowSnapshot()
             builtInTerminalWindowOpener(sessionID, .owner)
-            let capturedWindowID = try? captureNewAppWindowID(snapshot: snapshot, appName: terminalAppName(for: terminalHost))
+            let capturedWindowID = try? captureSummonedBuiltInTerminalWindowID(appName: terminalAppName(for: terminalHost))
             return .reopenedSession(windowID: capturedWindowID)
         }
         guard let terminalAdapter = terminalAdapter(for: terminalHost) else { return .unavailable }
@@ -4443,6 +4442,11 @@ public final class WorkspaceOrchestrator {
 
     private func captureNewAppWindowID(snapshot: [YabaiWindow], appName: String) throws -> Int? {
         try captureNewAppWindow(snapshot: snapshot, appName: appName)?.id
+    }
+
+    private func captureSummonedBuiltInTerminalWindowID(appName: String) throws -> Int? {
+        if let focused = try? yabai.focusedWindow(), focused.app == appName { return focused.id }
+        return try yabai.listWindows().filter { $0.app == appName }.sorted { $0.id > $1.id }.first?.id
     }
 
     private func bestEffortYabaiWindowSnapshot() -> [YabaiWindow] { (try? yabai.listWindows()) ?? [] }
