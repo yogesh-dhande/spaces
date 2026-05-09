@@ -18,7 +18,6 @@ Build, test, and release workflows for the Spaces monorepo. For product overview
 ## Requirements
 - macOS 14+
 - `yabai`, `tmux`
-- iTerm2 or Ghostty
 - Google Chrome
 - Accessibility permission (handled via the in-app setup flow on first launch)
 

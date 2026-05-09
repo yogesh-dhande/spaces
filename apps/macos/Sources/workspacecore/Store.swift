@@ -806,11 +806,7 @@ public final class SQLiteStore {
         try setSetting(key: SettingsKey.appPortRangeEnd, value: String(config.portRange.end))
     }
 
-    private static func detectDefaultTerminalHost() -> TerminalHost {
-        if GhosttyAdapter().isAvailable() { return .ghostty }
-        if Iterm2Adapter().isAvailable() { return .iterm2 }
-        return TerminalHost(rawValue: SettingsKey.defaultAppTerminalHost) ?? .iterm2
-    }
+    private static func detectDefaultTerminalHost() -> TerminalHost { TerminalHost(rawValue: SettingsKey.defaultAppTerminalHost) ?? .spaces }
 
     // MARK: - Agent Windows
 

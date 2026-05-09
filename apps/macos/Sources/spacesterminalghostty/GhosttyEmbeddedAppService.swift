@@ -40,7 +40,7 @@ import GhosttyKit
 
         var runtimeConfig = ghostty_runtime_config_s()
         runtimeConfig.userdata = Unmanaged.passUnretained(self).toOpaque()
-        runtimeConfig.supports_selection_clipboard = false
+        runtimeConfig.supports_selection_clipboard = true
         runtimeConfig.wakeup_cb = { _ in DispatchQueue.main.async { GhosttyEmbeddedAppService.shared.tick() } }
         runtimeConfig.action_cb = { _, target, action in
             guard target.tag == GHOSTTY_TARGET_SURFACE else { return true }
@@ -48,9 +48,11 @@ import GhosttyKit
             GhosttyEmbeddedAppService.shared.handleAction(event, target: target)
             return true
         }
-        runtimeConfig.read_clipboard_cb = { _, _, _ in false }
-        runtimeConfig.confirm_read_clipboard_cb = { _, _, _, _ in }
-        runtimeConfig.write_clipboard_cb = { _, _, _, _, _ in }
+        runtimeConfig.read_clipboard_cb = { userdata, _, state in GhosttyClipboardBridge.readClipboard(userdata: userdata, state: state) }
+        runtimeConfig.confirm_read_clipboard_cb = { userdata, content, state, _ in
+            GhosttyClipboardBridge.confirmReadClipboard(userdata: userdata, content: content, state: state)
+        }
+        runtimeConfig.write_clipboard_cb = { _, _, content, len, _ in GhosttyClipboardBridge.writeClipboard(content: content, len: UInt(len)) }
         runtimeConfig.close_surface_cb = { userdata, _ in
             guard let userdata else { return }
             let view = Unmanaged<GhosttyEmbeddedTerminalView>.fromOpaque(userdata).takeUnretainedValue()

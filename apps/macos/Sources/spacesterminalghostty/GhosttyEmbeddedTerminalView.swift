@@ -179,6 +179,34 @@ import spacesterminalcore
         super.flagsChanged(with: event)
     }
 
+    public override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        guard event.type == .keyDown, let surface else { return false }
+        let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        let hasActionModifier = flags.contains(.command) || flags.contains(.control) || flags.contains(.option)
+        guard hasActionModifier else { return false }
+
+        var input = makeGhosttyKeyEvent(for: event, action: event.isARepeat ? GHOSTTY_ACTION_REPEAT : GHOSTTY_ACTION_PRESS)
+        input.text = nil
+        guard ghostty_surface_key_is_binding(surface, input, nil) else { return false }
+        _ = ghostty_surface_key(surface, input)
+        return true
+    }
+
+    @objc public func copy(_ sender: Any?) {
+        guard GhosttyClipboardBridge.copySelection(from: surface) else {
+            NSSound.beep()
+            return
+        }
+    }
+
+    @objc public func paste(_ sender: Any?) {
+        guard let text = NSPasteboard.general.string(forType: .string), !text.isEmpty else {
+            NSSound.beep()
+            return
+        }
+        sendRawBytes(Data(text.utf8))
+    }
+
     public func sendRawBytes(_ data: Data) {
         guard let surface, !data.isEmpty else { return }
         data.withUnsafeBytes { rawBuffer in
@@ -296,13 +324,7 @@ import spacesterminalcore
 
     private func sendGhosttyKey(event: NSEvent, action: ghostty_input_action_e) -> Bool {
         guard let surface else { return false }
-        var input = ghostty_input_key_s()
-        input.action = action
-        input.mods = ghostty_surface_key_translation_mods(surface, ghosttyModifiers(from: event.modifierFlags))
-        input.consumed_mods = GHOSTTY_MODS_NONE
-        input.keycode = UInt32(event.keyCode)
-        input.unshifted_codepoint = event.charactersIgnoringModifiers?.unicodeScalars.first.map(\.value) ?? 0
-        input.composing = false
+        var input = makeGhosttyKeyEvent(for: event, action: action)
 
         if let characters = event.characters, !characters.isEmpty {
             return characters.withCString { charactersPointer in
@@ -313,6 +335,18 @@ import spacesterminalcore
 
         input.text = nil
         return ghostty_surface_key(surface, input)
+    }
+
+    private func makeGhosttyKeyEvent(for event: NSEvent, action: ghostty_input_action_e) -> ghostty_input_key_s {
+        var input = ghostty_input_key_s()
+        input.action = action
+        input.mods = ghostty_surface_key_translation_mods(surface, ghosttyModifiers(from: event.modifierFlags))
+        input.consumed_mods = GHOSTTY_MODS_NONE
+        input.keycode = UInt32(event.keyCode)
+        input.unshifted_codepoint = event.charactersIgnoringModifiers?.unicodeScalars.first.map(\.value) ?? 0
+        input.composing = false
+        input.text = nil
+        return input
     }
 
     private func modifierKeyAction(for event: NSEvent) -> ghostty_input_action_e {

@@ -8,17 +8,17 @@ final class AppConfigStoreTests: XCTestCase {
         let store = try makeTemporaryStore()
         let config = try store.appConfig()
         XCTAssertNil(config.editor)
-        XCTAssertEqual(config.terminalHost, .iterm2)
+        XCTAssertEqual(config.terminalHost, .spaces)
         XCTAssertEqual(config.processShell, .zsh)
         XCTAssertEqual(config.portRange.start, 20000)
         XCTAssertEqual(config.portRange.end, 30000)
     }
 
-    // Tests first-run config prefers Ghostty when no terminal host setting has been saved yet.
-    func testDefaultsPreferGhosttyOnFirstRun() throws {
-        let store = try makeTemporaryStore(defaultTerminalHostResolver: { .ghostty })
+    // Tests first-run config uses the built-in Spaces terminal when no terminal host setting has been saved yet.
+    func testDefaultsPreferSpacesOnFirstRun() throws {
+        let store = try makeTemporaryStore(defaultTerminalHostResolver: { .spaces })
         let config = try store.appConfig()
-        XCTAssertEqual(config.terminalHost, .ghostty)
+        XCTAssertEqual(config.terminalHost, .spaces)
     }
 
     // Tests round trip by arranging representative inputs and asserting the expected result.

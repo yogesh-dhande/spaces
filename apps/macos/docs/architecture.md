@@ -318,7 +318,7 @@ It also lets lifecycle state stay explicit while runtime health is derived from 
 - Process launch and terminal recovery use tmux so the process lifetime can outlive a missing terminal window and be reattached later.
 - Immediate process-start failures should be surfaced from the recent tmux pane output itself so launch errors report the real command failure instead of a follow-on tmux attach error.
 - Core external dependencies that the GUI invokes directly, such as `tmux`, `yabai`, and `git`, are resolved through a shared executable-locator path instead of relying on the Finder app environment to provide a complete `PATH`.
-- Global app settings include the selected terminal host, and the GUI is the configuration surface for that value.
+- Global app settings include the selected terminal host, defaulting to `Spaces`, and the GUI is the configuration surface for that value.
 - App-level settings such as terminal host and shell-mode process shell are persisted in the shared store but are configured through the app rather than through `spaces`.
 - Global app settings also store the app-toggle hotkey and the separate command-palette hotkey.
 - Global settings also store the shared window focus pulse color and enabled state behind window-scoped keys.

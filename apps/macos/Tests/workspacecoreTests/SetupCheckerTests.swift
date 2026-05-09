@@ -179,12 +179,12 @@ final class SetupCheckerTests: XCTestCase {
             if [[ "$*" == *"query --windows"* ]]; then echo '[{"id":1}]'; exit 0; fi
             exit 1
             """
-        let mock = MockAvailableIterm2()
-        mock.availableResult = true
         try withMockCommands(["yabai": yabaiScript]) {
             let tmux = MockAvailableTmux()
             tmux.availableResult = true
-            let checker = SetupChecker(iterm2: mock, ghostty: MockAvailableGhostty(), tmux: tmux)
+            let iterm = MockAvailableIterm2()
+            iterm.availableResult = true
+            let checker = SetupChecker(iterm2: iterm, ghostty: MockAvailableGhostty(), tmux: tmux)
             let results = checker.runAll()
             XCTAssertEqual(results.count, 5)
             XCTAssertTrue(results.allSatisfy(\.passed))
@@ -214,14 +214,12 @@ final class SetupCheckerTests: XCTestCase {
             echo "unexpected command: $*" >&2
             exit 1
             """
-        let mock = MockAvailableIterm2()
-        mock.availableResult = true
         try withMockCommands(["yabai": yabaiScript]) {
             let tmux = MockAvailableTmux()
             tmux.availableResult = true
-            let checker = SetupChecker(iterm2: mock, ghostty: MockAvailableGhostty(), tmux: tmux)
+            let checker = SetupChecker(iterm2: MockAvailableIterm2(), ghostty: MockAvailableGhostty(), tmux: tmux)
             let results = checker.runStartupBlockingChecks()
-            XCTAssertEqual(results.map(\.id), [.terminalInstalled, .tmuxInstalled, .yabaiInstalled])
+            XCTAssertEqual(results.map(\.id), [.tmuxInstalled, .yabaiInstalled])
             XCTAssertTrue(results.allSatisfy(\.passed))
         }
     }

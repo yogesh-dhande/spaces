@@ -30,15 +30,9 @@ private enum SetupStepAction {
 @MainActor final class SetupManager: NSObject {
     private let checker: any SetupChecking
 
-    // Steps 3 & 4 are combined: yabai's --spaces query also requires Accessibility, so
+    // Steps 2 & 3 are combined: yabai's --spaces query also requires Accessibility, so
     // "service running" and "accessibility granted" cannot be detected independently.
     private let steps: [SetupStep] = [
-        SetupStep(
-            ids: [.terminalInstalled], icon: "terminal", title: "Install a terminal",
-            body:
-                "Spaces opens terminal processes in iTerm2 or Ghostty. If neither is installed, install Ghostty with Homebrew or from the Ghostty website.",
-            action: .commandAndURL(
-                command: "brew install --cask ghostty", url: URL(string: "https://ghostty.org/")!, urlLabel: "Open Ghostty Website")),
         SetupStep(
             ids: [.tmuxInstalled], icon: "rectangle.split.1x2", title: "Install tmux",
             body: "Spaces uses tmux to keep process sessions recoverable when terminal windows close.", action: .copyCommand("brew install tmux")),
@@ -349,13 +343,7 @@ private enum SetupStepAction {
             box.isHidden = false
             box.layer?.cornerRadius = 0
             box.layer?.backgroundColor = NSColor.clear.cgColor
-
-            let actionTitle: String
-            switch step.ids.first {
-            case .terminalInstalled: actionTitle = "Download Ghostty"
-            default: actionTitle = "Open System Settings"
-            }
-            let openBtn = NSButton(title: actionTitle, target: self, action: #selector(openURLPressed(_:)))
+            let openBtn = NSButton(title: "Open System Settings", target: self, action: #selector(openURLPressed(_:)))
             openBtn.bezelStyle = .rounded
             openBtn.translatesAutoresizingMaskIntoConstraints = false
             openBtn.setAccessibilityIdentifier(url.absoluteString)

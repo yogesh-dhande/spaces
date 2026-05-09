@@ -8,11 +8,9 @@ import systembridge
     @Test func startupSkipsDeferredYabaiFailure() {
         let manager = SetupManager(
             checker: MockSetupChecker(
-                startupBlockingResults: [
-                    .init(id: .terminalInstalled, passed: true), .init(id: .tmuxInstalled, passed: true), .init(id: .yabaiInstalled, passed: true),
-                ],
+                startupBlockingResults: [.init(id: .tmuxInstalled, passed: true), .init(id: .yabaiInstalled, passed: true)],
                 allResults: [
-                    .init(id: .terminalInstalled, passed: true), .init(id: .tmuxInstalled, passed: true), .init(id: .yabaiInstalled, passed: true),
+                    .init(id: .terminalInstalled, passed: false), .init(id: .tmuxInstalled, passed: true), .init(id: .yabaiInstalled, passed: true),
                     .init(id: .yabaiServiceRunning, passed: false), .init(id: .yabaiAccessibility, passed: false),
                 ]))
         var completed = false
@@ -29,11 +27,9 @@ import systembridge
     @Test func deferredStartShowsYabaiStep() {
         let manager = SetupManager(
             checker: MockSetupChecker(
-                startupBlockingResults: [
-                    .init(id: .terminalInstalled, passed: true), .init(id: .tmuxInstalled, passed: true), .init(id: .yabaiInstalled, passed: true),
-                ],
+                startupBlockingResults: [.init(id: .tmuxInstalled, passed: true), .init(id: .yabaiInstalled, passed: true)],
                 allResults: [
-                    .init(id: .terminalInstalled, passed: true), .init(id: .tmuxInstalled, passed: true), .init(id: .yabaiInstalled, passed: true),
+                    .init(id: .terminalInstalled, passed: false), .init(id: .tmuxInstalled, passed: true), .init(id: .yabaiInstalled, passed: true),
                     .init(id: .yabaiServiceRunning, passed: false), .init(id: .yabaiAccessibility, passed: false),
                 ]))
         var completed = false
@@ -50,11 +46,9 @@ import systembridge
     @Test func startupBlockingFailureShowsSetupScreenWithCheckingStatus() {
         let manager = SetupManager(
             checker: MockSetupChecker(
-                startupBlockingResults: [
-                    .init(id: .terminalInstalled, passed: true), .init(id: .tmuxInstalled, passed: false), .init(id: .yabaiInstalled, passed: true),
-                ],
+                startupBlockingResults: [.init(id: .tmuxInstalled, passed: false), .init(id: .yabaiInstalled, passed: true)],
                 allResults: [
-                    .init(id: .terminalInstalled, passed: true), .init(id: .tmuxInstalled, passed: false), .init(id: .yabaiInstalled, passed: true),
+                    .init(id: .terminalInstalled, passed: false), .init(id: .tmuxInstalled, passed: false), .init(id: .yabaiInstalled, passed: true),
                     .init(id: .yabaiServiceRunning, passed: true), .init(id: .yabaiAccessibility, passed: true),
                 ]))
 
