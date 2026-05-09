@@ -16,6 +16,7 @@ import spacesterminalghostty
     private let rendererMode: TerminalRendererMode
     private let backend: TerminalSessionBackendKind
     private var preferredAttachmentMode: TerminalAttachmentMode
+    private let titleLabel = NSTextField(labelWithString: "")
     private let summaryLabel = NSTextField(labelWithString: "")
     private let stateLabel = NSTextField(labelWithString: "")
     private let rendererLabel = NSTextField(labelWithString: "")
@@ -31,6 +32,7 @@ import spacesterminalghostty
     private let outputView = NSTextView(frame: NSRect(x: 0, y: 0, width: 880, height: 400))
     private let outputScrollView = NSScrollView()
     private let terminalContainer = NSView()
+    private let headerStackView = NSStackView()
     private let bodyStackView = NSStackView()
     private let sendInputAction: @Sendable (String, Bool) throws -> TerminalControlResponse
     private let sendKeyAction: @Sendable (String) throws -> TerminalControlResponse
@@ -161,7 +163,7 @@ import spacesterminalghostty
         contentView.translatesAutoresizingMaskIntoConstraints = false
         window.contentView = contentView
 
-        let titleLabel = NSTextField(labelWithString: sessionID)
+        titleLabel.stringValue = sessionID
         titleLabel.font = .monospacedSystemFont(ofSize: 12, weight: .medium)
         titleLabel.lineBreakMode = .byTruncatingMiddle
         titleLabel.translatesAutoresizingMaskIntoConstraints = false
@@ -195,6 +197,7 @@ import spacesterminalghostty
         inputStatusLabel.font = .systemFont(ofSize: 12)
         inputStatusLabel.textColor = .secondaryLabelColor
         inputStatusLabel.translatesAutoresizingMaskIntoConstraints = false
+        inputStatusLabel.isHidden = true
 
         for button in [sendButton, interruptButton, newlineButton, takeoverButton] {
             button.translatesAutoresizingMaskIntoConstraints = false
@@ -259,6 +262,15 @@ import spacesterminalghostty
         takeoverRowStackView.addArrangedSubview(takeoverButton)
         takeoverButton.widthAnchor.constraint(equalToConstant: 92).isActive = true
 
+        headerStackView.translatesAutoresizingMaskIntoConstraints = false
+        headerStackView.orientation = .vertical
+        headerStackView.alignment = .leading
+        headerStackView.distribution = .fill
+        headerStackView.spacing = 6
+        for view in [titleLabel, summaryLabel, stateLabel, rendererLabel, inputRowStackView, takeoverRowStackView, inputStatusLabel] {
+            headerStackView.addArrangedSubview(view)
+        }
+
         terminalContainer.translatesAutoresizingMaskIntoConstraints = false
         terminalContainer.wantsLayer = true
         terminalContainer.layer?.backgroundColor = NSColor.textBackgroundColor.cgColor
@@ -273,39 +285,14 @@ import spacesterminalghostty
         bodyStackView.addArrangedSubview(outputScrollView)
         outputScrollView.heightAnchor.constraint(greaterThanOrEqualToConstant: 180).isActive = true
 
-        [titleLabel, summaryLabel, stateLabel, rendererLabel, inputRowStackView, takeoverRowStackView, inputStatusLabel, bodyStackView].forEach(
-            contentView.addSubview)
+        [headerStackView, bodyStackView].forEach(contentView.addSubview)
 
         NSLayoutConstraint.activate([
-            titleLabel.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 16),
-            titleLabel.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 16),
-            titleLabel.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -16),
+            headerStackView.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 16),
+            headerStackView.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 16),
+            headerStackView.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -16),
 
-            summaryLabel.topAnchor.constraint(equalTo: titleLabel.bottomAnchor, constant: 6),
-            summaryLabel.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 16),
-            summaryLabel.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -16),
-
-            stateLabel.topAnchor.constraint(equalTo: summaryLabel.bottomAnchor, constant: 6),
-            stateLabel.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 16),
-            stateLabel.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -16),
-
-            rendererLabel.topAnchor.constraint(equalTo: stateLabel.bottomAnchor, constant: 6),
-            rendererLabel.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 16),
-            rendererLabel.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -16),
-
-            inputRowStackView.topAnchor.constraint(equalTo: rendererLabel.bottomAnchor, constant: 12),
-            inputRowStackView.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 16),
-            inputRowStackView.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -16),
-
-            takeoverRowStackView.topAnchor.constraint(equalTo: inputRowStackView.bottomAnchor, constant: 0),
-            takeoverRowStackView.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 16),
-            takeoverRowStackView.trailingAnchor.constraint(lessThanOrEqualTo: contentView.trailingAnchor, constant: -16),
-
-            inputStatusLabel.topAnchor.constraint(equalTo: takeoverRowStackView.bottomAnchor, constant: 6),
-            inputStatusLabel.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 16),
-            inputStatusLabel.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -16),
-
-            bodyStackView.topAnchor.constraint(equalTo: inputStatusLabel.bottomAnchor, constant: 12),
+            bodyStackView.topAnchor.constraint(equalTo: headerStackView.bottomAnchor, constant: 12),
             bodyStackView.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 16),
             bodyStackView.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -16),
             bodyStackView.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -16),
@@ -437,6 +424,7 @@ import spacesterminalghostty
     private func updateInputStatus(message: String, isError: Bool) {
         inputStatusLabel.stringValue = message
         inputStatusLabel.textColor = isError ? .systemRed : .secondaryLabelColor
+        inputStatusLabel.isHidden = message.isEmpty
     }
 
     private func attachLocalClientIfNeeded() {
@@ -465,6 +453,7 @@ import spacesterminalghostty
             terminalContainer.isHidden = true
         }
         let isCompactOwnerChrome = visibleRenderer == .ghosttyOwner && preferredAttachmentMode == .owner
+        titleLabel.isHidden = isCompactOwnerChrome
         rendererLabel.isHidden = isCompactOwnerChrome
     }
 
@@ -591,4 +580,5 @@ import spacesterminalghostty
     var debugShowsInlineControls: Bool { !inputRowStackView.isHidden }
     var debugShowsTakeoverButton: Bool { !takeoverRowStackView.isHidden }
     var debugShowsRendererLabel: Bool { !rendererLabel.isHidden }
+    var debugShowsTitleLabel: Bool { !titleLabel.isHidden }
 }

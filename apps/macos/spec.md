@@ -118,6 +118,7 @@ Spaces focuses those windows; it does not decide their geometry.
 - `ghostty-embedded` owner windows should follow live terminal metadata where possible, including title and working directory updates emitted by the session backend instead of staying frozen at launch-time values.
 - `ghostty-embedded` owner windows should accept direct keyboard input in the terminal surface itself rather than relying on a separate send-input form.
 - `ghostty-embedded` owner windows should prioritize the terminal surface over diagnostic chrome. Backend or attachment details may remain visible in viewer or fallback states, but the active owner window should keep the live terminal as the primary experience.
+- `ghostty-embedded` owner windows should use the native window titlebar for the live session title and collapse redundant in-window session identifiers or renderer diagnostics when the owner surface is active.
 - A terminal session may have one active owner client and one or more passive viewer clients attached at the same time.
 - Only the active owner client may send input or control PTY size.
 - Viewer windows should remain readable, identify the current owner, and be able to take over ownership without restarting the underlying shell session.
