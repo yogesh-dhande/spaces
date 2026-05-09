@@ -2516,6 +2516,55 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertEqual(capture.modes, [.owner])
     }
 
+    func testFocusWorkspaceProcessReopensBuiltInSpacesSessionAndClearsStaleWindowBinding() throws {
+        let store = try makeTemporaryStore()
+        let capture = TerminalOpenCapture()
+        let pulseController = MockTerminalFocusPulseController()
+        let orchestrator = WorkspaceOrchestrator(
+            store: store, iterm: MockIterm2Adapter(), ghostty: MockGhosttyAdapter(), tmux: MockTmuxAdapter(),
+            terminalFocusPulseController: pulseController,
+            builtInTerminalWindowOpener: { sessionID, mode in
+                capture.sessionIDs.append(sessionID)
+                capture.modes.append(mode)
+            })
+        let root = try makeTempDirectory()
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
+        _ = project
+
+        let process = RunningProcessRecord(
+            id: "process-spaces-stale-window", workspaceID: workspace.id, templateName: "web", command: "npm run dev",
+            terminalApp: TerminalHost.spaces.appName, windowID: 777, terminalTrackingID: "spaces-session-stale",
+            terminalNativeID: "spaces-session-stale", terminalContainerID: nil, itermTabIndex: nil, tmuxWindowID: nil, pid: nil, status: .running,
+            logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil)
+        try store.upsert(runningProcess: process)
+        try store.upsert(
+            window: WindowRecord(
+                id: "window-spaces-stale-window", workspaceID: workspace.id, app: TerminalHost.spaces.appName, name: "web", detail: "npm run dev",
+                targetURL: nil, windowID: 777, terminalTrackingID: "spaces-session-stale", terminalNativeID: "spaces-session-stale",
+                terminalContainerID: nil, itermTabIndex: nil, tmuxWindowID: nil, role: "terminal", orderIndex: 200, lastSeenAt: "now"))
+
+        try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) {
+            try withEnv(name: "YABAI_WINDOWS_JSON", value: "[]") {
+                try withEnv(name: "YABAI_FOCUS_FAIL_IDS", value: "777") {
+                    try orchestrator.focusWorkspaceProcess(workspaceID: workspace.id, processID: process.id)
+                }
+            }
+        }
+
+        XCTAssertEqual(capture.sessionIDs, ["spaces-session-stale"])
+        XCTAssertEqual(capture.modes, [.owner])
+        XCTAssertTrue(pulseController.pulsedWindowIDs.isEmpty)
+
+        let updatedProcess = try XCTUnwrap(try store.runningProcesses(workspaceID: workspace.id).first(where: { $0.id == process.id }))
+        XCTAssertNil(updatedProcess.windowID)
+
+        let updatedWindow = try XCTUnwrap(try store.windows(workspaceID: workspace.id).first(where: { $0.id == "window-spaces-stale-window" }))
+        XCTAssertNil(updatedWindow.windowID)
+    }
+
     func testFocusWorkspaceProcessUsesTrackedBuiltInSpacesWindowWhenLiveWindowIDExists() throws {
         let store = try makeTemporaryStore()
         let capture = TerminalOpenCapture()
