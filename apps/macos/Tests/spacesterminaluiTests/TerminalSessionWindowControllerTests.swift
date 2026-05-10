@@ -601,6 +601,26 @@ final class TerminalSessionWindowControllerTests: XCTestCase {
         XCTAssertTrue(controller.validateUserInterfaceItem(ValidatedItem(action: #selector(NSText.selectAll(_:)))))
     }
 
+    @MainActor func testFallbackWindowShowPrefersInteractiveInputFieldAsFirstResponder() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+        try TerminalSessionPersistence.writeLaunchConfiguration(
+            .init(
+                sessionID: "session-fallback-focus", title: "fallback-focus", workingDirectory: "/tmp/work", shell: "/bin/zsh", command: "cat",
+                createdAt: "2026-05-09T00:00:00Z"), paths: paths)
+        try TerminalSessionPersistence.writeRuntimeState(
+            .init(sessionID: "session-fallback-focus", servicePID: 1, childPID: 2, state: .running, updatedAt: "2026-05-09T00:00:01Z"), paths: paths)
+
+        let controller = TerminalSessionWindowController(sessionID: "session-fallback-focus", paths: paths)
+        controller.show()
+
+        XCTAssertTrue(controller.debugFirstResponderTargetsInputField)
+        XCTAssertFalse(controller.debugFirstResponderTargetsOutputView)
+    }
+
     @MainActor func testFallbackWindowPreservesSelectionAndScrollOffsetWhenNewOutputArrives() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -665,6 +685,85 @@ final class TerminalSessionWindowControllerTests: XCTestCase {
 
         XCTAssertGreaterThan(initialHorizontalOffset, 0)
         XCTAssertLessThan(abs(controller.debugOutputHorizontalOffset - initialHorizontalOffset), 32)
+    }
+
+    @MainActor func testFallbackWindowPreservesHorizontalScrollOffsetWhenPinnedToBottom() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+        try TerminalSessionPersistence.writeLaunchConfiguration(
+            .init(
+                sessionID: "session-horizontal-bottom", title: "horizontal-bottom", workingDirectory: "/tmp/work", shell: "/bin/zsh",
+                command: "tail -f log", createdAt: "2026-05-09T00:00:00Z"), paths: paths)
+        try TerminalSessionPersistence.writeRuntimeState(
+            .init(sessionID: "session-horizontal-bottom", servicePID: 1, childPID: 2, state: .running, updatedAt: "2026-05-09T00:00:01Z"),
+            paths: paths)
+        let longLine = String(repeating: "abcdefghij", count: 120)
+        let initialOutput = (0..<20).map { _ in longLine }.joined(separator: "\n") + "\n"
+        try initialOutput.write(toFile: paths.outputPath, atomically: true, encoding: .utf8)
+
+        let controller = TerminalSessionWindowController(sessionID: "session-horizontal-bottom", paths: paths)
+        controller.show()
+        controller.window?.setContentSize(NSSize(width: 760, height: 420))
+        controller.window?.layoutIfNeeded()
+        controller.window?.contentView?.layoutSubtreeIfNeeded()
+        controller.debugScrollOutputHorizontally(to: 220)
+        let initialHorizontalOffset = controller.debugOutputHorizontalOffset
+        let initialBottomOffset = controller.debugOutputOffsetFromBottom
+
+        let updatedOutput = initialOutput + "\(longLine)-tail\n"
+        try updatedOutput.write(toFile: paths.outputPath, atomically: true, encoding: .utf8)
+
+        controller.debugForceRefresh()
+
+        XCTAssertGreaterThan(initialHorizontalOffset, 0)
+        XCTAssertLessThan(abs(controller.debugOutputOffsetFromBottom - initialBottomOffset), 32)
+        XCTAssertLessThan(abs(controller.debugOutputHorizontalOffset - initialHorizontalOffset), 32)
+    }
+
+    @MainActor func testFallbackTranscriptDisablesSmartTextEditingFeatures() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+        try TerminalSessionPersistence.writeLaunchConfiguration(
+            .init(
+                sessionID: "session-transcript-config", title: "transcript", workingDirectory: "/tmp/work", shell: "/bin/zsh", command: "cat",
+                createdAt: "2026-05-09T00:00:00Z"), paths: paths)
+        try TerminalSessionPersistence.writeRuntimeState(
+            .init(sessionID: "session-transcript-config", servicePID: 1, childPID: 2, state: .running, updatedAt: "2026-05-09T00:00:01Z"),
+            paths: paths)
+
+        let controller = TerminalSessionWindowController(sessionID: "session-transcript-config", paths: paths)
+
+        XCTAssertTrue(controller.debugOutputDisablesSmartSubstitutions)
+    }
+
+    @MainActor func testViewerTailShowPrefersTranscriptAsFirstResponder() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+        try TerminalSessionPersistence.writeLaunchConfiguration(
+            .init(
+                sessionID: "session-viewer-focus", backend: .ghosttyEmbedded, title: "viewer-focus", workingDirectory: "/tmp/work", shell: "/bin/zsh",
+                command: "npm run dev", createdAt: "2026-05-09T00:00:00Z"), paths: paths)
+        try TerminalSessionPersistence.writeRuntimeState(
+            .init(
+                sessionID: "session-viewer-focus", backend: .ghosttyEmbedded, servicePID: 1, childPID: 4321, state: .running,
+                updatedAt: "2026-05-09T00:00:01Z"), paths: paths)
+
+        let controller = TerminalSessionWindowController(
+            sessionID: "session-viewer-focus", paths: paths, preferredAttachmentMode: .viewer, attachClientAction: { _, _ in },
+            detachClientAction: { _ in })
+        controller.show()
+
+        XCTAssertTrue(controller.debugFirstResponderTargetsOutputView)
+        XCTAssertFalse(controller.debugFirstResponderTargetsInputField)
     }
 
     @MainActor func testWindowCloseInvokesCleanupCallback() throws {

@@ -165,6 +165,7 @@ import spacesterminalghostty
         if backend == .ghosttyEmbedded { ensureGhosttyHostAttached() }
         refreshNow()
         startRefreshing()
+        assignPreferredFirstResponder()
     }
 
     public func focusWindow() {
@@ -363,6 +364,13 @@ import spacesterminalghostty
         outputView.isRichText = false
         outputView.importsGraphics = false
         outputView.usesFindPanel = true
+        outputView.isAutomaticQuoteSubstitutionEnabled = false
+        outputView.isAutomaticDashSubstitutionEnabled = false
+        outputView.isAutomaticTextReplacementEnabled = false
+        outputView.isAutomaticSpellingCorrectionEnabled = false
+        outputView.isContinuousSpellCheckingEnabled = false
+        outputView.isGrammarCheckingEnabled = false
+        outputView.isAutomaticTextCompletionEnabled = false
         outputView.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
         outputView.backgroundColor = .textBackgroundColor
         outputView.textColor = .textColor
@@ -722,6 +730,19 @@ import spacesterminalghostty
         bodyTopToContentConstraint?.isActive = !hasVisibleHeaderContent
     }
 
+    private func assignPreferredFirstResponder() {
+        guard let window else { return }
+        switch visibleRenderer {
+        case .ghosttyOwner: break
+        case .outputFallback:
+            if !inputRowStackView.isHidden, inputField.isEnabled {
+                window.makeFirstResponder(inputField)
+            } else {
+                window.makeFirstResponder(outputView)
+            }
+        }
+    }
+
     private func scrollOutputToBottom() {
         let length = outputView.string.utf16.count
         outputView.scrollRangeToVisible(NSRange(location: length, length: 0))
@@ -743,15 +764,22 @@ import spacesterminalghostty
         let clampedLength = min(state.selectedRange.length, remainingLength)
         outputView.setSelectedRange(NSRange(location: clampedLocation, length: clampedLength))
 
-        guard !state.wasPinnedToBottom, let documentView = outputScrollView.documentView else {
+        guard let documentView = outputScrollView.documentView else {
             scrollOutputToBottom()
             return
         }
-
         let visibleRect = outputScrollView.contentView.documentVisibleRect
         let maxOriginX = max(0, documentView.bounds.width - visibleRect.width)
-        let maxOriginY = max(0, documentView.bounds.height - visibleRect.height)
         let targetOriginX = max(0, min(state.horizontalOffset, maxOriginX))
+
+        guard !state.wasPinnedToBottom else {
+            scrollOutputToBottom()
+            outputScrollView.contentView.scroll(to: NSPoint(x: targetOriginX, y: outputScrollView.contentView.documentVisibleRect.minY))
+            outputScrollView.reflectScrolledClipView(outputScrollView.contentView)
+            return
+        }
+
+        let maxOriginY = max(0, documentView.bounds.height - visibleRect.height)
         let targetOriginY = max(0, maxOriginY - state.offsetFromBottom)
         outputScrollView.contentView.scroll(to: NSPoint(x: targetOriginX, y: min(targetOriginY, maxOriginY)))
         outputScrollView.reflectScrolledClipView(outputScrollView.contentView)
@@ -952,10 +980,24 @@ import spacesterminalghostty
     var debugOutputHorizontalOffset: CGFloat { outputScrollView.contentView.documentVisibleRect.minX }
     var debugTerminalContainerWidth: CGFloat { terminalContainer.frame.width }
     var debugBodyWidth: CGFloat { bodyStackView.frame.width }
+    var debugFirstResponderTypeName: String? {
+        guard let firstResponder = window?.firstResponder else { return nil }
+        return String(describing: type(of: firstResponder))
+    }
+    var debugFirstResponderTargetsInputField: Bool {
+        guard let fieldEditor = inputField.currentEditor() else { return false }
+        return window?.firstResponder === fieldEditor
+    }
+    var debugFirstResponderTargetsOutputView: Bool { window?.firstResponder === outputView }
     var debugRefreshIntervalMS: Int {
         switch currentRefreshInterval() {
         case Self.ownerGhosttyRefreshInterval: 2000
         default: 500
         }
+    }
+    var debugOutputDisablesSmartSubstitutions: Bool {
+        !outputView.isAutomaticQuoteSubstitutionEnabled && !outputView.isAutomaticDashSubstitutionEnabled
+            && !outputView.isAutomaticTextReplacementEnabled && !outputView.isAutomaticSpellingCorrectionEnabled
+            && !outputView.isContinuousSpellCheckingEnabled && !outputView.isGrammarCheckingEnabled && !outputView.isAutomaticTextCompletionEnabled
     }
 }
