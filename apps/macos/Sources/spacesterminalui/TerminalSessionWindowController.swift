@@ -160,6 +160,17 @@ import spacesterminalghostty
         refreshNow()
     }
 
+    public func focusWindow() {
+        guard let window else { return }
+        if window.isMiniaturized { window.deminiaturize(nil) }
+        NSApp.activate(ignoringOtherApps: true)
+        window.makeKeyAndOrderFront(nil)
+        if backend == .ghosttyEmbedded {
+            ensureGhosttyHostAttached()
+            syncGhosttyOwnerFocus(reason: "window_focus_ipc", requestWindowFocus: true)
+        }
+    }
+
     public func windowWillClose(_ notification: Notification) {
         didCloseWindow = true
         persistCurrentWindowFrame(immediately: true)

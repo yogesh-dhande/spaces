@@ -79,6 +79,7 @@ Live runtime-state changes also propagate through an in-process notification so 
 ## Native Window Behavior
 - Active owner windows keep the libghostty surface as the primary experience.
 - Viewer and fallback windows keep more diagnostic metadata because they are not the active terminal surface.
+- When Spaces refocuses a live built-in process window, it also reasserts first-responder focus onto the owner libghostty surface so the user can type immediately after the window comes forward.
 - The owner path intentionally collapses redundant in-window chrome:
   - hides the in-window session ID
   - hides the redundant inline cwd and command summary once the titlebar carries live terminal title and path

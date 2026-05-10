@@ -7,6 +7,7 @@ import systembridge
 
 public final class WorkspaceOrchestrator {
     public typealias BuiltInTerminalWindowOpener = @Sendable (String, TerminalAttachmentMode) -> Void
+    public typealias BuiltInTerminalWindowFocuser = @Sendable (String) -> Void
     public typealias BuiltInTerminalWindowCloser = @Sendable (String) -> Void
 
     private final class NotificationAuthorizationCache: @unchecked Sendable {
@@ -145,6 +146,7 @@ public final class WorkspaceOrchestrator {
     private let currentDate: () -> Date
     private let notificationDeliverer: (String, String, String?) -> Void
     private let builtInTerminalWindowOpener: BuiltInTerminalWindowOpener
+    private let builtInTerminalWindowFocuser: BuiltInTerminalWindowFocuser
     private let builtInTerminalWindowCloser: BuiltInTerminalWindowCloser
     private let projectsRootDirectoryURL: URL?
     private let workspacesRootDirectoryURL: URL?
@@ -172,7 +174,8 @@ public final class WorkspaceOrchestrator {
         chrome: ChromeAdapter = .init(), browserWindowScanDebounceInterval: TimeInterval = PollingConstants.browserWindowScanDebounceInterval,
         terminalFocusPulseController: TerminalFocusPulseControlling = TerminalFocusPulseController(),
         notificationDeliverer: ((String, String, String?) -> Void)? = nil, builtInTerminalWindowOpener: BuiltInTerminalWindowOpener? = nil,
-        builtInTerminalWindowCloser: BuiltInTerminalWindowCloser? = nil, currentDate: @escaping () -> Date = Date.init
+        builtInTerminalWindowFocuser: BuiltInTerminalWindowFocuser? = nil, builtInTerminalWindowCloser: BuiltInTerminalWindowCloser? = nil,
+        currentDate: @escaping () -> Date = Date.init
     ) {
         self.store = store
         projectsRootDirectoryURL = projectsRootDirectory
@@ -194,6 +197,12 @@ public final class WorkspaceOrchestrator {
                     userInfo: [
                         IPCNotification.terminalSessionIDUserInfoKey: sessionID, IPCNotification.terminalAttachmentModeUserInfoKey: mode.rawValue,
                     ], options: [.deliverImmediately])
+            }
+        self.builtInTerminalWindowFocuser =
+            builtInTerminalWindowFocuser ?? { sessionID in
+                DistributedNotificationCenter.default().postNotificationName(
+                    IPCNotification.focusTerminalSessionWindow, object: nil, userInfo: [IPCNotification.terminalSessionIDUserInfoKey: sessionID],
+                    options: [.deliverImmediately])
             }
         self.builtInTerminalWindowCloser =
             builtInTerminalWindowCloser ?? { sessionID in
@@ -2372,7 +2381,10 @@ public final class WorkspaceOrchestrator {
     {
         guard let terminalHost = terminalHost(for: terminalApp) else { return .unavailable }
         if terminalHost == .spaces {
-            if let windowID, (try? yabai.focusWindow(id: windowID)) ?? false { return .existingWindow }
+            if let windowID, (try? yabai.focusWindow(id: windowID)) ?? false {
+                if case .session(let sessionID)? = providerIdentity { builtInTerminalWindowFocuser(sessionID) }
+                return .existingWindow
+            }
             guard case .session(let sessionID)? = providerIdentity else { return .unavailable }
             builtInTerminalWindowOpener(sessionID, .owner)
             let capturedWindowID = try? captureSummonedBuiltInTerminalWindowID(appName: terminalAppName(for: terminalHost))

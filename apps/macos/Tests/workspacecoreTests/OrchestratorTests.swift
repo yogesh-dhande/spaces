@@ -22,6 +22,8 @@ private final class TerminalOpenCapture: @unchecked Sendable {
     var modes: [TerminalAttachmentMode] = []
 }
 
+private final class TerminalFocusCapture: @unchecked Sendable { var sessionIDs: [String] = [] }
+
 private final class TerminalCloseCapture: @unchecked Sendable { var sessionIDs: [String] = [] }
 
 private func managedProjectStorageDirname(namespace: String, source: String, preferredName: String) -> String {
@@ -2514,6 +2516,44 @@ final class OrchestratorTests: XCTestCase {
 
         XCTAssertEqual(capture.sessionIDs, ["spaces-session-1"])
         XCTAssertEqual(capture.modes, [.owner])
+    }
+
+    func testFocusWorkspaceProcessRefocusesLiveBuiltInSpacesWindowBySessionID() throws {
+        let store = try makeTemporaryStore()
+        let focusCapture = TerminalFocusCapture()
+        let root = try makeTempDirectory()
+        let focusLog = root.appendingPathComponent("yabai-focus.log")
+        let orchestrator = WorkspaceOrchestrator(
+            store: store, iterm: MockIterm2Adapter(), ghostty: MockGhosttyAdapter(), tmux: MockTmuxAdapter(),
+            builtInTerminalWindowOpener: { _, _ in XCTFail("live built-in window focus should not reopen the session") },
+            builtInTerminalWindowFocuser: { sessionID in focusCapture.sessionIDs.append(sessionID) })
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
+        _ = project
+
+        let process = RunningProcessRecord(
+            id: "process-spaces-live-window", workspaceID: workspace.id, templateName: "web", command: "npm run dev",
+            terminalApp: TerminalHost.spaces.appName, windowID: 501, terminalTrackingID: "spaces-session-live",
+            terminalNativeID: "spaces-session-live", terminalContainerID: nil, itermTabIndex: nil, tmuxWindowID: nil, pid: nil, status: .running,
+            logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil)
+        try store.upsert(runningProcess: process)
+        try store.upsert(
+            window: WindowRecord(
+                id: "window-spaces-live-window", workspaceID: workspace.id, app: TerminalHost.spaces.appName, name: "web", detail: "npm run dev",
+                targetURL: nil, windowID: 501, terminalTrackingID: "spaces-session-live", terminalNativeID: "spaces-session-live",
+                terminalContainerID: nil, itermTabIndex: nil, tmuxWindowID: nil, role: "terminal", orderIndex: 200, lastSeenAt: "now"))
+
+        try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) {
+            try withEnv(name: "YABAI_FOCUS_LOG_FILE", value: focusLog.path) {
+                try orchestrator.focusWorkspaceProcess(workspaceID: workspace.id, processID: process.id)
+            }
+        }
+
+        let focusedWindowID = try String(contentsOf: focusLog, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines)
+        XCTAssertEqual(focusedWindowID, "501")
+        XCTAssertEqual(focusCapture.sessionIDs, ["spaces-session-live"])
     }
 
     func testFocusWorkspaceProcessReopensBuiltInSpacesSessionAndClearsStaleWindowBinding() throws {

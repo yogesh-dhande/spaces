@@ -344,6 +344,35 @@ final class TerminalSessionWindowControllerTests: XCTestCase {
         XCTAssertTrue(focusedStates.contains(false))
     }
 
+    @MainActor func testGhosttyOwnerFocusWindowReassertsOwnerSurfaceFocus() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+        try TerminalSessionPersistence.writeLaunchConfiguration(
+            .init(
+                sessionID: "session-focus-window", backend: .ghosttyEmbedded, title: "owner", workingDirectory: "/tmp/work", shell: "/bin/zsh",
+                command: "cat", createdAt: "2026-05-09T00:00:00Z"), paths: paths)
+        try TerminalSessionPersistence.writeRuntimeState(
+            .init(
+                sessionID: "session-focus-window", backend: .ghosttyEmbedded, servicePID: 1, childPID: 22, state: .running,
+                updatedAt: "2026-05-09T00:00:01Z"), paths: paths)
+
+        var focusWindowCalls = 0
+        var focusedStates: [Bool] = []
+        let controller = TerminalSessionWindowController(
+            sessionID: "session-focus-window", paths: paths, ownerWindowFocusAction: { _ in focusWindowCalls += 1 },
+            ownerSurfaceFocusAction: { focused in focusedStates.append(focused) })
+
+        let initialWindowFocusCalls = focusWindowCalls
+        let initialFocusedStateCount = focusedStates.count
+        controller.focusWindow()
+
+        XCTAssertGreaterThan(focusWindowCalls, initialWindowFocusCalls)
+        XCTAssertGreaterThan(focusedStates.count, initialFocusedStateCount)
+    }
+
     @MainActor func testFallbackWindowPasteTargetsInlineInputAndSelectAllStaysEnabled() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
