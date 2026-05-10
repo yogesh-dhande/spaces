@@ -4273,7 +4273,7 @@ public final class WorkspaceOrchestrator {
         var pruned = 0
         for window in windows {
             guard let id = window.windowID else {
-                if ghosttyTrackedWindowIsStillLive(window: window, liveGhosttyTrackingIdentities: liveGhosttyTrackingIdentities) { continue }
+                if managedTrackedTerminalWindowIsStillLive(window: window, liveGhosttyTrackingIdentities: liveGhosttyTrackingIdentities) { continue }
                 if let tmuxWindowID = window.tmuxWindowID, liveTmuxWindowIDs.contains(tmuxWindowID) { continue }
                 if window.role == "terminal", let trackingKey = window.terminalTrackingKey { prunedTerminalTrackingKeys.insert(trackingKey) }
                 try store.deleteWindow(id: window.id)
@@ -4281,7 +4281,7 @@ public final class WorkspaceOrchestrator {
                 continue
             }
             if !existingIDs.contains(id) {
-                if ghosttyTrackedWindowIsStillLive(window: window, liveGhosttyTrackingIdentities: liveGhosttyTrackingIdentities) { continue }
+                if managedTrackedTerminalWindowIsStillLive(window: window, liveGhosttyTrackingIdentities: liveGhosttyTrackingIdentities) { continue }
                 if window.role == "browser" { continue }
                 if let tmuxWindowID = window.tmuxWindowID, liveTmuxWindowIDs.contains(tmuxWindowID) { continue }
                 if window.role == "terminal" {
@@ -4298,10 +4298,27 @@ public final class WorkspaceOrchestrator {
         return pruned
     }
 
-    private func ghosttyTrackedWindowIsStillLive(window: WindowRecord, liveGhosttyTrackingIdentities: Set<TerminalTrackingIdentity>) -> Bool {
-        guard window.role == "terminal", terminalHost(for: window.app) == .ghostty, let terminalID = window.terminalNativeID, !terminalID.isEmpty
-        else { return false }
-        return liveGhosttyTrackingIdentities.contains(.session(terminalID))
+    private func managedTrackedTerminalWindowIsStillLive(window: WindowRecord, liveGhosttyTrackingIdentities: Set<TerminalTrackingIdentity>) -> Bool {
+        guard window.role == "terminal", let host = terminalHost(for: window.app) else { return false }
+        switch host {
+        case .ghostty:
+            guard let terminalID = window.terminalNativeID, !terminalID.isEmpty else { return false }
+            return liveGhosttyTrackingIdentities.contains(.session(terminalID))
+        case .spaces: return builtInTrackedWindowIsStillLive(window: window)
+        default: return false
+        }
+    }
+
+    private func builtInTrackedWindowIsStillLive(window: WindowRecord) -> Bool {
+        guard window.role == "terminal", terminalHost(for: window.app) == .spaces else { return false }
+        guard let sessionID = window.terminalNativeID ?? window.terminalTrackingID, !sessionID.isEmpty else { return false }
+        guard let paths = try? TerminalSessionPaths.forSession(id: sessionID) else { return false }
+        guard FileManager.default.fileExists(atPath: paths.controlSocketPath), FileManager.default.fileExists(atPath: paths.statePath) else {
+            return false
+        }
+        guard let runtimeState = try? TerminalSessionPersistence.readRuntimeState(paths: paths) else { return false }
+        guard runtimeState.state == .starting || runtimeState.state == .running else { return false }
+        return isProcessAlive(pid: Int(runtimeState.servicePID))
     }
 
     @discardableResult private func pruneOrphanedAgentWindows(
