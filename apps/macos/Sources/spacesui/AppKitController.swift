@@ -514,15 +514,26 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
     private func focusTerminalSessionWindow(sessionID: String) {
         pruneClosedTerminalSessionWindowControllers(sessionID: sessionID)
+        let existingControllers = terminalSessionWindowControllers[sessionID] ?? []
+        if let controller = Self.inMemoryOwnerTerminalSessionWindowController(existingControllers) {
+            controller.focusWindow()
+            return
+        }
         guard let paths = try? TerminalSessionPaths.forSession(id: sessionID) else { return }
         let activeOwnerClientID = Self.activeOwnerClientID(paths: paths)
         if let controller = Self.reusableTerminalSessionWindowController(
-            terminalSessionWindowControllers[sessionID] ?? [], mode: .owner, activeOwnerClientID: activeOwnerClientID)
+            existingControllers, mode: .owner, activeOwnerClientID: activeOwnerClientID)
         {
             controller.focusWindow()
             return
         }
         openTerminalSessionWindow(sessionID: sessionID, mode: .owner)
+    }
+
+    static func inMemoryOwnerTerminalSessionWindowController(_ controllers: [TerminalSessionWindowController]) -> TerminalSessionWindowController? {
+        let liveOwnerControllers = controllers.filter { !$0.didClose && $0.attachmentMode == .owner }
+        guard liveOwnerControllers.count == 1 else { return nil }
+        return liveOwnerControllers[0]
     }
 
     static func reusableTerminalSessionWindowController(

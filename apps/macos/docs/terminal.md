@@ -81,6 +81,7 @@ Active owner windows keep a slower two-second safety poll because the libghostty
 - Active owner windows keep the libghostty surface as the primary experience.
 - Viewer and fallback windows keep more diagnostic metadata because they are not the active terminal surface.
 - When Spaces refocuses a live built-in process window, it also reasserts first-responder focus onto the owner libghostty surface so the user can type immediately after the window comes forward.
+- If the running app already has one unambiguous live owner controller for that session, it reuses that in-memory owner window directly during focus instead of reloading attachment state from disk first.
 - The owner path intentionally collapses redundant in-window chrome:
   - hides the in-window session ID
   - hides the redundant inline cwd and command summary once the titlebar carries live terminal title and path

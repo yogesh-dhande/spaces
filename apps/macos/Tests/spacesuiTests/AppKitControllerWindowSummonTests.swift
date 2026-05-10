@@ -134,4 +134,54 @@ import spacesterminalcore
 
         #expect(selected === promotedViewerController)
     }
+
+    @MainActor @Test func inMemoryOwnerWindowReuseAvoidsAttachmentSnapshotWhenOneLiveOwnerExists() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+        try TerminalSessionPersistence.writeLaunchConfiguration(
+            .init(
+                sessionID: "session-3", backend: .ghosttyEmbedded, title: "frontend", workingDirectory: "/tmp/work", shell: "/bin/zsh",
+                command: "npm run dev", createdAt: "2026-05-09T00:00:00Z"), paths: paths)
+        try TerminalSessionPersistence.writeRuntimeState(
+            .init(
+                sessionID: "session-3", backend: .ghosttyEmbedded, servicePID: 1, childPID: 4321, state: .running, updatedAt: "2026-05-09T00:00:01Z"),
+            paths: paths)
+
+        let ownerController = TerminalSessionWindowController(
+            sessionID: "session-3", paths: paths, preferredAttachmentMode: .owner, attachClientAction: { _, _ in }, detachClientAction: { _ in })
+        let viewerController = TerminalSessionWindowController(
+            sessionID: "session-3", paths: paths, preferredAttachmentMode: .viewer, attachClientAction: { _, _ in }, detachClientAction: { _ in })
+
+        let selected = AppKitController.inMemoryOwnerTerminalSessionWindowController([viewerController, ownerController])
+
+        #expect(selected === ownerController)
+    }
+
+    @MainActor @Test func inMemoryOwnerWindowReuseReturnsNilWhenOwnerIsAmbiguous() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+        try TerminalSessionPersistence.writeLaunchConfiguration(
+            .init(
+                sessionID: "session-4", backend: .ghosttyEmbedded, title: "frontend", workingDirectory: "/tmp/work", shell: "/bin/zsh",
+                command: "npm run dev", createdAt: "2026-05-09T00:00:00Z"), paths: paths)
+        try TerminalSessionPersistence.writeRuntimeState(
+            .init(
+                sessionID: "session-4", backend: .ghosttyEmbedded, servicePID: 1, childPID: 4321, state: .running, updatedAt: "2026-05-09T00:00:01Z"),
+            paths: paths)
+
+        let firstOwner = TerminalSessionWindowController(
+            sessionID: "session-4", paths: paths, preferredAttachmentMode: .owner, attachClientAction: { _, _ in }, detachClientAction: { _ in })
+        let secondOwner = TerminalSessionWindowController(
+            sessionID: "session-4", paths: paths, preferredAttachmentMode: .owner, attachClientAction: { _, _ in }, detachClientAction: { _ in })
+
+        let selected = AppKitController.inMemoryOwnerTerminalSessionWindowController([firstOwner, secondOwner])
+
+        #expect(selected == nil)
+    }
 }
