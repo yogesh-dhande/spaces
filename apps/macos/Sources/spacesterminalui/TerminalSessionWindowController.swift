@@ -4,6 +4,9 @@ import spacesterminalcore
 import spacesterminalghostty
 
 @MainActor public final class TerminalSessionWindowController: NSWindowController, NSWindowDelegate, NSUserInterfaceValidations {
+    private static let ownerGhosttyRefreshInterval: Duration = .seconds(2)
+    private static let fallbackRefreshInterval: Duration = .milliseconds(500)
+
     private enum VisibleRenderer {
         case ghosttyOwner
         case outputFallback
@@ -450,7 +453,7 @@ import spacesterminalghostty
             guard let self else { return }
             while !Task.isCancelled {
                 self.refreshNow()
-                do { try await Task.sleep(for: .milliseconds(500)) } catch { break }
+                do { try await Task.sleep(for: self.currentRefreshInterval()) } catch { break }
             }
         }
     }
@@ -757,6 +760,10 @@ import spacesterminalghostty
         return .ghosttyOwner
     }
 
+    private func currentRefreshInterval() -> Duration {
+        visibleRenderer == .ghosttyOwner ? Self.ownerGhosttyRefreshInterval : Self.fallbackRefreshInterval
+    }
+
     private func rendererSummary(isOwner: Bool?) -> String {
         guard isOwner == true else { return "Renderer: viewer tail" }
         switch visibleRenderer {
@@ -894,4 +901,10 @@ import spacesterminalghostty
     }
     var debugTerminalContainerWidth: CGFloat { terminalContainer.frame.width }
     var debugBodyWidth: CGFloat { bodyStackView.frame.width }
+    var debugRefreshIntervalMS: Int {
+        switch currentRefreshInterval() {
+        case Self.ownerGhosttyRefreshInterval: 2000
+        default: 500
+        }
+    }
 }
