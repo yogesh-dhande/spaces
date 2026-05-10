@@ -69,6 +69,7 @@ import spacesterminalghostty
     private var lastObservedOwnerClientID: String?
     private var lastObservedRuntimeState: TerminalSessionRuntimeState?
     private var shouldShowOwnerStateLabel = true
+    private var inputStatusIsError = false
     private var appDidBecomeActiveObserver: NSObjectProtocol?
     private var appDidResignActiveObserver: NSObjectProtocol?
     private var attachmentStateDidChangeObserver: NSObjectProtocol?
@@ -566,6 +567,7 @@ import spacesterminalghostty
     @objc private func takeoverOwnershipAction() { takeOverOwnership() }
 
     private func submitInput() {
+        guard !inputRowStackView.isHidden else { return }
         guard isInteractiveRuntimeState(lastObservedRuntimeState) else {
             updateInputStatus(message: "Session is not running.", isError: true)
             return
@@ -589,6 +591,7 @@ import spacesterminalghostty
     }
 
     private func sendKey(_ key: String) {
+        guard !inputRowStackView.isHidden else { return }
         guard isInteractiveRuntimeState(lastObservedRuntimeState) else {
             updateInputStatus(message: "Session is not running.", isError: true)
             return
@@ -605,6 +608,7 @@ import spacesterminalghostty
     }
 
     private func updateInputStatus(message: String, isError: Bool) {
+        inputStatusIsError = isError
         inputStatusLabel.stringValue = message
         inputStatusLabel.textColor = isError ? .systemRed : .secondaryLabelColor
         inputStatusLabel.isHidden = message.isEmpty
@@ -721,6 +725,10 @@ import spacesterminalghostty
             inputField.placeholderString = "Session is not running"
         } else {
             inputField.placeholderString = isOwner ? "Send input to the session" : "Viewer window"
+        }
+        if !usesInlineControls && isOwner && !inputStatusIsError {
+            inputStatusLabel.stringValue = ""
+            inputStatusLabel.isHidden = true
         }
         updateHeaderLayoutVisibility()
     }
@@ -948,6 +956,8 @@ import spacesterminalghostty
     var debugShowsStateLabel: Bool { !stateLabel.isHidden }
     var debugShowsHeader: Bool { !headerStackView.isHidden }
     var debugInputStatus: String { inputStatusLabel.stringValue }
+    var debugShowsInputStatus: Bool { !inputStatusLabel.isHidden }
+    func debugSubmitInput() { submitInput() }
     var debugInputFieldValue: String { inputField.stringValue }
     func debugSimulateApplicationDidBecomeActive() { NotificationCenter.default.post(name: NSApplication.didBecomeActiveNotification, object: NSApp) }
     func debugSimulateApplicationDidResignActive() { NotificationCenter.default.post(name: NSApplication.didResignActiveNotification, object: NSApp) }

@@ -266,13 +266,13 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     }
 
     enum ExternalWindowAction: Sendable {
-        case focus
-        case open
+        case focus(hidesApp: Bool)
+        case open(hidesApp: Bool)
     }
 
     private enum WindowShortcutExecutionOutcome: Sendable {
-        case focused(kind: String, recentFocusIdentity: String)
-        case opened(kind: String)
+        case focused(kind: String, recentFocusIdentity: String, hidesApp: Bool)
+        case opened(kind: String, hidesApp: Bool)
         case noWorkspace
         case noMatch
     }
@@ -926,14 +926,15 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         }.value
     }
 
-    nonisolated private static func openWorkspaceTerminalSnapshot(workspaceID: String) async -> Result<Void, Error> {
+    nonisolated private static func openWorkspaceTerminalSnapshot(workspaceID: String) async -> Result<ExternalWindowAction, Error> {
         await Task.detached(priority: .userInitiated) {
             do {
                 let db = try DatabaseLocator.defaultPath()
                 let store = try SQLiteStore(path: db)
                 let orchestrator = WorkspaceOrchestrator(store: store)
+                let terminalHost = try store.appConfig().terminalHost
                 try orchestrator.openWorkspaceTerminal(workspaceID: workspaceID)
-                return .success(())
+                return .success(.open(hidesApp: terminalHost != .spaces))
             } catch { return .failure(error) }
         }.value
     }
@@ -1011,22 +1012,26 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 switch request {
                 case .workspaceBrowserSession(let workspaceID, let targetURL):
                     try orchestrator.focusWorkspaceBrowserSession(workspaceID: workspaceID, targetURL: targetURL)
-                    return .success(.focus)
+                    return .success(.focus(hidesApp: true))
                 case .workspaceWindow(let workspaceID, let index):
+                    let trackedWindows = try orchestrator.windows(workspaceID: workspaceID)
+                    let trackedWindow = index > 0 && index <= trackedWindows.count ? trackedWindows[index - 1] : nil
                     try orchestrator.focusWorkspaceWindow(workspaceID: workspaceID, index: index)
-                    return .success(.focus)
+                    return .success(.focus(hidesApp: trackedWindow?.app != TerminalHost.spaces.appName))
                 case .workspaceProcess(let workspaceID, let processID):
+                    let process = try orchestrator.runningProcesses(workspaceID: workspaceID).first(where: { $0.id == processID })
                     try orchestrator.focusWorkspaceProcess(workspaceID: workspaceID, processID: processID)
-                    return .success(.focus)
+                    return .success(.focus(hidesApp: process?.terminalApp != TerminalHost.spaces.appName))
                 case .workspaceMissingConfiguredProcess(let workspaceID, let processKey):
+                    let terminalHost = try store.appConfig().terminalHost
                     try orchestrator.recoverMissingConfiguredProcess(workspaceID: workspaceID, processKey: processKey)
-                    return .success(.open)
+                    return .success(.open(hidesApp: terminalHost != .spaces))
                 case .workspaceAgentLauncher(let workspaceID, let name):
                     _ = try orchestrator.launchAgentLauncher(workspaceID: workspaceID, name: name)
-                    return .success(.open)
+                    return .success(.open(hidesApp: true))
                 case .agentWindow(let record):
                     try orchestrator.focusAgentWindow(record)
-                    return .success(.focus)
+                    return .success(.focus(hidesApp: true))
                 }
             } catch { return .failure(error) }
         }.value
@@ -1123,25 +1128,37 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                     case .workspaceBrowserSession(let workspaceID, let targetURL):
                         try orchestrator.focusWorkspaceBrowserSession(workspaceID: workspaceID, targetURL: targetURL)
                         return .success(
-                            .focused(kind: "alerts_browser", recentFocusIdentity: CommandPaletteItem.recentFocusIdentity(for: alertsFocusRequest)))
+                            .focused(
+                                kind: "alerts_browser", recentFocusIdentity: CommandPaletteItem.recentFocusIdentity(for: alertsFocusRequest),
+                                hidesApp: true))
                     case .workspaceWindow(let workspaceID, let index):
+                        let trackedWindows = try orchestrator.windows(workspaceID: workspaceID)
+                        let trackedWindow = index > 0 && index <= trackedWindows.count ? trackedWindows[index - 1] : nil
                         try orchestrator.focusWorkspaceWindow(workspaceID: workspaceID, index: index)
                         return .success(
-                            .focused(kind: "alerts_window", recentFocusIdentity: CommandPaletteItem.recentFocusIdentity(for: alertsFocusRequest)))
+                            .focused(
+                                kind: "alerts_window", recentFocusIdentity: CommandPaletteItem.recentFocusIdentity(for: alertsFocusRequest),
+                                hidesApp: trackedWindow?.app != TerminalHost.spaces.appName))
                     case .workspaceProcess(let workspaceID, let processID):
+                        let process = try orchestrator.runningProcesses(workspaceID: workspaceID).first(where: { $0.id == processID })
                         try orchestrator.focusWorkspaceProcess(workspaceID: workspaceID, processID: processID)
                         return .success(
-                            .focused(kind: "alerts_process", recentFocusIdentity: CommandPaletteItem.recentFocusIdentity(for: alertsFocusRequest)))
+                            .focused(
+                                kind: "alerts_process", recentFocusIdentity: CommandPaletteItem.recentFocusIdentity(for: alertsFocusRequest),
+                                hidesApp: process?.terminalApp != TerminalHost.spaces.appName))
                     case .workspaceMissingConfiguredProcess(let workspaceID, let processKey):
+                        let terminalHost = try store.appConfig().terminalHost
                         try orchestrator.recoverMissingConfiguredProcess(workspaceID: workspaceID, processKey: processKey)
-                        return .success(.opened(kind: "alerts_process"))
+                        return .success(.opened(kind: "alerts_process", hidesApp: terminalHost != .spaces))
                     case .workspaceAgentLauncher(let workspaceID, let name):
                         _ = try orchestrator.launchAgentLauncher(workspaceID: workspaceID, name: name)
-                        return .success(.opened(kind: "alerts_agent_launcher"))
+                        return .success(.opened(kind: "alerts_agent_launcher", hidesApp: true))
                     case .agentWindow(let record):
                         try orchestrator.focusAgentWindow(record)
                         return .success(
-                            .focused(kind: "alerts_agent", recentFocusIdentity: CommandPaletteItem.recentFocusIdentity(for: alertsFocusRequest)))
+                            .focused(
+                                kind: "alerts_agent", recentFocusIdentity: CommandPaletteItem.recentFocusIdentity(for: alertsFocusRequest),
+                                hidesApp: true))
                     }
                 }
                 guard let selectedWorkspaceID else { return .success(.noWorkspace) }
@@ -1168,30 +1185,41 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                     guard let targetURL = target.targetURL else { return .success(.noMatch) }
                     let focusRequest = WindowFocusRequest.workspaceBrowserSession(workspaceID: selectedWorkspaceID, targetURL: targetURL)
                     try orchestrator.focusWorkspaceBrowserSession(workspaceID: selectedWorkspaceID, targetURL: targetURL)
-                    return .success(.focused(kind: "browser", recentFocusIdentity: CommandPaletteItem.recentFocusIdentity(for: focusRequest)))
+                    return .success(
+                        .focused(kind: "browser", recentFocusIdentity: CommandPaletteItem.recentFocusIdentity(for: focusRequest), hidesApp: true))
                 case .process:
                     guard let processID = target.processID else { return .success(.noMatch) }
                     let focusRequest = WindowFocusRequest.workspaceProcess(workspaceID: selectedWorkspaceID, processID: processID)
+                    let process = processesByID[processID]
                     try orchestrator.focusWorkspaceProcess(workspaceID: selectedWorkspaceID, processID: processID)
-                    return .success(.focused(kind: "process", recentFocusIdentity: CommandPaletteItem.recentFocusIdentity(for: focusRequest)))
+                    return .success(
+                        .focused(
+                            kind: "process", recentFocusIdentity: CommandPaletteItem.recentFocusIdentity(for: focusRequest),
+                            hidesApp: process?.terminalApp != TerminalHost.spaces.appName))
                 case .window:
                     guard let windowListIndex = target.windowListIndex else { return .success(.noMatch) }
                     let focusRequest = WindowFocusRequest.workspaceWindow(workspaceID: selectedWorkspaceID, index: windowListIndex + 1)
+                    let targetWindow = windowListIndex < windows.count ? windows[windowListIndex] : nil
                     try orchestrator.focusWorkspaceWindow(workspaceID: selectedWorkspaceID, index: windowListIndex + 1)
-                    return .success(.focused(kind: "window", recentFocusIdentity: CommandPaletteItem.recentFocusIdentity(for: focusRequest)))
+                    return .success(
+                        .focused(
+                            kind: "window", recentFocusIdentity: CommandPaletteItem.recentFocusIdentity(for: focusRequest),
+                            hidesApp: targetWindow?.app != TerminalHost.spaces.appName))
                 case .missingConfiguredProcess:
                     guard let processKey = target.processKey else { return .success(.noMatch) }
+                    let terminalHost = try store.appConfig().terminalHost
                     try orchestrator.recoverMissingConfiguredProcess(workspaceID: selectedWorkspaceID, processKey: processKey)
-                    return .success(.opened(kind: "process"))
+                    return .success(.opened(kind: "process", hidesApp: terminalHost != .spaces))
                 case .agentLauncher:
                     guard let launcherName = target.launcherName else { return .success(.noMatch) }
                     _ = try orchestrator.launchAgentLauncher(workspaceID: selectedWorkspaceID, name: launcherName)
-                    return .success(.opened(kind: "agent_launcher"))
+                    return .success(.opened(kind: "agent_launcher", hidesApp: true))
                 case .agent:
                     guard let record = target.agentWindow else { return .success(.noMatch) }
                     let focusRequest = WindowFocusRequest.agentWindow(record)
                     try orchestrator.focusAgentWindow(record)
-                    return .success(.focused(kind: "agent", recentFocusIdentity: CommandPaletteItem.recentFocusIdentity(for: focusRequest)))
+                    return .success(
+                        .focused(kind: "agent", recentFocusIdentity: CommandPaletteItem.recentFocusIdentity(for: focusRequest), hidesApp: true))
                 }
             } catch { return .failure(error) }
         }.value
@@ -1411,15 +1439,15 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     nonisolated static func shouldHideAfterSuccessfulExternalWindowAction(_ succeeded: Bool, action: ExternalWindowAction) -> Bool {
         guard succeeded else { return false }
         switch action {
-        case .focus, .open: return true
+        case .focus(let hidesApp), .open(let hidesApp): return hidesApp
         }
     }
 
     nonisolated static func hideDelayAfterSuccessfulExternalWindowAction(_ succeeded: Bool, action: ExternalWindowAction) -> Duration? {
         guard shouldHideAfterSuccessfulExternalWindowAction(succeeded, action: action) else { return nil }
         switch action {
-        case .focus: return .milliseconds(400)
-        case .open: return nil
+        case .focus(_): return .milliseconds(400)
+        case .open(_): return nil
         }
     }
 
@@ -6241,7 +6269,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         do {
             try orchestrator.openWorkspaceEditor(workspaceID: workspaceID)
             reloadData()
-            hideAfterSuccessfulExternalWindowAction(.open)
+            hideAfterSuccessfulExternalWindowAction(.open(hidesApp: true))
         } catch { showError(error) }
     }
 
@@ -6259,12 +6287,12 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             let result = await Self.openWorkspaceTerminalSnapshot(workspaceID: workspaceID)
             let elapsedMS = windowShortcutElapsedMS(since: startedAt)
             switch result {
-            case .success:
+            case .success(let action):
                 logPerfMetric(
                     "workspace_terminal_open_ui", target: "workspace=\(workspaceID)", elapsedMS: elapsedMS, success: true,
                     detail: "route=\(route.rawValue)")
                 reloadData()
-                hideAfterSuccessfulExternalWindowAction(.open)
+                hideAfterSuccessfulExternalWindowAction(action)
             case .failure(let error):
                 logPerfMetric(
                     "workspace_terminal_open_ui", target: "workspace=\(workspaceID)", elapsedMS: elapsedMS, success: false,
@@ -6277,7 +6305,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     private func openWorkspaceFinder(workspaceID: String) {
         guard let (_, workspace) = findWorkspace(id: workspaceID) else { return }
         let url = URL(fileURLWithPath: workspace.dir, isDirectory: true)
-        if NSWorkspace.shared.open(url) { hideAfterSuccessfulExternalWindowAction(.open) }
+        if NSWorkspace.shared.open(url) { hideAfterSuccessfulExternalWindowAction(.open(hidesApp: true)) }
     }
 
     private func findWorkspace(id: String) -> (ProjectSummary, WorkspaceSummary)? {
@@ -6792,7 +6820,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         switch result {
         case .success(let action):
             reloadData()
-            if case .open = action { hideAfterSuccessfulExternalWindowAction(action) }
+            hideAfterSuccessfulExternalWindowAction(action)
         case .failure(let error): await handleWindowFocusFailure(error)
         }
     }
@@ -6802,7 +6830,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         switch result {
         case .success:
             reloadData()
-            hideAfterSuccessfulExternalWindowAction(.open)
+            hideAfterSuccessfulExternalWindowAction(.open(hidesApp: true))
         case .failure(let error): showError(error)
         }
     }
@@ -6815,19 +6843,20 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let result = await Self.focusWindowShortcutSnapshot(
             index: index, selectedWorkspaceID: selectedWorkspaceID, alertsFocusRequest: alertsFocusRequest)
         switch result {
-        case .success(.focused(let kind, let recentFocusIdentity)):
+        case .success(.focused(let kind, let recentFocusIdentity, let hidesApp)):
             logWindowShortcutProfile("stage=route_done index=\(index) kind=\(kind) elapsed_ms=\(windowShortcutElapsedMS(since: routeStartedAt))")
             activeWindowShortcutProfile?.routeCompletedAt = Date()
             rememberRecentCommandPaletteFocusIdentity(recentFocusIdentity)
             logWindowShortcutProfile("stage=total index=\(index) elapsed_ms=\(windowShortcutElapsedMS(since: startedAt))")
             logPerfMetric("window_shortcut", target: "index=\(index)", elapsedMS: windowShortcutElapsedMS(since: startedAt), success: true)
-        case .success(.opened(let kind)):
+            if hidesApp { hideAfterSuccessfulExternalWindowAction(.focus(hidesApp: true)) }
+        case .success(.opened(let kind, let hidesApp)):
             logWindowShortcutProfile("stage=route_done index=\(index) kind=\(kind) elapsed_ms=\(windowShortcutElapsedMS(since: routeStartedAt))")
             activeWindowShortcutProfile?.routeCompletedAt = Date()
             logWindowShortcutProfile("stage=total index=\(index) elapsed_ms=\(windowShortcutElapsedMS(since: startedAt))")
             logPerfMetric("window_shortcut", target: "index=\(index)", elapsedMS: windowShortcutElapsedMS(since: startedAt), success: true)
             reloadData()
-            hideAfterSuccessfulExternalWindowAction(.open)
+            if hidesApp { hideAfterSuccessfulExternalWindowAction(.open(hidesApp: true)) }
         case .success(.noWorkspace):
             logWindowShortcutProfile("stage=aborted index=\(index) reason=no_workspace elapsed_ms=\(windowShortcutElapsedMS(since: startedAt))")
             logPerfMetric("window_shortcut", target: "index=\(index)", elapsedMS: windowShortcutElapsedMS(since: startedAt), success: false)
@@ -6953,7 +6982,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             } else {
                 try orchestrator.focusPreviousWindow(workspaceID: workspaceID)
             }
-            hideAfterSuccessfulExternalWindowAction(.focus)
+            hideAfterSuccessfulExternalWindowAction(.focus(hidesApp: true))
         } catch { showError(error) }
     }
 
@@ -8905,10 +8934,10 @@ extension AppKitController {
             let result = await Self.performWindowFocusSnapshot(item.focusRequest)
             switch result {
             case .success(let action):
-                if case .focus = action { self.rememberRecentCommandPaletteFocusIdentity(item.recentFocusIdentity) }
+                if case .focus(_) = action { self.rememberRecentCommandPaletteFocusIdentity(item.recentFocusIdentity) }
                 dismissCommandPalette()
                 reloadData()
-                if case .open = action { hideAfterSuccessfulExternalWindowAction(action) }
+                hideAfterSuccessfulExternalWindowAction(action)
             case .failure(let error): await handleWindowFocusFailure(error)
             }
         }
