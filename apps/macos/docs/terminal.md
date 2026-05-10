@@ -74,6 +74,7 @@ These hooks are important because snapshot-style render reads are not enough for
 The takeover path updates `attachments.json`, moves ownership to the requested client, and rehosts the active libghostty surface without restarting the session.
 Local macOS windows also react to ownership changes immediately through an in-process attachment-state notification, so owner and viewer chrome does not wait for the polling loop to catch up after takeover.
 Live libghostty title and working-directory updates also propagate through an in-process metadata notification so the owner window title and summary stay in sync without waiting for the refresh loop.
+Live runtime-state changes also propagate through an in-process notification so owner windows update compact state text, including the visible child PID, as soon as the session host persists a new runtime signature.
 
 ## Native Window Behavior
 - Active owner windows keep the libghostty surface as the primary experience.

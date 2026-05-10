@@ -497,6 +497,41 @@ final class TerminalSessionWindowControllerTests: XCTestCase {
         XCTAssertTrue(controller.debugSummary.contains("/tmp/runtime"))
     }
 
+    @MainActor func testGhosttyOwnerRefreshesRuntimeStateImmediatelyFromRuntimeStateNotification() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+        try TerminalSessionPersistence.writeLaunchConfiguration(
+            .init(
+                sessionID: "session-runtime", backend: .ghosttyEmbedded, title: "backend", workingDirectory: "/tmp/work", shell: "/bin/zsh",
+                command: "uv run api", createdAt: "2026-05-09T00:00:00Z"), paths: paths)
+        try TerminalSessionPersistence.writeRuntimeState(
+            .init(
+                sessionID: "session-runtime", backend: .ghosttyEmbedded, servicePID: 1, childPID: 1111, state: .running,
+                updatedAt: "2026-05-09T00:00:01Z"), paths: paths)
+
+        let controller = TerminalSessionWindowController(sessionID: "session-runtime", paths: paths)
+        let owner = TerminalClient(
+            id: controller.clientID, kind: .localWindow, identity: .init(label: "Spaces window", hostName: "mac", deviceName: "Owner Mac"),
+            connectedAt: "2026-05-09T00:00:00Z")
+        try TerminalSessionPersistence.attachClient(
+            sessionID: "session-runtime", client: owner, mode: .owner, paths: paths, attachedAt: "2026-05-09T00:00:00Z")
+
+        controller.debugForceRefresh()
+        XCTAssertTrue(controller.debugState.hasPrefix("state: running"))
+
+        try TerminalSessionPersistence.writeRuntimeState(
+            .init(
+                sessionID: "session-runtime", backend: .ghosttyEmbedded, servicePID: 1, childPID: 2222, state: .running,
+                updatedAt: "2026-05-09T00:00:02Z"), paths: paths)
+
+        controller.debugSimulateRuntimeStateDidChange()
+
+        XCTAssertEqual(controller.debugState, "state: running    child: 2222")
+    }
+
     @MainActor func testGhosttyOwnerCloseMarksControllerAndReopenUsesFreshClientAttachment() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)

@@ -5,6 +5,7 @@ import spacesterminalcore
 extension Notification.Name {
     public static let spacesTerminalAttachmentStateDidChange = Notification.Name("spaces.terminal.attachment-state-did-change")
     public static let spacesTerminalSessionMetadataDidChange = Notification.Name("spaces.terminal.session-metadata-did-change")
+    public static let spacesTerminalRuntimeStateDidChange = Notification.Name("spaces.terminal.runtime-state-did-change")
 }
 
 @MainActor public final class GhosttyEmbeddedSessionRegistry {
@@ -237,9 +238,12 @@ extension Notification.Name {
             state: .running, updatedAt: ISO8601DateFormatter().string(from: now))
         let shouldPersist = force || shouldPersistRuntimeState(state, now: now)
         guard shouldPersist else { return }
+        let previousSignature = lastPersistedRuntimeState.map(runtimeStateSignature(for:))
+        let nextSignature = runtimeStateSignature(for: state)
         try? TerminalSessionPersistence.writeRuntimeState(state, paths: paths)
         lastPersistedRuntimeState = state
         lastRuntimeStateWriteAt = now
+        if previousSignature != nextSignature { postRuntimeStateDidChange() }
     }
 
     private func appendOutput(_ data: Data) {
@@ -279,6 +283,11 @@ extension Notification.Name {
     private func postSessionMetadataDidChange() {
         NotificationCenter.default.post(
             name: .spacesTerminalSessionMetadataDidChange, object: nil, userInfo: ["sessionID": launchConfiguration.sessionID])
+    }
+
+    private func postRuntimeStateDidChange() {
+        NotificationCenter.default.post(
+            name: .spacesTerminalRuntimeStateDidChange, object: nil, userInfo: ["sessionID": launchConfiguration.sessionID])
     }
 
     private func shouldPersistRuntimeState(_ state: TerminalSessionRuntimeState, now: Date) -> Bool {
