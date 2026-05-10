@@ -114,7 +114,7 @@ The owner window controller also routes standard AppKit edit actions to the acti
 - `Copy` reads from the live libghostty selection when the window owns the session
 - `Paste` sends pasteboard text into the owner session rather than the hidden inline input field
 - fallback or viewer windows keep using the text-output or inline-input path instead of pretending they own the live terminal surface
-- fallback or viewer windows preserve scrollback position and selection when new tailed output arrives, instead of snapping back to the bottom on every refresh
+- fallback or viewer windows preserve selection plus both horizontal and vertical scroll position when new tailed output arrives, instead of snapping back to the bottom or left edge on every refresh
 
 The headless `ghostty-embedded` backend runtime disables selection clipboard hooks because it is not the user-facing surface. The app-hosted owner path enables clipboard hooks through `GhosttyEmbeddedAppService`.
 
