@@ -261,6 +261,15 @@ shell_samples = [
 combined = [(name, elapsed, target, "shell") for name, elapsed, target in shell_samples]
 combined.extend((sample["metric"], sample["elapsed"], sample["target"], sample["detail"]) for sample in samples)
 combined.sort(key=lambda item: item[1], reverse=True)
+focus_route = None
+for sample in samples:
+    if sample["metric"] != "process_focus":
+        continue
+    detail = sample["detail"] or ""
+    route_match = re.search(r"route=([a-z_]+)", detail)
+    if route_match:
+        focus_route = route_match.group(1)
+        break
 
 with open(metrics_path, "w", encoding="utf-8") as handle:
     json.dump(
@@ -268,6 +277,7 @@ with open(metrics_path, "w", encoding="utf-8") as handle:
             "backend_session_stable": original_session == reopened_session,
             "backend_session_before_close": original_session,
             "backend_session_after_focus": reopened_session,
+            "workspace_process_focus_route": focus_route,
             "slowest_samples": [
                 {
                     "metric": name,
@@ -288,6 +298,8 @@ print()
 print(f"backend session stable across close/reopen: {'yes' if original_session == reopened_session else 'no'}")
 print(f"backend session before close: {original_session}")
 print(f"backend session after focus:  {reopened_session}")
+if focus_route:
+    print(f"workspace process focus route: {focus_route}")
 print()
 print("Slowest samples:")
 for name, elapsed, target, detail in combined[:10]:

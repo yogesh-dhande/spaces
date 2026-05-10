@@ -95,6 +95,7 @@ public final class WorkspaceOrchestrator {
     private enum ManagedTerminalFocusResult {
         case existingWindow
         case trackedTerminal
+        case reboundSession(windowID: Int?)
         case reopenedSession(windowID: Int?)
         case unavailable
     }
@@ -2184,6 +2185,16 @@ public final class WorkspaceOrchestrator {
             case .trackedTerminal:
                 focused = true
                 focusedExistingWindow = window.windowID != nil
+            case .reboundSession(let capturedWindowID):
+                focused = true
+                focusedExistingWindow = false
+                if terminalHost(for: window.app) == .spaces {
+                    if let capturedWindowID {
+                        try? persistBuiltInTerminalWindowBinding(window, windowID: capturedWindowID)
+                    } else {
+                        try? clearStaleBuiltInTerminalWindowBinding(window)
+                    }
+                }
             case .reopenedSession(let capturedWindowID):
                 focused = true
                 focusedExistingWindow = false
@@ -2388,7 +2399,7 @@ public final class WorkspaceOrchestrator {
             guard case .session(let sessionID)? = providerIdentity else { return .unavailable }
             builtInTerminalWindowFocuser(sessionID)
             if let capturedWindowID = try? captureSummonedBuiltInTerminalWindowID(appName: terminalAppName(for: terminalHost)) {
-                return .reopenedSession(windowID: capturedWindowID)
+                return .reboundSession(windowID: capturedWindowID)
             }
             builtInTerminalWindowOpener(sessionID, .owner)
             let capturedWindowID = try? captureSummonedBuiltInTerminalWindowID(appName: terminalAppName(for: terminalHost))
@@ -5545,6 +5556,17 @@ public final class WorkspaceOrchestrator {
             focused = true
             focusedExistingWindow = target.windowID != nil
             route = "tracked_terminal"
+        case .reboundSession(let capturedWindowID):
+            focused = true
+            focusedExistingWindow = false
+            route = "rebound_session"
+            if terminalHost(for: process.terminalApp) == .spaces {
+                if let capturedWindowID {
+                    try persistBuiltInTerminalWindowBinding(process, workspaceID: workspaceID, windowID: capturedWindowID)
+                } else {
+                    try clearStaleBuiltInTerminalWindowBinding(process, workspaceID: workspaceID)
+                }
+            }
         case .reopenedSession(let capturedWindowID):
             focused = true
             focusedExistingWindow = false
@@ -5682,6 +5704,9 @@ public final class WorkspaceOrchestrator {
         case .trackedTerminal:
             focused = true
             focusedExistingWindow = windowID != nil
+        case .reboundSession:
+            focused = true
+            focusedExistingWindow = false
         case .reopenedSession:
             focused = true
             focusedExistingWindow = false
