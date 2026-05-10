@@ -525,8 +525,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         }
         guard let paths = try? TerminalSessionPaths.forSession(id: sessionID) else { return }
         let activeOwnerClientID = Self.activeOwnerClientID(paths: paths)
-        if let controller = Self.reusableTerminalSessionWindowController(
-            existingControllers, mode: .owner, activeOwnerClientID: activeOwnerClientID)
+        if let controller = Self.reusableTerminalSessionWindowController(existingControllers, mode: .owner, activeOwnerClientID: activeOwnerClientID)
         {
             controller.focusWindow()
             return
