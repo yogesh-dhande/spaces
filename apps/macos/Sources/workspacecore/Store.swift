@@ -754,6 +754,18 @@ public final class SQLiteStore {
         return row?.first
     }
 
+    public func workspaceIDForTerminalSession(_ sessionID: String) throws -> String? {
+        let row = try queryRow(
+            sql: """
+                SELECT workspace_id
+                FROM windows
+                WHERE terminal_tracking_id = ? OR terminal_native_id = ?
+                ORDER BY last_seen_at DESC, order_index
+                LIMIT 1
+                """, bindings: [sessionID, sessionID])
+        return row?.first
+    }
+
     public func workspaceIDForAgentWindow(yabaiWindowID: Int) throws -> String? {
         let row = try queryRow(
             sql: """

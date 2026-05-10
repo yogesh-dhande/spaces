@@ -1624,6 +1624,8 @@ public final class WorkspaceOrchestrator {
         return try store.workspaceIDForAgentWindow(yabaiWindowID: focused.id)
     }
 
+    public func workspaceIDForTerminalSession(_ sessionID: String) throws -> String? { try store.workspaceIDForTerminalSession(sessionID) }
+
     private func focusedChromeWorkspaceID(windowID: Int) throws -> String? {
         if chrome.isAvailable(), let activeURL = (try? chrome.frontmostActiveTabURL()) ?? nil {
             var matchingWorkspaceIDs: [String] = []

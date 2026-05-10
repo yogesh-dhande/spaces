@@ -160,6 +160,7 @@ Current performance decisions:
 - Ghostty owner windows suppress inline non-error send-status text because the live terminal surface is the interactive input path. The inline status area stays available for real errors and for fallback/viewer flows.
 - App-side open/focus actions distinguish built-in `Spaces` terminal windows from external apps. Built-in terminal windows stay visible with the main app, while external terminal/browser/editor actions still use the hide-after-success behavior.
 - Global app-toggle behavior also distinguishes the primary main window from auxiliary built-in windows. When a built-in terminal or the command palette is focused, toggling the app summons the main Spaces window instead of hiding every Spaces-owned window in the process.
+- Built-in terminal summon/focus flows keep the tracked workspace association in the `windows` table through the terminal session ID. That lets the main window restore the owning workspace detail view when the user toggles back from a focused built-in terminal, even before yabai has supplied or refreshed a native window ID.
 - Built-in terminal actions emit debug metrics through the shared `spaces: perf metric=...` format when `DEBUG=1`, including:
   - `workspace_terminal_open_ui`
   - `terminal_session_start`

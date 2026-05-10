@@ -225,6 +225,7 @@ Spaces focuses those windows; it does not decide their geometry.
 - Window focus actions and numbered shortcuts should follow one target-level rule: make that target available now.
 - Focusing a target from the app UI or command palette should keep Spaces visible instead of hiding the app after the target receives focus.
 - The global `Toggle app` shortcut controls the main Spaces window, not the built-in terminal windows. If a built-in terminal or the command palette is focused, toggling the app should bring the main Spaces window forward instead of hiding all Spaces-owned windows.
+- Returning to the main Spaces window from a focused built-in terminal should show the workspace detail view that owns that terminal, matching the behavior of externally hosted terminal windows.
 - A live target should receive focus. A configured target that is not live should be opened directly instead of requiring a full workspace launch or restart.
 - Opening a configured browser session, process, or coding agent from a stopped workspace should move that workspace out of the stopped state immediately.
 - Partial runtime is a first-class workspace state: some configured targets may be live and focusable while others remain directly openable.

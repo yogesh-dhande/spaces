@@ -847,6 +847,15 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         return hasVisibleTerminalSessionWindowsForHotkeyState()
     }
 
+    private func focusedTerminalSessionIDForToggle() -> String? {
+        for (sessionID, controllers) in terminalSessionWindowControllers {
+            if controllers.contains(where: { !$0.didClose && ($0.window?.isKeyWindow == true || $0.window?.isMainWindow == true) }) {
+                return sessionID
+            }
+        }
+        return nil
+    }
+
     private func effectiveMainWindowVisibilityForHotkeyState() -> Bool {
         Self.effectiveMainWindowVisibilityForHotkeyState(
             rawMainWindowIsVisible: rawMainWindowVisibility(),
@@ -7101,6 +7110,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         return nil
     }
 
+    nonisolated static func preferredWorkspaceIDForAppToggle(focusedTerminalSessionWorkspaceID: String?, focusedWindowWorkspaceID: String?) -> String?
+    { focusedTerminalSessionWorkspaceID ?? focusedWindowWorkspaceID }
+
     nonisolated static func commandPaletteContextWorkspaceID(selectedWorkspaceID: String?, focusedWorkspaceID: () throws -> String?) rethrows
         -> String?
     {
@@ -7180,7 +7192,14 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             logHotkeyPerfMetric("toggle_window", action: "hide", context: perfContext)
             return
         }
-        let focusedWorkspaceID = try? orchestrator.workspaceIDForFocusedWindow()
+        let focusedTerminalWorkspaceID: String?
+        if let terminalSessionID = focusedTerminalSessionIDForToggle() {
+            focusedTerminalWorkspaceID = try? orchestrator.workspaceIDForTerminalSession(terminalSessionID)
+        } else {
+            focusedTerminalWorkspaceID = nil
+        }
+        let focusedWorkspaceID = Self.preferredWorkspaceIDForAppToggle(
+            focusedTerminalSessionWorkspaceID: focusedTerminalWorkspaceID, focusedWindowWorkspaceID: try? orchestrator.workspaceIDForFocusedWindow())
         NSApp.activate(ignoringOtherApps: true)
         NSApp.unhide(nil)
         if window.isMiniaturized { window.deminiaturize(nil) }
