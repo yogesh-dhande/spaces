@@ -184,4 +184,38 @@ import spacesterminalcore
 
         #expect(selected == nil)
     }
+
+    @MainActor @Test func focusableOwnerWindowReuseReturnsNilWhenNoLiveWindowExists() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let selected = AppKitController.focusableTerminalSessionWindowController([], sessionID: "missing-session")
+
+        #expect(selected == nil)
+    }
+
+    @MainActor @Test func focusableOwnerWindowReuseLabelsInMemoryOwnerRoute() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+        try TerminalSessionPersistence.writeLaunchConfiguration(
+            .init(
+                sessionID: "session-5", backend: .ghosttyEmbedded, title: "frontend", workingDirectory: "/tmp/work", shell: "/bin/zsh",
+                command: "npm run dev", createdAt: "2026-05-09T00:00:00Z"), paths: paths)
+        try TerminalSessionPersistence.writeRuntimeState(
+            .init(
+                sessionID: "session-5", backend: .ghosttyEmbedded, servicePID: 1, childPID: 4321, state: .running, updatedAt: "2026-05-09T00:00:01Z"),
+            paths: paths)
+
+        let ownerController = TerminalSessionWindowController(
+            sessionID: "session-5", paths: paths, preferredAttachmentMode: .owner, attachClientAction: { _, _ in }, detachClientAction: { _ in })
+
+        let selected = AppKitController.focusableTerminalSessionWindowController([ownerController], sessionID: "session-5")
+
+        #expect(selected?.controller === ownerController)
+        #expect(selected?.route == "in_memory_owner")
+    }
 }

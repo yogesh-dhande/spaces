@@ -519,20 +519,19 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     }
 
     private func focusTerminalSessionWindow(sessionID: String) {
+        let startedAt = Date()
         pruneClosedTerminalSessionWindowControllers(sessionID: sessionID)
         let existingControllers = terminalSessionWindowControllers[sessionID] ?? []
-        if let controller = Self.inMemoryOwnerTerminalSessionWindowController(existingControllers) {
-            controller.focusWindow()
+        guard let (controller, route) = Self.focusableTerminalSessionWindowController(existingControllers, sessionID: sessionID) else {
+            logPerfMetric(
+                "terminal_window_focus_ipc", target: "session=\(sessionID)", elapsedMS: windowShortcutElapsedMS(since: startedAt), success: true,
+                detail: "route=missing")
             return
         }
-        guard let paths = try? TerminalSessionPaths.forSession(id: sessionID) else { return }
-        let activeOwnerClientID = Self.activeOwnerClientID(paths: paths)
-        if let controller = Self.reusableTerminalSessionWindowController(existingControllers, mode: .owner, activeOwnerClientID: activeOwnerClientID)
-        {
-            controller.focusWindow()
-            return
-        }
-        openTerminalSessionWindow(sessionID: sessionID, mode: .owner)
+        controller.focusWindow()
+        logPerfMetric(
+            "terminal_window_focus_ipc", target: "session=\(sessionID)", elapsedMS: windowShortcutElapsedMS(since: startedAt), success: true,
+            detail: "route=\(route)")
     }
 
     static func inMemoryOwnerTerminalSessionWindowController(_ controllers: [TerminalSessionWindowController]) -> TerminalSessionWindowController? {
@@ -546,6 +545,19 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     ) -> TerminalSessionWindowController? {
         guard mode == .owner, let activeOwnerClientID else { return nil }
         return controllers.first { !$0.didClose && $0.clientID == activeOwnerClientID }
+    }
+
+    static func focusableTerminalSessionWindowController(_ controllers: [TerminalSessionWindowController], sessionID: String) -> (
+        controller: TerminalSessionWindowController, route: String
+    )? {
+        if let controller = inMemoryOwnerTerminalSessionWindowController(controllers) { return (controller, "in_memory_owner") }
+        guard !controllers.isEmpty else { return nil }
+        guard let paths = try? TerminalSessionPaths.forSession(id: sessionID) else { return nil }
+        guard
+            let controller = reusableTerminalSessionWindowController(
+                controllers, mode: .owner, activeOwnerClientID: activeOwnerClientID(paths: paths))
+        else { return nil }
+        return (controller, "persisted_owner")
     }
 
     static func activeOwnerClientID(paths: TerminalSessionPaths) -> String? {

@@ -142,6 +142,8 @@ Current performance decisions:
 - Owner and viewer frame persistence is coalesced during move and resize, then flushed immediately on live-resize end or window close so drag-heavy sessions do not spam synchronous state writes.
 - Built-in workspace-process reopen prefers the currently focused `Spaces` window when rebinding a reopened owner session, instead of diffing broader yabai window snapshots first.
 - Built-in workspace-process focus also tries the session-focus IPC path before it asks the app to reopen a built-in owner window, so a live owner controller with a missing persisted `windowID` can be rebound without unnecessary summon churn.
+- The session-focus IPC path is focus-only. It reuses a live owner controller when one exists and leaves window creation to the explicit open IPC, so the `reopened_session` path does not pay redundant app-side summon work before the real reopen request.
+- The app-side session-focus IPC also exits before resolving session files when there are no live controllers for that session, and it emits `terminal_window_focus_ipc` route metrics (`in_memory_owner`, `persisted_owner`, `missing`) so workspace-process profiles can show whether focus IPC actually reused a live window.
 - Workspace-process focus metrics distinguish that lighter `rebound_session` path from a true `reopened_session`, so profile runs can separate live-window rebind cost from actual window recreation cost.
 - Session output still streams directly to `output.log`, but session runtime-state persistence is coalesced so steady-state windows are not constantly paying synchronous metadata write costs.
 - Built-in terminal actions emit debug metrics through the shared `spaces: perf metric=...` format when `DEBUG=1`, including:
@@ -149,6 +151,7 @@ Current performance decisions:
   - `terminal_surface_create`
   - `terminal_window_attach`
   - `terminal_window_summon`
+  - `terminal_window_focus_ipc`
   - `terminal_owner_focus_sync`
   - `terminal_control_send`
   - `terminal_control_key`

@@ -470,7 +470,8 @@ import spacesterminalghostty
             }
             let runtimeState = try? TerminalSessionPersistence.readRuntimeState(paths: paths)
             updateGhosttySessionHostReference(for: currentLaunchConfiguration)
-            let currentOwnerClient = activeOwnerClient(paths: paths)
+            let attachmentSnapshot = try? TerminalSessionPersistence.readAttachmentSnapshot(paths: paths)
+            let currentOwnerClient = activeOwnerClient(snapshot: attachmentSnapshot)
             let isOwner = currentOwnerClient?.id == client.id || (currentOwnerClient == nil && preferredAttachmentMode == .owner)
             let currentTitle = currentWindowTitle(fallback: currentLaunchConfiguration.title, isOwner: isOwner)
             let currentWorkingDirectory = currentSummaryWorkingDirectory(fallback: currentLaunchConfiguration.workingDirectory)
@@ -484,8 +485,7 @@ import spacesterminalghostty
             stateLabel.stringValue = stateText
 
             if backend == .ghosttyEmbedded {
-                let activeAttachments = (try? TerminalSessionPersistence.activeAttachments(paths: paths)) ?? []
-                let activeAttachment = activeAttachments.first { $0.clientID == client.id }
+                let activeAttachment = attachmentSnapshot?.attachments.last(where: { $0.clientID == client.id && $0.detachedAt == nil })
                 if let activeAttachment {
                     preferredAttachmentMode = activeAttachment.mode
                     if lastObservedAttachmentMode != activeAttachment.mode {
@@ -826,10 +826,10 @@ import spacesterminalghostty
         }
     }
 
-    private func activeOwnerClient(paths: TerminalSessionPaths) -> TerminalClient? {
-        guard let snapshot = try? TerminalSessionPersistence.readAttachmentSnapshot(paths: paths),
-            let ownerAttachment = snapshot.attachments.last(where: { $0.mode == .owner && $0.detachedAt == nil })
-        else { return nil }
+    private func activeOwnerClient(snapshot: TerminalSessionAttachmentSnapshot?) -> TerminalClient? {
+        guard let snapshot else { return nil }
+        let activeAttachments = snapshot.attachments
+        guard let ownerAttachment = activeAttachments.last(where: { $0.mode == .owner && $0.detachedAt == nil }) else { return nil }
         return snapshot.clients.first(where: { $0.id == ownerAttachment.clientID })
     }
 
