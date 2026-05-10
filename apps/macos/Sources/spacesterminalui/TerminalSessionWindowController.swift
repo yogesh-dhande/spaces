@@ -462,7 +462,12 @@ import spacesterminalghostty
 
     private func refreshNow() {
         do {
-            let currentLaunchConfiguration = try TerminalSessionPersistence.readLaunchConfiguration(paths: paths)
+            let currentLaunchConfiguration: TerminalSessionLaunchConfiguration
+            if let launchConfiguration {
+                currentLaunchConfiguration = launchConfiguration
+            } else {
+                currentLaunchConfiguration = try TerminalSessionPersistence.readLaunchConfiguration(paths: paths)
+            }
             let runtimeState = try? TerminalSessionPersistence.readRuntimeState(paths: paths)
             updateGhosttySessionHostReference(for: currentLaunchConfiguration)
             let currentOwnerClient = activeOwnerClient(paths: paths)
