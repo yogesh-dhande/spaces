@@ -1182,8 +1182,8 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertEqual(unchanged?.status, .running)
     }
 
-    // Tests check and update process statuses prefers a live tmux session pid over a stale tracked pid for managed terminals.
-    func testCheckAndUpdateProcessStatusesPrefersLiveTmuxSessionPIDForManagedProcess() throws {
+    // Tests check and update process statuses refreshes a stale tracked pid from the live tmux session for managed terminals.
+    func testCheckAndUpdateProcessStatusesRefreshesLiveTmuxSessionPIDForManagedProcess() throws {
         let root = try makeTempDirectory()
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
@@ -1204,9 +1204,10 @@ final class OrchestratorTests: XCTestCase {
 
         let didUpdate = try orchestrator.checkAndUpdateProcessStatuses()
 
-        XCTAssertFalse(didUpdate)
-        let unchanged = try store.runningProcesses(workspaceID: workspace.id).first
-        XCTAssertEqual(unchanged?.status, .running)
+        XCTAssertTrue(didUpdate)
+        let refreshed = try store.runningProcesses(workspaceID: workspace.id).first
+        XCTAssertEqual(refreshed?.status, .running)
+        XCTAssertEqual(refreshed?.pid, Int(ProcessInfo.processInfo.processIdentifier))
     }
 
     // Tests check and update process statuses only checks running processes by arranging representative inputs and asserting the expected result.
@@ -3576,7 +3577,7 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertEqual(Set(windows.compactMap(\.terminalContainerID)), ["ghostty-tab-1", "ghostty-tab-2"])
     }
 
-    func testLaunchWorkspaceWithBuiltInSpacesHostWaitsForStableChildPID() throws {
+    func testLaunchWorkspaceWithBuiltInSpacesHostReturnsAfterSessionReadyWithoutWaitingForChildPID() throws {
         let root = try makeTempDirectory()
         defer { try? FileManager.default.removeItem(at: root) }
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
@@ -3598,7 +3599,7 @@ final class OrchestratorTests: XCTestCase {
                 DispatchQueue.global().asyncAfter(deadline: .now() + 0.15) {
                     try! TerminalSessionPersistence.writeRuntimeState(
                         .init(
-                            sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: 100, childPID: 4321, state: .running,
+                            sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: 100, childPID: Int32(getpid()), state: .running,
                             updatedAt: "2026-05-09T17:00:01Z"), paths: paths)
                 }
             })
@@ -3616,7 +3617,7 @@ final class OrchestratorTests: XCTestCase {
         }
 
         let runningProcess = try XCTUnwrap(try store.runningProcesses(workspaceID: workspace.id).first)
-        XCTAssertEqual(runningProcess.pid, 4321)
+        XCTAssertNil(runningProcess.pid)
         XCTAssertEqual(runningProcess.terminalApp, TerminalHost.spaces.appName)
         XCTAssertEqual(runningProcess.terminalTrackingID, runningProcess.terminalNativeID)
 

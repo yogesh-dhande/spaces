@@ -1170,6 +1170,16 @@ public final class WorkspaceOrchestrator {
                 continue
             }
             guard let pid = resolvedRuntimePID(for: process) else { continue }
+            if process.pid != pid {
+                let updatedProcess = RunningProcessRecord(
+                    id: process.id, workspaceID: process.workspaceID, templateName: process.templateName, command: process.command,
+                    terminalApp: process.terminalApp, windowID: process.windowID, terminalTrackingID: process.terminalTrackingID,
+                    terminalNativeID: process.terminalNativeID, terminalContainerID: process.terminalContainerID,
+                    itermTabIndex: process.itermTabIndex, tmuxWindowID: process.tmuxWindowID, pid: pid, status: process.status,
+                    logPath: process.logPath, lastOutputAt: process.lastOutputAt, startedAt: process.startedAt, exitedAt: process.exitedAt)
+                try store.upsert(runningProcess: updatedProcess)
+                didUpdate = true
+            }
             if !isProcessAlive(pid: pid) {
                 let updatedProcess = RunningProcessRecord(
                     id: process.id, workspaceID: process.workspaceID, templateName: process.templateName, command: process.command,
@@ -2630,8 +2640,14 @@ public final class WorkspaceOrchestrator {
         return configuredShell.flatMap { $0.isEmpty ? nil : $0 }
     }
 
+    private enum BuiltInTerminalReadinessPolicy: String {
+        case sessionReady = "session_ready"
+        case stableChildPID = "stable_child_pid"
+    }
+
     private func launchSpacesTerminalSession(
-        title: String, workingDirectory: String, command: String?, showMode: TerminalAttachmentMode, timeout: TimeInterval = 5.0
+        title: String, workingDirectory: String, command: String?, showMode: TerminalAttachmentMode,
+        readinessPolicy: BuiltInTerminalReadinessPolicy = .stableChildPID, timeout: TimeInterval = 5.0
     ) throws -> SpacesTerminalSessionHandle {
         let sessionID = UUID().uuidString
         let paths = try TerminalSessionPaths.forSession(id: sessionID)
@@ -2645,13 +2661,29 @@ public final class WorkspaceOrchestrator {
         builtInTerminalWindowOpener(sessionID, showMode)
 
         let deadline = currentDate().addingTimeInterval(timeout)
-        let runtimeState = try waitForBuiltInTerminalSession(paths: paths, deadline: deadline)
+        let waitStartedAt = currentDate()
+        let runtimeState: TerminalSessionRuntimeState
+        do {
+            runtimeState = try waitForBuiltInTerminalSession(paths: paths, deadline: deadline, readinessPolicy: readinessPolicy)
+            logTerminalPerfMetric(
+                "terminal_session_wait_ready", target: "session=\(sessionID)",
+                detail:
+                    "policy=\(readinessPolicy.rawValue) state=\(runtimeState.state.rawValue) child_pid=\(runtimeState.childPID.map(String.init) ?? "-")",
+                elapsedMS: elapsedMS(since: waitStartedAt), success: true)
+        } catch {
+            logTerminalPerfMetric(
+                "terminal_session_wait_ready", target: "session=\(sessionID)", detail: "policy=\(readinessPolicy.rawValue)",
+                elapsedMS: elapsedMS(since: waitStartedAt), success: false)
+            throw error
+        }
         let windowID = bestEffortCaptureNewAppWindowID(snapshot: snapshot, appName: TerminalHost.spaces.appName)
         return SpacesTerminalSessionHandle(
             sessionID: sessionID, childPID: runtimeState.childPID.map(Int.init), windowID: windowID, outputPath: paths.outputPath)
     }
 
-    private func waitForBuiltInTerminalSession(paths: TerminalSessionPaths, deadline: Date) throws -> TerminalSessionRuntimeState {
+    private func waitForBuiltInTerminalSession(paths: TerminalSessionPaths, deadline: Date, readinessPolicy: BuiltInTerminalReadinessPolicy) throws
+        -> TerminalSessionRuntimeState
+    {
         var lastRuntimeState: TerminalSessionRuntimeState?
         var firstReadyAt: Date?
 
@@ -2661,9 +2693,13 @@ public final class WorkspaceOrchestrator {
             if hasControlSocket, hasState {
                 if let runtimeState = try? TerminalSessionPersistence.readRuntimeState(paths: paths) {
                     lastRuntimeState = runtimeState
-                    if runtimeState.childPID != nil || runtimeState.state != .running { return runtimeState }
-                    if firstReadyAt == nil { firstReadyAt = currentDate() }
-                    if let firstReadyAt, currentDate().timeIntervalSince(firstReadyAt) >= 0.5 { return runtimeState }
+                    switch readinessPolicy {
+                    case .sessionReady: return runtimeState
+                    case .stableChildPID:
+                        if runtimeState.childPID != nil || runtimeState.state != .running { return runtimeState }
+                        if firstReadyAt == nil { firstReadyAt = currentDate() }
+                        if let firstReadyAt, currentDate().timeIntervalSince(firstReadyAt) >= 0.5 { return runtimeState }
+                    }
                 }
             }
             Thread.sleep(forTimeInterval: 0.05)
@@ -3388,6 +3424,12 @@ public final class WorkspaceOrchestrator {
         fputs(
             "spaces: perf metric=\(metric) workspace=\(workspaceID) target=\(target) success=\(success ? 1 : 0) elapsed_ms=\(elapsedMS)\(suffix)\n",
             stderr)
+    }
+
+    private func logTerminalPerfMetric(_ metric: String, target: String, detail: String = "", elapsedMS: Int, success: Bool) {
+        guard debugLoggingEnabled() else { return }
+        let suffix = detail.isEmpty ? "" : " \(detail)"
+        fputs("spaces: perf metric=\(metric) target=\(target) success=\(success ? 1 : 0) elapsed_ms=\(elapsedMS)\(suffix)\n", stderr)
     }
 
     private func debugLoggingEnabled() -> Bool { ProcessInfo.processInfo.environment["DEBUG"] == "1" }
@@ -4354,7 +4396,8 @@ public final class WorkspaceOrchestrator {
             for (index, template) in templates.enumerated() {
                 let name = template.name ?? template.command
                 let sessionCommand = try spacesTerminalCommand(template: template, env: env, processShell: processShell)
-                let session = try launchSpacesTerminalSession(title: name, workingDirectory: workspace.dir, command: sessionCommand, showMode: .owner)
+                let session = try launchSpacesTerminalSession(
+                    title: name, workingDirectory: workspace.dir, command: sessionCommand, showMode: .owner, readinessPolicy: .sessionReady)
                 let now = nowISO8601()
                 let running = RunningProcessRecord(
                     id: UUID().uuidString, workspaceID: workspace.id, templateName: name, command: template.command,
@@ -4593,13 +4636,27 @@ public final class WorkspaceOrchestrator {
         if let pid = process.pid, pid > 0 {
             if isProcessAlive(pid: pid) { return pid }
             guard isManagedTerminalApp(process.terminalApp) else { return pid }
+            if let builtInSessionRuntimePID = resolvedBuiltInSessionRuntimePID(for: process), isProcessAlive(pid: builtInSessionRuntimePID) {
+                return builtInSessionRuntimePID
+            }
             guard let pidFile = try? processRuntimePaths(workspaceID: process.workspaceID, name: process.templateName).pidFile else { return pid }
             if let runtimePID = runtimePID(fromFile: pidFile), runtimePID > 0, isProcessAlive(pid: runtimePID) { return runtimePID }
             return pid
         }
         guard isManagedTerminalApp(process.terminalApp) else { return nil }
+        if let builtInSessionRuntimePID = resolvedBuiltInSessionRuntimePID(for: process), isProcessAlive(pid: builtInSessionRuntimePID) {
+            return builtInSessionRuntimePID
+        }
         guard let pidFile = try? processRuntimePaths(workspaceID: process.workspaceID, name: process.templateName).pidFile else { return nil }
         return runtimePID(fromFile: pidFile)
+    }
+
+    private func resolvedBuiltInSessionRuntimePID(for process: RunningProcessRecord) -> Int? {
+        guard terminalHost(for: process.terminalApp) == .spaces else { return nil }
+        guard let sessionID = process.terminalNativeID ?? process.terminalTrackingID, !sessionID.isEmpty else { return nil }
+        guard let paths = try? TerminalSessionPaths.forSession(id: sessionID) else { return nil }
+        guard let runtimeState = try? TerminalSessionPersistence.readRuntimeState(paths: paths) else { return nil }
+        return runtimeState.childPID.map(Int.init)
     }
 
     private func resolvedTmuxRuntimePID(for process: RunningProcessRecord) -> Int? {
@@ -5489,7 +5546,8 @@ public final class WorkspaceOrchestrator {
         if terminalHost == .spaces {
             let name = processKey(for: template)
             let sessionCommand = try spacesTerminalCommand(template: template, env: env, processShell: try store.appConfig().processShell)
-            let session = try launchSpacesTerminalSession(title: name, workingDirectory: workspace.dir, command: sessionCommand, showMode: .owner)
+            let session = try launchSpacesTerminalSession(
+                title: name, workingDirectory: workspace.dir, command: sessionCommand, showMode: .owner, readinessPolicy: .sessionReady)
             let now = nowISO8601()
             let record = RunningProcessRecord(
                 id: UUID().uuidString, workspaceID: workspace.id, templateName: name, command: template.command,

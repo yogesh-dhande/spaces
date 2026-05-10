@@ -21,10 +21,10 @@ import spacesterminalghostty
 
     private let sessionID: String
     private let paths: TerminalSessionPaths
-    private let launchConfiguration: TerminalSessionLaunchConfiguration?
+    private var launchConfiguration: TerminalSessionLaunchConfiguration?
     private let client: TerminalClient
-    private let rendererMode: TerminalRendererMode
-    private let backend: TerminalSessionBackendKind
+    private var rendererMode: TerminalRendererMode
+    private var backend: TerminalSessionBackendKind
     private var preferredAttachmentMode: TerminalAttachmentMode
     private let titleLabel = NSTextField(labelWithString: "")
     private let summaryLabel = NSTextField(labelWithString: "")
@@ -490,6 +490,11 @@ import spacesterminalghostty
             } else {
                 currentLaunchConfiguration = try TerminalSessionPersistence.readLaunchConfiguration(paths: paths)
             }
+            launchConfiguration = currentLaunchConfiguration
+            if backend != currentLaunchConfiguration.backend {
+                backend = currentLaunchConfiguration.backend
+                rendererMode = TerminalRendererResolver.resolveGhosttyEmbeddedMode(backend: currentLaunchConfiguration.backend)
+            }
             let runtimeState = try? TerminalSessionPersistence.readRuntimeState(paths: paths)
             lastObservedRuntimeState = runtimeState
             updateGhosttySessionHostReference(for: currentLaunchConfiguration)
@@ -536,7 +541,6 @@ import spacesterminalghostty
                 updateInputOwnershipUI(isOwner: isOwner, isInteractive: isInteractiveRuntimeState(runtimeState))
                 rendererLabel.stringValue = rendererMode.statusSummary
             }
-
             guard visibleRenderer != .ghosttyOwner else { return }
             let output = (try? TerminalOutputTail.tail(path: paths.outputPath, lineCount: 200)) ?? ""
             if output != lastRenderedOutput {

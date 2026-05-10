@@ -10,10 +10,11 @@ struct MXE2ECommand: ParsableCommand {
         commandName: "spacese2e", abstract: "Manual real-system test helpers for Spaces.",
         subcommands: [
             SeedFixtureCommand.self, CleanupFixturesCommand.self, CreateWorkspaceCommand.self, LookupWorkspaceCommand.self,
-            SelectWorkspaceDetailCommand.self, DumpWorkspaceCommand.self, FocusableWindowNamesCommand.self, ArchiveWorkspaceCommand.self,
-            StopWorkspaceCommand.self, StopFixturesCommand.self, SetWorkspaceBrowserSessionURLsCommand.self, SetWorkspaceAgentLaunchersCommand.self,
-            SetWorkspaceStopScriptCommand.self, SetTerminalHostCommand.self, TerminalHostAvailableCommand.self, FocusWorkspaceProcessCommand.self,
-            RecoverWorkspaceProcessCommand.self, CloseWorkspaceProcessWindowCommand.self, RecordScreenCommand.self,
+            SelectWorkspaceDetailCommand.self, OpenWorkspaceTerminalCommand.self, DumpWorkspaceCommand.self, FocusableWindowNamesCommand.self,
+            ArchiveWorkspaceCommand.self, StopWorkspaceCommand.self, StopFixturesCommand.self, SetWorkspaceBrowserSessionURLsCommand.self,
+            SetWorkspaceAgentLaunchersCommand.self, SetWorkspaceStopScriptCommand.self, SetTerminalHostCommand.self,
+            TerminalHostAvailableCommand.self, FocusWorkspaceProcessCommand.self, RecoverWorkspaceProcessCommand.self,
+            CloseWorkspaceProcessWindowCommand.self, RecordScreenCommand.self,
         ])
 }
 
@@ -33,6 +34,31 @@ private struct SelectWorkspaceDetailCommand: ParsableCommand {
         }
         DistributedNotificationCenter.default().postNotificationName(
             IPCNotification.selectWorkspaceDetail, object: nil, userInfo: [IPCNotification.workspaceIDUserInfoKey: workspace.id],
+            options: [.deliverImmediately])
+        try emitJSON(
+            WorkspaceSummaryPayload(
+                id: workspace.id, title: workspace.title, dir: workspace.dir, isArchived: workspace.isArchived, isRunning: workspace.isRunning,
+                notes: workspace.notes))
+    }
+}
+
+private struct OpenWorkspaceTerminalCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "open-workspace-terminal")
+
+    @Option(name: .long) var workspaceDir: String
+
+    /// Tells the running Spaces app to open one built-in terminal for a
+    /// workspace through the same UI-side path used by the app itself, so the
+    /// manual harness can profile launch responsiveness without scripting
+    /// shortcuts or sidebar clicks.
+    func run() throws {
+        let orchestrator = try makeOrchestrator()
+        let normalizedWorkspaceDir = normalizePath(workspaceDir)
+        guard let workspace = try orchestrator.store.workspace(dir: normalizedWorkspaceDir) else {
+            throw ValidationError("Workspace not found at: \(normalizedWorkspaceDir)")
+        }
+        DistributedNotificationCenter.default().postNotificationName(
+            IPCNotification.openWorkspaceTerminal, object: nil, userInfo: [IPCNotification.workspaceIDUserInfoKey: workspace.id],
             options: [.deliverImmediately])
         try emitJSON(
             WorkspaceSummaryPayload(

@@ -34,6 +34,7 @@ import spacesterminalcore
     private var previousAcceptsMouseMovedEvents: Bool?
     private var nextSurfaceCreationRetryAt: Date?
     private var lastSurfaceCreationFailureMessage: String?
+    private var refreshScheduled = false
 
     public init(launchConfiguration: TerminalSessionLaunchConfiguration) {
         self.launchConfiguration = launchConfiguration
@@ -182,7 +183,10 @@ import spacesterminalcore
     public override func keyDown(with event: NSEvent) {
         let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
 
-        if sendGhosttyKey(event: event, action: event.isARepeat ? GHOSTTY_ACTION_REPEAT : GHOSTTY_ACTION_PRESS) { return }
+        if sendGhosttyKey(event: event, action: event.isARepeat ? GHOSTTY_ACTION_REPEAT : GHOSTTY_ACTION_PRESS) {
+            requestSurfaceRefresh()
+            return
+        }
         if flags.contains(.command) {
             super.keyDown(with: event)
             return
@@ -191,12 +195,18 @@ import spacesterminalcore
     }
 
     public override func keyUp(with event: NSEvent) {
-        if sendGhosttyKey(event: event, action: GHOSTTY_ACTION_RELEASE) { return }
+        if sendGhosttyKey(event: event, action: GHOSTTY_ACTION_RELEASE) {
+            requestSurfaceRefresh()
+            return
+        }
         super.keyUp(with: event)
     }
 
     public override func flagsChanged(with event: NSEvent) {
-        if sendGhosttyKey(event: event, action: modifierKeyAction(for: event)) { return }
+        if sendGhosttyKey(event: event, action: modifierKeyAction(for: event)) {
+            requestSurfaceRefresh()
+            return
+        }
         super.flagsChanged(with: event)
     }
 
@@ -210,6 +220,7 @@ import spacesterminalcore
         input.text = nil
         guard ghostty_surface_key_is_binding(surface, input, nil) else { return false }
         _ = ghostty_surface_key(surface, input)
+        requestSurfaceRefresh()
         return true
     }
 
@@ -242,6 +253,7 @@ import spacesterminalcore
             guard let baseAddress = rawBuffer.bindMemory(to: UInt8.self).baseAddress else { return }
             ghostty_surface_send_input_raw(surface, baseAddress, UInt(data.count))
         }
+        requestSurfaceRefresh()
     }
 
     public func foregroundPID() -> Int32? {
@@ -253,6 +265,15 @@ import spacesterminalcore
 
     public func setOutputHandler(_ handler: (@Sendable (Data) -> Void)?) { outputHandler = handler }
     public func setFocused(_ focused: Bool) { setSurfaceFocus(focused) }
+    public func requestSurfaceRefresh() {
+        guard surface != nil else { return }
+        guard !refreshScheduled else { return }
+        refreshScheduled = true
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            MainActor.assumeIsolated { self.performSurfaceRefresh() }
+        }
+    }
 
     func handleSurfaceClosed() { destroySurface() }
 
@@ -478,6 +499,21 @@ import spacesterminalcore
         guard lastOccluded != occluded else { return }
         lastOccluded = occluded
         ghostty_surface_set_occlusion(surface, occluded)
+    }
+
+    private func performSurfaceRefresh() {
+        refreshScheduled = false
+        guard let surface else { return }
+        superview?.layoutSubtreeIfNeeded()
+        window?.contentView?.layoutSubtreeIfNeeded()
+        GhosttyEmbeddedAppService.shared.tick()
+        ghostty_surface_refresh(surface)
+        needsDisplay = true
+        layer?.setNeedsDisplay()
+        displayIfNeeded()
+        superview?.displayIfNeeded()
+        window?.contentView?.displayIfNeeded()
+        window?.displayIfNeeded()
     }
 
     private func teardownWindowObservation() {

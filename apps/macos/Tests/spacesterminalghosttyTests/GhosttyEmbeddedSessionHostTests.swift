@@ -47,4 +47,23 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         XCTAssertEqual(host.effectiveTitle, "fallback-title")
         XCTAssertEqual(host.effectiveWorkingDirectory, "/tmp/original")
     }
+
+    @MainActor func testIncomingOutputRequestsSurfaceRefreshImmediately() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let launchConfiguration = TerminalSessionLaunchConfiguration(
+            sessionID: "session-3", backend: .ghosttyEmbedded, title: "shell", workingDirectory: "/tmp/original", shell: "/bin/zsh", command: "zsh",
+            createdAt: "2026-05-10T00:00:00Z")
+        var refreshCount = 0
+        let host = GhosttyEmbeddedSessionHost(
+            launchConfiguration: launchConfiguration, paths: .init(rootDirectory: root.path), requestSurfaceRefreshAction: { refreshCount += 1 })
+
+        host.debugHandleIncomingOutput(Data("echo hello\n".utf8))
+
+        XCTAssertEqual(refreshCount, 1)
+        let output = try String(contentsOfFile: TerminalSessionPaths(rootDirectory: root.path).outputPath)
+        XCTAssertEqual(output, "echo hello\n")
+    }
 }

@@ -31,6 +31,7 @@ extension Notification.Name {
 
     private let controlQueue: DispatchQueue
     private let terminalView: GhosttyEmbeddedTerminalView
+    private let requestSurfaceRefreshAction: @MainActor () -> Void
     private var runtimeStateTimer: Timer?
     private var controlServer: TerminalControlServer?
     private var outputHandle: FileHandle?
@@ -40,12 +41,18 @@ extension Notification.Name {
     private var lastKnownChildPID: Int32?
     private var lastPersistedRuntimeState: TerminalSessionRuntimeState?
     private var lastRuntimeStateWriteAt: Date?
+    private var sessionStartedAt: Date?
+    private var didLogFirstOutput = false
 
-    public init(launchConfiguration: TerminalSessionLaunchConfiguration, paths: TerminalSessionPaths) {
+    public init(
+        launchConfiguration: TerminalSessionLaunchConfiguration, paths: TerminalSessionPaths,
+        requestSurfaceRefreshAction: (@MainActor () -> Void)? = nil
+    ) {
         self.launchConfiguration = launchConfiguration
         self.paths = paths
         controlQueue = DispatchQueue(label: "spaces.terminal.session-host.control.\(launchConfiguration.sessionID)")
         terminalView = GhosttyEmbeddedTerminalView(launchConfiguration: launchConfiguration)
+        self.requestSurfaceRefreshAction = requestSurfaceRefreshAction ?? { [terminalView] in terminalView.requestSurfaceRefresh() }
         terminalView.onActionEvent = { [weak self] event in self?.applyActionEvent(event) }
     }
 
@@ -55,15 +62,19 @@ extension Notification.Name {
         do {
             try paths.ensureDirectories()
             try TerminalSessionPersistence.writeLaunchConfiguration(launchConfiguration, paths: paths)
-            FileManager.default.createFile(atPath: paths.outputPath, contents: nil)
-            FileManager.default.createFile(atPath: paths.serviceLogPath, contents: nil)
-            outputHandle = try FileHandle(forWritingTo: URL(fileURLWithPath: paths.outputPath))
-            try outputHandle?.seekToEnd()
-            terminalView.setOutputHandler { [weak self] data in Task { @MainActor [weak self] in self?.appendOutput(data) } }
+            try ensureOutputHandle()
+            terminalView.setOutputHandler { [weak self] data in
+                Task { @MainActor [weak self] in
+                    self?.requestSurfaceRefreshAction()
+                    self?.appendOutput(data)
+                }
+            }
             try startControlServer()
             startRuntimeStateTimer()
             refreshRuntimeState(force: true)
             started = true
+            sessionStartedAt = startedAt
+            didLogFirstOutput = false
             GhosttyEmbeddedPerformance.logMetric(
                 "terminal_session_start", target: "session=\(launchConfiguration.sessionID) backend=\(launchConfiguration.backend.rawValue)",
                 elapsedMS: GhosttyEmbeddedPerformance.elapsedMS(since: startedAt), success: true)
@@ -99,6 +110,9 @@ extension Notification.Name {
                         terminalView.bottomAnchor.constraint(equalTo: container.bottomAnchor),
                     ])
                 }
+                container.needsLayout = true
+                container.layoutSubtreeIfNeeded()
+                terminalView.requestSurfaceRefresh()
                 focusWindow(container.window)
             }
             refreshRuntimeState(force: true)
@@ -247,11 +261,29 @@ extension Notification.Name {
     }
 
     private func appendOutput(_ data: Data) {
-        guard let outputHandle = outputHandle else { return }
         do {
+            let outputHandle = try ensureOutputHandle()
             try outputHandle.write(contentsOf: data)
             try outputHandle.synchronize()
+            if !didLogFirstOutput, !data.isEmpty {
+                didLogFirstOutput = true
+                if let sessionStartedAt {
+                    GhosttyEmbeddedPerformance.logMetric(
+                        "terminal_first_output", target: "session=\(launchConfiguration.sessionID)",
+                        elapsedMS: GhosttyEmbeddedPerformance.elapsedMS(since: sessionStartedAt), success: true, detail: "bytes=\(data.count)")
+                }
+            }
         } catch { fputs("spaces: ghostty output write failed: \(error)\n", stderr) }
+    }
+
+    @discardableResult private func ensureOutputHandle() throws -> FileHandle {
+        if let outputHandle { return outputHandle }
+        FileManager.default.createFile(atPath: paths.outputPath, contents: nil)
+        FileManager.default.createFile(atPath: paths.serviceLogPath, contents: nil)
+        let createdHandle = try FileHandle(forWritingTo: URL(fileURLWithPath: paths.outputPath))
+        try createdHandle.seekToEnd()
+        outputHandle = createdHandle
+        return createdHandle
     }
 
     func applyActionEvent(_ event: GhosttyActionEvent) {
@@ -302,4 +334,8 @@ extension Notification.Name {
 
     var debugCurrentTitle: String? { currentTitle }
     var debugCurrentWorkingDirectory: String? { currentWorkingDirectory }
+    func debugHandleIncomingOutput(_ data: Data) {
+        requestSurfaceRefreshAction()
+        appendOutput(data)
+    }
 }

@@ -139,6 +139,7 @@ Current performance decisions:
 - Owner-window focus avoids unnecessary `makeKeyAndOrderFront` and repeated focus toggles when the view is already first responder.
 - Active owner windows skip fallback `output.log` tail reads while the live libghostty surface is visible, so steady-state refresh ticks do not churn hidden text views.
 - Active owner windows also use the slower notification-first refresh cadence above, which keeps the live terminal path responsive without doing the same fallback polling work as passive windows.
+- If a window controller is created before `metadata.json` is readable, the next refresh upgrades that window to the persisted backend instead of leaving it stuck on fallback `script-pty` controls.
 - Active owner windows fall back to the faster 500 ms cadence again whenever the runtime state is no longer steady-state `running`, so exited or warning states refresh like the diagnostic viewer path instead of waiting on the slower safety poll.
 - Fresh terminal window controllers do an immediate one-time render pass during construction but do not start their periodic refresh loop until `show()`, so summon and reopen avoid canceling and restarting a loop that the user has not seen yet.
 - App-managed terminal summon paths also skip that constructor refresh for newly created controllers and rely on `show()` for the first render pass, so a real window summon does not pay the same synchronous metadata and output read twice.
@@ -153,8 +154,13 @@ Current performance decisions:
 - The workspace-process profiler prints both the workspace-process focus route and the app-side `terminal_window_focus_ipc` route, which makes it easier to see whether a slow reopen actually tried and missed the live-window focus path or never exercised it.
 - The built-in terminal profiler treats `spaces terminal command --backend ghostty-embedded` as the owner summon itself and waits for the first owner attach, instead of immediately posting a second owner `terminal show` that would measure an artificial re-summon.
 - Session output still streams directly to `output.log`, but session runtime-state persistence is coalesced so steady-state windows are not constantly paying synchronous metadata write costs.
+- Built-in process sessions use a lighter readiness policy than ad hoc terminals. Workspace-process launch waits only for the embedded session control socket plus `state.json` to exist, then lets later runtime-state refreshes reconcile a child PID after the window is already visible.
+- Owner-surface attach forces one immediate layout + surface refresh, and later PTY output or local input coalesces explicit surface refresh requests. That keeps first-open prompts and command output visible on live `ghostty-embedded` process windows instead of relying on a close/reopen cycle to reveal buffered content.
 - Built-in terminal actions emit debug metrics through the shared `spaces: perf metric=...` format when `DEBUG=1`, including:
+  - `workspace_terminal_open_ui`
   - `terminal_session_start`
+  - `terminal_first_output`
+  - `terminal_session_wait_ready`
   - `terminal_surface_create`
   - `terminal_window_attach`
   - `terminal_window_summon`
@@ -222,6 +228,44 @@ The profiler:
 - aggregates the built-in terminal perf metrics into a short summary
 - writes a machine-readable `metrics.json` baseline artifact next to the text summary
 - breaks out `terminal_owner_focus_sync` samples by reason so focus churn can be tracked over time
+
+For repeatable performance sampling of the app-triggered workspace-terminal open path:
+
+```bash
+ITERATIONS=3 apps/macos/Tests/profile_workspace_terminal_open.sh
+```
+
+The workspace-terminal-open profiler:
+- seeds an isolated fixture workspace with terminal host `spaces`
+- launches a debug `SpacesApp` with `DEBUG=1`
+- triggers the app-side workspace-terminal open route through manual-E2E IPC instead of the CLI-only terminal session path
+- records three timings that separate the visible launch cost:
+  - `workspace_terminal_open_wall`: wall-clock time from the trigger until the app reports the open completed
+  - `workspace_terminal_open_ui`: the app-side detached open action, including the backend readiness wait and sidebar reload
+  - `terminal_session_wait_ready`: the built-in session bootstrap wait inside `WorkspaceOrchestrator`
+- keeps `terminal_window_summon` in the same summary so the window-controller contribution stays visible next to the backend wait
+
+A representative isolated debug run recorded:
+- `workspace_terminal_open_wall`: `686-688ms`
+- `workspace_terminal_open_ui`: `634-639ms`
+- `terminal_session_wait_ready`: `588-597ms`
+- `terminal_window_summon`: `26-34ms`
+
+That split shows the dominant cost is session readiness rather than native window summon. The built-in app path therefore keeps the readiness wait for correctness but runs it off the main thread so the sidebar window does not spin while the embedded backend starts.
+
+For repeatable profiling of built-in workspace-process launch, close, and reopen:
+
+```bash
+apps/macos/Tests/profile_workspace_process_terminal.sh
+```
+
+With the lighter built-in process readiness policy, a representative isolated debug run recorded:
+- `workspace_start_wall`: `298ms`
+- `terminal_session_wait_ready`: `53-59ms` per built-in process window, with `policy=session_ready`
+- `terminal_window_summon`: `22-30ms`
+- `workspace_process_focus_wall`: `164ms`
+
+That profile shows the dominant process-launch overhead has moved off the built-in terminal bootstrap path. Remaining steady-state process-window work is now mostly in the workspace-level focus and reopen flow rather than the initial session bring-up.
 
 ## What This Branch Does Not Decide
 - whether external hosts are removed in a later PR

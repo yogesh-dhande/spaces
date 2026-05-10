@@ -98,6 +98,18 @@ ITERATIONS=3 apps/macos/Tests/profile_built_in_terminal.sh
 The profiler runs against an isolated `SPACES_DB_PATH`, enables `DEBUG=1`, exercises owner attach, viewer attach, send, `tail`, and takeover, then summarizes the built-in terminal perf metrics captured from the app log.
 It also writes `summary.txt` and `metrics.json` under its temp work root so baseline metric snapshots can be compared across terminal-window parity changes.
 
+For repeatable profiling of the app-triggered built-in workspace-terminal open path:
+
+```bash
+ITERATIONS=3 apps/macos/Tests/profile_workspace_terminal_open.sh
+```
+
+That profiler seeds an isolated fixture workspace, triggers the app-side workspace-terminal open route through the manual E2E IPC helper, and summarizes:
+- `workspace_terminal_open_wall`
+- `workspace_terminal_open_ui`
+- `terminal_session_wait_ready`
+- `terminal_window_summon`
+
 For workspace-process profiling, use:
 
 ```bash

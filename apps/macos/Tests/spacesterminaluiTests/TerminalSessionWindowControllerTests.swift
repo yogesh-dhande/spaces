@@ -176,6 +176,36 @@ final class TerminalSessionWindowControllerTests: XCTestCase {
         XCTAssertEqual(controller.debugRenderedOutput, "hello")
     }
 
+    @MainActor func testControllerUpgradesFromFallbackBackendOnceGhosttyMetadataAppears() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+        let controller = TerminalSessionWindowController(sessionID: "session-upgrade", paths: paths, performInitialRefresh: false)
+
+        XCTAssertTrue(controller.debugShowsInlineControls)
+
+        try TerminalSessionPersistence.writeLaunchConfiguration(
+            .init(
+                sessionID: "session-upgrade", backend: .ghosttyEmbedded, title: "backend", workingDirectory: "/tmp/work", shell: "/bin/zsh",
+                command: "zsh", createdAt: "2026-05-10T00:00:00Z"), paths: paths)
+        try TerminalSessionPersistence.writeRuntimeState(
+            .init(
+                sessionID: "session-upgrade", backend: .ghosttyEmbedded, servicePID: 1, childPID: 4321, state: .running,
+                updatedAt: "2026-05-10T00:00:01Z"), paths: paths)
+        let owner = TerminalClient(
+            id: controller.clientID, kind: .localWindow, identity: .init(label: "Spaces window", hostName: "mac", deviceName: "Owner Mac"),
+            connectedAt: "2026-05-10T00:00:00Z")
+        try TerminalSessionPersistence.attachClient(
+            sessionID: "session-upgrade", client: owner, mode: .owner, paths: paths, attachedAt: "2026-05-10T00:00:00Z")
+
+        controller.debugForceRefresh()
+
+        XCTAssertEqual(controller.debugRendererSummary, "Renderer: libghostty (owner)")
+        XCTAssertFalse(controller.debugShowsInlineControls)
+    }
+
     @MainActor func testControllerCompactsExportHeavyProcessCommandInSummary() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)

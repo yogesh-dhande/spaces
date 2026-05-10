@@ -156,6 +156,7 @@ def summarize(values):
 
 ordered_metrics = [
     "terminal_session_start",
+    "terminal_first_output",
     "terminal_surface_create",
     "terminal_window_attach",
     "terminal_window_summon",

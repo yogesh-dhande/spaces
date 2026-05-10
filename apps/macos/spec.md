@@ -119,6 +119,8 @@ Spaces focuses those windows; it does not decide their geometry.
 - `ghostty-embedded` owner windows should accept direct keyboard input in the terminal surface itself rather than relying on a separate send-input form.
 - `ghostty-embedded` owner windows should prioritize the terminal surface over diagnostic chrome. Backend or attachment details may remain visible in viewer or fallback states, but the active owner window should keep the live terminal as the primary experience.
 - `ghostty-embedded` owner windows should use the native window titlebar for the live session title and collapse redundant in-window session identifiers or renderer diagnostics when the owner surface is active.
+- `ghostty-embedded` owner windows should show prompt and shell output on first open, including workspace-process sessions, without requiring the user to close and reopen the window to reveal already-buffered terminal content.
+- Opening a built-in `Spaces` terminal from the app should not block the sidebar window while the session backend becomes ready; session bootstrap latency may still exist, but the workspace UI should stay interactive during that wait.
 - When the active `ghostty-embedded` owner window has no warning or non-running state to show, its inline header band should collapse so the terminal surface fills the content area instead of leaving a dead strip of chrome above the terminal.
 - When Spaces focuses an already-open built-in process window from the normal workspace flow, the owner terminal surface should be ready for immediate typing without requiring an extra click inside the window.
 - A terminal session may have one active owner client and one or more passive viewer clients attached at the same time.

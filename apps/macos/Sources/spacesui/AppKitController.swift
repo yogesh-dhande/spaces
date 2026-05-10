@@ -203,6 +203,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     }()
     private var agentEventIPCObserver: NSObjectProtocol?
     private var selectWorkspaceDetailIPCObserver: NSObjectProtocol?
+    private var openWorkspaceTerminalIPCObserver: NSObjectProtocol?
     private var openTerminalSessionWindowIPCObserver: NSObjectProtocol?
     private var focusTerminalSessionWindowIPCObserver: NSObjectProtocol?
     private var closeTerminalSessionWindowIPCObserver: NSObjectProtocol?
@@ -328,6 +329,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         logStartupProfile("shortcut_monitor_ready")
         setupAgentEventIPCObserver()
         setupSelectWorkspaceDetailIPCObserver()
+        setupOpenWorkspaceTerminalIPCObserver()
         setupOpenTerminalSessionWindowIPCObserver()
         setupFocusTerminalSessionWindowIPCObserver()
         setupCloseTerminalSessionWindowIPCObserver()
@@ -417,6 +419,18 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                     window.makeKey()
                 }
                 self.logWorkspaceDetailIPC("selected id=\(workspaceID) title=\(workspace.title)")
+            }
+        }
+    }
+
+    private func setupOpenWorkspaceTerminalIPCObserver() {
+        openWorkspaceTerminalIPCObserver = DistributedNotificationCenter.default().addObserver(
+            forName: IPCNotification.openWorkspaceTerminal, object: nil, queue: .main
+        ) { [weak self] notification in
+            guard let workspaceID = notification.userInfo?[IPCNotification.workspaceIDUserInfoKey] as? String else { return }
+            Task { @MainActor [weak self, workspaceID] in
+                guard let self else { return }
+                self.openWorkspaceTerminal(workspaceID: workspaceID, route: .ipc)
             }
         }
     }
@@ -908,6 +922,18 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                     notice = outcome.notice
                 }
                 return .success(.init(notice: notice))
+            } catch { return .failure(error) }
+        }.value
+    }
+
+    nonisolated private static func openWorkspaceTerminalSnapshot(workspaceID: String) async -> Result<Void, Error> {
+        await Task.detached(priority: .userInitiated) {
+            do {
+                let db = try DatabaseLocator.defaultPath()
+                let store = try SQLiteStore(path: db)
+                let orchestrator = WorkspaceOrchestrator(store: store)
+                try orchestrator.openWorkspaceTerminal(workspaceID: workspaceID)
+                return .success(())
             } catch { return .failure(error) }
         }.value
     }
@@ -5517,7 +5543,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
     @objc private func openWorkspaceTerminal(_ sender: NSButton) {
         guard let workspaceID = sender.identifier?.rawValue else { return }
-        openWorkspaceTerminal(workspaceID: workspaceID)
+        sender.isEnabled = false
+        openWorkspaceTerminal(workspaceID: workspaceID, route: .button) { sender.isEnabled = true }
     }
 
     @objc private func openWorkspaceFinder(_ sender: NSButton) {
@@ -6218,12 +6245,33 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         } catch { showError(error) }
     }
 
-    private func openWorkspaceTerminal(workspaceID: String) {
-        do {
-            try orchestrator.openWorkspaceTerminal(workspaceID: workspaceID)
-            reloadData()
-            hideAfterSuccessfulExternalWindowAction(.open)
-        } catch { showError(error) }
+    private enum WorkspaceTerminalOpenRoute: String {
+        case button
+        case shortcut
+        case ipc
+    }
+
+    private func openWorkspaceTerminal(workspaceID: String, route: WorkspaceTerminalOpenRoute, completion: (() -> Void)? = nil) {
+        let startedAt = Date()
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer { completion?() }
+            let result = await Self.openWorkspaceTerminalSnapshot(workspaceID: workspaceID)
+            let elapsedMS = windowShortcutElapsedMS(since: startedAt)
+            switch result {
+            case .success:
+                logPerfMetric(
+                    "workspace_terminal_open_ui", target: "workspace=\(workspaceID)", elapsedMS: elapsedMS, success: true,
+                    detail: "route=\(route.rawValue)")
+                reloadData()
+                hideAfterSuccessfulExternalWindowAction(.open)
+            case .failure(let error):
+                logPerfMetric(
+                    "workspace_terminal_open_ui", target: "workspace=\(workspaceID)", elapsedMS: elapsedMS, success: false,
+                    detail: "route=\(route.rawValue)")
+                showError(error)
+            }
+        }
     }
 
     private func openWorkspaceFinder(workspaceID: String) {
@@ -6353,7 +6401,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 return nil
             }
             if let openTerminalShortcutSpec, matches(event: event, spec: openTerminalShortcutSpec) {
-                if let workspaceID = self.selectedWorkspaceID { self.openWorkspaceTerminal(workspaceID: workspaceID) }
+                if let workspaceID = self.selectedWorkspaceID { self.openWorkspaceTerminal(workspaceID: workspaceID, route: .shortcut) }
                 return nil
             }
             if let openFinderShortcutSpec, matches(event: event, spec: openFinderShortcutSpec) {
