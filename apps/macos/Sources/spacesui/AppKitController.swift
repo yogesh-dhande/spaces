@@ -470,8 +470,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             if mode == .owner, let existing = Self.inMemoryOwnerTerminalSessionWindowController(existingControllers) {
                 controller = existing
                 reusedExistingWindow = true
-            } else if let existing = Self.reusableTerminalSessionWindowController(
-                existingControllers, mode: mode, activeOwnerClientID: Self.activeOwnerClientID(paths: paths))
+            } else if mode == .owner,
+                let existing = Self.reusableTerminalSessionWindowController(
+                    existingControllers, mode: .owner, activeOwnerClientID: Self.activeOwnerClientID(paths: paths))
             {
                 controller = existing
                 reusedExistingWindow = true
