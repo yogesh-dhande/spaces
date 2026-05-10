@@ -70,6 +70,7 @@ These hooks are important because snapshot-style render reads are not enough for
   - show owner identity
   - can request takeover
   - continue using tailed output until ownership changes
+- Once a session is no longer running, passive viewer windows stop presenting takeover affordances, script-pty fallback windows disable their inline send controls, and owner-window paste actions stop claiming the session is still interactive.
 
 The takeover path updates `attachments.json`, moves ownership to the requested client, and rehosts the active libghostty surface without restarting the session.
 Local macOS windows also react to ownership changes immediately through an in-process attachment-state notification, so owner and viewer chrome does not wait for the polling loop to catch up after takeover.

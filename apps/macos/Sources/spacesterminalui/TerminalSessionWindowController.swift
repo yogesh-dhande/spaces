@@ -66,6 +66,7 @@ import spacesterminalghostty
     private var ghosttySessionHost: GhosttyEmbeddedSessionHost?
     private var visibleRenderer: VisibleRenderer = .outputFallback
     private var lastObservedOwnerClientID: String?
+    private var lastObservedRuntimeState: TerminalSessionRuntimeState?
     private var shouldShowOwnerStateLabel = true
     private var appDidBecomeActiveObserver: NSObjectProtocol?
     private var appDidResignActiveObserver: NSObjectProtocol?
@@ -219,7 +220,7 @@ import spacesterminalghostty
             }
         case #selector(NSText.paste(_:)):
             switch visibleRenderer {
-            case .ghosttyOwner: return preferredAttachmentMode == .owner
+            case .ghosttyOwner: return preferredAttachmentMode == .owner && isInteractiveRuntimeState(lastObservedRuntimeState)
             case .outputFallback: return !inputRowStackView.isHidden && inputField.isEnabled
             }
         case #selector(selectAll(_:)): return visibleRenderer == .outputFallback
@@ -246,6 +247,11 @@ import spacesterminalghostty
     @objc public func paste(_ sender: Any?) {
         switch visibleRenderer {
         case .ghosttyOwner:
+            guard isInteractiveRuntimeState(lastObservedRuntimeState) else {
+                updateInputStatus(message: "Session is not running.", isError: true)
+                NSSound.beep()
+                return
+            }
             guard preferredAttachmentMode == .owner else {
                 updateInputStatus(message: "Viewer windows cannot paste into the terminal. Take over ownership first.", isError: true)
                 NSSound.beep()
@@ -279,6 +285,10 @@ import spacesterminalghostty
     }
 
     public func takeOverOwnership() {
+        guard isInteractiveRuntimeState(lastObservedRuntimeState) else {
+            updateInputStatus(message: "Session is not running.", isError: true)
+            return
+        }
         do {
             let response = try takeoverAction(client.id)
             guard response.ok else {
@@ -471,6 +481,7 @@ import spacesterminalghostty
                 currentLaunchConfiguration = try TerminalSessionPersistence.readLaunchConfiguration(paths: paths)
             }
             let runtimeState = try? TerminalSessionPersistence.readRuntimeState(paths: paths)
+            lastObservedRuntimeState = runtimeState
             updateGhosttySessionHostReference(for: currentLaunchConfiguration)
             let attachmentSnapshot = try? TerminalSessionPersistence.readAttachmentSnapshot(paths: paths)
             let currentOwnerClient = activeOwnerClient(snapshot: attachmentSnapshot)
@@ -506,12 +517,13 @@ import spacesterminalghostty
                 shouldShowOwnerStateLabel = shouldShowCompactOwnerStateLabel(runtimeState: runtimeState, isOwner: isOwner)
                 visibleRenderer = resolveVisibleRenderer(isOwner: isOwner)
                 updateRendererVisibility()
-                updateInputOwnershipUI(isOwner: isOwner)
+                updateInputOwnershipUI(isOwner: isOwner, isInteractive: isInteractiveRuntimeState(runtimeState))
                 rendererLabel.stringValue = rendererSummary(isOwner: isOwner)
             } else {
                 shouldShowOwnerStateLabel = true
                 visibleRenderer = .outputFallback
                 updateRendererVisibility()
+                updateInputOwnershipUI(isOwner: isOwner, isInteractive: isInteractiveRuntimeState(runtimeState))
                 rendererLabel.stringValue = rendererMode.statusSummary
             }
 
@@ -540,6 +552,10 @@ import spacesterminalghostty
     @objc private func takeoverOwnershipAction() { takeOverOwnership() }
 
     private func submitInput() {
+        guard isInteractiveRuntimeState(lastObservedRuntimeState) else {
+            updateInputStatus(message: "Session is not running.", isError: true)
+            return
+        }
         guard preferredAttachmentMode == .owner else {
             updateInputStatus(message: "Viewer windows cannot send input. Take over ownership first.", isError: true)
             return
@@ -559,6 +575,10 @@ import spacesterminalghostty
     }
 
     private func sendKey(_ key: String) {
+        guard isInteractiveRuntimeState(lastObservedRuntimeState) else {
+            updateInputStatus(message: "Session is not running.", isError: true)
+            return
+        }
         guard preferredAttachmentMode == .owner else {
             updateInputStatus(message: "Viewer windows cannot send keys. Take over ownership first.", isError: true)
             return
@@ -673,17 +693,21 @@ import spacesterminalghostty
         updateHeaderLayoutVisibility()
     }
 
-    private func updateInputOwnershipUI(isOwner: Bool) {
+    private func updateInputOwnershipUI(isOwner: Bool, isInteractive: Bool) {
         let usesInlineControls = backend != .ghosttyEmbedded
         inputRowStackView.isHidden = !usesInlineControls
-        takeoverRowStackView.isHidden = !(backend == .ghosttyEmbedded && !isOwner)
-        inputField.isEnabled = usesInlineControls && isOwner
-        sendButton.isEnabled = usesInlineControls && isOwner
-        interruptButton.isEnabled = usesInlineControls && isOwner
-        newlineButton.isEnabled = usesInlineControls && isOwner
+        takeoverRowStackView.isHidden = !(backend == .ghosttyEmbedded && !isOwner && isInteractive)
+        inputField.isEnabled = usesInlineControls && isOwner && isInteractive
+        sendButton.isEnabled = usesInlineControls && isOwner && isInteractive
+        interruptButton.isEnabled = usesInlineControls && isOwner && isInteractive
+        newlineButton.isEnabled = usesInlineControls && isOwner && isInteractive
         takeoverButton.isHidden = isOwner
-        takeoverButton.isEnabled = !isOwner
-        inputField.placeholderString = isOwner ? "Send input to the session" : "Viewer window"
+        takeoverButton.isEnabled = !isOwner && isInteractive
+        if !isInteractive {
+            inputField.placeholderString = "Session is not running"
+        } else {
+            inputField.placeholderString = isOwner ? "Send input to the session" : "Viewer window"
+        }
         updateHeaderLayoutVisibility()
     }
 
@@ -806,6 +830,8 @@ import spacesterminalghostty
         return runtimeState.state != .running
     }
 
+    private func isInteractiveRuntimeState(_ runtimeState: TerminalSessionRuntimeState?) -> Bool { runtimeState?.state == .running }
+
     private func runtimeStateText(runtimeState: TerminalSessionRuntimeState?, ownerClient: TerminalClient?, isOwner: Bool) -> String {
         guard let runtimeState else { return "state: unknown" }
         if backend == .ghosttyEmbedded && isOwner {
@@ -877,6 +903,8 @@ import spacesterminalghostty
     public var clientID: String { client.id }
     var debugShowsInlineControls: Bool { !inputRowStackView.isHidden }
     var debugShowsTakeoverButton: Bool { !takeoverRowStackView.isHidden }
+    var debugInlineInputEnabled: Bool { inputField.isEnabled }
+    var debugTakeoverEnabled: Bool { takeoverButton.isEnabled }
     var debugShowsRendererLabel: Bool { !rendererLabel.isHidden }
     var debugShowsTitleLabel: Bool { !titleLabel.isHidden }
     var debugShowsSummaryLabel: Bool { !summaryLabel.isHidden }

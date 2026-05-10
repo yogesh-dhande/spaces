@@ -362,6 +362,60 @@ final class TerminalSessionWindowControllerTests: XCTestCase {
         XCTAssertEqual(controller.debugRefreshIntervalMS, 500)
     }
 
+    @MainActor func testGhosttyViewerHidesTakeoverWhenSessionIsNotRunning() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+        try TerminalSessionPersistence.writeLaunchConfiguration(
+            .init(
+                sessionID: "session-viewer-exited", backend: .ghosttyEmbedded, title: "viewer", workingDirectory: "/tmp/work", shell: "/bin/zsh",
+                command: "cat", createdAt: "2026-05-09T00:00:00Z"), paths: paths)
+        try TerminalSessionPersistence.writeRuntimeState(
+            .init(
+                sessionID: "session-viewer-exited", backend: .ghosttyEmbedded, servicePID: 1, childPID: 22, state: .exited,
+                updatedAt: "2026-05-09T00:00:01Z"), paths: paths)
+        let owner = TerminalClient(
+            id: "owner-client", kind: .localWindow, identity: .init(label: "Spaces window", hostName: "mac", deviceName: "Owner Mac"),
+            connectedAt: "2026-05-09T00:00:00Z")
+        let viewer = TerminalClient(
+            id: "viewer-client", kind: .localWindow, identity: .init(label: "Spaces window", hostName: "mac", deviceName: "Viewer Mac"),
+            connectedAt: "2026-05-09T00:00:01Z")
+        try TerminalSessionPersistence.upsertClient(owner, paths: paths)
+        try TerminalSessionPersistence.upsertClient(viewer, paths: paths)
+        try TerminalSessionPersistence.attachClient(
+            sessionID: "session-viewer-exited", client: owner, mode: .owner, paths: paths, attachedAt: "2026-05-09T00:00:00Z")
+        try TerminalSessionPersistence.attachClient(
+            sessionID: "session-viewer-exited", client: viewer, mode: .viewer, paths: paths, attachedAt: "2026-05-09T00:00:01Z")
+
+        let controller = TerminalSessionWindowController(
+            sessionID: "session-viewer-exited", paths: paths, preferredAttachmentMode: .viewer, attachClientAction: { _, _ in },
+            detachClientAction: { _ in })
+
+        XCTAssertFalse(controller.debugShowsTakeoverButton)
+        XCTAssertFalse(controller.debugTakeoverEnabled)
+    }
+
+    @MainActor func testFallbackWindowDisablesInlineInputWhenSessionIsNotRunning() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+        try TerminalSessionPersistence.writeLaunchConfiguration(
+            .init(
+                sessionID: "session-script-exited", title: "script", workingDirectory: "/tmp/work", shell: "/bin/zsh", command: "cat",
+                createdAt: "2026-05-09T00:00:00Z"), paths: paths)
+        try TerminalSessionPersistence.writeRuntimeState(
+            .init(sessionID: "session-script-exited", servicePID: 1, childPID: 22, state: .exited, updatedAt: "2026-05-09T00:00:01Z"), paths: paths)
+
+        let controller = TerminalSessionWindowController(sessionID: "session-script-exited", paths: paths)
+
+        XCTAssertTrue(controller.debugShowsInlineControls)
+        XCTAssertFalse(controller.debugInlineInputEnabled)
+    }
+
     @MainActor func testGhosttyOwnerUsesLiveSurfaceBodyWithoutRefreshingFallbackTail() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -426,6 +480,36 @@ final class TerminalSessionWindowControllerTests: XCTestCase {
         XCTAssertTrue(controller.validateUserInterfaceItem(ValidatedItem(action: #selector(NSText.copy(_:)))))
         XCTAssertTrue(controller.validateUserInterfaceItem(ValidatedItem(action: #selector(NSText.paste(_:)))))
         XCTAssertFalse(controller.validateUserInterfaceItem(ValidatedItem(action: #selector(NSText.selectAll(_:)))))
+    }
+
+    @MainActor func testGhosttyOwnerPasteIsDisabledWhenSessionIsNotRunning() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+        try TerminalSessionPersistence.writeLaunchConfiguration(
+            .init(
+                sessionID: "session-copy-paste-exited", backend: .ghosttyEmbedded, title: "owner", workingDirectory: "/tmp/work", shell: "/bin/zsh",
+                command: "cat", createdAt: "2026-05-09T00:00:00Z"), paths: paths)
+        try TerminalSessionPersistence.writeRuntimeState(
+            .init(
+                sessionID: "session-copy-paste-exited", backend: .ghosttyEmbedded, servicePID: 1, childPID: 22, state: .exited,
+                updatedAt: "2026-05-09T00:00:01Z"), paths: paths)
+
+        var pasteCalls = 0
+        let controller = TerminalSessionWindowController(
+            sessionID: "session-copy-paste-exited", paths: paths,
+            pasteClipboardAction: {
+                pasteCalls += 1
+                return true
+            })
+
+        controller.paste(nil)
+
+        XCTAssertEqual(pasteCalls, 0)
+        XCTAssertFalse(controller.validateUserInterfaceItem(ValidatedItem(action: #selector(NSText.paste(_:)))))
+        XCTAssertEqual(controller.debugInputStatus, "Session is not running.")
     }
 
     @MainActor func testGhosttyOwnerResyncsFocusAcrossWindowAndAppTransitions() throws {
