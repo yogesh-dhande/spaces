@@ -6904,8 +6904,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             paletteWasVisible: commandPalettePanel?.isVisible == true)
     }
 
-    nonisolated static func shouldUnhideMainWindowForCommandPalettePresentation(mainWindowIsVisible: Bool) -> Bool { mainWindowIsVisible }
-
     nonisolated static func shouldOrderOutMainWindowForCommandPalettePresentation(mainWindowIsVisible: Bool) -> Bool { !mainWindowIsVisible }
 
     nonisolated static func commandPalettePresentationIsComplete(panelIsVisible: Bool, panelIsKey: Bool) -> Bool { panelIsVisible && panelIsKey }
@@ -7200,15 +7198,19 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         }
         let focusedWorkspaceID = Self.preferredWorkspaceIDForAppToggle(
             focusedTerminalSessionWorkspaceID: focusedTerminalWorkspaceID, focusedWindowWorkspaceID: try? orchestrator.workspaceIDForFocusedWindow())
-        NSApp.activate(ignoringOtherApps: true)
-        NSApp.unhide(nil)
-        if window.isMiniaturized { window.deminiaturize(nil) }
-        prepareWindowForActiveSpaceSummon(window)
-        window.orderFrontRegardless()
-        window.makeKey()
+        revealTargetedHotkeyWindow(window)
         logHotkeyDebug("toggle_window show_main focused_workspace=\(focusedWorkspaceID ?? "nil") \(hotkeyWindowStateSummary())")
         logHotkeyPerfMetric("toggle_window", action: "show", context: perfContext)
         scheduleDeferredHotkeySelectionRefresh(focusedWorkspaceID: focusedWorkspaceID ?? nil)
+    }
+
+    private func activateAppForTargetedHotkeyPresentation() { NSApp.activate(ignoringOtherApps: true) }
+
+    private func revealTargetedHotkeyWindow(_ window: NSWindow) {
+        activateAppForTargetedHotkeyPresentation()
+        if window.isMiniaturized { window.deminiaturize(nil) }
+        prepareWindowForActiveSpaceSummon(window)
+        window.makeKeyAndOrderFront(nil)
     }
 
     private func prepareWindowForActiveSpaceSummon(_ window: NSWindow) {
@@ -8618,14 +8620,9 @@ extension AppKitController {
         logHotkeyDebug("present_palette begin \(hotkeyWindowStateSummary())")
         commandPaletteContextWorkspaceID = commandPaletteDefaultWorkspaceID()
         if Self.shouldOrderOutMainWindowForCommandPalettePresentation(mainWindowIsVisible: mainWindowWasVisible) { window?.orderOut(nil) }
-        if Self.shouldActivateAppForCommandPalettePresentation(appIsActive: NSApp.isActive) {
-            NSApp.activate(ignoringOtherApps: true)
-            if Self.shouldUnhideMainWindowForCommandPalettePresentation(mainWindowIsVisible: mainWindowWasVisible) { NSApp.unhide(nil) }
-        }
-        prepareWindowForActiveSpaceSummon(panel)
+        if Self.shouldActivateAppForCommandPalettePresentation(appIsActive: NSApp.isActive) { activateAppForTargetedHotkeyPresentation() }
         panel.center()
-        panel.orderFrontRegardless()
-        panel.makeKey()
+        revealTargetedHotkeyWindow(panel)
         commandPaletteSearchField?.stringValue = ""
         commandPaletteSelectedIndex = 0
         if let commandPaletteSearchField { panel.makeFirstResponder(commandPaletteSearchField) }

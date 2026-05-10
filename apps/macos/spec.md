@@ -209,9 +209,9 @@ Spaces focuses those windows; it does not decide their geometry.
 - Project and workspace detail screens should prefer flat section layouts with spacing and dividers over nested bordered cards.
 - Global shortcuts should bring Spaces forward and support fast workspace switching.
 - The global app-toggle shortcut should hide Spaces when it is already frontmost and visible, and show it otherwise.
-- The app should expose a separate global command-palette shortcut that opens a lightweight palette without changing the visibility of the main window.
+- The app should expose a separate global command-palette shortcut that opens a lightweight palette without unhiding or fronting built-in terminal windows.
 - The command palette should default to `Cmd+Opt+-`.
-- Summoning Spaces from the global app-toggle shortcut should raise the main window above other apps and onto the active space.
+- Summoning Spaces from the global app-toggle shortcut should raise only the main window above other apps and onto the active space.
 - When Spaces is summoned, it should select the workspace for the window that was focused immediately before activation when that window belongs to a tracked workspace; otherwise it should show Alerts.
 - The app should expose a configurable shortcut leader that supplies the shared modifiers for leader-based shortcuts like workspace navigation, Alerts, editor, terminal, and Finder.
 - The command palette should draw from every navigable workspace target that can appear in workspace detail rows: browser sessions, processes, ad-hoc windows, configured coding-agent launchers, and live coding-agent terminals.
@@ -224,7 +224,7 @@ Spaces focuses those windows; it does not decide their geometry.
 - Numbered window focus shortcuts should keep the saved workspace-settings order for configured browser sessions and processes, and append newly added ad-hoc windows after those configured rows.
 - Window focus actions and numbered shortcuts should follow one target-level rule: make that target available now.
 - Focusing a target from the app UI or command palette should keep Spaces visible instead of hiding the app after the target receives focus.
-- The global `Toggle app` shortcut controls the main Spaces window, not the built-in terminal windows. If a built-in terminal or the command palette is focused, toggling the app should bring the main Spaces window forward instead of hiding all Spaces-owned windows.
+- The global `Toggle app` shortcut controls only the main Spaces window, not the built-in terminal windows or the command palette. If a built-in terminal or the command palette is focused, toggling the app should bring the main Spaces window forward instead of fronting all Spaces-owned windows.
 - Returning to the main Spaces window from a focused built-in terminal should show the workspace detail view that owns that terminal, matching the behavior of externally hosted terminal windows.
 - A live target should receive focus. A configured target that is not live should be opened directly instead of requiring a full workspace launch or restart.
 - Opening a configured browser session, process, or coding agent from a stopped workspace should move that workspace out of the stopped state immediately.

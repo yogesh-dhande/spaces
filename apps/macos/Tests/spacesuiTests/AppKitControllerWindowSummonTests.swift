@@ -34,9 +34,7 @@ import spacesterminalcore
         #expect(!AppKitController.shouldActivateAppForCommandPalettePresentation(appIsActive: true))
     }
 
-    @Test func commandPalettePresentationKeepsMainWindowHiddenWhenItWasHidden() {
-        #expect(!AppKitController.shouldUnhideMainWindowForCommandPalettePresentation(mainWindowIsVisible: false))
-        #expect(AppKitController.shouldUnhideMainWindowForCommandPalettePresentation(mainWindowIsVisible: true))
+    @Test func commandPalettePresentationKeepsWindowVisibilityDecisionsLocal() {
         #expect(AppKitController.shouldOrderOutMainWindowForCommandPalettePresentation(mainWindowIsVisible: false))
         #expect(!AppKitController.shouldOrderOutMainWindowForCommandPalettePresentation(mainWindowIsVisible: true))
         #expect(AppKitController.shouldHideAppAfterCommandPaletteDismissal(mainWindowIsVisible: false, auxiliarySessionWindowsVisible: false))
