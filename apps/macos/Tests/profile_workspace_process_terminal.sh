@@ -192,7 +192,7 @@ import time
 print(time.time())
 PY
 )"
-env SPACES_DB_PATH="$DB_PATH" "$SPACES_CLI" start "$WORKSPACE_DIR" >/dev/null
+env SPACES_DB_PATH="$DB_PATH" DEBUG=1 "$SPACES_CLI" start "$WORKSPACE_DIR" >/dev/null
 wait_for_process_session_id "$WORKSPACE_DIR" backend "$WORK_ROOT/after-start.json" 30
 START_MS="$(ms_since "$start_started_at")"
 
@@ -213,7 +213,7 @@ PY
 )"
 summon_pattern="spaces: perf metric=terminal_window_summon target=session=${BACKEND_SESSION_ID} success=1 .*mode=owner"
 summon_baseline="$(log_pattern_count "$summon_pattern")"
-env SPACES_DB_PATH="$DB_PATH" "$MX_E2E_BIN" focus-workspace-process --workspace-dir "$WORKSPACE_DIR" --process-name backend >/dev/null 2>"$FOCUS_LOG"
+env SPACES_DB_PATH="$DB_PATH" DEBUG=1 "$MX_E2E_BIN" focus-workspace-process --workspace-dir "$WORKSPACE_DIR" --process-name backend >/dev/null 2>"$FOCUS_LOG"
 wait_for_log_pattern_count_greater_than "$summon_pattern" "$summon_baseline" 30
 write_workspace_dump "$WORKSPACE_DIR" "$WORK_ROOT/after-focus.json"
 FOCUS_MS="$(ms_since "$focus_started_at")"
