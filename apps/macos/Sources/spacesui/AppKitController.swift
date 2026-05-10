@@ -7204,13 +7204,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         scheduleDeferredHotkeySelectionRefresh(focusedWorkspaceID: focusedWorkspaceID ?? nil)
     }
 
-    private func activateAppForTargetedHotkeyPresentation() { NSApp.activate(ignoringOtherApps: true) }
-
     private func revealTargetedHotkeyWindow(_ window: NSWindow) {
         if window.isMiniaturized { window.deminiaturize(nil) }
         prepareWindowForActiveSpaceSummon(window)
         window.orderFrontRegardless()
-        activateAppForTargetedHotkeyPresentation()
         window.makeKey()
         window.orderFrontRegardless()
     }
@@ -8622,7 +8619,6 @@ extension AppKitController {
         logHotkeyDebug("present_palette begin \(hotkeyWindowStateSummary())")
         commandPaletteContextWorkspaceID = commandPaletteDefaultWorkspaceID()
         if Self.shouldOrderOutMainWindowForCommandPalettePresentation(mainWindowIsVisible: mainWindowWasVisible) { window?.orderOut(nil) }
-        if Self.shouldActivateAppForCommandPalettePresentation(appIsActive: NSApp.isActive) { activateAppForTargetedHotkeyPresentation() }
         panel.center()
         revealTargetedHotkeyWindow(panel)
         commandPaletteSearchField?.stringValue = ""
