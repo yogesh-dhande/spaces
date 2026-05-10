@@ -61,6 +61,7 @@ import spacesterminalghostty
     private var appDidBecomeActiveObserver: NSObjectProtocol?
     private var appDidResignActiveObserver: NSObjectProtocol?
     private var attachmentStateDidChangeObserver: NSObjectProtocol?
+    private var sessionMetadataDidChangeObserver: NSObjectProtocol?
 
     public init(
         sessionID: String, paths: TerminalSessionPaths, preferredAttachmentMode: TerminalAttachmentMode = .owner,
@@ -554,6 +555,15 @@ import spacesterminalghostty
                 self.refreshNow()
             }
         }
+        sessionMetadataDidChangeObserver = NotificationCenter.default.addObserver(
+            forName: .spacesTerminalSessionMetadataDidChange, object: nil, queue: .main
+        ) { [weak self] notification in
+            let changedSessionID = notification.userInfo?["sessionID"] as? String
+            MainActor.assumeIsolated {
+                guard let self, let changedSessionID, changedSessionID == self.sessionID else { return }
+                self.refreshNow()
+            }
+        }
     }
 
     private func stopObservingApplicationActivation() {
@@ -563,6 +573,8 @@ import spacesterminalghostty
         appDidResignActiveObserver = nil
         attachmentStateDidChangeObserver.flatMap { NotificationCenter.default.removeObserver($0) }
         attachmentStateDidChangeObserver = nil
+        sessionMetadataDidChangeObserver.flatMap { NotificationCenter.default.removeObserver($0) }
+        sessionMetadataDidChangeObserver = nil
     }
 
     private func syncGhosttyOwnerFocus(reason: String, requestWindowFocus: Bool, focused explicitFocused: Bool? = nil) {
@@ -747,6 +759,9 @@ import spacesterminalghostty
     func debugSimulateApplicationDidResignActive() { NotificationCenter.default.post(name: NSApplication.didResignActiveNotification, object: NSApp) }
     func debugSimulateAttachmentStateDidChange() {
         NotificationCenter.default.post(name: .spacesTerminalAttachmentStateDidChange, object: nil, userInfo: ["sessionID": sessionID])
+    }
+    func debugSimulateSessionMetadataDidChange() {
+        NotificationCenter.default.post(name: .spacesTerminalSessionMetadataDidChange, object: nil, userInfo: ["sessionID": sessionID])
     }
     func debugSelectRenderedRange(_ range: NSRange) { outputView.setSelectedRange(range) }
     var debugSelectedRange: NSRange { outputView.selectedRange() }

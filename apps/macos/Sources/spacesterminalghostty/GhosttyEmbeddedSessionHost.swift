@@ -4,6 +4,7 @@ import spacesterminalcore
 
 extension Notification.Name {
     public static let spacesTerminalAttachmentStateDidChange = Notification.Name("spaces.terminal.attachment-state-did-change")
+    public static let spacesTerminalSessionMetadataDidChange = Notification.Name("spaces.terminal.session-metadata-did-change")
 }
 
 @MainActor public final class GhosttyEmbeddedSessionRegistry {
@@ -258,6 +259,7 @@ extension Notification.Name {
             let trimmed = path.trimmingCharacters(in: .whitespacesAndNewlines)
             currentWorkingDirectory = trimmed.isEmpty ? nil : trimmed
         }
+        postSessionMetadataDidChange()
         refreshRuntimeState(force: true)
     }
 
@@ -272,6 +274,11 @@ extension Notification.Name {
     private func postAttachmentStateDidChange() {
         NotificationCenter.default.post(
             name: .spacesTerminalAttachmentStateDidChange, object: nil, userInfo: ["sessionID": launchConfiguration.sessionID])
+    }
+
+    private func postSessionMetadataDidChange() {
+        NotificationCenter.default.post(
+            name: .spacesTerminalSessionMetadataDidChange, object: nil, userInfo: ["sessionID": launchConfiguration.sessionID])
     }
 
     private func shouldPersistRuntimeState(_ state: TerminalSessionRuntimeState, now: Date) -> Bool {

@@ -1,6 +1,7 @@
 import XCTest
 import spacesterminalcore
 
+@testable import spacesterminalghostty
 @testable import spacesterminalui
 
 final class TerminalSessionWindowControllerTests: XCTestCase {
@@ -456,6 +457,44 @@ final class TerminalSessionWindowControllerTests: XCTestCase {
         XCTAssertEqual(viewerController.debugRendererSummary, "Renderer: libghostty (owner)")
         XCTAssertTrue(ownerController.debugShowsTakeoverButton)
         XCTAssertFalse(viewerController.debugShowsTakeoverButton)
+    }
+
+    @MainActor func testGhosttyOwnerRefreshesTitleAndWorkingDirectoryImmediatelyFromSessionMetadataNotification() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+        try TerminalSessionPersistence.writeLaunchConfiguration(
+            .init(
+                sessionID: "session-metadata", backend: .ghosttyEmbedded, title: "backend", workingDirectory: "/tmp/work", shell: "/bin/zsh",
+                command: "uv run api", createdAt: "2026-05-09T00:00:00Z"), paths: paths)
+        try TerminalSessionPersistence.writeRuntimeState(
+            .init(
+                sessionID: "session-metadata", backend: .ghosttyEmbedded, servicePID: 1, childPID: 9876, state: .running,
+                updatedAt: "2026-05-09T00:00:01Z"), paths: paths)
+
+        let controller = TerminalSessionWindowController(sessionID: "session-metadata", paths: paths)
+        let owner = TerminalClient(
+            id: controller.clientID, kind: .localWindow, identity: .init(label: "Spaces window", hostName: "mac", deviceName: "Owner Mac"),
+            connectedAt: "2026-05-09T00:00:00Z")
+        try TerminalSessionPersistence.attachClient(
+            sessionID: "session-metadata", client: owner, mode: .owner, paths: paths, attachedAt: "2026-05-09T00:00:00Z")
+
+        controller.debugForceRefresh()
+        XCTAssertEqual(controller.debugWindowTitle, "backend")
+        XCTAssertTrue(controller.debugSummary.contains("/tmp/work"))
+
+        guard let host = GhosttyEmbeddedSessionRegistry.shared.existingHost(sessionID: "session-metadata") else {
+            XCTFail("expected ghostty host")
+            return
+        }
+
+        host.applyActionEvent(.setTitle(" live api "))
+        host.applyActionEvent(.setWorkingDirectory(" /tmp/runtime "))
+
+        XCTAssertEqual(controller.debugWindowTitle, "live api")
+        XCTAssertTrue(controller.debugSummary.contains("/tmp/runtime"))
     }
 
     @MainActor func testGhosttyOwnerCloseMarksControllerAndReopenUsesFreshClientAttachment() throws {
