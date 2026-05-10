@@ -40,6 +40,8 @@ import spacesterminalghostty
     private let terminalContainer = NSView()
     private let headerStackView = NSStackView()
     private let bodyStackView = NSStackView()
+    private var bodyTopToHeaderConstraint: NSLayoutConstraint?
+    private var bodyTopToContentConstraint: NSLayoutConstraint?
     private let sendInputAction: @Sendable (String, Bool) throws -> TerminalControlResponse
     private let sendKeyAction: @Sendable (String) throws -> TerminalControlResponse
     private let takeoverAction: @Sendable (String) throws -> TerminalControlResponse
@@ -404,12 +406,14 @@ import spacesterminalghostty
 
         [headerStackView, bodyStackView].forEach(contentView.addSubview)
 
+        bodyTopToHeaderConstraint = bodyStackView.topAnchor.constraint(equalTo: headerStackView.bottomAnchor, constant: 12)
+        bodyTopToContentConstraint = bodyStackView.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 12)
+
         NSLayoutConstraint.activate([
             headerStackView.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 16),
             headerStackView.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 16),
             headerStackView.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -16),
 
-            bodyStackView.topAnchor.constraint(equalTo: headerStackView.bottomAnchor, constant: 12),
             bodyStackView.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 16),
             bodyStackView.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -16),
             bodyStackView.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -16),
@@ -547,6 +551,7 @@ import spacesterminalghostty
         inputStatusLabel.stringValue = message
         inputStatusLabel.textColor = isError ? .systemRed : .secondaryLabelColor
         inputStatusLabel.isHidden = message.isEmpty
+        updateHeaderLayoutVisibility()
     }
 
     private func attachLocalClientIfNeeded() {
@@ -641,6 +646,7 @@ import spacesterminalghostty
         summaryLabel.isHidden = isCompactOwnerChrome
         rendererLabel.isHidden = isCompactOwnerChrome
         stateLabel.isHidden = isCompactOwnerChrome && !shouldShowOwnerStateLabel
+        updateHeaderLayoutVisibility()
     }
 
     private func updateInputOwnershipUI(isOwner: Bool) {
@@ -654,6 +660,16 @@ import spacesterminalghostty
         takeoverButton.isHidden = isOwner
         takeoverButton.isEnabled = !isOwner
         inputField.placeholderString = isOwner ? "Send input to the session" : "Viewer window"
+        updateHeaderLayoutVisibility()
+    }
+
+    private func updateHeaderLayoutVisibility() {
+        let hasVisibleHeaderContent = [
+            titleLabel, summaryLabel, stateLabel, rendererLabel, inputRowStackView, takeoverRowStackView, inputStatusLabel,
+        ].contains { !$0.isHidden }
+        headerStackView.isHidden = !hasVisibleHeaderContent
+        bodyTopToHeaderConstraint?.isActive = hasVisibleHeaderContent
+        bodyTopToContentConstraint?.isActive = !hasVisibleHeaderContent
     }
 
     private func scrollOutputToBottom() {
@@ -837,6 +853,7 @@ import spacesterminalghostty
     var debugShowsTitleLabel: Bool { !titleLabel.isHidden }
     var debugShowsSummaryLabel: Bool { !summaryLabel.isHidden }
     var debugShowsStateLabel: Bool { !stateLabel.isHidden }
+    var debugShowsHeader: Bool { !headerStackView.isHidden }
     var debugInputStatus: String { inputStatusLabel.stringValue }
     var debugInputFieldValue: String { inputField.stringValue }
     func debugSimulateApplicationDidBecomeActive() { NotificationCenter.default.post(name: NSApplication.didBecomeActiveNotification, object: NSApp) }

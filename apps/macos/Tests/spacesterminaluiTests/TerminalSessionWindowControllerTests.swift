@@ -218,7 +218,29 @@ final class TerminalSessionWindowControllerTests: XCTestCase {
         XCTAssertFalse(controller.debugShowsTitleLabel)
         XCTAssertFalse(controller.debugShowsSummaryLabel)
         XCTAssertFalse(controller.debugShowsStateLabel)
+        XCTAssertFalse(controller.debugShowsHeader)
         XCTAssertEqual(controller.debugState, "state: running    child: 22")
+    }
+
+    @MainActor func testGhosttyOwnerShowsHeaderWhenRuntimeStateNeedsStatus() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+        try TerminalSessionPersistence.writeLaunchConfiguration(
+            .init(
+                sessionID: "session-owner-status", backend: .ghosttyEmbedded, title: "owner", workingDirectory: "/tmp/work", shell: "/bin/zsh",
+                command: "cat", createdAt: "2026-05-09T00:00:00Z"), paths: paths)
+        try TerminalSessionPersistence.writeRuntimeState(
+            .init(
+                sessionID: "session-owner-status", backend: .ghosttyEmbedded, servicePID: 1, childPID: 22, state: .exited,
+                updatedAt: "2026-05-09T00:00:01Z"), paths: paths)
+        let controller = TerminalSessionWindowController(sessionID: "session-owner-status", paths: paths)
+
+        XCTAssertTrue(controller.debugShowsHeader)
+        XCTAssertTrue(controller.debugShowsStateLabel)
+        XCTAssertEqual(controller.debugState, "state: exited    child: 22")
     }
 
     @MainActor func testGhosttyOwnerUsesLiveSurfaceBodyWithoutRefreshingFallbackTail() throws {

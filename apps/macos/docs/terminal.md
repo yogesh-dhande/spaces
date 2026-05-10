@@ -85,6 +85,7 @@ Live runtime-state changes also propagate through an in-process notification so 
   - hides renderer diagnostics
   - hides steady-state `running` status text for the active owner path, while still surfacing non-running or error state
   - hides empty status rows
+  - collapses the entire inline header band when there is no owner status or error worth showing
   - uses compact runtime text such as `state` and `child`
 - The native window titlebar remains the primary place for the live terminal title.
 - Owner windows also project the live working directory into the native titlebar represented path when that directory exists on disk, so the proxy icon and document path behave like a normal macOS terminal window.
