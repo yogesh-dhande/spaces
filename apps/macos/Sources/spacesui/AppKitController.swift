@@ -464,11 +464,14 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         do {
             let paths = try TerminalSessionPaths.forSession(id: sessionID)
             pruneClosedTerminalSessionWindowControllers(sessionID: sessionID)
-            let activeOwnerClientID = Self.activeOwnerClientID(paths: paths)
+            let existingControllers = terminalSessionWindowControllers[sessionID] ?? []
             let controller: TerminalSessionWindowController
             let reusedExistingWindow: Bool
-            if let existing = Self.reusableTerminalSessionWindowController(
-                terminalSessionWindowControllers[sessionID] ?? [], mode: mode, activeOwnerClientID: activeOwnerClientID)
+            if mode == .owner, let existing = Self.inMemoryOwnerTerminalSessionWindowController(existingControllers) {
+                controller = existing
+                reusedExistingWindow = true
+            } else if let existing = Self.reusableTerminalSessionWindowController(
+                existingControllers, mode: mode, activeOwnerClientID: Self.activeOwnerClientID(paths: paths))
             {
                 controller = existing
                 reusedExistingWindow = true
