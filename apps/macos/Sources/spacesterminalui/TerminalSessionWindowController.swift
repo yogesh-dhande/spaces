@@ -60,6 +60,7 @@ import spacesterminalghostty
     private var lastObservedOwnerClientID: String?
     private var appDidBecomeActiveObserver: NSObjectProtocol?
     private var appDidResignActiveObserver: NSObjectProtocol?
+    private var attachmentStateDidChangeObserver: NSObjectProtocol?
 
     public init(
         sessionID: String, paths: TerminalSessionPaths, preferredAttachmentMode: TerminalAttachmentMode = .owner,
@@ -544,6 +545,15 @@ import spacesterminalghostty
         ) { [weak self] _ in
             MainActor.assumeIsolated { self?.syncGhosttyOwnerFocus(reason: "app_inactive", requestWindowFocus: false, focused: false) }
         }
+        attachmentStateDidChangeObserver = NotificationCenter.default.addObserver(
+            forName: .spacesTerminalAttachmentStateDidChange, object: nil, queue: .main
+        ) { [weak self] notification in
+            let changedSessionID = notification.userInfo?["sessionID"] as? String
+            MainActor.assumeIsolated {
+                guard let self, let changedSessionID, changedSessionID == self.sessionID else { return }
+                self.refreshNow()
+            }
+        }
     }
 
     private func stopObservingApplicationActivation() {
@@ -551,6 +561,8 @@ import spacesterminalghostty
         appDidBecomeActiveObserver = nil
         appDidResignActiveObserver.flatMap { NotificationCenter.default.removeObserver($0) }
         appDidResignActiveObserver = nil
+        attachmentStateDidChangeObserver.flatMap { NotificationCenter.default.removeObserver($0) }
+        attachmentStateDidChangeObserver = nil
     }
 
     private func syncGhosttyOwnerFocus(reason: String, requestWindowFocus: Bool, focused explicitFocused: Bool? = nil) {
@@ -733,6 +745,9 @@ import spacesterminalghostty
     var debugInputFieldValue: String { inputField.stringValue }
     func debugSimulateApplicationDidBecomeActive() { NotificationCenter.default.post(name: NSApplication.didBecomeActiveNotification, object: NSApp) }
     func debugSimulateApplicationDidResignActive() { NotificationCenter.default.post(name: NSApplication.didResignActiveNotification, object: NSApp) }
+    func debugSimulateAttachmentStateDidChange() {
+        NotificationCenter.default.post(name: .spacesTerminalAttachmentStateDidChange, object: nil, userInfo: ["sessionID": sessionID])
+    }
     func debugSelectRenderedRange(_ range: NSRange) { outputView.setSelectedRange(range) }
     var debugSelectedRange: NSRange { outputView.selectedRange() }
     func debugScrollOutputToOffsetFromBottom(_ offset: CGFloat) {

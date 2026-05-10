@@ -2,6 +2,10 @@ import AppKit
 import Foundation
 import spacesterminalcore
 
+extension Notification.Name {
+    public static let spacesTerminalAttachmentStateDidChange = Notification.Name("spaces.terminal.attachment-state-did-change")
+}
+
 @MainActor public final class GhosttyEmbeddedSessionRegistry {
     public static let shared = GhosttyEmbeddedSessionRegistry()
 
@@ -79,6 +83,7 @@ import spacesterminalcore
                 try TerminalSessionPersistence.attachClient(
                     sessionID: launchConfiguration.sessionID, client: client, mode: mode, paths: paths,
                     attachedAt: ISO8601DateFormatter().string(from: Date()))
+                postAttachmentStateDidChange()
             }
             if mode == .owner, let container {
                 if terminalView.superview !== container {
@@ -109,6 +114,7 @@ import spacesterminalcore
     public func detach(clientID: String) throws {
         try TerminalSessionPersistence.detachClient(id: clientID, paths: paths, detachedAt: ISO8601DateFormatter().string(from: Date()))
         if !isOwner(clientID: clientID) { terminalView.setFocused(false) }
+        postAttachmentStateDidChange()
         refreshRuntimeState(force: true)
     }
 
@@ -124,6 +130,8 @@ import spacesterminalcore
 
     public func focusWindow(_ window: NSWindow?) {
         guard let window else { return }
+        if !window.isVisible { window.orderFront(nil) }
+        if !window.isKeyWindow { window.makeKeyAndOrderFront(nil) }
         window.makeFirstResponder(terminalView)
         terminalView.setFocused(window.isKeyWindow)
     }
@@ -191,6 +199,7 @@ import spacesterminalcore
                             try TerminalSessionPersistence.transferOwnership(
                                 sessionID: self.launchConfiguration.sessionID, newOwnerClientID: clientID, paths: self.paths,
                                 transferredAt: ISO8601DateFormatter().string(from: Date()))
+                            self.postAttachmentStateDidChange()
                             self.refreshRuntimeState(force: true)
                             GhosttyEmbeddedPerformance.logMetric(
                                 "terminal_control_takeover", target: "session=\(self.launchConfiguration.sessionID) client=\(clientID)",
@@ -258,6 +267,11 @@ import spacesterminalcore
             return foregroundPID
         }
         return lastKnownChildPID
+    }
+
+    private func postAttachmentStateDidChange() {
+        NotificationCenter.default.post(
+            name: .spacesTerminalAttachmentStateDidChange, object: nil, userInfo: ["sessionID": launchConfiguration.sessionID])
     }
 
     private func shouldPersistRuntimeState(_ state: TerminalSessionRuntimeState, now: Date) -> Bool {

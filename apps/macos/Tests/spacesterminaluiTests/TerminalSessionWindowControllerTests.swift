@@ -410,6 +410,54 @@ final class TerminalSessionWindowControllerTests: XCTestCase {
         XCTAssertFalse(viewerController.debugShowsTakeoverButton)
     }
 
+    @MainActor func testGhosttyControllersRefreshOwnershipImmediatelyFromAttachmentChangeNotification() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+        try TerminalSessionPersistence.writeLaunchConfiguration(
+            .init(
+                sessionID: "session-notify", backend: .ghosttyEmbedded, title: "backend", workingDirectory: "/tmp/work", shell: "/bin/zsh",
+                command: "uv run api", createdAt: "2026-05-09T00:00:00Z"), paths: paths)
+        try TerminalSessionPersistence.writeRuntimeState(
+            .init(
+                sessionID: "session-notify", backend: .ghosttyEmbedded, servicePID: 1, childPID: 9876, state: .running,
+                updatedAt: "2026-05-09T00:00:01Z"), paths: paths)
+
+        let ownerController = TerminalSessionWindowController(sessionID: "session-notify", paths: paths)
+        let viewerController = TerminalSessionWindowController(
+            sessionID: "session-notify", paths: paths, preferredAttachmentMode: .viewer, attachClientAction: { _, _ in }, detachClientAction: { _ in }
+        )
+
+        let owner = TerminalClient(
+            id: ownerController.clientID, kind: .localWindow, identity: .init(label: "Spaces window", hostName: "mac", deviceName: "Owner Mac"),
+            connectedAt: "2026-05-09T00:00:00Z")
+        let viewer = TerminalClient(
+            id: viewerController.clientID, kind: .localWindow, identity: .init(label: "Spaces window", hostName: "mac", deviceName: "Viewer Mac"),
+            connectedAt: "2026-05-09T00:00:01Z")
+        try TerminalSessionPersistence.attachClient(
+            sessionID: "session-notify", client: owner, mode: .owner, paths: paths, attachedAt: "2026-05-09T00:00:00Z")
+        try TerminalSessionPersistence.attachClient(
+            sessionID: "session-notify", client: viewer, mode: .viewer, paths: paths, attachedAt: "2026-05-09T00:00:01Z")
+
+        ownerController.debugForceRefresh()
+        viewerController.debugForceRefresh()
+        XCTAssertEqual(ownerController.debugRendererSummary, "Renderer: libghostty (owner)")
+        XCTAssertEqual(viewerController.debugRendererSummary, "Renderer: viewer tail")
+
+        try TerminalSessionPersistence.transferOwnership(
+            sessionID: "session-notify", newOwnerClientID: viewer.id, paths: paths, transferredAt: "2026-05-09T00:00:02Z")
+
+        ownerController.debugSimulateAttachmentStateDidChange()
+        viewerController.debugSimulateAttachmentStateDidChange()
+
+        XCTAssertEqual(ownerController.debugRendererSummary, "Renderer: viewer tail")
+        XCTAssertEqual(viewerController.debugRendererSummary, "Renderer: libghostty (owner)")
+        XCTAssertTrue(ownerController.debugShowsTakeoverButton)
+        XCTAssertFalse(viewerController.debugShowsTakeoverButton)
+    }
+
     @MainActor func testGhosttyOwnerCloseMarksControllerAndReopenUsesFreshClientAttachment() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)

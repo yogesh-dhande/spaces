@@ -72,6 +72,7 @@ These hooks are important because snapshot-style render reads are not enough for
   - continue using tailed output until ownership changes
 
 The takeover path updates `attachments.json`, moves ownership to the requested client, and rehosts the active libghostty surface without restarting the session.
+Local macOS windows also react to ownership changes immediately through an in-process attachment-state notification, so owner and viewer chrome does not wait for the polling loop to catch up after takeover.
 
 ## Native Window Behavior
 - Active owner windows keep the libghostty surface as the primary experience.
@@ -93,6 +94,7 @@ The active owner surface currently supports:
 - scroll-wheel forwarding
 - copy from terminal selection
 - paste from the macOS pasteboard
+- owner-window focus reassertion when ownership is promoted locally
 
 The owner window controller also routes standard AppKit edit actions to the active terminal session:
 - `Copy` reads from the live libghostty selection when the window owns the session
