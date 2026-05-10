@@ -27,6 +27,7 @@ final class TerminalSessionWindowControllerTests: XCTestCase {
 
         XCTAssertNotNil(controller.window)
         XCTAssertEqual(controller.window?.title, "Terminal session-1")
+        XCTAssertEqual(controller.window?.tabbingMode, .disallowed)
     }
 
     @MainActor func testShowAttachesClientAndCloseDetachesClient() throws {
@@ -266,6 +267,7 @@ final class TerminalSessionWindowControllerTests: XCTestCase {
         controller.show()
         controller.windowDidBecomeKey(Notification(name: NSWindow.didBecomeKeyNotification))
         controller.windowDidBecomeMain(Notification(name: NSWindow.didBecomeMainNotification))
+        controller.windowDidResize(Notification(name: NSWindow.didResizeNotification))
         controller.windowDidEndLiveResize(Notification(name: NSWindow.didEndLiveResizeNotification))
         controller.debugSimulateApplicationDidBecomeActive()
         controller.windowDidResignMain(Notification(name: NSWindow.didResignMainNotification))
@@ -463,12 +465,16 @@ final class TerminalSessionWindowControllerTests: XCTestCase {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }
+        let initialWorkingDirectory = root.appendingPathComponent("work", isDirectory: true)
+        let updatedWorkingDirectory = root.appendingPathComponent("runtime", isDirectory: true)
+        try FileManager.default.createDirectory(at: initialWorkingDirectory, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: updatedWorkingDirectory, withIntermediateDirectories: true)
 
         let paths = TerminalSessionPaths(rootDirectory: root.path)
         try TerminalSessionPersistence.writeLaunchConfiguration(
             .init(
-                sessionID: "session-metadata", backend: .ghosttyEmbedded, title: "backend", workingDirectory: "/tmp/work", shell: "/bin/zsh",
-                command: "uv run api", createdAt: "2026-05-09T00:00:00Z"), paths: paths)
+                sessionID: "session-metadata", backend: .ghosttyEmbedded, title: "backend", workingDirectory: initialWorkingDirectory.path,
+                shell: "/bin/zsh", command: "uv run api", createdAt: "2026-05-09T00:00:00Z"), paths: paths)
         try TerminalSessionPersistence.writeRuntimeState(
             .init(
                 sessionID: "session-metadata", backend: .ghosttyEmbedded, servicePID: 1, childPID: 9876, state: .running,
@@ -483,7 +489,8 @@ final class TerminalSessionWindowControllerTests: XCTestCase {
 
         controller.debugForceRefresh()
         XCTAssertEqual(controller.debugWindowTitle, "backend")
-        XCTAssertTrue(controller.debugSummary.contains("/tmp/work"))
+        XCTAssertEqual(controller.debugWindowRepresentedPath, initialWorkingDirectory.path)
+        XCTAssertTrue(controller.debugSummary.contains("work"))
 
         guard let host = GhosttyEmbeddedSessionRegistry.shared.existingHost(sessionID: "session-metadata") else {
             XCTFail("expected ghostty host")
@@ -491,10 +498,11 @@ final class TerminalSessionWindowControllerTests: XCTestCase {
         }
 
         host.applyActionEvent(.setTitle(" live api "))
-        host.applyActionEvent(.setWorkingDirectory(" /tmp/runtime "))
+        host.applyActionEvent(.setWorkingDirectory(" \(updatedWorkingDirectory.path) "))
 
         XCTAssertEqual(controller.debugWindowTitle, "live api")
-        XCTAssertTrue(controller.debugSummary.contains("/tmp/runtime"))
+        XCTAssertEqual(controller.debugWindowRepresentedPath, updatedWorkingDirectory.path)
+        XCTAssertTrue(controller.debugSummary.contains("runtime"))
     }
 
     @MainActor func testGhosttyOwnerRefreshesRuntimeStateImmediatelyFromRuntimeStateNotification() throws {

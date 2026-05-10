@@ -85,6 +85,8 @@ Live runtime-state changes also propagate through an in-process notification so 
   - hides empty status rows
   - uses compact runtime text such as `state` and `child`
 - The native window titlebar remains the primary place for the live terminal title.
+- Owner windows also project the live working directory into the native titlebar represented path when that directory exists on disk, so the proxy icon and document path behave like a normal macOS terminal window.
+- Built-in terminal windows explicitly disable AppKit tabbing; one terminal session maps to one window.
 
 ## Input, Mouse, and Clipboard
 The active owner surface currently supports:
@@ -97,6 +99,7 @@ The active owner surface currently supports:
 - copy from terminal selection
 - paste from the macOS pasteboard
 - owner-window focus reassertion when ownership is promoted locally
+- owner-surface focus resync during window resize as well as app and window activation changes
 
 The owner window controller also routes standard AppKit edit actions to the active terminal session:
 - `Copy` reads from the live libghostty selection when the window owns the session

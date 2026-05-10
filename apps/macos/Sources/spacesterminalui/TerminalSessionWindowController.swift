@@ -122,6 +122,7 @@ import spacesterminalghostty
         let window = NSWindow(contentRect: contentRect, styleMask: styleMask, backing: .buffered, defer: false)
         window.isReleasedWhenClosed = false
         window.title = "Terminal \(sessionID)"
+        window.tabbingMode = .disallowed
         window.minSize = NSSize(width: 760, height: 420)
         super.init(window: window)
         window.delegate = self
@@ -167,6 +168,8 @@ import spacesterminalghostty
     public func windowDidResignMain(_ notification: Notification) {
         syncGhosttyOwnerFocus(reason: "window_main_lost", requestWindowFocus: false, focused: false)
     }
+
+    public func windowDidResize(_ notification: Notification) { syncGhosttyOwnerFocus(reason: "window_resize", requestWindowFocus: false) }
 
     public func windowDidEndLiveResize(_ notification: Notification) { syncGhosttyOwnerFocus(reason: "window_resize_end", requestWindowFocus: true) }
 
@@ -427,7 +430,10 @@ import spacesterminalghostty
             let isOwner = currentOwnerClient?.id == client.id || (currentOwnerClient == nil && preferredAttachmentMode == .owner)
             let currentTitle = currentWindowTitle(fallback: currentLaunchConfiguration.title, isOwner: isOwner)
             let currentWorkingDirectory = currentSummaryWorkingDirectory(fallback: currentLaunchConfiguration.workingDirectory)
-            if let window { window.title = currentTitle }
+            if let window {
+                window.title = currentTitle
+                window.representedURL = currentRepresentedURL(workingDirectory: currentWorkingDirectory)
+            }
             summaryLabel.stringValue = Self.summaryText(
                 workingDirectory: currentWorkingDirectory, shell: currentLaunchConfiguration.shell, command: currentLaunchConfiguration.command)
             let stateText = runtimeStateText(runtimeState: runtimeState, ownerClient: currentOwnerClient, isOwner: isOwner)
@@ -694,6 +700,13 @@ import spacesterminalghostty
         return ghosttySessionHost?.effectiveWorkingDirectory ?? fallback
     }
 
+    private func currentRepresentedURL(workingDirectory: String) -> URL? {
+        let url = URL(fileURLWithPath: workingDirectory, isDirectory: true)
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory), isDirectory.boolValue else { return nil }
+        return url
+    }
+
     private func runtimeStateText(runtimeState: TerminalSessionRuntimeState?, ownerClient: TerminalClient?, isOwner: Bool) -> String {
         guard let runtimeState else { return "state: unknown" }
         if backend == .ghosttyEmbedded && isOwner {
@@ -756,6 +769,7 @@ import spacesterminalghostty
     var debugSummary: String { summaryLabel.stringValue }
     var debugState: String { stateLabel.stringValue }
     var debugWindowTitle: String { window?.title ?? "" }
+    var debugWindowRepresentedPath: String? { window?.representedURL?.path }
     public var attachmentMode: TerminalAttachmentMode { preferredAttachmentMode }
     public var didClose: Bool { didCloseWindow }
     var debugDidCloseWindow: Bool { didCloseWindow }
