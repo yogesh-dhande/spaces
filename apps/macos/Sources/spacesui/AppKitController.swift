@@ -828,11 +828,24 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let mainKey = window?.isKeyWindow == true ? 1 : 0
         let paletteVisible = commandPalettePanel?.isVisible == true ? 1 : 0
         let paletteKey = commandPalettePanel?.isKeyWindow == true ? 1 : 0
+        let auxiliaryVisible = hasVisibleAuxiliaryWindowsForHotkeyState() ? 1 : 0
+        let terminalVisible = hasVisibleTerminalSessionWindowsForHotkeyState() ? 1 : 0
         return
-            "app_active=\(NSApp.isActive ? 1 : 0) app_hidden=\(NSApp.isHidden ? 1 : 0) main_visible=\(mainVisible) main_key=\(mainKey) main_mini=\(mainMini) palette_exists=\(commandPalettePanel == nil ? 0 : 1) palette_visible=\(paletteVisible) palette_key=\(paletteKey)"
+            "app_active=\(NSApp.isActive ? 1 : 0) app_hidden=\(NSApp.isHidden ? 1 : 0) main_visible=\(mainVisible) main_key=\(mainKey) main_mini=\(mainMini) palette_exists=\(commandPalettePanel == nil ? 0 : 1) palette_visible=\(paletteVisible) palette_key=\(paletteKey) auxiliary_visible=\(auxiliaryVisible) terminal_visible=\(terminalVisible)"
     }
 
     private func rawMainWindowVisibility() -> Bool { window?.isVisible == true && window?.isMiniaturized != true }
+
+    private func hasVisibleTerminalSessionWindowsForHotkeyState() -> Bool {
+        terminalSessionWindowControllers.values.joined().contains { controller in
+            controller.window?.isVisible == true && controller.window?.isMiniaturized != true
+        }
+    }
+
+    private func hasVisibleAuxiliaryWindowsForHotkeyState() -> Bool {
+        if commandPalettePanel?.isVisible == true { return true }
+        return hasVisibleTerminalSessionWindowsForHotkeyState()
+    }
 
     private func effectiveMainWindowVisibilityForHotkeyState() -> Bool {
         Self.effectiveMainWindowVisibilityForHotkeyState(
@@ -6888,7 +6901,13 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
     nonisolated static func commandPalettePresentationIsComplete(panelIsVisible: Bool, panelIsKey: Bool) -> Bool { panelIsVisible && panelIsKey }
 
-    nonisolated static func shouldHideAppAfterCommandPaletteDismissal(mainWindowIsVisible: Bool) -> Bool { !mainWindowIsVisible }
+    nonisolated static func shouldHideAppAfterCommandPaletteDismissal(mainWindowIsVisible: Bool, auxiliarySessionWindowsVisible: Bool) -> Bool {
+        !mainWindowIsVisible && !auxiliarySessionWindowsVisible
+    }
+
+    nonisolated static func shouldHideMainWindowForToggle(appIsActive: Bool, appIsHidden: Bool, mainWindowIsVisible: Bool, mainWindowIsKey: Bool)
+        -> Bool
+    { appIsActive && !appIsHidden && mainWindowIsVisible && mainWindowIsKey }
 
     nonisolated static func effectiveMainWindowVisibilityForHotkeyState(rawMainWindowIsVisible: Bool, commandPaletteMainWindowVisibility: Bool?)
         -> Bool
@@ -7152,9 +7171,12 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let perfContext = captureHotkeyPerfContext()
         logHotkeyDebug("toggle_window begin \(hotkeyWindowStateSummary())")
         if commandPalettePanel?.isVisible == true { dismissCommandPalette() }
-        if NSApp.isActive, !NSApp.isHidden, window.isVisible, !window.isMiniaturized {
-            logHotkeyDebug("toggle_window hide_main")
-            NSApp.hide(nil)
+        if Self.shouldHideMainWindowForToggle(
+            appIsActive: NSApp.isActive, appIsHidden: NSApp.isHidden, mainWindowIsVisible: rawMainWindowVisibility(),
+            mainWindowIsKey: window.isKeyWindow)
+        {
+            logHotkeyDebug("toggle_window hide_main_only")
+            window.orderOut(nil)
             logHotkeyPerfMetric("toggle_window", action: "hide", context: perfContext)
             return
         }
@@ -8607,11 +8629,16 @@ extension AppKitController {
         guard !isDismissingCommandPalette else { return }
         isDismissingCommandPalette = true
         let mainWindowIsVisible = effectiveMainWindowVisibilityForHotkeyState()
+        let auxiliarySessionWindowsVisible = hasVisibleTerminalSessionWindowsForHotkeyState()
         logHotkeyDebug("dismiss_palette begin visible=\(panel.isVisible ? 1 : 0) key=\(panel.isKeyWindow ? 1 : 0) \(hotkeyWindowStateSummary())")
         panel.makeFirstResponder(nil)
         panel.orderOut(nil)
         commandPaletteContextWorkspaceID = nil
-        if Self.shouldHideAppAfterCommandPaletteDismissal(mainWindowIsVisible: mainWindowIsVisible) { NSApp.hide(nil) }
+        if Self.shouldHideAppAfterCommandPaletteDismissal(
+            mainWindowIsVisible: mainWindowIsVisible, auxiliarySessionWindowsVisible: auxiliarySessionWindowsVisible)
+        {
+            NSApp.hide(nil)
+        }
         isDismissingCommandPalette = false
         logHotkeyDebug("dismiss_palette end \(hotkeyWindowStateSummary())")
         commandPaletteMainWindowVisibility = nil

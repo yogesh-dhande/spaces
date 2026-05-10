@@ -39,8 +39,20 @@ import spacesterminalcore
         #expect(AppKitController.shouldUnhideMainWindowForCommandPalettePresentation(mainWindowIsVisible: true))
         #expect(AppKitController.shouldOrderOutMainWindowForCommandPalettePresentation(mainWindowIsVisible: false))
         #expect(!AppKitController.shouldOrderOutMainWindowForCommandPalettePresentation(mainWindowIsVisible: true))
-        #expect(AppKitController.shouldHideAppAfterCommandPaletteDismissal(mainWindowIsVisible: false))
-        #expect(!AppKitController.shouldHideAppAfterCommandPaletteDismissal(mainWindowIsVisible: true))
+        #expect(AppKitController.shouldHideAppAfterCommandPaletteDismissal(mainWindowIsVisible: false, auxiliarySessionWindowsVisible: false))
+        #expect(!AppKitController.shouldHideAppAfterCommandPaletteDismissal(mainWindowIsVisible: false, auxiliarySessionWindowsVisible: true))
+        #expect(!AppKitController.shouldHideAppAfterCommandPaletteDismissal(mainWindowIsVisible: true, auxiliarySessionWindowsVisible: false))
+    }
+
+    @Test func toggleHotkeyOnlyHidesWhenMainWindowIsActuallyKey() {
+        #expect(
+            AppKitController.shouldHideMainWindowForToggle(appIsActive: true, appIsHidden: false, mainWindowIsVisible: true, mainWindowIsKey: true))
+        #expect(
+            !AppKitController.shouldHideMainWindowForToggle(appIsActive: true, appIsHidden: false, mainWindowIsVisible: true, mainWindowIsKey: false))
+        #expect(
+            !AppKitController.shouldHideMainWindowForToggle(appIsActive: false, appIsHidden: false, mainWindowIsVisible: true, mainWindowIsKey: true))
+        #expect(
+            !AppKitController.shouldHideMainWindowForToggle(appIsActive: true, appIsHidden: true, mainWindowIsVisible: true, mainWindowIsKey: true))
     }
 
     @Test func commandPalettePresentationCompletesOnlyAfterPaletteBecomesKey() {
