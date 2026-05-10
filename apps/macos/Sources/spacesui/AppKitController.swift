@@ -479,7 +479,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                     reusedExistingWindow = true
                 } else {
                     let created = TerminalSessionWindowController(
-                        sessionID: sessionID, paths: paths, preferredAttachmentMode: mode,
+                        sessionID: sessionID, paths: paths, preferredAttachmentMode: mode, performInitialRefresh: false,
                         onWindowClose: { [weak self] sessionID, clientID in
                             self?.removeTerminalSessionWindowController(sessionID: sessionID, clientID: clientID)
                         })

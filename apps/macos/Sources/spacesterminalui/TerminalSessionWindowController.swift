@@ -74,7 +74,7 @@ import spacesterminalghostty
     private var runtimeStateDidChangeObserver: NSObjectProtocol?
 
     public init(
-        sessionID: String, paths: TerminalSessionPaths, preferredAttachmentMode: TerminalAttachmentMode = .owner,
+        sessionID: String, paths: TerminalSessionPaths, preferredAttachmentMode: TerminalAttachmentMode = .owner, performInitialRefresh: Bool = true,
         sendInputAction: (@Sendable (String, Bool) throws -> TerminalControlResponse)? = nil,
         sendKeyAction: (@Sendable (String) throws -> TerminalControlResponse)? = nil,
         takeoverAction: (@Sendable (String) throws -> TerminalControlResponse)? = nil,
@@ -142,7 +142,7 @@ import spacesterminalghostty
         window.delegate = self
         startObservingApplicationActivation()
         buildUI()
-        refreshNow()
+        if performInitialRefresh { refreshNow() }
     }
 
     @available(*, unavailable) required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
