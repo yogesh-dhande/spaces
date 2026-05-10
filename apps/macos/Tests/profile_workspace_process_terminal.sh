@@ -262,8 +262,16 @@ combined = [(name, elapsed, target, "shell") for name, elapsed, target in shell_
 combined.extend((sample["metric"], sample["elapsed"], sample["target"], sample["detail"]) for sample in samples)
 combined.sort(key=lambda item: item[1], reverse=True)
 focus_route = None
+focus_ipc_route = None
+focus_ipc_elapsed = None
 for sample in samples:
     if sample["metric"] != "process_focus":
+        if sample["metric"] == "terminal_window_focus_ipc" and focus_ipc_route is None:
+            detail = sample["detail"] or ""
+            route_match = re.search(r"route=([a-z_]+)", detail)
+            if route_match:
+                focus_ipc_route = route_match.group(1)
+            focus_ipc_elapsed = sample["elapsed"]
         continue
     detail = sample["detail"] or ""
     route_match = re.search(r"route=([a-z_]+)", detail)
@@ -278,6 +286,8 @@ with open(metrics_path, "w", encoding="utf-8") as handle:
             "backend_session_before_close": original_session,
             "backend_session_after_focus": reopened_session,
             "workspace_process_focus_route": focus_route,
+            "terminal_window_focus_ipc_route": focus_ipc_route,
+            "terminal_window_focus_ipc_elapsed_ms": focus_ipc_elapsed,
             "slowest_samples": [
                 {
                     "metric": name,
@@ -300,6 +310,10 @@ print(f"backend session before close: {original_session}")
 print(f"backend session after focus:  {reopened_session}")
 if focus_route:
     print(f"workspace process focus route: {focus_route}")
+if focus_ipc_route:
+    print(f"terminal window focus ipc route: {focus_ipc_route} ({focus_ipc_elapsed}ms)")
+else:
+    print("terminal window focus ipc route: missing")
 print()
 print("Slowest samples:")
 for name, elapsed, target, detail in combined[:10]:
