@@ -283,6 +283,7 @@ final class TerminalSessionWindowControllerTests: XCTestCase {
         let controller = TerminalSessionWindowController(sessionID: "session-owner-status", paths: paths)
 
         XCTAssertTrue(controller.debugShowsHeader)
+        XCTAssertTrue(controller.debugShowsSummaryLabel)
         XCTAssertTrue(controller.debugShowsStateLabel)
         XCTAssertEqual(controller.debugState, "state: exited    child: 22")
     }
@@ -305,6 +306,26 @@ final class TerminalSessionWindowControllerTests: XCTestCase {
         let controller = TerminalSessionWindowController(sessionID: "session-owner-refresh", paths: paths)
 
         XCTAssertEqual(controller.debugRefreshIntervalMS, 2000)
+    }
+
+    @MainActor func testGhosttyOwnerUsesFastRefreshWhenRuntimeStateNeedsStatus() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+        try TerminalSessionPersistence.writeLaunchConfiguration(
+            .init(
+                sessionID: "session-owner-exited-refresh", backend: .ghosttyEmbedded, title: "owner", workingDirectory: "/tmp/work",
+                shell: "/bin/zsh", command: "cat", createdAt: "2026-05-09T00:00:00Z"), paths: paths)
+        try TerminalSessionPersistence.writeRuntimeState(
+            .init(
+                sessionID: "session-owner-exited-refresh", backend: .ghosttyEmbedded, servicePID: 1, childPID: 22, state: .exited,
+                updatedAt: "2026-05-09T00:00:01Z"), paths: paths)
+
+        let controller = TerminalSessionWindowController(sessionID: "session-owner-exited-refresh", paths: paths)
+
+        XCTAssertEqual(controller.debugRefreshIntervalMS, 500)
     }
 
     @MainActor func testViewerFallbackKeepsFastRefreshInterval() throws {

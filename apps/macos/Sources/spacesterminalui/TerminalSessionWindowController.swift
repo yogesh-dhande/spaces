@@ -664,11 +664,12 @@ import spacesterminalghostty
             outputScrollView.isHidden = false
             terminalContainer.isHidden = true
         }
-        let isCompactOwnerChrome = visibleRenderer == .ghosttyOwner && preferredAttachmentMode == .owner
-        titleLabel.isHidden = isCompactOwnerChrome
-        summaryLabel.isHidden = isCompactOwnerChrome
-        rendererLabel.isHidden = isCompactOwnerChrome
-        stateLabel.isHidden = isCompactOwnerChrome && !shouldShowOwnerStateLabel
+        let isGhosttyOwner = visibleRenderer == .ghosttyOwner && preferredAttachmentMode == .owner
+        let shouldCollapseOwnerChrome = isGhosttyOwner && !shouldShowOwnerStateLabel
+        titleLabel.isHidden = isGhosttyOwner
+        summaryLabel.isHidden = shouldCollapseOwnerChrome
+        rendererLabel.isHidden = isGhosttyOwner
+        stateLabel.isHidden = shouldCollapseOwnerChrome
         updateHeaderLayoutVisibility()
     }
 
@@ -770,7 +771,7 @@ import spacesterminalghostty
     }
 
     private func currentRefreshInterval() -> Duration {
-        visibleRenderer == .ghosttyOwner ? Self.ownerGhosttyRefreshInterval : Self.fallbackRefreshInterval
+        visibleRenderer == .ghosttyOwner && !shouldShowOwnerStateLabel ? Self.ownerGhosttyRefreshInterval : Self.fallbackRefreshInterval
     }
 
     private func rendererSummary(isOwner: Bool?) -> String {

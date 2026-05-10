@@ -90,6 +90,7 @@ Active owner windows keep a slower two-second safety poll because the libghostty
   - hides empty status rows
   - collapses the entire inline header band when there is no owner status or error worth showing
   - uses compact runtime text such as `state` and `child`
+- When the active owner session leaves steady-state `running`, the inline summary band expands again so the user can see session context while the terminal is exited or otherwise non-running.
 - The native window titlebar remains the primary place for the live terminal title.
 - Owner windows also project the live working directory into the native titlebar represented path when that directory exists on disk, so the proxy icon and document path behave like a normal macOS terminal window.
 - Built-in terminal windows explicitly disable AppKit tabbing; one terminal session maps to one window.
@@ -135,6 +136,7 @@ Current performance decisions:
 - Owner-window focus avoids unnecessary `makeKeyAndOrderFront` and repeated focus toggles when the view is already first responder.
 - Active owner windows skip fallback `output.log` tail reads while the live libghostty surface is visible, so steady-state refresh ticks do not churn hidden text views.
 - Active owner windows also use the slower notification-first refresh cadence above, which keeps the live terminal path responsive without doing the same fallback polling work as passive windows.
+- Active owner windows fall back to the faster 500 ms cadence again whenever the runtime state is no longer steady-state `running`, so exited or warning states refresh like the diagnostic viewer path instead of waiting on the slower safety poll.
 - Fresh terminal window controllers do an immediate one-time render pass during construction but do not start their periodic refresh loop until `show()`, so summon and reopen avoid canceling and restarting a loop that the user has not seen yet.
 - App-managed terminal summon paths also skip that constructor refresh for newly created controllers and rely on `show()` for the first render pass, so a real window summon does not pay the same synchronous metadata and output read twice.
 - Reusing an already visible terminal window does not reapply its persisted frame or restart the refresh loop. Spaces brings that live window forward and refreshes it in place instead of treating it like a fresh summon.
