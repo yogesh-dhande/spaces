@@ -462,7 +462,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     private func openTerminalSessionWindow(sessionID: String, mode: TerminalAttachmentMode) {
         let startedAt = Date()
         do {
-            let paths = try TerminalSessionPaths.forSession(id: sessionID)
             pruneClosedTerminalSessionWindowControllers(sessionID: sessionID)
             let existingControllers = terminalSessionWindowControllers[sessionID] ?? []
             let controller: TerminalSessionWindowController
@@ -470,21 +469,24 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             if mode == .owner, let existing = Self.inMemoryOwnerTerminalSessionWindowController(existingControllers) {
                 controller = existing
                 reusedExistingWindow = true
-            } else if mode == .owner,
-                let existing = Self.reusableTerminalSessionWindowController(
-                    existingControllers, mode: .owner, activeOwnerClientID: Self.activeOwnerClientID(paths: paths))
-            {
-                controller = existing
-                reusedExistingWindow = true
             } else {
-                let created = TerminalSessionWindowController(
-                    sessionID: sessionID, paths: paths, preferredAttachmentMode: mode,
-                    onWindowClose: { [weak self] sessionID, clientID in
-                        self?.removeTerminalSessionWindowController(sessionID: sessionID, clientID: clientID)
-                    })
-                terminalSessionWindowControllers[sessionID, default: []].append(created)
-                controller = created
-                reusedExistingWindow = false
+                let paths = try TerminalSessionPaths.forSession(id: sessionID)
+                if mode == .owner,
+                    let existing = Self.reusableTerminalSessionWindowController(
+                        existingControllers, mode: .owner, activeOwnerClientID: Self.activeOwnerClientID(paths: paths))
+                {
+                    controller = existing
+                    reusedExistingWindow = true
+                } else {
+                    let created = TerminalSessionWindowController(
+                        sessionID: sessionID, paths: paths, preferredAttachmentMode: mode,
+                        onWindowClose: { [weak self] sessionID, clientID in
+                            self?.removeTerminalSessionWindowController(sessionID: sessionID, clientID: clientID)
+                        })
+                    terminalSessionWindowControllers[sessionID, default: []].append(created)
+                    controller = created
+                    reusedExistingWindow = false
+                }
             }
             controller.show()
             logPerfMetric(
