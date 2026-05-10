@@ -7207,10 +7207,12 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     private func activateAppForTargetedHotkeyPresentation() { NSApp.activate(ignoringOtherApps: true) }
 
     private func revealTargetedHotkeyWindow(_ window: NSWindow) {
-        activateAppForTargetedHotkeyPresentation()
         if window.isMiniaturized { window.deminiaturize(nil) }
         prepareWindowForActiveSpaceSummon(window)
-        window.makeKeyAndOrderFront(nil)
+        window.orderFrontRegardless()
+        activateAppForTargetedHotkeyPresentation()
+        window.makeKey()
+        window.orderFrontRegardless()
     }
 
     private func prepareWindowForActiveSpaceSummon(_ window: NSWindow) {
