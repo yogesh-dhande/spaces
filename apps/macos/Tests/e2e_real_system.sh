@@ -20,7 +20,7 @@ DEBUG_LOG="${DEBUG_LOG:-/tmp/spaces-e2e-debug.log}"
 RESULTS_LOG="${RESULTS_LOG:-/tmp/spaces-e2e-results.log}"
 RECORDER_LOG="${RECORDER_LOG:-/tmp/spaces-e2e-recorder.log}"
 ACTION_TIMEOUT_SECONDS="${ACTION_TIMEOUT_SECONDS:-20}"
-HOSTS_CSV="${HOSTS_CSV:-iterm2,ghostty}"
+HOSTS_CSV="${HOSTS_CSV:-iterm2,ghostty,spaces}"
 SEED_FILE="${SEED_FILE:-/tmp/spaces-e2e-seed.json}"
 SECOND_SEED_FILE="${SECOND_SEED_FILE:-/tmp/spaces-e2e-seed-2.json}"
 THIRD_SEED_FILE="${THIRD_SEED_FILE:-/tmp/spaces-e2e-seed-3.json}"
@@ -2277,11 +2277,12 @@ run_launch_and_focus_assertions() {
   assert_equals "$host" "$(json_get "$dump_file" "appTerminalHost")" "terminal host persisted"
   local terminal_app
   terminal_app="$(json_get "$dump_file" "runningProcesses[0].terminalApp")"
-  if [[ "$host" == "iterm2" ]]; then
-    assert_equals "iTerm2" "$terminal_app" "iTerm2 launch"
-  else
-    assert_equals "Ghostty" "$terminal_app" "Ghostty launch"
-  fi
+  case "$host" in
+    iterm2) assert_equals "iTerm2" "$terminal_app" "iTerm2 launch" ;;
+    ghostty) assert_equals "Ghostty" "$terminal_app" "Ghostty launch" ;;
+    spaces) assert_equals "Spaces" "$terminal_app" "Spaces launch" ;;
+    *) fail "unsupported terminal host '$host'" ;;
+  esac
   ensure_workspace_http_ready "$workspace_dir" "$PRIMARY_DOCS_URL" "Beacon docs sentinel" "$PRIMARY_BACKEND_STATUS_URL" '"workspace": "beacon-status"'
   pass_case
 
@@ -2361,7 +2362,7 @@ PY
     frontend_session_id="$(wait_for_workspace_terminal_tracking_id "$workspace_dir" "frontend" "$dump_file")"
     wait_for_iterm_session_focus "$frontend_session_id"
     pass_case
-  else
+  elif [[ "$host" == "ghostty" ]]; then
     begin_case "$host: focus tracked Ghostty tab with extra user tab present"
     local frontend_terminal_id backend_terminal_id
     frontend_terminal_id="$(python3 - "$dump_file" <<'PY'
@@ -2395,6 +2396,16 @@ PY
     record_process_focus_metric "terminal_untracked_tab.cli_window_focus.process_tracked_tab" "frontend" "$host" "single"
     wait_for_condition "ghostty_focused_terminal" "$frontend_terminal_id"
     pass_case
+  else
+    begin_case "$host: focus tracked Spaces terminal window"
+    env HOME="$TMP_HOME" SPACES_DB_PATH="$TMP_DB" SPACES_RUNTIME_DIR="$TMP_RUNTIME_DIR" "$MX_E2E_BIN" open-workspace-terminal --workspace-dir "$workspace_dir" >/dev/null
+    transition_pause "$host add ad hoc Spaces terminal window"
+    wait_for_spaces_frontmost_ready
+    env HOME="$TMP_HOME" SPACES_DB_PATH="$TMP_DB" SPACES_RUNTIME_DIR="$TMP_RUNTIME_DIR" "$MX_E2E_BIN" focus-workspace-process --workspace-dir "$workspace_dir" --process-name frontend >/dev/null
+    transition_pause "$host refocus frontend terminal"
+    record_process_focus_metric "terminal_untracked_tab.cli_window_focus.process_tracked_tab" "frontend" "$host" "single"
+    wait_for_spaces_frontmost_ready
+    pass_case
   fi
 
   # The Run tab numbers shortcuts in on-screen order:
@@ -2423,8 +2434,10 @@ PY
   if [[ "$host" == "iterm2" ]]; then
     frontend_session_id="$(wait_for_workspace_terminal_tracking_id "$workspace_dir" "frontend" "$dump_file")"
     wait_for_iterm_session_focus "$frontend_session_id"
-  else
+  elif [[ "$host" == "ghostty" ]]; then
     wait_for_condition "ghostty_focused_terminal" "$frontend_terminal_id"
+  else
+    wait_for_spaces_frontmost_ready
   fi
   pass_case
 
@@ -2439,8 +2452,10 @@ PY
   record_cycle_metric "terminal_tracked_tab.keyboard_cycle_next.browser_tracked_tab" "next" "$host" "single"
   if [[ "$host" == "iterm2" ]]; then
     wait_for_any_value "iterm_focused_session $frontend_window_id" "$frontend_session_id" "$backend_session_id"
-  else
+  elif [[ "$host" == "ghostty" ]]; then
     wait_for_any_value "ghostty_focused_terminal" "$frontend_terminal_id" "$backend_terminal_id"
+  else
+    wait_for_spaces_frontmost_ready
   fi
   send_cycle_hotkey previous
   transition_pause "$host cycle previous"
@@ -2542,6 +2557,26 @@ run_hotkey_visibility_profiling() {
     wait_for_condition "frontmost_app" "Google Chrome"
   done
   pass_case
+
+  if [[ "$host" == "spaces" ]]; then
+    begin_case "$host: profile repeated terminal to main window toggle"
+    ensure_single_spaces_instance "$SPACES_PID"
+    reset_fixture_runtime "$workspace_dir"
+    run_spaces_logged /tmp/spaces-e2e-profile-terminal-toggle-start.log start "$workspace_dir"
+    env HOME="$TMP_HOME" SPACES_DB_PATH="$TMP_DB" SPACES_RUNTIME_DIR="$TMP_RUNTIME_DIR" "$MX_E2E_BIN" focus-workspace-process --workspace-dir "$workspace_dir" --process-name frontend >/dev/null
+    transition_pause "$host seed frontend terminal focus for app toggle profiling"
+    wait_for_spaces_frontmost_ready
+    for (( iteration = 1; iteration <= REAL_SYSTEM_PROFILE_REPETITIONS; iteration++ )); do
+      send_spaces_toggle_hotkey_with_ack
+      wait_for_spaces_frontmost_ready
+      record_toggle_window_metric "spaces_terminal.keyboard_toggle_main_window.main_window" "show" "1" "$host" "single"
+
+      env HOME="$TMP_HOME" SPACES_DB_PATH="$TMP_DB" SPACES_RUNTIME_DIR="$TMP_RUNTIME_DIR" DEBUG=1 "$MX_E2E_BIN" focus-workspace-process --workspace-dir "$workspace_dir" --process-name frontend >/dev/null
+      wait_for_spaces_frontmost_ready
+      record_process_focus_metric "main_window.cli_window_focus.process_tracked_tab" "frontend" "$host" "single"
+    done
+    pass_case
+  fi
 }
 
 run_multi_workspace_focus_and_cycle_assertions() {
@@ -2690,8 +2725,10 @@ PY
   if [[ "$host" == "iterm2" ]]; then
     wait_for_condition "frontmost_app" "iTerm2"
     wait_for_any_value "iterm_front_session" "$primary_frontend_session_id" "$primary_backend_session_id"
-  else
+  elif [[ "$host" == "ghostty" ]]; then
     wait_for_any_value "ghostty_focused_terminal" "$primary_frontend_terminal_id" "$primary_backend_terminal_id"
+  else
+    wait_for_spaces_frontmost_ready
   fi
   send_cycle_hotkey previous
   transition_pause "$host primary cycle previous"
@@ -2713,8 +2750,10 @@ PY
   if [[ "$host" == "iterm2" ]]; then
     wait_for_condition "frontmost_app" "iTerm2"
     wait_for_any_value "iterm_front_session" "$secondary_frontend_session_id" "$secondary_backend_session_id"
-  else
+  elif [[ "$host" == "ghostty" ]]; then
     wait_for_any_value "ghostty_focused_terminal" "$secondary_frontend_terminal_id" "$secondary_backend_terminal_id"
+  else
+    wait_for_spaces_frontmost_ready
   fi
   send_cycle_hotkey previous
   transition_pause "$host secondary cycle previous"

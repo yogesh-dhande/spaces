@@ -26,6 +26,18 @@ import spacesterminalcore
         #expect(cleaned.contains(.managed))
     }
 
+    @Test func targetedHotkeyRevealUsesDirectRouteWhenAppIsAlreadyActive() {
+        #expect(AppKitController.shouldUseDirectTargetedHotkeyReveal(appIsActive: true))
+        #expect(!AppKitController.shouldUseDirectTargetedHotkeyReveal(appIsActive: false))
+    }
+
+    @Test func targetedHotkeyRevealPrefersLightweightFocusForVisibleWindow() {
+        #expect(AppKitController.shouldFocusVisibleTargetedHotkeyWindow(appIsActive: true, windowIsVisible: true, windowIsMiniaturized: false))
+        #expect(!AppKitController.shouldFocusVisibleTargetedHotkeyWindow(appIsActive: false, windowIsVisible: true, windowIsMiniaturized: false))
+        #expect(!AppKitController.shouldFocusVisibleTargetedHotkeyWindow(appIsActive: true, windowIsVisible: false, windowIsMiniaturized: false))
+        #expect(!AppKitController.shouldFocusVisibleTargetedHotkeyWindow(appIsActive: true, windowIsVisible: true, windowIsMiniaturized: true))
+    }
+
     @Test func commandPalettePresentationActivatesAppWhenInactive() {
         #expect(AppKitController.shouldActivateAppForCommandPalettePresentation(appIsActive: false))
     }

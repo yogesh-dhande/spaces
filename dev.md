@@ -110,6 +110,19 @@ That profiler seeds an isolated fixture workspace, triggers the app-side workspa
 - `terminal_session_wait_ready`
 - `terminal_window_summon`
 
+For repeatable profiling of the built-in `Spaces terminal -> main window -> tracked process terminal` hotkey loop:
+
+```bash
+ITERATIONS=3 apps/macos/Tests/profile_spaces_terminal_hotkeys.sh
+```
+
+That profiler runs against an isolated `SPACES_DB_PATH`, enables `DEBUG=1`, focuses a tracked built-in process terminal, repeatedly toggles back to the main window with `Cmd+Opt+=`, then refocuses the tracked terminal through the normal workspace-process path while summarizing:
+- `terminal_to_main_toggle_wall`
+- `toggle_window`
+- `toggle_window_reveal_target`
+- `toggle_window_terminal_workspace_lookup`
+- `toggle_window_selection_refresh`
+
 For workspace-process profiling, use:
 
 ```bash
@@ -177,7 +190,7 @@ Primary coverage:
 - adding and archiving a workspace
 - overriding workspace settings after creation
 - launch, stop, restart, and dead-process recovery
-- iTerm2 and Ghostty default terminal coverage
+- Spaces, iTerm2, and Ghostty default terminal coverage
 - extra user-added Chrome and terminal tabs
 - workspace-detail numbered focus shortcuts
 - forward/back workspace window cycling
@@ -188,6 +201,7 @@ The suite emits performance metrics in milliseconds for the main window-focus an
 Repeated real-system profiling also covers:
 - main window visibility toggles from inactive and active app states
 - command palette toggles from inactive and active app states
+- built-in `Spaces terminal -> main window -> tracked process terminal` focus loops
 
 When the suite finishes with recorded metrics, it appends aggregated metric history to `apps/macos/.artifacts/real-system-profiles/metrics-history.csv` and regenerates `apps/macos/.artifacts/real-system-profiles/report.html` with `best`, `previous`, and `latest` comparisons for each tracked metric. Metric names use `start.action.end`, such as `browser_untracked_tab.cli_window_focus.browser_tracked_tab`, and the start and end tokens refer to concrete visible surfaces rather than app-level state. Scenario context like terminal host and workspace scope is stored alongside each row. Dirty worktrees are recorded alongside clean runs by pairing the base `HEAD` commit with a worktree fingerprint, so the report can distinguish two different uncommitted snapshots on the same branch.
 

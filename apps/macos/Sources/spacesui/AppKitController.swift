@@ -7178,6 +7178,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
     private func toggleWindowFromHotkey() {
         guard let window else { return }
+        let toggleStartedAt = Date()
         let perfContext = captureHotkeyPerfContext()
         logHotkeyDebug("toggle_window begin \(hotkeyWindowStateSummary())")
         if commandPalettePanel?.isVisible == true { dismissCommandPalette() }
@@ -7191,21 +7192,54 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             return
         }
         let focusedTerminalWorkspaceID: String?
+        let selectionRefreshSource: String
         if let terminalSessionID = focusedTerminalSessionIDForToggle() {
+            let lookupStartedAt = Date()
             focusedTerminalWorkspaceID = try? orchestrator.workspaceIDForTerminalSession(terminalSessionID)
+            logPerfMetric(
+                "toggle_window_terminal_workspace_lookup", target: "session=\(terminalSessionID)",
+                elapsedMS: windowShortcutElapsedMS(since: lookupStartedAt), success: focusedTerminalWorkspaceID != nil)
+            selectionRefreshSource = "terminal_session"
         } else {
             focusedTerminalWorkspaceID = nil
+            selectionRefreshSource = "focused_window"
+        }
+        let focusedWindowWorkspaceID: String?
+        if focusedTerminalWorkspaceID == nil {
+            let focusedWindowLookupStartedAt = Date()
+            focusedWindowWorkspaceID = try? orchestrator.workspaceIDForFocusedWindow()
+            logPerfMetric(
+                "toggle_window_focused_window_workspace_lookup", target: "frontmost_window",
+                elapsedMS: windowShortcutElapsedMS(since: focusedWindowLookupStartedAt), success: focusedWindowWorkspaceID != nil)
+        } else {
+            focusedWindowWorkspaceID = nil
         }
         let focusedWorkspaceID = Self.preferredWorkspaceIDForAppToggle(
-            focusedTerminalSessionWorkspaceID: focusedTerminalWorkspaceID, focusedWindowWorkspaceID: try? orchestrator.workspaceIDForFocusedWindow())
+            focusedTerminalSessionWorkspaceID: focusedTerminalWorkspaceID, focusedWindowWorkspaceID: focusedWindowWorkspaceID)
+        let revealStartedAt = Date()
         revealTargetedHotkeyWindow(window)
+        logPerfMetric(
+            "toggle_window_reveal_target", target: "main", elapsedMS: windowShortcutElapsedMS(since: revealStartedAt), success: true,
+            detail: "app_active=\(NSApp.isActive ? 1 : 0)")
         logHotkeyDebug("toggle_window show_main focused_workspace=\(focusedWorkspaceID ?? "nil") \(hotkeyWindowStateSummary())")
+        logPerfMetric("toggle_window_flow", target: "main", elapsedMS: windowShortcutElapsedMS(since: toggleStartedAt), success: true)
         logHotkeyPerfMetric("toggle_window", action: "show", context: perfContext)
-        scheduleDeferredHotkeySelectionRefresh(focusedWorkspaceID: focusedWorkspaceID ?? nil)
+        scheduleDeferredHotkeySelectionRefresh(focusedWorkspaceID: focusedWorkspaceID ?? nil, source: selectionRefreshSource)
     }
 
     private func revealTargetedHotkeyWindow(_ window: NSWindow) {
         if window.isMiniaturized { window.deminiaturize(nil) }
+        if Self.shouldFocusVisibleTargetedHotkeyWindow(
+            appIsActive: NSApp.isActive, windowIsVisible: window.isVisible, windowIsMiniaturized: window.isMiniaturized)
+        {
+            window.orderFront(nil)
+            window.makeKey()
+            return
+        }
+        if Self.shouldUseDirectTargetedHotkeyReveal(appIsActive: NSApp.isActive) {
+            window.makeKeyAndOrderFront(nil)
+            return
+        }
         prepareWindowForActiveSpaceSummon(window)
         window.orderFrontRegardless()
         window.makeKey()
@@ -7235,14 +7269,24 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         return updated
     }
 
+    nonisolated static func shouldUseDirectTargetedHotkeyReveal(appIsActive: Bool) -> Bool { appIsActive }
+
+    nonisolated static func shouldFocusVisibleTargetedHotkeyWindow(appIsActive: Bool, windowIsVisible: Bool, windowIsMiniaturized: Bool) -> Bool {
+        appIsActive && windowIsVisible && !windowIsMiniaturized
+    }
+
     nonisolated static func shouldActivateAppForCommandPalettePresentation(appIsActive: Bool) -> Bool { !appIsActive }
 
-    private func scheduleDeferredHotkeySelectionRefresh(focusedWorkspaceID: String?) {
+    private func scheduleDeferredHotkeySelectionRefresh(focusedWorkspaceID: String?, source: String) {
         deferredHotkeySelectionRefreshTask?.cancel()
         deferredHotkeySelectionRefreshTask = Task { @MainActor [weak self] in
             await Task.yield()
             guard let self, !Task.isCancelled else { return }
+            let refreshStartedAt = Date()
             self.refreshWorkspaceSelectionForActivation(focusedWorkspaceID: focusedWorkspaceID)
+            self.logPerfMetric(
+                "toggle_window_selection_refresh", target: "workspace=\(focusedWorkspaceID ?? "alerts")",
+                elapsedMS: self.windowShortcutElapsedMS(since: refreshStartedAt), success: true, detail: "source=\(source)")
         }
     }
 
