@@ -2386,6 +2386,10 @@ public final class WorkspaceOrchestrator {
                 return .existingWindow
             }
             guard case .session(let sessionID)? = providerIdentity else { return .unavailable }
+            builtInTerminalWindowFocuser(sessionID)
+            if let capturedWindowID = try? captureSummonedBuiltInTerminalWindowID(appName: terminalAppName(for: terminalHost)) {
+                return .reopenedSession(windowID: capturedWindowID)
+            }
             builtInTerminalWindowOpener(sessionID, .owner)
             let capturedWindowID = try? captureSummonedBuiltInTerminalWindowID(appName: terminalAppName(for: terminalHost))
             return .reopenedSession(windowID: capturedWindowID)
