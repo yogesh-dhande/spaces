@@ -81,7 +81,9 @@ Live runtime-state changes also propagate through an in-process notification so 
 - Viewer and fallback windows keep more diagnostic metadata because they are not the active terminal surface.
 - The owner path intentionally collapses redundant in-window chrome:
   - hides the in-window session ID
+  - hides the redundant inline cwd and command summary once the titlebar carries live terminal title and path
   - hides renderer diagnostics
+  - hides steady-state `running` status text for the active owner path, while still surfacing non-running or error state
   - hides empty status rows
   - uses compact runtime text such as `state` and `child`
 - The native window titlebar remains the primary place for the live terminal title.

@@ -58,6 +58,7 @@ import spacesterminalghostty
     private var ghosttySessionHost: GhosttyEmbeddedSessionHost?
     private var visibleRenderer: VisibleRenderer = .outputFallback
     private var lastObservedOwnerClientID: String?
+    private var shouldShowOwnerStateLabel = true
     private var appDidBecomeActiveObserver: NSObjectProtocol?
     private var appDidResignActiveObserver: NSObjectProtocol?
     private var attachmentStateDidChangeObserver: NSObjectProtocol?
@@ -457,11 +458,13 @@ import spacesterminalghostty
                     lastObservedOwnerClientID = currentOwnerClient?.id
                     if isOwner { syncGhosttyOwnerFocus(reason: "ownership_promoted", requestWindowFocus: true) }
                 }
+                shouldShowOwnerStateLabel = shouldShowCompactOwnerStateLabel(runtimeState: runtimeState, isOwner: isOwner)
                 visibleRenderer = resolveVisibleRenderer(isOwner: isOwner)
                 updateRendererVisibility()
                 updateInputOwnershipUI(isOwner: isOwner)
                 rendererLabel.stringValue = rendererSummary(isOwner: isOwner)
             } else {
+                shouldShowOwnerStateLabel = true
                 visibleRenderer = .outputFallback
                 updateRendererVisibility()
                 rendererLabel.stringValue = rendererMode.statusSummary
@@ -617,7 +620,9 @@ import spacesterminalghostty
         }
         let isCompactOwnerChrome = visibleRenderer == .ghosttyOwner && preferredAttachmentMode == .owner
         titleLabel.isHidden = isCompactOwnerChrome
+        summaryLabel.isHidden = isCompactOwnerChrome
         rendererLabel.isHidden = isCompactOwnerChrome
+        stateLabel.isHidden = isCompactOwnerChrome && !shouldShowOwnerStateLabel
     }
 
     private func updateInputOwnershipUI(isOwner: Bool) {
@@ -707,6 +712,12 @@ import spacesterminalghostty
         return url
     }
 
+    private func shouldShowCompactOwnerStateLabel(runtimeState: TerminalSessionRuntimeState?, isOwner: Bool) -> Bool {
+        guard backend == .ghosttyEmbedded, isOwner else { return true }
+        guard let runtimeState else { return true }
+        return runtimeState.state != .running
+    }
+
     private func runtimeStateText(runtimeState: TerminalSessionRuntimeState?, ownerClient: TerminalClient?, isOwner: Bool) -> String {
         guard let runtimeState else { return "state: unknown" }
         if backend == .ghosttyEmbedded && isOwner {
@@ -779,6 +790,8 @@ import spacesterminalghostty
     var debugShowsTakeoverButton: Bool { !takeoverRowStackView.isHidden }
     var debugShowsRendererLabel: Bool { !rendererLabel.isHidden }
     var debugShowsTitleLabel: Bool { !titleLabel.isHidden }
+    var debugShowsSummaryLabel: Bool { !summaryLabel.isHidden }
+    var debugShowsStateLabel: Bool { !stateLabel.isHidden }
     var debugInputStatus: String { inputStatusLabel.stringValue }
     var debugInputFieldValue: String { inputField.stringValue }
     func debugSimulateApplicationDidBecomeActive() { NotificationCenter.default.post(name: NSApplication.didBecomeActiveNotification, object: NSApp) }

@@ -174,6 +174,8 @@ final class TerminalSessionWindowControllerTests: XCTestCase {
         XCTAssertFalse(controller.debugShowsTakeoverButton)
         XCTAssertFalse(controller.debugShowsRendererLabel)
         XCTAssertFalse(controller.debugShowsTitleLabel)
+        XCTAssertFalse(controller.debugShowsSummaryLabel)
+        XCTAssertFalse(controller.debugShowsStateLabel)
         XCTAssertEqual(controller.debugState, "state: running    child: 22")
     }
 
