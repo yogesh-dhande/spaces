@@ -86,6 +86,26 @@ final class TerminalSessionWindowControllerTests: XCTestCase {
         XCTAssertEqual(controller.debugWindowFrame.height, 560, accuracy: 0.5)
     }
 
+    @MainActor func testRepeatedShowDoesNotReapplyPersistedFrameForVisibleWindow() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        var loadCalls = 0
+        let controller = TerminalSessionWindowController(
+            sessionID: "session-restore-reuse", paths: .init(rootDirectory: root.path),
+            loadWindowFrameAction: { mode in
+                XCTAssertEqual(mode, .owner)
+                loadCalls += 1
+                return .init(x: 90, y: 110, width: 840, height: 560)
+            })
+
+        controller.show()
+        controller.show()
+
+        XCTAssertEqual(loadCalls, 1)
+    }
+
     @MainActor func testWindowResizeCoalescesFramePersistenceBeforeFlush() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)

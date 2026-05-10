@@ -151,11 +151,14 @@ import spacesterminalghostty
 
     public func show() {
         guard let window else { return }
+        let wasVisible = window.isVisible && !didCloseWindow
         didCloseWindow = false
         attachLocalClientIfNeeded()
         startRefreshing()
-        restorePersistedWindowFrame(window)
-        constrainWindowToVisibleFrame(window)
+        if !wasVisible {
+            restorePersistedWindowFrame(window)
+            constrainWindowToVisibleFrame(window)
+        }
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
         if backend == .ghosttyEmbedded { ensureGhosttyHostAttached() }
@@ -447,7 +450,7 @@ import spacesterminalghostty
     }
 
     private func startRefreshing() {
-        refreshTask?.cancel()
+        guard refreshTask == nil else { return }
         refreshTask = Task { @MainActor [weak self] in
             guard let self else { return }
             while !Task.isCancelled {

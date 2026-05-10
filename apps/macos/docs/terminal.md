@@ -136,6 +136,7 @@ Current performance decisions:
 - Active owner windows skip fallback `output.log` tail reads while the live libghostty surface is visible, so steady-state refresh ticks do not churn hidden text views.
 - Active owner windows also use the slower notification-first refresh cadence above, which keeps the live terminal path responsive without doing the same fallback polling work as passive windows.
 - Fresh terminal window controllers do an immediate one-time render pass during construction but do not start their periodic refresh loop until `show()`, so summon and reopen avoid canceling and restarting a loop that the user has not seen yet.
+- Reusing an already visible terminal window does not reapply its persisted frame or restart the refresh loop. Spaces brings that live window forward and refreshes it in place instead of treating it like a fresh summon.
 - Owner and viewer frame persistence is coalesced during move and resize, then flushed immediately on live-resize end or window close so drag-heavy sessions do not spam synchronous state writes.
 - Built-in workspace-process reopen prefers the currently focused `Spaces` window when rebinding a reopened owner session, instead of diffing broader yabai window snapshots first.
 - Session output still streams directly to `output.log`, but session runtime-state persistence is coalesced so steady-state windows are not constantly paying synchronous metadata write costs.
