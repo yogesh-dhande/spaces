@@ -142,6 +142,7 @@ import spacesterminalghostty
         didCloseWindow = false
         attachLocalClientIfNeeded()
         startRefreshing()
+        restorePersistedWindowFrame(window)
         constrainWindowToVisibleFrame(window)
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
@@ -151,6 +152,7 @@ import spacesterminalghostty
 
     public func windowWillClose(_ notification: Notification) {
         didCloseWindow = true
+        persistCurrentWindowFrame()
         if backend == .ghosttyEmbedded { syncGhosttyOwnerFocus(reason: "window_close", requestWindowFocus: false, focused: false) }
         detachLocalClientIfNeeded()
         refreshTask?.cancel()
@@ -170,9 +172,17 @@ import spacesterminalghostty
         syncGhosttyOwnerFocus(reason: "window_main_lost", requestWindowFocus: false, focused: false)
     }
 
-    public func windowDidResize(_ notification: Notification) { syncGhosttyOwnerFocus(reason: "window_resize", requestWindowFocus: false) }
+    public func windowDidMove(_ notification: Notification) { persistCurrentWindowFrame() }
 
-    public func windowDidEndLiveResize(_ notification: Notification) { syncGhosttyOwnerFocus(reason: "window_resize_end", requestWindowFocus: true) }
+    public func windowDidResize(_ notification: Notification) {
+        persistCurrentWindowFrame()
+        syncGhosttyOwnerFocus(reason: "window_resize", requestWindowFocus: false)
+    }
+
+    public func windowDidEndLiveResize(_ notification: Notification) {
+        persistCurrentWindowFrame()
+        syncGhosttyOwnerFocus(reason: "window_resize_end", requestWindowFocus: true)
+    }
 
     public func validateUserInterfaceItem(_ item: any NSValidatedUserInterfaceItem) -> Bool {
         switch item.action {
@@ -681,6 +691,20 @@ import spacesterminalghostty
         window.setFrame(frame, display: false)
     }
 
+    private func restorePersistedWindowFrame(_ window: NSWindow) {
+        guard let frame = try? TerminalSessionPersistence.readWindowFrame(mode: preferredAttachmentMode, paths: paths) else { return }
+        let restoredFrame = NSRect(x: frame.x, y: frame.y, width: frame.width, height: frame.height)
+        guard restoredFrame.width >= window.minSize.width, restoredFrame.height >= window.minSize.height else { return }
+        window.setFrame(restoredFrame, display: false)
+    }
+
+    private func persistCurrentWindowFrame() {
+        guard let window else { return }
+        let frame = window.frame
+        let persistedFrame = TerminalSessionWindowFrame(x: frame.origin.x, y: frame.origin.y, width: frame.size.width, height: frame.size.height)
+        try? TerminalSessionPersistence.writeWindowFrame(persistedFrame, mode: preferredAttachmentMode, paths: paths)
+    }
+
     private func resolveVisibleRenderer(isOwner: Bool?) -> VisibleRenderer {
         guard backend == .ghosttyEmbedded, isOwner == true else { return .outputFallback }
         return .ghosttyOwner
@@ -781,6 +805,7 @@ import spacesterminalghostty
     var debugState: String { stateLabel.stringValue }
     var debugWindowTitle: String { window?.title ?? "" }
     var debugWindowRepresentedPath: String? { window?.representedURL?.path }
+    var debugWindowFrame: NSRect { window?.frame ?? .zero }
     public var attachmentMode: TerminalAttachmentMode { preferredAttachmentMode }
     public var didClose: Bool { didCloseWindow }
     var debugDidCloseWindow: Bool { didCloseWindow }

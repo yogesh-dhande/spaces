@@ -146,4 +146,20 @@ final class TerminalSessionModelTests: XCTestCase {
         XCTAssertFalse(paths.controlSocketPath.contains("/terminal/sessions/7399141B-E18F-429C-AD87-1FA6191DC9FE/"))
         XCTAssertLessThan(paths.controlSocketPath.utf8.count, 104)
     }
+
+    func testWindowFramePersistsPerAttachmentMode() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+        let ownerFrame = TerminalSessionWindowFrame(x: 100, y: 120, width: 980, height: 640)
+        let viewerFrame = TerminalSessionWindowFrame(x: 160, y: 180, width: 720, height: 480)
+
+        try TerminalSessionPersistence.writeWindowFrame(ownerFrame, mode: .owner, paths: paths)
+        try TerminalSessionPersistence.writeWindowFrame(viewerFrame, mode: .viewer, paths: paths)
+
+        XCTAssertEqual(try TerminalSessionPersistence.readWindowFrame(mode: .owner, paths: paths), ownerFrame)
+        XCTAssertEqual(try TerminalSessionPersistence.readWindowFrame(mode: .viewer, paths: paths), viewerFrame)
+    }
 }

@@ -223,6 +223,28 @@ public enum TerminalSessionPersistence {
         }.sorted { $0.createdAt < $1.createdAt }
     }
 
+    public static func readWindowState(paths: TerminalSessionPaths) throws -> TerminalSessionWindowState {
+        try readJSONIfExists(TerminalSessionWindowState.self, from: paths.windowStatePath) ?? .init()
+    }
+
+    public static func writeWindowFrame(_ frame: TerminalSessionWindowFrame, mode: TerminalAttachmentMode, paths: TerminalSessionPaths) throws {
+        var state = try readWindowState(paths: paths)
+        switch mode {
+        case .owner: state.ownerFrame = frame
+        case .viewer: state.viewerFrame = frame
+        }
+        try paths.ensureDirectories()
+        try writeJSON(state, to: paths.windowStatePath)
+    }
+
+    public static func readWindowFrame(mode: TerminalAttachmentMode, paths: TerminalSessionPaths) throws -> TerminalSessionWindowFrame? {
+        let state = try readWindowState(paths: paths)
+        return switch mode {
+        case .owner: state.ownerFrame
+        case .viewer: state.viewerFrame
+        }
+    }
+
     private static func writeJSON<Value: Encodable>(_ value: Value, to path: String) throws {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]

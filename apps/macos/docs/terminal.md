@@ -89,6 +89,7 @@ Live runtime-state changes also propagate through an in-process notification so 
 - The native window titlebar remains the primary place for the live terminal title.
 - Owner windows also project the live working directory into the native titlebar represented path when that directory exists on disk, so the proxy icon and document path behave like a normal macOS terminal window.
 - Built-in terminal windows explicitly disable AppKit tabbing; one terminal session maps to one window.
+- Built-in owner and viewer windows persist their last local frame per attachment mode, so close and reopen returns to the user’s last size and position instead of a generic default rectangle.
 
 ## Input, Mouse, and Clipboard
 The active owner surface currently supports:

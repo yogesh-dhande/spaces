@@ -68,6 +68,22 @@ final class TerminalSessionWindowControllerTests: XCTestCase {
         wait(for: [expectation], timeout: 1)
     }
 
+    @MainActor func testShowRestoresPersistedWindowFrameForAttachmentMode() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+        try TerminalSessionPersistence.writeWindowFrame(.init(x: 90, y: 110, width: 840, height: 560), mode: .owner, paths: paths)
+
+        let controller = TerminalSessionWindowController(sessionID: "session-restore", paths: paths)
+
+        controller.show()
+
+        XCTAssertEqual(controller.debugWindowFrame.width, 840, accuracy: 0.5)
+        XCTAssertEqual(controller.debugWindowFrame.height, 560, accuracy: 0.5)
+    }
+
     @MainActor func testControllerLoadsRecentOutputIntoTextView() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)

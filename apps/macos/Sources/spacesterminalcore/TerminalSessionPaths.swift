@@ -5,6 +5,7 @@ public struct TerminalSessionPaths: Sendable, Equatable {
     public let metadataPath: String
     public let statePath: String
     public let outputPath: String
+    public let windowStatePath: String
     public let clientsPath: String
     public let attachmentsPath: String
     public let controlSocketPath: String
@@ -15,6 +16,7 @@ public struct TerminalSessionPaths: Sendable, Equatable {
         metadataPath = URL(fileURLWithPath: rootDirectory).appendingPathComponent("metadata.json").path
         statePath = URL(fileURLWithPath: rootDirectory).appendingPathComponent("state.json").path
         outputPath = URL(fileURLWithPath: rootDirectory).appendingPathComponent("output.log").path
+        windowStatePath = URL(fileURLWithPath: rootDirectory).appendingPathComponent("window-state.json").path
         clientsPath = URL(fileURLWithPath: rootDirectory).appendingPathComponent("clients.json").path
         attachmentsPath = URL(fileURLWithPath: rootDirectory).appendingPathComponent("attachments.json").path
         self.controlSocketPath = controlSocketPath ?? URL(fileURLWithPath: rootDirectory).appendingPathComponent("control.sock").path
