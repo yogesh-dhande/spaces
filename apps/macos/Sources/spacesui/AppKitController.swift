@@ -7111,15 +7111,36 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     nonisolated static func preferredWorkspaceIDForAppToggle(focusedTerminalSessionWorkspaceID: String?, focusedWindowWorkspaceID: String?) -> String?
     { focusedTerminalSessionWorkspaceID ?? focusedWindowWorkspaceID }
 
-    nonisolated static func commandPaletteContextWorkspaceID(selectedWorkspaceID: String?, focusedWorkspaceID: () throws -> String?) rethrows
-        -> String?
-    {
-        if let selectedWorkspaceID { return selectedWorkspaceID }
-        return try focusedWorkspaceID()
-    }
+    nonisolated static func preferredWorkspaceIDForCommandPalette(
+        selectedWorkspaceID: String?, focusedTerminalSessionWorkspaceID: String?, focusedWindowWorkspaceID: String?
+    ) -> String? { selectedWorkspaceID ?? focusedTerminalSessionWorkspaceID ?? focusedWindowWorkspaceID }
 
     private func commandPaletteDefaultWorkspaceID() -> String? {
-        try? Self.commandPaletteContextWorkspaceID(selectedWorkspaceID: selectedWorkspaceID) { try orchestrator.workspaceIDForFocusedWindow() }
+        let focusedTerminalWorkspaceID: String?
+        if let terminalSessionID = focusedTerminalSessionIDForToggle() {
+            let lookupStartedAt = Date()
+            focusedTerminalWorkspaceID = try? orchestrator.workspaceIDForTerminalSession(terminalSessionID)
+            logPerfMetric(
+                "toggle_palette_terminal_workspace_lookup", target: "session=\(terminalSessionID)",
+                elapsedMS: windowShortcutElapsedMS(since: lookupStartedAt), success: focusedTerminalWorkspaceID != nil)
+        } else {
+            focusedTerminalWorkspaceID = nil
+        }
+
+        let focusedWindowWorkspaceID: String?
+        if selectedWorkspaceID == nil, focusedTerminalWorkspaceID == nil {
+            let lookupStartedAt = Date()
+            focusedWindowWorkspaceID = try? orchestrator.workspaceIDForFocusedWindow()
+            logPerfMetric(
+                "toggle_palette_focused_window_workspace_lookup", target: "frontmost_window",
+                elapsedMS: windowShortcutElapsedMS(since: lookupStartedAt), success: focusedWindowWorkspaceID != nil)
+        } else {
+            focusedWindowWorkspaceID = nil
+        }
+
+        return Self.preferredWorkspaceIDForCommandPalette(
+            selectedWorkspaceID: selectedWorkspaceID, focusedTerminalSessionWorkspaceID: focusedTerminalWorkspaceID,
+            focusedWindowWorkspaceID: focusedWindowWorkspaceID)
     }
 
     private func handleCommandPaletteShortcut(event: NSEvent) -> Bool {
@@ -8661,14 +8682,23 @@ extension AppKitController {
         let panel = ensureCommandPalettePanel()
         let mainWindowWasVisible = rawMainWindowVisibility()
         logHotkeyDebug("present_palette begin \(hotkeyWindowStateSummary())")
+        let contextLookupStartedAt = Date()
         commandPaletteContextWorkspaceID = commandPaletteDefaultWorkspaceID()
+        logPerfMetric(
+            "toggle_palette_context_workspace", target: "workspace=\(commandPaletteContextWorkspaceID ?? "nil")",
+            elapsedMS: windowShortcutElapsedMS(since: contextLookupStartedAt), success: true)
         if Self.shouldOrderOutMainWindowForCommandPalettePresentation(mainWindowIsVisible: mainWindowWasVisible) { window?.orderOut(nil) }
         panel.center()
+        let revealStartedAt = Date()
         revealTargetedHotkeyWindow(panel)
+        logPerfMetric("toggle_palette_reveal_target", target: "palette", elapsedMS: windowShortcutElapsedMS(since: revealStartedAt), success: true)
         commandPaletteSearchField?.stringValue = ""
         commandPaletteSelectedIndex = 0
         if let commandPaletteSearchField { panel.makeFirstResponder(commandPaletteSearchField) }
+        let filterStartedAt = Date()
         applyCommandPaletteFilter()
+        logPerfMetric(
+            "toggle_palette_apply_filter", target: "query=<empty>", elapsedMS: windowShortcutElapsedMS(since: filterStartedAt), success: true)
         if commandPaletteItems.isEmpty {
             reloadCommandPaletteItems()
         } else if commandPaletteNeedsReload, commandPaletteLoadTask == nil {

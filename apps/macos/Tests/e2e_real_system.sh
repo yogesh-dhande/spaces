@@ -2576,6 +2576,26 @@ run_hotkey_visibility_profiling() {
       record_process_focus_metric "main_window.cli_window_focus.process_tracked_tab" "frontend" "$host" "single"
     done
     pass_case
+
+    begin_case "$host: profile repeated terminal to command palette toggle"
+    ensure_single_spaces_instance "$SPACES_PID"
+    reset_fixture_runtime "$workspace_dir"
+    run_spaces_logged /tmp/spaces-e2e-profile-terminal-palette-start.log start "$workspace_dir"
+    env HOME="$TMP_HOME" SPACES_DB_PATH="$TMP_DB" SPACES_RUNTIME_DIR="$TMP_RUNTIME_DIR" "$MX_E2E_BIN" focus-workspace-process --workspace-dir "$workspace_dir" --process-name frontend >/dev/null
+    transition_pause "$host seed frontend terminal focus for command palette profiling"
+    wait_for_spaces_frontmost_ready
+    for (( iteration = 1; iteration <= REAL_SYSTEM_PROFILE_REPETITIONS; iteration++ )); do
+      send_spaces_command_palette_hotkey_with_ack
+      wait_for_spaces_command_palette_presented "0"
+      record_toggle_palette_metric "spaces_terminal.keyboard_toggle_palette.palette" "show" "1" "$host" "single"
+
+      send_spaces_command_palette_hotkey_with_ack
+      wait_for_spaces_command_palette_dismissed
+      env HOME="$TMP_HOME" SPACES_DB_PATH="$TMP_DB" SPACES_RUNTIME_DIR="$TMP_RUNTIME_DIR" DEBUG=1 "$MX_E2E_BIN" focus-workspace-process --workspace-dir "$workspace_dir" --process-name frontend >/dev/null
+      wait_for_spaces_frontmost_ready
+      record_process_focus_metric "palette.cli_window_focus.process_tracked_tab" "frontend" "$host" "single"
+    done
+    pass_case
   fi
 }
 

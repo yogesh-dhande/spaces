@@ -198,6 +198,10 @@ def metric_description(metric: str, terminal_host: str, workspace_scope: str) ->
             "measures how long Spaces takes to show the command palette when the main app window is frontmost.",
         "palette.keyboard_toggle_palette.main_window":
             "measures how long Spaces takes to hide the command palette and return to the main app window.",
+        "spaces_terminal.keyboard_toggle_palette.palette":
+            "measures how long Spaces takes to show the command palette when a built-in Spaces terminal is frontmost.",
+        "palette.cli_window_focus.process_tracked_tab":
+            "measures how long Spaces takes to refocus the tracked built-in process terminal after dismissing the command palette.",
     }
 
     suffix = descriptions.get(metric, f"captures the real-system timing for `{metric}`.")

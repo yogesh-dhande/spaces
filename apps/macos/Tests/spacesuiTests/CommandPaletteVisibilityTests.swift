@@ -16,24 +16,23 @@ import workspacecore
     }
 
     @Test func paletteContextPrefersPreviouslySelectedWorkspace() {
-        let workspaceID = AppKitController.commandPaletteContextWorkspaceID(
-            selectedWorkspaceID: "workspace-selected", focusedWorkspaceID: { "workspace-focused" })
+        let workspaceID = AppKitController.preferredWorkspaceIDForCommandPalette(
+            selectedWorkspaceID: "workspace-selected", focusedTerminalSessionWorkspaceID: "workspace-terminal",
+            focusedWindowWorkspaceID: "workspace-focused")
 
         #expect(workspaceID == "workspace-selected")
     }
 
-    @Test func paletteContextSkipsFocusedWorkspaceLookupWhenSelectionExists() throws {
-        enum SentinelError: Error { case shouldNotBeCalled }
+    @Test func paletteContextPrefersFocusedTerminalWorkspaceBeforeFocusedWindowWorkspace() {
+        let workspaceID = AppKitController.preferredWorkspaceIDForCommandPalette(
+            selectedWorkspaceID: nil, focusedTerminalSessionWorkspaceID: "workspace-terminal", focusedWindowWorkspaceID: "workspace-focused")
 
-        let workspaceID = try AppKitController.commandPaletteContextWorkspaceID(selectedWorkspaceID: "workspace-selected") {
-            throw SentinelError.shouldNotBeCalled
-        }
-
-        #expect(workspaceID == "workspace-selected")
+        #expect(workspaceID == "workspace-terminal")
     }
 
     @Test func paletteContextFallsBackToFocusedTrackedWorkspace() {
-        let workspaceID = AppKitController.commandPaletteContextWorkspaceID(selectedWorkspaceID: nil, focusedWorkspaceID: { "workspace-focused" })
+        let workspaceID = AppKitController.preferredWorkspaceIDForCommandPalette(
+            selectedWorkspaceID: nil, focusedTerminalSessionWorkspaceID: nil, focusedWindowWorkspaceID: "workspace-focused")
 
         #expect(workspaceID == "workspace-focused")
     }

@@ -162,6 +162,7 @@ Current performance decisions:
 - Global app-toggle behavior also distinguishes the primary main window from auxiliary built-in windows. When a built-in terminal or the command palette is focused, toggling the app summons only the main Spaces window instead of unhiding or fronting every Spaces-owned window in the process. Command-palette presentation also targets only the palette panel, so built-in terminal windows stay in their existing visibility state.
 - Built-in terminal summon/focus flows keep the tracked workspace association in the `windows` table through the terminal session ID. That lets the main window restore the owning workspace detail view when the user toggles back from a focused built-in terminal, even before yabai has supplied or refreshed a native window ID.
 - The main-window hotkey path resolves the owning workspace from the focused built-in terminal session first and skips the generic focused-window workspace lookup whenever that session mapping already exists. That keeps `Cmd+Opt+=` from paying an unnecessary focused-window lookup on every `Spaces terminal -> main window` transition.
+- The command-palette hotkey path follows the same pattern. When a built-in terminal is focused, it resolves the palette context workspace from the terminal session first and skips the generic focused-window lookup whenever the session already maps back to a workspace.
 - Built-in terminal actions emit debug metrics through the shared `spaces: perf metric=...` format when `DEBUG=1`, including:
   - `workspace_terminal_open_ui`
   - `terminal_session_start`
@@ -175,6 +176,11 @@ Current performance decisions:
   - `terminal_control_send`
   - `terminal_control_key`
   - `terminal_control_takeover`
+  - `toggle_palette_terminal_workspace_lookup`
+  - `toggle_palette_focused_window_workspace_lookup`
+  - `toggle_palette_context_workspace`
+  - `toggle_palette_reveal_target`
+  - `toggle_palette_apply_filter`
   - `toggle_window_terminal_workspace_lookup`
   - `toggle_window_focused_window_workspace_lookup`
   - `toggle_window_reveal_target`
@@ -286,6 +292,30 @@ A representative isolated debug run recorded:
 - `toggle_window_selection_refresh`: `26-32ms`
 
 That split shows the built-in hotkey handler itself is no longer the slow part of the loop. The remaining wall time lives in the broader real-system focus transition after the main-window reveal, not in the terminal-session lookup or main-window workspace-selection refresh.
+
+For repeatable performance sampling of the built-in `Spaces terminal -> command palette -> tracked process terminal` hotkey loop:
+
+```bash
+ITERATIONS=3 apps/macos/Tests/profile_spaces_terminal_palette.sh
+```
+
+That profiler:
+- seeds an isolated fixture workspace with terminal host `spaces`
+- launches a debug `SpacesApp` with `DEBUG=1`
+- focuses a tracked built-in process terminal
+- repeats `Cmd+Opt+-` to present the command palette
+- dismisses the palette and refocuses the tracked process terminal through the real workspace-process focus path
+- records wall-clock palette timing alongside app-side palette metrics
+
+A representative isolated debug run recorded:
+- `terminal_to_palette_toggle_wall`: `751-771ms`
+- `toggle_palette`: `3-21ms`
+- `toggle_palette_terminal_workspace_lookup`: `0ms`
+- `toggle_palette_context_workspace`: `0ms`
+- `toggle_palette_reveal_target`: `2-7ms`
+- `toggle_palette_apply_filter`: `0ms`
+
+That split shows the built-in command-palette handler is also no longer spending meaningful time on terminal-session context lookup when a built-in terminal is focused. The remaining wall time lives in the broader real-system focus transition after the palette panel is presented, not in the terminal-aware lookup or filter path.
 
 For repeatable profiling of built-in workspace-process launch, close, and reopen:
 
