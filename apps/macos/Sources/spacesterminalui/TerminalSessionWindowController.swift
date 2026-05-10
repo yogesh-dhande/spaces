@@ -154,7 +154,6 @@ import spacesterminalghostty
         let wasVisible = window.isVisible && !didCloseWindow
         didCloseWindow = false
         attachLocalClientIfNeeded()
-        startRefreshing()
         if !wasVisible {
             restorePersistedWindowFrame(window)
             constrainWindowToVisibleFrame(window)
@@ -163,6 +162,7 @@ import spacesterminalghostty
         NSApp.activate(ignoringOtherApps: true)
         if backend == .ghosttyEmbedded { ensureGhosttyHostAttached() }
         refreshNow()
+        startRefreshing()
     }
 
     public func focusWindow() {
@@ -444,6 +444,8 @@ import spacesterminalghostty
             let host = GhosttyEmbeddedSessionRegistry.shared.host(for: launchConfiguration, paths: paths)
             ghosttySessionHost = host
             try host.attach(client: client, mode: preferredAttachmentMode, into: preferredAttachmentMode == .owner ? terminalContainer : nil)
+            lastObservedAttachmentMode = preferredAttachmentMode
+            lastObservedOwnerClientID = host.activeOwnerClientID()
             syncGhosttyOwnerFocus(reason: "attach_owner_surface", requestWindowFocus: preferredAttachmentMode == .owner)
             updateRendererVisibility()
         } catch { updateInputStatus(message: String(describing: error), isError: true) }

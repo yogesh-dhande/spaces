@@ -146,6 +146,7 @@ Current performance decisions:
 - The app-side session-focus IPC also exits before resolving session files when there are no live controllers for that session, and it emits `terminal_window_focus_ipc` route metrics (`in_memory_owner`, `persisted_owner`, `missing`) so workspace-process profiles can show whether focus IPC actually reused a live window.
 - Workspace-process focus metrics distinguish that lighter `rebound_session` path from a true `reopened_session`, so profile runs can separate live-window rebind cost from actual window recreation cost.
 - The workspace-process profiler prints both the workspace-process focus route and the app-side `terminal_window_focus_ipc` route, which makes it easier to see whether a slow reopen actually tried and missed the live-window focus path or never exercised it.
+- The built-in terminal profiler treats `spaces terminal command --backend ghostty-embedded` as the owner summon itself and waits for the first owner attach, instead of immediately posting a second owner `terminal show` that would measure an artificial re-summon.
 - Session output still streams directly to `output.log`, but session runtime-state persistence is coalesced so steady-state windows are not constantly paying synchronous metadata write costs.
 - Built-in terminal actions emit debug metrics through the shared `spaces: perf metric=...` format when `DEBUG=1`, including:
   - `terminal_session_start`

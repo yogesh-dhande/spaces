@@ -95,7 +95,6 @@ for iteration in $(seq 1 "$ITERATIONS"); do
   session_id="$(extract_session_id "$command_output")"
   [[ -n "$session_id" ]] || { echo "Failed to parse session ID from: $command_output" >&2; exit 1; }
 
-  env SPACES_DB_PATH="$DB_PATH" "$SPACES_CLI" terminal show "$session_id"
   wait_for_log_pattern "spaces: perf metric=terminal_window_attach .*target=session=${session_id} .*mode=owner"
 
   payload="profile-ping-$iteration"
