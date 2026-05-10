@@ -1703,6 +1703,24 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertEqual(try orchestrator.workspaceIDForTerminalSession("session-123"), workspace.id)
     }
 
+    func testWorkspaceIDForTerminalSessionFallsBackToRunningProcessSessionID() throws {
+        let root = try makeTempDirectory()
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let store = try makeTemporaryStore()
+        let orchestrator = WorkspaceOrchestrator(store: store)
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
+
+        try store.upsert(
+            runningProcess: RunningProcessRecord(
+                id: "process-1", workspaceID: workspace.id, templateName: "api", command: "zsh", terminalApp: TerminalHost.spaces.appName,
+                windowID: nil, terminalTrackingID: "session-456", terminalNativeID: "session-456", terminalContainerID: nil, itermTabIndex: nil,
+                tmuxWindowID: nil, pid: 1234, status: .running, logPath: nil, lastOutputAt: nil, startedAt: "2026-05-10T18:05:00Z", exitedAt: nil))
+
+        XCTAssertEqual(try orchestrator.workspaceIDForTerminalSession("session-456"), workspace.id)
+    }
+
     func testOpenWorkspaceTerminalUsesResolvedLoginShellWithoutBashWrapper() throws {
         let root = try makeTempDirectory()
         let projectDir = root.appendingPathComponent("project", isDirectory: true)

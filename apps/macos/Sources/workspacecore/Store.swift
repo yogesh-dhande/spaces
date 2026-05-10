@@ -755,7 +755,7 @@ public final class SQLiteStore {
     }
 
     public func workspaceIDForTerminalSession(_ sessionID: String) throws -> String? {
-        let row = try queryRow(
+        if let row = try queryRow(
             sql: """
                 SELECT workspace_id
                 FROM windows
@@ -763,7 +763,18 @@ public final class SQLiteStore {
                 ORDER BY last_seen_at DESC, order_index
                 LIMIT 1
                 """, bindings: [sessionID, sessionID])
-        return row?.first
+        {
+            return row.first
+        }
+        let processRow = try queryRow(
+            sql: """
+                SELECT workspace_id
+                FROM running_processes
+                WHERE terminal_tracking_id = ? OR terminal_native_id = ?
+                ORDER BY started_at DESC
+                LIMIT 1
+                """, bindings: [sessionID, sessionID])
+        return processRow?.first
     }
 
     public func workspaceIDForAgentWindow(yabaiWindowID: Int) throws -> String? {
