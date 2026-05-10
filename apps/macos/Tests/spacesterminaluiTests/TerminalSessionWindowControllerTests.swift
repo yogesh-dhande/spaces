@@ -73,15 +73,41 @@ final class TerminalSessionWindowControllerTests: XCTestCase {
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }
 
-        let paths = TerminalSessionPaths(rootDirectory: root.path)
-        try TerminalSessionPersistence.writeWindowFrame(.init(x: 90, y: 110, width: 840, height: 560), mode: .owner, paths: paths)
-
-        let controller = TerminalSessionWindowController(sessionID: "session-restore", paths: paths)
+        let controller = TerminalSessionWindowController(
+            sessionID: "session-restore", paths: .init(rootDirectory: root.path),
+            loadWindowFrameAction: { mode in
+                XCTAssertEqual(mode, .owner)
+                return .init(x: 90, y: 110, width: 840, height: 560)
+            })
 
         controller.show()
 
         XCTAssertEqual(controller.debugWindowFrame.width, 840, accuracy: 0.5)
         XCTAssertEqual(controller.debugWindowFrame.height, 560, accuracy: 0.5)
+    }
+
+    @MainActor func testWindowResizeCoalescesFramePersistenceBeforeFlush() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        var writes: [TerminalSessionWindowFrame] = []
+        let controller = TerminalSessionWindowController(
+            sessionID: "session-frame-write", paths: .init(rootDirectory: root.path),
+            saveWindowFrameAction: { frame, mode in
+                XCTAssertEqual(mode, .owner)
+                writes.append(frame)
+            })
+
+        controller.show()
+        controller.windowDidResize(Notification(name: NSWindow.didResizeNotification))
+        controller.windowDidResize(Notification(name: NSWindow.didResizeNotification))
+
+        XCTAssertTrue(writes.isEmpty)
+
+        try await Task.sleep(for: .milliseconds(250))
+
+        XCTAssertEqual(writes.count, 1)
     }
 
     @MainActor func testControllerLoadsRecentOutputIntoTextView() throws {

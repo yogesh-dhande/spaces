@@ -50,7 +50,10 @@ import spacesterminalghostty
     private let ownerWindowFocusAction: (@MainActor (NSWindow?) -> Void)?
     private let ownerSurfaceFocusAction: (@MainActor (Bool) -> Void)?
     private let onWindowClose: (@MainActor (String, String) -> Void)?
+    private let loadWindowFrameAction: (TerminalAttachmentMode) throws -> TerminalSessionWindowFrame?
+    private let saveWindowFrameAction: (TerminalSessionWindowFrame, TerminalAttachmentMode) throws -> Void
     private var refreshTask: Task<Void, Never>?
+    private var pendingWindowFramePersistTask: Task<Void, Never>?
     private var lastRenderedOutput = ""
     private var isClientAttached = false
     private var didCloseWindow = false
@@ -73,7 +76,9 @@ import spacesterminalghostty
         attachClientAction: (@Sendable (TerminalClient, TerminalAttachmentMode) throws -> Void)? = nil,
         detachClientAction: (@Sendable (String) throws -> Void)? = nil, copySelectionAction: (@MainActor () -> Bool)? = nil,
         pasteClipboardAction: (@MainActor () -> Bool)? = nil, ownerWindowFocusAction: (@MainActor (NSWindow?) -> Void)? = nil,
-        ownerSurfaceFocusAction: (@MainActor (Bool) -> Void)? = nil, onWindowClose: (@MainActor (String, String) -> Void)? = nil
+        ownerSurfaceFocusAction: (@MainActor (Bool) -> Void)? = nil, onWindowClose: (@MainActor (String, String) -> Void)? = nil,
+        loadWindowFrameAction: ((TerminalAttachmentMode) throws -> TerminalSessionWindowFrame?)? = nil,
+        saveWindowFrameAction: ((TerminalSessionWindowFrame, TerminalAttachmentMode) throws -> Void)? = nil
     ) {
         self.sessionID = sessionID
         self.paths = paths
@@ -117,6 +122,9 @@ import spacesterminalghostty
         self.ownerWindowFocusAction = ownerWindowFocusAction
         self.ownerSurfaceFocusAction = ownerSurfaceFocusAction
         self.onWindowClose = onWindowClose
+        self.loadWindowFrameAction = loadWindowFrameAction ?? { mode in try TerminalSessionPersistence.readWindowFrame(mode: mode, paths: paths) }
+        self.saveWindowFrameAction =
+            saveWindowFrameAction ?? { frame, mode in try TerminalSessionPersistence.writeWindowFrame(frame, mode: mode, paths: paths) }
 
         let contentRect = NSRect(x: 0, y: 0, width: 980, height: 640)
         let styleMask: NSWindow.StyleMask = [.titled, .closable, .miniaturizable, .resizable]
@@ -152,7 +160,7 @@ import spacesterminalghostty
 
     public func windowWillClose(_ notification: Notification) {
         didCloseWindow = true
-        persistCurrentWindowFrame()
+        persistCurrentWindowFrame(immediately: true)
         if backend == .ghosttyEmbedded { syncGhosttyOwnerFocus(reason: "window_close", requestWindowFocus: false, focused: false) }
         detachLocalClientIfNeeded()
         refreshTask?.cancel()
@@ -180,7 +188,7 @@ import spacesterminalghostty
     }
 
     public func windowDidEndLiveResize(_ notification: Notification) {
-        persistCurrentWindowFrame()
+        persistCurrentWindowFrame(immediately: true)
         syncGhosttyOwnerFocus(reason: "window_resize_end", requestWindowFocus: true)
     }
 
@@ -692,17 +700,29 @@ import spacesterminalghostty
     }
 
     private func restorePersistedWindowFrame(_ window: NSWindow) {
-        guard let frame = try? TerminalSessionPersistence.readWindowFrame(mode: preferredAttachmentMode, paths: paths) else { return }
+        guard let frame = try? loadWindowFrameAction(preferredAttachmentMode) else { return }
         let restoredFrame = NSRect(x: frame.x, y: frame.y, width: frame.width, height: frame.height)
         guard restoredFrame.width >= window.minSize.width, restoredFrame.height >= window.minSize.height else { return }
         window.setFrame(restoredFrame, display: false)
     }
 
-    private func persistCurrentWindowFrame() {
+    private func persistCurrentWindowFrame(immediately: Bool = false) {
+        pendingWindowFramePersistTask?.cancel()
+        if immediately {
+            writeCurrentWindowFrame()
+            return
+        }
+        pendingWindowFramePersistTask = Task { @MainActor [weak self] in
+            do { try await Task.sleep(for: .milliseconds(150)) } catch { return }
+            self?.writeCurrentWindowFrame()
+        }
+    }
+
+    private func writeCurrentWindowFrame() {
         guard let window else { return }
         let frame = window.frame
         let persistedFrame = TerminalSessionWindowFrame(x: frame.origin.x, y: frame.origin.y, width: frame.size.width, height: frame.size.height)
-        try? TerminalSessionPersistence.writeWindowFrame(persistedFrame, mode: preferredAttachmentMode, paths: paths)
+        try? saveWindowFrameAction(persistedFrame, preferredAttachmentMode)
     }
 
     private func resolveVisibleRenderer(isOwner: Bool?) -> VisibleRenderer {

@@ -32,6 +32,8 @@ import spacesterminalcore
     private var trackingArea: NSTrackingArea?
     private weak var observedWindow: NSWindow?
     private var previousAcceptsMouseMovedEvents: Bool?
+    private var nextSurfaceCreationRetryAt: Date?
+    private var lastSurfaceCreationFailureMessage: String?
 
     public init(launchConfiguration: TerminalSessionLaunchConfiguration) {
         self.launchConfiguration = launchConfiguration
@@ -256,6 +258,7 @@ import spacesterminalcore
 
     private func createSurfaceIfNeeded() {
         guard surface == nil else { return }
+        if let nextSurfaceCreationRetryAt, Date() < nextSurfaceCreationRetryAt { return }
         let startedAt = Date()
 
         guard let backingSize = backingPixelSize() else {
@@ -295,6 +298,8 @@ import spacesterminalcore
             guard let createdSurface else { throw GhosttyEmbeddedAppServiceError.configuration("ghostty_surface_new failed") }
 
             surface = createdSurface
+            nextSurfaceCreationRetryAt = nil
+            lastSurfaceCreationFailureMessage = nil
             lastGeometry = nil
             lastFocused = nil
             lastOccluded = nil
@@ -316,7 +321,13 @@ import spacesterminalcore
             GhosttyEmbeddedPerformance.logMetric(
                 "terminal_surface_create", target: "session=\(launchConfiguration.sessionID)",
                 elapsedMS: GhosttyEmbeddedPerformance.elapsedMS(since: startedAt), success: false)
-            fputs("spaces: ghostty surface creation failed: \(error)\n", stderr)
+            pendingSurfaceCreation = true
+            nextSurfaceCreationRetryAt = Date().addingTimeInterval(1)
+            let message = String(describing: error)
+            if lastSurfaceCreationFailureMessage != message {
+                lastSurfaceCreationFailureMessage = message
+                fputs("spaces: ghostty surface creation failed: \(message)\n", stderr)
+            }
         }
     }
 
