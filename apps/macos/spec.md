@@ -148,7 +148,7 @@ Spaces focuses those windows; it does not decide their geometry.
 - `restart` forces a full restart
 - `update` should own post-creation workspace metadata edits such as title and notes.
 - Launch should wait for setup to finish and should surface setup failures clearly.
-- If a configured process exits during startup, launch should surface the process error itself and should not open a dedicated tmux attach window that only reports a secondary attach failure.
+- If a configured process exits during startup, launch should surface the recent process output itself and should not open a dedicated tmux attach window that only reports a secondary attach failure.
 - Named ports must be available to setup scripts, stop scripts, and process commands.
 - Adding a named port from the workspace detail view should reserve its port number immediately instead of waiting for the next workspace launch.
 - Named port assignments belong to the workspace until that workspace is archived. Stopping a workspace must not give its assigned port numbers back to other workspaces.
