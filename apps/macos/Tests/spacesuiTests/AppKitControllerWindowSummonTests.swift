@@ -72,6 +72,27 @@ import spacesterminalcore
             !AppKitController.shouldRestoreTerminalFocusAfterMainHide(returnTerminalSessionID: "session-1", auxiliaryTerminalWindowsVisible: false))
     }
 
+    @Test func toggleHotkeyRestoresReturnApplicationOnlyWhenNoTerminalReturnTargetExists() {
+        #expect(
+            AppKitController.shouldRestoreReturnApplicationAfterMainHide(
+                returnTerminalSessionID: nil, returnApplicationProcessID: 123, auxiliaryTerminalWindowsVisible: false))
+        #expect(
+            !AppKitController.shouldRestoreReturnApplicationAfterMainHide(
+                returnTerminalSessionID: "session-1", returnApplicationProcessID: 123, auxiliaryTerminalWindowsVisible: false))
+        #expect(
+            !AppKitController.shouldRestoreReturnApplicationAfterMainHide(
+                returnTerminalSessionID: nil, returnApplicationProcessID: nil, auxiliaryTerminalWindowsVisible: false))
+        #expect(
+            !AppKitController.shouldRestoreReturnApplicationAfterMainHide(
+                returnTerminalSessionID: nil, returnApplicationProcessID: 123, auxiliaryTerminalWindowsVisible: true))
+    }
+
+    @Test func toggleHotkeyCapturesOnlyNonSpacesReturnApplicationProcessID() {
+        #expect(AppKitController.returnApplicationProcessIDForAppToggle(frontmostApplicationProcessID: 123, currentProcessID: 456) == 123)
+        #expect(AppKitController.returnApplicationProcessIDForAppToggle(frontmostApplicationProcessID: 456, currentProcessID: 456) == nil)
+        #expect(AppKitController.returnApplicationProcessIDForAppToggle(frontmostApplicationProcessID: nil, currentProcessID: 456) == nil)
+    }
+
     @Test func commandPalettePresentationCompletesOnlyAfterPaletteBecomesKey() {
         #expect(!AppKitController.commandPalettePresentationIsComplete(panelIsVisible: false, panelIsKey: false))
         #expect(!AppKitController.commandPalettePresentationIsComplete(panelIsVisible: true, panelIsKey: false))

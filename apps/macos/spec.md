@@ -227,6 +227,7 @@ Spaces focuses those windows; it does not decide their geometry.
 - The global `Toggle app` shortcut controls only the main Spaces window, not the built-in terminal windows or the command palette. If a built-in terminal or the command palette is focused, toggling the app should bring the main Spaces window forward instead of fronting all Spaces-owned windows.
 - Returning to the main Spaces window from a focused built-in terminal should show the workspace detail view that owns that terminal, matching the behavior of externally hosted terminal windows.
 - If the main Spaces window was summoned from a focused built-in terminal, toggling the app again should hide only the main window and restore focus to that same built-in terminal.
+- If the main Spaces window was summoned from an untracked external app such as Chrome or Ghostty, toggling the app again should hide only the main window and return focus to that external app instead of leaving Spaces frontmost.
 - A live target should receive focus. A configured target that is not live should be opened directly instead of requiring a full workspace launch or restart.
 - Opening a configured browser session, process, or coding agent from a stopped workspace should move that workspace out of the stopped state immediately.
 - Partial runtime is a first-class workspace state: some configured targets may be live and focusable while others remain directly openable.

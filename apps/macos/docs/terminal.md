@@ -163,6 +163,7 @@ Current performance decisions:
 - Built-in terminal summon/focus flows keep the tracked workspace association in the `windows` table through the terminal session ID. That lets the main window restore the owning workspace detail view when the user toggles back from a focused built-in terminal, even before yabai has supplied or refreshed a native window ID.
 - The main-window hotkey path resolves the owning workspace from the focused built-in terminal session first and skips the generic focused-window workspace lookup whenever that session mapping already exists. That keeps `Cmd+Opt+=` from paying an unnecessary focused-window lookup on every `Spaces terminal -> main window` transition.
 - When `Cmd+Opt+=` brings the main window forward from a focused built-in terminal, the app remembers that terminal session and restores focus back to it when the user presses the hotkey again to hide the main window. That keeps the round-trip `terminal -> main window -> terminal` path explicit instead of leaving focus restoration to AppKit.
+- When `Cmd+Opt+=` brings the main window forward from an untracked external app, the app remembers that frontmost non-Spaces process and reactivates it when the user presses the hotkey again to hide the main window. That keeps the `external app -> main window -> external app` round trip explicit instead of leaving Spaces frontmost after `orderOut(nil)`.
 - The command-palette hotkey path follows the same pattern. When a built-in terminal is focused, it resolves the palette context workspace from the terminal session first and skips the generic focused-window lookup whenever the session already maps back to a workspace.
 - Built-in terminal actions emit debug metrics through the shared `spaces: perf metric=...` format when `DEBUG=1`, including:
   - `workspace_terminal_open_ui`
@@ -187,6 +188,7 @@ Current performance decisions:
   - `toggle_window_reveal_target`
   - `toggle_window_selection_refresh`
   - `toggle_window_return_terminal_focus`
+  - `toggle_window_return_application_focus`
   - `toggle_window_flow`
 
 These metrics are intended to guide regressions around owner-window attach, owner-focus reassertion, session bring-up, control-plane latency, and ownership handoff.
