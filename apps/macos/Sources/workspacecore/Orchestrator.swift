@@ -1071,6 +1071,53 @@ public final class WorkspaceOrchestrator {
     }
 
     public func runningProcesses(workspaceID: String) throws -> [RunningProcessRecord] { try store.runningProcesses(workspaceID: workspaceID) }
+    public func workspaceTargetGroups(workspaceID: String) throws -> [WorkspaceTargetGroupSnapshot] {
+        try store.workspaceTargetGroups(workspaceID: workspaceID)
+    }
+
+    @discardableResult public func createWorkspaceTargetGroup(workspaceID: String, name: String? = nil, members: [WorkspaceTargetGroupMember]) throws
+        -> WorkspaceTargetGroupSnapshot
+    {
+        let snapshots = try store.workspaceTargetGroups(workspaceID: workspaceID)
+        let existingMemberKeys = Set(snapshots.flatMap(\.members).map(groupMemberIdentity))
+        let normalizedMembers = members.enumerated().compactMap { index, member -> WorkspaceTargetGroupMember? in
+            let trimmedReferenceID = member.referenceID.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmedReferenceID.isEmpty else { return nil }
+            return WorkspaceTargetGroupMember(groupID: "", orderIndex: index, kind: member.kind, referenceID: trimmedReferenceID)
+        }
+        guard normalizedMembers.count >= 2 else { throw WorkspaceError.invalidArgument(message: "A target group requires at least two targets.") }
+        let newMemberKeys = Set(normalizedMembers.map(groupMemberIdentity))
+        guard newMemberKeys.intersection(existingMemberKeys).isEmpty else {
+            throw WorkspaceError.invalidArgument(message: "Targets already assigned to a group must be removed from that group first.")
+        }
+        return try store.createWorkspaceTargetGroup(workspaceID: workspaceID, name: name, members: normalizedMembers)
+    }
+
+    public func updateWorkspaceTargetGroupName(workspaceID: String, groupID: String, name: String?) throws {
+        let trimmedName = name?.trimmingCharacters(in: .whitespacesAndNewlines)
+        try store.updateWorkspaceTargetGroupName(workspaceID: workspaceID, groupID: groupID, name: trimmedName?.isEmpty == true ? nil : trimmedName)
+    }
+
+    public func deleteWorkspaceTargetGroup(workspaceID: String, groupID: String) throws {
+        try store.deleteWorkspaceTargetGroup(workspaceID: workspaceID, groupID: groupID)
+    }
+
+    public func removeWorkspaceTargetGroupMember(workspaceID: String, groupID: String, kind: WorkspaceTargetGroupMember.Kind, referenceID: String)
+        throws
+    {
+        try store.removeWorkspaceTargetGroupMember(
+            workspaceID: workspaceID, groupID: groupID, kind: kind, referenceID: referenceID.trimmingCharacters(in: .whitespacesAndNewlines))
+    }
+
+    public func focusWorkspaceTargetGroup(workspaceID: String, groupID: String) throws {
+        guard let snapshot = try store.workspaceTargetGroups(workspaceID: workspaceID).first(where: { $0.group.id == groupID }) else { return }
+        var focusedAtLeastOne = false
+        for member in snapshot.members {
+            focusedAtLeastOne = (try focusWorkspaceTargetGroupMember(workspaceID: workspaceID, member: member)) || focusedAtLeastOne
+        }
+        if focusedAtLeastOne { try setActiveWorkspace(id: workspaceID) }
+    }
+
     public func checkAndUpdateProcessStatuses() throws -> Bool {
         var didUpdate = false
         let allProjects = try store.projects()
@@ -5328,6 +5375,27 @@ public final class WorkspaceOrchestrator {
             MissingTrackedWindowContext(
                 kind: .codingAgent, workspaceID: record.workspaceID, windowID: record.windowID ?? record.yabaiWindowID,
                 title: record.label ?? "Coding Agent CLI"))
+    }
+
+    private func groupMemberIdentity(_ member: WorkspaceTargetGroupMember) -> String { "\(member.kind.rawValue):\(member.referenceID)" }
+
+    private func focusWorkspaceTargetGroupMember(workspaceID: String, member: WorkspaceTargetGroupMember) throws -> Bool {
+        switch member.kind {
+        case .browserSession:
+            try focusWorkspaceBrowserSession(workspaceID: workspaceID, targetURL: member.referenceID)
+            return true
+        case .process:
+            guard let process = try store.runningProcesses(workspaceID: workspaceID).first(where: { $0.id == member.referenceID }) else {
+                return false
+            }
+            return try focusWorkspaceProcessRecord(process, workspaceID: workspaceID)
+        case .agentWindow:
+            guard let record = try store.agentWindows(workspaceID: workspaceID).first(where: { $0.id == member.referenceID }) else { return false }
+            return try focusAgentWindowRecord(record)
+        case .window:
+            guard let window = try store.windows(workspaceID: workspaceID).first(where: { $0.id == member.referenceID }) else { return false }
+            return focusTrackedWindow(window, workspaceID: workspaceID)
+        }
     }
 
     private func safeFilename(_ raw: String) -> String {

@@ -236,6 +236,7 @@ public final class SQLiteStore {
                 bindings: [id])
             try execute(sql: "DELETE FROM agent_sessions WHERE workspace_id = ?", bindings: [id])
             try execute(sql: "DELETE FROM runtime_targets WHERE workspace_id = ?", bindings: [id])
+            try execute(sql: "DELETE FROM workspace_target_groups WHERE workspace_id = ?", bindings: [id])
             try execute(sql: "DELETE FROM workspace_settings WHERE workspace_id = ?", bindings: [id])
             try execute(sql: "DELETE FROM workspace_processes WHERE workspace_id = ?", bindings: [id])
             try execute(sql: "DELETE FROM workspace_browser_sessions WHERE workspace_id = ?", bindings: [id])
@@ -773,6 +774,126 @@ public final class SQLiteStore {
 
     public func deleteWindow(id: String) throws { try execute(sql: "DELETE FROM runtime_targets WHERE id = ?", bindings: [id]) }
 
+    public func workspaceTargetGroups(workspaceID: String) throws -> [WorkspaceTargetGroupSnapshot] {
+        let groupRows = try queryRows(
+            sql: """
+                SELECT id, workspace_id, COALESCE(name, ''), order_index, created_at, updated_at
+                FROM workspace_target_groups
+                WHERE workspace_id = ?
+                ORDER BY order_index, created_at DESC
+                """, bindings: [workspaceID])
+        return try groupRows.compactMap { row in
+            guard row.count >= 6 else { return nil }
+            let group = WorkspaceTargetGroup(
+                id: row[0], workspaceID: row[1], name: row[2].isEmpty ? nil : row[2], orderIndex: Int(row[3]) ?? 0, createdAt: row[4],
+                updatedAt: row[5])
+            let members = try queryRows(
+                sql: """
+                    SELECT group_id, order_index, member_kind, reference_id
+                    FROM workspace_target_group_members
+                    WHERE group_id = ?
+                    ORDER BY order_index
+                    """, bindings: [group.id]
+            ).compactMap(decodeWorkspaceTargetGroupMember)
+            return WorkspaceTargetGroupSnapshot(group: group, members: members)
+        }
+    }
+
+    @discardableResult public func createWorkspaceTargetGroup(workspaceID: String, name: String?, members: [WorkspaceTargetGroupMember]) throws
+        -> WorkspaceTargetGroupSnapshot
+    {
+        let now = ISO8601DateFormatter().string(from: Date())
+        let group = WorkspaceTargetGroup(id: UUID().uuidString, workspaceID: workspaceID, name: name, orderIndex: 0, createdAt: now, updatedAt: now)
+        try withImmediateTransaction {
+            try execute(
+                sql: "UPDATE workspace_target_groups SET order_index = order_index + 1, updated_at = ? WHERE workspace_id = ?",
+                bindings: [now, workspaceID])
+            try execute(
+                sql: """
+                    INSERT INTO workspace_target_groups(id, workspace_id, name, order_index, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """, bindings: [group.id, workspaceID, name ?? "", "0", now, now])
+            for (index, member) in members.enumerated() {
+                try execute(
+                    sql: """
+                        INSERT INTO workspace_target_group_members(group_id, order_index, member_kind, reference_id)
+                        VALUES (?, ?, ?, ?)
+                        """, bindings: [group.id, String(index), member.kind.rawValue, member.referenceID])
+            }
+        }
+        let storedMembers = members.enumerated().map { index, member in
+            WorkspaceTargetGroupMember(groupID: group.id, orderIndex: index, kind: member.kind, referenceID: member.referenceID)
+        }
+        return WorkspaceTargetGroupSnapshot(group: group, members: storedMembers)
+    }
+
+    public func updateWorkspaceTargetGroupName(workspaceID: String, groupID: String, name: String?) throws {
+        try execute(
+            sql: """
+                UPDATE workspace_target_groups
+                SET name = ?, updated_at = ?
+                WHERE id = ? AND workspace_id = ?
+                """, bindings: [name ?? "", ISO8601DateFormatter().string(from: Date()), groupID, workspaceID])
+    }
+
+    public func deleteWorkspaceTargetGroup(workspaceID: String, groupID: String) throws {
+        try withImmediateTransaction {
+            try execute(sql: "DELETE FROM workspace_target_group_members WHERE group_id = ?", bindings: [groupID])
+            try execute(sql: "DELETE FROM workspace_target_groups WHERE id = ? AND workspace_id = ?", bindings: [groupID, workspaceID])
+        }
+    }
+
+    public func removeWorkspaceTargetGroupMember(workspaceID: String, groupID: String, kind: WorkspaceTargetGroupMember.Kind, referenceID: String)
+        throws
+    {
+        let now = ISO8601DateFormatter().string(from: Date())
+        try withImmediateTransaction {
+            let groupRows = try queryRows(
+                sql: """
+                    SELECT id
+                    FROM workspace_target_groups
+                    WHERE id = ? AND workspace_id = ?
+                    """, bindings: [groupID, workspaceID])
+            guard !groupRows.isEmpty else { return }
+
+            try execute(
+                sql: """
+                    DELETE FROM workspace_target_group_members
+                    WHERE group_id = ? AND member_kind = ? AND reference_id = ?
+                    """, bindings: [groupID, kind.rawValue, referenceID])
+
+            let remainingRows = try queryRows(
+                sql: """
+                    SELECT group_id, order_index, member_kind, reference_id
+                    FROM workspace_target_group_members
+                    WHERE group_id = ?
+                    ORDER BY order_index
+                    """, bindings: [groupID])
+            let remainingMembers = remainingRows.compactMap(decodeWorkspaceTargetGroupMember)
+
+            if remainingMembers.count < 2 {
+                try execute(sql: "DELETE FROM workspace_target_group_members WHERE group_id = ?", bindings: [groupID])
+                try execute(sql: "DELETE FROM workspace_target_groups WHERE id = ? AND workspace_id = ?", bindings: [groupID, workspaceID])
+                return
+            }
+
+            for (index, member) in remainingMembers.enumerated() where member.orderIndex != index {
+                try execute(
+                    sql: """
+                        UPDATE workspace_target_group_members
+                        SET order_index = ?
+                        WHERE group_id = ? AND member_kind = ? AND reference_id = ?
+                        """, bindings: [String(index), groupID, member.kind.rawValue, member.referenceID])
+            }
+            try execute(
+                sql: """
+                    UPDATE workspace_target_groups
+                    SET updated_at = ?
+                    WHERE id = ? AND workspace_id = ?
+                    """, bindings: [now, groupID, workspaceID])
+        }
+    }
+
     public func setting(key: String) throws -> String? {
         let rows = try queryRows(sql: "SELECT value FROM settings WHERE key = ?", bindings: [key])
         guard let value = rows.first?.first else { return nil }
@@ -1129,6 +1250,11 @@ public final class SQLiteStore {
             targetURL: row[5].isEmpty ? nil : row[5], windowID: Int(row[6]), terminalTrackingID: row[7].isEmpty ? nil : row[7],
             terminalNativeID: row[8].isEmpty ? nil : row[8], terminalContainerID: row[9].isEmpty ? nil : row[9], itermTabIndex: Int(row[10]),
             tmuxWindowID: row[11].isEmpty ? nil : row[11], role: row[12], orderIndex: Int(row[13]) ?? 0, lastSeenAt: row[14])
+    }
+
+    private func decodeWorkspaceTargetGroupMember(row: [String]) -> WorkspaceTargetGroupMember? {
+        guard row.count >= 4, let kind = WorkspaceTargetGroupMember.Kind(rawValue: row[2]) else { return nil }
+        return WorkspaceTargetGroupMember(groupID: row[0], orderIndex: Int(row[1]) ?? 0, kind: kind, referenceID: row[3])
     }
 
     private func runtimeTargetProvider(app: String) -> String {

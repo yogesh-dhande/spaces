@@ -43,8 +43,10 @@ final class StoreTests: XCTestCase {
         let terminalTargetColumns = try readTableColumns(dbURL: dbURL, table: "terminal_targets")
         let browserTargetColumns = try readTableColumns(dbURL: dbURL, table: "browser_targets")
         let agentSessionColumns = try readTableColumns(dbURL: dbURL, table: "agent_sessions")
+        let targetGroupColumns = try readTableColumns(dbURL: dbURL, table: "workspace_target_groups")
+        let targetGroupMemberColumns = try readTableColumns(dbURL: dbURL, table: "workspace_target_group_members")
         let workspaceForeignKeys = try readSingleInteger(dbURL: dbURL, sql: "SELECT COUNT(*) FROM pragma_foreign_key_list('workspaces')")
-        XCTAssertEqual(version, 1)
+        XCTAssertEqual(version, DatabaseSchema.currentVersion)
         XCTAssertTrue(workspaceColumns.contains("title"))
         XCTAssertTrue(workspaceColumns.contains("notes"))
         XCTAssertTrue(workspaceColumns.contains("is_hidden"))
@@ -67,6 +69,10 @@ final class StoreTests: XCTestCase {
         XCTAssertTrue(agentSessionColumns.contains("runtime_target_id"))
         XCTAssertTrue(agentSessionColumns.contains("session_key"))
         XCTAssertTrue(agentSessionColumns.contains("claimed_launcher_name"))
+        XCTAssertTrue(targetGroupColumns.contains("workspace_id"))
+        XCTAssertTrue(targetGroupColumns.contains("order_index"))
+        XCTAssertTrue(targetGroupMemberColumns.contains("member_kind"))
+        XCTAssertTrue(targetGroupMemberColumns.contains("reference_id"))
         XCTAssertFalse(agentSessionColumns.contains("terminal_target_id"))
         XCTAssertFalse(agentSessionColumns.contains("terminal_tracking_id"))
         XCTAssertFalse(agentSessionColumns.contains("terminal_native_id"))
@@ -89,7 +95,7 @@ final class StoreTests: XCTestCase {
         _ = try SQLiteStore(path: dbURL.path)
         _ = try SQLiteStore(path: dbURL.path)
 
-        XCTAssertEqual(try readSingleInteger(dbURL: dbURL, sql: "SELECT current_version FROM migration_state"), 1)
+        XCTAssertEqual(try readSingleInteger(dbURL: dbURL, sql: "SELECT current_version FROM migration_state"), DatabaseSchema.currentVersion)
         XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent("backups").path))
     }
 
@@ -488,6 +494,66 @@ final class StoreTests: XCTestCase {
         XCTAssertEqual(try store.windows(workspaceID: workspace.id).count, 2)
         try store.deleteWindows(workspaceID: workspace.id)
         XCTAssertTrue(try store.windows(workspaceID: workspace.id).isEmpty)
+    }
+
+    func testWorkspaceTargetGroupRenamePersists() throws {
+        let store = try makeTemporaryStore()
+        let project = makeProjectRecord(dir: try makeTempDirectory().path)
+        let workspace = makeWorkspaceRecord(projectID: project.id, title: "feature", dir: project.dir)
+        try store.upsert(project: project)
+        try store.upsert(workspace: workspace)
+
+        let group = try store.createWorkspaceTargetGroup(
+            workspaceID: workspace.id, name: "Frontend",
+            members: [
+                WorkspaceTargetGroupMember(groupID: "", orderIndex: 0, kind: .browserSession, referenceID: "http://localhost:3000"),
+                WorkspaceTargetGroupMember(groupID: "", orderIndex: 1, kind: .process, referenceID: "process-web"),
+            ])
+
+        try store.updateWorkspaceTargetGroupName(workspaceID: workspace.id, groupID: group.group.id, name: "Frontend Stack")
+
+        let groups = try store.workspaceTargetGroups(workspaceID: workspace.id)
+        XCTAssertEqual(groups.count, 1)
+        XCTAssertEqual(groups[0].group.name, "Frontend Stack")
+    }
+
+    func testRemoveWorkspaceTargetGroupMemberDisbandsWhenOneRemains() throws {
+        let store = try makeTemporaryStore()
+        let project = makeProjectRecord(dir: try makeTempDirectory().path)
+        let workspace = makeWorkspaceRecord(projectID: project.id, title: "feature", dir: project.dir)
+        try store.upsert(project: project)
+        try store.upsert(workspace: workspace)
+
+        let group = try store.createWorkspaceTargetGroup(
+            workspaceID: workspace.id, name: "Frontend",
+            members: [
+                WorkspaceTargetGroupMember(groupID: "", orderIndex: 0, kind: .browserSession, referenceID: "http://localhost:3000"),
+                WorkspaceTargetGroupMember(groupID: "", orderIndex: 1, kind: .process, referenceID: "process-web"),
+            ])
+
+        try store.removeWorkspaceTargetGroupMember(workspaceID: workspace.id, groupID: group.group.id, kind: .process, referenceID: "process-web")
+
+        XCTAssertTrue(try store.workspaceTargetGroups(workspaceID: workspace.id).isEmpty)
+    }
+
+    func testDeleteWorkspaceTargetGroupRemovesMembers() throws {
+        let store = try makeTemporaryStore()
+        let project = makeProjectRecord(dir: try makeTempDirectory().path)
+        let workspace = makeWorkspaceRecord(projectID: project.id, title: "feature", dir: project.dir)
+        try store.upsert(project: project)
+        try store.upsert(workspace: workspace)
+
+        let group = try store.createWorkspaceTargetGroup(
+            workspaceID: workspace.id, name: "Frontend",
+            members: [
+                WorkspaceTargetGroupMember(groupID: "", orderIndex: 0, kind: .browserSession, referenceID: "http://localhost:3000"),
+                WorkspaceTargetGroupMember(groupID: "", orderIndex: 1, kind: .process, referenceID: "process-web"),
+                WorkspaceTargetGroupMember(groupID: "", orderIndex: 2, kind: .agentWindow, referenceID: "agent-1"),
+            ])
+
+        try store.deleteWorkspaceTargetGroup(workspaceID: workspace.id, groupID: group.group.id)
+
+        XCTAssertTrue(try store.workspaceTargetGroups(workspaceID: workspace.id).isEmpty)
     }
 
     // Tests agent-window yabai lookup resolves a workspace by arranging a stored agent window and asserting the lookup result.

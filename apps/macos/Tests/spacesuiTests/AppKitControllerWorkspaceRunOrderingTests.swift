@@ -256,6 +256,64 @@ import workspacecore
         #expect(shortcutTargets[3].agentWindow?.id == "agent")
     }
 
+    @Test func groupedShortcutTargetsCollapseMembersIntoOneTopLevelTarget() {
+        let rawTargets = [
+            AppKitController.WorkspaceRunShortcutTarget(
+                kind: .browser, processID: nil, windowListIndex: nil, targetURL: "http://localhost:3000", processKey: nil, launcherName: nil,
+                agentWindow: nil, groupID: nil, groupName: nil),
+            AppKitController.WorkspaceRunShortcutTarget(
+                kind: .process, processID: "process-web", windowListIndex: nil, targetURL: nil, processKey: nil, launcherName: nil, agentWindow: nil,
+                groupID: nil, groupName: nil),
+            AppKitController.WorkspaceRunShortcutTarget(
+                kind: .agent, processID: nil, windowListIndex: nil, targetURL: nil, processKey: nil, launcherName: nil,
+                agentWindow: AgentWindowRecord(
+                    id: "agent-1", workspaceID: "workspace", provider: .ghostty, label: "Claude", terminalTrackingID: nil, codexThreadID: nil,
+                    windowID: 303, yabaiWindowID: 303, status: .idle, createdAt: "now", updatedAt: "now"), groupID: nil, groupName: nil),
+        ]
+        let groups = [
+            WorkspaceTargetGroupSnapshot(
+                group: WorkspaceTargetGroup(
+                    id: "group-1", workspaceID: "workspace", name: "Frontend Stack", orderIndex: 0, createdAt: "now", updatedAt: "now"),
+                members: [
+                    WorkspaceTargetGroupMember(groupID: "group-1", orderIndex: 0, kind: .browserSession, referenceID: "http://localhost:3000"),
+                    WorkspaceTargetGroupMember(groupID: "group-1", orderIndex: 1, kind: .process, referenceID: "process-web"),
+                ])
+        ]
+
+        let groupedTargets = AppKitController.groupedWorkspaceRunShortcutTargets(shortcutTargets: rawTargets, groupSnapshots: groups)
+
+        #expect(groupedTargets.map(\.kind) == [.group, .agent])
+        #expect(groupedTargets.first?.groupID == "group-1")
+        #expect(groupedTargets.first?.groupName == "Frontend Stack")
+    }
+
+    @Test func groupedShortcutIndicesSkipChildMembers() {
+        let browserSessions = [BrowserSession(name: "frontend", url: "http://localhost:3000")]
+        let processEntries = [
+            AppKitController.WorkspaceRunProcessEntry(
+                kind: .process, processID: "process-web", windowListIndex: nil, processKey: "web", processLabel: "web", processCommand: "npm run dev")
+        ]
+        let process = RunningProcessRecord(
+            id: "process-web", workspaceID: "workspace", templateName: "web", command: "npm run dev", terminalApp: "iTerm2", windowID: 101,
+            terminalTrackingID: "session-web", itermTabIndex: nil, tmuxWindowID: nil, pid: 1, status: .running, logPath: nil, lastOutputAt: nil,
+            startedAt: nil, exitedAt: nil)
+        let groups = [
+            WorkspaceTargetGroupSnapshot(
+                group: WorkspaceTargetGroup(id: "group-1", workspaceID: "workspace", name: nil, orderIndex: 0, createdAt: "now", updatedAt: "now"),
+                members: [
+                    WorkspaceTargetGroupMember(groupID: "group-1", orderIndex: 0, kind: .browserSession, referenceID: "http://localhost:3000"),
+                    WorkspaceTargetGroupMember(groupID: "group-1", orderIndex: 1, kind: .process, referenceID: "process-web"),
+                ])
+        ]
+
+        let indices = AppKitController.workspaceDetailShortcutIndices(
+            browserSessions: browserSessions, processEntries: processEntries, processesByID: ["process-web": process], configuredAgentLaunchers: [],
+            agentWindows: [], groupSnapshots: groups)
+
+        #expect(indices.browserSessionsByURL["http://localhost:3000"] == nil)
+        #expect(indices.processesByName["web"] == nil)
+    }
+
     @Test func configuredAndAdHocAgentsShareOneVisibleShortcutRunOrder() {
         let configuredAgentLaunchers = [AgentLauncher(name: "claude", command: "claude")]
         let agentWindows = [

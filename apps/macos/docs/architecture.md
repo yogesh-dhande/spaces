@@ -33,7 +33,7 @@ flowchart LR
 
 ## Module Responsibilities
 - `SpacesApp`: minimal app entry point that boots AppKit.
-- `spacesui`: AppKit UI layer that renders state and dispatches actions into `workspacecore`. Shared visual language lives in `Theme.swift` (brand color tokens mirroring `apps/web/app/globals.css`) and `RowPrimitives.swift` (status dot, type icon tile, shortcut/project/branch chips, `ColoredBackgroundView` helper). The workspace detail pane is a single scrollable `NSStackView`; it stacks the header, directory meta row, inline notes editor, and five configuration sections (Processes, Browser sessions, Coding agents, Named ports, Stop script) in order. Each section is a self-contained class (e.g. `ProcessesSection.swift`) that owns its transient form state, swaps each row between collapsed and editing subviews via `NSAnimationContext`, and publishes commits through an `onCommit` closure that the host bridges to `orchestrator.updateWorkspaceSettings`. Named-port rows render the configured env-var name plus the currently reserved port number from `workspace_ports`, mirroring how browser-session rows separate configured input from resolved display output. The `⋯` overflow menu is built by the static `AppKitController.makeWorkspaceOverflowMenu(workspaceID:path:target:)`, which emits a stock `NSMenu` whose path-based items forward to `copyDirectoryPath(_:)` and `revealDirectoryInFinder(_:)`, while workspace actions use the same shared `senderIdentifier(_:)` helper for `NSMenuItem` and `NSControl` senders. Update delivery also lives here: `AppKitController` owns a programmatic `SPUStandardUpdaterController` from Sparkle, wires the application menu’s `Check for Updates...` item directly to Sparkle, and relies on one stable appcast feed configured in the app bundle metadata. That stable feed serves one universal Sparkle archive and one manual-download DMG rather than arch-specific release artifacts.
+- `spacesui`: AppKit UI layer that renders state and dispatches actions into `workspacecore`. Shared visual language lives in `Theme.swift` (brand color tokens mirroring `apps/web/app/globals.css`) and `RowPrimitives.swift` (status dot, type icon tile, shortcut/project/branch chips, `ColoredBackgroundView` helper). The workspace detail pane is a single scrollable `NSStackView`; it stacks the header, directory meta row, inline notes editor, a grouped-runtime strip, and the configuration sections (Processes, Browser sessions, Coding agents, Named ports, Stop script) in order. The grouped-runtime strip is derived from the same ordered shortcut-target model that powers numbered shortcuts and the command palette, but it overlays persisted runtime target groups so one row can stand in for several live targets. The configuration sections remain self-contained classes (e.g. `ProcessesSection.swift`) that own transient form state, swap each row between collapsed and editing subviews via `NSAnimationContext`, and publish commits through an `onCommit` closure that the host bridges to `orchestrator.updateWorkspaceSettings`. Named-port rows render the configured env-var name plus the currently reserved port number from `workspace_ports`, mirroring how browser-session rows separate configured input from resolved display output. The `⋯` overflow menu is built by the static `AppKitController.makeWorkspaceOverflowMenu(workspaceID:path:target:)`, which emits a stock `NSMenu` whose path-based items forward to `copyDirectoryPath(_:)` and `revealDirectoryInFinder(_:)`, while workspace actions use the same shared `senderIdentifier(_:)` helper for `NSMenuItem` and `NSControl` senders. Update delivery also lives here: `AppKitController` owns a programmatic `SPUStandardUpdaterController` from Sparkle, wires the application menu’s `Check for Updates...` item directly to Sparkle, and relies on one stable appcast feed configured in the app bundle metadata. That stable feed serves one universal Sparkle archive and one manual-download DMG rather than arch-specific release artifacts.
 - `spaces`: executable shim that boots the declarative CLI parser.
 - `spacescli`: declarative `swift-argument-parser` command tree for `spaces`, including command help, leaf validation, and translation from CLI inputs into orchestration calls.
 - `workspacecore`: core orchestration, lifecycle, validation, persistence coordination, environment building, and the shared `AppVersion` constants consumed by both the GUI and CLI. Those constants are generated from `apps/macos/AppVersion.plist`, which is also used to generate the app bundle `Info.plist`.
@@ -45,7 +45,7 @@ flowchart LR
 - Path: `~/.spaces/spaces.db`
 - SQLite stores projects, workspaces, runtime state, and global settings.
 - SQLite should run in WAL mode with a busy timeout so overlapping GUI, CLI, and background work does not produce avoidable lock failures.
-- `migration_state.current_version` records the canonical schema version. The active schema is version `1`.
+- `migration_state.current_version` records the canonical schema version. The active schema is version `2`.
 - `PRAGMA user_version` is not used by Spaces for migration control; if present, treat it as informational only and keep it aligned with `migration_state` when inspecting or repairing a database manually.
 
 ### Migration Rules
@@ -160,6 +160,22 @@ classDiagram
     +updated_at
   }
 
+  class WorkspaceTargetGroup {
+    +id
+    +workspace_id
+    +name
+    +order_index
+    +created_at
+    +updated_at
+  }
+
+  class WorkspaceTargetGroupMember {
+    +group_id
+    +order_index
+    +member_kind
+    +reference_id
+  }
+
   class RuntimeTargetEvent {
     +id
     +runtime_target_id
@@ -186,6 +202,7 @@ classDiagram
   Workspace "1" --> "*" RunningProcess
   Workspace "1" --> "*" RuntimeTarget
   Workspace "1" --> "*" AgentSession
+  Workspace "1" --> "*" WorkspaceTargetGroup
   RunningProcess "*" --> "0..1" RuntimeTarget : runtime_target_id
   RuntimeTarget "1" --> "0..1" TerminalTarget
   RuntimeTarget "1" --> "0..1" BrowserTarget
@@ -193,6 +210,7 @@ classDiagram
   AgentSession "*" --> "0..1" RuntimeTarget : runtime_target_id
   AgentSession "1" --> "*" AgentSessionEvent
   AgentSessionEvent "*" --> "0..1" RuntimeTarget : runtime_target_id
+  WorkspaceTargetGroup "1" --> "*" WorkspaceTargetGroupMember
 ```
 
 ### Projects
@@ -225,6 +243,7 @@ Runtime state persists separately from project and workspace templates:
 - terminal target details
 - browser target details
 - agent sessions
+- workspace target groups
 
 This separation lets template edits coexist with current runtime state and per-workspace overrides.
 It also lets lifecycle state stay explicit while runtime health is derived from the current runtime records.
@@ -236,6 +255,9 @@ It also lets lifecycle state stay explicit while runtime health is derived from 
 - `agent_sessions` models logical coding-agent sessions separately from focusable windows. Each row links to a `runtime_target` and stores only agent-session state: provider, display label, status, provider session key, claimed launcher name, and timestamps.
 - `agent_session_events` records signal-driven lifecycle updates and launcher-driven agent transitions. Each event keeps the resolved runtime-target link plus a compact message containing the provider, label, tracking token, native terminal ID, provider session key, yabai window ID, and the full set of environment key names seen by `spaces signal` for that event.
 - `running_processes` is the canonical process-status record. Each row links to a `runtime_target` and stores only process runtime state such as command, PID, status, log path, and timestamps.
+- `workspace_target_groups` stores the ordered list of grouped runtime targets for a workspace.
+- `workspace_target_group_members` stores the ordered members of each group as references to existing runtime identities such as browser target URLs, running-process IDs, agent-session window IDs, or tracked runtime-target IDs.
+- Member-removal writes should compact member ordering in place, and if a group drops below two members the persistence layer should delete the group instead of leaving behind a degenerate one-target group.
 - Runtime targets are seeded as soon as a process or agent terminal is known, even before a separate window-reconciliation pass fills in a live yabai `window_id`. That keeps process and agent rows linked to a single canonical target instead of caching terminal identity on the base row.
 
 ### Data Modeling Guidelines
@@ -440,6 +462,7 @@ Terminal host notes:
 - In-app shortcuts use an AppKit event monitor so they can respect focused text inputs and support digit-family shortcuts such as window `1` through `9`.
 - Leader-based shortcuts store a suffix key spec and derive their shared modifiers from `gui_leader_hotkey`; the orchestrator resolves them to full effective hotkeys for both the GUI and CLI. Reload and the workspace terminal action use this same leader-backed resolution path.
 - Window focus shortcuts are modeled as a modifier family rather than nine separate persisted bindings, with digits `1` through `9` sharing one direct-focus binding.
+- Runtime target groups reuse that same direct-focus family by collapsing several live targets into one synthetic ordered shortcut target before the GUI assigns digits, command-palette rows, or workspace-detail runtime rows.
 - Alerts shares the same direct-focus shortcut family as workspace detail, and those focus shortcuts take precedence over Alerts-local create actions while Alerts is visible.
 
 ## Performance Principles

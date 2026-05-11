@@ -77,11 +77,12 @@ The current macOS redesign in `apps/macos/Sources/gui` and `design-mocks/workspa
   - Body: a vertical stack of row views with spacing `0` (dividers between rows, not stack spacing).
 - Use section cards when they help related content read as one unit. Avoid card-on-card-on-card nesting.
 - For single-value sections (e.g., Stop Script), the same card pattern applies with a collapsed preview row and an inline editing state that replaces the preview.
-- Example: workspace detail uses separate section cards for processes, browser sessions, coding agents, ports, and stop script rather than one large editor.
+- Example: workspace detail uses a compact grouped-runtime strip ahead of the editable process, browser-session, coding-agent, port, and stop-script sections rather than one large editor.
 
 ## Rows And Lists
 - Rows are the default unit for list-based interaction.
 - A good row should make the primary label, current state, and next likely action easy to scan.
+- When several runtime targets act as one workflow unit, represent that unit as one row with a shared shortcut rather than repeating the same shortcut on adjacent child rows.
 - The standard collapsed row layout uses edge insets `top: 9, left: 14, bottom: 9, right: 14` and horizontal spacing `10`:
   - Optional shortcut chip (leading).
   - Optional status dot (processes only).
@@ -187,6 +188,10 @@ These are examples of how the general guidelines apply to important parts of the
 - Workspace detail is a good example of when a single scrollable page is better than multiple tabs.
 - A compact header, thin metadata rows, and stacked sections work well for dense operational data.
 - The current path row, notes editor, and resource sections are examples of how to surface detail without turning the page into a generic settings form.
+- Runtime-group rows belong near the top of workspace detail because they are navigation surfaces first and editors second.
+- Runtime-group creation should ask for a name in a small modal prompt rather than opening a large editor.
+- Existing runtime-group rows should expose lightweight rename affordances, such as a pencil action, alongside focus-oriented actions.
+- Destructive runtime-group edits should stay in a compact overflow menu on the row, with explicit wording for member removal and disbanding.
 
 ### Sidebar Navigation
 - Two-line rows are appropriate when an item has one clear identity and one important secondary piece of metadata.

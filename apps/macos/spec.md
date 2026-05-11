@@ -103,7 +103,7 @@ Spaces focuses those windows; it does not decide their geometry.
 - Sidebar project rows should expose a dedicated settings action that opens project settings in the detail pane.
 - The project settings pane should use the same flat detail-header treatment as workspace detail: project title and directory path at the top, then project-level configuration sections and footer actions.
 - Sidebar workspace rows show the workspace title on the first line and the git branch name on a second indented line underneath; the branch line is omitted when the workspace has no branch recorded.
-- The workspace detail pane is a single scrollable page: title + actions at the top, directory path with copy and reveal-in-Finder buttons, inline notes editor, then configuration sections for Processes, Browser sessions, Coding agents, Named ports, and Stop script. Each section shows its configured items as rows and expands inline into an edit form when the pencil icon is clicked; the `+ add` header button appends a new item. Running process rows should expose stop and restart actions before edit and delete, while non-running process rows should show run before edit and delete. Named-port rows should show the reserved port number as secondary text next to the configured name. A `⋯` overflow button in the action row exposes Copy path and Reveal in Finder, with Reveal in Finder available as a keyboard-invokable menu item via `⌘⇧F`.
+- The workspace detail pane is a single scrollable page: title + actions at the top, directory path with copy and reveal-in-Finder buttons, inline notes editor, then a grouped-runtime strip followed by configuration sections for Processes, Browser sessions, Coding agents, Named ports, and Stop script. The grouped-runtime strip shows runtime target groups first so one row can represent a browser/process/agent set that should be reopened together. The configuration sections still show their configured items as rows and expand inline into an edit form when the pencil icon is clicked; the `+ add` header button appends a new item. Running process rows should expose stop and restart actions before edit and delete, while non-running process rows should show run before edit and delete. Named-port rows should show the reserved port number as secondary text next to the configured name. A `⋯` overflow button in the action row exposes Copy path and Reveal in Finder, with Reveal in Finder available as a keyboard-invokable menu item via `⌘⇧F`.
 - The workspace detail footer should show inline shortcut hints for Toggle app, Alerts, Settings, Open editor, New terminal, Next window, and Prev window, in that order.
 
 ## Workspaces
@@ -206,6 +206,16 @@ Spaces focuses those windows; it does not decide their geometry.
 - Window rows in the selected workspace should expose numbered shortcuts for direct focus.
 - Numbered window focus shortcuts should keep the saved workspace-settings order for configured browser sessions and processes, and append newly added ad-hoc windows after those configured rows.
 - Window focus actions and numbered shortcuts should follow one target-level rule: make that target available now.
+- Users should be able to capture a runtime target group with one global hotkey while a workspace window is focused. The capture should use the currently visible tracked targets from that workspace and create one grouped target only when at least two live targets are visible.
+- After a valid runtime target group capture, Spaces should present a compact naming prompt before saving the group. Empty input should keep the group unnamed rather than blocking creation.
+- A runtime target group may contain browser sessions, processes, coding-agent terminals, or a mix of those target types.
+- Grouped targets should appear ahead of ungrouped workspace targets in workspace detail, command-palette results, and direct-focus numbering.
+- A grouped target should claim one numbered shortcut slot and focus all of its member targets together.
+- Workspace detail should let the user rename an existing runtime target group inline from that group row without expanding another editor surface.
+- Workspace detail should also let the user disband a runtime target group or remove one specific target from it from the same row-level controls.
+- Removing a target from a runtime target group should automatically disband the group when fewer than two targets remain.
+- Command-palette results should show the group row and omit the individual targets that belong to that group.
+- Previous/next target navigation should treat each group as one entity in the cycle order.
 - Focusing a target from the app UI or command palette should keep Spaces visible instead of hiding the app after the target receives focus.
 - A live target should receive focus. A configured target that is not live should be opened directly instead of requiring a full workspace launch or restart.
 - Opening a configured browser session, process, or coding agent from a stopped workspace should move that workspace out of the stopped state immediately.

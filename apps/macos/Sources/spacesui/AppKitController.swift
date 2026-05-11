@@ -6,6 +6,7 @@ import systembridge
 import workspacecore
 
 private let startupProfileBaselineUptime = ProcessInfo.processInfo.systemUptime
+private let workspaceTargetGroupIdentifierSeparator = "\t"
 
 private final class InlineWorkspaceEditorTextView: NSTextView {
     var onSave: (() -> Void)?
@@ -127,6 +128,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let mainWindowWasVisible: Bool
     }
 
+    private struct CapturedWorkspaceTargetGroupDraft: Sendable {
+        let workspaceID: String
+        let members: [WorkspaceTargetGroupMember]
+    }
+
     private var window: NSWindow!
     private var splitView: NSSplitView?
     private let outlineView = SidebarOutlineView()
@@ -167,6 +173,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     private var nextShortcutSpec: HotkeySpec?
     private var previousShortcutSpec: HotkeySpec?
     private var windowShortcutSpec: HotkeySpec?
+    private let captureTargetGroupHotkeySpec = try? HotkeySpec.parse("cmd+alt+g")
     private var shortcutButtonsBySetting: [String: NSButton] = [:]
     private var activeShortcutCaptureSetting: ShortcutSetting?
     private weak var pulseColorWell: NSColorWell?
@@ -250,6 +257,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     }
 
     enum WindowFocusRequest: Sendable {
+        case workspaceTargetGroup(workspaceID: String, groupID: String)
         case workspaceBrowserSession(workspaceID: String, targetURL: String)
         case workspaceWindow(workspaceID: String, index: Int)
         case workspaceProcess(workspaceID: String, processID: String)
@@ -806,6 +814,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 let store = try SQLiteStore(path: db)
                 let orchestrator = WorkspaceOrchestrator(store: store)
                 switch request {
+                case .workspaceTargetGroup(let workspaceID, let groupID):
+                    try orchestrator.focusWorkspaceTargetGroup(workspaceID: workspaceID, groupID: groupID)
+                    return .success(.focus)
                 case .workspaceBrowserSession(let workspaceID, let targetURL):
                     try orchestrator.focusWorkspaceBrowserSession(workspaceID: workspaceID, targetURL: targetURL)
                     return .success(.focus)
@@ -893,6 +904,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
                 if let alertsFocusRequest {
                     switch alertsFocusRequest {
+                    case .workspaceTargetGroup(let workspaceID, let groupID):
+                        try orchestrator.focusWorkspaceTargetGroup(workspaceID: workspaceID, groupID: groupID)
+                        return .success(
+                            .focused(kind: "alerts_group", recentFocusIdentity: CommandPaletteItem.recentFocusIdentity(for: alertsFocusRequest)))
                     case .workspaceBrowserSession(let workspaceID, let targetURL):
                         try orchestrator.focusWorkspaceBrowserSession(workspaceID: workspaceID, targetURL: targetURL)
                         return .success(
@@ -931,12 +946,19 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 let processEntries = orderedWorkspaceRunProcessEntries(
                     configuredProcesses: configuredProcesses, windows: windows, processes: processes, agentWindows: agentWindows)
                 let processesByID = Dictionary(uniqueKeysWithValues: processes.map { ($0.id, $0) })
-                let shortcutTargets = orderedWorkspaceRunShortcutTargets(
+                let rawShortcutTargets = orderedWorkspaceRunShortcutTargets(
                     browserSessions: browserSessions, processEntries: processEntries, processesByID: processesByID,
                     configuredAgentLaunchers: workspaceSettings?.agentLaunchers ?? [], agentWindows: agentWindows)
+                let shortcutTargets = groupedWorkspaceRunShortcutTargets(
+                    shortcutTargets: rawShortcutTargets, groupSnapshots: try orchestrator.workspaceTargetGroups(workspaceID: selectedWorkspaceID))
                 guard index > 0, index <= shortcutTargets.count else { return .success(.noMatch) }
                 let target = shortcutTargets[index - 1]
                 switch target.kind {
+                case .group:
+                    guard let groupID = target.groupID else { return .success(.noMatch) }
+                    let focusRequest = WindowFocusRequest.workspaceTargetGroup(workspaceID: selectedWorkspaceID, groupID: groupID)
+                    try orchestrator.focusWorkspaceTargetGroup(workspaceID: selectedWorkspaceID, groupID: groupID)
+                    return .success(.focused(kind: "group", recentFocusIdentity: CommandPaletteItem.recentFocusIdentity(for: focusRequest)))
                 case .browser:
                     guard let targetURL = target.targetURL else { return .success(.noMatch) }
                     let focusRequest = WindowFocusRequest.workspaceBrowserSession(workspaceID: selectedWorkspaceID, targetURL: targetURL)
@@ -982,6 +1004,156 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 let orchestrator = WorkspaceOrchestrator(store: store)
                 try orchestrator.runWorkspaceSetup(workspaceID: workspaceID)
                 return .success(())
+            } catch { return .failure(error) }
+        }.value
+    }
+
+    nonisolated private static func captureWorkspaceTargetGroupSnapshot() async -> Result<CapturedWorkspaceTargetGroupDraft?, Error> {
+        await Task.detached(priority: .userInitiated) {
+            do {
+                let db = try DatabaseLocator.defaultPath()
+                let store = try SQLiteStore(path: db)
+                let orchestrator = WorkspaceOrchestrator(store: store)
+                guard let workspaceID = try orchestrator.workspaceIDForFocusedWindow() else { return .success(nil) }
+                let windows = try orchestrator.windows(workspaceID: workspaceID)
+                let processes = try orchestrator.runningProcesses(workspaceID: workspaceID)
+                let agentWindows = try orchestrator.agentWindows(workspaceID: workspaceID)
+                let settings = try orchestrator.workspaceSettings(workspaceID: workspaceID)
+                let browserSessions = try orchestrator.resolvedWorkspaceBrowserSessions(workspaceID: workspaceID)
+                let processEntries = orderedWorkspaceRunProcessEntries(
+                    configuredProcesses: settings?.processes ?? [], windows: windows, processes: processes, agentWindows: agentWindows)
+                let processesByID = Dictionary(uniqueKeysWithValues: processes.map { ($0.id, $0) })
+                let rawTargets = orderedWorkspaceRunShortcutTargets(
+                    browserSessions: browserSessions, processEntries: processEntries, processesByID: processesByID,
+                    configuredAgentLaunchers: settings?.agentLaunchers ?? [], agentWindows: agentWindows)
+                let existingGroups = try orchestrator.workspaceTargetGroups(workspaceID: workspaceID)
+                let groupedTargetIDs = Set(
+                    existingGroups.flatMap(\.members).map { member in
+                        switch member.kind {
+                        case .browserSession: return "browser:\(member.referenceID)"
+                        case .process: return "process:\(member.referenceID)"
+                        case .agentWindow: return "agent:\(member.referenceID)"
+                        case .window: return "window:\(member.referenceID)"
+                        }
+                    })
+                let visibleWindowIDs = Set(try YabaiAdapter().listWindows().filter(\.isVisible).map(\.id))
+                let visibleMembers = rawTargets.compactMap { target -> WorkspaceTargetGroupMember? in
+                    guard let identity = workspaceRunShortcutTargetIdentity(target), !groupedTargetIDs.contains(identity) else { return nil }
+                    switch target.kind {
+                    case .browser:
+                        guard let targetURL = target.targetURL else { return nil }
+                        let isVisible = windows.contains {
+                            $0.role == "browser" && $0.targetURL == targetURL && (($0.windowID.map(visibleWindowIDs.contains)) == true)
+                        }
+                        guard isVisible else { return nil }
+                        return WorkspaceTargetGroupMember(groupID: "", orderIndex: 0, kind: .browserSession, referenceID: targetURL)
+                    case .process:
+                        guard let processID = target.processID, let process = processesByID[processID], let windowID = process.windowID,
+                            visibleWindowIDs.contains(windowID)
+                        else { return nil }
+                        return WorkspaceTargetGroupMember(groupID: "", orderIndex: 0, kind: .process, referenceID: processID)
+                    case .agent:
+                        guard let agent = target.agentWindow, let windowID = agent.yabaiWindowID ?? agent.windowID,
+                            visibleWindowIDs.contains(windowID)
+                        else { return nil }
+                        return WorkspaceTargetGroupMember(groupID: "", orderIndex: 0, kind: .agentWindow, referenceID: agent.id)
+                    default: return nil
+                    }
+                }
+                guard visibleMembers.count >= 2 else { return .success(nil) }
+                return .success(.init(workspaceID: workspaceID, members: visibleMembers))
+            } catch { return .failure(error) }
+        }.value
+    }
+
+    nonisolated private static func focusGlobalWindowNavigationSnapshot(workspaceID: String, direction: Int) async -> Result<Bool, Error> {
+        await Task.detached(priority: .userInitiated) {
+            do {
+                guard direction == -1 || direction == 1 else { return .success(false) }
+                let db = try DatabaseLocator.defaultPath()
+                let store = try SQLiteStore(path: db)
+                let orchestrator = WorkspaceOrchestrator(store: store)
+                let windows = try orchestrator.windows(workspaceID: workspaceID)
+                let processes = try orchestrator.runningProcesses(workspaceID: workspaceID)
+                let agentWindows = try orchestrator.agentWindows(workspaceID: workspaceID)
+                let settings = try orchestrator.workspaceSettings(workspaceID: workspaceID)
+                let browserSessions = try orchestrator.resolvedWorkspaceBrowserSessions(workspaceID: workspaceID)
+                let processEntries = orderedWorkspaceRunProcessEntries(
+                    configuredProcesses: settings?.processes ?? [], windows: windows, processes: processes, agentWindows: agentWindows)
+                let processesByID = Dictionary(uniqueKeysWithValues: processes.map { ($0.id, $0) })
+                let rawTargets = orderedWorkspaceRunShortcutTargets(
+                    browserSessions: browserSessions, processEntries: processEntries, processesByID: processesByID,
+                    configuredAgentLaunchers: settings?.agentLaunchers ?? [], agentWindows: agentWindows)
+                let groups = try orchestrator.workspaceTargetGroups(workspaceID: workspaceID)
+                let targets = groupedWorkspaceRunShortcutTargets(shortcutTargets: rawTargets, groupSnapshots: groups)
+                guard !targets.isEmpty else { return .success(false) }
+                let focusedWindowID = try YabaiAdapter().focusedWindow()?.id
+                let currentIndex = targets.firstIndex { target in
+                    switch target.kind {
+                    case .group:
+                        guard let groupID = target.groupID, let focusedWindowID else { return false }
+                        guard let snapshot = groups.first(where: { $0.group.id == groupID }) else { return false }
+                        return snapshot.members.contains { member in
+                            switch member.kind {
+                            case .browserSession:
+                                return windows.contains {
+                                    $0.role == "browser" && $0.targetURL == member.referenceID && $0.windowID == focusedWindowID
+                                }
+                            case .process: return processesByID[member.referenceID]?.windowID == focusedWindowID
+                            case .agentWindow:
+                                return agentWindows.first(where: { $0.id == member.referenceID })?.yabaiWindowID == focusedWindowID
+                                    || agentWindows.first(where: { $0.id == member.referenceID })?.windowID == focusedWindowID
+                            case .window: return windows.first(where: { $0.id == member.referenceID })?.windowID == focusedWindowID
+                            }
+                        }
+                    case .browser:
+                        guard let focusedWindowID, let targetURL = target.targetURL else { return false }
+                        return windows.contains { $0.role == "browser" && $0.targetURL == targetURL && $0.windowID == focusedWindowID }
+                    case .process:
+                        guard let focusedWindowID, let processID = target.processID else { return false }
+                        return processesByID[processID]?.windowID == focusedWindowID
+                    case .agent:
+                        guard let focusedWindowID, let agent = target.agentWindow else { return false }
+                        return agent.yabaiWindowID == focusedWindowID || agent.windowID == focusedWindowID
+                    case .window:
+                        guard let focusedWindowID, let windowListIndex = target.windowListIndex, windows.indices.contains(windowListIndex) else {
+                            return false
+                        }
+                        return windows[windowListIndex].windowID == focusedWindowID
+                    case .missingConfiguredProcess, .agentLauncher: return false
+                    }
+                }
+                let nextIndex: Int
+                if let currentIndex {
+                    nextIndex = (currentIndex + direction + targets.count) % targets.count
+                } else {
+                    nextIndex = direction > 0 ? 0 : (targets.count - 1)
+                }
+                let target = targets[nextIndex]
+                switch target.kind {
+                case .group:
+                    guard let groupID = target.groupID else { return .success(false) }
+                    try orchestrator.focusWorkspaceTargetGroup(workspaceID: workspaceID, groupID: groupID)
+                case .browser:
+                    guard let targetURL = target.targetURL else { return .success(false) }
+                    try orchestrator.focusWorkspaceBrowserSession(workspaceID: workspaceID, targetURL: targetURL)
+                case .process:
+                    guard let processID = target.processID else { return .success(false) }
+                    try orchestrator.focusWorkspaceProcess(workspaceID: workspaceID, processID: processID)
+                case .window:
+                    guard let windowListIndex = target.windowListIndex else { return .success(false) }
+                    try orchestrator.focusWorkspaceWindow(workspaceID: workspaceID, index: windowListIndex + 1)
+                case .agent:
+                    guard let agent = target.agentWindow else { return .success(false) }
+                    try orchestrator.focusAgentWindow(agent)
+                case .missingConfiguredProcess:
+                    guard let processKey = target.processKey else { return .success(false) }
+                    try orchestrator.recoverMissingConfiguredProcess(workspaceID: workspaceID, processKey: processKey)
+                case .agentLauncher:
+                    guard let launcherName = target.launcherName else { return .success(false) }
+                    _ = try orchestrator.launchAgentLauncher(workspaceID: workspaceID, name: launcherName)
+                }
+                return .success(true)
             } catch { return .failure(error) }
         }.value
     }
@@ -1221,6 +1393,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
     struct WorkspaceRunShortcutTarget: Sendable {
         enum Kind: String, Sendable, Equatable {
+            case group
             case browser
             case process
             case window
@@ -1236,6 +1409,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let processKey: String?
         let launcherName: String?
         let agentWindow: AgentWindowRecord?
+        let groupID: String?
+        let groupName: String?
     }
 
     struct WorkspaceDetailShortcutIndices: Sendable {
@@ -1461,7 +1636,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             guard let targetURL = session.url, !targetURL.isEmpty else { continue }
             targets.append(
                 WorkspaceRunShortcutTarget(
-                    kind: .browser, processID: nil, windowListIndex: nil, targetURL: targetURL, processKey: nil, launcherName: nil, agentWindow: nil))
+                    kind: .browser, processID: nil, windowListIndex: nil, targetURL: targetURL, processKey: nil, launcherName: nil, agentWindow: nil,
+                    groupID: nil, groupName: nil))
         }
 
         for entry in processEntries {
@@ -1471,19 +1647,19 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 targets.append(
                     WorkspaceRunShortcutTarget(
                         kind: .process, processID: processID, windowListIndex: nil, targetURL: nil, processKey: nil, launcherName: nil,
-                        agentWindow: nil))
+                        agentWindow: nil, groupID: nil, groupName: nil))
             case .window:
                 guard let windowListIndex = entry.windowListIndex else { continue }
                 targets.append(
                     WorkspaceRunShortcutTarget(
                         kind: .window, processID: nil, windowListIndex: windowListIndex, targetURL: nil, processKey: nil, launcherName: nil,
-                        agentWindow: nil))
+                        agentWindow: nil, groupID: nil, groupName: nil))
             case .missingConfiguredProcess:
                 guard let processKey = entry.processKey else { continue }
                 targets.append(
                     WorkspaceRunShortcutTarget(
                         kind: .missingConfiguredProcess, processID: nil, windowListIndex: nil, targetURL: nil, processKey: processKey,
-                        launcherName: nil, agentWindow: nil))
+                        launcherName: nil, agentWindow: nil, groupID: nil, groupName: nil))
             }
         }
 
@@ -1491,19 +1667,71 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             targets.append(
                 WorkspaceRunShortcutTarget(
                     kind: entry.kind, processID: nil, windowListIndex: nil, targetURL: nil, processKey: nil,
-                    launcherName: entry.agentWindow == nil ? entry.launcherName : nil, agentWindow: entry.agentWindow))
+                    launcherName: entry.agentWindow == nil ? entry.launcherName : nil, agentWindow: entry.agentWindow, groupID: nil, groupName: nil))
         }
 
         return targets
     }
 
+    nonisolated static func workspaceRunShortcutTargetIdentity(_ target: WorkspaceRunShortcutTarget) -> String? {
+        switch target.kind {
+        case .group: return target.groupID.map { "group:\($0)" }
+        case .browser: return target.targetURL.map { "browser:\($0)" }
+        case .process: return target.processID.map { "process:\($0)" }
+        case .window: return target.windowListIndex.map { "window:\($0)" }
+        case .missingConfiguredProcess: return target.processKey.map { "missing:\($0)" }
+        case .agentLauncher: return target.launcherName.map { codingAgentShortcutIdentity(launcherName: $0) }
+        case .agent: return target.agentWindow.map { "agent:\($0.id)" }
+        }
+    }
+
+    nonisolated static func groupedWorkspaceRunShortcutTargets(
+        shortcutTargets: [WorkspaceRunShortcutTarget], groupSnapshots: [WorkspaceTargetGroupSnapshot]
+    ) -> [WorkspaceRunShortcutTarget] {
+        let targetByIdentity = Dictionary(
+            uniqueKeysWithValues: shortcutTargets.compactMap { target -> (String, WorkspaceRunShortcutTarget)? in
+                guard let identity = workspaceRunShortcutTargetIdentity(target) else { return nil }
+                return (identity, target)
+            })
+        var groupedIdentities = Set<String>()
+        var groupedTargets: [WorkspaceRunShortcutTarget] = []
+
+        for snapshot in groupSnapshots {
+            let resolvedMembers = snapshot.members.compactMap { member -> WorkspaceRunShortcutTarget? in
+                let identity: String
+                switch member.kind {
+                case .browserSession: identity = "browser:\(member.referenceID)"
+                case .process: identity = "process:\(member.referenceID)"
+                case .agentWindow: identity = "agent:\(member.referenceID)"
+                case .window: identity = "window:\(member.referenceID)"
+                }
+                return targetByIdentity[identity]
+            }
+            guard resolvedMembers.count >= 2 else { continue }
+            for memberTarget in resolvedMembers {
+                if let identity = workspaceRunShortcutTargetIdentity(memberTarget) { groupedIdentities.insert(identity) }
+            }
+            groupedTargets.append(
+                WorkspaceRunShortcutTarget(
+                    kind: .group, processID: nil, windowListIndex: nil, targetURL: nil, processKey: nil, launcherName: nil, agentWindow: nil,
+                    groupID: snapshot.group.id, groupName: snapshot.group.name))
+        }
+
+        let ungroupedTargets = shortcutTargets.filter { target in
+            guard let identity = workspaceRunShortcutTargetIdentity(target) else { return true }
+            return !groupedIdentities.contains(identity)
+        }
+        return groupedTargets + ungroupedTargets
+    }
+
     nonisolated static func workspaceDetailShortcutIndices(
         browserSessions: [BrowserSession], processEntries: [WorkspaceRunProcessEntry], processesByID: [String: RunningProcessRecord],
-        configuredAgentLaunchers: [AgentLauncher], agentWindows: [AgentWindowRecord]
+        configuredAgentLaunchers: [AgentLauncher], agentWindows: [AgentWindowRecord], groupSnapshots: [WorkspaceTargetGroupSnapshot] = []
     ) -> WorkspaceDetailShortcutIndices {
-        let targets = orderedWorkspaceRunShortcutTargets(
+        let rawTargets = orderedWorkspaceRunShortcutTargets(
             browserSessions: browserSessions, processEntries: processEntries, processesByID: processesByID,
             configuredAgentLaunchers: configuredAgentLaunchers, agentWindows: agentWindows)
+        let targets = groupedWorkspaceRunShortcutTargets(shortcutTargets: rawTargets, groupSnapshots: groupSnapshots)
 
         var browserSessionsByURL: [String: Int] = [:]
         var processesByName: [String: Int] = [:]
@@ -1513,6 +1741,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         for (offset, target) in targets.enumerated() {
             let index = offset + 1
             switch target.kind {
+            case .group: break
             case .browser: if let targetURL = target.targetURL, !targetURL.isEmpty { browserSessionsByURL[targetURL] = index }
             case .process:
                 if let processID = target.processID, let process = processesByID[processID] { processesByName[process.templateName] = index }
@@ -3808,15 +4037,20 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let browserSessions = (try? orchestrator.resolvedWorkspaceBrowserSessions(workspaceID: workspace.id)) ?? []
         let configuredProcesses = sectionConfig?.processes ?? []
         let configuredAgentLaunchers = sectionConfig?.agentLaunchers ?? []
+        let targetGroups = (try? orchestrator.workspaceTargetGroups(workspaceID: workspace.id)) ?? []
         let processEntries = Self.orderedWorkspaceRunProcessEntries(
             configuredProcesses: configuredProcesses, windows: trackedWindows, processes: runningProcesses, agentWindows: agentWindows)
         let processesByID = Dictionary(uniqueKeysWithValues: runningProcesses.map { ($0.id, $0) })
-        let shortcutTargets = Self.orderedWorkspaceRunShortcutTargets(
+        let rawShortcutTargets = Self.orderedWorkspaceRunShortcutTargets(
             browserSessions: browserSessions, processEntries: processEntries, processesByID: processesByID,
             configuredAgentLaunchers: configuredAgentLaunchers, agentWindows: agentWindows)
+        let shortcutTargets = Self.groupedWorkspaceRunShortcutTargets(shortcutTargets: rawShortcutTargets, groupSnapshots: targetGroups)
         let shortcutIndices = Self.workspaceDetailShortcutIndices(
             browserSessions: browserSessions, processEntries: processEntries, processesByID: processesByID,
-            configuredAgentLaunchers: configuredAgentLaunchers, agentWindows: agentWindows)
+            configuredAgentLaunchers: configuredAgentLaunchers, agentWindows: agentWindows, groupSnapshots: targetGroups)
+        let targetGroupsSection = workspaceTargetGroupsSection(
+            workspace: workspace, shortcutTargets: shortcutTargets, groupSnapshots: targetGroups, browserSessions: browserSessions,
+            processesByID: processesByID, trackedWindows: trackedWindows, agentWindows: agentWindows)
         let processStatusByName = Self.workspaceProcessStatusByName(runningProcesses)
         let processesSection = workspaceProcessesSection(
             workspace: workspace, trackedWindows: trackedWindows, processEntries: processEntries, shortcutTargets: shortcutTargets,
@@ -3831,8 +4065,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         stack.addArrangedSubview(headerAndActionsRow)
         stack.addArrangedSubview(inlineNotesRow)
         for section in Self.orderedWorkspaceDetailSections(
-            processesSection: processesSection, browserSessionsSection: browserSessionsSection, agentLaunchersSection: agentLaunchersSection,
-            portsSection: portsSection, stopScriptSection: stopScriptSection)
+            targetGroupsSection: targetGroupsSection, processesSection: processesSection, browserSessionsSection: browserSessionsSection,
+            agentLaunchersSection: agentLaunchersSection, portsSection: portsSection, stopScriptSection: stopScriptSection)
         {
             stack.addArrangedSubview(section)
             constrainFormFieldToFillWidth(section, in: stack)
@@ -3975,8 +4209,266 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     }
 
     static func orderedWorkspaceDetailSections(
-        processesSection: NSView?, browserSessionsSection: NSView?, agentLaunchersSection: NSView?, portsSection: NSView?, stopScriptSection: NSView?
-    ) -> [NSView] { [browserSessionsSection, processesSection, agentLaunchersSection, portsSection, stopScriptSection].compactMap { $0 } }
+        targetGroupsSection: NSView? = nil, processesSection: NSView?, browserSessionsSection: NSView?, agentLaunchersSection: NSView?,
+        portsSection: NSView?, stopScriptSection: NSView?
+    ) -> [NSView] {
+        [targetGroupsSection, browserSessionsSection, processesSection, agentLaunchersSection, portsSection, stopScriptSection].compactMap { $0 }
+    }
+
+    private func workspaceTargetGroupsSection(
+        workspace: WorkspaceSummary, shortcutTargets: [WorkspaceRunShortcutTarget], groupSnapshots: [WorkspaceTargetGroupSnapshot],
+        browserSessions: [BrowserSession], processesByID: [String: RunningProcessRecord], trackedWindows: [WindowRecord],
+        agentWindows: [AgentWindowRecord]
+    ) -> NSView? {
+        let groupTargets = shortcutTargets.enumerated().compactMap { offset, target -> (Int, WorkspaceRunShortcutTarget)? in
+            guard target.kind == .group else { return nil }
+            return (offset + 1, target)
+        }
+        guard !groupTargets.isEmpty else { return nil }
+
+        let stack = NSStackView()
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 8
+
+        let header = NSTextField(labelWithString: "Groups")
+        header.font = .systemFont(ofSize: 13, weight: .semibold)
+        header.textColor = Theme.text
+        stack.addArrangedSubview(header)
+
+        for (index, target) in groupTargets {
+            guard let groupID = target.groupID, let snapshot = groupSnapshots.first(where: { $0.group.id == groupID }) else { continue }
+            let label = target.groupName ?? "Target Group"
+            let detail = Self.workspaceTargetGroupDetailText(
+                snapshot: snapshot, browserSessions: browserSessions, processesByID: processesByID, trackedWindows: trackedWindows,
+                agentWindows: agentWindows)
+            let actionButtons = NSStackView()
+            actionButtons.orientation = .horizontal
+            actionButtons.alignment = .centerY
+            actionButtons.spacing = 6
+            let renameButton = iconButton(symbol: "pencil", tooltip: "Rename target group", action: #selector(renameWorkspaceTargetGroupAction(_:)))
+            renameButton.identifier = NSUserInterfaceItemIdentifier(workspaceTargetGroupRenameIdentifier(workspaceID: workspace.id, groupID: groupID))
+            let menuButton = iconButton(symbol: "ellipsis.circle", tooltip: "Edit target group", action: #selector(showWorkspaceTargetGroupMenu(_:)))
+            menuButton.identifier = NSUserInterfaceItemIdentifier(workspaceTargetGroupMenuIdentifier(workspaceID: workspace.id, groupID: groupID))
+            actionButtons.addArrangedSubview(renameButton)
+            actionButtons.addArrangedSubview(menuButton)
+            let row = windowRow(
+                icon: "square.grid.2x2", iconColor: .systemTeal, label: label, detail: detail, shortcut: windowShortcutBadgeText(index: index),
+                trailingAccessory: actionButtons,
+                action: { [weak self] in
+                    guard let self else { return }
+                    await self.runWindowShortcut(index: index, startedAt: Date())
+                })
+            stack.addArrangedSubview(row)
+            constrainFormFieldToFillWidth(row, in: stack)
+        }
+
+        return stack
+    }
+
+    nonisolated static func workspaceTargetGroupDetailText(
+        snapshot: WorkspaceTargetGroupSnapshot, browserSessions: [BrowserSession], processesByID: [String: RunningProcessRecord],
+        trackedWindows: [WindowRecord], agentWindows: [AgentWindowRecord]
+    ) -> String {
+        let parts = snapshot.members.compactMap { member -> String? in
+            workspaceTargetGroupMemberDisplayName(
+                member: member, browserSessions: browserSessions, processesByID: processesByID, trackedWindows: trackedWindows,
+                agentWindows: agentWindows)
+        }
+        return parts.joined(separator: "  ·  ")
+    }
+
+    nonisolated static func workspaceTargetGroupMemberDisplayName(
+        member: WorkspaceTargetGroupMember, browserSessions: [BrowserSession], processesByID: [String: RunningProcessRecord],
+        trackedWindows: [WindowRecord], agentWindows: [AgentWindowRecord]
+    ) -> String? {
+        switch member.kind {
+        case .browserSession: return browserSessionDisplayName(for: member.referenceID, sessions: browserSessions) ?? member.referenceID
+        case .process: return processesByID[member.referenceID]?.templateName
+        case .agentWindow: return agentWindows.first(where: { $0.id == member.referenceID })?.label ?? "Coding Agent"
+        case .window: return trackedWindows.first(where: { $0.id == member.referenceID })?.name
+        }
+    }
+
+    private func workspaceTargetGroupRenameIdentifier(workspaceID: String, groupID: String) -> String {
+        "\(workspaceID)\(workspaceTargetGroupIdentifierSeparator)\(groupID)"
+    }
+
+    private func workspaceTargetGroupMenuIdentifier(workspaceID: String, groupID: String) -> String {
+        "\(workspaceID)\(workspaceTargetGroupIdentifierSeparator)\(groupID)"
+    }
+
+    nonisolated static func workspaceTargetGroupDisbandIdentifier(workspaceID: String, groupID: String) -> String {
+        "\(workspaceID)\(workspaceTargetGroupIdentifierSeparator)\(groupID)"
+    }
+
+    nonisolated static func workspaceTargetGroupMemberActionIdentifier(workspaceID: String, groupID: String, member: WorkspaceTargetGroupMember)
+        -> String
+    { [workspaceID, groupID, member.kind.rawValue, member.referenceID].joined(separator: workspaceTargetGroupIdentifierSeparator) }
+
+    nonisolated static func makeWorkspaceTargetGroupMenu(
+        workspaceID: String, snapshot: WorkspaceTargetGroupSnapshot, browserSessions: [BrowserSession], processesByID: [String: RunningProcessRecord],
+        trackedWindows: [WindowRecord], agentWindows: [AgentWindowRecord], target: AnyObject?
+    ) -> NSMenu {
+        let menu = NSMenu()
+
+        func addItem(title: String, symbol: String?, action: Selector, identifier: String) {
+            let item = NSMenuItem(title: title, action: action, keyEquivalent: "")
+            item.identifier = NSUserInterfaceItemIdentifier(identifier)
+            item.target = target
+            if let symbol { item.image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil) }
+            menu.addItem(item)
+        }
+
+        for member in snapshot.members {
+            let name =
+                workspaceTargetGroupMemberDisplayName(
+                    member: member, browserSessions: browserSessions, processesByID: processesByID, trackedWindows: trackedWindows,
+                    agentWindows: agentWindows) ?? member.referenceID
+            addItem(
+                title: "Remove \(name)", symbol: "minus.circle", action: #selector(AppKitController.removeWorkspaceTargetGroupMemberAction(_:)),
+                identifier: workspaceTargetGroupMemberActionIdentifier(workspaceID: workspaceID, groupID: snapshot.group.id, member: member))
+        }
+        if !snapshot.members.isEmpty { menu.addItem(.separator()) }
+        addItem(
+            title: "Disband group", symbol: "square.split.2x2", action: #selector(AppKitController.disbandWorkspaceTargetGroupAction(_:)),
+            identifier: workspaceTargetGroupDisbandIdentifier(workspaceID: workspaceID, groupID: snapshot.group.id))
+        return menu
+    }
+
+    @objc private func renameWorkspaceTargetGroupAction(_ sender: Any) {
+        guard let identifier = Self.senderIdentifier(sender) else { return }
+        let components = identifier.components(separatedBy: workspaceTargetGroupIdentifierSeparator)
+        guard components.count == 2 else { return }
+        let workspaceID = components[0]
+        let groupID = components[1]
+        guard let snapshot = try? orchestrator.workspaceTargetGroups(workspaceID: workspaceID).first(where: { $0.group.id == groupID }) else {
+            return
+        }
+        renameWorkspaceTargetGroup(workspaceID: workspaceID, snapshot: snapshot)
+    }
+
+    private func renameWorkspaceTargetGroup(workspaceID: String, snapshot: WorkspaceTargetGroupSnapshot) {
+        presentWorkspaceTargetGroupNamePrompt(
+            title: "Rename Target Group", message: "Update the name for this target group.", defaultValue: snapshot.group.name
+        ) { [weak self] name in
+            guard let self, let name else { return }
+            do {
+                try orchestrator.updateWorkspaceTargetGroupName(workspaceID: workspaceID, groupID: snapshot.group.id, name: name)
+                reloadData()
+            } catch { showError(error) }
+        }
+    }
+
+    @objc private func showWorkspaceTargetGroupMenu(_ sender: NSButton) {
+        guard let identifier = sender.identifier?.rawValue else { return }
+        let components = identifier.components(separatedBy: workspaceTargetGroupIdentifierSeparator)
+        guard components.count == 2 else { return }
+        let workspaceID = components[0]
+        let groupID = components[1]
+        let allWorkspaces = Array(workspacesByProject.values.joined())
+        guard allWorkspaces.first(where: { $0.id == workspaceID }) != nil,
+            let snapshot = try? orchestrator.workspaceTargetGroups(workspaceID: workspaceID).first(where: { $0.group.id == groupID })
+        else { return }
+
+        let browserSessions = (try? orchestrator.resolvedWorkspaceBrowserSessions(workspaceID: workspaceID)) ?? []
+        let processesByID = Dictionary(
+            uniqueKeysWithValues: ((try? orchestrator.runningProcesses(workspaceID: workspaceID)) ?? []).map { ($0.id, $0) })
+        let trackedWindows = (try? orchestrator.windows(workspaceID: workspaceID)) ?? []
+        let agentWindows = (try? orchestrator.agentWindows(workspaceID: workspaceID)) ?? []
+        let menu = Self.makeWorkspaceTargetGroupMenu(
+            workspaceID: workspaceID, snapshot: snapshot, browserSessions: browserSessions, processesByID: processesByID,
+            trackedWindows: trackedWindows, agentWindows: agentWindows, target: self)
+        let origin = NSPoint(x: 0, y: sender.bounds.maxY + 4)
+        menu.popUp(positioning: nil as NSMenuItem?, at: origin, in: sender)
+    }
+
+    @objc private func removeWorkspaceTargetGroupMemberAction(_ sender: Any) {
+        guard let identifier = Self.senderIdentifier(sender) else { return }
+        let components = identifier.components(separatedBy: workspaceTargetGroupIdentifierSeparator)
+        guard components.count == 4, let kind = WorkspaceTargetGroupMember.Kind(rawValue: components[2]) else { return }
+        let workspaceID = components[0]
+        let groupID = components[1]
+        let referenceID = components[3]
+        guard let snapshot = try? orchestrator.workspaceTargetGroups(workspaceID: workspaceID).first(where: { $0.group.id == groupID }) else {
+            return
+        }
+        let browserSessions = (try? orchestrator.resolvedWorkspaceBrowserSessions(workspaceID: workspaceID)) ?? []
+        let processesByID = Dictionary(
+            uniqueKeysWithValues: ((try? orchestrator.runningProcesses(workspaceID: workspaceID)) ?? []).map { ($0.id, $0) })
+        let trackedWindows = (try? orchestrator.windows(workspaceID: workspaceID)) ?? []
+        let agentWindows = (try? orchestrator.agentWindows(workspaceID: workspaceID)) ?? []
+        let member = WorkspaceTargetGroupMember(groupID: groupID, orderIndex: 0, kind: kind, referenceID: referenceID)
+        let memberName =
+            Self.workspaceTargetGroupMemberDisplayName(
+                member: member, browserSessions: browserSessions, processesByID: processesByID, trackedWindows: trackedWindows,
+                agentWindows: agentWindows) ?? referenceID
+        guard confirmWorkspaceTargetGroupMemberRemoval(groupName: snapshot.group.name ?? "Target Group", memberName: memberName) else { return }
+        do {
+            try orchestrator.removeWorkspaceTargetGroupMember(workspaceID: workspaceID, groupID: groupID, kind: kind, referenceID: referenceID)
+            reloadData()
+        } catch { showError(error) }
+    }
+
+    @objc private func disbandWorkspaceTargetGroupAction(_ sender: Any) {
+        guard let identifier = Self.senderIdentifier(sender) else { return }
+        let components = identifier.components(separatedBy: workspaceTargetGroupIdentifierSeparator)
+        guard components.count == 2 else { return }
+        let workspaceID = components[0]
+        let groupID = components[1]
+        guard let snapshot = try? orchestrator.workspaceTargetGroups(workspaceID: workspaceID).first(where: { $0.group.id == groupID }) else {
+            return
+        }
+        guard confirmWorkspaceTargetGroupDisband(groupName: snapshot.group.name ?? "Target Group") else { return }
+        do {
+            try orchestrator.deleteWorkspaceTargetGroup(workspaceID: workspaceID, groupID: groupID)
+            reloadData()
+        } catch { showError(error) }
+    }
+
+    private func confirmWorkspaceTargetGroupMemberRemoval(groupName: String, memberName: String) -> Bool {
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "Remove target from group?"
+        alert.informativeText = "Remove \(memberName) from \(groupName). If only one target remains, the group is disbanded automatically."
+        alert.addButton(withTitle: "Remove Target")
+        alert.addButton(withTitle: "Cancel")
+        return alert.runModal() == .alertFirstButtonReturn
+    }
+
+    private func confirmWorkspaceTargetGroupDisband(groupName: String) -> Bool {
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "Disband target group?"
+        alert.informativeText = "Disband \(groupName) and return its targets to individual focus rows."
+        alert.addButton(withTitle: "Disband Group")
+        alert.addButton(withTitle: "Cancel")
+        return alert.runModal() == .alertFirstButtonReturn
+    }
+
+    private func presentWorkspaceTargetGroupNamePrompt(title: String, message: String, defaultValue: String?, onSubmit: @escaping (String?) -> Void) {
+        let alert = NSAlert()
+        alert.messageText = title
+        alert.informativeText = message
+        alert.alertStyle = .informational
+        alert.addButton(withTitle: "Save")
+        alert.addButton(withTitle: "Cancel")
+
+        let textField = NSTextField(string: defaultValue ?? "")
+        textField.placeholderString = "Target Group"
+        textField.frame = NSRect(x: 0, y: 0, width: 280, height: 24)
+        alert.accessoryView = textField
+        alert.window.initialFirstResponder = textField
+
+        let response = alert.runModal()
+        guard response == .alertFirstButtonReturn else {
+            onSubmit(nil)
+            return
+        }
+
+        let trimmed = textField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        onSubmit(trimmed.isEmpty ? nil : trimmed)
+    }
 
     static func makeInlineEditorSlot(label: NSView, editor: NSView) -> NSView {
         let slot = NSView()
@@ -6085,7 +6577,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             "setup start toggle=\(toggleShortcutSpec) palette=\(String(describing: commandPaletteShortcutSpec)) next=\(String(describing: nextShortcutSpec)) previous=\(String(describing: previousShortcutSpec))"
         )
         registerHotkeys(
-            toggle: toggleShortcutSpec, commandPalette: commandPaletteShortcutSpec, next: nextShortcutSpec, previous: previousShortcutSpec)
+            toggle: toggleShortcutSpec, commandPalette: commandPaletteShortcutSpec, next: nextShortcutSpec, previous: previousShortcutSpec,
+            captureTargetGroup: captureTargetGroupHotkeySpec)
     }
 
     private func teardownGlobalHotkey() {
@@ -6096,7 +6589,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         hotkeyHandler = nil
     }
 
-    private func registerHotkeys(toggle: HotkeySpec, commandPalette: HotkeySpec?, next: HotkeySpec?, previous: HotkeySpec?) {
+    private func registerHotkeys(
+        toggle: HotkeySpec, commandPalette: HotkeySpec?, next: HotkeySpec?, previous: HotkeySpec?, captureTargetGroup: HotkeySpec?
+    ) {
         teardownGlobalHotkey()
         let signature = OSType(UInt32(truncatingIfNeeded: "AMUX".utf8.reduce(0) { ($0 << 8) + UInt32($1) }))
         let target = GetEventDispatcherTarget()
@@ -6109,6 +6604,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         if let previous { registerHotkey(spec: previous, id: GlobalHotkey.previous.rawValue, signature: signature, target: target) }
         if let openEditorShortcutSpec {
             registerHotkey(spec: openEditorShortcutSpec, id: GlobalHotkey.openEditor.rawValue, signature: signature, target: target)
+        }
+        if let captureTargetGroup {
+            registerHotkey(spec: captureTargetGroup, id: GlobalHotkey.captureTargetGroup.rawValue, signature: signature, target: target)
         }
 
         var eventSpec = EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyPressed))
@@ -6422,12 +6920,34 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         case .next: if NSApp.isActive { selectNextVisibleWorkspace() } else { focusGlobalWindowNavigation(direction: 1) }
         case .previous: if NSApp.isActive { selectPreviousVisibleWorkspace() } else { focusGlobalWindowNavigation(direction: -1) }
         case .openEditor: openGlobalEditorFromHotkey()
+        case .captureTargetGroup: captureWorkspaceTargetGroupFromHotkey()
         }
     }
 
     private func openGlobalEditorFromHotkey() {
         guard let workspaceID = globalEditorWorkspaceID() else { return }
         openWorkspaceEditor(workspaceID: workspaceID)
+    }
+
+    private func captureWorkspaceTargetGroupFromHotkey() {
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            let result = await Self.captureWorkspaceTargetGroupSnapshot()
+            switch result {
+            case .success(let draft):
+                guard let draft else { return }
+                presentWorkspaceTargetGroupNamePrompt(
+                    title: "Create Target Group", message: "Enter a name for the captured target group.", defaultValue: nil
+                ) { [weak self] name in
+                    guard let self, let name else { return }
+                    do {
+                        _ = try orchestrator.createWorkspaceTargetGroup(workspaceID: draft.workspaceID, name: name, members: draft.members)
+                        reloadData()
+                    } catch { showError(error) }
+                }
+            case .failure(let error): showError(error)
+            }
+        }
     }
 
     private func globalEditorWorkspaceID() -> String? {
@@ -6697,14 +7217,13 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     private func focusGlobalWindowNavigation(direction: Int) {
         guard !NSApp.isActive else { return }
         guard let workspaceID = globalWindowNavigationWorkspaceID() else { return }
-        do {
-            if direction > 0 {
-                try orchestrator.focusNextWindow(workspaceID: workspaceID)
-            } else {
-                try orchestrator.focusPreviousWindow(workspaceID: workspaceID)
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            switch await Self.focusGlobalWindowNavigationSnapshot(workspaceID: workspaceID, direction: direction) {
+            case .success(let didFocus): if didFocus { hideAfterSuccessfulExternalWindowAction(.focus) }
+            case .failure(let error): showError(error)
             }
-            hideAfterSuccessfulExternalWindowAction(.focus)
-        } catch { showError(error) }
+        }
     }
 
     private func hideAfterSuccessfulExternalWindowAction(_ action: ExternalWindowAction) {
@@ -7756,6 +8275,7 @@ struct CommandPaletteItem: Sendable {
 
     var focusIdentity: String {
         switch focusRequest {
+        case .workspaceTargetGroup(let workspaceID, let groupID): return "group:\(workspaceID):\(groupID)"
         case .workspaceBrowserSession(let workspaceID, let targetURL): return "browser:\(workspaceID):\(targetURL)"
         case .workspaceWindow(let workspaceID, let index): return "window:\(workspaceID):\(index)"
         case .workspaceProcess(let workspaceID, let processID): return "process:\(workspaceID):\(processID)"
@@ -7773,6 +8293,7 @@ struct CommandPaletteItem: Sendable {
 
     var iconSymbol: String {
         switch kind {
+        case .group: return "square.grid.2x2"
         case .browser: return "globe"
         case .process, .missingConfiguredProcess: return "terminal"
         case .window: return (detail?.localizedStandardContains("http") == true) ? "globe" : "chevron.left.forwardslash.chevron.right"
@@ -7782,6 +8303,7 @@ struct CommandPaletteItem: Sendable {
 
     var typeKind: RowPrimitives.TypeKind {
         switch kind {
+        case .group: return .process
         case .browser: return .browser
         case .agentLauncher, .agent: return .agent
         case .process, .window, .missingConfiguredProcess: return .process
@@ -7796,6 +8318,7 @@ struct CommandPaletteItem: Sendable {
 
     static func recentFocusIdentity(for focusRequest: AppKitController.WindowFocusRequest, detail: String? = nil) -> String {
         switch focusRequest {
+        case .workspaceTargetGroup(let workspaceID, let groupID): return "group:\(workspaceID):\(groupID)"
         case .workspaceBrowserSession(let workspaceID, let targetURL): return "browser:\(workspaceID):\(targetURL)"
         case .workspaceWindow(let workspaceID, let index):
             let normalizedDetail = detail?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ?? ""
@@ -8098,6 +8621,7 @@ extension AppKitController {
         focusRequest: WindowFocusRequest?, fallbackIcon: String, processStatus: RunningProcessState?, agentStatus: AgentWindowStatus?
     ) -> WorkspaceRunShortcutTarget.Kind {
         switch focusRequest {
+        case .workspaceTargetGroup: return .group
         case .workspaceBrowserSession: return .browser
         case .workspaceWindow: return .window
         case .workspaceProcess: return .process
@@ -8160,15 +8684,28 @@ extension AppKitController {
                 let processEntries = orderedWorkspaceRunProcessEntries(
                     configuredProcesses: settings?.processes ?? [], windows: windows, processes: processes, agentWindows: agentWindows)
                 let processesByID = Dictionary(uniqueKeysWithValues: processes.map { ($0.id, $0) })
-                let shortcutTargets = orderedWorkspaceRunShortcutTargets(
+                let rawShortcutTargets = orderedWorkspaceRunShortcutTargets(
                     browserSessions: browserSessions, processEntries: processEntries, processesByID: processesByID,
                     configuredAgentLaunchers: settings?.agentLaunchers ?? [], agentWindows: agentWindows)
+                let shortcutTargets = groupedWorkspaceRunShortcutTargets(
+                    shortcutTargets: rawShortcutTargets, groupSnapshots: try orchestrator.workspaceTargetGroups(workspaceID: workspace.id))
                 let runtimeWindowTitleByAgentID = codingAgentWindowTitleByAgentID(agentWindows: agentWindows, trackedWindows: windows)
                 let configuredAgentByName = Dictionary(uniqueKeysWithValues: (settings?.agentLaunchers ?? []).map { ($0.name, $0) })
 
                 for (offset, target) in shortcutTargets.enumerated() {
                     let itemID = "\(workspace.id)::\(offset)"
                     switch target.kind {
+                    case .group:
+                        guard let groupID = target.groupID else { continue }
+                        let label = target.groupName ?? "Target Group"
+                        items.append(
+                            CommandPaletteItem(
+                                id: itemID, source: .workspaceTarget, alertsAttentionID: nil, workspaceID: workspace.id,
+                                workspaceTitle: workspace.title, workspaceBranch: workspace.branch, projectTitle: project.name, kind: target.kind,
+                                label: label, detail: "Grouped runtime targets", status: .none,
+                                focusRequest: .workspaceTargetGroup(workspaceID: workspace.id, groupID: groupID),
+                                recentFocusIdentity: CommandPaletteItem.recentFocusIdentity(
+                                    for: .workspaceTargetGroup(workspaceID: workspace.id, groupID: groupID), detail: nil)))
                     case .browser:
                         guard let targetURL = target.targetURL else { continue }
                         let label = browserSessionDisplayName(for: targetURL, sessions: browserSessions) ?? targetURL

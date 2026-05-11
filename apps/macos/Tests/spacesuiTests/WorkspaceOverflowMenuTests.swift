@@ -2,6 +2,7 @@ import AppKit
 import Testing
 
 @testable import spacesui
+@testable import workspacecore
 
 @MainActor @Suite struct WorkspaceOverflowMenuTests {
     @Test func menuIncludesCopyPathAndRevealItems() {
@@ -73,5 +74,51 @@ import Testing
     @Test func senderIdentifierReturnsNilWhenIdentifierMissing() {
         let item = NSMenuItem(title: "x", action: nil, keyEquivalent: "")
         #expect(AppKitController.senderIdentifier(item) == nil)
+    }
+
+    @Test func workspaceTargetGroupMenuIncludesMemberRemovalAndDisband() {
+        let snapshot = WorkspaceTargetGroupSnapshot(
+            group: WorkspaceTargetGroup(id: "group-1", workspaceID: "ws-1", name: "Frontend", orderIndex: 0, createdAt: "now", updatedAt: "now"),
+            members: [
+                WorkspaceTargetGroupMember(groupID: "group-1", orderIndex: 0, kind: .browserSession, referenceID: "http://localhost:3000"),
+                WorkspaceTargetGroupMember(groupID: "group-1", orderIndex: 1, kind: .process, referenceID: "process-web"),
+            ])
+        let process = RunningProcessRecord(
+            id: "process-web", workspaceID: "ws-1", templateName: "web", command: "npm run dev", terminalApp: nil, windowID: nil, pid: nil,
+            status: .running, logPath: nil, lastOutputAt: nil, startedAt: nil, exitedAt: nil)
+
+        let menu = AppKitController.makeWorkspaceTargetGroupMenu(
+            workspaceID: "ws-1", snapshot: snapshot, browserSessions: [BrowserSession(name: "frontend", url: "http://localhost:3000")],
+            processesByID: ["process-web": process], trackedWindows: [], agentWindows: [], target: nil)
+
+        let titles = menu.items.map(\.title)
+        #expect(titles.contains("Remove frontend"))
+        #expect(titles.contains("Remove web"))
+        #expect(titles.contains("Disband group"))
+    }
+
+    @Test func workspaceTargetGroupMenuWiresMemberAndDisbandActions() {
+        let snapshot = WorkspaceTargetGroupSnapshot(
+            group: WorkspaceTargetGroup(id: "group-1", workspaceID: "ws-1", name: nil, orderIndex: 0, createdAt: "now", updatedAt: "now"),
+            members: [WorkspaceTargetGroupMember(groupID: "group-1", orderIndex: 0, kind: .process, referenceID: "process-web")])
+        let process = RunningProcessRecord(
+            id: "process-web", workspaceID: "ws-1", templateName: "web", command: "npm run dev", terminalApp: nil, windowID: nil, pid: nil,
+            status: .running, logPath: nil, lastOutputAt: nil, startedAt: nil, exitedAt: nil)
+
+        let menu = AppKitController.makeWorkspaceTargetGroupMenu(
+            workspaceID: "ws-1", snapshot: snapshot, browserSessions: [], processesByID: ["process-web": process], trackedWindows: [],
+            agentWindows: [], target: nil)
+
+        guard let remove = menu.items.first(where: { $0.title == "Remove web" }),
+            let disband = menu.items.first(where: { $0.title == "Disband group" })
+        else {
+            Issue.record("Expected target-group menu items missing")
+            return
+        }
+
+        #expect(remove.action.map(NSStringFromSelector) == "removeWorkspaceTargetGroupMemberAction:")
+        #expect(disband.action.map(NSStringFromSelector) == "disbandWorkspaceTargetGroupAction:")
+        #expect(remove.identifier?.rawValue == "ws-1\tgroup-1\tprocess\tprocess-web")
+        #expect(disband.identifier?.rawValue == "ws-1\tgroup-1")
     }
 }

@@ -7,5 +7,6 @@ extension AppKitController {
         case previous = 3
         case openEditor = 4
         case openCommandPalette = 5
+        case captureTargetGroup = 6
     }
 }

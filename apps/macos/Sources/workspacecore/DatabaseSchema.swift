@@ -2,9 +2,36 @@ import Foundation
 import SQLite3
 
 enum DatabaseSchema {
-    static let currentVersion = 1
+    static let currentVersion = 2
 
-    static let migrationSteps: [DatabaseMigrationStep] = []
+    static let migrationSteps: [DatabaseMigrationStep] = [
+        DatabaseMigrationStep(fromVersion: 1, toVersion: 2, description: "Add workspace target groups.", requiresBackup: false) { db in
+            let sql = """
+                CREATE TABLE IF NOT EXISTS workspace_target_groups (
+                  id TEXT PRIMARY KEY,
+                  workspace_id TEXT NOT NULL,
+                  name TEXT,
+                  order_index INTEGER NOT NULL,
+                  created_at TEXT NOT NULL,
+                  updated_at TEXT NOT NULL,
+                  FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE
+                );
+
+                CREATE TABLE IF NOT EXISTS workspace_target_group_members (
+                  group_id TEXT NOT NULL,
+                  order_index INTEGER NOT NULL,
+                  member_kind TEXT NOT NULL,
+                  reference_id TEXT NOT NULL,
+                  PRIMARY KEY (group_id, order_index),
+                  FOREIGN KEY (group_id) REFERENCES workspace_target_groups(id) ON DELETE CASCADE
+                );
+                """
+            guard sqlite3_exec(db, sql, nil, nil, nil) == SQLITE_OK else {
+                let message = String(cString: sqlite3_errmsg(db))
+                throw NSError(domain: "spaces.store", code: 46, userInfo: [NSLocalizedDescriptionKey: message])
+            }
+        }
+    ]
 
     static let latestSchemaSQL = """
             CREATE TABLE IF NOT EXISTS projects (
@@ -233,6 +260,25 @@ enum DatabaseSchema {
               created_at TEXT NOT NULL,
               FOREIGN KEY (agent_session_id) REFERENCES agent_sessions(id) ON DELETE CASCADE,
               FOREIGN KEY (runtime_target_id) REFERENCES runtime_targets(id) ON DELETE SET NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS workspace_target_groups (
+              id TEXT PRIMARY KEY,
+              workspace_id TEXT NOT NULL,
+              name TEXT,
+              order_index INTEGER NOT NULL,
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL,
+              FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE
+            );
+
+            CREATE TABLE IF NOT EXISTS workspace_target_group_members (
+              group_id TEXT NOT NULL,
+              order_index INTEGER NOT NULL,
+              member_kind TEXT NOT NULL,
+              reference_id TEXT NOT NULL,
+              PRIMARY KEY (group_id, order_index),
+              FOREIGN KEY (group_id) REFERENCES workspace_target_groups(id) ON DELETE CASCADE
             );
 
             CREATE TABLE IF NOT EXISTS migration_state (
