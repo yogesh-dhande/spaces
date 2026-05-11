@@ -251,6 +251,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     private var terminalSessionWindowControllers: [String: [TerminalSessionWindowController]] = [:]
     private var appToggleReturnTerminalSessionID: String?
     private var appToggleReturnApplicationProcessID: pid_t?
+    private var commandPaletteReturnTerminalSessionID: String?
+    private var commandPaletteReturnApplicationProcessID: pid_t?
 
     private struct WindowShortcutProfile {
         let index: Int
@@ -6911,13 +6913,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             paletteWasVisible: commandPalettePanel?.isVisible == true)
     }
 
-    nonisolated static func shouldOrderOutMainWindowForCommandPalettePresentation(mainWindowIsVisible: Bool) -> Bool { !mainWindowIsVisible }
-
     nonisolated static func commandPalettePresentationIsComplete(panelIsVisible: Bool, panelIsKey: Bool) -> Bool { panelIsVisible && panelIsKey }
-
-    nonisolated static func shouldHideAppAfterCommandPaletteDismissal(mainWindowIsVisible: Bool, auxiliarySessionWindowsVisible: Bool) -> Bool {
-        !mainWindowIsVisible && !auxiliarySessionWindowsVisible
-    }
 
     nonisolated static func shouldHideMainWindowForToggle(appIsHidden: Bool, mainWindowIsVisible: Bool) -> Bool {
         !appIsHidden && mainWindowIsVisible
@@ -7137,6 +7133,12 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         selectedWorkspaceID: String?, focusedTerminalSessionWorkspaceID: String?, focusedWindowWorkspaceID: String?
     ) -> String? { selectedWorkspaceID ?? focusedTerminalSessionWorkspaceID ?? focusedWindowWorkspaceID }
 
+    nonisolated static func shouldRestoreTerminalFocusAfterPaletteHide(returnTerminalSessionID: String?) -> Bool { returnTerminalSessionID != nil }
+
+    nonisolated static func shouldRestoreReturnApplicationAfterPaletteHide(returnTerminalSessionID: String?, returnApplicationProcessID: pid_t?)
+        -> Bool
+    { return returnTerminalSessionID == nil && returnApplicationProcessID != nil }
+
     private func commandPaletteDefaultWorkspaceID() -> String? {
         let focusedTerminalWorkspaceID: String?
         if let terminalSessionID = focusedTerminalSessionIDForToggle() {
@@ -7224,7 +7226,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let toggleStartedAt = Date()
         let perfContext = captureHotkeyPerfContext()
         logHotkeyDebug("toggle_window begin \(hotkeyWindowStateSummary())")
-        if commandPalettePanel?.isVisible == true { dismissCommandPalette() }
         if Self.shouldHideMainWindowForToggle(appIsHidden: NSApp.isHidden, mainWindowIsVisible: rawMainWindowVisibility()) {
             logHotkeyDebug("toggle_window hide_main_only")
             let returnTerminalSessionID = appToggleReturnTerminalSessionID
@@ -8740,12 +8741,17 @@ extension AppKitController {
         let panel = ensureCommandPalettePanel()
         let mainWindowWasVisible = rawMainWindowVisibility()
         logHotkeyDebug("present_palette begin \(hotkeyWindowStateSummary())")
+        let focusedTerminalSessionID = focusedTerminalSessionIDForToggle()
+        let returnApplicationProcessID = Self.returnApplicationProcessIDForAppToggle(
+            frontmostApplicationProcessID: NSWorkspace.shared.frontmostApplication?.processIdentifier,
+            currentProcessID: ProcessInfo.processInfo.processIdentifier)
+        commandPaletteReturnTerminalSessionID = focusedTerminalSessionID
+        commandPaletteReturnApplicationProcessID = focusedTerminalSessionID == nil ? returnApplicationProcessID : nil
         let contextLookupStartedAt = Date()
         commandPaletteContextWorkspaceID = commandPaletteDefaultWorkspaceID()
         logPerfMetric(
             "toggle_palette_context_workspace", target: "workspace=\(commandPaletteContextWorkspaceID ?? "nil")",
             elapsedMS: windowShortcutElapsedMS(since: contextLookupStartedAt), success: true)
-        if Self.shouldOrderOutMainWindowForCommandPalettePresentation(mainWindowIsVisible: mainWindowWasVisible) { window?.orderOut(nil) }
         panel.center()
         let revealStartedAt = Date()
         revealTargetedHotkeyWindow(panel)
@@ -8774,20 +8780,27 @@ extension AppKitController {
         guard let panel = commandPalettePanel else { return }
         guard !isDismissingCommandPalette else { return }
         isDismissingCommandPalette = true
-        let mainWindowIsVisible = effectiveMainWindowVisibilityForHotkeyState()
-        let auxiliarySessionWindowsVisible = hasVisibleTerminalSessionWindowsForHotkeyState()
         logHotkeyDebug("dismiss_palette begin visible=\(panel.isVisible ? 1 : 0) key=\(panel.isKeyWindow ? 1 : 0) \(hotkeyWindowStateSummary())")
         panel.makeFirstResponder(nil)
         panel.orderOut(nil)
         commandPaletteContextWorkspaceID = nil
-        if Self.shouldHideAppAfterCommandPaletteDismissal(
-            mainWindowIsVisible: mainWindowIsVisible, auxiliarySessionWindowsVisible: auxiliarySessionWindowsVisible)
+        if Self.shouldRestoreTerminalFocusAfterPaletteHide(returnTerminalSessionID: commandPaletteReturnTerminalSessionID),
+            let returnTerminalSessionID = commandPaletteReturnTerminalSessionID
         {
-            NSApp.hide(nil)
+            focusTerminalSessionWindow(sessionID: returnTerminalSessionID)
+        } else if Self.shouldRestoreReturnApplicationAfterPaletteHide(
+            returnTerminalSessionID: commandPaletteReturnTerminalSessionID, returnApplicationProcessID: commandPaletteReturnApplicationProcessID),
+            let returnApplicationProcessID = commandPaletteReturnApplicationProcessID
+        {
+            activateReturnApplication(processIdentifier: returnApplicationProcessID)
+        } else if rawMainWindowVisibility(), let window {
+            revealTargetedHotkeyWindow(window)
         }
         isDismissingCommandPalette = false
         logHotkeyDebug("dismiss_palette end \(hotkeyWindowStateSummary())")
         commandPaletteMainWindowVisibility = nil
+        commandPaletteReturnTerminalSessionID = nil
+        commandPaletteReturnApplicationProcessID = nil
         if let perfContext { logHotkeyPerfMetric("toggle_palette", action: "hide", context: perfContext) }
     }
 

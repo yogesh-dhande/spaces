@@ -51,12 +51,13 @@ import spacesterminalcore
         #expect(!AppKitController.shouldActivateAppForCommandPalettePresentation(appIsActive: true))
     }
 
-    @Test func commandPalettePresentationKeepsWindowVisibilityDecisionsLocal() {
-        #expect(AppKitController.shouldOrderOutMainWindowForCommandPalettePresentation(mainWindowIsVisible: false))
-        #expect(!AppKitController.shouldOrderOutMainWindowForCommandPalettePresentation(mainWindowIsVisible: true))
-        #expect(AppKitController.shouldHideAppAfterCommandPaletteDismissal(mainWindowIsVisible: false, auxiliarySessionWindowsVisible: false))
-        #expect(!AppKitController.shouldHideAppAfterCommandPaletteDismissal(mainWindowIsVisible: false, auxiliarySessionWindowsVisible: true))
-        #expect(!AppKitController.shouldHideAppAfterCommandPaletteDismissal(mainWindowIsVisible: true, auxiliarySessionWindowsVisible: false))
+    @Test func commandPaletteDismissRestoresOnlyItsCapturedReturnTarget() {
+        #expect(AppKitController.shouldRestoreTerminalFocusAfterPaletteHide(returnTerminalSessionID: "session-1"))
+        #expect(!AppKitController.shouldRestoreTerminalFocusAfterPaletteHide(returnTerminalSessionID: nil))
+        #expect(AppKitController.shouldRestoreReturnApplicationAfterPaletteHide(returnTerminalSessionID: nil, returnApplicationProcessID: 123))
+        #expect(
+            !AppKitController.shouldRestoreReturnApplicationAfterPaletteHide(returnTerminalSessionID: "session-1", returnApplicationProcessID: 123))
+        #expect(!AppKitController.shouldRestoreReturnApplicationAfterPaletteHide(returnTerminalSessionID: nil, returnApplicationProcessID: nil))
     }
 
     @Test func toggleHotkeyDependsOnlyOnMainWindowVisibility() {

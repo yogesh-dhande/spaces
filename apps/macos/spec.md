@@ -213,6 +213,7 @@ Spaces focuses those windows; it does not decide their geometry.
 - The command palette should default to `Cmd+Opt+-`.
 - Summoning Spaces from the global app-toggle shortcut should raise only the main window above other apps and onto the active space.
 - The global app-toggle shortcut should depend only on whether the main Spaces window is visible. Built-in terminal windows and the command palette must not change whether `Cmd+Opt+=` shows or hides the main window.
+- The command-palette shortcut should depend only on whether the command palette is visible. The main window and built-in terminal windows must not change whether `Cmd+Opt+-` shows or hides the command palette.
 - When Spaces is summoned, it should select the workspace for the window that was focused immediately before activation when that window belongs to a tracked workspace; otherwise it should show Alerts.
 - The app should expose a configurable shortcut leader that supplies the shared modifiers for leader-based shortcuts like workspace navigation, Alerts, editor, terminal, and Finder.
 - The command palette should draw from every navigable workspace target that can appear in workspace detail rows: browser sessions, processes, ad-hoc windows, configured coding-agent launchers, and live coding-agent terminals.
@@ -226,6 +227,7 @@ Spaces focuses those windows; it does not decide their geometry.
 - Window focus actions and numbered shortcuts should follow one target-level rule: make that target available now.
 - Focusing a target from the app UI or command palette should keep Spaces visible instead of hiding the app after the target receives focus.
 - The global `Toggle app` shortcut controls only the main Spaces window, not the built-in terminal windows or the command palette. If a built-in terminal or the command palette is focused, toggling the app should bring the main Spaces window forward instead of fronting all Spaces-owned windows.
+- The global command-palette shortcut controls only the command-palette panel. Showing the palette should not hide the main window, and hiding the palette should return focus to whichever window was active before the palette was shown.
 - Returning to the main Spaces window from a focused built-in terminal should show the workspace detail view that owns that terminal, matching the behavior of externally hosted terminal windows.
 - If the main Spaces window was summoned from a focused built-in terminal, toggling the app again should hide only the main window and restore focus to that same built-in terminal.
 - If the main Spaces window was summoned from an untracked external app such as Chrome or Ghostty, toggling the app again should hide only the main window and return focus to that external app instead of leaving Spaces frontmost.

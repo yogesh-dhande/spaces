@@ -634,7 +634,7 @@ import spacesterminalghostty
     private func startObservingApplicationActivation() {
         appDidBecomeActiveObserver = NotificationCenter.default.addObserver(
             forName: NSApplication.didBecomeActiveNotification, object: NSApp, queue: .main
-        ) { [weak self] _ in MainActor.assumeIsolated { self?.syncGhosttyOwnerFocus(reason: "app_active", requestWindowFocus: true) } }
+        ) { [weak self] _ in MainActor.assumeIsolated { self?.syncGhosttyOwnerFocus(reason: "app_active", requestWindowFocus: false) } }
         appDidResignActiveObserver = NotificationCenter.default.addObserver(
             forName: NSApplication.didResignActiveNotification, object: NSApp, queue: .main
         ) { [weak self] _ in

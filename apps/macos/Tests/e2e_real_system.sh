@@ -2573,10 +2573,13 @@ run_hotkey_visibility_profiling() {
   for (( iteration = 1; iteration <= REAL_SYSTEM_PROFILE_REPETITIONS; iteration++ )); do
     send_spaces_command_palette_hotkey_with_ack
     wait_for_spaces_command_palette_presented "0"
+    wait_for_condition "spaces_command_palette_visible" "1"
+    wait_for_condition "spaces_main_window_visible" "0"
     record_toggle_palette_metric "external_app.keyboard_toggle_palette.palette" "show" "0" "$host" "single"
 
     send_spaces_command_palette_hotkey_with_ack
     wait_for_spaces_command_palette_dismissed
+    wait_for_condition "spaces_command_palette_visible" "0"
     wait_for_condition "frontmost_app" "Google Chrome"
     record_toggle_palette_metric "palette.keyboard_toggle_palette.external_app" "hide" "1" "$host" "single"
 
@@ -2584,10 +2587,14 @@ run_hotkey_visibility_profiling() {
     wait_for_spaces_frontmost_ready
     send_spaces_command_palette_hotkey_with_ack
     wait_for_spaces_command_palette_presented "1"
+    wait_for_condition "spaces_command_palette_visible" "1"
+    wait_for_condition "spaces_main_window_visible" "1"
     record_toggle_palette_metric "main_window.keyboard_toggle_palette.palette" "show" "1" "$host" "single"
 
     send_spaces_command_palette_hotkey_with_ack
     wait_for_spaces_command_palette_dismissed "1"
+    wait_for_condition "spaces_command_palette_visible" "0"
+    wait_for_condition "spaces_main_window_visible" "1"
     wait_for_spaces_frontmost_ready
     record_toggle_palette_metric "palette.keyboard_toggle_palette.main_window" "hide" "1" "$host" "single"
 
@@ -2666,10 +2673,13 @@ run_hotkey_visibility_profiling() {
     for (( iteration = 1; iteration <= REAL_SYSTEM_PROFILE_REPETITIONS; iteration++ )); do
       send_spaces_command_palette_hotkey_with_ack
       wait_for_spaces_command_palette_presented "0"
+      wait_for_condition "spaces_command_palette_visible" "1"
+      wait_for_condition "spaces_main_window_visible" "0"
       record_toggle_palette_metric "spaces_terminal.keyboard_toggle_palette.palette" "show" "1" "$host" "single"
 
       send_spaces_command_palette_hotkey_with_ack
       wait_for_spaces_command_palette_dismissed
+      wait_for_condition "spaces_command_palette_visible" "0"
       env HOME="$TMP_HOME" SPACES_DB_PATH="$TMP_DB" SPACES_RUNTIME_DIR="$TMP_RUNTIME_DIR" DEBUG=1 "$MX_E2E_BIN" focus-workspace-process --workspace-dir "$workspace_dir" --process-name frontend >/dev/null
       wait_for_spaces_frontmost_ready
       record_process_focus_metric "palette.cli_window_focus.process_tracked_tab" "frontend" "$host" "single"
